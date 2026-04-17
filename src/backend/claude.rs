@@ -1,0 +1,270 @@
+use super::{ModelBackend, sse_data_lines};
+use crate::types::{BackendResponse, Message, StopReason, ToolCall, ToolDef};
+use anyhow::{Context, Result, bail};
+use async_trait::async_trait;
+use colored::Colorize;
+use futures_util::StreamExt;
+use reqwest::Client;
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::io::Write;
+
+pub struct ClaudeBackend {
+    client: Client,
+    api_key: String,
+    model: String,
+}
+
+impl ClaudeBackend {
+    pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        ClaudeBackend {
+            client: Client::new(),
+            api_key: api_key.into(),
+            model: model.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl ModelBackend for ClaudeBackend {
+    fn name(&self) -> &str {
+        "claude"
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model
+    }
+
+    async fn chat(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+        system: &str,
+    ) -> Result<BackendResponse> {
+        let claude_messages = serialize_messages(messages);
+
+        let mut body = json!({
+            "model": self.model,
+            "max_tokens": 8192,
+            "system": system,
+            "messages": claude_messages,
+            "stream": true,
+        });
+
+        if !tools.is_empty() {
+            body["tools"] = serialize_tools(tools);
+        }
+
+        let response = self
+            .client
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .context("failed to connect to Anthropic API")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            bail!("Anthropic API error {status}: {text}");
+        }
+
+        parse_claude_stream(response).await
+    }
+}
+
+async fn parse_claude_stream(
+    response: reqwest::Response,
+) -> Result<BackendResponse> {
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+
+    let mut result = BackendResponse::default();
+
+    // Per-index state for streaming content blocks
+    // true = tool_use block, false = text block
+    let mut block_types: HashMap<usize, bool> = HashMap::new();
+    // Accumulated tool use data per block index
+    let mut tool_accum: HashMap<usize, (String, String, String)> = HashMap::new(); // (id, name, json)
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("stream error")?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        // Process complete lines
+        while let Some(pos) = buffer.find('\n') {
+            let line = buffer[..pos].trim().to_string();
+            buffer.drain(..=pos);
+
+            if !line.starts_with("data: ") {
+                continue;
+            }
+            let data = &line[6..];
+            if data == "[DONE]" || data.is_empty() {
+                continue;
+            }
+
+            let event: Value = match serde_json::from_str(data) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            match event["type"].as_str().unwrap_or("") {
+                "message_start" => {
+                    if let Some(usage) = event["message"]["usage"].as_object() {
+                        result.input_tokens = usage
+                            .get("input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u32;
+                    }
+                }
+
+                "content_block_start" => {
+                    let idx = event["index"].as_u64().unwrap_or(0) as usize;
+                    let block_type = event["content_block"]["type"].as_str().unwrap_or("");
+                    match block_type {
+                        "tool_use" => {
+                            block_types.insert(idx, true);
+                            let id = event["content_block"]["id"]
+                                .as_str()
+                                .unwrap_or("")
+                                .to_string();
+                            let name = event["content_block"]["name"]
+                                .as_str()
+                                .unwrap_or("")
+                                .to_string();
+                            // Print tool invocation header
+                            print!("\n{}", format!("⚙ {name}").cyan());
+                            std::io::stdout().flush().ok();
+                            tool_accum.insert(idx, (id, name, String::new()));
+                        }
+                        "text" => {
+                            block_types.insert(idx, false);
+                        }
+                        _ => {}
+                    }
+                }
+
+                "content_block_delta" => {
+                    let idx = event["index"].as_u64().unwrap_or(0) as usize;
+                    let delta = &event["delta"];
+
+                    match delta["type"].as_str().unwrap_or("") {
+                        "text_delta" => {
+                            if let Some(text) = delta["text"].as_str() {
+                                print!("{text}");
+                                std::io::stdout().flush().ok();
+                                result.text.push_str(text);
+                            }
+                        }
+                        "input_json_delta" => {
+                            if let Some(partial) = delta["partial_json"].as_str() {
+                                if let Some(entry) = tool_accum.get_mut(&idx) {
+                                    entry.2.push_str(partial);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                "content_block_stop" => {
+                    let idx = event["index"].as_u64().unwrap_or(0) as usize;
+                    if block_types.get(&idx) == Some(&true) {
+                        if let Some((id, name, json_str)) = tool_accum.remove(&idx) {
+                            let input: Value =
+                                serde_json::from_str(&json_str).unwrap_or(json!({}));
+                            result.tool_calls.push(ToolCall { id, name, input });
+                        }
+                    }
+                }
+
+                "message_delta" => {
+                    if let Some(usage) = event["usage"].as_object() {
+                        result.output_tokens = usage
+                            .get("output_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u32;
+                    }
+                    result.stop_reason = match event["delta"]["stop_reason"].as_str() {
+                        Some("tool_use") => StopReason::ToolUse,
+                        Some("max_tokens") => StopReason::MaxTokens,
+                        _ => StopReason::EndTurn,
+                    };
+                }
+
+                _ => {}
+            }
+        }
+    }
+
+    if !result.text.is_empty() || !result.tool_calls.is_empty() {
+        println!(); // newline after streamed content
+    }
+
+    Ok(result)
+}
+
+fn serialize_messages(messages: &[Message]) -> Value {
+    let mut out = vec![];
+
+    for msg in messages {
+        match msg {
+            Message::System { .. } => {} // handled separately as top-level system param
+            Message::User { content } => {
+                out.push(json!({ "role": "user", "content": content }));
+            }
+            Message::Assistant { text, tool_calls } => {
+                let mut content: Vec<Value> = vec![];
+                if let Some(t) = text {
+                    if !t.is_empty() {
+                        content.push(json!({ "type": "text", "text": t }));
+                    }
+                }
+                for tc in tool_calls {
+                    content.push(json!({
+                        "type": "tool_use",
+                        "id": tc.id,
+                        "name": tc.name,
+                        "input": tc.input,
+                    }));
+                }
+                if !content.is_empty() {
+                    out.push(json!({ "role": "assistant", "content": content }));
+                }
+            }
+            Message::ToolResults(results) => {
+                let content: Vec<Value> = results
+                    .iter()
+                    .map(|r| {
+                        json!({
+                            "type": "tool_result",
+                            "tool_use_id": r.tool_use_id,
+                            "content": r.content,
+                            "is_error": r.is_error,
+                        })
+                    })
+                    .collect();
+                out.push(json!({ "role": "user", "content": content }));
+            }
+        }
+    }
+
+    Value::Array(out)
+}
+
+fn serialize_tools(tools: &[ToolDef]) -> Value {
+    tools
+        .iter()
+        .map(|t| {
+            json!({
+                "name": t.name,
+                "description": t.description,
+                "input_schema": t.input_schema,
+            })
+        })
+        .collect()
+}

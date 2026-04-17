@@ -1,0 +1,51 @@
+[package]
+name = "brain"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "brain"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP + streaming
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async traits
+async-trait = "0.1"
+
+# Error handling
+anyhow = "1"
+
+# Terminal / readline
+rustyline = "14"
+colored = "2"
+
+# Utilities
+dirs = "5"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+glob = "0.3"
+
+# Logging (off by default, enabled via BRAIN_LOG=debug)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+
+[profile.dev]
+opt-level = 0
