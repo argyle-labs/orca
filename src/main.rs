@@ -51,6 +51,13 @@ enum Command {
         project: Option<String>,
     },
 
+    /// Run Bear audit on a project (dependency vulnerabilities, code review)
+    Audit {
+        /// Path to project directory (default: current directory)
+        #[arg(default_value = ".")]
+        path: String,
+    },
+
     /// One-shot: send prompt to an agent and print response
     Run {
         #[arg(short = 'a', long, default_value = "wolf")]
@@ -77,6 +84,18 @@ async fn main() -> Result<()> {
         Some(Command::Agents) => cmd_agents(&config),
         Some(Command::Escalate { question, project }) => {
             cmd_escalate(&config, &question, project.as_deref()).await
+        }
+        Some(Command::Audit { path }) => {
+            let abs = std::fs::canonicalize(&path).unwrap_or_else(|_| path.into());
+            let prompt = format!(
+                "Run a full audit on the project at {}. \
+                 Check for dependency vulnerabilities (cargo audit, npm audit if applicable), \
+                 review code for security issues, and check for cleanup opportunities \
+                 (orphaned files, broken symlinks, dead code). \
+                 Present findings as a prioritized list.",
+                abs.display()
+            );
+            cmd_run(&config, "bear", &prompt).await
         }
         Some(Command::Run { agent, prompt }) => {
             cmd_run(&config, &agent, &prompt).await
@@ -224,12 +243,21 @@ fn read_frontmatter_field(path: &std::path::Path, field: &str) -> Option<String>
     None
 }
 
-async fn cmd_run(config: &Config, _agent: &str, prompt: &str) -> Result<()> {
+async fn cmd_run(config: &Config, agent: &str, prompt: &str) -> Result<()> {
     use session::Session;
 
     let ctx = ProjectContext::default();
     let mut session = Session::new(config.clone(), ctx).await?;
-    session.one_shot(prompt.to_string()).await
+
+    // If a specific agent was requested, wrap as a delegation task
+    if agent != "wolf" && agent != "brain" {
+        let delegate_prompt = format!(
+            "Delegate this to @{agent}: {prompt}"
+        );
+        session.one_shot(delegate_prompt).await
+    } else {
+        session.one_shot(prompt.to_string()).await
+    }
 }
 
 async fn cmd_escalate(config: &Config, question: &str, project: Option<&str>) -> Result<()> {

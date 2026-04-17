@@ -3,6 +3,7 @@ use colored::Colorize;
 use std::io::{self, Write};
 use std::process::Command;
 use std::collections::HashSet;
+use std::time::Duration;
 
 /// Permissions granted for this session (commands that bypass the prompt).
 #[derive(Default)]
@@ -62,7 +63,28 @@ pub fn run_bash(
         cmd.current_dir(dir);
     }
 
-    let output = cmd.output()?;
+    // Spawn with timeout to prevent hanging the session
+    let mut child = cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+
+    let timeout = Duration::from_secs(120);
+    let start = std::time::Instant::now();
+
+    loop {
+        match child.try_wait()? {
+            Some(_status) => break,
+            None => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    bail!("command timed out after {}s", timeout.as_secs());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+
+    let output = child.wait_with_output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
