@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout agent definitions
+        uses: actions/checkout@v4
+        with:
+          repository: scottdkey/dotfiles
+          path: dotfiles-repo
+          token: ${{ secrets.DOTFILES_TOKEN }}
+
+      - name: Set up agent symlinks
+        run: |
+          mkdir -p ~/brain/ai/claude
+          cp -r dotfiles-repo/obsidian/ai/claude/agents ~/brain/ai/claude/agents
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Check
+        run: cargo check
+
+      - name: Test
+        run: cargo test
+
+  build:
+    runs-on: ${{ matrix.os }}
+    needs: check
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout agent definitions
+        uses: actions/checkout@v4
+        with:
+          repository: scottdkey/dotfiles
+          path: dotfiles-repo
+          token: ${{ secrets.DOTFILES_TOKEN }}
+
+      - name: Set up agent symlinks
+        run: |
+          mkdir -p ~/brain/ai/claude
+          cp -r dotfiles-repo/obsidian/ai/claude/agents ~/brain/ai/claude/agents
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: brain-${{ matrix.os }}
+          path: target/release/brain

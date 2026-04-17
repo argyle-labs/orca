@@ -50,19 +50,13 @@ impl ProjectContext {
     }
 
     /// Build the system prompt for this context.
-    /// Loads Wolf's agent definition + injects memory if present.
+    /// Loads Wolf's agent definition (filesystem first, embedded fallback) + injects memory.
     pub fn build_system_prompt(&self, config: &Config) -> String {
-        let wolf_path = config.agents_dir().join("wolf.md");
-
-        let wolf_prompt = if wolf_path.exists() {
-            // Strip YAML frontmatter (everything between --- lines)
-            match std::fs::read_to_string(&wolf_path) {
-                Ok(content) => strip_frontmatter(&content),
-                Err(_) => default_wolf_prompt(),
-            }
-        } else {
-            default_wolf_prompt()
-        };
+        let wolf_prompt = crate::agents::load_agent_prompt("wolf", &config.agents_dir())
+            .unwrap_or_else(|| {
+                eprintln!("warning: wolf.md not found — using minimal fallback prompt");
+                "You are an AI assistant. Be precise, efficient, and honest.".to_string()
+            });
 
         if let Some(memory) = &self.memory_content {
             format!(
@@ -74,22 +68,4 @@ impl ProjectContext {
             wolf_prompt
         }
     }
-}
-
-fn strip_frontmatter(content: &str) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-    if lines.first().map(|l| l.trim()) == Some("---") {
-        // Find closing ---
-        if let Some(end) = lines[1..].iter().position(|l| l.trim() == "---") {
-            return lines[end + 2..].join("\n").trim().to_string();
-        }
-    }
-    content.trim().to_string()
-}
-
-fn default_wolf_prompt() -> String {
-    // wolf.md not found in the brain vault — minimal fallback
-    // Real prompt lives at: ~/brain/ai/claude/agents/wolf.md
-    eprintln!("warning: wolf.md not found in agents dir — using minimal fallback prompt");
-    "You are an AI assistant. Be precise, efficient, and honest.".to_string()
 }

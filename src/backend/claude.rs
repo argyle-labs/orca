@@ -189,11 +189,10 @@ async fn parse_claude_stream(
 
                 "content_block_stop" => {
                     let idx = event["index"].as_u64().unwrap_or(0) as usize;
-                    if block_types.get(&idx) == Some(&true) {
-                        if let Some((id, name, json_str)) = tool_accum.remove(&idx) {
-                            let input: Value = serde_json::from_str(&json_str).unwrap_or(json!({}));
-                            result.tool_calls.push(ToolCall { id, name, input });
-                        }
+                    if block_types.get(&idx) == Some(&true)
+                        && let Some((id, name, json_str)) = tool_accum.remove(&idx) {
+                        let input: Value = serde_json::from_str(&json_str).unwrap_or(json!({}));
+                        result.tool_calls.push(ToolCall { id, name, input });
                     }
                 }
 

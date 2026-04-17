@@ -104,3 +104,78 @@ impl SessionLog {
         Ok(())
     }
 }
+
+// ─── search across sessions ──────────────────────────────────────────────────
+
+/// List JSONL session files in logs_dir, most recent first.
+fn session_files(logs_dir: &Path) -> Result<Vec<std::fs::DirEntry>> {
+    let mut files: Vec<_> = std::fs::read_dir(logs_dir)?
+        .flatten()
+        .filter(|e| e.path().extension().map(|x| x == "jsonl").unwrap_or(false))
+        .collect();
+    files.sort_by_key(|e| std::cmp::Reverse(e.file_name()));
+    Ok(files)
+}
+
+/// Parse all JSONL records from a file, skipping malformed lines.
+fn read_records(path: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+/// Search all session logs for a keyword. Returns matching records with context.
+pub fn search_logs(logs_dir: &Path, query: &str, limit: usize) -> Result<Vec<serde_json::Value>> {
+    let mut matches = Vec::new();
+    let query_lower = query.to_lowercase();
+
+    for entry in session_files(logs_dir)? {
+        for record in read_records(&entry.path()) {
+            if let Some(text) = record["content"].as_str()
+                && text.to_lowercase().contains(&query_lower) {
+                matches.push(record);
+                if matches.len() >= limit {
+                    return Ok(matches);
+                }
+            }
+        }
+    }
+
+    Ok(matches)
+}
+
+/// List recent sessions with summary info.
+pub fn list_sessions(logs_dir: &Path, limit: usize) -> Result<Vec<SessionSummary>> {
+    let mut summaries = Vec::new();
+
+    for entry in session_files(logs_dir)?.into_iter().take(limit) {
+        let records = read_records(&entry.path());
+        let msg_count = records.iter().filter(|r| r["role"].as_str().is_some()).count();
+        let flagged = records.iter().filter(|r| r["important"].as_bool() == Some(true)).count();
+        let session_id = entry.path().file_stem()
+            .unwrap_or_default().to_string_lossy().to_string();
+
+        summaries.push(SessionSummary { session_id, messages: msg_count, flagged });
+    }
+
+    Ok(summaries)
+}
+
+/// Recall all messages from a specific session.
+pub fn recall_session(logs_dir: &Path, session_id: &str) -> Result<Vec<serde_json::Value>> {
+    let target = session_files(logs_dir)?
+        .into_iter()
+        .find(|e| e.file_name().to_string_lossy().contains(session_id))
+        .map(|e| e.path())
+        .ok_or_else(|| anyhow::anyhow!("session not found: {session_id}"))?;
+
+    Ok(read_records(&target))
+}
+
+pub struct SessionSummary {
+    pub session_id: String,
+    pub messages: usize,
+    pub flagged: usize,
+}

@@ -21,6 +21,7 @@ pub struct Session {
     project: Option<String>,
     log: Option<SessionLog>,
     context_window: usize,
+    narration: bool,
 }
 
 impl Session {
@@ -49,6 +50,7 @@ impl Session {
             tools: ToolRegistry::default(),
             context_window,
             log,
+            narration: true,
             config,
         })
     }
@@ -258,6 +260,24 @@ impl Session {
                     println!("{}", "logging not active".yellow());
                 }
             }
+            "/search" => {
+                if parts.len() < 2 {
+                    println!("{}", "usage: /search <query>".yellow());
+                } else {
+                    let query = parts[1..].join(" ");
+                    self.cmd_search_logs(&query);
+                }
+            }
+            "/sessions" => {
+                self.cmd_list_sessions();
+            }
+            "/recall" => {
+                if parts.len() < 2 {
+                    println!("{}", "usage: /recall <session_id or partial>".yellow());
+                } else {
+                    self.cmd_recall_session(parts[1]);
+                }
+            }
             "/escalate" => {
                 if parts.len() < 2 {
                     println!("{}", "usage: /escalate <question>".yellow());
@@ -265,6 +285,11 @@ impl Session {
                     let question = parts[1..].join(" ");
                     self.cmd_escalate(&question).await?;
                 }
+            }
+            "/narration" => {
+                self.narration = !self.narration;
+                let state = if self.narration { "on" } else { "off" };
+                println!("{}", format!("narration: {state}").green());
             }
             "/cleanup" => {
                 cleanup_phantom_processes();
@@ -404,6 +429,73 @@ impl Session {
         Ok(())
     }
 
+    fn cmd_search_logs(&self, query: &str) {
+        let logs_dir = self.config.logs_dir();
+        match crate::log::search_logs(&logs_dir, query, 20) {
+            Ok(matches) if matches.is_empty() => {
+                println!("{}", format!("no matches for '{query}'").dimmed());
+            }
+            Ok(matches) => {
+                println!("{}", format!("found {} match(es):", matches.len()).green());
+                for m in &matches {
+                    let session = m["session"].as_str().unwrap_or("?");
+                    let role = m["role"].as_str().unwrap_or("?");
+                    let agent = m["agent"].as_str().unwrap_or("?");
+                    let content = m["content"].as_str().unwrap_or("");
+                    let preview: String = content.chars().take(120).collect();
+                    let important = m["important"].as_bool() == Some(true);
+                    let flag = if important { " ★" } else { "" };
+                    println!("  {} {} @{} {}{}", session.dimmed(), role.cyan(), agent, preview, flag.yellow());
+                }
+            }
+            Err(e) => println!("{}", format!("search error: {e}").red()),
+        }
+    }
+
+    fn cmd_list_sessions(&self) {
+        let logs_dir = self.config.logs_dir();
+        match crate::log::list_sessions(&logs_dir, 15) {
+            Ok(sessions) if sessions.is_empty() => {
+                println!("{}", "no sessions found".dimmed());
+            }
+            Ok(sessions) => {
+                println!("{}", "Recent sessions:".green());
+                for s in &sessions {
+                    let flag = if s.flagged > 0 { format!(" (★ {})", s.flagged) } else { String::new() };
+                    println!("  {}  {} msgs{}", s.session_id.dimmed(), s.messages, flag.yellow());
+                }
+            }
+            Err(e) => println!("{}", format!("error: {e}").red()),
+        }
+    }
+
+    fn cmd_recall_session(&self, session_id: &str) {
+        let logs_dir = self.config.logs_dir();
+        match crate::log::recall_session(&logs_dir, session_id) {
+            Ok(records) => {
+                println!("{}", format!("session: {} ({} records)", session_id, records.len()).green());
+                for r in &records {
+                    let role = r["role"].as_str().unwrap_or("?");
+                    let agent = r["agent"].as_str().unwrap_or("");
+                    let content = r["content"].as_str().unwrap_or("");
+                    let important = r["important"].as_bool() == Some(true);
+                    let flag = if important { " ★" } else { "" };
+
+                    let prefix = if agent.is_empty() {
+                        format!("[{role}]")
+                    } else {
+                        format!("[{role}/@{agent}]")
+                    };
+
+                    let preview: String = content.chars().take(200).collect();
+                    let ellipsis = if content.len() > 200 { "…" } else { "" };
+                    println!("  {} {}{}{}", prefix.cyan(), preview, ellipsis, flag.yellow());
+                }
+            }
+            Err(e) => println!("{}", format!("error: {e}").red()),
+        }
+    }
+
     async fn execute_delegate(&mut self, input: &serde_json::Value) -> ToolResult {
         let agent = input["agent"].as_str().unwrap_or("");
         let task = input["task"].as_str().unwrap_or("");
@@ -416,11 +508,10 @@ impl Session {
             };
         }
 
-        // Load agent system prompt
-        let agent_path = self.config.agents_dir().join(format!("{agent}.md"));
-        let agent_prompt = match std::fs::read_to_string(&agent_path) {
-            Ok(raw) => strip_frontmatter(&raw),
-            Err(_) => {
+        // Load agent system prompt (filesystem first, embedded fallback)
+        let agent_prompt = match crate::agents::load_agent_prompt(agent, &self.config.agents_dir()) {
+            Some(prompt) => prompt,
+            None => {
                 return ToolResult {
                     tool_use_id: String::new(),
                     content: format!("error: agent @{agent} not found"),
@@ -430,24 +521,26 @@ impl Session {
         };
 
         // Brain narrates to Pinky
-        println!();
-        println!("{}", format!(
-            "  Brain: \"Pinky, I'm sending this to @{agent}. {}\"",
-            match agent {
-                "fox" => "Something is broken and Fox will sniff out the root cause.",
-                "owl" => "Owl will read the code and explain what's happening.",
-                "crow" => "Crow will write the implementation.",
-                "spider" => "Spider will find the pattern and simplify.",
-                "bear" => "Bear will tear this apart and find every weakness.",
-                "ferret" => "Ferret will check this against proper standards.",
-                "badger" => "Badger knows the homelab infrastructure.",
-                _ => "This specialist knows what to do.",
-            }
-        ).dimmed());
-        println!("{}", format!(
-            "  Pinky: \"Ooh! @{agent}! NARF! I'll write everything down!\""
-        ).dimmed());
-        println!();
+        if self.narration {
+            println!();
+            println!("{}", format!(
+                "  Brain: \"Pinky, I'm sending this to @{agent}. {}\"",
+                match agent {
+                    "fox" => "Something is broken and Fox will sniff out the root cause.",
+                    "owl" => "Owl will read the code and explain what's happening.",
+                    "crow" => "Crow will write the implementation.",
+                    "spider" => "Spider will find the pattern and simplify.",
+                    "bear" => "Bear will tear this apart and find every weakness.",
+                    "ferret" => "Ferret will check this against proper standards.",
+                    "badger" => "Badger knows the homelab infrastructure.",
+                    _ => "This specialist knows what to do.",
+                }
+            ).dimmed());
+            println!("{}", format!(
+                "  Pinky: \"Ooh! @{agent}! NARF! I'll write everything down!\""
+            ).dimmed());
+            println!();
+        }
 
         // Log the delegation
         if let Some(log) = &mut self.log {
@@ -545,12 +638,14 @@ impl Session {
         }
 
         println!("{}", format!("  └─ @{agent} done ───────────────────────").cyan());
-        println!();
-        println!("{}", format!(
-            "  Brain: \"Thank you, @{agent}. Pinky, did you get all that?\""
-        ).dimmed());
-        println!("{}", "  Pinky: \"Every word, Brain! POIT!\"".dimmed());
-        println!();
+        if self.narration {
+            println!();
+            println!("{}", format!(
+                "  Brain: \"Thank you, @{agent}. Pinky, did you get all that?\""
+            ).dimmed());
+            println!("{}", "  Pinky: \"Every word, Brain! POIT!\"".dimmed());
+            println!();
+        }
 
         ToolResult {
             tool_use_id: String::new(),
@@ -562,29 +657,17 @@ impl Session {
     fn check_commit_status(&self) {
         let cwd = std::env::current_dir().ok()
             .and_then(|p| p.to_str().map(|s| s.to_string()));
-        if let Some(dir) = cwd && let Some(count) = check_git_changes(&dir) {
-            if count >= 5 {
-                println!("{}", format!(
-                    "⚠  {} uncommitted files in {} — good time to commit",
-                    count,
-                    dir.split('/').next_back().unwrap_or(&dir)
-                ).yellow());
-            }
+        if let Some(dir) = cwd && let Some(count) = check_git_changes(&dir) && count >= 5 {
+            println!("{}", format!(
+                "⚠  {} uncommitted files in {} — good time to commit",
+                count,
+                dir.split('/').next_back().unwrap_or(&dir)
+            ).yellow());
         }
     }
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
-
-fn strip_frontmatter(content: &str) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-    if lines.first().map(|l| l.trim()) == Some("---") {
-        if let Some(end) = lines[1..].iter().position(|l| l.trim() == "---") {
-            return lines[end + 2..].join("\n").trim().to_string();
-        }
-    }
-    content.trim().to_string()
-}
 
 async fn resolve_model(config: &Config) -> Result<Model> {
     match &config.default_model {
@@ -697,12 +780,18 @@ fn print_help() {
     println!("  /agent            show active agent");
     println!("  /system           show current system prompt");
     println!();
-    println!("{}", "Logging:".green());
-    println!("  /flag [note]      mark last message as important in session log");
+    println!("{}", "Logging (Pinky):".green());
+    println!("  /flag [note]      mark last message as important");
     println!("  /log              show current session log path");
+    println!("  /search <query>   search all session logs for a keyword");
+    println!("  /sessions         list recent sessions");
+    println!("  /recall <id>      replay a session's messages");
     println!();
     println!("{}", "Escalation:".green());
     println!("  /escalate <q>     send question to Claude, inject answer into context");
+    println!();
+    println!("{}", "Preferences:".green());
+    println!("  /narration        toggle Brain/Pinky narration on/off");
     println!();
     println!("{}", "Maintenance:".green());
     println!("  /cleanup          find and kill orphaned brain processes");
