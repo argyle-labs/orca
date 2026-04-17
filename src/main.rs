@@ -58,12 +58,35 @@ enum Command {
         path: String,
     },
 
+    /// Search and manage session logs
+    Log {
+        #[command(subcommand)]
+        action: LogAction,
+    },
+
+    /// Validate agent files, symlinks, and config
+    Doctor,
+
     /// One-shot: send prompt to an agent and print response
     Run {
         #[arg(short = 'a', long, default_value = "wolf")]
         agent: String,
         prompt: String,
     },
+}
+
+#[derive(Subcommand)]
+enum LogAction {
+    /// Search all session logs for a keyword
+    Search { query: String },
+    /// List recent sessions
+    Sessions {
+        /// Max sessions to show
+        #[arg(short, long, default_value = "15")]
+        limit: usize,
+    },
+    /// Recall messages from a session
+    Recall { session_id: String },
 }
 
 #[tokio::main]
@@ -85,6 +108,8 @@ async fn main() -> Result<()> {
         Some(Command::Escalate { question, project }) => {
             cmd_escalate(&config, &question, project.as_deref()).await
         }
+        Some(Command::Doctor) => cmd_doctor(&config),
+        Some(Command::Log { action }) => cmd_log(&config, action),
         Some(Command::Audit { path }) => {
             let abs = std::fs::canonicalize(&path).unwrap_or_else(|_| path.into());
             let prompt = format!(
@@ -101,11 +126,16 @@ async fn main() -> Result<()> {
             cmd_run(&config, &agent, &prompt).await
         }
         None => {
-            let project = cli.project.as_deref().unwrap_or("");
+            let explicit = cli.project.as_deref().unwrap_or("");
+            let project = if explicit.is_empty() {
+                detect_project_from_cwd(&config).unwrap_or_default()
+            } else {
+                explicit.to_string()
+            };
             let ctx = if project.is_empty() {
                 ProjectContext::default()
             } else {
-                ProjectContext::resolve(project, &config)?
+                ProjectContext::resolve(&project, &config)?
             };
             let mut session = Session::new(config, ctx).await?;
             session.run().await
@@ -181,6 +211,18 @@ fn cmd_auth(config: &Config) -> Result<()> {
     Ok(())
 }
 
+fn detect_project_from_cwd(config: &Config) -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    // Walk cwd and up to 3 ancestors, check if any dir name matches a memory project
+    for ancestor in cwd.ancestors().take(4) {
+        let name = ancestor.file_name()?.to_string_lossy().to_string();
+        if config.memory_root.join(&name).exists() {
+            return Some(name);
+        }
+    }
+    None
+}
+
 fn rpassword_or_stdin() -> Result<String> {
     // Try to read without echo using stty
     let _ = std::process::Command::new("stty").arg("-echo").status();
@@ -231,6 +273,212 @@ fn cmd_agents(config: &Config) -> Result<()> {
         let ellipsis = if desc.len() > 72 { "…" } else { "" };
         println!("  {}  {}{}", format!("@{name:<10}").cyan(), short.dimmed(), ellipsis.dimmed());
     }
+    Ok(())
+}
+
+fn cmd_doctor(config: &Config) -> Result<()> {
+    let mut issues: Vec<String> = Vec::new();
+    let mut ok_count = 0;
+
+    // 1. Brain vault exists
+    if config.brain_vault.exists() {
+        println!("  {} brain vault: {}", "✓".green(), config.brain_vault.display());
+        ok_count += 1;
+    } else {
+        issues.push(format!("brain vault not found at {}", config.brain_vault.display()));
+    }
+
+    // 2. Agents dir exists and has files
+    let agents_dir = config.agents_dir();
+    let agent_files: Vec<_> = if agents_dir.exists() {
+        std::fs::read_dir(&agents_dir)?
+            .flatten()
+            .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
+            .collect()
+    } else {
+        issues.push(format!("agents dir not found: {}", agents_dir.display()));
+        vec![]
+    };
+
+    // 3. Validate each agent file has required frontmatter
+    let mut agent_names: Vec<String> = Vec::new();
+    for entry in &agent_files {
+        let path = entry.path();
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        agent_names.push(stem.clone());
+
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let has_name = content.contains("name:");
+        let has_desc = content.contains("description:");
+        let has_tools = content.contains("tools:");
+
+        if !has_name || !has_desc || !has_tools {
+            let missing: Vec<&str> = [
+                if !has_name { Some("name") } else { None },
+                if !has_desc { Some("description") } else { None },
+                if !has_tools { Some("tools") } else { None },
+            ].into_iter().flatten().collect();
+            issues.push(format!("{}.md: missing frontmatter: {}", stem, missing.join(", ")));
+        } else {
+            ok_count += 1;
+        }
+    }
+    println!("  {} {} agent definitions found", "✓".green(), agent_files.len());
+
+    // 4. Cross-reference wolf.md routing table
+    let wolf_path = agents_dir.join("wolf.md");
+    if wolf_path.exists() {
+        let wolf_content = std::fs::read_to_string(&wolf_path)?;
+        // Extract agent names from wolf's table (lines like "| **@name** |")
+        let wolf_agents: Vec<String> = wolf_content
+            .lines()
+            .filter_map(|line| {
+                if let Some(start) = line.find("**@") {
+                    let rest = &line[start + 3..];
+                    rest.find("**").map(|end| rest[..end].to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Agents with files but not in wolf's table
+        for name in &agent_names {
+            if name != "wolf" && !wolf_agents.contains(name) {
+                issues.push(format!("{}.md exists but not in wolf.md routing table", name));
+            }
+        }
+
+        // Agents in wolf's table but no file
+        for name in &wolf_agents {
+            if !agent_names.contains(name) {
+                issues.push(format!("@{} in wolf.md routing table but no {}.md file", name, name));
+            }
+        }
+
+        if wolf_agents.len() == agent_names.len() - 1 {
+            // -1 because wolf itself isn't in its own table
+            ok_count += 1;
+        }
+    }
+
+    // 5. Logs dir exists and is writable
+    let logs_dir = config.logs_dir();
+    if logs_dir.exists() {
+        let test_file = logs_dir.join(".doctor_test");
+        match std::fs::write(&test_file, "test") {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&test_file);
+                println!("  {} logs dir: writable", "✓".green());
+                ok_count += 1;
+            }
+            Err(_) => issues.push(format!("logs dir not writable: {}", logs_dir.display())),
+        }
+    } else {
+        issues.push(format!("logs dir not found: {}", logs_dir.display()));
+    }
+
+    // 6. Memory root exists
+    if config.memory_root.exists() {
+        let project_count = std::fs::read_dir(&config.memory_root)?
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .count();
+        println!("  {} memory root: {} projects", "✓".green(), project_count);
+        ok_count += 1;
+    } else {
+        issues.push(format!("memory root not found: {}", config.memory_root.display()));
+    }
+
+    // 7. API key
+    if config.anthropic_api_key.is_some() {
+        println!("  {} anthropic API key: set", "✓".green());
+        ok_count += 1;
+    } else {
+        println!("  {} anthropic API key: not set (escalation unavailable)", "⚠".yellow());
+    }
+
+    // Report
+    println!();
+    if issues.is_empty() {
+        println!("{}", format!("  all clear — {} checks passed", ok_count).green());
+    } else {
+        println!("{}", format!("  {} issue(s) found:", issues.len()).red());
+        for issue in &issues {
+            println!("    {} {}", "✗".red(), issue);
+        }
+        println!();
+        println!("  {} checks passed", ok_count);
+    }
+
+    Ok(())
+}
+
+fn cmd_log(config: &Config, action: LogAction) -> Result<()> {
+    let logs_dir = config.logs_dir();
+
+    match action {
+        LogAction::Search { query } => {
+            match log::search_logs(&logs_dir, &query, 20) {
+                Ok(matches) if matches.is_empty() => {
+                    println!("{}", format!("no matches for '{query}'").dimmed());
+                }
+                Ok(matches) => {
+                    println!("{}", format!("found {} match(es):", matches.len()).green());
+                    for m in &matches {
+                        let session = m["session"].as_str().unwrap_or("?");
+                        let role = m["role"].as_str().unwrap_or("?");
+                        let agent = m["agent"].as_str().unwrap_or("?");
+                        let content = m["content"].as_str().unwrap_or("");
+                        let preview: String = content.chars().take(120).collect();
+                        let important = m["important"].as_bool() == Some(true);
+                        let flag = if important { " ★" } else { "" };
+                        println!("  {} {} @{} {}{}", session.dimmed(), role.cyan(), agent, preview, flag.yellow());
+                    }
+                }
+                Err(e) => eprintln!("{}", format!("search error: {e}").red()),
+            }
+        }
+        LogAction::Sessions { limit } => {
+            match log::list_sessions(&logs_dir, limit) {
+                Ok(sessions) if sessions.is_empty() => {
+                    println!("{}", "no sessions found".dimmed());
+                }
+                Ok(sessions) => {
+                    println!("{}", "Recent sessions:".green());
+                    for s in &sessions {
+                        let flag = if s.flagged > 0 { format!(" (★ {})", s.flagged) } else { String::new() };
+                        println!("  {}  {} msgs{}", s.session_id.dimmed(), s.messages, flag.yellow());
+                    }
+                }
+                Err(e) => eprintln!("{}", format!("error: {e}").red()),
+            }
+        }
+        LogAction::Recall { session_id } => {
+            match log::recall_session(&logs_dir, &session_id) {
+                Ok(records) => {
+                    println!("{}", format!("session: {} ({} records)", session_id, records.len()).green());
+                    for r in &records {
+                        let role = r["role"].as_str().unwrap_or("?");
+                        let agent = r["agent"].as_str().unwrap_or("");
+                        let content = r["content"].as_str().unwrap_or("");
+                        let important = r["important"].as_bool() == Some(true);
+                        let flag = if important { " ★" } else { "" };
+                        let prefix = if agent.is_empty() {
+                            format!("[{role}]")
+                        } else {
+                            format!("[{role}/@{agent}]")
+                        };
+                        let preview: String = content.chars().take(200).collect();
+                        let ellipsis = if content.len() > 200 { "…" } else { "" };
+                        println!("  {} {}{}{}", prefix.cyan(), preview, ellipsis, flag.yellow());
+                    }
+                }
+                Err(e) => eprintln!("{}", format!("error: {e}").red()),
+            }
+        }
+    }
+
     Ok(())
 }
 

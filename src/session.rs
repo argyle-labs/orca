@@ -545,6 +545,11 @@ impl Session {
                     "scribe" => "Scribe will check the documentation.",
                     "lynx" => "Lynx will plan the most efficient path.",
                     "smith" => "Smith will inspect and repair the agent definitions.",
+                    "raven" => "Raven will capture this in the vault.",
+                    "pinky" => "Pinky will search the session logs. NARF!",
+                    "magpie" => "Magpie will check for scope graduation candidates.",
+                    "oracle" => "Oracle will judge whether to escalate.",
+                    "boar" => "Boar will charge through the carl commands.",
                     _ => "This specialist knows what to do.",
                 }
             ).dimmed());
