@@ -40,7 +40,7 @@ impl Session {
 
         Ok(Session {
             system_prompt,
-            active_agent: "wolf".to_string(),
+            active_agent: "brain".to_string(),
             project,
             backend,
             messages: Vec::new(),
@@ -68,6 +68,9 @@ impl Session {
             &self.active_agent,
         );
 
+        // Warn about phantom brain processes on startup
+        warn_phantom_processes();
+
         loop {
             let prompt = format!("{} {} ",
                 self.active_agent.cyan(),
@@ -83,12 +86,27 @@ impl Session {
                     }
                     let _ = rl.add_history_entry(&input);
 
-                    let result = if input.starts_with('/') {
-                        self.handle_command(&input).await
-                    } else if input.starts_with('@') {
-                        self.cmd_switch_agent(&input).await
-                    } else {
-                        self.chat(input).await
+                    // Bare commands — no slash needed
+                    let result = match input.as_str() {
+                        "exit" | "quit" | "q" | "bye" => {
+                            println!("{}", "bye.".dimmed());
+                            if let Some(p) = &history_path {
+                                rl.save_history(p).ok();
+                            }
+                            std::process::exit(0);
+                        }
+                        "help" => { print_help(); Ok(()) }
+                        "clear" => {
+                            self.messages.clear();
+                            println!("{}", "context cleared.".dimmed());
+                            Ok(())
+                        }
+                        _ if input.starts_with('/') => {
+                            self.handle_command(&input).await
+                        }
+                        _ => {
+                            self.chat(input).await
+                        }
                     };
 
                     if let Err(e) = result {
@@ -139,10 +157,8 @@ impl Session {
             let has_tools = !response.tool_calls.is_empty();
 
             // Log assistant response
-            if !response.text.is_empty() {
-                if let Some(log) = &mut self.log {
-                    log.append("assistant", &self.active_agent.clone(), &response.text, &[]).ok();
-                }
+            if !response.text.is_empty() && let Some(log) = &mut self.log {
+                log.append("assistant", &self.active_agent.clone(), &response.text, &[]).ok();
             }
 
             self.messages.push(Message::Assistant {
@@ -207,7 +223,7 @@ impl Session {
                 println!("{}", self.system_prompt.dimmed());
             }
             "/agent" => {
-                println!("{}", format!("active: @{}", self.active_agent).cyan());
+                println!("{}", "you're talking to Brain.".cyan());
             }
             "/flag" => {
                 let note = parts.get(1).copied().unwrap_or("flagged as important");
@@ -234,6 +250,9 @@ impl Session {
                     self.cmd_escalate(&question).await?;
                 }
             }
+            "/cleanup" => {
+                cleanup_phantom_processes();
+            }
             "/quit" | "/exit" | "/q" => {
                 println!("{}", "bye.".dimmed());
                 std::process::exit(0);
@@ -243,48 +262,13 @@ impl Session {
             }
             _ => {
                 println!("{}", format!("unknown command: {}", parts[0]).yellow());
-                println!("{}", "  type /help for commands, or @agentname to switch agent".dimmed());
+                println!("{}", "  type /help or help for commands".dimmed());
             }
         }
         Ok(())
     }
 
-    /// Switch active agent: @agentname [optional first message]
-    async fn cmd_switch_agent(&mut self, input: &str) -> Result<()> {
-        let mut parts = input.splitn(2, ' ');
-        let agent_tag = parts.next().unwrap_or("").trim_start_matches('@');
-        let rest = parts.next().map(|s| s.trim().to_string());
 
-        if agent_tag.is_empty() {
-            println!("{}", "usage: @agentname [message]".yellow());
-            return Ok(());
-        }
-
-        // Load agent system prompt from brain vault
-        let agent_path = self.config.agents_dir().join(format!("{agent_tag}.md"));
-        if !agent_path.exists() {
-            println!("{}", format!("agent not found: @{agent_tag}").red());
-            println!("{}", "  run `brain agents` to list available agents".dimmed());
-            return Ok(());
-        }
-
-        let raw = std::fs::read_to_string(&agent_path)?;
-        let prompt = strip_frontmatter(&raw);
-
-        self.system_prompt = prompt;
-        self.active_agent = agent_tag.to_string();
-
-        println!("{}", format!("switched to @{agent_tag}").green());
-
-        // If there's a message after the agent name, send it immediately
-        if let Some(msg) = rest {
-            if !msg.is_empty() {
-                self.chat(msg).await?;
-            }
-        }
-
-        Ok(())
-    }
 
     fn cmd_context(&self) {
         let msg_count = self.messages.len();
@@ -401,15 +385,13 @@ impl Session {
     fn check_commit_status(&self) {
         let cwd = std::env::current_dir().ok()
             .and_then(|p| p.to_str().map(|s| s.to_string()));
-        if let Some(dir) = cwd {
-            if let Some(count) = check_git_changes(&dir) {
-                if count >= 5 {
-                    println!("{}", format!(
-                        "⚠  {} uncommitted files in {} — good time to commit",
-                        count,
-                        dir.split('/').last().unwrap_or(&dir)
-                    ).yellow());
-                }
+        if let Some(dir) = cwd && let Some(count) = check_git_changes(&dir) {
+            if count >= 5 {
+                println!("{}", format!(
+                    "⚠  {} uncommitted files in {} — good time to commit",
+                    count,
+                    dir.split('/').next_back().unwrap_or(&dir)
+                ).yellow());
             }
         }
     }
@@ -417,7 +399,7 @@ impl Session {
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
-pub async fn resolve_model(config: &Config) -> Result<Model> {
+async fn resolve_model(config: &Config) -> Result<Model> {
     match &config.default_model {
         Model::Claude(id) if !id.is_empty() => return Ok(Model::Claude(id.clone())),
         Model::LMStudio(id) if !id.is_empty() => return Ok(Model::LMStudio(id.clone())),
@@ -460,7 +442,7 @@ pub async fn resolve_model(config: &Config) -> Result<Model> {
     }
 }
 
-pub fn build_backend(config: &Config, model: &Model) -> Result<Box<dyn ModelBackend>> {
+fn build_backend(config: &Config, model: &Model) -> Result<Box<dyn ModelBackend>> {
     match model {
         Model::Claude(id) => {
             let key = config.anthropic_api_key.clone()
@@ -487,15 +469,6 @@ fn history_file() -> Option<std::path::PathBuf> {
     Some(dir.join("history"))
 }
 
-fn strip_frontmatter(content: &str) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-    if lines.first().map(|l| l.trim()) == Some("---") {
-        if let Some(end) = lines[1..].iter().position(|l| l.trim() == "---") {
-            return lines[end + 2..].join("\n").trim().to_string();
-        }
-    }
-    content.trim().to_string()
-}
 
 fn check_git_changes(dir: &str) -> Option<usize> {
     let output = std::process::Command::new("git")
@@ -521,16 +494,15 @@ fn print_banner(backend: &str, model: &str, project: Option<&str>, agent: &str) 
         println!("{}", "  brain".bold());
     }
     println!("  {}  {}", format!("@{agent}").cyan(), format!("{backend}:{model}").dimmed());
-    println!("{}", "  /help · @agentname to switch · ^D to quit".dimmed());
+    println!("{}", "  /help · exit to quit".dimmed());
     println!();
 }
 
 fn print_help() {
     println!("{}", "Navigation:".green());
-    println!("  @agentname [msg]  switch active agent (optionally send first message)");
     println!("  /model            list models + interactive picker");
     println!("  /model <spec>     switch directly  (lmstudio:qwen3, claude-sonnet-4-6)");
-    println!("  /clear            clear conversation history");
+    println!("  clear             clear conversation history");
     println!();
     println!("{}", "Context:".green());
     println!("  /context          show messages, token usage, context window %");
@@ -545,6 +517,77 @@ fn print_help() {
     println!("{}", "Escalation:".green());
     println!("  /escalate <q>     send question to Claude, inject answer into context");
     println!();
+    println!("{}", "Maintenance:".green());
+    println!("  /cleanup          find and kill orphaned brain processes");
+    println!();
     println!("{}", "Session:".green());
-    println!("  /quit             exit  (also: ^D)");
+    println!("  exit              quit  (also: quit, q, bye, ^D)");
+}
+
+fn find_other_brain_pids() -> Vec<u32> {
+    let my_pid = std::process::id();
+    let output = std::process::Command::new("pgrep")
+        .args(["-x", "brain"])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(|l| l.trim().parse::<u32>().ok())
+                .filter(|&pid| pid != my_pid)
+                .collect()
+        }
+        _ => vec![],
+    }
+}
+
+fn warn_phantom_processes() {
+    let others = find_other_brain_pids();
+    if !others.is_empty() {
+        let pids: Vec<String> = others.iter().map(|p| p.to_string()).collect();
+        println!("{}", format!(
+            "  {} other brain process(es) running: {}",
+            others.len(),
+            pids.join(", ")
+        ).yellow());
+        println!("{}", "  run /cleanup to kill them".dimmed());
+        println!();
+    }
+}
+
+fn cleanup_phantom_processes() {
+    let others = find_other_brain_pids();
+    if others.is_empty() {
+        println!("{}", "no phantom brain processes found.".green());
+        return;
+    }
+
+    println!("{}", format!("found {} other brain process(es):", others.len()).yellow());
+    for pid in &others {
+        // Show what the process is doing
+        let info = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "pid,etime,args"])
+            .output();
+        if let Ok(out) = info {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines().skip(1) {
+                println!("  {}", line.trim());
+            }
+        }
+    }
+
+    print!("{} ", "kill them? [y/N]:".cyan());
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+    let mut input = String::new();
+    std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut input).ok();
+    if input.trim().eq_ignore_ascii_case("y") {
+        for pid in &others {
+            let _ = std::process::Command::new("kill")
+                .arg(pid.to_string())
+                .status();
+        }
+        println!("{}", format!("killed {} process(es).", others.len()).green());
+    } else {
+        println!("{}", "skipped.".dimmed());
+    }
 }

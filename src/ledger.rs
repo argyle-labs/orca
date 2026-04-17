@@ -29,12 +29,6 @@ impl TokenLedger {
         );
     }
 
-    pub fn display_last(&self, input: u32, output: u32) {
-        print!(
-            "{}",
-            format!(" [↑{} ↓{}]", fmt_tokens(input), fmt_tokens(output)).dimmed()
-        );
-    }
 }
 
 fn fmt_tokens(n: u32) -> String {

@@ -4,9 +4,6 @@ use serde::{Deserialize, Serialize};
 /// Each backend converts to/from its own wire format.
 #[derive(Debug, Clone)]
 pub enum Message {
-    System {
-        content: String,
-    },
     User {
         content: String,
     },
@@ -20,10 +17,6 @@ pub enum Message {
 impl Message {
     pub fn user(content: impl Into<String>) -> Self {
         Message::User { content: content.into() }
-    }
-
-    pub fn system(content: impl Into<String>) -> Self {
-        Message::System { content: content.into() }
     }
 }
 
@@ -57,7 +50,6 @@ pub enum StopReason {
     EndTurn,
     ToolUse,
     MaxTokens,
-    StopSequence,
 }
 
 /// Definition of a tool exposed to the model.

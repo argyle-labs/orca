@@ -17,13 +17,6 @@ pub enum Model {
 }
 
 impl Model {
-    pub fn display(&self) -> String {
-        match self {
-            Model::Claude(m) => format!("claude:{m}"),
-            Model::LMStudio(m) => format!("lmstudio:{m}"),
-        }
-    }
-
     /// Parse a /model <spec> argument.
     /// Accepts: "claude-sonnet-4-6", "claude:claude-sonnet-4-6", "lmstudio:model-id"
     pub fn parse(s: &str) -> Self {

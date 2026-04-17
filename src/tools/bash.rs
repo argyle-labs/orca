@@ -5,16 +5,9 @@ use std::process::Command;
 use std::collections::HashSet;
 
 /// Permissions granted for this session (commands that bypass the prompt).
+#[derive(Default)]
 pub struct BashPermissions {
     always_allow: HashSet<String>,
-}
-
-impl Default for BashPermissions {
-    fn default() -> Self {
-        BashPermissions {
-            always_allow: HashSet::new(),
-        }
-    }
 }
 
 impl BashPermissions {

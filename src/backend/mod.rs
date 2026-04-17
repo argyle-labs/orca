@@ -26,12 +26,3 @@ pub trait ModelBackend: Send + Sync {
     fn model_id(&self) -> &str;
 }
 
-/// Parse SSE stream lines, yielding "data: ..." payloads.
-/// Filters out "[DONE]" and empty data lines.
-pub fn sse_data_lines(chunk: &str) -> impl Iterator<Item = &str> {
-    chunk
-        .lines()
-        .filter(|l| l.starts_with("data: "))
-        .map(|l| &l[6..])
-        .filter(|l| *l != "[DONE]" && !l.is_empty())
-}

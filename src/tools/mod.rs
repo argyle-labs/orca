@@ -7,18 +7,10 @@ use anyhow::Result;
 use bash::BashPermissions;
 use serde_json::{Value, json};
 
+#[derive(Default)]
 pub struct ToolRegistry {
     pub permissions: BashPermissions,
     pub working_dir: Option<String>,
-}
-
-impl Default for ToolRegistry {
-    fn default() -> Self {
-        ToolRegistry {
-            permissions: BashPermissions::default(),
-            working_dir: None,
-        }
-    }
 }
 
 impl ToolRegistry {

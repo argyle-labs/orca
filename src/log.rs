@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::json;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -22,7 +22,7 @@ impl SessionLog {
         let path = logs_dir.join(format!("{session_id}.jsonl"));
 
         // Write session-start record
-        let mut log = SessionLog {
+        let log = SessionLog {
             path,
             session_id: session_id.clone(),
             project,
@@ -73,12 +73,10 @@ impl SessionLog {
         let updated: String = content
             .lines()
             .map(|line| {
-                if let Ok(mut record) = serde_json::from_str::<serde_json::Value>(line) {
-                    if record["id"].as_str() == Some(id.as_str()) {
-                        record["important"] = json!(true);
-                        record["note"] = json!(note);
-                        return record.to_string();
-                    }
+                if let Ok(mut record) = serde_json::from_str::<serde_json::Value>(line) && record["id"].as_str() == Some(id.as_str()) {
+                    record["important"] = json!(true);
+                    record["note"] = json!(note);
+                    return record.to_string();
                 }
                 line.to_string()
             })

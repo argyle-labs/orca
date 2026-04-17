@@ -1,4 +1,4 @@
-use super::{ModelBackend, sse_data_lines};
+use super::ModelBackend;
 use crate::types::{BackendResponse, Message, StopReason, ToolCall, ToolDef};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -161,10 +161,11 @@ async fn parse_claude_stream(
                             }
                         }
                         "input_json_delta" => {
-                            if let Some(partial) = delta["partial_json"].as_str() {
-                                if let Some(entry) = tool_accum.get_mut(&idx) {
-                                    entry.2.push_str(partial);
-                                }
+                            if let (Some(partial), Some(entry)) = (
+                                delta["partial_json"].as_str(),
+                                tool_accum.get_mut(&idx),
+                            ) {
+                                entry.2.push_str(partial);
                             }
                         }
                         _ => {}
@@ -175,8 +176,7 @@ async fn parse_claude_stream(
                     let idx = event["index"].as_u64().unwrap_or(0) as usize;
                     if block_types.get(&idx) == Some(&true) {
                         if let Some((id, name, json_str)) = tool_accum.remove(&idx) {
-                            let input: Value =
-                                serde_json::from_str(&json_str).unwrap_or(json!({}));
+                            let input: Value = serde_json::from_str(&json_str).unwrap_or(json!({}));
                             result.tool_calls.push(ToolCall { id, name, input });
                         }
                     }
@@ -213,16 +213,13 @@ fn serialize_messages(messages: &[Message]) -> Value {
 
     for msg in messages {
         match msg {
-            Message::System { .. } => {} // handled separately as top-level system param
             Message::User { content } => {
                 out.push(json!({ "role": "user", "content": content }));
             }
             Message::Assistant { text, tool_calls } => {
                 let mut content: Vec<Value> = vec![];
-                if let Some(t) = text {
-                    if !t.is_empty() {
-                        content.push(json!({ "type": "text", "text": t }));
-                    }
+                if let Some(t) = text.as_deref().filter(|t| !t.is_empty()) {
+                    content.push(json!({ "type": "text", "text": t }));
                 }
                 for tc in tool_calls {
                     content.push(json!({

@@ -1,12 +1,10 @@
 use crate::config::Config;
 use anyhow::Result;
-use std::path::PathBuf;
 
 /// Resolved project context: system prompt + memory content.
 #[derive(Debug, Default)]
 pub struct ProjectContext {
     pub project: Option<String>,
-    pub memory_path: Option<PathBuf>,
     pub memory_content: Option<String>,
 }
 
@@ -22,7 +20,6 @@ impl ProjectContext {
             let content = std::fs::read_to_string(&exact)?;
             return Ok(ProjectContext {
                 project: Some(name.to_string()),
-                memory_path: Some(exact),
                 memory_content: Some(content),
             });
         }
@@ -38,7 +35,6 @@ impl ProjectContext {
                         let content = std::fs::read_to_string(&memory_file)?;
                         return Ok(ProjectContext {
                             project: Some(dir_name.to_string()),
-                            memory_path: Some(memory_file),
                             memory_content: Some(content),
                         });
                     }
