@@ -90,8 +90,19 @@ impl ToolRegistry {
                 }),
             },
             ToolDef {
+                name: "confirm".into(),
+                description: "Ask the user for confirmation before proceeding. Use this after presenting a plan or before making changes. Returns 'yes' or 'no'.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "question": { "type": "string", "description": "What to ask the user, e.g. 'Proceed with the audit?'" }
+                    },
+                    "required": ["question"]
+                }),
+            },
+            ToolDef {
                 name: "delegate".into(),
-                description: "Delegate a task to a specialist agent. The agent runs a sub-conversation with full tool access and returns its result. Available agents: owl (explain code), fox (debug), crow (write code), spider (simplify), bear (review + audit), ferret (code standards), badger (homelab), hawk (containers), mole (processes/ports), elephant (external docs), scribe (doc consistency), boar (carl/rebuy only), lynx (plan), raven (notes), oracle (escalation judge).".into(),
+                description: "Delegate a task to a specialist agent. The agent runs a sub-conversation with full tool access and returns its result. Available agents: owl (explain code), fox (debug), crow (write code), spider (simplify), bear (review + audit), ferret (code standards), badger (homelab), hawk (containers), mole (processes/ports), elephant (external docs), scribe (doc consistency), boar (carl/rebuy only), lynx (plan), raven (notes), oracle (escalation judge), smith (agent file maintenance).".into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {

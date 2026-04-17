@@ -79,7 +79,8 @@ impl Session {
         warn_phantom_processes();
 
         loop {
-            let prompt = format!("{} {} ",
+            let emoji = agent_emoji(&self.active_agent);
+            let prompt = format!("{emoji} {} {} ",
                 self.active_agent.cyan(),
                 "›".dimmed(),
             );
@@ -94,14 +95,15 @@ impl Session {
                     let _ = rl.add_history_entry(&input);
 
                     // Bare commands — no slash needed
-                    let result = match input.as_str() {
-                        "exit" | "quit" | "q" | "bye" => {
-                            println!("{}", "bye.".dimmed());
-                            if let Some(p) = &history_path {
-                                rl.save_history(p).ok();
-                            }
-                            std::process::exit(0);
+                    if matches!(input.as_str(), "exit" | "quit" | "q" | "bye") {
+                        println!("{}", "bye.".dimmed());
+                        if let Some(p) = &history_path {
+                            rl.save_history(p).ok();
                         }
+                        break;
+                    }
+
+                    let result = match input.as_str() {
                         "help" => { print_help(); Ok(()) }
                         "clear" => {
                             self.messages.clear();
@@ -117,6 +119,12 @@ impl Session {
                     };
 
                     if let Err(e) = result {
+                        if e.to_string() == "__exit__" {
+                            if let Some(p) = &history_path {
+                                rl.save_history(p).ok();
+                            }
+                            break;
+                        }
                         eprintln!("{}", format!("error: {e}").red());
                     }
                 }
@@ -170,7 +178,7 @@ impl Session {
             let has_tools = !response.tool_calls.is_empty();
 
             // Log assistant response
-            if !response.text.is_empty() && let Some(log) = &mut self.log {
+            if !response.text.trim().is_empty() && let Some(log) = &mut self.log {
                 log.append("assistant", &self.active_agent.clone(), &response.text, &[]).ok();
             }
 
@@ -193,6 +201,8 @@ impl Session {
 
                 let mut r = if tc.name == "delegate" {
                     self.execute_delegate(&tc.input).await
+                } else if tc.name == "confirm" {
+                    execute_confirm(&tc.input)
                 } else {
                     self.tools.execute(&tc.name, &tc.input)
                 };
@@ -296,7 +306,7 @@ impl Session {
             }
             "/quit" | "/exit" | "/q" => {
                 println!("{}", "bye.".dimmed());
-                std::process::exit(0);
+                anyhow::bail!("__exit__");
             }
             "/help" | "/h" => {
                 print_help();
@@ -374,27 +384,22 @@ impl Session {
             return Ok(());
         }
 
-        println!("{}", "Available models:".green());
+        println!("{}", "Switch model:".green());
         for (i, (display, _)) in all.iter().enumerate() {
-            let active = if current.ends_with(display.trim_start_matches("lmstudio:").trim_start_matches("claude:"))
+            let marker = if current.ends_with(display.trim_start_matches("lmstudio:").trim_start_matches("claude:"))
                 || current == *display { "●" } else { " " };
-            println!("  {} {}  {display}", active, format!("[{i}]").dimmed());
+            println!("  {} {}  {display}", marker, format!("[{}]", i + 1).dimmed());
         }
-        print!("{} ", "switch to [enter to cancel]:".cyan());
+        print!("{} ", "[enter to cancel]:".cyan());
         std::io::Write::flush(&mut std::io::stdout())?;
-
         let mut input = String::new();
         std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut input)?;
         let trimmed = input.trim();
-        if trimmed.is_empty() {
-            return Ok(());
-        }
-        if let Ok(idx) = trimmed.parse::<usize>() {
-            if let Some((_, spec)) = all.get(idx) {
-                self.cmd_switch_model(spec).await?;
-            }
-        } else {
-            self.cmd_switch_model(trimmed).await?;
+        if !trimmed.is_empty()
+            && let Ok(idx) = trimmed.parse::<usize>()
+            && idx > 0
+            && let Some((_, spec)) = all.get(idx - 1) {
+            self.cmd_switch_model(spec).await?;
         }
         Ok(())
     }
@@ -521,10 +526,11 @@ impl Session {
         };
 
         // Brain narrates to Pinky
+        let agent_icon = agent_emoji(agent);
         if self.narration {
             println!();
             println!("{}", format!(
-                "  Brain: \"Pinky, I'm sending this to @{agent}. {}\"",
+                "  🧠 Brain: \"Pinky, I'm sending this to {agent_icon} @{agent}. {}\"",
                 match agent {
                     "fox" => "Something is broken and Fox will sniff out the root cause.",
                     "owl" => "Owl will read the code and explain what's happening.",
@@ -533,11 +539,17 @@ impl Session {
                     "bear" => "Bear will tear this apart and find every weakness.",
                     "ferret" => "Ferret will check this against proper standards.",
                     "badger" => "Badger knows the homelab infrastructure.",
+                    "hawk" => "Hawk will inspect the containers.",
+                    "mole" => "Mole will dig into the system processes.",
+                    "elephant" => "Elephant never forgets the docs.",
+                    "scribe" => "Scribe will check the documentation.",
+                    "lynx" => "Lynx will plan the most efficient path.",
+                    "smith" => "Smith will inspect and repair the agent definitions.",
                     _ => "This specialist knows what to do.",
                 }
             ).dimmed());
             println!("{}", format!(
-                "  Pinky: \"Ooh! @{agent}! NARF! I'll write everything down!\""
+                "  🐭 Pinky: \"Ooh! {agent_icon} @{agent}! NARF! I'll write everything down!\""
             ).dimmed());
             println!();
         }
@@ -558,7 +570,7 @@ impl Session {
         let mut full_response = String::new();
         let max_rounds = 20; // safety limit
 
-        println!("{}", format!("  ┌─ @{agent} ─────────────────────────────").cyan());
+        println!("{}", format!("  ┌─ {agent_icon} @{agent} ────────────────────────────").cyan());
 
         for round in 0..max_rounds {
             let cancel = CancellationToken::new();
@@ -637,13 +649,50 @@ impl Session {
             }
         }
 
-        println!("{}", format!("  └─ @{agent} done ───────────────────────").cyan());
+        println!("{}", format!("  └─ {agent_icon} @{agent} done ──────────────────────").cyan());
         if self.narration {
+            // Varied post-delegation dialogue based on agent
+            let (brain_line, pinky_line) = match agent {
+                "fox" => (
+                    format!("\"Excellent work, {agent_icon} Fox. The trail was well-traced.\""),
+                    "\"Ooh! Was it a mystery? I love mysteries! TROZ!\"".to_string(),
+                ),
+                "bear" => (
+                    format!("\"Thorough as always, {agent_icon} Bear. Nothing escapes you.\""),
+                    "\"Bear is scary when he does that, Brain! NARF!\"".to_string(),
+                ),
+                "crow" => (
+                    format!("\"Clean implementation, {agent_icon} Crow. Well built.\""),
+                    "\"Ooh! New code! Can I name a variable? POIT!\"".to_string(),
+                ),
+                "ferret" => (
+                    format!("\"Good eye, {agent_icon} Ferret. Standards matter.\""),
+                    "\"Ferret found ALL the things! Every single one! ZORT!\"".to_string(),
+                ),
+                "owl" => (
+                    format!("\"Clear explanation, {agent_icon} Owl. Wisdom earned.\""),
+                    "\"I understood some of those words, Brain! NARF!\"".to_string(),
+                ),
+                "spider" => (
+                    format!("\"Elegant simplification, {agent_icon} Spider. Less is more.\""),
+                    "\"The web is so pretty now! POIT!\"".to_string(),
+                ),
+                "scribe" => (
+                    format!("\"Good catch, {agent_icon} Scribe. Documentation is truth.\""),
+                    "\"Words! So many words! I'll file them all! TROZ!\"".to_string(),
+                ),
+                "smith" => (
+                    format!("\"Good work, {agent_icon} Smith. The tools are sharper now.\""),
+                    "\"Smith fixed the things that fix the things! ZORT!\"".to_string(),
+                ),
+                _ => (
+                    format!("\"Thank you, {agent_icon} @{agent}. Pinky, did you get all that?\""),
+                    "\"Every word, Brain! POIT!\"".to_string(),
+                ),
+            };
             println!();
-            println!("{}", format!(
-                "  Brain: \"Thank you, @{agent}. Pinky, did you get all that?\""
-            ).dimmed());
-            println!("{}", "  Pinky: \"Every word, Brain! POIT!\"".dimmed());
+            println!("{}", format!("  🧠 Brain: {brain_line}").dimmed());
+            println!("{}", format!("  🐭 Pinky: {pinky_line}").dimmed());
             println!();
         }
 
@@ -699,14 +748,14 @@ async fn resolve_model(config: &Config) -> Result<Model> {
 
             println!("{}", "Select a model:".green());
             for (i, m) in chat_models.iter().enumerate() {
-                println!("  {}  {m}", format!("[{i}]").dimmed());
+                println!("  {}  {m}", format!("[{}]", i + 1).dimmed());
             }
-            print!("{} ", "model [0]:".cyan());
+            print!("{} ", "[1]:".cyan());
             std::io::Write::flush(&mut std::io::stdout())?;
             let mut input = String::new();
             std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut input)?;
-            let choice: usize = input.trim().parse().unwrap_or(0);
-            let selected = chat_models.get(choice).unwrap_or(&chat_models[0]);
+            let choice: usize = input.trim().parse().unwrap_or(1);
+            let selected = chat_models.get(choice.saturating_sub(1)).unwrap_or(&chat_models[0]);
             Ok(Model::LMStudio(selected.to_string()))
         }
     }
@@ -756,14 +805,59 @@ fn fmt_tokens(n: u32) -> String {
     else { n.to_string() }
 }
 
+fn execute_confirm(input: &serde_json::Value) -> ToolResult {
+    let question = input["question"].as_str().unwrap_or("Proceed?");
+
+    println!("{}", question.cyan());
+    println!("  {}  yes", "[1]".dimmed());
+    println!("  {}  no", "[2]".dimmed());
+    print!("{} ", "[1]:".cyan());
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+    let mut buf = String::new();
+    std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut buf).ok();
+
+    let answer = if buf.trim() == "2" { "no" } else { "yes" };
+    ToolResult {
+        tool_use_id: String::new(),
+        content: answer.to_string(),
+        is_error: false,
+    }
+}
+
+fn agent_emoji(name: &str) -> &'static str {
+    match name {
+        "brain" | "wolf" => "🧠",
+        "pinky" => "🐭",
+        "owl" => "🦉",
+        "fox" => "🦊",
+        "crow" => "🐦‍⬛",
+        "bear" => "🐻",
+        "spider" => "🕷️",
+        "badger" => "🦡",
+        "ferret" => "🐾",
+        "hawk" => "🦅",
+        "mole" => "🐀",
+        "elephant" => "🐘",
+        "raven" => "🪶",
+        "lynx" => "🐱",
+        "boar" => "🐗",
+        "magpie" => "🐦",
+        "oracle" => "🔮",
+        "scribe" => "✍️",
+        "smith" => "🔨",
+        _ => "🔧",
+    }
+}
+
 fn print_banner(backend: &str, model: &str, project: Option<&str>, agent: &str) {
     println!();
+    let emoji = agent_emoji(agent);
     if let Some(p) = project {
-        println!("{}", format!("  brain  ·  {p}").bold());
+        println!("{}", format!("  {emoji} brain  ·  {p}").bold());
     } else {
-        println!("{}", "  brain".bold());
+        println!("{}", format!("  {emoji} brain").bold());
     }
-    println!("  {}  {}", format!("@{agent}").cyan(), format!("{backend}:{model}").dimmed());
+    println!("  {}  {}", format!("{emoji} @{agent}").cyan(), format!("{backend}:{model}").dimmed());
     println!("{}", "  /help · exit to quit".dimmed());
     println!();
 }
@@ -852,11 +946,15 @@ fn cleanup_phantom_processes() {
         }
     }
 
-    print!("{} ", "kill them? [y/N]:".cyan());
+    println!("{}", "Kill them?".cyan());
+    println!("  {}  no", "[1]".dimmed());
+    println!("  {}  yes, kill all", "[2]".dimmed());
+    print!("{} ", "[1]:".cyan());
     std::io::Write::flush(&mut std::io::stdout()).ok();
-    let mut input = String::new();
-    std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut input).ok();
-    if input.trim().eq_ignore_ascii_case("y") {
+    let mut kill_input = String::new();
+    std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut kill_input).ok();
+
+    if kill_input.trim() == "2" {
         for pid in &others {
             let _ = std::process::Command::new("kill")
                 .arg(pid.to_string())

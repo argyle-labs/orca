@@ -30,23 +30,21 @@ pub fn run_bash(
     working_dir: Option<&str>,
 ) -> Result<String> {
     if !permissions.is_allowed(command) {
-        print!(
-            "\n{}\n  {}\n{} ",
-            "⚡ bash command:".yellow(),
-            command.white(),
-            "[allow / deny / always]:".dimmed(),
-        );
+        let prefix = command.split_whitespace().next().unwrap_or(command);
+        println!("\n{}", "⚡ bash command:".yellow());
+        println!("  {}", command.white());
+        println!("  {}  allow", "[1]".dimmed());
+        println!("  {}  always allow '{}' this session", "[2]".dimmed(), prefix);
+        println!("  {}  deny", "[3]".dimmed());
+        print!("{} ", "[1]:".cyan());
         io::stdout().flush()?;
 
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
-        let choice = input.trim().to_lowercase();
 
-        match choice.as_str() {
-            "allow" | "a" | "y" | "yes" => {}
-            "always" => {
-                // Allow the command prefix (first word) for the session
-                let prefix = command.split_whitespace().next().unwrap_or(command);
+        match input.trim() {
+            "" | "1" => {}
+            "2" => {
                 permissions.allow(prefix);
                 println!("{}", format!("'{prefix}' allowed for this session").dimmed());
             }
@@ -97,12 +95,19 @@ pub fn run_bash(
         combined.push_str(&stderr);
     }
 
+    // Cap output to avoid blowing up context
+    let max_chars = 10_000;
+    if combined.len() > max_chars {
+        let truncated = &combined[..max_chars];
+        let total = combined.len();
+        combined = format!("{truncated}\n\n[… truncated — {total} total chars, showing first {max_chars}]");
+    }
+
     if !output.status.success() {
         let code = output.status.code().unwrap_or(-1);
         if combined.is_empty() {
             bail!("command exited with code {code}");
         }
-        // Return output even on failure — the model should see what went wrong
         return Ok(format!("[exit code {code}]\n{combined}"));
     }
 

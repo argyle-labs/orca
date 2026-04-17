@@ -118,11 +118,13 @@ async fn main() -> Result<()> {
 fn cmd_login(config: &Config) -> Result<()> {
     if let Some(key) = &config.anthropic_api_key {
         println!("{} API key already set: {}", "✓".green(), auth::mask_key(key).dimmed());
-        print!("Replace it? [y/N] ");
+        println!("  {}  no", "[1]".dimmed());
+        println!("  {}  yes, replace", "[2]".dimmed());
+        print!("{} ", "[1]:".cyan());
         std::io::Write::flush(&mut std::io::stdout())?;
         let mut input = String::new();
         std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut input)?;
-        if !input.trim().eq_ignore_ascii_case("y") {
+        if input.trim() != "2" {
             return Ok(());
         }
     }
