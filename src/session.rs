@@ -114,6 +114,7 @@ impl Session {
             if !has_tools {
                 // Done — print token info and exit the tool loop
                 self.ledger.display();
+                self.check_commit_status();
                 println!();
                 break;
             }
@@ -309,6 +310,46 @@ fn print_banner(backend: &str, model: &str, project: Option<&str>) {
     println!("{}", format!("  {backend}:{model}").dimmed());
     println!("{}", "  /help for commands, ^D to quit".dimmed());
     println!();
+}
+
+impl Session {
+    fn check_commit_status(&self) {
+        // Check the current working directory for uncommitted changes
+        let cwd = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(|s| s.to_string()));
+
+        if let Some(dir) = cwd {
+            if let Some(count) = check_git_changes(&dir) {
+                if count >= 5 {
+                    println!(
+                        "{}",
+                        format!(
+                            "⚠  {} uncommitted files in {} — good time to commit",
+                            count,
+                            dir.split('/').last().unwrap_or(&dir)
+                        )
+                        .yellow()
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn check_git_changes(dir: &str) -> Option<usize> {
+    let output = std::process::Command::new("git")
+        .args(["-C", dir, "status", "--short"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let count = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count();
+    if count == 0 { None } else { Some(count) }
 }
 
 fn print_help() {
