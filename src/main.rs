@@ -1,7 +1,9 @@
+mod auth;
 mod backend;
 mod config;
 mod context;
 mod ledger;
+mod log;
 mod session;
 mod tools;
 mod types;
@@ -14,14 +16,9 @@ use context::ProjectContext;
 use session::Session;
 
 #[derive(Parser)]
-#[command(
-    name = "brain",
-    about = "Context-first AI agent orchestrator",
-    version
-)]
+#[command(name = "brain", about = "Context-first AI agent orchestrator", version)]
 struct Cli {
-    /// Project context to load (e.g. "halvor", "bardbase")
-    /// If omitted, starts a general session.
+    /// Project context to load (e.g. "halvor"). Omit for general session.
     #[arg(value_name = "PROJECT")]
     project: Option<String>,
 
@@ -31,36 +28,38 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Send a one-shot message and print the response (non-interactive)
-    Run {
-        #[arg(short = 'a', long = "agent", default_value = "wolf")]
-        agent: String,
-        prompt: String,
-    },
+    /// Store Anthropic API key for Claude escalation
+    Login,
 
-    /// Ask Claude a question (bypasses local model, useful for escalation)
+    /// Check authentication and connectivity status
+    Auth,
+
+    /// Remove stored API key from keychain
+    Logout,
+
+    /// List projects (memory dirs in brain vault)
+    Projects,
+
+    /// List available agents
+    Agents,
+
+    /// Ask Claude directly (escalation, non-interactive)
     Escalate {
         question: String,
         #[arg(long)]
         project: Option<String>,
     },
 
-    /// Log into Claude Code (runs: claude /login)
-    Login,
-
-    /// Check authentication status
-    Auth,
-
-    /// List all known projects (memory dirs in the brain vault)
-    Projects,
-
-    /// List all agents in the brain vault
-    Agents,
+    /// One-shot: send prompt to an agent and print response
+    Run {
+        #[arg(short = 'a', long, default_value = "wolf")]
+        agent: String,
+        prompt: String,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging — only active when BRAIN_LOG is set
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_env("BRAIN_LOG"))
         .with_target(false)
@@ -70,7 +69,8 @@ async fn main() -> Result<()> {
     let config = Config::load()?;
 
     match cli.command {
-        Some(Command::Login) => cmd_login(),
+        Some(Command::Login) => cmd_login(&config),
+        Some(Command::Logout) => cmd_logout(),
         Some(Command::Auth) => cmd_auth(&config),
         Some(Command::Projects) => cmd_projects(&config),
         Some(Command::Agents) => cmd_agents(&config),
@@ -94,109 +94,121 @@ async fn main() -> Result<()> {
     }
 }
 
-fn cmd_login() -> Result<()> {
-    println!("{}", "Launching Claude Code login…".cyan());
-    println!("{}", "(This opens a browser window for OAuth)".dimmed());
+// ─── auth commands ────────────────────────────────────────────────────────────
 
-    let status = std::process::Command::new("claude").arg("/login").status();
-
-    match status {
-        Ok(s) if s.success() => {
-            println!("{}", "Login successful.".green());
-        }
-        Ok(s) => {
-            eprintln!("{}", format!("claude exited with code {:?}", s.code()).red());
-        }
-        Err(_) => {
-            eprintln!("{}", "claude CLI not found in PATH.".red());
-            eprintln!("{}", "Install Claude Code: https://claude.ai/code".dimmed());
-            eprintln!("{}", "Or set ANTHROPIC_API_KEY to use the API directly.".dimmed());
+fn cmd_login(config: &Config) -> Result<()> {
+    if let Some(key) = &config.anthropic_api_key {
+        println!("{} API key already set: {}", "✓".green(), auth::mask_key(key).dimmed());
+        print!("Replace it? [y/N] ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut input = String::new();
+        std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            return Ok(());
         }
     }
+
+    println!("{}", "Enter your Anthropic API key (sk-ant-…):".cyan());
+    println!("{}", "  Get one at: https://console.anthropic.com/settings/keys".dimmed());
+    print!("> ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+
+    let key = rpassword_or_stdin()?;
+    let key = key.trim().to_string();
+
+    if !key.starts_with("sk-ant-") {
+        eprintln!("{}", "key doesn't look right (expected sk-ant-…) — saving anyway".yellow());
+    }
+
+    auth::store_api_key(&key)?;
+    println!("{}", "API key stored in macOS Keychain.".green());
+    println!("{}", "Use /escalate or /model claude-* in sessions.".dimmed());
+    Ok(())
+}
+
+fn cmd_logout() -> Result<()> {
+    auth::remove_api_key();
+    println!("{}", "API key removed from keychain.".green());
     Ok(())
 }
 
 fn cmd_auth(config: &Config) -> Result<()> {
     match &config.anthropic_api_key {
         Some(key) => {
-            let masked = format!("sk-ant-…{}", &key[key.len().saturating_sub(6)..]);
-            println!("{} ANTHROPIC_API_KEY: {}", "✓".green(), masked.dimmed());
+            println!("{} Anthropic API key: {}", "✓".green(), auth::mask_key(key).dimmed());
         }
         None => {
-            println!("{} ANTHROPIC_API_KEY not set", "✗".red());
-            println!(
-                "{}",
-                "  run `brain login` or set ANTHROPIC_API_KEY in your environment".dimmed()
-            );
+            println!("{} Anthropic API key: not set", "✗".red());
+            println!("{}", "  run `brain login` to store one for Claude escalation".dimmed());
         }
     }
 
-    println!("  LM Studio: {}", config.lmstudio_url.dimmed());
-
-    let claude_ok = std::process::Command::new("claude")
-        .arg("--version")
-        .output()
-        .is_ok();
-    if claude_ok {
-        println!("{} claude CLI: found in PATH", "✓".green());
+    // LM Studio connectivity
+    let lms_url = &config.lmstudio_url;
+    let lms_status = std::process::Command::new("curl")
+        .args(["-sf", &format!("{lms_url}/v1/models"), "-o", "/dev/null"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if lms_status {
+        println!("{} LM Studio: reachable at {lms_url}", "✓".green());
     } else {
-        println!("{} claude CLI: not found (needed for `brain login`)", "✗".yellow());
+        println!("{} LM Studio: not reachable at {lms_url}", "✗".yellow());
+        println!("{}", "  enable Local Server in LM Studio → Developer tab".dimmed());
     }
 
     Ok(())
 }
 
+fn rpassword_or_stdin() -> Result<String> {
+    // Try to read without echo using stty
+    let _ = std::process::Command::new("stty").arg("-echo").status();
+    let mut input = String::new();
+    std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut input)?;
+    let _ = std::process::Command::new("stty").arg("echo").status();
+    println!(); // newline after hidden input
+    Ok(input)
+}
+
+// ─── listing commands ─────────────────────────────────────────────────────────
+
 fn cmd_projects(config: &Config) -> Result<()> {
-    let memory_root = &config.memory_root;
-    if !memory_root.exists() {
+    let root = &config.memory_root;
+    if !root.exists() {
         println!("{}", "brain vault not found at ~/brain".red());
         return Ok(());
     }
-
-    println!("{}", "Projects (~/brain/ai/claude/memory/):".green());
-    let mut entries: Vec<_> = std::fs::read_dir(memory_root)?
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .collect();
+    println!("{}", "Projects:".green());
+    let mut entries: Vec<_> = std::fs::read_dir(root)?.flatten()
+        .filter(|e| e.path().is_dir()).collect();
     entries.sort_by_key(|e| e.file_name());
-
-    for entry in entries {
-        let name = entry.file_name();
+    for e in entries {
+        let name = e.file_name();
         let name = name.to_string_lossy();
-        let has_memory = entry.path().join("MEMORY.md").exists();
-        let marker = if has_memory { "●" } else { "○" };
+        let marker = if e.path().join("MEMORY.md").exists() { "●" } else { "○" };
         println!("  {marker}  {name}");
     }
     Ok(())
 }
 
 fn cmd_agents(config: &Config) -> Result<()> {
-    let agents_dir = config.agents_dir();
-    if !agents_dir.exists() {
-        println!("{}", "agents dir not found at ~/brain/ai/claude/agents/".red());
+    let dir = config.agents_dir();
+    if !dir.exists() {
+        println!("{}", "agents dir not found".red());
         return Ok(());
     }
-
-    println!("{}", "Agents (~/brain/ai/claude/agents/):".green());
-    let mut entries: Vec<_> = std::fs::read_dir(&agents_dir)?
-        .flatten()
-        .filter(|e| {
-            e.path()
-                .extension()
-                .map(|x| x == "md")
-                .unwrap_or(false)
-        })
+    println!("{}", "Agents:".green());
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)?.flatten()
+        .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
         .collect();
     entries.sort_by_key(|e| e.file_name());
-
-    for entry in entries {
-        let path = entry.path();
+    for e in entries {
+        let path = e.path();
         let name = path.file_stem().unwrap_or_default().to_string_lossy();
         let desc = read_frontmatter_field(&path, "description").unwrap_or_default();
-        // Truncate description for display
-        let short: String = desc.chars().take(80).collect();
-        let ellipsis = if desc.len() > 80 { "…" } else { "" };
-        println!("  {}  {}{}", format!("@{name}").cyan(), short.dimmed(), ellipsis.dimmed());
+        let short: String = desc.chars().take(72).collect();
+        let ellipsis = if desc.len() > 72 { "…" } else { "" };
+        println!("  {}  {}{}", format!("@{name:<10}").cyan(), short.dimmed(), ellipsis.dimmed());
     }
     Ok(())
 }
@@ -212,28 +224,21 @@ fn read_frontmatter_field(path: &std::path::Path, field: &str) -> Option<String>
     None
 }
 
-async fn cmd_escalate(
-    config: &Config,
-    question: &str,
-    project: Option<&str>,
-) -> Result<()> {
+async fn cmd_escalate(config: &Config, question: &str, project: Option<&str>) -> Result<()> {
     use backend::ClaudeBackend;
     use backend::ModelBackend;
 
-    let api_key = config.anthropic_api_key.clone().ok_or_else(|| {
-        anyhow::anyhow!("ANTHROPIC_API_KEY not set. Run `brain login` to authenticate.")
-    })?;
+    let api_key = config.anthropic_api_key.clone()
+        .ok_or_else(|| anyhow::anyhow!("no API key — run `brain login`"))?;
 
     let system = if let Some(p) = project {
-        let ctx = ProjectContext::resolve(p, config)?;
-        ctx.build_system_prompt(config)
+        ProjectContext::resolve(p, config)?.build_system_prompt(config)
     } else {
         String::new()
     };
 
     let claude = ClaudeBackend::new(api_key, "claude-sonnet-4-6");
     let messages = vec![types::Message::user(question)];
-    let _response = claude.chat(&messages, &[], &system).await?;
-
+    claude.chat(&messages, &[], &system).await?;
     Ok(())
 }

@@ -45,12 +45,16 @@ impl Config {
         let home = dirs::home_dir().context("no home dir")?;
         let brain_vault = home.join("brain");
         let memory_root = brain_vault.join("ai/claude/memory");
-        let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
+
+        // API key: env var takes priority, then macOS Keychain
+        let api_key = std::env::var("ANTHROPIC_API_KEY").ok()
+            .or_else(crate::auth::load_api_key_from_keychain);
+
         let lmstudio_url = std::env::var("LMSTUDIO_URL")
             .unwrap_or_else(|_| "http://localhost:1234".to_string());
 
-        // Always default to LM Studio. Claude is for escalation only.
-        // Model ID is resolved at session start from /v1/models.
+        // Always default to LM Studio. Claude is escalation-only.
+        // Model ID resolved at session start from /v1/models.
         let default_model = Model::LMStudio(String::new());
 
         Ok(Config {
