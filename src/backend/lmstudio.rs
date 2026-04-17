@@ -151,7 +151,16 @@ async fn parse_lmstudio_stream(response: reqwest::Response) -> Result<BackendRes
             let delta = &choice["delta"];
             let finish_reason = choice["finish_reason"].as_str();
 
-            // Text content
+            // Thinking/reasoning content (Qwen3, o1-style models) — stream dimmed
+            if let Some(thinking) = delta["reasoning_content"].as_str() {
+                if !thinking.is_empty() {
+                    print!("{}", thinking.dimmed());
+                    std::io::stdout().flush().ok();
+                    // Don't add to result.text — reasoning is not the answer
+                }
+            }
+
+            // Text content (the actual response)
             if let Some(text) = delta["content"].as_str() {
                 if !text.is_empty() {
                     print!("{text}");

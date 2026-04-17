@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
             } else {
                 ProjectContext::resolve(project, &config)?
             };
-            let mut session = Session::new(config, ctx)?;
+            let mut session = Session::new(config, ctx).await?;
             session.run().await
         }
     }

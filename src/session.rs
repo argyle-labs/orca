@@ -20,11 +20,12 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(config: Config, ctx: ProjectContext) -> Result<Self> {
+    pub async fn new(config: Config, ctx: ProjectContext) -> Result<Self> {
         let system_prompt = ctx.build_system_prompt(&config);
         let project = ctx.project.clone();
 
-        let backend = build_backend(&config, &config.default_model.clone())?;
+        let model = resolve_model(&config).await?;
+        let backend = build_backend(&config, &model)?;
 
         Ok(Session {
             system_prompt,
@@ -212,41 +213,54 @@ impl Session {
     }
 
     async fn cmd_list_models(&mut self) -> Result<()> {
-        match self.backend.name() {
-            "lmstudio" => {
-                // Reach into the backend to list models
-                // For now, use a fresh client call
-                let lms = LMStudioBackend::new(
-                    &self.config.lmstudio_url,
-                    self.backend.model_id(),
-                );
-                match lms.list_models().await {
-                    Ok(models) if models.is_empty() => {
-                        println!("{}", "no models loaded in LM Studio".yellow());
-                    }
-                    Ok(models) => {
-                        println!("{}", "LM Studio models:".green());
-                        for (i, m) in models.iter().enumerate() {
-                            println!("  {}  {m}", format!("[{i}]").dimmed());
-                        }
-                    }
-                    Err(e) => {
-                        println!("{}", format!("LM Studio not reachable: {e}").red());
-                    }
+        let current = format!("{}:{}", self.backend.name(), self.backend.model_id());
+        let mut all: Vec<(String, String)> = vec![]; // (display, switch-spec)
+
+        // LM Studio models
+        let lms = LMStudioBackend::new(&self.config.lmstudio_url, "");
+        match lms.list_models().await {
+            Ok(models) => {
+                for m in models.iter().filter(|m| !m.contains("embed")) {
+                    all.push((format!("lmstudio:{m}"), format!("lmstudio:{m}")));
                 }
             }
-            _ => {
-                println!("{}", "Claude models (common):".green());
-                let models = [
-                    "claude-opus-4-6",
-                    "claude-sonnet-4-6",
-                    "claude-haiku-4-5-20251001",
-                ];
-                for m in models {
-                    let marker = if m == self.backend.model_id() { "●" } else { " " };
-                    println!("  {marker} {m}");
-                }
+            Err(_) => {
+                println!("{}", "  LM Studio: not reachable".dimmed());
             }
+        }
+
+        // Claude models (always show if API key present)
+        if self.config.anthropic_api_key.is_some() {
+            for m in ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5-20251001"] {
+                all.push((format!("claude:{m}"), m.to_string()));
+            }
+        }
+
+        if all.is_empty() {
+            println!("{}", "no models available".yellow());
+            return Ok(());
+        }
+
+        println!("{}", "Available models:".green());
+        for (i, (display, _)) in all.iter().enumerate() {
+            let active = if current.contains(display.as_str()) { "●" } else { " " };
+            println!("  {} {}  {display}", active, format!("[{i}]").dimmed());
+        }
+        print!("{} ", "switch to [enter to cancel]:".cyan());
+        std::io::Write::flush(&mut std::io::stdout())?;
+
+        let mut input = String::new();
+        std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut input)?;
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        if let Ok(idx) = trimmed.parse::<usize>() {
+            if let Some((_, spec)) = all.get(idx) {
+                self.cmd_switch_model(spec).await?;
+            }
+        } else {
+            self.cmd_switch_model(trimmed).await?;
         }
         Ok(())
     }
@@ -284,19 +298,66 @@ impl Session {
     }
 }
 
+/// Resolve the startup model:
+/// - If API key set → Claude (default)
+/// - If no API key → LM Studio, pick first loaded model (interactive if >1)
+async fn resolve_model(config: &Config) -> Result<Model> {
+    match &config.default_model {
+        Model::Claude(id) => return Ok(Model::Claude(id.clone())),
+        Model::LMStudio(id) if !id.is_empty() => return Ok(Model::LMStudio(id.clone())),
+        _ => {}
+    }
+
+    // No API key — try LM Studio
+    let lms = LMStudioBackend::new(&config.lmstudio_url, "");
+    match lms.list_models().await {
+        Err(e) => {
+            eprintln!("{}", format!("LM Studio not reachable: {e}").red());
+            eprintln!("{}", "Start the local server in LM Studio, or set ANTHROPIC_API_KEY.".dimmed());
+            anyhow::bail!("no model available");
+        }
+        Ok(models) => {
+            // Filter out embedding models
+            let chat_models: Vec<&str> = models
+                .iter()
+                .map(|s| s.as_str())
+                .filter(|m| !m.contains("embed") && !m.contains("embedding"))
+                .collect();
+
+            if chat_models.is_empty() {
+                anyhow::bail!("LM Studio is running but no chat models are loaded. Load a model in LM Studio first.");
+            }
+            if chat_models.len() == 1 {
+                return Ok(Model::LMStudio(chat_models[0].to_string()));
+            }
+
+            // Multiple models — interactive picker
+            println!("{}", "Select a model:".green());
+            for (i, m) in chat_models.iter().enumerate() {
+                println!("  {}  {m}", format!("[{i}]").dimmed());
+            }
+            print!("{} ", "model [0]:".cyan());
+            std::io::Write::flush(&mut std::io::stdout())?;
+
+            let mut input = String::new();
+            std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut input)?;
+            let choice: usize = input.trim().parse().unwrap_or(0);
+            let selected = chat_models.get(choice).unwrap_or(&chat_models[0]);
+            Ok(Model::LMStudio(selected.to_string()))
+        }
+    }
+}
+
 fn build_backend(config: &Config, model: &Model) -> Result<Box<dyn ModelBackend>> {
     match model {
         Model::Claude(id) => {
             let key = config
                 .anthropic_api_key
                 .clone()
-                .context("ANTHROPIC_API_KEY not set")?;
+                .context("ANTHROPIC_API_KEY not set. Run `brain login` or set ANTHROPIC_API_KEY.")?;
             Ok(Box::new(ClaudeBackend::new(key, id)))
         }
-        Model::LMStudio(id) => Ok(Box::new(LMStudioBackend::new(
-            &config.lmstudio_url,
-            id,
-        ))),
+        Model::LMStudio(id) => Ok(Box::new(LMStudioBackend::new(&config.lmstudio_url, id))),
     }
 }
 

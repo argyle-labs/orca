@@ -45,12 +45,18 @@ impl Config {
         let home = dirs::home_dir().context("no home dir")?;
         let brain_vault = home.join("brain");
         let memory_root = brain_vault.join("ai/claude/memory");
+        let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
+        let lmstudio_url = std::env::var("LMSTUDIO_URL")
+            .unwrap_or_else(|_| "http://localhost:1234".to_string());
+
+        // Always default to LM Studio. Claude is for escalation only.
+        // Model ID is resolved at session start from /v1/models.
+        let default_model = Model::LMStudio(String::new());
 
         Ok(Config {
-            anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
-            lmstudio_url: std::env::var("LMSTUDIO_URL")
-                .unwrap_or_else(|_| "http://localhost:1234".to_string()),
-            default_model: Model::Claude("claude-sonnet-4-6".to_string()),
+            anthropic_api_key: api_key,
+            lmstudio_url,
+            default_model,
             brain_vault,
             memory_root,
         })
