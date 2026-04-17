@@ -89,6 +89,18 @@ impl ToolRegistry {
                     "required": ["command"]
                 }),
             },
+            ToolDef {
+                name: "delegate".into(),
+                description: "Delegate a task to a specialist agent. The agent runs a sub-conversation and returns its result. Available agents: owl (explain code), fox (debug), crow (write code), spider (simplify), bear (review), ferret (code standards), badger (homelab).".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "agent": { "type": "string", "description": "Agent name (e.g. fox, crow, owl)" },
+                        "task": { "type": "string", "description": "What the agent should do — include all necessary context" }
+                    },
+                    "required": ["agent", "task"]
+                }),
+            },
         ]
     }
 

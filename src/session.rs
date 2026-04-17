@@ -188,7 +188,12 @@ impl Session {
             let mut results: Vec<ToolResult> = Vec::new();
             for tc in &response.tool_calls {
                 println!("{}", format!("  input: {}", tc.input).dimmed());
-                let mut r = self.tools.execute(&tc.name, &tc.input);
+
+                let mut r = if tc.name == "delegate" {
+                    self.execute_delegate(&tc.input).await
+                } else {
+                    self.tools.execute(&tc.name, &tc.input)
+                };
                 r.tool_use_id = tc.id.clone();
 
                 let preview = if r.content.len() > 200 {
@@ -399,6 +404,161 @@ impl Session {
         Ok(())
     }
 
+    async fn execute_delegate(&mut self, input: &serde_json::Value) -> ToolResult {
+        let agent = input["agent"].as_str().unwrap_or("");
+        let task = input["task"].as_str().unwrap_or("");
+
+        if agent.is_empty() || task.is_empty() {
+            return ToolResult {
+                tool_use_id: String::new(),
+                content: "error: agent and task are required".into(),
+                is_error: true,
+            };
+        }
+
+        // Load agent system prompt
+        let agent_path = self.config.agents_dir().join(format!("{agent}.md"));
+        let agent_prompt = match std::fs::read_to_string(&agent_path) {
+            Ok(raw) => strip_frontmatter(&raw),
+            Err(_) => {
+                return ToolResult {
+                    tool_use_id: String::new(),
+                    content: format!("error: agent @{agent} not found"),
+                    is_error: true,
+                };
+            }
+        };
+
+        // Brain narrates to Pinky
+        println!();
+        println!("{}", format!(
+            "  Brain: \"Pinky, I'm sending this to @{agent}. {}\"",
+            match agent {
+                "fox" => "Something is broken and Fox will sniff out the root cause.",
+                "owl" => "Owl will read the code and explain what's happening.",
+                "crow" => "Crow will write the implementation.",
+                "spider" => "Spider will find the pattern and simplify.",
+                "bear" => "Bear will tear this apart and find every weakness.",
+                "ferret" => "Ferret will check this against proper standards.",
+                "badger" => "Badger knows the homelab infrastructure.",
+                _ => "This specialist knows what to do.",
+            }
+        ).dimmed());
+        println!("{}", format!(
+            "  Pinky: \"Ooh! @{agent}! NARF! I'll write everything down!\""
+        ).dimmed());
+        println!();
+
+        // Log the delegation
+        if let Some(log) = &mut self.log {
+            log.append("system", &self.active_agent, &format!("delegated to @{agent}: {task}"), &["delegation"]).ok();
+        }
+
+        // Specialist tools — everything except delegate (no recursion)
+        let specialist_tools: Vec<_> = ToolRegistry::definitions()
+            .into_iter()
+            .filter(|t| t.name != "delegate")
+            .collect();
+
+        // Run sub-conversation with full tool loop
+        let mut sub_messages = vec![Message::user(task)];
+        let mut full_response = String::new();
+        let max_rounds = 20; // safety limit
+
+        println!("{}", format!("  ┌─ @{agent} ─────────────────────────────").cyan());
+
+        for round in 0..max_rounds {
+            let cancel = CancellationToken::new();
+            let cancel_clone = cancel.clone();
+            tokio::spawn(async move {
+                tokio::signal::ctrl_c().await.ok();
+                cancel_clone.cancel();
+            });
+
+            print!("{}", "  │ ".cyan());
+            let result = self.backend.chat(
+                &sub_messages, &specialist_tools, &agent_prompt, cancel
+            ).await;
+
+            let response = match result {
+                Ok(r) => r,
+                Err(e) => {
+                    println!("{}", format!("  └─ @{agent} error ──────────────────────").red());
+                    return ToolResult {
+                        tool_use_id: String::new(),
+                        content: format!("delegation error: {e}"),
+                        is_error: true,
+                    };
+                }
+            };
+
+            self.ledger.record(response.input_tokens, response.output_tokens);
+
+            if !response.text.is_empty() {
+                full_response.push_str(&response.text);
+
+                // Log specialist response
+                if let Some(log) = &mut self.log {
+                    log.append("assistant", agent, &response.text, &["delegation"]).ok();
+                }
+            }
+
+            sub_messages.push(Message::Assistant {
+                text: if response.text.is_empty() { None } else { Some(response.text.clone()) },
+                tool_calls: response.tool_calls.clone(),
+            });
+
+            // No tool calls = specialist is done
+            if response.tool_calls.is_empty() {
+                break;
+            }
+
+            // Execute specialist's tool calls
+            let mut tool_results: Vec<ToolResult> = Vec::new();
+            for tc in &response.tool_calls {
+                print!("{}", "  │ ".cyan());
+                println!("{}", format!("⚙ {} {}", tc.name, tc.input).dimmed());
+                let mut r = self.tools.execute(&tc.name, &tc.input);
+                r.tool_use_id = tc.id.clone();
+
+                // Log tool usage
+                if let Some(log) = &mut self.log {
+                    log.append("tool", agent, &format!("{}({})", tc.name, tc.input), &["delegation"]).ok();
+                }
+
+                let preview = if r.content.len() > 200 {
+                    format!("{}…", &r.content[..200])
+                } else {
+                    r.content.clone()
+                };
+                print!("{}", "  │ ".cyan());
+                println!("{}", if r.is_error { preview.red().to_string() } else { preview.dimmed().to_string() });
+
+                tool_results.push(r);
+            }
+
+            sub_messages.push(Message::ToolResults(tool_results));
+
+            if round == max_rounds - 1 {
+                println!("{}", "  │ (max rounds reached)".yellow());
+            }
+        }
+
+        println!("{}", format!("  └─ @{agent} done ───────────────────────").cyan());
+        println!();
+        println!("{}", format!(
+            "  Brain: \"Thank you, @{agent}. Pinky, did you get all that?\""
+        ).dimmed());
+        println!("{}", "  Pinky: \"Every word, Brain! POIT!\"".dimmed());
+        println!();
+
+        ToolResult {
+            tool_use_id: String::new(),
+            content: full_response,
+            is_error: false,
+        }
+    }
+
     fn check_commit_status(&self) {
         let cwd = std::env::current_dir().ok()
             .and_then(|p| p.to_str().map(|s| s.to_string()));
@@ -415,6 +575,16 @@ impl Session {
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
+
+fn strip_frontmatter(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.first().map(|l| l.trim()) == Some("---") {
+        if let Some(end) = lines[1..].iter().position(|l| l.trim() == "---") {
+            return lines[end + 2..].join("\n").trim().to_string();
+        }
+    }
+    content.trim().to_string()
+}
 
 async fn resolve_model(config: &Config) -> Result<Model> {
     match &config.default_model {
