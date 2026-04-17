@@ -8,6 +8,7 @@ use crate::types::{Message, ToolResult};
 use anyhow::{Context, Result};
 use colored::Colorize;
 use rustyline::DefaultEditor;
+use tokio_util::sync::CancellationToken;
 
 pub struct Session {
     config: Config,
@@ -50,6 +51,10 @@ impl Session {
             log,
             config,
         })
+    }
+
+    pub async fn one_shot(&mut self, prompt: String) -> Result<()> {
+        self.chat(prompt).await
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -147,9 +152,15 @@ impl Session {
 
         loop {
             let tools = ToolRegistry::definitions();
+            let cancel = CancellationToken::new();
+            let cancel_clone = cancel.clone();
+            tokio::spawn(async move {
+                tokio::signal::ctrl_c().await.ok();
+                cancel_clone.cancel();
+            });
             let response = self
                 .backend
-                .chat(&self.messages, &tools, &self.system_prompt)
+                .chat(&self.messages, &tools, &self.system_prompt, cancel)
                 .await?;
 
             self.ledger.record(response.input_tokens, response.output_tokens);
@@ -366,7 +377,13 @@ impl Session {
 
         let claude = ClaudeBackend::new(api_key, "claude-sonnet-4-6");
         let msgs = vec![Message::user(question)];
-        let response = claude.chat(&msgs, &[], &self.system_prompt).await?;
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::signal::ctrl_c().await.ok();
+            cancel_clone.cancel();
+        });
+        let response = claude.chat(&msgs, &[], &self.system_prompt, cancel).await?;
 
         self.ledger.record(response.input_tokens, response.output_tokens);
 

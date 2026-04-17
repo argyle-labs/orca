@@ -32,6 +32,9 @@ anyhow = "1"
 rustyline = "14"
 colored = "2"
 
+# Cancellation
+tokio-util = "0.7"
+
 # Utilities
 dirs = "5"
 uuid = { version = "1", features = ["v4"] }

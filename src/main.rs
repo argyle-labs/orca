@@ -77,9 +77,8 @@ async fn main() -> Result<()> {
         Some(Command::Escalate { question, project }) => {
             cmd_escalate(&config, &question, project.as_deref()).await
         }
-        Some(Command::Run { .. }) => {
-            println!("{}", "brain run: coming in Phase 2".yellow());
-            Ok(())
+        Some(Command::Run { agent, prompt }) => {
+            cmd_run(&config, &agent, &prompt).await
         }
         None => {
             let project = cli.project.as_deref().unwrap_or("");
@@ -224,6 +223,14 @@ fn read_frontmatter_field(path: &std::path::Path, field: &str) -> Option<String>
     None
 }
 
+async fn cmd_run(config: &Config, _agent: &str, prompt: &str) -> Result<()> {
+    use session::Session;
+
+    let ctx = ProjectContext::default();
+    let mut session = Session::new(config.clone(), ctx).await?;
+    session.one_shot(prompt.to_string()).await
+}
+
 async fn cmd_escalate(config: &Config, question: &str, project: Option<&str>) -> Result<()> {
     use backend::ClaudeBackend;
     use backend::ModelBackend;
@@ -239,6 +246,7 @@ async fn cmd_escalate(config: &Config, question: &str, project: Option<&str>) ->
 
     let claude = ClaudeBackend::new(api_key, "claude-sonnet-4-6");
     let messages = vec![types::Message::user(question)];
-    claude.chat(&messages, &[], &system).await?;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    claude.chat(&messages, &[], &system, cancel).await?;
     Ok(())
 }

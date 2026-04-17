@@ -8,6 +8,7 @@ use reqwest::Client;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::Write;
+use tokio_util::sync::CancellationToken;
 
 pub struct LMStudioBackend {
     client: Client,
@@ -67,6 +68,7 @@ impl ModelBackend for LMStudioBackend {
         messages: &[Message],
         tools: &[ToolDef],
         system: &str,
+        cancel: CancellationToken,
     ) -> Result<BackendResponse> {
         let oai_messages = serialize_messages(messages, system);
 
@@ -98,11 +100,11 @@ impl ModelBackend for LMStudioBackend {
             bail!("LM Studio error {status}: {text}");
         }
 
-        parse_lmstudio_stream(response).await
+        parse_lmstudio_stream(response, cancel).await
     }
 }
 
-async fn parse_lmstudio_stream(response: reqwest::Response) -> Result<BackendResponse> {
+async fn parse_lmstudio_stream(response: reqwest::Response, cancel: CancellationToken) -> Result<BackendResponse> {
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
     let mut result = BackendResponse::default();
@@ -110,7 +112,19 @@ async fn parse_lmstudio_stream(response: reqwest::Response) -> Result<BackendRes
     // Accumulate tool call deltas: index → (id, name, arguments)
     let mut tool_accum: HashMap<usize, (String, String, String)> = HashMap::new();
 
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let chunk = tokio::select! {
+            _ = cancel.cancelled() => {
+                println!("{}", "\n[interrupted]".yellow());
+                break;
+            }
+            chunk = stream.next() => {
+                match chunk {
+                    Some(c) => c,
+                    None => break,
+                }
+            }
+        };
         let chunk = chunk.context("stream error")?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 

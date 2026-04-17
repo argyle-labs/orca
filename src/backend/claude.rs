@@ -8,6 +8,7 @@ use reqwest::Client;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::Write;
+use tokio_util::sync::CancellationToken;
 
 pub struct ClaudeBackend {
     client: Client,
@@ -40,6 +41,7 @@ impl ModelBackend for ClaudeBackend {
         messages: &[Message],
         tools: &[ToolDef],
         system: &str,
+        cancel: CancellationToken,
     ) -> Result<BackendResponse> {
         let claude_messages = serialize_messages(messages);
 
@@ -72,12 +74,13 @@ impl ModelBackend for ClaudeBackend {
             bail!("Anthropic API error {status}: {text}");
         }
 
-        parse_claude_stream(response).await
+        parse_claude_stream(response, cancel).await
     }
 }
 
 async fn parse_claude_stream(
     response: reqwest::Response,
+    cancel: CancellationToken,
 ) -> Result<BackendResponse> {
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
@@ -90,7 +93,19 @@ async fn parse_claude_stream(
     // Accumulated tool use data per block index
     let mut tool_accum: HashMap<usize, (String, String, String)> = HashMap::new(); // (id, name, json)
 
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let chunk = tokio::select! {
+            _ = cancel.cancelled() => {
+                println!("{}", "\n[interrupted]".yellow());
+                break;
+            }
+            chunk = stream.next() => {
+                match chunk {
+                    Some(c) => c,
+                    None => break,
+                }
+            }
+        };
         let chunk = chunk.context("stream error")?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
