@@ -28,7 +28,11 @@ fn main() {
         for entry in entries {
             let path = entry.path();
             let name = path.file_stem().unwrap().to_string_lossy().to_string();
-            let abs = path.canonicalize().expect("failed to canonicalize agent path");
+            // Skip broken symlinks (e.g. macOS project agents on Linux)
+            let abs = match path.canonicalize() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
             code.push_str(&format!(
                 "        \"{name}\" => Some(include_str!(\"{}\")),\n",
                 abs.display()
