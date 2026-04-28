@@ -158,7 +158,7 @@ fn filter_ops(mut spec: Value, keep: impl Fn(&Value) -> bool) -> Value {
 /// Filter brain's own spec to only operations in publicly accessible domain groups.
 /// Uses domain tags (docs, library) since utoipa 4.x doesn't support multi-tag paths.
 pub fn filter_brain_public(spec: Value) -> Value {
-    filter_ops(spec, |op| {
+    let mut filtered = filter_ops(spec, |op| {
         op["tags"]
             .as_array()
             .map(|tags| {
@@ -166,5 +166,31 @@ pub fn filter_brain_public(spec: Value) -> Value {
                     .any(|t| BRAIN_PUBLIC_DOMAINS.contains(&t.as_str().unwrap_or("")))
             })
             .unwrap_or(false)
-    })
+    });
+
+    // Collect tags actually referenced in the surviving paths.
+    let used_tags: std::collections::HashSet<String> = filtered["paths"]
+        .as_object()
+        .into_iter()
+        .flat_map(|paths| paths.values())
+        .flat_map(|item| METHODS.iter().filter_map(|m| item.get(*m)))
+        .flat_map(|op| op["tags"].as_array().into_iter().flatten())
+        .filter_map(|t| t.as_str().map(String::from))
+        .collect();
+
+    if let Some(tags) = filtered["tags"].as_array() {
+        let pruned: Vec<Value> = tags
+            .iter()
+            .filter(|t| {
+                t["name"]
+                    .as_str()
+                    .map(|n| used_tags.contains(n))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        filtered["tags"] = Value::Array(pruned);
+    }
+
+    filtered
 }

@@ -1,5 +1,6 @@
+use brain_utils::config::{Config, Model};
 use brain_utils::types::{BackendResponse, Message, ToolDef};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -80,4 +81,18 @@ pub trait ModelBackend: Send + Sync {
 
     /// Model identifier for API calls.
     fn model_id(&self) -> &str;
+}
+
+/// Construct the correct backend from config and model selection.
+pub fn build_backend(config: &Config, model: &Model) -> Result<Box<dyn ModelBackend>> {
+    match model {
+        Model::Claude(id) => {
+            let key = config
+                .anthropic_api_key
+                .clone()
+                .context("no API key — run `brain login` to store one")?;
+            Ok(Box::new(ClaudeBackend::new(key, id)))
+        }
+        Model::LMStudio(id) => Ok(Box::new(LMStudioBackend::new(&config.lmstudio_url, id))),
+    }
 }

@@ -48,7 +48,7 @@ pub struct SpecQuery {
 }
 
 fn specs_dir() -> std::path::PathBuf {
-    crate::scanner::openapi_dir()
+    brain_scanner::openapi_dir()
 }
 
 fn validate_repo(repo: &str) -> bool {

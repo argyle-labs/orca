@@ -8,10 +8,10 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use crate::backend::buffer_sink;
-use crate::config::Config;
+use brain_core::backend::buffer_sink;
+use brain_utils::config::Config;
+use brain_utils::log;
 use crate::context::ProjectContext;
-use crate::log;
 use crate::session::Session;
 
 pub async fn serve(config: &Config) -> Result<()> {
@@ -308,7 +308,7 @@ async fn dispatch(name: &str, args: &Value, config: &Config) -> Result<String> {
 
 fn agents() -> Result<String> {
     let mut lines = vec!["Available brain agents:".to_string(), String::new()];
-    for (name, desc) in crate::agents::list_embedded_agents() {
+    for (name, desc) in brain_agents::list_embedded_agents() {
         let short: String = desc.chars().take(100).collect();
         let ellipsis = if desc.len() > 100 { "…" } else { "" };
         lines.push(format!("@{name}: {short}{ellipsis}"));
@@ -320,7 +320,7 @@ fn get_agent(args: &Value, config: &Config) -> Result<String> {
     let name = args["name"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("name is required"))?;
-    let prompt = crate::agents::load_agent_prompt(name, &config.agents_dir())
+    let prompt = brain_agents::load_agent_prompt(name, &config.agents_dir())
         .ok_or_else(|| anyhow::anyhow!("agent not found: {name}"))?;
     Ok(prompt)
 }
@@ -646,7 +646,7 @@ fn list_roots(config: &Config) -> Result<String> {
         "root": "docs",
         "path": "(embedded in binary)",
         "exists": true,
-        "docs": crate::docs::file_count()
+        "docs": brain_docs::file_count()
     }));
     Ok(serde_json::to_string_pretty(&entries)?)
 }
@@ -657,7 +657,7 @@ fn get_tree(args: &Value, config: &Config) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("root is required"))?;
 
     if root_name == "docs" {
-        return Ok(serde_json::to_string_pretty(&crate::docs::tree())?);
+        return Ok(serde_json::to_string_pretty(&brain_docs::tree())?);
     }
 
     let sub_path = args["path"].as_str();
@@ -683,7 +683,7 @@ fn read_doc(args: &Value, config: &Config) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("path is required"))?;
 
     if root_name == "docs" {
-        return crate::docs::read(doc_path)
+        return brain_docs::read(doc_path)
             .ok_or_else(|| anyhow::anyhow!("not found: docs/{doc_path}"));
     }
 
@@ -739,7 +739,7 @@ fn search_docs(args: &Value, config: &Config) -> Result<String> {
     }
 
     if filter == "all" || filter == "docs" {
-        for (path, matches) in crate::docs::search(query) {
+        for (path, matches) in brain_docs::search(query) {
             results.push(format!("## docs/{}\n{}", path, matches.join("\n")));
         }
     }
@@ -854,7 +854,7 @@ async fn service_logs(args: &Value) -> Result<String> {
 // ── Spec registry tools ───────────────────────────────────────────────────────
 
 fn spec_dir() -> std::path::PathBuf {
-    crate::scanner::openapi_dir()
+    brain_scanner::openapi_dir()
 }
 
 fn validate_spec_repo(repo: &str) -> bool {

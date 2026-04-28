@@ -1,9 +1,8 @@
 pub mod bash;
-pub mod fs;
-pub mod search;
 
 use crate::backend::{OutputSink, stdout_sink};
-use crate::types::{ToolDef, ToolResult};
+use brain_utils::tools::{fs, search};
+use brain_utils::types::{ToolDef, ToolResult};
 use anyhow::Result;
 use bash::BashPermissions;
 use serde_json::{Value, json};

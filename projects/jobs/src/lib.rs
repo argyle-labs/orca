@@ -1,7 +1,7 @@
-use crate::backend::{ModelBackend, OutputSink, buffer_sink};
-use crate::config::{Config, Model};
-use crate::tools::ToolRegistry;
-use crate::types::{Message, ToolResult};
+use brain_core::backend::{ModelBackend, OutputSink, buffer_sink, sink_write};
+use brain_core::tools::ToolRegistry;
+use brain_utils::config::{Config, Model};
+use brain_utils::types::{Message, ToolResult, truncate_preview};
 use anyhow::Result;
 use colored::Colorize;
 use std::sync::{Arc, Mutex};
@@ -65,7 +65,7 @@ impl JobManager {
         let id = self.next_id;
         self.next_id += 1;
 
-        let backend = crate::session::build_backend(config, model)?;
+        let backend = brain_core::backend::build_backend(config, model)?;
         let (sink, buffer) = buffer_sink();
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
@@ -104,7 +104,7 @@ impl JobManager {
                     "⚡".dimmed(),
                     job.id,
                     status,
-                    truncate_prompt(&job.prompt, 60),
+                    truncate_preview(&job.prompt, 60),
                 ));
             }
         }
@@ -128,7 +128,7 @@ impl JobManager {
                     "  #{:<3} [{}]  {}",
                     j.id,
                     status,
-                    truncate_prompt(&j.prompt, 60),
+                    truncate_preview(&j.prompt, 60),
                 )
             })
             .collect()
@@ -166,7 +166,7 @@ async fn run_background_chat(
     let mut tools = ToolRegistry {
         output: output.clone(),
         permissions: {
-            let mut p = crate::tools::bash::BashPermissions::default();
+            let mut p = brain_core::tools::bash::BashPermissions::default();
             p.auto_approve = true;
             p
         },
@@ -204,7 +204,6 @@ async fn run_background_chat(
             break;
         }
 
-        // Execute tool calls
         let mut results: Vec<ToolResult> = Vec::new();
         for tc in &response.tool_calls {
             write_to_sink(
@@ -215,7 +214,7 @@ async fn run_background_chat(
             let mut r = tools.execute(&tc.name, &tc.input);
             r.tool_use_id = tc.id.clone();
 
-            let preview = crate::session::truncate_preview(&r.content, 200);
+            let preview = truncate_preview(&r.content, 200);
             if r.is_error {
                 write_to_sink(&output, &format!("{}\n", preview.red()));
             } else {
@@ -232,15 +231,5 @@ async fn run_background_chat(
 }
 
 fn write_to_sink(sink: &OutputSink, data: &str) {
-    crate::backend::sink_write(sink, data);
-}
-
-fn truncate_prompt(s: &str, max: usize) -> String {
-    let clean: String = s.chars().filter(|c| !c.is_control()).collect();
-    if clean.chars().count() <= max {
-        clean
-    } else {
-        let truncated: String = clean.chars().take(max).collect();
-        format!("{truncated}…")
-    }
+    sink_write(sink, data);
 }

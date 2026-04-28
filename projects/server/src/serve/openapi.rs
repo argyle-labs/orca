@@ -88,5 +88,5 @@ pub async fn openapi_handler() -> impl axum::response::IntoResponse {
 }
 
 pub async fn openapi_public_handler() -> impl axum::response::IntoResponse {
-    axum::Json(crate::scanner::filter_brain_public(brain_spec_json()))
+    axum::Json(brain_scanner::filter_brain_public(brain_spec_json()))
 }

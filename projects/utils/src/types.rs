@@ -62,3 +62,15 @@ pub struct ToolDef {
     /// JSON Schema for the tool's input.
     pub input_schema: serde_json::Value,
 }
+
+/// Truncate a string to at most `max_chars` characters, appending "…" if truncated.
+/// Safe for multi-byte UTF-8 — never slices mid-character.
+pub fn truncate_preview(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}

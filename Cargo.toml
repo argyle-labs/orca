@@ -4,6 +4,7 @@ members = [
     "projects/commands",
     "projects/core",
     "projects/docs",
+    "projects/jobs",
     "projects/scanner",
     "projects/server",
     "projects/utils",

@@ -98,9 +98,6 @@ pub fn cmd_auth(config: &Config) -> Result<()> {
 pub async fn cmd_escalate(config: &Config, question: &str, project: Option<&str>) -> Result<()> {
     use backend::ClaudeBackend;
     use backend::ModelBackend;
-    // NOTE: requires brain crate — crate::context::ProjectContext not yet extracted
-    use brain_utils::types::Message as _Message;
-
     let api_key = config
         .anthropic_api_key
         .clone()

@@ -1,14 +1,15 @@
-use crate::backend::{
-    ClaudeBackend, LMStudioBackend, ModelBackend, OutputSink, sink_write, sink_writeln, stdout_sink,
+use brain_core::backend::{
+    ClaudeBackend, LMStudioBackend, ModelBackend, OutputSink, build_backend,
+    sink_write, sink_writeln, stdout_sink,
 };
-use crate::config::{Config, Model};
+use brain_core::tools::ToolRegistry;
+use brain_jobs::JobManager;
+use brain_utils::config::{Config, Model};
+use brain_utils::ledger::TokenLedger;
+use brain_utils::log::SessionLog;
+use brain_utils::types::{Message, ToolResult, truncate_preview};
 use crate::context::ProjectContext;
-use crate::jobs::JobManager;
-use crate::ledger::TokenLedger;
-use crate::log::SessionLog;
-use crate::tools::ToolRegistry;
 use crate::tui::{self, TuiAction, TuiApp};
-use crate::types::{Message, ToolResult};
 use anyhow::{Context, Result};
 use colored::Colorize;
 use crossterm::event::{Event, EventStream};
@@ -752,7 +753,7 @@ impl Session {
 
     fn cmd_search_logs(&self, query: &str) {
         let logs_dir = self.config.logs_dir();
-        match crate::log::search_logs(&logs_dir, query, 20) {
+        match brain_utils::log::search_logs(&logs_dir, query, 20) {
             Ok(matches) if matches.is_empty() => {
                 self.out(&format!("no matches for '{query}'").dimmed().to_string());
             }
@@ -786,7 +787,7 @@ impl Session {
 
     fn cmd_list_sessions(&self) {
         let logs_dir = self.config.logs_dir();
-        match crate::log::list_sessions(&logs_dir, 15) {
+        match brain_utils::log::list_sessions(&logs_dir, 15) {
             Ok(sessions) if sessions.is_empty() => {
                 self.out(&"no sessions found".dimmed().to_string());
             }
@@ -812,7 +813,7 @@ impl Session {
 
     fn cmd_recall_session(&self, session_id: &str) {
         let logs_dir = self.config.logs_dir();
-        match crate::log::recall_session(&logs_dir, session_id) {
+        match brain_utils::log::recall_session(&logs_dir, session_id) {
             Ok(records) => {
                 self.out(
                     &format!("session: {} ({} records)", session_id, records.len())
@@ -863,7 +864,7 @@ impl Session {
             };
         }
 
-        let agent_prompt = match crate::agents::load_agent_prompt(agent, &self.config.agents_dir())
+        let agent_prompt = match brain_agents::load_agent_prompt(agent, &self.config.agents_dir())
         {
             Some(prompt) => prompt,
             None => {
@@ -1234,19 +1235,6 @@ async fn resolve_model(config: &Config) -> Result<Model> {
     }
 }
 
-pub(crate) fn build_backend(config: &Config, model: &Model) -> Result<Box<dyn ModelBackend>> {
-    match model {
-        Model::Claude(id) => {
-            let key = config
-                .anthropic_api_key
-                .clone()
-                .context("no API key — run `brain login` to store one")?;
-            Ok(Box::new(ClaudeBackend::new(key, id)))
-        }
-        Model::LMStudio(id) => Ok(Box::new(LMStudioBackend::new(&config.lmstudio_url, id))),
-    }
-}
-
 fn estimate_context_window(model: &Model) -> usize {
     match model {
         Model::Claude(id) if id.contains("opus") => 200_000,
@@ -1308,18 +1296,6 @@ fn agent_emoji(name: &str) -> &'static str {
         "magpie" => "🐦",
         "oracle" => "🔮",
         _ => "🔧",
-    }
-}
-
-/// Truncate a string to at most `max_chars` characters, appending "…" if truncated.
-/// Safe for multi-byte UTF-8 — never slices mid-character.
-pub(crate) fn truncate_preview(s: &str, max_chars: usize) -> String {
-    let mut chars = s.chars();
-    let truncated: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        format!("{truncated}…")
-    } else {
-        truncated
     }
 }
 

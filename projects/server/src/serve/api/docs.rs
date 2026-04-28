@@ -30,7 +30,7 @@ pub async fn tree_handler() -> impl IntoResponse {
             serde_json::to_value(get_root_tree(name)).unwrap_or_default(),
         );
     }
-    result.insert("docs".to_string(), crate::docs::tree());
+    result.insert("docs".to_string(), brain_docs::tree());
     Json(serde_json::Value::Object(result))
 }
 
@@ -94,7 +94,7 @@ pub async fn search_handler(Query(params): Query<SearchQuery>) -> Response {
         }
     }
     if root_filter == "all" || root_filter == "docs" {
-        for (path, matches) in crate::docs::search(&query) {
+        for (path, matches) in brain_docs::search(&query) {
             let file_path = path.trim_end_matches(".md").replace('\\', "/").to_string();
             results.push(json!({ "root": "docs", "path": file_path, "matches": matches }));
         }
@@ -134,7 +134,7 @@ pub struct DocQuery {
 )]
 pub async fn doc_handler(Query(params): Query<DocQuery>) -> Response {
     if params.root == "docs" {
-        return match crate::docs::read(&params.path) {
+        return match brain_docs::read(&params.path) {
             Some(content) => (
                 StatusCode::OK,
                 [("content-type", "text/plain; charset=utf-8")],

@@ -1,11 +1,10 @@
 use anyhow::Result;
-use brain::cmd;
-use brain::cmd::{LogAction, SpecAction};
-use brain::config::Config;
 use brain::context::ProjectContext;
 use brain::mcp;
 use brain::serve;
 use brain::session::Session;
+use brain_commands::{self as cmd, LogAction, SpecAction};
+use brain_utils::config::Config;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]

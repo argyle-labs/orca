@@ -1,4 +1,4 @@
-use crate::backend::OutputSink;
+use brain_core::backend::OutputSink;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame, Terminal,

@@ -13,10 +13,13 @@ path = "src/main.rs"
 
 [dependencies]
 # Workspace crates
-brain-agents  = { path = "../agents" }
-brain-docs    = { path = "../docs" }
-brain-scanner = { path = "../scanner" }
-brain-utils   = { path = "../utils" }
+brain-agents   = { path = "../agents" }
+brain-commands = { path = "../commands" }
+brain-core     = { path = "../core" }
+brain-docs     = { path = "../docs" }
+brain-jobs     = { path = "../jobs" }
+brain-scanner  = { path = "../scanner" }
+brain-utils    = { path = "../utils" }
 
 # CLI
 clap = { version = "4", features = ["derive"] }

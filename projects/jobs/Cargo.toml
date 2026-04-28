@@ -1,0 +1,12 @@
+[package]
+name = "brain-jobs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+brain-core  = { path = "../core" }
+brain-utils = { path = "../utils" }
+anyhow = "1"
+colored = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
