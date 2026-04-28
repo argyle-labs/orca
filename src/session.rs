@@ -1,18 +1,27 @@
-use crate::backend::{ClaudeBackend, LMStudioBackend, ModelBackend};
+use crate::backend::{
+    sink_write, sink_writeln, ClaudeBackend, LMStudioBackend, ModelBackend, OutputSink,
+    stdout_sink,
+};
 use crate::config::{Config, Model};
 use crate::context::ProjectContext;
+use crate::jobs::JobManager;
 use crate::ledger::TokenLedger;
 use crate::log::SessionLog;
 use crate::tools::ToolRegistry;
+use crate::tui::{self, TuiAction, TuiApp};
 use crate::types::{Message, ToolResult};
 use anyhow::{Context, Result};
 use colored::Colorize;
+use crossterm::event::{Event, EventStream};
+use futures_util::StreamExt;
 use rustyline::DefaultEditor;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub struct Session {
     config: Config,
     backend: Box<dyn ModelBackend>,
+    current_model: Model,
     messages: Vec<Message>,
     system_prompt: String,
     active_agent: String,
@@ -22,10 +31,16 @@ pub struct Session {
     log: Option<SessionLog>,
     context_window: usize,
     narration: bool,
+    output: OutputSink,
+    jobs: JobManager,
 }
 
 impl Session {
     pub async fn new(config: Config, ctx: ProjectContext) -> Result<Self> {
+        Self::new_with_output(config, ctx, stdout_sink()).await
+    }
+
+    pub async fn new_with_output(config: Config, ctx: ProjectContext, output: OutputSink) -> Result<Self> {
         let system_prompt = ctx.build_system_prompt(&config);
         let project = ctx.project.clone();
 
@@ -33,54 +48,78 @@ impl Session {
         let context_window = estimate_context_window(&model);
         let backend = build_backend(&config, &model)?;
 
-        // Start Pinky log
-        let log = SessionLog::new(
-            project.as_deref(),
-            &config.logs_dir(),
-        )
-        .ok(); // non-fatal — if logging fails, session continues
+        let log = SessionLog::new(project.as_deref(), &config.logs_dir()).ok();
 
         Ok(Session {
             system_prompt,
             active_agent: "brain".to_string(),
             project,
             backend,
+            current_model: model,
             messages: Vec::new(),
             ledger: TokenLedger::default(),
             tools: ToolRegistry::default(),
             context_window,
             log,
-            narration: true,
+            narration: false,
+            output,
+            jobs: JobManager::new(),
             config,
         })
     }
+
+    // ── Output helpers ───────────────────────────────────────────────────────
+    // ALL session output goes through these so TUI mode can redirect to channel.
+
+    fn out(&self, s: &str) {
+        sink_writeln(&self.output, s);
+    }
+
+    fn out_raw(&self, s: &str) {
+        sink_write(&self.output, s);
+    }
+
+    fn out_fmt(&self, s: impl std::fmt::Display) {
+        sink_writeln(&self.output, &s.to_string());
+    }
+
+    /// Replace the output sink (used when switching to TUI mode).
+    pub fn set_output(&mut self, sink: OutputSink) {
+        self.output = sink.clone();
+        self.tools.output = sink;
+    }
+
+    /// Enable TUI mode settings (auto-approve bash, etc.)
+    pub fn enable_tui_mode(&mut self) {
+        self.tools.permissions.auto_approve = true;
+    }
+
+    // ── Public entry points ──────────────────────────────────────────────────
 
     pub async fn one_shot(&mut self, prompt: String) -> Result<()> {
         self.chat(prompt).await
     }
 
+    /// Classic readline-based REPL (non-TUI).
     pub async fn run(&mut self) -> Result<()> {
         let mut rl = DefaultEditor::new().context("failed to init readline")?;
 
-        // Persist history across sessions
         let history_path = history_file();
         if let Some(p) = &history_path {
             rl.load_history(p).ok();
         }
 
-        print_banner(
-            self.backend.name(),
-            self.backend.model_id(),
-            self.project.as_deref(),
-            &self.active_agent,
-        );
-
-        // Warn about phantom brain processes on startup
-        warn_phantom_processes();
+        self.print_banner();
+        self.warn_phantom_processes();
 
         loop {
+            for note in self.jobs.drain_notifications() {
+                self.out(&note);
+            }
+
             let emoji = agent_emoji(&self.active_agent);
-            let prompt = format!("{emoji} {} {} ",
+            let prompt = format!(
+                "{emoji} {} {} ",
                 self.active_agent.cyan(),
                 "›".dimmed(),
             );
@@ -94,9 +133,8 @@ impl Session {
                     }
                     let _ = rl.add_history_entry(&input);
 
-                    // Bare commands — no slash needed
                     if matches!(input.as_str(), "exit" | "quit" | "q" | "bye") {
-                        println!("{}", "bye.".dimmed());
+                        self.out(&"bye.".dimmed().to_string());
                         if let Some(p) = &history_path {
                             rl.save_history(p).ok();
                         }
@@ -104,18 +142,17 @@ impl Session {
                     }
 
                     let result = match input.as_str() {
-                        "help" => { print_help(); Ok(()) }
-                        "clear" => {
-                            self.messages.clear();
-                            println!("{}", "context cleared.".dimmed());
+                        "help" => {
+                            self.print_help();
                             Ok(())
                         }
-                        _ if input.starts_with('/') => {
-                            self.handle_command(&input).await
+                        "clear" => {
+                            self.messages.clear();
+                            self.out(&"context cleared.".dimmed().to_string());
+                            Ok(())
                         }
-                        _ => {
-                            self.chat(input).await
-                        }
+                        _ if input.starts_with('/') => self.handle_command(&input).await,
+                        _ => self.chat(input).await,
                     };
 
                     if let Err(e) = result {
@@ -125,22 +162,22 @@ impl Session {
                             }
                             break;
                         }
-                        eprintln!("{}", format!("error: {e}").red());
+                        self.out(&format!("error: {e}").red().to_string());
                     }
                 }
                 Err(rustyline::error::ReadlineError::Interrupted) => {
-                    println!("{}", "^C".dimmed());
+                    self.out(&"^C".dimmed().to_string());
                     continue;
                 }
                 Err(rustyline::error::ReadlineError::Eof) => {
-                    println!("{}", "\nbye.".dimmed());
+                    self.out(&"\nbye.".dimmed().to_string());
                     if let Some(p) = &history_path {
                         rl.save_history(p).ok();
                     }
                     break;
                 }
                 Err(e) => {
-                    eprintln!("{}", format!("readline error: {e}").red());
+                    self.out(&format!("readline error: {e}").red().to_string());
                     if let Some(p) = &history_path {
                         rl.save_history(p).ok();
                     }
@@ -152,77 +189,234 @@ impl Session {
         Ok(())
     }
 
+    /// TUI-based REPL — split-pane with always-responsive input.
+    pub async fn run_tui(&mut self) -> Result<()> {
+        // Channel: session output → TUI rendering
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
+        self.set_output(tui::tui_sink(out_tx));
+        self.enable_tui_mode();
+
+        let mut terminal = tui::setup_terminal()?;
+
+        let prompt_str = format!(
+            "{} {} ›",
+            agent_emoji(&self.active_agent),
+            self.active_agent,
+        );
+        let mut app = TuiApp::new(&prompt_str);
+
+        // Banner
+        app.push_line(format!(
+            "{} brain · {}",
+            agent_emoji(&self.active_agent),
+            self.project.as_deref().unwrap_or("general"),
+        ));
+        app.push_line(format!(
+            "@{} · {}:{}",
+            self.active_agent,
+            self.backend.name(),
+            self.backend.model_id(),
+        ));
+        app.push_line("/help · Ctrl+C to quit · PageUp/Down to scroll");
+        app.push_line("");
+
+        let mut event_stream = EventStream::new();
+
+
+        loop {
+            // Draw
+            terminal.draw(|f| tui::render(f, &app))?;
+
+            // Drain output channel (non-blocking)
+            while let Ok(chunk) = out_rx.try_recv() {
+                app.append(&chunk);
+            }
+
+            // Drain job notifications
+            for note in self.jobs.drain_notifications() {
+                app.push_line(note);
+            }
+
+            if app.should_quit {
+                break;
+            }
+
+            // If a chat is running, we can't call self methods.
+            // Instead, we process in a cooperative loop: try_recv + poll events.
+            // When idle, we block on select. When busy, we poll.
+            if app.busy {
+                // We're mid-chat — just drain events and output until done.
+                // This shouldn't happen in the actor model, but as a safety net:
+                app.busy = false;
+            }
+
+            tokio::select! {
+                Some(Ok(event)) = event_stream.next() => {
+                    if let Event::Key(key) = event {
+                        match app.handle_key(key) {
+                            TuiAction::Submit(input) => {
+                                app.push_line(format!("› {input}"));
+
+                                if matches!(input.as_str(), "exit" | "quit" | "q" | "bye") {
+                                    break;
+                                }
+
+                                if input == "help" || input == "/help" || input == "/h" {
+                                    self.print_help();
+                                    // Drain the output channel so help text appears
+                                    while let Ok(chunk) = out_rx.try_recv() {
+                                        app.append(&chunk);
+                                    }
+                                    continue;
+                                }
+
+                                // Process command or chat
+                                app.busy = true;
+                                terminal.draw(|f| tui::render(f, &app))?;
+
+                                if input.starts_with('/') {
+                                    let _ = self.handle_command(&input).await;
+                                } else {
+                                    let _ = self.chat(input).await;
+                                }
+
+                                app.busy = false;
+
+                                // Drain all output produced during chat
+                                while let Ok(chunk) = out_rx.try_recv() {
+                                    app.append(&chunk);
+                                }
+                            }
+                            TuiAction::Cancel => {
+                                app.push_line("[cancelled]");
+                            }
+                            TuiAction::Quit => {
+                                break;
+                            }
+                            TuiAction::None => {}
+                        }
+                    }
+                }
+                Some(chunk) = out_rx.recv() => {
+                    app.append(&chunk);
+                }
+            }
+        }
+
+        tui::restore_terminal(&mut terminal);
+        Ok(())
+    }
+
+    // ── Chat ─────────────────────────────────────────────────────────────────
+
     async fn chat(&mut self, input: String) -> Result<()> {
-        // Log user message
         if let Some(log) = &mut self.log {
             log.append("user", &self.active_agent.clone(), &input, &[]).ok();
         }
 
         self.messages.push(Message::user(input));
 
-        loop {
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::signal::ctrl_c().await.ok();
+            cancel_clone.cancel();
+        });
+
+        let max_rounds = 30;
+        for round in 0..max_rounds {
             let tools = ToolRegistry::definitions();
-            let cancel = CancellationToken::new();
-            let cancel_clone = cancel.clone();
-            tokio::spawn(async move {
-                tokio::signal::ctrl_c().await.ok();
-                cancel_clone.cancel();
-            });
             let response = self
                 .backend
-                .chat(&self.messages, &tools, &self.system_prompt, cancel)
+                .chat(
+                    &self.messages,
+                    &tools,
+                    &self.system_prompt,
+                    cancel.child_token(),
+                    &self.output,
+                )
                 .await?;
 
             self.ledger.record(response.input_tokens, response.output_tokens);
 
+            if cancel.is_cancelled() {
+                self.out(&"\n[chat interrupted]".yellow().to_string());
+                break;
+            }
+
             let has_tools = !response.tool_calls.is_empty();
 
-            // Log assistant response
-            if !response.text.trim().is_empty() && let Some(log) = &mut self.log {
-                log.append("assistant", &self.active_agent.clone(), &response.text, &[]).ok();
+            if !response.text.trim().is_empty() {
+                if let Some(log) = &mut self.log {
+                    log.append("assistant", &self.active_agent.clone(), &response.text, &[])
+                        .ok();
+                }
             }
 
             self.messages.push(Message::Assistant {
-                text: if response.text.is_empty() { None } else { Some(response.text.clone()) },
+                text: if response.text.is_empty() {
+                    None
+                } else {
+                    Some(response.text.clone())
+                },
                 tool_calls: response.tool_calls.clone(),
             });
 
             if !has_tools {
-                self.ledger.display();
+                self.out(&self.ledger.format().dimmed().to_string());
                 self.check_commit_status();
-                println!();
+                self.out("");
                 break;
             }
 
-            // Execute tool calls
+            if round > 0 {
+                self.out_fmt(format!("  [round {}/{}]", round + 1, max_rounds).dimmed());
+            }
+
             let mut results: Vec<ToolResult> = Vec::new();
             for tc in &response.tool_calls {
-                println!("{}", format!("  input: {}", tc.input).dimmed());
+                if cancel.is_cancelled() {
+                    self.out(&"\n[interrupted during tool execution]".yellow().to_string());
+                    break;
+                }
+
+                self.out_fmt(format!("  input: {}", tc.input).dimmed());
 
                 let mut r = if tc.name == "delegate" {
                     self.execute_delegate(&tc.input).await
                 } else if tc.name == "confirm" {
-                    execute_confirm(&tc.input)
+                    self.execute_confirm(&tc.input)
                 } else {
                     self.tools.execute(&tc.name, &tc.input)
                 };
                 r.tool_use_id = tc.id.clone();
 
-                let preview = if r.content.len() > 200 {
-                    format!("{}…", &r.content[..200])
+                let preview = truncate_preview(&r.content, 200);
+                let styled = if r.is_error {
+                    preview.red().to_string()
                 } else {
-                    r.content.clone()
+                    preview.dimmed().to_string()
                 };
-                println!("{}", if r.is_error { preview.red().to_string() } else { preview.dimmed().to_string() });
+                self.out(&styled);
 
                 results.push(r);
             }
 
+            if cancel.is_cancelled() {
+                break;
+            }
+
             self.messages.push(Message::ToolResults(results));
+
+            if round == max_rounds - 1 {
+                self.out(&"(max tool rounds reached — stopping)".yellow().to_string());
+            }
         }
 
         Ok(())
     }
+
+    // ── Commands ─────────────────────────────────────────────────────────────
 
     async fn handle_command(&mut self, input: &str) -> Result<()> {
         let parts: Vec<&str> = input.splitn(3, ' ').collect();
@@ -234,63 +428,53 @@ impl Session {
                     self.cmd_switch_model(parts[1]).await?;
                 }
             }
-            "/models" => {
-                self.cmd_list_models().await?;
-            }
+            "/models" => self.cmd_list_models().await?,
             "/clear" => {
                 self.messages.clear();
-                println!("{}", "context cleared.".dimmed());
+                self.out(&"context cleared.".dimmed().to_string());
             }
             "/tokens" | "/t" => {
-                self.ledger.display();
+                self.out(&self.ledger.format().dimmed().to_string());
             }
-            "/context" | "/ctx" => {
-                self.cmd_context();
-            }
-            "/system" => {
-                println!("{}", self.system_prompt.dimmed());
-            }
-            "/agent" => {
-                println!("{}", "you're talking to Brain.".cyan());
-            }
+            "/context" | "/ctx" => self.cmd_context(),
+            "/system" => self.out(&self.system_prompt.dimmed().to_string()),
+            "/agent" => self.out(&"you're talking to Brain.".cyan().to_string()),
             "/flag" => {
                 let note = parts.get(1).copied().unwrap_or("flagged as important");
                 if let Some(log) = &mut self.log {
                     log.flag_last(note).ok();
-                    println!("{}", format!("flagged: {note}").green());
+                    self.out(&format!("flagged: {note}").green().to_string());
                 } else {
-                    println!("{}", "logging not active".yellow());
+                    self.out(&"logging not active".yellow().to_string());
                 }
             }
             "/log" => {
                 if let Some(log) = &self.log {
-                    println!("{}", format!("session: {}", log.session_id()).dimmed());
-                    println!("{}", format!("file: {}", log.path().display()).dimmed());
+                    self.out(&format!("session: {}", log.session_id()).dimmed().to_string());
+                    self.out(&format!("file: {}", log.path().display()).dimmed().to_string());
                 } else {
-                    println!("{}", "logging not active".yellow());
+                    self.out(&"logging not active".yellow().to_string());
                 }
             }
             "/search" => {
                 if parts.len() < 2 {
-                    println!("{}", "usage: /search <query>".yellow());
+                    self.out(&"usage: /search <query>".yellow().to_string());
                 } else {
                     let query = parts[1..].join(" ");
                     self.cmd_search_logs(&query);
                 }
             }
-            "/sessions" => {
-                self.cmd_list_sessions();
-            }
+            "/sessions" => self.cmd_list_sessions(),
             "/recall" => {
                 if parts.len() < 2 {
-                    println!("{}", "usage: /recall <session_id or partial>".yellow());
+                    self.out(&"usage: /recall <session_id or partial>".yellow().to_string());
                 } else {
                     self.cmd_recall_session(parts[1]);
                 }
             }
             "/escalate" => {
                 if parts.len() < 2 {
-                    println!("{}", "usage: /escalate <question>".yellow());
+                    self.out(&"usage: /escalate <question>".yellow().to_string());
                 } else {
                     let question = parts[1..].join(" ");
                     self.cmd_escalate(&question).await?;
@@ -299,31 +483,93 @@ impl Session {
             "/narration" => {
                 self.narration = !self.narration;
                 let state = if self.narration { "on" } else { "off" };
-                println!("{}", format!("narration: {state}").green());
+                self.out(&format!("narration: {state}").green().to_string());
             }
-            "/cleanup" => {
-                cleanup_phantom_processes();
+            "/bg" => {
+                if parts.len() < 2 {
+                    self.out(&"usage: /bg <prompt>".yellow().to_string());
+                } else {
+                    let bg_prompt = parts[1..].join(" ");
+                    self.cmd_bg(&bg_prompt)?;
+                }
             }
+            "/jobs" => {
+                for line in self.jobs.list() {
+                    self.out(&line);
+                }
+            }
+            "/output" => {
+                if parts.len() < 2 {
+                    self.out(&"usage: /output <job_id>".yellow().to_string());
+                } else if let Ok(id) = parts[1].trim_start_matches('#').parse::<usize>() {
+                    match self.jobs.get_output(id) {
+                        Some(out) if out.is_empty() => {
+                            self.out(&"(no output yet)".dimmed().to_string());
+                        }
+                        Some(out) => {
+                            self.out(&format!("── job #{id} output ──").cyan().to_string());
+                            self.out_raw(&out);
+                            self.out(&format!("── end ──").cyan().to_string());
+                        }
+                        None => self.out(&format!("job #{id} not found").yellow().to_string()),
+                    }
+                } else {
+                    self.out(&"usage: /output <job_id>  (e.g. /output 1)".yellow().to_string());
+                }
+            }
+            "/cancel" => {
+                if parts.len() < 2 {
+                    self.out(&"usage: /cancel <job_id>".yellow().to_string());
+                } else if let Ok(id) = parts[1].trim_start_matches('#').parse::<usize>() {
+                    if self.jobs.cancel(id) {
+                        self.out(&format!("cancelled job #{id}").green().to_string());
+                    } else {
+                        self.out(
+                            &format!("job #{id} not found or already finished")
+                                .yellow()
+                                .to_string(),
+                        );
+                    }
+                } else {
+                    self.out(&"usage: /cancel <job_id>".yellow().to_string());
+                }
+            }
+            "/cleanup" => self.cleanup_phantom_processes(),
             "/quit" | "/exit" | "/q" => {
-                println!("{}", "bye.".dimmed());
+                self.out(&"bye.".dimmed().to_string());
                 anyhow::bail!("__exit__");
             }
-            "/help" | "/h" => {
-                print_help();
-            }
+            "/help" | "/h" => self.print_help(),
             _ => {
-                println!("{}", format!("unknown command: {}", parts[0]).yellow());
-                println!("{}", "  type /help or help for commands".dimmed());
+                self.out(&format!("unknown command: {}", parts[0]).yellow().to_string());
+                self.out(&"  type /help or help for commands".dimmed().to_string());
             }
         }
         Ok(())
     }
 
-
+    fn cmd_bg(&mut self, prompt: &str) -> Result<()> {
+        let id = self.jobs.spawn(
+            &self.config,
+            &self.current_model,
+            self.system_prompt.clone(),
+            prompt.to_string(),
+        )?;
+        self.out(
+            &format!("job #{id} started — /jobs to check status, /output {id} to view result")
+                .green()
+                .to_string(),
+        );
+        Ok(())
+    }
 
     fn cmd_context(&self) {
         let msg_count = self.messages.len();
-        let turns = self.messages.iter().filter(|m| matches!(m, Message::User { .. })).count();
+        let turns = self
+            .messages
+            .iter()
+            .filter(|m| matches!(m, Message::User { .. }))
+            .count();
         let session_tokens = self.ledger.session_input + self.ledger.session_output;
         let pct = if self.context_window > 0 {
             (session_tokens as f64 / self.context_window as f64 * 100.0).min(100.0)
@@ -331,20 +577,29 @@ impl Session {
             0.0
         };
 
-        println!("{}", "Context:".green());
-        println!("  active agent:  @{}", self.active_agent);
-        println!("  model:         {}:{}", self.backend.name(), self.backend.model_id());
-        println!("  messages:      {} ({} turns)", msg_count, turns);
-        println!("  tokens (est):  {} / {} ({:.0}%)",
+        self.out(&"Context:".green().to_string());
+        self.out(&format!("  active agent:  @{}", self.active_agent));
+        self.out(&format!(
+            "  model:         {}:{}",
+            self.backend.name(),
+            self.backend.model_id()
+        ));
+        self.out(&format!("  messages:      {} ({} turns)", msg_count, turns));
+        self.out(&format!(
+            "  tokens (est):  {} / {} ({:.0}%)",
             fmt_tokens(session_tokens),
             fmt_tokens(self.context_window as u32),
             pct,
-        );
+        ));
         if let Some(log) = &self.log {
-            println!("  session log:   {}", log.session_id());
+            self.out(&format!("  session log:   {}", log.session_id()));
         }
         if pct > 75.0 {
-            println!("{}", "  ⚠ context over 75% — consider /clear or starting a new session".yellow());
+            self.out(
+                &"  ⚠ context over 75% — consider /clear or starting a new session"
+                    .yellow()
+                    .to_string(),
+            );
         }
     }
 
@@ -352,8 +607,17 @@ impl Session {
         let model = Model::parse(spec);
         let new_backend = build_backend(&self.config, &model)?;
         self.context_window = estimate_context_window(&model);
-        println!("{}", format!("switched to {}:{}", new_backend.name(), new_backend.model_id()).green());
+        self.out(
+            &format!(
+                "switched to {}:{}",
+                new_backend.name(),
+                new_backend.model_id()
+            )
+            .green()
+            .to_string(),
+        );
         self.backend = new_backend;
+        self.current_model = model;
         Ok(())
     }
 
@@ -368,47 +632,60 @@ impl Session {
                     all.push((format!("lmstudio:{m}"), format!("lmstudio:{m}")));
                 }
             }
-            Err(_) => println!("{}", "  LM Studio: not reachable".dimmed()),
+            Err(_) => self.out(&"  LM Studio: not reachable".dimmed().to_string()),
         }
 
         if self.config.anthropic_api_key.is_some() {
-            for m in ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5-20251001"] {
+            for m in [
+                "claude-sonnet-4-6",
+                "claude-opus-4-6",
+                "claude-haiku-4-5-20251001",
+            ] {
                 all.push((format!("claude:{m}"), m.to_string()));
             }
         } else {
-            println!("{}", "  Claude: no API key (run `brain login`)".dimmed());
+            self.out(&"  Claude: no API key (run `brain login`)".dimmed().to_string());
         }
 
         if all.is_empty() {
-            println!("{}", "no models available".yellow());
+            self.out(&"no models available".yellow().to_string());
             return Ok(());
         }
 
-        println!("{}", "Switch model:".green());
+        self.out(&"Available models:".green().to_string());
         for (i, (display, _)) in all.iter().enumerate() {
-            let marker = if current.ends_with(display.trim_start_matches("lmstudio:").trim_start_matches("claude:"))
-                || current == *display { "●" } else { " " };
-            println!("  {} {}  {display}", marker, format!("[{}]", i + 1).dimmed());
+            let marker = if current
+                .ends_with(
+                    display
+                        .trim_start_matches("lmstudio:")
+                        .trim_start_matches("claude:"),
+                )
+                || current == *display
+            {
+                "●"
+            } else {
+                " "
+            };
+            self.out(&format!(
+                "  {} {}  {display}",
+                marker,
+                format!("[{}]", i + 1).dimmed()
+            ));
         }
-        print!("{} ", "[enter to cancel]:".cyan());
-        std::io::Write::flush(&mut std::io::stdout())?;
-        let mut input = String::new();
-        std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut input)?;
-        let trimmed = input.trim();
-        if !trimmed.is_empty()
-            && let Ok(idx) = trimmed.parse::<usize>()
-            && idx > 0
-            && let Some((_, spec)) = all.get(idx - 1) {
-            self.cmd_switch_model(spec).await?;
-        }
+        self.out(&"  use /model <spec> to switch  (e.g. /model lmstudio:qwen3)"
+            .dimmed()
+            .to_string());
         Ok(())
     }
 
     async fn cmd_escalate(&mut self, question: &str) -> Result<()> {
-        let api_key = self.config.anthropic_api_key.clone()
+        let api_key = self
+            .config
+            .anthropic_api_key
+            .clone()
             .context("no API key — run `brain login` first")?;
 
-        println!("{}", "↑ escalating to Claude…".yellow());
+        self.out(&"↑ escalating to Claude…".yellow().to_string());
 
         let claude = ClaudeBackend::new(api_key, "claude-sonnet-4-6");
         let msgs = vec![Message::user(question)];
@@ -418,19 +695,26 @@ impl Session {
             tokio::signal::ctrl_c().await.ok();
             cancel_clone.cancel();
         });
-        let response = claude.chat(&msgs, &[], &self.system_prompt, cancel).await?;
+        let response = claude
+            .chat(&msgs, &[], &self.system_prompt, cancel, &self.output)
+            .await?;
 
         self.ledger.record(response.input_tokens, response.output_tokens);
 
         if let Some(log) = &mut self.log {
             log.append("user", "escalate", question, &["escalation"]).ok();
-            log.append("assistant", "claude-sonnet-4-6", &response.text, &["escalation"]).ok();
+            log.append("assistant", "claude-sonnet-4-6", &response.text, &["escalation"])
+                .ok();
         }
 
-        self.messages.push(Message::user(format!("[escalated to Claude]\nQuestion: {question}")));
-        self.messages.push(Message::Assistant { text: Some(response.text), tool_calls: vec![] });
+        self.messages
+            .push(Message::user(format!("[escalated to Claude]\nQuestion: {question}")));
+        self.messages.push(Message::Assistant {
+            text: Some(response.text),
+            tool_calls: vec![],
+        });
 
-        self.ledger.display();
+        self.out(&self.ledger.format().dimmed().to_string());
         Ok(())
     }
 
@@ -438,10 +722,10 @@ impl Session {
         let logs_dir = self.config.logs_dir();
         match crate::log::search_logs(&logs_dir, query, 20) {
             Ok(matches) if matches.is_empty() => {
-                println!("{}", format!("no matches for '{query}'").dimmed());
+                self.out(&format!("no matches for '{query}'").dimmed().to_string());
             }
             Ok(matches) => {
-                println!("{}", format!("found {} match(es):", matches.len()).green());
+                self.out(&format!("found {} match(es):", matches.len()).green().to_string());
                 for m in &matches {
                     let session = m["session"].as_str().unwrap_or("?");
                     let role = m["role"].as_str().unwrap_or("?");
@@ -450,10 +734,17 @@ impl Session {
                     let preview: String = content.chars().take(120).collect();
                     let important = m["important"].as_bool() == Some(true);
                     let flag = if important { " ★" } else { "" };
-                    println!("  {} {} @{} {}{}", session.dimmed(), role.cyan(), agent, preview, flag.yellow());
+                    self.out(&format!(
+                        "  {} {} @{} {}{}",
+                        session.dimmed(),
+                        role.cyan(),
+                        agent,
+                        preview,
+                        flag.yellow()
+                    ));
                 }
             }
-            Err(e) => println!("{}", format!("search error: {e}").red()),
+            Err(e) => self.out(&format!("search error: {e}").red().to_string()),
         }
     }
 
@@ -461,16 +752,25 @@ impl Session {
         let logs_dir = self.config.logs_dir();
         match crate::log::list_sessions(&logs_dir, 15) {
             Ok(sessions) if sessions.is_empty() => {
-                println!("{}", "no sessions found".dimmed());
+                self.out(&"no sessions found".dimmed().to_string());
             }
             Ok(sessions) => {
-                println!("{}", "Recent sessions:".green());
+                self.out(&"Recent sessions:".green().to_string());
                 for s in &sessions {
-                    let flag = if s.flagged > 0 { format!(" (★ {})", s.flagged) } else { String::new() };
-                    println!("  {}  {} msgs{}", s.session_id.dimmed(), s.messages, flag.yellow());
+                    let flag = if s.flagged > 0 {
+                        format!(" (★ {})", s.flagged)
+                    } else {
+                        String::new()
+                    };
+                    self.out(&format!(
+                        "  {}  {} msgs{}",
+                        s.session_id.dimmed(),
+                        s.messages,
+                        flag.yellow()
+                    ));
                 }
             }
-            Err(e) => println!("{}", format!("error: {e}").red()),
+            Err(e) => self.out(&format!("error: {e}").red().to_string()),
         }
     }
 
@@ -478,28 +778,38 @@ impl Session {
         let logs_dir = self.config.logs_dir();
         match crate::log::recall_session(&logs_dir, session_id) {
             Ok(records) => {
-                println!("{}", format!("session: {} ({} records)", session_id, records.len()).green());
+                self.out(
+                    &format!("session: {} ({} records)", session_id, records.len())
+                        .green()
+                        .to_string(),
+                );
                 for r in &records {
                     let role = r["role"].as_str().unwrap_or("?");
                     let agent = r["agent"].as_str().unwrap_or("");
                     let content = r["content"].as_str().unwrap_or("");
                     let important = r["important"].as_bool() == Some(true);
                     let flag = if important { " ★" } else { "" };
-
                     let prefix = if agent.is_empty() {
                         format!("[{role}]")
                     } else {
                         format!("[{role}/@{agent}]")
                     };
-
                     let preview: String = content.chars().take(200).collect();
-                    let ellipsis = if content.len() > 200 { "…" } else { "" };
-                    println!("  {} {}{}{}", prefix.cyan(), preview, ellipsis, flag.yellow());
+                    let ellipsis = if content.chars().count() > 200 { "…" } else { "" };
+                    self.out(&format!(
+                        "  {} {}{}{}",
+                        prefix.cyan(),
+                        preview,
+                        ellipsis,
+                        flag.yellow()
+                    ));
                 }
             }
-            Err(e) => println!("{}", format!("error: {e}").red()),
+            Err(e) => self.out(&format!("error: {e}").red().to_string()),
         }
     }
+
+    // ── Delegation ───────────────────────────────────────────────────────────
 
     async fn execute_delegate(&mut self, input: &serde_json::Value) -> ToolResult {
         let agent = input["agent"].as_str().unwrap_or("");
@@ -513,69 +823,75 @@ impl Session {
             };
         }
 
-        // Load agent system prompt (filesystem first, embedded fallback)
-        let agent_prompt = match crate::agents::load_agent_prompt(agent, &self.config.agents_dir()) {
-            Some(prompt) => prompt,
-            None => {
-                return ToolResult {
-                    tool_use_id: String::new(),
-                    content: format!("error: agent @{agent} not found"),
-                    is_error: true,
-                };
-            }
-        };
+        let agent_prompt =
+            match crate::agents::load_agent_prompt(agent, &self.config.agents_dir()) {
+                Some(prompt) => prompt,
+                None => {
+                    return ToolResult {
+                        tool_use_id: String::new(),
+                        content: format!("error: agent @{agent} not found"),
+                        is_error: true,
+                    };
+                }
+            };
 
-        // Brain narrates to Pinky
         let agent_icon = agent_emoji(agent);
         if self.narration {
-            println!();
-            println!("{}", format!(
-                "  🧠 Brain: \"Pinky, I'm sending this to {agent_icon} @{agent}. {}\"",
-                match agent {
-                    "fox" => "Something is broken and Fox will sniff out the root cause.",
-                    "owl" => "Owl will read the code and explain what's happening.",
-                    "crow" => "Crow will write the implementation.",
-                    "spider" => "Spider will find the pattern and simplify.",
-                    "bear" => "Bear will tear this apart and find every weakness.",
-                    "ferret" => "Ferret will check this against proper standards.",
-                    "badger" => "Badger knows the homelab infrastructure.",
-                    "hawk" => "Hawk will inspect the containers.",
-                    "mole" => "Mole will dig into the system processes.",
-                    "elephant" => "Elephant never forgets the docs.",
-                    "scribe" => "Scribe will check the documentation.",
-                    "lynx" => "Lynx will plan the most efficient path.",
-                    "smith" => "Smith will inspect and repair the agent definitions.",
-                    "raven" => "Raven will capture this in the vault.",
-                    "pinky" => "Pinky will search the session logs. NARF!",
-                    "magpie" => "Magpie will check for scope graduation candidates.",
-                    "oracle" => "Oracle will judge whether to escalate.",
-                    "boar" => "Boar will charge through the carl commands.",
-                    _ => "This specialist knows what to do.",
-                }
-            ).dimmed());
-            println!("{}", format!(
-                "  🐭 Pinky: \"Ooh! {agent_icon} @{agent}! NARF! I'll write everything down!\""
-            ).dimmed());
-            println!();
+            self.out("");
+            self.out_fmt(
+                format!(
+                    "  🧠 Brain: \"Pinky, I'm sending this to {agent_icon} @{agent}. {}\"",
+                    match agent {
+                        "fox" => "Something is broken and Fox will sniff out the root cause.",
+                        "owl" => "Owl will read the code and explain what's happening.",
+                        "crow" => "Crow will write the implementation.",
+                        "spider" => "Spider will find the pattern and simplify.",
+                        "bear" => "Bear will tear this apart and find every weakness.",
+                        "ferret" => "Ferret will check this against proper standards.",
+                        "badger" => "Badger knows the homelab infrastructure.",
+                        "hawk" => "Hawk will inspect the containers.",
+                        "mole" => "Mole will dig into the system processes.",
+                        "elephant" => "Elephant never forgets the docs.",
+                        "raven" => "Raven will capture this in the vault.",
+                        "lynx" => "Lynx will plan the most efficient path.",
+                        "pinky" => "Pinky will search the session logs. NARF!",
+                        "boar" => "Boar will charge through the carl commands.",
+                        _ => "This specialist knows what to do.",
+                    }
+                )
+                .dimmed(),
+            );
+            self.out_fmt(
+                format!(
+                    "  🐭 Pinky: \"Ooh! {agent_icon} @{agent}! NARF! I'll write everything down!\""
+                )
+                .dimmed(),
+            );
+            self.out("");
         }
 
-        // Log the delegation
         if let Some(log) = &mut self.log {
-            log.append("system", &self.active_agent, &format!("delegated to @{agent}: {task}"), &["delegation"]).ok();
+            log.append(
+                "system",
+                &self.active_agent,
+                &format!("delegated to @{agent}: {task}"),
+                &["delegation"],
+            )
+            .ok();
         }
 
-        // Specialist tools — everything except delegate (no recursion)
         let specialist_tools: Vec<_> = ToolRegistry::definitions()
             .into_iter()
             .filter(|t| t.name != "delegate")
             .collect();
 
-        // Run sub-conversation with full tool loop
         let mut sub_messages = vec![Message::user(task)];
         let mut full_response = String::new();
-        let max_rounds = 20; // safety limit
+        let max_rounds = 20;
 
-        println!("{}", format!("  ┌─ {agent_icon} @{agent} ────────────────────────────").cyan());
+        self.out_fmt(
+            format!("  ┌─ {agent_icon} @{agent} ────────────────────────────").cyan(),
+        );
 
         for round in 0..max_rounds {
             let cancel = CancellationToken::new();
@@ -585,15 +901,18 @@ impl Session {
                 cancel_clone.cancel();
             });
 
-            print!("{}", "  │ ".cyan());
-            let result = self.backend.chat(
-                &sub_messages, &specialist_tools, &agent_prompt, cancel
-            ).await;
+            self.out_raw(&"  │ ".cyan().to_string());
+            let result = self
+                .backend
+                .chat(&sub_messages, &specialist_tools, &agent_prompt, cancel, &self.output)
+                .await;
 
             let response = match result {
                 Ok(r) => r,
                 Err(e) => {
-                    println!("{}", format!("  └─ @{agent} error ──────────────────────").red());
+                    self.out_fmt(
+                        format!("  └─ @{agent} error ──────────────────────").red(),
+                    );
                     return ToolResult {
                         tool_use_id: String::new(),
                         content: format!("delegation error: {e}"),
@@ -606,43 +925,44 @@ impl Session {
 
             if !response.text.is_empty() {
                 full_response.push_str(&response.text);
-
-                // Log specialist response
                 if let Some(log) = &mut self.log {
                     log.append("assistant", agent, &response.text, &["delegation"]).ok();
                 }
             }
 
             sub_messages.push(Message::Assistant {
-                text: if response.text.is_empty() { None } else { Some(response.text.clone()) },
+                text: if response.text.is_empty() {
+                    None
+                } else {
+                    Some(response.text.clone())
+                },
                 tool_calls: response.tool_calls.clone(),
             });
 
-            // No tool calls = specialist is done
             if response.tool_calls.is_empty() {
                 break;
             }
 
-            // Execute specialist's tool calls
             let mut tool_results: Vec<ToolResult> = Vec::new();
             for tc in &response.tool_calls {
-                print!("{}", "  │ ".cyan());
-                println!("{}", format!("⚙ {} {}", tc.name, tc.input).dimmed());
+                self.out_raw(&"  │ ".cyan().to_string());
+                self.out_fmt(format!("⚙ {} {}", tc.name, tc.input).dimmed());
                 let mut r = self.tools.execute(&tc.name, &tc.input);
                 r.tool_use_id = tc.id.clone();
 
-                // Log tool usage
                 if let Some(log) = &mut self.log {
-                    log.append("tool", agent, &format!("{}({})", tc.name, tc.input), &["delegation"]).ok();
+                    log.append("tool", agent, &format!("{}({})", tc.name, tc.input), &["delegation"])
+                        .ok();
                 }
 
-                let preview = if r.content.len() > 200 {
-                    format!("{}…", &r.content[..200])
+                let preview = truncate_preview(&r.content, 200);
+                self.out_raw(&"  │ ".cyan().to_string());
+                let styled = if r.is_error {
+                    preview.red().to_string()
                 } else {
-                    r.content.clone()
+                    preview.dimmed().to_string()
                 };
-                print!("{}", "  │ ".cyan());
-                println!("{}", if r.is_error { preview.red().to_string() } else { preview.dimmed().to_string() });
+                self.out(&styled);
 
                 tool_results.push(r);
             }
@@ -650,13 +970,12 @@ impl Session {
             sub_messages.push(Message::ToolResults(tool_results));
 
             if round == max_rounds - 1 {
-                println!("{}", "  │ (max rounds reached)".yellow());
+                self.out(&"  │ (max rounds reached)".yellow().to_string());
             }
         }
 
-        println!("{}", format!("  └─ {agent_icon} @{agent} done ──────────────────────").cyan());
+        self.out_fmt(format!("  └─ {agent_icon} @{agent} done ──────────────────────").cyan());
         if self.narration {
-            // Varied post-delegation dialogue based on agent
             let (brain_line, pinky_line) = match agent {
                 "fox" => (
                     format!("\"Excellent work, {agent_icon} Fox. The trail was well-traced.\""),
@@ -670,35 +989,17 @@ impl Session {
                     format!("\"Clean implementation, {agent_icon} Crow. Well built.\""),
                     "\"Ooh! New code! Can I name a variable? POIT!\"".to_string(),
                 ),
-                "ferret" => (
-                    format!("\"Good eye, {agent_icon} Ferret. Standards matter.\""),
-                    "\"Ferret found ALL the things! Every single one! ZORT!\"".to_string(),
-                ),
-                "owl" => (
-                    format!("\"Clear explanation, {agent_icon} Owl. Wisdom earned.\""),
-                    "\"I understood some of those words, Brain! NARF!\"".to_string(),
-                ),
-                "spider" => (
-                    format!("\"Elegant simplification, {agent_icon} Spider. Less is more.\""),
-                    "\"The web is so pretty now! POIT!\"".to_string(),
-                ),
-                "scribe" => (
-                    format!("\"Good catch, {agent_icon} Scribe. Documentation is truth.\""),
-                    "\"Words! So many words! I'll file them all! TROZ!\"".to_string(),
-                ),
-                "smith" => (
-                    format!("\"Good work, {agent_icon} Smith. The tools are sharper now.\""),
-                    "\"Smith fixed the things that fix the things! ZORT!\"".to_string(),
-                ),
                 _ => (
-                    format!("\"Thank you, {agent_icon} @{agent}. Pinky, did you get all that?\""),
+                    format!(
+                        "\"Thank you, {agent_icon} @{agent}. Pinky, did you get all that?\""
+                    ),
                     "\"Every word, Brain! POIT!\"".to_string(),
                 ),
             };
-            println!();
-            println!("{}", format!("  🧠 Brain: {brain_line}").dimmed());
-            println!("{}", format!("  🐭 Pinky: {pinky_line}").dimmed());
-            println!();
+            self.out("");
+            self.out_fmt(format!("  🧠 Brain: {brain_line}").dimmed());
+            self.out_fmt(format!("  🐭 Pinky: {pinky_line}").dimmed());
+            self.out("");
         }
 
         ToolResult {
@@ -708,20 +1009,133 @@ impl Session {
         }
     }
 
-    fn check_commit_status(&self) {
-        let cwd = std::env::current_dir().ok()
-            .and_then(|p| p.to_str().map(|s| s.to_string()));
-        if let Some(dir) = cwd && let Some(count) = check_git_changes(&dir) && count >= 5 {
-            println!("{}", format!(
-                "⚠  {} uncommitted files in {} — good time to commit",
-                count,
-                dir.split('/').next_back().unwrap_or(&dir)
-            ).yellow());
+    fn execute_confirm(&self, input: &serde_json::Value) -> ToolResult {
+        let question = input["question"].as_str().unwrap_or("Proceed?");
+        self.out(&format!("{} (auto-confirmed)", question).cyan().to_string());
+        ToolResult {
+            tool_use_id: String::new(),
+            content: "yes".to_string(),
+            is_error: false,
         }
+    }
+
+    fn check_commit_status(&self) {
+        let cwd = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(|s| s.to_string()));
+        if let Some(dir) = cwd
+            && let Some(count) = check_git_changes(&dir)
+            && count >= 5
+        {
+            self.out_fmt(
+                format!(
+                    "⚠  {} uncommitted files in {} — good time to commit",
+                    count,
+                    dir.split('/').next_back().unwrap_or(&dir)
+                )
+                .yellow(),
+            );
+        }
+    }
+
+    // ── Output helpers (banner, help, etc.) ───────────────────────────────────
+
+    fn print_banner(&self) {
+        let emoji = agent_emoji(&self.active_agent);
+        self.out("");
+        if let Some(p) = &self.project {
+            self.out_fmt(format!("  {emoji} brain  ·  {p}").bold());
+        } else {
+            self.out_fmt(format!("  {emoji} brain").bold());
+        }
+        self.out(&format!(
+            "  {}  {}",
+            format!("{emoji} @{}", self.active_agent).cyan(),
+            format!("{}:{}", self.backend.name(), self.backend.model_id()).dimmed()
+        ));
+        self.out(&"  /help · exit to quit".dimmed().to_string());
+        self.out("");
+    }
+
+    fn print_help(&self) {
+        self.out(&"Navigation:".green().to_string());
+        self.out("  /model            list models + interactive picker");
+        self.out("  /model <spec>     switch directly  (lmstudio:qwen3, claude-sonnet-4-6)");
+        self.out("  clear             clear conversation history");
+        self.out("");
+        self.out(&"Context:".green().to_string());
+        self.out("  /context          show messages, token usage, context window %");
+        self.out("  /tokens           token ledger");
+        self.out("  /agent            show active agent");
+        self.out("  /system           show current system prompt");
+        self.out("");
+        self.out(&"Logging (Pinky):".green().to_string());
+        self.out("  /flag [note]      mark last message as important");
+        self.out("  /log              show current session log path");
+        self.out("  /search <query>   search all session logs for a keyword");
+        self.out("  /sessions         list recent sessions");
+        self.out("  /recall <id>      replay a session's messages");
+        self.out("");
+        self.out(&"Background jobs:".green().to_string());
+        self.out("  /bg <prompt>      run a prompt in the background");
+        self.out("  /jobs             list background jobs");
+        self.out("  /output <id>      view a job's output  (e.g. /output 1)");
+        self.out("  /cancel <id>      cancel a running job");
+        self.out("");
+        self.out(&"Escalation:".green().to_string());
+        self.out("  /escalate <q>     send question to Claude, inject answer into context");
+        self.out("");
+        self.out(&"Preferences:".green().to_string());
+        self.out("  /narration        toggle Brain/Pinky narration on/off");
+        self.out("");
+        self.out(&"Maintenance:".green().to_string());
+        self.out("  /cleanup          find and kill orphaned brain processes");
+        self.out("");
+        self.out(&"Session:".green().to_string());
+        self.out("  exit              quit  (also: quit, q, bye, ^D)");
+    }
+
+    fn warn_phantom_processes(&self) {
+        let others = find_other_brain_pids();
+        if !others.is_empty() {
+            let pids: Vec<String> = others.iter().map(|p| p.to_string()).collect();
+            self.out_fmt(
+                format!(
+                    "  {} other brain process(es) running: {}",
+                    others.len(),
+                    pids.join(", ")
+                )
+                .yellow(),
+            );
+            self.out(&"  run /cleanup to kill them".dimmed().to_string());
+            self.out("");
+        }
+    }
+
+    fn cleanup_phantom_processes(&self) {
+        let others = find_other_brain_pids();
+        if others.is_empty() {
+            self.out(&"no phantom brain processes found.".green().to_string());
+            return;
+        }
+
+        self.out_fmt(format!("found {} other brain process(es):", others.len()).yellow());
+        for pid in &others {
+            let info = std::process::Command::new("ps")
+                .args(["-p", &pid.to_string(), "-o", "pid,etime,args"])
+                .output();
+            if let Ok(out) = info {
+                let text = String::from_utf8_lossy(&out.stdout);
+                for line in text.lines().skip(1) {
+                    self.out(&format!("  {}", line.trim()));
+                }
+            }
+        }
+        self.out(&"  use `kill <pid>` to stop them manually".dimmed().to_string());
     }
 }
 
-// ─── helpers ──────────────────────────────────────────────────────────────────
+// ─── free helpers ────────────────────────────────────────────────────────────
 
 async fn resolve_model(config: &Config) -> Result<Model> {
     match &config.default_model {
@@ -739,7 +1153,8 @@ async fn resolve_model(config: &Config) -> Result<Model> {
             );
         }
         Ok(models) => {
-            let chat_models: Vec<&str> = models.iter()
+            let chat_models: Vec<&str> = models
+                .iter()
                 .map(|s| s.as_str())
                 .filter(|m| !m.contains("embed"))
                 .collect();
@@ -760,16 +1175,20 @@ async fn resolve_model(config: &Config) -> Result<Model> {
             let mut input = String::new();
             std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut input)?;
             let choice: usize = input.trim().parse().unwrap_or(1);
-            let selected = chat_models.get(choice.saturating_sub(1)).unwrap_or(&chat_models[0]);
+            let selected = chat_models
+                .get(choice.saturating_sub(1))
+                .unwrap_or(&chat_models[0]);
             Ok(Model::LMStudio(selected.to_string()))
         }
     }
 }
 
-fn build_backend(config: &Config, model: &Model) -> Result<Box<dyn ModelBackend>> {
+pub(crate) fn build_backend(config: &Config, model: &Model) -> Result<Box<dyn ModelBackend>> {
     match model {
         Model::Claude(id) => {
-            let key = config.anthropic_api_key.clone()
+            let key = config
+                .anthropic_api_key
+                .clone()
                 .context("no API key — run `brain login` to store one")?;
             Ok(Box::new(ClaudeBackend::new(key, id)))
         }
@@ -793,39 +1212,28 @@ fn history_file() -> Option<std::path::PathBuf> {
     Some(dir.join("history"))
 }
 
-
 fn check_git_changes(dir: &str) -> Option<usize> {
     let output = std::process::Command::new("git")
         .args(["-C", dir, "status", "--short"])
-        .output().ok()?;
-    if !output.status.success() { return None; }
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
     let count = String::from_utf8_lossy(&output.stdout)
-        .lines().filter(|l| !l.trim().is_empty()).count();
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count();
     if count == 0 { None } else { Some(count) }
 }
 
 fn fmt_tokens(n: u32) -> String {
-    if n >= 1_000_000 { format!("{:.1}M", n as f64 / 1_000_000.0) }
-    else if n >= 1_000 { format!("{:.1}k", n as f64 / 1_000.0) }
-    else { n.to_string() }
-}
-
-fn execute_confirm(input: &serde_json::Value) -> ToolResult {
-    let question = input["question"].as_str().unwrap_or("Proceed?");
-
-    println!("{}", question.cyan());
-    println!("  {}  yes", "[1]".dimmed());
-    println!("  {}  no", "[2]".dimmed());
-    print!("{} ", "[1]:".cyan());
-    std::io::Write::flush(&mut std::io::stdout()).ok();
-    let mut buf = String::new();
-    std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut buf).ok();
-
-    let answer = if buf.trim() == "2" { "no" } else { "yes" };
-    ToolResult {
-        tool_use_id: String::new(),
-        content: answer.to_string(),
-        is_error: false,
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
     }
 }
 
@@ -848,55 +1256,20 @@ fn agent_emoji(name: &str) -> &'static str {
         "boar" => "🐗",
         "magpie" => "🐦",
         "oracle" => "🔮",
-        "scribe" => "✍️",
-        "smith" => "🔨",
         _ => "🔧",
     }
 }
 
-fn print_banner(backend: &str, model: &str, project: Option<&str>, agent: &str) {
-    println!();
-    let emoji = agent_emoji(agent);
-    if let Some(p) = project {
-        println!("{}", format!("  {emoji} brain  ·  {p}").bold());
+/// Truncate a string to at most `max_chars` characters, appending "…" if truncated.
+/// Safe for multi-byte UTF-8 — never slices mid-character.
+pub(crate) fn truncate_preview(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
     } else {
-        println!("{}", format!("  {emoji} brain").bold());
+        truncated
     }
-    println!("  {}  {}", format!("{emoji} @{agent}").cyan(), format!("{backend}:{model}").dimmed());
-    println!("{}", "  /help · exit to quit".dimmed());
-    println!();
-}
-
-fn print_help() {
-    println!("{}", "Navigation:".green());
-    println!("  /model            list models + interactive picker");
-    println!("  /model <spec>     switch directly  (lmstudio:qwen3, claude-sonnet-4-6)");
-    println!("  clear             clear conversation history");
-    println!();
-    println!("{}", "Context:".green());
-    println!("  /context          show messages, token usage, context window %");
-    println!("  /tokens           token ledger");
-    println!("  /agent            show active agent");
-    println!("  /system           show current system prompt");
-    println!();
-    println!("{}", "Logging (Pinky):".green());
-    println!("  /flag [note]      mark last message as important");
-    println!("  /log              show current session log path");
-    println!("  /search <query>   search all session logs for a keyword");
-    println!("  /sessions         list recent sessions");
-    println!("  /recall <id>      replay a session's messages");
-    println!();
-    println!("{}", "Escalation:".green());
-    println!("  /escalate <q>     send question to Claude, inject answer into context");
-    println!();
-    println!("{}", "Preferences:".green());
-    println!("  /narration        toggle Brain/Pinky narration on/off");
-    println!();
-    println!("{}", "Maintenance:".green());
-    println!("  /cleanup          find and kill orphaned brain processes");
-    println!();
-    println!("{}", "Session:".green());
-    println!("  exit              quit  (also: quit, q, bye, ^D)");
 }
 
 fn find_other_brain_pids() -> Vec<u32> {
@@ -905,68 +1278,11 @@ fn find_other_brain_pids() -> Vec<u32> {
         .args(["-x", "brain"])
         .output();
     match output {
-        Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .filter_map(|l| l.trim().parse::<u32>().ok())
-                .filter(|&pid| pid != my_pid)
-                .collect()
-        }
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| l.trim().parse::<u32>().ok())
+            .filter(|&pid| pid != my_pid)
+            .collect(),
         _ => vec![],
-    }
-}
-
-fn warn_phantom_processes() {
-    let others = find_other_brain_pids();
-    if !others.is_empty() {
-        let pids: Vec<String> = others.iter().map(|p| p.to_string()).collect();
-        println!("{}", format!(
-            "  {} other brain process(es) running: {}",
-            others.len(),
-            pids.join(", ")
-        ).yellow());
-        println!("{}", "  run /cleanup to kill them".dimmed());
-        println!();
-    }
-}
-
-fn cleanup_phantom_processes() {
-    let others = find_other_brain_pids();
-    if others.is_empty() {
-        println!("{}", "no phantom brain processes found.".green());
-        return;
-    }
-
-    println!("{}", format!("found {} other brain process(es):", others.len()).yellow());
-    for pid in &others {
-        // Show what the process is doing
-        let info = std::process::Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "pid,etime,args"])
-            .output();
-        if let Ok(out) = info {
-            let text = String::from_utf8_lossy(&out.stdout);
-            for line in text.lines().skip(1) {
-                println!("  {}", line.trim());
-            }
-        }
-    }
-
-    println!("{}", "Kill them?".cyan());
-    println!("  {}  no", "[1]".dimmed());
-    println!("  {}  yes, kill all", "[2]".dimmed());
-    print!("{} ", "[1]:".cyan());
-    std::io::Write::flush(&mut std::io::stdout()).ok();
-    let mut kill_input = String::new();
-    std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut kill_input).ok();
-
-    if kill_input.trim() == "2" {
-        for pid in &others {
-            let _ = std::process::Command::new("kill")
-                .arg(pid.to_string())
-                .status();
-        }
-        println!("{}", format!("killed {} process(es).", others.len()).green());
-    } else {
-        println!("{}", "skipped.".dimmed());
     }
 }

@@ -1,2 +1,7 @@
 /target/
 Cargo.lock
+site/src/api/
+site/dist/
+site/node_modules/
+site/.env.local
+site/.env.*.local

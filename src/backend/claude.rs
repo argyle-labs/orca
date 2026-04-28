@@ -1,4 +1,4 @@
-use super::ModelBackend;
+use super::{ModelBackend, OutputSink, sink_write, sink_writeln};
 use crate::types::{BackendResponse, Message, StopReason, ToolCall, ToolDef};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -7,7 +7,6 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::io::Write;
 use tokio_util::sync::CancellationToken;
 
 pub struct ClaudeBackend {
@@ -42,6 +41,7 @@ impl ModelBackend for ClaudeBackend {
         tools: &[ToolDef],
         system: &str,
         cancel: CancellationToken,
+        output: &OutputSink,
     ) -> Result<BackendResponse> {
         let claude_messages = serialize_messages(messages);
 
@@ -74,13 +74,14 @@ impl ModelBackend for ClaudeBackend {
             bail!("Anthropic API error {status}: {text}");
         }
 
-        parse_claude_stream(response, cancel).await
+        parse_claude_stream(response, cancel, output).await
     }
 }
 
 async fn parse_claude_stream(
     response: reqwest::Response,
     cancel: CancellationToken,
+    output: &OutputSink,
 ) -> Result<BackendResponse> {
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
@@ -96,7 +97,7 @@ async fn parse_claude_stream(
     loop {
         let chunk = tokio::select! {
             _ = cancel.cancelled() => {
-                println!("{}", "\n[interrupted]".yellow());
+                sink_writeln(output, &format!("{}", "\n[interrupted]".yellow()));
                 break;
             }
             chunk = stream.next() => {
@@ -151,9 +152,7 @@ async fn parse_claude_stream(
                                 .as_str()
                                 .unwrap_or("")
                                 .to_string();
-                            // Print tool invocation header
-                            print!("\n{}", format!("⚙ {name}").cyan());
-                            std::io::stdout().flush().ok();
+                            sink_write(output, &format!("\n{}", format!("⚙ {name}").cyan()));
                             tool_accum.insert(idx, (id, name, String::new()));
                         }
                         "text" => {
@@ -170,8 +169,7 @@ async fn parse_claude_stream(
                     match delta["type"].as_str().unwrap_or("") {
                         "text_delta" => {
                             if let Some(text) = delta["text"].as_str() {
-                                print!("{text}");
-                                std::io::stdout().flush().ok();
+                                sink_write(output, text);
                                 result.text.push_str(text);
                             }
                         }
@@ -216,7 +214,7 @@ async fn parse_claude_stream(
     }
 
     if !result.text.is_empty() || !result.tool_calls.is_empty() {
-        println!(); // newline after streamed content
+        sink_writeln(output, ""); // newline after streamed content
     }
 
     Ok(result)

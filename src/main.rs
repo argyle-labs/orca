@@ -3,10 +3,15 @@ mod auth;
 mod backend;
 mod config;
 mod context;
+mod jobs;
 mod ledger;
 mod log;
+mod mcp;
+mod scanner;
+mod serve;
 mod session;
 mod tools;
+mod tui;
 mod types;
 
 use anyhow::Result;
@@ -22,6 +27,10 @@ struct Cli {
     /// Project context to load (e.g. "halvor"). Omit for general session.
     #[arg(value_name = "PROJECT")]
     project: Option<String>,
+
+    /// Use classic readline mode instead of the split-pane TUI.
+    #[arg(long)]
+    classic: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -72,6 +81,59 @@ enum Command {
         #[arg(short = 'a', long, default_value = "wolf")]
         agent: String,
         prompt: String,
+    },
+
+    /// Start MCP stdio server — exposes brain tools to Claude Code
+    McpServe,
+
+    /// Start the brain web server (docs + services UI)
+    Serve {
+        /// Dev mode: spawn Vite dev server for hot reload
+        #[arg(long)]
+        dev: bool,
+        /// Port to listen on
+        #[arg(short, long, default_value = "12000")]
+        port: u16,
+    },
+
+    /// Generate TypeScript types and hooks from the OpenAPI schema
+    Gen {
+        /// Backend URL to fetch the spec from
+        #[arg(long, default_value = "http://localhost:12000")]
+        url: String,
+        /// Output directory (relative to site/)
+        #[arg(long, default_value = "src/api")]
+        out: String,
+    },
+
+    /// Manage the external API spec registry (~/brain/openapi/)
+    Spec {
+        #[command(subcommand)]
+        action: SpecAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SpecAction {
+    /// List all registered external specs
+    List,
+    /// Register a repo and scaffold a spec file if one doesn't exist
+    Add {
+        /// Repository name (e.g. admin-api)
+        repo: String,
+        /// Project the repo belongs to (e.g. rebuy)
+        #[arg(long, default_value = "rebuy")]
+        project: String,
+        /// Base URL for the API (e.g. https://api.example.com)
+        #[arg(long)]
+        url: Option<String>,
+        /// Short description
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// [reserved] Snapshot a live API's OpenAPI output — not yet implemented
+    Sync {
+        repo: String,
     },
 }
 
@@ -125,6 +187,10 @@ async fn main() -> Result<()> {
         Some(Command::Run { agent, prompt }) => {
             cmd_run(&config, &agent, &prompt).await
         }
+        Some(Command::McpServe) => mcp::serve(&config).await,
+        Some(Command::Serve { dev, port }) => serve::run(dev, port).await,
+        Some(Command::Gen { url, out }) => cmd_gen(&url, &out).await,
+        Some(Command::Spec { action }) => cmd_spec(action),
         None => {
             let explicit = cli.project.as_deref().unwrap_or("");
             let project = if explicit.is_empty() {
@@ -138,7 +204,11 @@ async fn main() -> Result<()> {
                 ProjectContext::resolve(&project, &config)?
             };
             let mut session = Session::new(config, ctx).await?;
-            session.run().await
+            if cli.classic {
+                session.run().await
+            } else {
+                session.run_tui().await
+            }
         }
     }
 }
@@ -526,6 +596,108 @@ async fn cmd_escalate(config: &Config, question: &str, project: Option<&str>) ->
     let claude = ClaudeBackend::new(api_key, "claude-sonnet-4-6");
     let messages = vec![types::Message::user(question)];
     let cancel = tokio_util::sync::CancellationToken::new();
-    claude.chat(&messages, &[], &system, cancel).await?;
+    let output = backend::stdout_sink();
+    claude.chat(&messages, &[], &system, cancel, &output).await?;
+    Ok(())
+}
+
+fn cmd_spec(action: SpecAction) -> Result<()> {
+    match action {
+        SpecAction::List => {
+            let registry = scanner::SpecRegistry::load()?;
+            if registry.entries.is_empty() {
+                println!("{}", "no specs registered — use `brain spec add <repo>`".dimmed());
+                return Ok(());
+            }
+            println!("{}", "External specs:".green());
+            for e in &registry.entries {
+                let url = e.base_url.as_deref().unwrap_or("-");
+                let captured = e.captured_at.as_deref().unwrap_or("-");
+                println!(
+                    "  {}  project={}  url={}  captured={}  [{}]",
+                    e.repo.cyan(),
+                    e.project.dimmed(),
+                    url.dimmed(),
+                    captured.dimmed(),
+                    e.source.yellow(),
+                );
+            }
+        }
+
+        SpecAction::Add { repo, project, url, description } => {
+            let mut registry = scanner::SpecRegistry::load()?;
+            let entry = scanner::SpecEntry {
+                repo: repo.clone(),
+                project,
+                description,
+                source: "manual".to_string(),
+                base_url: url,
+                captured_at: Some(chrono::Utc::now().to_rfc3339()),
+            };
+            let spec_path = registry.add(entry)?;
+            println!("{} registered {} → {}", "✓".green(), repo.cyan(), spec_path.display());
+            println!("{}", "  edit the scaffolded spec manually, then restart `brain serve`".dimmed());
+        }
+
+        SpecAction::Sync { repo } => {
+            println!(
+                "{}",
+                format!("sync not yet implemented for '{repo}' — snapshot automation coming soon").yellow()
+            );
+            println!(
+                "{}",
+                format!("  manually update ~/brain/openapi/{repo}.json for now").dimmed()
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_gen(url: &str, out: &str) -> Result<()> {
+    use colored::Colorize;
+
+    // Poll until the backend is reachable (up to 30s after a cargo-watch restart)
+    let spec_url = format!("{url}/api/openapi.json");
+    let client = reqwest::Client::new();
+    let mut attempts = 0;
+    loop {
+        match client.get(&spec_url).send().await {
+            Ok(r) if r.status().is_success() => break,
+            _ => {
+                attempts += 1;
+                if attempts >= 30 {
+                    anyhow::bail!("backend not reachable at {spec_url} after 30s");
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
+
+    // Run the TypeScript generator in site/
+    let repo_root = std::env::current_exe()?
+        .parent().unwrap_or(std::path::Path::new("."))
+        .parent().unwrap_or(std::path::Path::new("."))
+        .parent().unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+
+    // Fall back to cwd-relative site/ if the exe path heuristic fails
+    let site_dir = if repo_root.join("site/scripts/gen.ts").exists() {
+        repo_root.join("site")
+    } else {
+        std::env::current_dir()?.join("site")
+    };
+
+    println!("{} generating types and hooks from {spec_url}", "brain gen".cyan());
+
+    let status = std::process::Command::new("npx")
+        .args(["tsx", "scripts/gen.ts", "--url", url, "--out", out])
+        .current_dir(&site_dir)
+        .status()?;
+
+    if status.success() {
+        println!("{} {}/{}", "✓".green(), site_dir.display(), out);
+    } else {
+        anyhow::bail!("generator failed — check site/scripts/gen.ts");
+    }
     Ok(())
 }

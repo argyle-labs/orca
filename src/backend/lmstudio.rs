@@ -1,4 +1,4 @@
-use super::ModelBackend;
+use super::{ModelBackend, OutputSink, sink_write, sink_writeln};
 use crate::types::{BackendResponse, Message, StopReason, ToolCall, ToolDef};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -7,7 +7,6 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::io::Write;
 use tokio_util::sync::CancellationToken;
 
 pub struct LMStudioBackend {
@@ -69,6 +68,7 @@ impl ModelBackend for LMStudioBackend {
         tools: &[ToolDef],
         system: &str,
         cancel: CancellationToken,
+        output: &OutputSink,
     ) -> Result<BackendResponse> {
         let oai_messages = serialize_messages(messages, system);
 
@@ -100,11 +100,15 @@ impl ModelBackend for LMStudioBackend {
             bail!("LM Studio error {status}: {text}");
         }
 
-        parse_lmstudio_stream(response, cancel).await
+        parse_lmstudio_stream(response, cancel, output).await
     }
 }
 
-async fn parse_lmstudio_stream(response: reqwest::Response, cancel: CancellationToken) -> Result<BackendResponse> {
+async fn parse_lmstudio_stream(
+    response: reqwest::Response,
+    cancel: CancellationToken,
+    output: &OutputSink,
+) -> Result<BackendResponse> {
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
     let mut result = BackendResponse::default();
@@ -115,7 +119,7 @@ async fn parse_lmstudio_stream(response: reqwest::Response, cancel: Cancellation
     loop {
         let chunk = tokio::select! {
             _ = cancel.cancelled() => {
-                println!("{}", "\n[interrupted]".yellow());
+                sink_writeln(output, &format!("{}", "\n[interrupted]".yellow()));
                 break;
             }
             chunk = stream.next() => {
@@ -167,15 +171,12 @@ async fn parse_lmstudio_stream(response: reqwest::Response, cancel: Cancellation
 
             // Thinking/reasoning content (Qwen3, o1-style models) — stream dimmed
             if let Some(thinking) = delta["reasoning_content"].as_str().filter(|s| !s.is_empty()) {
-                print!("{}", thinking.dimmed());
-                std::io::stdout().flush().ok();
-                // Don't add to result.text — reasoning is not the answer
+                sink_write(output, &format!("{}", thinking.dimmed()));
             }
 
             // Text content (the actual response)
             if let Some(text) = delta["content"].as_str().filter(|s| !s.is_empty()) {
-                print!("{text}");
-                std::io::stdout().flush().ok();
+                sink_write(output, text);
                 result.text.push_str(text);
             }
 
@@ -190,8 +191,7 @@ async fn parse_lmstudio_stream(response: reqwest::Response, cancel: Cancellation
                             .unwrap_or("")
                             .to_string();
                         if !name.is_empty() {
-                            print!("\n{}", format!("⚙ {name}").cyan());
-                            std::io::stdout().flush().ok();
+                            sink_write(output, &format!("\n{}", format!("⚙ {name}").cyan()));
                         }
                         (id, name, String::new())
                     });
@@ -232,7 +232,7 @@ async fn parse_lmstudio_stream(response: reqwest::Response, cancel: Cancellation
     result.tool_calls = indexed.into_iter().map(|(_, tc)| tc).collect();
 
     if !result.text.is_empty() || !result.tool_calls.is_empty() {
-        println!();
+        sink_writeln(output, "");
     }
 
     Ok(result)

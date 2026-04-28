@@ -2,15 +2,26 @@ pub mod bash;
 pub mod fs;
 pub mod search;
 
+use crate::backend::{stdout_sink, OutputSink};
 use crate::types::{ToolDef, ToolResult};
 use anyhow::Result;
 use bash::BashPermissions;
 use serde_json::{Value, json};
 
-#[derive(Default)]
 pub struct ToolRegistry {
     pub permissions: BashPermissions,
     pub working_dir: Option<String>,
+    pub output: OutputSink,
+}
+
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        ToolRegistry {
+            permissions: BashPermissions::default(),
+            working_dir: None,
+            output: stdout_sink(),
+        }
+    }
 }
 
 impl ToolRegistry {
@@ -102,7 +113,7 @@ impl ToolRegistry {
             },
             ToolDef {
                 name: "delegate".into(),
-                description: "Delegate a task to a specialist agent. The agent runs a sub-conversation with full tool access and returns its result. Available agents: owl (explain code), fox (debug), crow (write code), spider (simplify), bear (review + audit), ferret (code standards), badger (homelab), hawk (containers), mole (processes/ports), elephant (external docs), scribe (doc consistency), boar (carl/rebuy only), lynx (plan), raven (notes), pinky (session logs), magpie (scope graduation), oracle (escalation judge), smith (agent file maintenance).".into(),
+                description: "Delegate a task to a specialist agent. The agent runs a sub-conversation with full tool access and returns its result. Available agents: owl (explain code), fox (debug), crow (write code), spider (simplify), bear (review + audit), ferret (code standards), badger (homelab), hawk (containers), mole (processes/ports), elephant (external docs), boar (carl/rebuy only), lynx (plan), raven (notes), pinky (session logs).".into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -120,7 +131,7 @@ impl ToolRegistry {
         let result = self.run(name, input);
         match result {
             Ok(content) => ToolResult {
-                tool_use_id: String::new(), // caller fills this in
+                tool_use_id: String::new(),
                 content,
                 is_error: false,
             },
@@ -162,7 +173,7 @@ impl ToolRegistry {
             }
             "bash" => {
                 let command = str_field(input, "command")?;
-                bash::run_bash(&command, &mut self.permissions, self.working_dir.as_deref())
+                bash::run_bash(&command, &mut self.permissions, self.working_dir.as_deref(), &self.output)
             }
             _ => anyhow::bail!("unknown tool: {name}"),
         }

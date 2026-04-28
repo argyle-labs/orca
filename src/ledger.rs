@@ -1,5 +1,3 @@
-use colored::Colorize;
-
 #[derive(Debug, Default)]
 pub struct TokenLedger {
     pub session_input: u32,
@@ -14,19 +12,16 @@ impl TokenLedger {
         self.total_calls += 1;
     }
 
-    pub fn display(&self) {
+    /// Format the token ledger as a display string.
+    pub fn format(&self) -> String {
         let total = self.session_input + self.session_output;
-        println!(
-            "{}",
-            format!(
-                " ↑{} ↓{} | session: {} | calls: {} ",
-                fmt_tokens(self.session_input),
-                fmt_tokens(self.session_output),
-                fmt_tokens(total),
-                self.total_calls,
-            )
-            .dimmed()
-        );
+        format!(
+            " ↑{} ↓{} | session: {} | calls: {} ",
+            fmt_tokens(self.session_input),
+            fmt_tokens(self.session_output),
+            fmt_tokens(total),
+            self.total_calls,
+        )
     }
 
 }
