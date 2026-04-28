@@ -4,6 +4,8 @@ pub mod middleware;
 mod openapi;
 pub mod tree;
 
+pub use openapi::brain_spec_json as openapi_spec_json;
+
 use std::net::SocketAddr;
 
 use anyhow::Result;
@@ -94,6 +96,8 @@ fn build_router(dev: bool) -> Router {
         .route("/api/search", get(api::search_handler))
         .route("/api/mcp/tools", get(api::mcp_tools_handler))
         .route("/api/mcp/run", post(api::mcp_run_handler))
+        .route("/api/docker/engine", get(api::docker_engine_handler))
+        .route("/api/docker/engine/start", post(api::docker_engine_start_handler))
         .route("/api/docker/services", get(api::docker_services_handler))
         .route("/api/docker/action", post(api::docker_action_handler))
         .route("/api/ctx7", get(api::ctx7_handler))

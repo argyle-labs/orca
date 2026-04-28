@@ -1,6 +1,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+fn colima_docker_host() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let sock = format!("{home}/.colima/default/docker.sock");
+    if std::path::Path::new(&sock).exists() {
+        Some(format!("unix://{sock}"))
+    } else {
+        None
+    }
+}
+
 use anyhow::Result;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -32,12 +42,19 @@ pub struct McpTool {
 
 impl McpClient {
     pub async fn connect(cfg: &McpServerConfig) -> Result<Self> {
-        let mut child = tokio::process::Command::new(&cfg.command)
-            .args(&cfg.args)
+        let mut cmd = tokio::process::Command::new(&cfg.command);
+        cmd.args(&cfg.args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
+            .stderr(std::process::Stdio::null());
+
+        // Inject DOCKER_HOST so child processes (e.g. rebuy-cli running docker
+        // compose) find the Colima socket instead of Docker Desktop's.
+        if let Some(host) = colima_docker_host() {
+            cmd.env("DOCKER_HOST", host);
+        }
+
+        let mut child = cmd.spawn()?;
 
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());

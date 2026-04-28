@@ -1,0 +1,9 @@
+[package]
+name = "brain-docs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+rust-embed = "8"
+serde_json = "1"

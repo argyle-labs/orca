@@ -1,3 +1,11 @@
 [workspace]
-members = ["projects/server"]
+members = [
+    "projects/agents",
+    "projects/commands",
+    "projects/core",
+    "projects/docs",
+    "projects/scanner",
+    "projects/server",
+    "projects/utils",
+]
 resolver = "2"

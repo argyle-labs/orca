@@ -16,6 +16,8 @@ use utoipa::OpenApi;
         // internal
         super::api::mcp_tools_handler,
         super::api::mcp_run_handler,
+        super::api::docker_engine_handler,
+        super::api::docker_engine_start_handler,
         super::api::docker_services_handler,
         super::api::docker_action_handler,
         super::api::schema_handler,
@@ -49,6 +51,7 @@ use utoipa::OpenApi;
         super::api::LogServicesResponse,
         super::api::LogsResponse,
         super::api::ErrorResponse,
+        super::api::SpecFiles,
         super::api::SpecMeta,
     )),
     tags(
@@ -66,7 +69,7 @@ use utoipa::OpenApi;
 )]
 pub struct ApiDoc;
 
-fn brain_spec_json() -> serde_json::Value {
+pub fn brain_spec_json() -> serde_json::Value {
     use utoipa::OpenApi as _;
     let mut doc = ApiDoc::openapi();
     doc.info.version = env!("CARGO_PKG_VERSION").to_string();

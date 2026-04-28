@@ -4,13 +4,15 @@ INSTALL_PATH := $(HOME)/.local/bin/brain
 
 # Build frontend + release binary (single self-contained binary with embedded assets)
 build:
-	cd projects/frontend && npm ci && npm run build
+	cargo build --manifest-path projects/server/Cargo.toml
+	target/debug/brain spec dump > /tmp/brain-openapi.json
+	cd projects/frontend && npm ci && npx tsx scripts/gen.ts --file /tmp/brain-openapi.json && npm run build
 	cargo build --release --manifest-path projects/server/Cargo.toml
-	@echo "built → projects/server/target/release/brain"
+	@echo "built → target/release/brain"
 
 # Build release binary and deploy to current system (~/.local/bin/brain)
 deploy: build
-	cp projects/server/target/release/brain $(INSTALL_PATH)
+	cp target/release/brain $(INSTALL_PATH)
 	$(INSTALL_PATH) install-agents
 	@echo "deployed → $(INSTALL_PATH)"
 
@@ -21,7 +23,7 @@ install-dev:
 # Watch for changes and rebuild+install on save (requires cargo-watch)
 # Install with: cargo install cargo-watch
 watch:
-	cargo watch --manifest-path projects/server/Cargo.toml -x 'build' -s 'cp projects/server/target/debug/brain $(INSTALL_PATH) && echo "→ reloaded"'
+	cargo watch -C projects/server -x 'build' -s 'cp target/debug/brain $(INSTALL_PATH) && echo "→ reloaded"'
 
 # Just check for compile errors without linking
 check:
@@ -42,9 +44,8 @@ dev:
 	@echo "  brain gen   →  runs after each backend restart"
 	@echo ""
 	@trap 'kill 0' SIGINT SIGTERM; \
-	 BRAIN_LOG=trace cargo watch -q -c \
-	   --manifest-path projects/server/Cargo.toml \
-	   -w projects/server/src -w projects/server/Cargo.toml \
+	 BRAIN_LOG=trace cargo watch -q -c -C projects/server \
+	   -w src -w Cargo.toml \
 	   -x 'run -- serve --dev' 2>&1 | \
 	   while IFS= read -r line; do \
 	     echo "[server]   $$line"; \

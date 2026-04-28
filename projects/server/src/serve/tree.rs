@@ -28,6 +28,13 @@ pub fn get_roots() -> HashMap<String, PathBuf> {
         PathBuf::from(std::env::var("REBUY_ROOT").unwrap_or_else(|_| format!("{home}/code/rebuy"))),
     );
     roots.insert("brain".to_string(), PathBuf::from(format!("{home}/brain")));
+    roots.insert("claude".to_string(), PathBuf::from(format!("{home}/.claude")));
+    roots.insert(
+        "dotfiles".to_string(),
+        PathBuf::from(
+            std::env::var("DOTFILES_ROOT").unwrap_or_else(|_| format!("{home}/dotfiles")),
+        ),
+    );
     roots
 }
 

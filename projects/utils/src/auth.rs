@@ -22,7 +22,6 @@ pub fn load_api_key_from_keychain() -> Option<String> {
 }
 
 pub fn store_api_key(key: &str) -> Result<()> {
-    // Remove existing entry first (ignore error if absent)
     let _ = std::process::Command::new("security")
         .args([
             "delete-generic-password",
@@ -96,7 +95,7 @@ mod tests {
 
     #[test]
     fn mask_key_13_chars_masks() {
-        let key = "abcdefghijklm"; // 13 chars
+        let key = "abcdefghijklm";
         let masked = mask_key(key);
         assert!(masked.starts_with("abcdefgh"), "got: {masked}");
         assert!(masked.ends_with("jklm"), "got: {masked}");
