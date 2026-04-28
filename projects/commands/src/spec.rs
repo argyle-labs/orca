@@ -95,8 +95,9 @@ pub fn cmd_spec(action: SpecAction) -> Result<()> {
         }
 
         SpecAction::Dump => {
-            // NOTE: requires brain crate — crate::serve::openapi_spec_json() not yet extracted
-            anyhow::bail!("Dump requires serve module — must remain in server crate for now")
+            // Handled by the server binary (main.rs) which has access to brain::serve::openapi.
+            // Should not reach here.
+            anyhow::bail!("spec dump must be dispatched from main.rs")
         }
     }
     Ok(())

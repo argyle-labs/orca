@@ -2,6 +2,7 @@ use anyhow::Result;
 use brain::context::ProjectContext;
 use brain::mcp;
 use brain::serve;
+use brain::serve::openapi_spec_json;
 use brain::session::Session;
 use brain_commands::{self as cmd, LogAction, SpecAction};
 use brain_utils::config::Config;
@@ -110,6 +111,8 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .with_target(false)
+        .with_ansi(true)
+        .compact()
         .init();
 
     let cli = Cli::parse();
@@ -143,7 +146,14 @@ async fn main() -> Result<()> {
         Some(Command::McpServe) => mcp::serve(&config).await,
         Some(Command::Serve { dev, port }) => serve::run(dev, port).await,
         Some(Command::Gen { url, out }) => cmd::cmd_gen(&url, &out).await,
-        Some(Command::Spec { action }) => cmd::cmd_spec(action),
+        Some(Command::Spec { action }) => match action {
+            SpecAction::Dump => {
+                let spec = openapi_spec_json();
+                println!("{}", serde_json::to_string_pretty(&spec)?);
+                Ok(())
+            }
+            other => cmd::cmd_spec(other),
+        },
         None => {
             let explicit = cli.project.as_deref().unwrap_or("");
             let project = if explicit.is_empty() {
