@@ -188,11 +188,12 @@ pub struct LogsResponse {
     tag = "docs"
 )]
 pub async fn tree_handler() -> impl IntoResponse {
-    let mut result = HashMap::new();
+    let mut result = serde_json::Map::new();
     for name in ["rebuy", "brain"] {
-        result.insert(name, get_root_tree(name));
+        result.insert(name.to_string(), serde_json::to_value(get_root_tree(name)).unwrap_or_default());
     }
-    Json(result)
+    result.insert("docs".to_string(), crate::docs::tree());
+    Json(serde_json::Value::Object(result))
 }
 
 // ── GET /api/search ───────────────────────────────────────────────────────────
@@ -254,6 +255,13 @@ pub async fn search_handler(Query(params): Query<SearchQuery>) -> Response {
             }
         }
     }
+    if root_filter == "all" || root_filter == "docs" {
+        for (path, matches) in crate::docs::search(&query) {
+            let file_path = path.trim_end_matches(".md").replace('\\', "/").to_string();
+            results.push(json!({ "root": "docs", "path": file_path, "matches": matches }));
+        }
+    }
+
     results.sort_by(|a, b| {
         let am = a["matches"].as_array().map(|a| a.len()).unwrap_or(0);
         let bm = b["matches"].as_array().map(|a| a.len()).unwrap_or(0);
@@ -333,6 +341,17 @@ pub struct DocQuery {
     tag = "docs"
 )]
 pub async fn doc_handler(Query(params): Query<DocQuery>) -> Response {
+    if params.root == "docs" {
+        return match crate::docs::read(&params.path) {
+            Some(content) => (
+                StatusCode::OK,
+                [("content-type", "text/plain; charset=utf-8")],
+                content,
+            ).into_response(),
+            None => err(StatusCode::NOT_FOUND, "not found"),
+        };
+    }
+
     let roots = get_roots();
     let Some(root_dir) = roots.get(&params.root) else {
         return err(StatusCode::BAD_REQUEST, "unknown root");
@@ -1070,5 +1089,241 @@ pub async fn specs_get_public_handler(Path(repo): Path<String>) -> Response {
             Err(_) => err(StatusCode::INTERNAL_SERVER_ERROR, "invalid spec JSON"),
         },
         Err(_) => err(StatusCode::NOT_FOUND, &format!("no public spec for '{repo}' — create {repo}.public.json in ~/brain/openapi/")),
+    }
+}
+
+// ── GET /api/tests/run ────────────────────────────────────────────────────────
+
+#[derive(Deserialize, ToSchema)]
+pub struct TestRunQuery {
+    /// Which suite to run: rust | frontend | e2e | all
+    pub suite: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct TestRunResponse {
+    pub suite: String,
+    pub output: String,
+    pub exit_code: i32,
+    pub passed: u32,
+    pub failed: u32,
+    pub duration_ms: u64,
+}
+
+pub async fn tests_run_handler(Query(params): Query<TestRunQuery>) -> Response {
+    let result = run_test_suite(&params.suite).await;
+    match result {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+pub async fn run_test_suite(suite: &str) -> anyhow::Result<TestRunResponse> {
+    let source_root = std::env::var("BRAIN_SOURCE_ROOT")
+        .unwrap_or_else(|_| env!("CARGO_MANIFEST_DIR").to_string());
+    let site_root = format!("{source_root}/site");
+
+    let start = std::time::Instant::now();
+
+    let (output, exit_code) = match suite {
+        "rust" => {
+            run_command("cargo", &["test", "--color=never"], &source_root).await?
+        }
+        "frontend" => {
+            run_command(
+                "npx",
+                &["vitest", "run", "--reporter=verbose"],
+                &site_root,
+            ).await?
+        }
+        "e2e" => {
+            run_command(
+                "npx",
+                &["playwright", "test", "--reporter=list"],
+                &site_root,
+            ).await?
+        }
+        "all" => {
+            let mut combined = String::new();
+            let mut total_exit = 0i32;
+            for s in &["rust", "frontend", "e2e"] {
+                combined.push_str(&format!("\n=== {} ===\n", s.to_uppercase()));
+                let (out, code) = run_command(
+                    if *s == "rust" { "cargo" } else { "npx" },
+                    &match *s {
+                        "rust" => vec!["test", "--color=never"],
+                        "frontend" => vec!["vitest", "run", "--reporter=verbose"],
+                        _ => vec!["playwright", "test", "--reporter=list"],
+                    },
+                    if *s == "rust" { &source_root } else { &site_root },
+                ).await?;
+                combined.push_str(&out);
+                if code != 0 { total_exit = code; }
+            }
+            (combined, total_exit)
+        }
+        _ => anyhow::bail!("unknown suite: {suite}. Valid: rust | frontend | e2e | all"),
+    };
+
+    let duration_ms = start.elapsed().as_millis() as u64;
+    let (passed, failed) = parse_test_counts(&output, suite);
+
+    Ok(TestRunResponse {
+        suite: suite.to_string(),
+        output,
+        exit_code,
+        passed,
+        failed,
+        duration_ms,
+    })
+}
+
+async fn run_command(cmd: &str, args: &[&str], cwd: &str) -> anyhow::Result<(String, i32)> {
+    let out = tokio::process::Command::new(cmd)
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .await?;
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let code = out.status.code().unwrap_or(-1);
+    Ok((combined, code))
+}
+
+fn parse_test_counts(output: &str, suite: &str) -> (u32, u32) {
+    match suite {
+        "rust" => {
+            for line in output.lines() {
+                if line.contains("test result:") {
+                    let passed = extract_count(line, "passed");
+                    let failed = extract_count(line, "failed");
+                    return (passed, failed);
+                }
+            }
+            (0, 0)
+        }
+        "frontend" => {
+            let passed = output.lines()
+                .filter(|l| l.contains("passed"))
+                .filter_map(|l| extract_first_number(l))
+                .next()
+                .unwrap_or(0);
+            let failed = output.lines()
+                .filter(|l| l.contains("failed"))
+                .filter_map(|l| extract_first_number(l))
+                .next()
+                .unwrap_or(0);
+            (passed, failed)
+        }
+        _ => (0, 0),
+    }
+}
+
+fn extract_count(line: &str, keyword: &str) -> u32 {
+    line.split_whitespace()
+        .zip(line.split_whitespace().skip(1))
+        .find(|(_, b)| b.starts_with(keyword))
+        .and_then(|(a, _)| a.trim_end_matches(';').parse().ok())
+        .unwrap_or(0)
+}
+
+fn extract_first_number(s: &str) -> Option<u32> {
+    s.split_whitespace()
+        .find_map(|w| w.parse::<u32>().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_mysql_tsv ────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_mysql_tsv_normal() {
+        let raw = "foo\tbar\nbaz\tqux\n";
+        let cols = &["col1", "col2"];
+        let rows = parse_mysql_tsv(raw, cols);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["col1"], "foo");
+        assert_eq!(rows[0]["col2"], "bar");
+        assert_eq!(rows[1]["col1"], "baz");
+    }
+
+    #[test]
+    fn parse_mysql_tsv_empty_input() {
+        let rows = parse_mysql_tsv("", &["col1"]);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn parse_mysql_tsv_short_row_fills_empty_strings() {
+        let raw = "only_one_field\n";
+        let cols = &["col1", "col2", "col3"];
+        let rows = parse_mysql_tsv(raw, cols);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["col1"], "only_one_field");
+        assert_eq!(rows[0]["col2"], "");
+        assert_eq!(rows[0]["col3"], "");
+    }
+
+    // ── parse_compose_ps ──────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_compose_ps_normal_service() {
+        let line = r#"{"Service":"web","State":"running","Health":"healthy","Publishers":[{"PublishedPort":8080,"TargetPort":80}]}"#;
+        let result = parse_compose_ps(line);
+        let svc = result.get("web").expect("web service missing");
+        assert_eq!(svc.state, "running");
+        assert_eq!(svc.health, "healthy");
+        assert_eq!(svc.ports, vec!["8080:80"]);
+    }
+
+    #[test]
+    fn parse_compose_ps_filters_zero_published_port() {
+        let line = r#"{"Service":"worker","State":"running","Health":"","Publishers":[{"PublishedPort":0,"TargetPort":9000}]}"#;
+        let result = parse_compose_ps(line);
+        let svc = result.get("worker").expect("worker service missing");
+        assert!(svc.ports.is_empty(), "zero-port should be filtered: {:?}", svc.ports);
+    }
+
+    #[test]
+    fn parse_compose_ps_skips_malformed_lines() {
+        let raw = "not json\n{\"Service\":\"ok\",\"State\":\"running\",\"Health\":\"\",\"Publishers\":[]}";
+        let result = parse_compose_ps(raw);
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key("ok"));
+    }
+
+    #[test]
+    fn parse_compose_ps_empty_input() {
+        let result = parse_compose_ps("");
+        assert!(result.is_empty());
+    }
+
+    // ── extract_library_id ────────────────────────────────────────────────────
+
+    #[test]
+    fn extract_library_id_from_json() {
+        let json = r#"{"libraries":[{"id":"/vercel/next.js","name":"Next.js"}]}"#;
+        let result = extract_library_id(json);
+        assert_eq!(result, Some(("/vercel/next.js".to_string(), "Next.js".to_string())));
+    }
+
+    #[test]
+    fn extract_library_id_regex_fallback() {
+        let text = "See /tanstack/react-query for details";
+        let result = extract_library_id(text);
+        let (id, title) = result.expect("should match via regex");
+        assert_eq!(id, "/tanstack/react-query");
+        assert_eq!(title, "react-query");
+    }
+
+    #[test]
+    fn extract_library_id_returns_none_for_no_match() {
+        let result = extract_library_id("no library here at all");
+        assert!(result.is_none());
     }
 }

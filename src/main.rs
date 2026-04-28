@@ -3,6 +3,7 @@ mod auth;
 mod backend;
 mod config;
 mod context;
+mod docs;
 mod jobs;
 mod ledger;
 mod log;

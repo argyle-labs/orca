@@ -67,3 +67,38 @@ impl Config {
         self.brain_vault.join("ai/claude/logs/sessions")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_lmstudio_prefix() {
+        let m = Model::parse("lmstudio:qwen3");
+        assert!(matches!(m, Model::LMStudio(ref s) if s == "qwen3"), "got: {m:?}");
+    }
+
+    #[test]
+    fn parse_claude_colon_prefix() {
+        let m = Model::parse("claude:claude-opus-4-7");
+        assert!(matches!(m, Model::Claude(ref s) if s == "claude-opus-4-7"), "got: {m:?}");
+    }
+
+    #[test]
+    fn parse_claude_dash_prefix() {
+        let m = Model::parse("claude-sonnet-4-6");
+        assert!(matches!(m, Model::Claude(ref s) if s == "claude-sonnet-4-6"), "got: {m:?}");
+    }
+
+    #[test]
+    fn parse_unknown_defaults_to_lmstudio() {
+        let m = Model::parse("some-local-model");
+        assert!(matches!(m, Model::LMStudio(ref s) if s == "some-local-model"), "got: {m:?}");
+    }
+
+    #[test]
+    fn parse_empty_defaults_to_lmstudio() {
+        let m = Model::parse("");
+        assert!(matches!(m, Model::LMStudio(ref s) if s.is_empty()), "got: {m:?}");
+    }
+}

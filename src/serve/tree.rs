@@ -47,7 +47,8 @@ pub fn get_ignored(root_name: &str) -> HashSet<String> {
     }
 }
 
-// Less restrictive ignore list for full-text search (includes memory files).
+// Search intentionally includes memory/ (unlike the nav tree) so Claude can
+// find relevant context across past decisions without exposing the raw tree.
 pub fn get_search_ignored(root_name: &str) -> HashSet<String> {
     match root_name {
         "rebuy" => ["node_modules", ".git", ".next", "dist", "build", "vendor", "www", "docs"]
@@ -234,4 +235,109 @@ pub fn resolve_file(root_name: &str, doc_path: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::fs;
+
+    fn make_file(dir: &std::path::Path, name: &str, content: &str) {
+        fs::write(dir.join(name), content).unwrap();
+    }
+
+    fn make_dir(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let p = dir.join(name);
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn build_tree_raw_returns_md_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_file(tmp.path(), "README.md", "# Hello");
+        make_file(tmp.path(), "notes.txt", "ignored");
+        let ignored = HashSet::new();
+        let nodes = build_tree_raw(tmp.path(), tmp.path(), &ignored);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node_type, NodeType::File);
+    }
+
+    #[test]
+    fn build_tree_raw_ignores_dotfiles() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_file(tmp.path(), ".hidden.md", "# Hidden");
+        make_file(tmp.path(), "visible.md", "# Visible");
+        let ignored = HashSet::new();
+        let nodes = build_tree_raw(tmp.path(), tmp.path(), &ignored);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].name, "Visible");
+    }
+
+    #[test]
+    fn extract_title_prefers_frontmatter_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("agent.md");
+        fs::write(&f, "---\nname: My Agent\n---\n# Other Heading\n").unwrap();
+        assert_eq!(extract_title(&f), Some("My Agent".to_string()));
+    }
+
+    #[test]
+    fn extract_title_falls_back_to_h1() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("doc.md");
+        fs::write(&f, "# The Title\nSome content.").unwrap();
+        assert_eq!(extract_title(&f), Some("The Title".to_string()));
+    }
+
+    #[test]
+    fn extract_title_returns_none_for_empty_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("empty.md");
+        fs::write(&f, "").unwrap();
+        assert_eq!(extract_title(&f), None);
+    }
+
+    #[test]
+    fn compact_tree_single_file_dir_collapses() {
+        // guides/ has only intro.md → collapse to the file itself
+        let tmp = tempfile::tempdir().unwrap();
+        let guides = make_dir(tmp.path(), "guides");
+        make_file(&guides, "intro.md", "# Intro");
+        let ignored = HashSet::new();
+        let raw = build_tree_raw(tmp.path(), tmp.path(), &ignored);
+        let compacted = compact_tree(raw);
+        assert_eq!(compacted.len(), 1);
+        assert_eq!(compacted[0].node_type, NodeType::File);
+        assert_eq!(compacted[0].name, "Intro");
+    }
+
+    #[test]
+    fn compact_tree_single_child_dir_merges_name() {
+        // parent/ → child/ → [file1.md, file2.md] → becomes "parent/child" dir node
+        let tmp = tempfile::tempdir().unwrap();
+        let child = make_dir(tmp.path(), "parent/child");
+        make_file(&child, "a.md", "# A");
+        make_file(&child, "b.md", "# B");
+        let ignored = HashSet::new();
+        let raw = build_tree_raw(tmp.path(), tmp.path(), &ignored);
+        let compacted = compact_tree(raw);
+        assert_eq!(compacted.len(), 1);
+        assert_eq!(compacted[0].name, "parent/child");
+        assert_eq!(compacted[0].node_type, NodeType::Dir);
+    }
+
+    #[test]
+    fn collect_all_files_flattens_nested() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = make_dir(tmp.path(), "sub");
+        make_file(tmp.path(), "root.md", "# Root");
+        make_file(&sub, "nested.md", "# Nested");
+        let ignored = HashSet::new();
+        let raw = build_tree_raw(tmp.path(), tmp.path(), &ignored);
+        let files = collect_all_files(&raw);
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().all(|f| f.node_type == NodeType::File));
+    }
 }

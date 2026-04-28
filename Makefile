@@ -1,14 +1,21 @@
-.PHONY: build install dev watch clean check
+.PHONY: build install dev watch clean check release init audit lint format test
 
 INSTALL_PATH := $(HOME)/.local/bin/brain
 
-# Build debug binary and install to ~/.local/bin/brain
-install:
-	cargo build 2>&1 && cp target/debug/brain $(INSTALL_PATH) && echo "installed → $(INSTALL_PATH)"
+# Build site + release binary (single self-contained binary with embedded assets)
+build:
+	cd site && npm ci && npm run build
+	cargo build --release
+	@echo "built → target/release/brain"
 
-# Build release binary and install
-release:
-	cargo build --release 2>&1 && cp target/release/brain $(INSTALL_PATH) && echo "installed (release) → $(INSTALL_PATH)"
+# Build and install to ~/.local/bin/brain
+install: build
+	cp target/release/brain $(INSTALL_PATH)
+	@echo "installed → $(INSTALL_PATH)"
+
+# Build debug binary and install to ~/.local/bin/brain (dev workflow, no site embed)
+install-dev:
+	cargo build 2>&1 && cp target/debug/brain $(INSTALL_PATH) && echo "installed → $(INSTALL_PATH)"
 
 # Watch for changes and rebuild+install on save (requires cargo-watch)
 # Install with: cargo install cargo-watch
@@ -45,7 +52,55 @@ dev:
 
 clean:
 	cargo clean
+	rm -rf site/dist site/node_modules
 
-# Install cargo-watch if not present
-setup:
-	cargo install cargo-watch
+audit:
+	@echo "→ npm audit..."
+	@cd site && npm audit fix
+	@echo "→ cargo audit..."
+	@cargo audit
+
+lint:
+	@echo "→ eslint..."
+	@cd site && npx eslint src --ext .ts,.tsx
+	@echo "→ clippy..."
+	@cargo clippy -- -D warnings
+
+format:
+	@echo "→ prettier..."
+	@cd site && npx prettier --write src
+	@echo "→ rustfmt..."
+	@cargo fmt
+
+test:
+	@echo "→ vitest..."
+	@cd site && npx vitest run
+	@echo "→ cargo test..."
+	@cargo test
+
+RUST_VERSION := $(shell cat rust-toolchain.toml | grep channel | sed 's/.*"\(.*\)"/\1/')
+NODE_VERSION := $(shell cat .nvmrc | tr -d '[:space:]')
+
+# Install all required tools and dependencies (idempotent — safe to re-run)
+init:
+	@echo "→ rust $(RUST_VERSION)..."
+	@command -v rustup >/dev/null 2>&1 || \
+	  (echo "  installing rustup..." && \
+	   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none && \
+	   . $$HOME/.cargo/env)
+	@rustup toolchain install $(RUST_VERSION) --no-self-update 2>/dev/null
+	@rustup override set $(RUST_VERSION)
+	@echo "→ node $(NODE_VERSION)..."
+	@if ! command -v nvm >/dev/null 2>&1 && [ ! -f "$$HOME/.nvm/nvm.sh" ]; then \
+	  echo "  installing nvm..."; \
+	  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash; \
+	fi
+	@. $$HOME/.nvm/nvm.sh && nvm install $(NODE_VERSION) --no-progress && nvm use $(NODE_VERSION) && nvm alias default $(NODE_VERSION)
+	@echo "→ cargo-watch..."
+	@cargo install --list 2>/dev/null | grep -q "^cargo-watch" || cargo install cargo-watch
+	@echo "→ cargo-audit..."
+	@cargo install --list 2>/dev/null | grep -q "^cargo-audit" || cargo install cargo-audit
+	@echo "→ site deps..."
+	@cd site && npm install
+	@echo ""
+	@echo "ready — run 'make dev' to start"

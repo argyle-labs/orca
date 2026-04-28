@@ -39,3 +39,59 @@ pub fn edit_file(path: &str, old: &str, new: &str) -> Result<String> {
     std::fs::write(p, &updated)?;
     Ok(format!("edit applied to {path}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn edit_file_rejects_missing_string() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(f, "hello world").unwrap();
+        let path = f.path().to_str().unwrap().to_string();
+        let err = edit_file(&path, "nonexistent", "replacement").unwrap_err();
+        assert!(err.to_string().contains("not found"), "got: {err}");
+    }
+
+    #[test]
+    fn edit_file_rejects_duplicate_match() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(f, "foo foo").unwrap();
+        let path = f.path().to_str().unwrap().to_string();
+        let err = edit_file(&path, "foo", "bar").unwrap_err();
+        assert!(err.to_string().contains("matches 2"), "got: {err}");
+    }
+
+    #[test]
+    fn edit_file_applies_single_match() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(f, "hello world").unwrap();
+        f.flush().unwrap();
+        let path = f.path().to_str().unwrap().to_string();
+        edit_file(&path, "world", "rust").unwrap();
+        assert_eq!(read_file(&path).unwrap(), "hello rust");
+    }
+
+    #[test]
+    fn read_file_missing_returns_err() {
+        let result = read_file("/tmp/brain_test_nonexistent_xyz_999.txt");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_file_creates_and_reads_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt").to_str().unwrap().to_string();
+        write_file(&path, "brain content").unwrap();
+        assert_eq!(read_file(&path).unwrap(), "brain content");
+    }
+
+    #[test]
+    fn write_file_creates_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub/dir/file.txt").to_str().unwrap().to_string();
+        write_file(&path, "nested").unwrap();
+        assert_eq!(read_file(&path).unwrap(), "nested");
+    }
+}

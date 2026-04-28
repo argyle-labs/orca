@@ -46,8 +46,9 @@ regex = "1"
 
 # Web server
 axum = { version = "0.7", features = ["macros"] }
-tower-http = { version = "0.5", features = ["fs", "cors"] }
+tower-http = { version = "0.5", features = ["cors"] }
 mime_guess = "2"
+rust-embed = "8"
 
 # OpenAPI
 utoipa = { version = "4", features = ["axum_extras"] }
@@ -64,6 +65,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 opt-level = 3
 lto = true
 strip = true
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.dev]
 opt-level = 0

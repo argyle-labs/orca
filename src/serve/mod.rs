@@ -1,4 +1,4 @@
-mod api;
+pub mod api;
 mod mcp_client;
 mod openapi;
 pub mod tree;
@@ -24,12 +24,43 @@ pub async fn run(dev: bool, port: u16) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to bind {addr}: {e} — is port {port} already in use?"))?;
     println!("[brain] listening on http://localhost:{port}");
 
-    if !dev {
-        println!("[brain] serving static site from site/dist");
-    }
-
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+// site/dist is compiled into the binary at build time so the binary ships alone —
+// no separate site/ directory needed at the install destination.
+#[derive(rust_embed::RustEmbed)]
+#[folder = "site/dist/"]
+struct Assets;
+
+async fn static_handler(uri: axum::http::Uri) -> axum::response::Response {
+    use axum::body::Body;
+    use axum::http::{Response, header};
+
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+
+    match Assets::get(path) {
+        Some(content) => {
+            let mime = mime_guess::from_path(path).first_or_octet_stream();
+            Response::builder()
+                .header(header::CONTENT_TYPE, mime.as_ref())
+                .body(Body::from(content.data))
+                .unwrap()
+        }
+        // SPA: any unmatched path serves index.html so client-side routing handles it.
+        None => match Assets::get("index.html") {
+            Some(content) => Response::builder()
+                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                .body(Body::from(content.data))
+                .unwrap(),
+            None => Response::builder()
+                .status(404)
+                .body(Body::empty())
+                .unwrap(),
+        },
+    }
 }
 
 fn build_router(dev: bool) -> Router {
@@ -63,16 +94,13 @@ fn build_router(dev: bool) -> Router {
         .route("/api/rebuy/health/local", get(api::rebuy_health_handler))
         .route("/api/logs/services", get(api::log_services_handler))
         .route("/api/logs", get(api::log_fetch_handler))
+        .route("/api/tests/run", get(api::tests_run_handler))
         .with_state(mcp_pool)
         .layer(cors);
 
     if dev {
         api
     } else {
-        let dist = std::env::current_dir().unwrap_or_default().join("site/dist");
-        use tower_http::services::{ServeDir, ServeFile};
-        let serve_dir = ServeDir::new(&dist)
-            .not_found_service(ServeFile::new(dist.join("index.html")));
-        api.fallback_service(serve_dir)
+        api.fallback(static_handler)
     }
 }

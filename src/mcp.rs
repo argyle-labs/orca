@@ -34,7 +34,7 @@ pub async fn serve(config: &Config) -> Result<()> {
         let method = req["method"].as_str().unwrap_or("");
         let params = req.get("params").cloned().unwrap_or(Value::Null);
 
-        // Notifications have no id and need no response.
+        // MCP notifications (no id) are fire-and-forget — replying would break the protocol.
         if req.get("id").is_none() {
             continue;
         }
@@ -201,6 +201,19 @@ fn tool_defs() -> Value {
                 },
                 "required": ["project", "service"]
             }
+        },
+        {
+            "name": "brain_run_tests",
+            "description": "Run the brain project test suite. Returns test output with pass/fail counts. Suites: rust (cargo test), frontend (vitest), e2e (playwright), all.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "suite": {
+                        "type": "string",
+                        "description": "Which suite to run: rust | frontend | e2e | all (default: rust)"
+                    }
+                }
+            }
         }
     ])
 }
@@ -220,6 +233,7 @@ async fn dispatch(name: &str, args: &Value, config: &Config) -> Result<String> {
         "list_commands" => list_commands(config),
         "brain_list_services" => list_services().await,
         "brain_service_logs" => service_logs(args).await,
+        "brain_run_tests" => run_tests(args).await,
         _ => anyhow::bail!("unknown tool: {name}"),
     }
 }
@@ -500,18 +514,28 @@ fn resolve_doc_file(root_dir: &Path, doc_path: &str) -> Option<PathBuf> {
 
 fn list_roots(config: &Config) -> Result<String> {
     let roots = doc_roots(config);
-    let entries: Vec<Value> = roots.iter().map(|r| {
+    let mut entries: Vec<Value> = roots.iter().map(|r| {
         let exists = r.path.exists();
         let docs = if exists { count_doc_files(&build_doc_tree(&r.path, &r.path, &r.ignored)) } else { 0 };
         json!({ "root": r.name, "path": r.path.to_string_lossy(), "exists": exists, "docs": docs })
     }).collect();
+    entries.push(json!({
+        "root": "docs",
+        "path": "(embedded in binary)",
+        "exists": true,
+        "docs": crate::docs::file_count()
+    }));
     Ok(serde_json::to_string_pretty(&entries)?)
 }
 
 fn get_tree(args: &Value, config: &Config) -> Result<String> {
     let root_name = args["root"].as_str().ok_or_else(|| anyhow::anyhow!("root is required"))?;
-    let sub_path = args["path"].as_str();
 
+    if root_name == "docs" {
+        return Ok(serde_json::to_string_pretty(&crate::docs::tree())?);
+    }
+
+    let sub_path = args["path"].as_str();
     let roots = doc_roots(config);
     let root = roots.iter().find(|r| r.name == root_name)
         .ok_or_else(|| anyhow::anyhow!("unknown root: {root_name}"))?;
@@ -524,6 +548,11 @@ fn get_tree(args: &Value, config: &Config) -> Result<String> {
 fn read_doc(args: &Value, config: &Config) -> Result<String> {
     let root_name = args["root"].as_str().ok_or_else(|| anyhow::anyhow!("root is required"))?;
     let doc_path = args["path"].as_str().ok_or_else(|| anyhow::anyhow!("path is required"))?;
+
+    if root_name == "docs" {
+        return crate::docs::read(doc_path)
+            .ok_or_else(|| anyhow::anyhow!("not found: docs/{doc_path}"));
+    }
 
     let roots = doc_roots(config);
     let root = roots.iter().find(|r| r.name == root_name)
@@ -562,6 +591,12 @@ fn search_docs(args: &Value, config: &Config) -> Result<String> {
             if !matches.is_empty() {
                 results.push(format!("## {}/{}\n{}", root.name, rel, matches.join("\n")));
             }
+        }
+    }
+
+    if filter == "all" || filter == "docs" {
+        for (path, matches) in crate::docs::search(query) {
+            results.push(format!("## docs/{}\n{}", path, matches.join("\n")));
         }
     }
 
@@ -622,6 +657,15 @@ async fn list_services() -> Result<String> {
     }
 
     Ok(lines.join("\n"))
+}
+
+async fn run_tests(args: &Value) -> Result<String> {
+    let suite = args["suite"].as_str().unwrap_or("rust");
+    let resp = crate::serve::api::run_test_suite(suite).await?;
+    Ok(format!(
+        "Suite: {}\nPassed: {} | Failed: {}\nDuration: {}ms\n\n{}",
+        resp.suite, resp.passed, resp.failed, resp.duration_ms, resp.output
+    ))
 }
 
 async fn service_logs(args: &Value) -> Result<String> {

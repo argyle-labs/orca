@@ -48,3 +48,40 @@ pub fn mask_key(key: &str) -> String {
         "****".to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mask_key_long_key_shows_first_and_last() {
+        let key = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz";
+        let masked = mask_key(key);
+        assert!(masked.starts_with("sk-ant-a"), "prefix wrong: {masked}");
+        assert!(masked.ends_with("wxyz"), "suffix wrong: {masked}");
+        assert!(masked.contains('…'), "no ellipsis: {masked}");
+    }
+
+    #[test]
+    fn mask_key_short_returns_stars() {
+        assert_eq!(mask_key("short"), "****");
+    }
+
+    #[test]
+    fn mask_key_exactly_12_returns_stars() {
+        assert_eq!(mask_key("abcdefghijkl"), "****");
+    }
+
+    #[test]
+    fn mask_key_13_chars_masks() {
+        let key = "abcdefghijklm"; // 13 chars
+        let masked = mask_key(key);
+        assert!(masked.starts_with("abcdefgh"), "got: {masked}");
+        assert!(masked.ends_with("jklm"), "got: {masked}");
+    }
+
+    #[test]
+    fn mask_key_empty_returns_stars() {
+        assert_eq!(mask_key(""), "****");
+    }
+}
