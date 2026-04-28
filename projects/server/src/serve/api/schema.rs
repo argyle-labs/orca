@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::process::Command;
 
-use super::err;
+use super::prelude::*;
 
 // ── Schema database config ────────────────────────────────────────────────────
 
@@ -87,8 +87,8 @@ pub(crate) fn load_domains(domains_file: &Option<String>) -> Value {
     operation_id = "getSchema",
     responses(
         (status = 200, description = "Database schema tabs", body = super::SchemaResponse),
-        (status = 404, description = "No databases configured", body = super::ErrorResponse),
-        (status = 500, description = "All DB connections failed", body = super::ErrorResponse),
+        (status = 404, description = "No databases configured", body = ErrorResponse),
+        (status = 500, description = "All DB connections failed", body = ErrorResponse),
     ),
     tag = "schema"
 )]

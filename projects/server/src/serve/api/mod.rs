@@ -26,15 +26,7 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct TreeNode {
-    pub name: String,
-    pub path: String,
-    #[serde(rename = "type")]
-    pub node_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub children: Option<Vec<TreeNode>>,
-}
+pub use crate::serve::tree::{TreeNode, NodeType};
 
 #[derive(Serialize, ToSchema)]
 pub struct SearchResult {
@@ -189,8 +181,20 @@ pub struct TestRunResponse {
     pub duration_ms: u64,
 }
 
+// ── Handler prelude ───────────────────────────────────────────────────────────
+// Import this with `use super::prelude::*;` in every handler module.
+// All types listed here are available unqualified — critical for utoipa body
+// annotations, which use the literal token path as the $ref name. Never write
+// `super::SomeType` inside a utoipa macro; always import it via this prelude.
+pub(super) mod prelude {
+    #[allow(unused_imports)]
+    pub use super::{ErrorResponse, McpState, err};
+}
+
 // ── Sub-modules ───────────────────────────────────────────────────────────────
 
+pub mod atlassian;
+pub mod bitbucket;
 pub mod ctx7;
 pub mod docker;
 pub mod docs;
@@ -201,6 +205,8 @@ pub mod schema;
 pub mod specs;
 pub mod tests_handler;
 
+pub use atlassian::*;
+pub use bitbucket::*;
 pub use ctx7::*;
 pub use docker::*;
 pub use docs::*;

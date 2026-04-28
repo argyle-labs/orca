@@ -4,8 +4,10 @@ use brain::mcp;
 use brain::serve;
 use brain::serve::openapi_spec_json;
 use brain::session::Session;
-use brain_commands::{self as cmd, LogAction, SpecAction};
+use brain_commands::{self as cmd, LogAction, McpAction, SpecAction};
+use brain_core::backend::{ClaudeBackend, ModelBackend, stdout_sink};
 use brain_utils::config::Config;
+use brain_utils::types::Message;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -101,6 +103,12 @@ enum Command {
         #[command(subcommand)]
         action: SpecAction,
     },
+
+    /// Manage MCP servers registered with brain
+    Mcp {
+        #[command(subcommand)]
+        action: McpAction,
+    },
 }
 
 #[tokio::main]
@@ -108,10 +116,14 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("BRAIN_LOG")
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| {
+                    // Quiet external crates; only surface brain's own info/warn/error.
+                    tracing_subscriber::EnvFilter::new(
+                        "warn,brain=info,tower_http=warn,axum=warn",
+                    )
+                }),
         )
         .with_target(false)
-        .with_ansi(true)
         .compact()
         .init();
 
@@ -125,7 +137,7 @@ async fn main() -> Result<()> {
         Some(Command::Projects) => cmd::cmd_projects(&config),
         Some(Command::Agents) => cmd::cmd_agents(&config),
         Some(Command::Escalate { question, project }) => {
-            cmd::cmd_escalate(&config, &question, project.as_deref()).await
+            escalate(&config, &question, project.as_deref()).await
         }
         Some(Command::Doctor) => cmd::cmd_doctor(&config),
         Some(Command::Log { action }) => cmd::cmd_log(&config, action),
@@ -139,12 +151,13 @@ async fn main() -> Result<()> {
                  Present findings as a prioritized list.",
                 abs.display()
             );
-            cmd::cmd_run(&config, "bear", &prompt).await
+            run_one_shot(&config, "bear", &prompt).await
         }
-        Some(Command::Run { agent, prompt }) => cmd::cmd_run(&config, &agent, &prompt).await,
+        Some(Command::Run { agent, prompt }) => run_one_shot(&config, &agent, &prompt).await,
         Some(Command::InstallAgents) => cmd::cmd_install_agents(&config),
         Some(Command::McpServe) => mcp::serve(&config).await,
-        Some(Command::Serve { dev, port }) => serve::run(dev, port).await,
+        Some(Command::Serve { dev, port }) => serve::run(dev, port, config.mcp_servers.clone()).await,
+        Some(Command::Mcp { action }) => cmd::cmd_mcp(&config, action),
         Some(Command::Gen { url, out }) => cmd::cmd_gen(&url, &out).await,
         Some(Command::Spec { action }) => match action {
             SpecAction::Dump => {
@@ -174,6 +187,37 @@ async fn main() -> Result<()> {
             }
         }
     }
+}
+
+/// Direct Claude escalation — loads project context if provided, then sends question.
+async fn escalate(config: &Config, question: &str, project: Option<&str>) -> Result<()> {
+    let api_key = config
+        .anthropic_api_key
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("no API key — run `brain login`"))?;
+
+    let system = match project {
+        Some(p) => {
+            let ctx = ProjectContext::resolve(p, config)?;
+            ctx.build_system_prompt(config)
+        }
+        None => String::new(),
+    };
+
+    let claude = ClaudeBackend::new(api_key, "claude-sonnet-4-6");
+    let messages = vec![Message::user(question)];
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let output = stdout_sink();
+    claude.chat(&messages, &[], &system, cancel, &output).await?;
+    Ok(())
+}
+
+/// One-shot: load the named agent's system prompt, send prompt, print response, exit.
+async fn run_one_shot(config: &Config, agent: &str, prompt: &str) -> Result<()> {
+    let ctx = ProjectContext::default();
+    let mut session = Session::new(config.clone(), ctx).await?;
+    session.set_agent(agent);
+    session.one_shot(prompt.to_string()).await
 }
 
 fn detect_project_from_cwd(config: &Config) -> Option<String> {

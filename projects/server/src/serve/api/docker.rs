@@ -11,7 +11,8 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 use utoipa::ToSchema;
 
-use super::{DockerActionRequest, DockerActionResponse, err};
+use super::prelude::*;
+use super::{DockerActionRequest, DockerActionResponse};
 
 // ── GET /api/docker/engine ────────────────────────────────────────────────────
 
@@ -37,7 +38,7 @@ pub async fn docker_engine_handler() -> Response {
     operation_id = "startDockerEngine",
     responses(
         (status = 200, description = "Engine start output"),
-        (status = 500, description = "Failed to start engine", body = super::ErrorResponse),
+        (status = 500, description = "Failed to start engine", body = ErrorResponse),
     ),
     tag = "docker"
 )]
@@ -75,7 +76,7 @@ pub struct DockerServicesQuery {
     ),
     responses(
         (status = 200, description = "Compose file path and service list", body = super::DockerServicesResponse),
-        (status = 500, description = "Docker error", body = super::ErrorResponse),
+        (status = 500, description = "Docker error", body = ErrorResponse),
     ),
     tag = "docker"
 )]
@@ -149,9 +150,9 @@ pub async fn docker_services_handler(Query(params): Query<DockerServicesQuery>) 
     request_body = DockerActionRequest,
     responses(
         (status = 200, description = "Action output", body = DockerActionResponse),
-        (status = 400, description = "Unknown action", body = super::ErrorResponse),
-        (status = 404, description = "No compose file", body = super::ErrorResponse),
-        (status = 500, description = "Docker error", body = super::ErrorResponse),
+        (status = 400, description = "Unknown action", body = ErrorResponse),
+        (status = 404, description = "No compose file", body = ErrorResponse),
+        (status = 500, description = "Docker error", body = ErrorResponse),
     ),
     tag = "docker"
 )]

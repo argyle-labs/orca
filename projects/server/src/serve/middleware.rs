@@ -21,7 +21,11 @@ const SKIP_BODY_PREFIXES: &[&str] = &[
 ];
 
 /// Paths to skip logging entirely (no request/response log lines).
-const SKIP_LOG_PREFIXES: &[&str] = &[];
+const SKIP_LOG_PREFIXES: &[&str] = &[
+    "/api/health",
+    "/assets/",
+    "/favicon",
+];
 
 fn skip_body(path: &str) -> bool {
     SKIP_BODY_PREFIXES.iter().any(|p| path.starts_with(p))
@@ -116,7 +120,8 @@ async fn collect_body(body: Body) -> Bytes {
         .unwrap_or_default()
 }
 
-/// Pretty-print JSON bodies; truncate non-JSON or oversized payloads.
+/// Compact-encode JSON bodies for structured log fields; truncate oversized payloads.
+/// Pretty-printing is intentionally avoided — multiline strings break JSON log lines.
 fn format_body(bytes: &Bytes) -> String {
     const MAX_RAW: usize = 4096;
     if bytes.is_empty() {
@@ -124,11 +129,11 @@ fn format_body(bytes: &Bytes) -> String {
     }
     if let Ok(s) = std::str::from_utf8(bytes) {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(s) {
-            let pretty = serde_json::to_string_pretty(&val).unwrap_or_else(|_| s.to_string());
-            if pretty.len() > MAX_RAW {
-                return format!("{}…\n[{} bytes total]", &pretty[..MAX_RAW], bytes.len());
+            let compact = serde_json::to_string(&val).unwrap_or_else(|_| s.to_string());
+            if compact.len() > MAX_RAW {
+                return format!("{}…[{} bytes]", &compact[..MAX_RAW], bytes.len());
             }
-            return pretty;
+            return compact;
         }
         // Not JSON — truncate raw string
         if s.len() > MAX_RAW {

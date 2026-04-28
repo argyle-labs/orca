@@ -21,6 +21,8 @@ use tokio::sync::Mutex;
 pub struct McpServerConfig {
     pub command: String,
     pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
 }
 
 pub struct McpClient {
@@ -52,6 +54,10 @@ impl McpClient {
         // compose) find the Colima socket instead of Docker Desktop's.
         if let Some(host) = colima_docker_host() {
             cmd.env("DOCKER_HOST", host);
+        }
+
+        for (k, v) in &cfg.env {
+            cmd.env(k, v);
         }
 
         let mut child = cmd.spawn()?;
@@ -125,23 +131,32 @@ impl McpClient {
             stdin.flush().await?;
         }
 
-        loop {
-            let mut buf = String::new();
-            let n = {
-                let mut stdout = self.stdout.lock().await;
-                stdout.read_line(&mut buf).await?
-            };
-            if n == 0 {
-                anyhow::bail!("MCP server closed");
+        match tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let mut buf = String::new();
+                let n = {
+                    let mut stdout = self.stdout.lock().await;
+                    stdout.read_line(&mut buf).await?
+                };
+                if n == 0 {
+                    anyhow::bail!("MCP server closed");
+                }
+                let buf = buf.trim();
+                if buf.is_empty() {
+                    continue;
+                }
+                let resp: Value = serde_json::from_str(buf)?;
+                if resp["id"] == id {
+                    return Ok(resp);
+                }
             }
-            let buf = buf.trim();
-            if buf.is_empty() {
-                continue;
-            }
-            let resp: Value = serde_json::from_str(buf)?;
-            if resp["id"] == id {
-                return Ok(resp);
-            }
+            #[allow(unreachable_code)]
+            Ok(Value::Null)
+        })
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => anyhow::bail!("MCP server closed"),
         }
     }
 
@@ -198,16 +213,31 @@ impl McpClient {
 
 pub struct McpPool {
     clients: Mutex<HashMap<String, Arc<McpClient>>>,
+    brain_servers: Vec<brain_utils::config::McpServerEntry>,
 }
 
 impl McpPool {
-    pub fn new() -> Self {
+    pub fn new(brain_servers: Vec<brain_utils::config::McpServerEntry>) -> Self {
         McpPool {
             clients: Mutex::new(HashMap::new()),
+            brain_servers,
         }
     }
 
-    pub fn read_configs() -> HashMap<String, McpServerConfig> {
+    pub fn read_configs(&self) -> HashMap<String, McpServerConfig> {
+        let mut configs = Self::read_claude_configs();
+        // brain.toml servers take precedence — override same-named claude configs
+        for entry in &self.brain_servers {
+            configs.insert(entry.name.clone(), McpServerConfig {
+                command: entry.command.clone(),
+                args: entry.args.clone(),
+                env: entry.env.clone(),
+            });
+        }
+        configs
+    }
+
+    fn read_claude_configs() -> HashMap<String, McpServerConfig> {
         let home = std::env::var("HOME").unwrap_or_default();
         let path = format!("{home}/.claude.json");
         let Ok(raw) = std::fs::read_to_string(&path) else {
@@ -229,7 +259,7 @@ impl McpPool {
                     .iter()
                     .filter_map(|a| a.as_str().map(|s| s.to_string()))
                     .collect();
-                Some((k.clone(), McpServerConfig { command, args }))
+                Some((k.clone(), McpServerConfig { command, args, env: Default::default() }))
             })
             .collect()
     }
@@ -239,7 +269,7 @@ impl McpPool {
         if let Some(c) = clients.get(server_name) {
             return Ok(c.clone());
         }
-        let configs = Self::read_configs();
+        let configs = self.read_configs();
         let cfg = configs
             .get(server_name)
             .ok_or_else(|| anyhow::anyhow!("unknown MCP server: {server_name}"))?;
@@ -248,8 +278,12 @@ impl McpPool {
         Ok(client)
     }
 
+    pub async fn evict(&self, server_name: &str) {
+        self.clients.lock().await.remove(server_name);
+    }
+
     pub async fn all_tools(&self) -> Vec<Value> {
-        let configs = Self::read_configs();
+        let configs = self.read_configs();
         let mut result = Vec::new();
         for server_name in configs.keys() {
             if let Ok(client) = self.get_or_connect(server_name).await {
@@ -267,7 +301,7 @@ impl McpPool {
     }
 
     pub async fn find_ctx7_server(&self) -> Option<String> {
-        let configs = Self::read_configs();
+        let configs = self.read_configs();
         for server_name in configs.keys() {
             if let Ok(client) = self.get_or_connect(server_name).await
                 && client.tools.iter().any(|t| t.name == "resolve-library-id")

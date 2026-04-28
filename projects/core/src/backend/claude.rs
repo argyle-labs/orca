@@ -1,4 +1,4 @@
-use super::{ModelBackend, OutputSink, sink_write, sink_writeln};
+use super::{ModelBackend, OutputSink, serialize, sink_write, sink_writeln};
 use brain_utils::types::{BackendResponse, Message, StopReason, ToolCall, ToolDef};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -43,7 +43,7 @@ impl ModelBackend for ClaudeBackend {
         cancel: CancellationToken,
         output: &OutputSink,
     ) -> Result<BackendResponse> {
-        let claude_messages = serialize_messages(messages);
+        let claude_messages = serialize::anthropic_messages(messages);
 
         let mut body = json!({
             "model": self.model,
@@ -54,7 +54,7 @@ impl ModelBackend for ClaudeBackend {
         });
 
         if !tools.is_empty() {
-            body["tools"] = serialize_tools(tools);
+            body["tools"] = serialize::anthropic_tools(tools);
         }
 
         let response = self
@@ -220,60 +220,3 @@ async fn parse_claude_stream(
     Ok(result)
 }
 
-fn serialize_messages(messages: &[Message]) -> Value {
-    let mut out = vec![];
-
-    for msg in messages {
-        match msg {
-            Message::User { content } => {
-                out.push(json!({ "role": "user", "content": content }));
-            }
-            Message::Assistant { text, tool_calls } => {
-                let mut content: Vec<Value> = vec![];
-                if let Some(t) = text.as_deref().filter(|t| !t.is_empty()) {
-                    content.push(json!({ "type": "text", "text": t }));
-                }
-                for tc in tool_calls {
-                    content.push(json!({
-                        "type": "tool_use",
-                        "id": tc.id,
-                        "name": tc.name,
-                        "input": tc.input,
-                    }));
-                }
-                if !content.is_empty() {
-                    out.push(json!({ "role": "assistant", "content": content }));
-                }
-            }
-            Message::ToolResults(results) => {
-                let content: Vec<Value> = results
-                    .iter()
-                    .map(|r| {
-                        json!({
-                            "type": "tool_result",
-                            "tool_use_id": r.tool_use_id,
-                            "content": r.content,
-                            "is_error": r.is_error,
-                        })
-                    })
-                    .collect();
-                out.push(json!({ "role": "user", "content": content }));
-            }
-        }
-    }
-
-    Value::Array(out)
-}
-
-fn serialize_tools(tools: &[ToolDef]) -> Value {
-    tools
-        .iter()
-        .map(|t| {
-            json!({
-                "name": t.name,
-                "description": t.description,
-                "input_schema": t.input_schema,
-            })
-        })
-        .collect()
-}

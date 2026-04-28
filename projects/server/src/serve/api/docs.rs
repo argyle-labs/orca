@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::json;
 use utoipa::ToSchema;
 
-use super::err;
+use super::prelude::*;
 use crate::serve::tree::{build_tree_raw, collect_all_files, get_root_tree, get_roots, get_search_ignored};
 
 // ── GET /api/tree ─────────────────────────────────────────────────────────────
@@ -18,7 +18,7 @@ use crate::serve::tree::{build_tree_raw, collect_all_files, get_root_tree, get_r
     operation_id = "getTree",
     responses(
         (status = 200, description = "Document tree indexed by root name", body = serde_json::Value),
-        (status = 500, description = "Error", body = super::ErrorResponse),
+        (status = 500, description = "Error", body = ErrorResponse),
     ),
     tag = "docs"
 )]
@@ -127,8 +127,8 @@ pub struct DocQuery {
     ),
     responses(
         (status = 200, description = "Document content as plain text", content_type = "text/plain"),
-        (status = 400, description = "Unknown root", body = super::ErrorResponse),
-        (status = 404, description = "File not found", body = super::ErrorResponse),
+        (status = 400, description = "Unknown root", body = ErrorResponse),
+        (status = 404, description = "File not found", body = ErrorResponse),
     ),
     tag = "docs"
 )]

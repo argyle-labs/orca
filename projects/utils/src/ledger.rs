@@ -25,7 +25,7 @@ impl TokenLedger {
     }
 }
 
-fn fmt_tokens(n: u32) -> String {
+pub fn fmt_tokens(n: u32) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {

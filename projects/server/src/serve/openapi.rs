@@ -32,6 +32,7 @@ use utoipa::OpenApi;
     ),
     components(schemas(
         super::api::TreeNode,
+        super::api::NodeType,
         super::api::SearchResult,
         super::api::McpToolInfo,
         super::api::McpRunRequest,

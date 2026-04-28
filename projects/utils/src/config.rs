@@ -1,5 +1,29 @@
 use anyhow::{Context, Result};
+use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct McpServerEntry {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct BrainToml {
+    #[serde(default)]
+    pub mcp: McpSection,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct McpSection {
+    #[serde(default)]
+    pub servers: Vec<McpServerEntry>,
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -8,6 +32,7 @@ pub struct Config {
     pub default_model: Model,
     pub brain_vault: PathBuf,
     pub memory_root: PathBuf,
+    pub mcp_servers: Vec<McpServerEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,13 +76,29 @@ impl Config {
         // Model ID resolved at session start from /v1/models.
         let default_model = Model::LMStudio(String::new());
 
+        let toml_path = brain_vault.join("config/brain.toml");
+        let mcp_servers = if toml_path.exists() {
+            std::fs::read_to_string(&toml_path)
+                .ok()
+                .and_then(|s| toml::from_str::<BrainToml>(&s).ok())
+                .map(|t| t.mcp.servers)
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+
         Ok(Config {
             anthropic_api_key: api_key,
             lmstudio_url,
             default_model,
             brain_vault,
             memory_root,
+            mcp_servers,
         })
+    }
+
+    pub fn brain_toml_path(&self) -> PathBuf {
+        self.brain_vault.join("config/brain.toml")
     }
 
     pub fn agents_dir(&self) -> PathBuf {

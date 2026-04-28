@@ -1,6 +1,10 @@
 use std::fs;
 use tempfile::tempdir;
 
+use brain_agents::{list_embedded_agents, load_agent_prompt};
+use brain_core::tools::bash::BashPermissions;
+use brain_utils::tools::{fs as fstool, search};
+
 // These tests verify the tool implementations work correctly.
 // They use real filesystem operations via the tempfile crate (no race conditions).
 
@@ -12,7 +16,7 @@ fn test_read_file() {
     let path = dir.path().join("test.txt");
     fs::write(&path, "hello world").unwrap();
 
-    let result = brain::tools::fs::read_file(path.to_str().unwrap());
+    let result = fstool::read_file(path.to_str().unwrap());
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), "hello world");
 }
@@ -22,7 +26,7 @@ fn test_write_creates_parent_dirs() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("sub/nested/file.txt");
 
-    let result = brain::tools::fs::write_file(path.to_str().unwrap(), "nested content");
+    let result = fstool::write_file(path.to_str().unwrap(), "nested content");
     assert!(result.is_ok());
     assert_eq!(fs::read_to_string(&path).unwrap(), "nested content");
 }
@@ -34,14 +38,14 @@ fn test_edit_file_replaces_content() {
     fs::write(&path, "hello world foo bar").unwrap();
 
     let result =
-        brain::tools::fs::edit_file(path.to_str().unwrap(), "hello world", "goodbye world");
+        fstool::edit_file(path.to_str().unwrap(), "hello world", "goodbye world");
     assert!(result.is_ok());
     assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world foo bar");
 }
 
 #[test]
 fn test_edit_file_not_found_returns_error() {
-    let result = brain::tools::fs::edit_file("/nonexistent/path.txt", "old", "new");
+    let result = fstool::edit_file("/nonexistent/path.txt", "old", "new");
     assert!(result.is_err());
 }
 
@@ -51,7 +55,7 @@ fn test_edit_file_old_string_not_found() {
     let path = dir.path().join("file.txt");
     fs::write(&path, "some content").unwrap();
 
-    let result = brain::tools::fs::edit_file(path.to_str().unwrap(), "not present", "new");
+    let result = fstool::edit_file(path.to_str().unwrap(), "not present", "new");
     assert!(result.is_err());
 }
 
@@ -66,7 +70,7 @@ fn test_glob_files_matches_pattern() {
 
     // glob_files with full pattern (no base)
     let pattern = format!("{}/*.rs", dir.path().display());
-    let result = brain::tools::search::glob_files(&pattern, None).unwrap();
+    let result = search::glob_files(&pattern, None).unwrap();
     let lines: Vec<&str> = result.lines().collect();
     assert_eq!(lines.len(), 2, "expected 2 .rs files, got: {result}");
 }
@@ -78,7 +82,7 @@ fn test_glob_files_with_base() {
     fs::write(dir.path().join("y.md"), "").unwrap();
 
     let result =
-        brain::tools::search::glob_files("*.md", Some(dir.path().to_str().unwrap())).unwrap();
+        search::glob_files("*.md", Some(dir.path().to_str().unwrap())).unwrap();
     let lines: Vec<&str> = result.lines().collect();
     assert_eq!(lines.len(), 2);
 }
@@ -87,7 +91,7 @@ fn test_glob_files_with_base() {
 fn test_glob_files_no_match_returns_message() {
     let dir = tempdir().unwrap();
     let pattern = format!("{}/*.xyz", dir.path().display());
-    let result = brain::tools::search::glob_files(&pattern, None).unwrap();
+    let result = search::glob_files(&pattern, None).unwrap();
     assert!(result.starts_with("no files matched"));
 }
 
@@ -98,7 +102,7 @@ fn test_grep_content_finds_match() {
     fs::write(&path, "line one\nline two needle\nline three\n").unwrap();
 
     let result =
-        brain::tools::search::grep_content("needle", path.to_str().unwrap(), false).unwrap();
+        search::grep_content("needle", path.to_str().unwrap(), false).unwrap();
     assert!(result.contains("needle"));
     assert!(result.contains(":2:")); // line 2 (1-indexed)
 }
@@ -109,7 +113,7 @@ fn test_grep_content_case_insensitive() {
     let path = dir.path().join("file.txt");
     fs::write(&path, "Hello WORLD\nlower world\n").unwrap();
 
-    let result = brain::tools::search::grep_content("hello", path.to_str().unwrap(), true).unwrap();
+    let result = search::grep_content("hello", path.to_str().unwrap(), true).unwrap();
     assert!(result.contains("Hello WORLD"));
 }
 
@@ -120,7 +124,7 @@ fn test_grep_content_no_match_returns_message() {
     fs::write(&path, "no match here\n").unwrap();
 
     let result =
-        brain::tools::search::grep_content("xyzzy", path.to_str().unwrap(), false).unwrap();
+        search::grep_content("xyzzy", path.to_str().unwrap(), false).unwrap();
     assert!(result.starts_with("no matches"));
 }
 
@@ -133,13 +137,13 @@ fn test_grep_content_truncates_at_200_lines() {
     fs::write(&path, &content).unwrap();
 
     let result =
-        brain::tools::search::grep_content("needle", path.to_str().unwrap(), false).unwrap();
+        search::grep_content("needle", path.to_str().unwrap(), false).unwrap();
     assert!(result.contains("truncated"));
 }
 
 #[test]
 fn test_grep_content_path_not_found_returns_error() {
-    let result = brain::tools::search::grep_content("x", "/no/such/path.txt", false);
+    let result = search::grep_content("x", "/no/such/path.txt", false);
     assert!(result.is_err());
 }
 
@@ -147,7 +151,7 @@ fn test_grep_content_path_not_found_returns_error() {
 
 #[test]
 fn test_allowlist_auto_approve() {
-    let mut p = brain::tools::bash::BashPermissions::default();
+    let mut p = BashPermissions::default();
     p.auto_approve = true;
     assert!(p.is_allowed("rm -rf /"));
     assert!(p.is_allowed("any command"));
@@ -155,7 +159,7 @@ fn test_allowlist_auto_approve() {
 
 #[test]
 fn test_allowlist_prefix_match() {
-    let mut p = brain::tools::bash::BashPermissions::default();
+    let mut p = BashPermissions::default();
     p.allow("cargo");
     assert!(p.is_allowed("cargo test"));
     assert!(p.is_allowed("cargo build --release"));
@@ -164,7 +168,7 @@ fn test_allowlist_prefix_match() {
 
 #[test]
 fn test_allowlist_empty_denies_all() {
-    let p = brain::tools::bash::BashPermissions::default();
+    let p = BashPermissions::default();
     assert!(!p.is_allowed("echo hello"));
     assert!(!p.is_allowed("ls"));
 }
@@ -178,7 +182,7 @@ fn test_strip_frontmatter_removes_yaml_block() {
     // Direct: recreate the same logic inline and verify it matches agents::strip_frontmatter output
     // by calling load_agent_prompt on an embedded agent — but that needs agents_dir.
     // Instead: verify agents::list_embedded_agents() strips correctly (descriptions don't start with "---")
-    let agents = brain::agents::list_embedded_agents();
+    let agents = list_embedded_agents();
     // At least one embedded agent must exist (wolf is always embedded)
     assert!(!agents.is_empty(), "no embedded agents found");
     for (name, desc) in &agents {
@@ -205,12 +209,12 @@ fn test_strip_frontmatter_removes_yaml_block() {
 fn test_strip_frontmatter_no_frontmatter_passthrough() {
     // Agents without frontmatter should come through unmodified (minus trim).
     // Use the existing embedded agents as proof: their prompts have content.
-    let agents = brain::agents::list_embedded_agents();
+    let agents = list_embedded_agents();
     assert!(!agents.is_empty());
     // All agents must have non-empty descriptions (list_embedded_agents calls strip_frontmatter)
     for (name, _) in &agents {
         let dir = std::path::Path::new("/nonexistent");
-        let prompt = brain::agents::load_agent_prompt(name, dir);
+        let prompt = load_agent_prompt(name, dir);
         // Falls back to embedded — must return Some
         assert!(prompt.is_some(), "embedded agent {name} returned None");
     }

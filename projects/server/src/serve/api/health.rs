@@ -5,8 +5,24 @@ use axum::{
 };
 use serde_json::json;
 
-use super::{HealthCheck, HealthResponse, McpState, err};
+use super::prelude::*;
+use super::{HealthCheck, HealthResponse};
 use crate::serve::middleware::CorrelationId;
+
+// ── GET /api/health ───────────────────────────────────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/api/health",
+    operation_id = "ping",
+    responses(
+        (status = 200, description = "Server is alive"),
+    ),
+    tag = "health"
+)]
+pub async fn ping_handler() -> impl IntoResponse {
+    Json(json!({ "ok": true }))
+}
 
 // ── GET /api/rebuy/health/local ───────────────────────────────────────────────
 
@@ -16,7 +32,7 @@ use crate::serve::middleware::CorrelationId;
     operation_id = "getHealth",
     responses(
         (status = 200, description = "All service health checks", body = HealthResponse),
-        (status = 503, description = "rebuy-cli MCP unavailable", body = super::ErrorResponse),
+        (status = 503, description = "rebuy-cli MCP unavailable", body = ErrorResponse),
     ),
     tag = "health"
 )]

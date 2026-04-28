@@ -9,7 +9,8 @@ use serde::Deserialize;
 use serde_json::json;
 use utoipa::ToSchema;
 
-use super::{LogsResponse, err};
+use super::prelude::*;
+use super::LogsResponse;
 use super::docker::{find_compose_file, parse_compose_ps, run_docker};
 
 // ── GET /api/logs/services ────────────────────────────────────────────────────
@@ -20,7 +21,7 @@ use super::docker::{find_compose_file, parse_compose_ps, run_docker};
     operation_id = "getLogServices",
     responses(
         (status = 200, description = "All Docker projects and their service states", body = super::LogServicesResponse),
-        (status = 404, description = "Rebuy root not found", body = super::ErrorResponse),
+        (status = 404, description = "Rebuy root not found", body = ErrorResponse),
     ),
     tag = "logs"
 )]
@@ -110,8 +111,8 @@ pub struct LogsQuery {
     ),
     responses(
         (status = 200, description = "Log output", body = LogsResponse),
-        (status = 404, description = "No compose file found", body = super::ErrorResponse),
-        (status = 500, description = "Docker error", body = super::ErrorResponse),
+        (status = 404, description = "No compose file found", body = ErrorResponse),
+        (status = 500, description = "Docker error", body = ErrorResponse),
     ),
     tag = "logs"
 )]

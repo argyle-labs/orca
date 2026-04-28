@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, ToSchema)]
 pub struct TreeNode {
     pub name: String,
     pub path: String,
@@ -13,7 +14,7 @@ pub struct TreeNode {
     pub children: Option<Vec<TreeNode>>,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum NodeType {
     File,

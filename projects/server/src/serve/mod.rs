@@ -1,5 +1,5 @@
 pub mod api;
-mod mcp_client;
+pub mod mcp_client;
 pub mod middleware;
 mod openapi;
 pub mod tree;
@@ -13,8 +13,8 @@ use axum::Router;
 use axum::routing::{get, post};
 use tower_http::cors::{Any, CorsLayer};
 
-pub async fn run(dev: bool, port: u16) -> Result<()> {
-    let app = build_router(dev);
+pub async fn run(dev: bool, port: u16, mcp_servers: Vec<brain_utils::config::McpServerEntry>) -> Result<()> {
+    let app = build_router(dev, mcp_servers);
 
     let addr: SocketAddr = if dev {
         format!("127.0.0.1:{port}").parse()?
@@ -64,7 +64,7 @@ async fn static_handler(uri: axum::http::Uri) -> axum::response::Response {
     }
 }
 
-fn build_router(dev: bool) -> Router {
+fn build_router(dev: bool, mcp_servers: Vec<brain_utils::config::McpServerEntry>) -> Router {
     use std::sync::Arc;
 
     let cors = CorsLayer::new()
@@ -72,9 +72,10 @@ fn build_router(dev: bool) -> Router {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let mcp_pool = Arc::new(mcp_client::McpPool::new());
+    let mcp_pool = Arc::new(mcp_client::McpPool::new(mcp_servers));
 
     let api = Router::new()
+        .route("/api/health", get(api::ping_handler))
         // brain's own spec — separate from the external registry
         .route("/api/openapi.json", get(openapi::openapi_handler))
         .route(
@@ -108,6 +109,12 @@ fn build_router(dev: bool) -> Router {
         .route("/api/logs/services", get(api::log_services_handler))
         .route("/api/logs", get(api::log_fetch_handler))
         .route("/api/tests/run", get(api::tests_run_handler))
+        .route("/api/bitbucket/repos", get(api::repos_handler))
+        .route("/api/bitbucket/prs", get(api::prs_handler))
+        .route("/api/jira/issues", get(api::jira_issues_handler))
+        .route("/api/jira/issues/:key/transitions", get(api::jira_get_transitions_handler))
+        .route("/api/jira/issues/:key/transitions", post(api::jira_transition_handler))
+        .route("/api/confluence/search", get(api::confluence_search_handler))
         .with_state(mcp_pool)
         .layer(axum::middleware::from_fn(middleware::log_requests))
         .layer(cors);

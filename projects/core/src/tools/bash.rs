@@ -29,22 +29,19 @@ impl BashPermissions {
     }
 }
 
-/// Execute a bash command, prompting for permission if not pre-approved.
-/// Returns the command's stdout+stderr combined.
-pub fn run_bash(
+/// Execute a bash command asynchronously.
+/// Permission prompt (if needed) is sync and brief; process wait runs on the blocking thread pool.
+pub async fn run_bash(
     command: &str,
     permissions: &mut BashPermissions,
     working_dir: Option<&str>,
     output: &OutputSink,
 ) -> Result<String> {
     if !permissions.is_allowed(command) {
-        // Interactive permission prompt (classic/readline mode only)
         let prefix = command.split_whitespace().next().unwrap_or(command);
         sink_writeln(output, &format!("\n{}", "⚡ bash command:".yellow()));
         sink_writeln(output, &format!("  {}", command.white()));
 
-        // In auto-approve mode we already returned true above,
-        // so this branch only runs in classic mode where stdin works.
         println!("  {}  allow", "[1]".dimmed());
         println!(
             "  {}  always allow '{}' this session",
@@ -69,44 +66,44 @@ pub fn run_bash(
                         .to_string(),
                 );
             }
-            _ => {
-                bail!("command denied by user");
-            }
+            _ => bail!("command denied by user"),
         }
     } else if permissions.auto_approve {
-        // TUI mode: show what's running without blocking
         sink_writeln(output, &format!("{} {}", "⚡".yellow(), command.dimmed()));
     }
 
-    let mut cmd = Command::new("bash");
-    cmd.arg("-c").arg(command);
+    let command = command.to_string();
+    let working_dir = working_dir.map(str::to_string);
 
-    if let Some(dir) = working_dir {
-        cmd.current_dir(dir);
-    }
-
-    let mut child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-
-    let timeout = Duration::from_secs(120);
-    let start = std::time::Instant::now();
-
-    loop {
-        match child.try_wait()? {
-            Some(_status) => break,
-            None => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    bail!("command timed out after {}s", timeout.as_secs());
-                }
-                std::thread::sleep(Duration::from_millis(100));
+    let output_result =
+        tokio::task::spawn_blocking(move || -> Result<std::process::Output> {
+            let mut cmd = Command::new("bash");
+            cmd.arg("-c").arg(&command);
+            if let Some(dir) = &working_dir {
+                cmd.current_dir(dir);
             }
-        }
-    }
+            let mut child = cmd
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()?;
 
-    let output_result = child.wait_with_output()?;
+            let timeout = Duration::from_secs(120);
+            let start = std::time::Instant::now();
+            loop {
+                match child.try_wait()? {
+                    Some(_) => break,
+                    None => {
+                        if start.elapsed() > timeout {
+                            let _ = child.kill();
+                            bail!("command timed out after {}s", timeout.as_secs());
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+            }
+            Ok(child.wait_with_output()?)
+        })
+        .await??;
 
     let stdout = String::from_utf8_lossy(&output_result.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output_result.stderr).to_string();
@@ -119,7 +116,6 @@ pub fn run_bash(
         combined.push_str(&stderr);
     }
 
-    // Cap output to avoid blowing up context (char-safe truncation)
     let max_chars = 10_000;
     let char_count = combined.chars().count();
     if char_count > max_chars {

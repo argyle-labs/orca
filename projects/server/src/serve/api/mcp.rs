@@ -5,7 +5,8 @@ use axum::{
 };
 use serde_json::json;
 
-use super::{McpRunRequest, McpState, err};
+use super::prelude::*;
+use super::McpRunRequest;
 use crate::serve::middleware::CorrelationId;
 
 // ── GET /api/mcp/tools ────────────────────────────────────────────────────────
@@ -33,8 +34,8 @@ pub async fn mcp_tools_handler(State(pool): State<McpState>) -> impl IntoRespons
     request_body = McpRunRequest,
     responses(
         (status = 200, description = "Tool result", body = McpRunResponse),
-        (status = 404, description = "Unknown MCP server", body = super::ErrorResponse),
-        (status = 500, description = "Tool execution error", body = super::ErrorResponse),
+        (status = 404, description = "Unknown MCP server", body = ErrorResponse),
+        (status = 500, description = "Tool execution error", body = ErrorResponse),
     ),
     tag = "mcp"
 )]
@@ -49,7 +50,13 @@ pub async fn mcp_run_handler(
             let args = body.arguments.unwrap_or(json!({}));
             match client.call_tool(&body.name, args, &cid).await {
                 Ok(result) => Json(result).into_response(),
-                Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("MCP server closed") {
+                        pool.evict(&body.server).await;
+                    }
+                    err(StatusCode::INTERNAL_SERVER_ERROR, &msg)
+                }
             }
         }
     }

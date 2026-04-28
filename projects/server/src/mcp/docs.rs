@@ -1,0 +1,319 @@
+use anyhow::Result;
+use brain_utils::config::Config;
+use serde_json::{Value, json};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+use crate::serve::tree::{TreeNode, build_tree_raw};
+
+pub struct DocRoot {
+    pub name: &'static str,
+    pub path: PathBuf,
+    pub ignored: HashSet<&'static str>,
+}
+
+pub fn doc_roots(config: &Config) -> Vec<DocRoot> {
+    let home = dirs::home_dir().unwrap_or_default();
+    vec![
+        DocRoot {
+            name: "rebuy",
+            path: std::env::var("REBUY_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| home.join("code/rebuy")),
+            ignored: [
+                "node_modules",
+                ".git",
+                ".next",
+                "dist",
+                "build",
+                "vendor",
+                "www",
+                "docs",
+            ]
+            .into_iter()
+            .collect(),
+        },
+        DocRoot {
+            name: "brain",
+            path: config.brain_vault.clone(),
+            ignored: [
+                ".git",
+                "logs",
+                "memory",
+                "plugins",
+                ".trash",
+                "node_modules",
+            ]
+            .into_iter()
+            .collect(),
+        },
+    ]
+}
+
+pub fn build_doc_tree(dir: &Path, root_dir: &Path, ignored: &HashSet<&str>) -> Vec<Value> {
+    let ignored_owned: HashSet<String> = ignored.iter().map(|s| s.to_string()).collect();
+    tree_nodes_to_values(build_tree_raw(dir, root_dir, &ignored_owned))
+}
+
+fn tree_nodes_to_values(nodes: Vec<TreeNode>) -> Vec<Value> {
+    nodes
+        .into_iter()
+        .filter_map(|n| serde_json::to_value(n).ok())
+        .collect()
+}
+
+pub fn count_doc_files(nodes: &[Value]) -> usize {
+    nodes
+        .iter()
+        .map(|n| {
+            if n["type"] == "file" {
+                1
+            } else {
+                n["children"]
+                    .as_array()
+                    .map(|c| count_doc_files(c))
+                    .unwrap_or(0)
+            }
+        })
+        .sum()
+}
+
+fn find_single_doc_file(nodes: &[Value]) -> Option<Value> {
+    for node in nodes {
+        if node["type"] == "file" {
+            return Some(node.clone());
+        }
+        if let Some(children) = node["children"].as_array()
+            && let Some(found) = find_single_doc_file(children)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+pub fn compact_doc_tree(nodes: Vec<Value>) -> Vec<Value> {
+    let mut result = vec![];
+    for node in nodes {
+        if node["type"] == "file" {
+            result.push(node);
+            continue;
+        }
+
+        let children_raw: Vec<Value> = node["children"].as_array().cloned().unwrap_or_default();
+        let children = compact_doc_tree(children_raw);
+
+        if count_doc_files(&children) == 1
+            && let Some(file) = find_single_doc_file(&children)
+        {
+            result.push(file);
+            continue;
+        }
+
+        if children.len() == 1 && children[0]["type"] == "dir" {
+            let child = &children[0];
+            let merged = format!(
+                "{}/{}",
+                node["name"].as_str().unwrap_or(""),
+                child["name"].as_str().unwrap_or("")
+            );
+            let mut n = child.clone();
+            n["name"] = json!(merged);
+            result.push(n);
+            continue;
+        }
+
+        let mut n = node.clone();
+        n["children"] = json!(children);
+        result.push(n);
+    }
+    result
+}
+
+pub fn collect_all_doc_files(nodes: &[Value]) -> Vec<Value> {
+    let mut files = vec![];
+    for node in nodes {
+        if node["type"] == "file" {
+            files.push(node.clone());
+        } else if let Some(children) = node["children"].as_array() {
+            files.extend(collect_all_doc_files(children));
+        }
+    }
+    files
+}
+
+/// Resolve `rel` relative to `root`, verifying the result stays within `root`.
+pub fn resolve_within_root(root: &Path, rel: &str) -> Result<PathBuf> {
+    let candidate = root.join(rel);
+    let canonical = candidate
+        .canonicalize()
+        .unwrap_or_else(|_| candidate.clone());
+    let root_canonical = root
+        .canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf());
+    if !canonical.starts_with(&root_canonical) {
+        anyhow::bail!("path escapes root: {rel}");
+    }
+    Ok(canonical)
+}
+
+pub fn resolve_doc_file(root_dir: &Path, doc_path: &str) -> Option<PathBuf> {
+    for ext in &[".md", ".mdx", ""] {
+        let rel = format!("{doc_path}{ext}");
+        if let Ok(full) = resolve_within_root(root_dir, &rel) {
+            if full.is_file() {
+                return Some(full);
+            }
+        }
+    }
+    None
+}
+
+// ── Tool implementations ──────────────────────────────────────────────────────
+
+pub fn list_roots(config: &Config) -> Result<String> {
+    let roots = doc_roots(config);
+    let mut entries: Vec<Value> = roots
+        .iter()
+        .map(|r| {
+            let exists = r.path.exists();
+            let docs = if exists {
+                count_doc_files(&build_doc_tree(&r.path, &r.path, &r.ignored))
+            } else {
+                0
+            };
+            json!({ "root": r.name, "path": r.path.to_string_lossy(), "exists": exists, "docs": docs })
+        })
+        .collect();
+    entries.push(json!({
+        "root": "docs",
+        "path": "(embedded in binary)",
+        "exists": true,
+        "docs": brain_docs::file_count()
+    }));
+    Ok(serde_json::to_string_pretty(&entries)?)
+}
+
+pub fn get_tree(args: &Value, config: &Config) -> Result<String> {
+    let root_name = args["root"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("root is required"))?;
+
+    if root_name == "docs" {
+        return Ok(serde_json::to_string_pretty(&brain_docs::tree())?);
+    }
+
+    let sub_path = args["path"].as_str();
+    let roots = doc_roots(config);
+    let root = roots
+        .iter()
+        .find(|r| r.name == root_name)
+        .ok_or_else(|| anyhow::anyhow!("unknown root: {root_name}"))?;
+
+    let dir = match sub_path {
+        Some(p) => resolve_within_root(&root.path, p)?,
+        None => root.path.clone(),
+    };
+    let compact = compact_doc_tree(build_doc_tree(&dir, &root.path, &root.ignored));
+    Ok(serde_json::to_string_pretty(&compact)?)
+}
+
+pub fn read_doc(args: &Value, config: &Config) -> Result<String> {
+    let root_name = args["root"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("root is required"))?;
+    let doc_path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("path is required"))?;
+
+    if root_name == "docs" {
+        return brain_docs::read(doc_path)
+            .ok_or_else(|| anyhow::anyhow!("not found: docs/{doc_path}"));
+    }
+
+    let roots = doc_roots(config);
+    let root = roots
+        .iter()
+        .find(|r| r.name == root_name)
+        .ok_or_else(|| anyhow::anyhow!("unknown root: {root_name}"))?;
+
+    let full = resolve_doc_file(&root.path, doc_path)
+        .ok_or_else(|| anyhow::anyhow!("not found: {root_name}/{doc_path}"))?;
+
+    Ok(std::fs::read_to_string(full)?)
+}
+
+pub fn search_docs(args: &Value, config: &Config) -> Result<String> {
+    let query = args["query"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("query is required"))?;
+    let filter = args["root"].as_str().unwrap_or("all");
+
+    let all_roots = doc_roots(config);
+    let roots: Vec<&DocRoot> = all_roots
+        .iter()
+        .filter(|r| filter == "all" || r.name == filter)
+        .collect();
+
+    let query_lower = query.to_lowercase();
+    let mut results: Vec<String> = vec![];
+
+    for root in roots {
+        if !root.path.exists() {
+            continue;
+        }
+        let files =
+            collect_all_doc_files(&build_doc_tree(&root.path, &root.path, &root.ignored));
+        for file in files {
+            let rel = file["path"].as_str().unwrap_or("");
+            let full = root.path.join(rel);
+            let Ok(content) = std::fs::read_to_string(&full) else {
+                continue;
+            };
+            let matches: Vec<String> = content
+                .lines()
+                .enumerate()
+                .filter(|(_, l)| l.to_lowercase().contains(&query_lower))
+                .take(5)
+                .map(|(i, l)| format!("L{}: {}", i + 1, l.trim()))
+                .collect();
+            if !matches.is_empty() {
+                results.push(format!("## {}/{}\n{}", root.name, rel, matches.join("\n")));
+            }
+        }
+    }
+
+    if filter == "all" || filter == "docs" {
+        for (path, matches) in brain_docs::search(query) {
+            results.push(format!("## docs/{}\n{}", path, matches.join("\n")));
+        }
+    }
+
+    if results.is_empty() {
+        Ok(format!("No results for \"{query}\""))
+    } else {
+        Ok(results.join("\n\n"))
+    }
+}
+
+pub fn list_commands(config: &Config) -> Result<String> {
+    let dir = config.brain_vault.join("ai/claude/commands");
+    if !dir.exists() {
+        return Ok("Commands dir not found.".into());
+    }
+    let mut files: Vec<_> = std::fs::read_dir(&dir)?
+        .flatten()
+        .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
+        .collect();
+    files.sort_by_key(|e| e.file_name());
+    let names: Vec<String> = files
+        .iter()
+        .map(|e| {
+            format!(
+                "/{}",
+                e.path().file_stem().unwrap_or_default().to_string_lossy()
+            )
+        })
+        .collect();
+    Ok(names.join("\n"))
+}

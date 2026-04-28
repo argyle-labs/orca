@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use utoipa::ToSchema;
 
-use super::err;
+use super::prelude::*;
 
 // ── External spec registry ────────────────────────────────────────────────────
 // Brain's own spec lives at /api/openapi.json and /api/openapi/public.json.
@@ -117,9 +117,9 @@ pub async fn specs_list_handler() -> Response {
     ),
     responses(
         (status = 200, description = "Full OpenAPI spec for the repo"),
-        (status = 400, description = "Invalid repo name", body = super::ErrorResponse),
-        (status = 404, description = "Spec not found", body = super::ErrorResponse),
-        (status = 500, description = "Invalid spec JSON", body = super::ErrorResponse),
+        (status = 400, description = "Invalid repo name", body = ErrorResponse),
+        (status = 404, description = "Spec not found", body = ErrorResponse),
+        (status = 500, description = "Invalid spec JSON", body = ErrorResponse),
     ),
     tag = "specs"
 )]
@@ -151,9 +151,9 @@ pub async fn specs_get_handler(
     ),
     responses(
         (status = 200, description = "Public-tagged operations only"),
-        (status = 400, description = "Invalid repo name", body = super::ErrorResponse),
-        (status = 404, description = "Spec not found", body = super::ErrorResponse),
-        (status = 500, description = "Invalid spec JSON", body = super::ErrorResponse),
+        (status = 400, description = "Invalid repo name", body = ErrorResponse),
+        (status = 404, description = "Spec not found", body = ErrorResponse),
+        (status = 500, description = "Invalid spec JSON", body = ErrorResponse),
     ),
     tag = "specs"
 )]
@@ -184,8 +184,8 @@ pub async fn specs_get_public_handler(
     ),
     responses(
         (status = 200, description = "GraphQL SDL schema for the repo", content_type = "text/plain"),
-        (status = 400, description = "Invalid repo name", body = super::ErrorResponse),
-        (status = 404, description = "Schema not found", body = super::ErrorResponse),
+        (status = 400, description = "Invalid repo name", body = ErrorResponse),
+        (status = 404, description = "Schema not found", body = ErrorResponse),
     ),
     tag = "specs"
 )]

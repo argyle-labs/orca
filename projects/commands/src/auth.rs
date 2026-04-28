@@ -1,9 +1,6 @@
 use anyhow::Result;
 use brain_utils::auth;
-use brain_core::backend; // NOTE: requires brain crate
 use brain_utils::config::Config;
-use brain_utils::types::Message;
-// NOTE: requires brain crate
 use colored::Colorize;
 
 pub fn cmd_login(config: &Config) -> Result<()> {
@@ -92,31 +89,6 @@ pub fn cmd_auth(config: &Config) -> Result<()> {
         );
     }
 
-    Ok(())
-}
-
-pub async fn cmd_escalate(config: &Config, question: &str, project: Option<&str>) -> Result<()> {
-    use backend::ClaudeBackend;
-    use backend::ModelBackend;
-    let api_key = config
-        .anthropic_api_key
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("no API key — run `brain login`"))?;
-
-    let system = if let Some(_p) = project {
-        // TODO: crate::context stays in server for now
-        String::new()
-    } else {
-        String::new()
-    };
-
-    let claude = ClaudeBackend::new(api_key, "claude-sonnet-4-6");
-    let messages = vec![Message::user(question)];
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let output = backend::stdout_sink();
-    claude
-        .chat(&messages, &[], &system, cancel, &output)
-        .await?;
     Ok(())
 }
 

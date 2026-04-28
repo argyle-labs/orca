@@ -1,3 +1,9 @@
+//! Brain jobs — background agent execution.
+//!
+//! `JobManager` spawns independent Tokio tasks that run a full chat+tool loop
+//! without blocking the foreground session. Results are buffered in memory and
+//! retrieved via `get_output`. Cancellation is handled via `CancellationToken`.
+
 use brain_core::backend::{ModelBackend, OutputSink, buffer_sink, sink_write};
 use brain_core::tools::ToolRegistry;
 use brain_utils::config::{Config, Model};
@@ -211,8 +217,7 @@ async fn run_background_chat(
                 &format!("{}\n", format!("  ⚙ {} {}", tc.name, tc.input).dimmed()),
             );
 
-            let mut r = tools.execute(&tc.name, &tc.input);
-            r.tool_use_id = tc.id.clone();
+            let r = tools.execute(tc.id.clone(), &tc.name, &tc.input).await;
 
             let preview = truncate_preview(&r.content, 200);
             if r.is_error {

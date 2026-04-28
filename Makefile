@@ -18,7 +18,7 @@ deploy: build
 
 # Build debug binary and install to ~/.local/bin/brain (dev workflow, no frontend embed)
 install-dev:
-	cargo build --manifest-path projects/server/Cargo.toml 2>&1 && cp projects/server/target/debug/brain $(INSTALL_PATH) && echo "installed → $(INSTALL_PATH)"
+	cargo build --manifest-path projects/server/Cargo.toml 2>&1 && cp target/debug/brain $(INSTALL_PATH) && echo "installed → $(INSTALL_PATH)"
 
 # Watch for changes and rebuild+install on save (requires cargo-watch)
 # Install with: cargo install cargo-watch
@@ -66,10 +66,12 @@ audit:
 	@cargo audit --manifest-path projects/server/Cargo.toml
 
 lint:
+	@echo "→ prettier check..."
+	@cd projects/frontend && npx prettier --check src
 	@echo "→ eslint..."
 	@cd projects/frontend && npx eslint src --ext .ts,.tsx
 	@echo "→ clippy..."
-	@cargo clippy --manifest-path projects/server/Cargo.toml -- -D warnings
+	@cargo clippy --workspace -- -D warnings
 
 format:
 	@echo "→ prettier..."

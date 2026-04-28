@@ -1,4 +1,4 @@
-use super::{ModelBackend, OutputSink, sink_write, sink_writeln};
+use super::{ModelBackend, OutputSink, serialize, sink_write, sink_writeln};
 use brain_utils::types::{BackendResponse, Message, StopReason, ToolCall, ToolDef};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -70,7 +70,7 @@ impl ModelBackend for LMStudioBackend {
         cancel: CancellationToken,
         output: &OutputSink,
     ) -> Result<BackendResponse> {
-        let oai_messages = serialize_messages(messages, system);
+        let oai_messages = serialize::openai_messages(messages, system);
 
         let mut body = json!({
             "model": self.model,
@@ -80,7 +80,7 @@ impl ModelBackend for LMStudioBackend {
         });
 
         if !tools.is_empty() {
-            body["tools"] = serialize_tools(tools);
+            body["tools"] = serialize::openai_tools(tools);
             body["tool_choice"] = json!("auto");
         }
 
@@ -243,73 +243,3 @@ async fn parse_lmstudio_stream(
     Ok(result)
 }
 
-fn serialize_messages(messages: &[Message], system: &str) -> Value {
-    let mut out = vec![];
-
-    if !system.is_empty() {
-        out.push(json!({ "role": "system", "content": system }));
-    }
-
-    for msg in messages {
-        match msg {
-            Message::User { content } => {
-                out.push(json!({ "role": "user", "content": content }));
-            }
-            Message::Assistant { text, tool_calls } => {
-                if tool_calls.is_empty() {
-                    out.push(json!({
-                        "role": "assistant",
-                        "content": text.as_deref().unwrap_or(""),
-                    }));
-                } else {
-                    let tc_list: Vec<Value> = tool_calls
-                        .iter()
-                        .map(|tc| {
-                            json!({
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.name,
-                                    "arguments": serde_json::to_string(&tc.input)
-                                        .unwrap_or_default(),
-                                },
-                            })
-                        })
-                        .collect();
-                    out.push(json!({
-                        "role": "assistant",
-                        "content": text.as_deref().unwrap_or(""),
-                        "tool_calls": tc_list,
-                    }));
-                }
-            }
-            Message::ToolResults(results) => {
-                for r in results {
-                    out.push(json!({
-                        "role": "tool",
-                        "tool_call_id": r.tool_use_id,
-                        "content": r.content,
-                    }));
-                }
-            }
-        }
-    }
-
-    Value::Array(out)
-}
-
-fn serialize_tools(tools: &[ToolDef]) -> Value {
-    tools
-        .iter()
-        .map(|t| {
-            json!({
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.input_schema,
-                },
-            })
-        })
-        .collect()
-}

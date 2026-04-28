@@ -61,4 +61,12 @@ fn main() {
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=BRAIN_AGENTS_DIR");
+
+    // Ensure frontend/dist exists so RustEmbed doesn't fail before the frontend
+    // is built. Dev mode (--dev flag) skips the static handler at runtime, so
+    // this stub is never served. Release builds run `make build` which populates
+    // dist/ with real assets before the final cargo build.
+    let manifest = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let dist = Path::new(&manifest).join("../frontend/dist");
+    fs::create_dir_all(&dist).expect("failed to create frontend/dist stub");
 }

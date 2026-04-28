@@ -57,30 +57,18 @@ impl SessionLog {
     }
 
     /// Flag the last appended message as important.
+    /// Appends a tombstone record rather than rewriting the file.
     pub fn flag_last(&mut self, note: &str) -> Result<()> {
-        let Some(id) = &self.last_id else {
+        let Some(id) = self.last_id.clone() else {
             return Ok(());
         };
-
-        // Read the file, find the record by id, update it in-place
-        let content = std::fs::read_to_string(&self.path)?;
-        let updated: String = content
-            .lines()
-            .map(|line| {
-                if let Ok(mut record) = serde_json::from_str::<serde_json::Value>(line)
-                    && record["id"].as_str() == Some(id.as_str())
-                {
-                    record["important"] = json!(true);
-                    record["note"] = json!(note);
-                    return record.to_string();
-                }
-                line.to_string()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        std::fs::write(&self.path, updated + "\n")?;
-        Ok(())
+        self.write_record(json!({
+            "type": "flag",
+            "ref": id,
+            "note": note,
+            "important": true,
+            "timestamp": Utc::now().to_rfc3339(),
+        }))
     }
 
     pub fn session_id(&self) -> &str {
@@ -113,12 +101,35 @@ fn session_files(logs_dir: &Path) -> Result<Vec<std::fs::DirEntry>> {
     Ok(files)
 }
 
-/// Parse all JSONL records from a file, skipping malformed lines.
+/// Parse all JSONL records from a file, resolving flag tombstones.
 fn read_records(path: &Path) -> Vec<serde_json::Value> {
-    std::fs::read_to_string(path)
+    let raw: Vec<serde_json::Value> = std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+
+    // Collect flags: ref_id → note
+    let mut flags: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for r in &raw {
+        if r["type"].as_str() == Some("flag") {
+            if let (Some(ref_id), Some(note)) = (r["ref"].as_str(), r["note"].as_str()) {
+                flags.insert(ref_id.to_string(), note.to_string());
+            }
+        }
+    }
+
+    raw.into_iter()
+        .filter(|r| r["type"].as_str() != Some("flag"))
+        .map(|mut r| {
+            if let Some(id) = r["id"].as_str().map(str::to_string) {
+                if let Some(note) = flags.get(&id) {
+                    r["important"] = json!(true);
+                    r["note"] = json!(note);
+                }
+            }
+            r
+        })
         .collect()
 }
 

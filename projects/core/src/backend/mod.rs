@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 pub mod claude;
 pub mod lmstudio;
+pub mod serialize;
 
 pub use claude::ClaudeBackend;
 pub use lmstudio::LMStudioBackend;

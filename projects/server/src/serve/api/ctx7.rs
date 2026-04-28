@@ -7,7 +7,8 @@ use serde::Deserialize;
 use serde_json::json;
 use utoipa::ToSchema;
 
-use super::{Ctx7Response, McpState, err};
+use super::prelude::*;
+use super::Ctx7Response;
 use crate::serve::middleware::CorrelationId;
 
 // ── GET /api/ctx7 ─────────────────────────────────────────────────────────────
@@ -28,9 +29,9 @@ pub struct Ctx7Query {
     ),
     responses(
         (status = 200, description = "Library documentation", body = Ctx7Response),
-        (status = 400, description = "Missing query", body = super::ErrorResponse),
-        (status = 404, description = "Library not found", body = super::ErrorResponse),
-        (status = 503, description = "context7 not available", body = super::ErrorResponse),
+        (status = 400, description = "Missing query", body = ErrorResponse),
+        (status = 404, description = "Library not found", body = ErrorResponse),
+        (status = 503, description = "context7 not available", body = ErrorResponse),
     ),
     tag = "library"
 )]

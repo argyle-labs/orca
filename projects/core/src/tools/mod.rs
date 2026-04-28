@@ -126,23 +126,23 @@ impl ToolRegistry {
     }
 
     /// Dispatch a tool call and return a ToolResult.
-    pub fn execute(&mut self, name: &str, input: &Value) -> ToolResult {
-        let result = self.run(name, input);
+    pub async fn execute(&mut self, tool_use_id: String, name: &str, input: &Value) -> ToolResult {
+        let result = self.run(name, input).await;
         match result {
             Ok(content) => ToolResult {
-                tool_use_id: String::new(),
+                tool_use_id,
                 content,
                 is_error: false,
             },
             Err(e) => ToolResult {
-                tool_use_id: String::new(),
+                tool_use_id,
                 content: format!("Error: {e}"),
                 is_error: true,
             },
         }
     }
 
-    fn run(&mut self, name: &str, input: &Value) -> Result<String> {
+    async fn run(&mut self, name: &str, input: &Value) -> Result<String> {
         match name {
             "read_file" => {
                 let path = str_field(input, "path")?;
@@ -178,6 +178,7 @@ impl ToolRegistry {
                     self.working_dir.as_deref(),
                     &self.output,
                 )
+                .await
             }
             _ => anyhow::bail!("unknown tool: {name}"),
         }
