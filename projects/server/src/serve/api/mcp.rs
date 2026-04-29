@@ -6,7 +6,7 @@ use axum::{
 use serde_json::json;
 
 use super::prelude::*;
-use super::McpRunRequest;
+use super::{McpRunRequest, McpRunResponse, McpToolInfo};
 use crate::serve::middleware::CorrelationId;
 
 // ── GET /api/mcp/tools ────────────────────────────────────────────────────────

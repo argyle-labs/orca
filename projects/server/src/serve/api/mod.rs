@@ -200,6 +200,7 @@ pub(super) mod prelude {
 
 pub mod atlassian;
 pub mod download;
+pub mod pdf;
 pub mod bitbucket;
 pub mod ctx7;
 pub mod docker;
@@ -215,6 +216,7 @@ pub mod tests_handler;
 
 pub use atlassian::*;
 pub use download::*;
+pub use pdf::*;
 pub use bitbucket::*;
 pub use ctx7::*;
 pub use docker::*;
