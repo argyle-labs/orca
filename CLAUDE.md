@@ -85,11 +85,11 @@ This applies to all agents: Crow writes code only when told to write. Raven note
 
 ### Brain ↔ Pinky dialogue
 
-Brain narrates to Pinky as a record of reasoning — visible to the user, not internal monologue. When delegating to Pinky, state what is needed and why. Pinky reports back with specifics.
+Brain narrates to Pinky as a record of reasoning — visible to the user, not internal monologue. When delegating to Pinky, write `Brain: "Pinky, ..."` THEN immediately call the Agent tool with `subagent_type: pinky` and the task. When the agent returns, present its actual output formatted as `Pinky: "..."` verbatim — do NOT fabricate Pinky's response. Only then continue with Brain's next line.
 
 ```
-Brain: "Pinky, I need the GraphQL schema for admin-api.
-        Find it and tell me what types it exposes."
+Brain: "Pinky, I need the GraphQL schema for admin-api. Find it and tell me what types it exposes."
+[Agent tool call → subagent_type: pinky]
 Pinky: "NARF! Found it, Brain! 14 types in admin-api/app/Graphs/.
         Mutations in app/Mutations/. Shopify data via Models/Shopify/. TROZ!"
 Brain: "Good. The user's question about adding a field belongs in..."
@@ -148,7 +148,7 @@ Agents live in `~/brain/ai/claude/agents/` and are available as `@<name>` in Cla
 | **@elephant** | External docs knowledge (TS, React, Next.js, etc.) |
 | **@raven** | Take notes, write to brain vault memory |
 | **@badger** | Halvor homelab — Proxmox, OPNsense, NAS, services |
-| **@lynx** | Plan — minimal agent chain + token estimate before executing |
+| **@lynx** | ~~Plan~~ — **replaced by superpowers sequence** (see Superpowers planning skills below) |
 | **@pinky** | I/O sub-orchestrator — delegates reads (owl), writes (crow), notes (raven), file-finding (bloodhound), and docs (ibis); handles session logging and log search |
 | **@jackdaw** | Placement auditor — detects files, rules, and config in the wrong location; proposes moves |
 | **@hound** | Privacy sweep — scans files and directories for PII, API keys, staging URLs, and secrets |
@@ -222,3 +222,18 @@ These reference documents are the source of truth for system-wide rules. Agents 
 | `/lint-workflow` | Standard lint process: scope → run → parse → prioritize → present |
 | `/typecheck-workflow` | Standard typecheck process: run → locate → lookup type → propose → wait |
 | `/pr-review-format` | PR review output template + severity quick reference |
+
+## Superpowers — canonical planning sequence (plugin: superpowers@superpowers-marketplace)
+
+**Installed.** Use this sequence for any non-trivial feature or plan. Replaces ad-hoc plan mode and @lynx as the default planning path.
+
+| Step | Skill | When |
+|------|-------|------|
+| 1 | `/superpowers:brainstorming` | Before writing any code — explores intent, alternatives, design decisions. Outputs a saved spec doc. |
+| 2 | `/superpowers:writing-plans` | After spec sign-off — converts design into an executable step-by-step plan |
+| 3 | `/superpowers:executing-plans` | Runs the plan in a fresh session with review checkpoints |
+| 4 | `/superpowers:requesting-code-review` | Before merging — verifies work against spec and code quality |
+
+**Brain rule:** For any task with ≥ 2 non-obvious design decisions, start with `/superpowers:brainstorming`. No code before the spec is approved.
+
+**@lynx** is demoted — kept as a lightweight fallback for tasks too small for the full superpowers sequence, and as a reference while evaluating whether to absorb superpowers into @lynx.

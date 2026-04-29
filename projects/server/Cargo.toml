@@ -65,6 +65,8 @@ http-body-util = "0.1"
 mime_guess = "2"
 rust-embed = "8"
 serde_yaml = "0.9"
+pulldown-cmark = "0.12"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # OpenAPI
 utoipa = { version = "4", features = ["axum_extras"] }
