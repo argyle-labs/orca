@@ -65,6 +65,8 @@ pub fn get_ignored(root_name: &str) -> HashSet<String> {
             "plugins",
             ".trash",
             "node_modules",
+            ".obsidian",
+            "templates",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -237,6 +239,17 @@ fn compact_tree(nodes: Vec<TreeNode>) -> Vec<TreeNode> {
     result
 }
 
+/// Returns the tree without compaction — directory structure matches the filesystem exactly.
+pub fn get_root_tree_raw(root_name: &str) -> Vec<TreeNode> {
+    let roots = get_roots();
+    let Some(root_dir) = roots.get(root_name) else {
+        return vec![];
+    };
+    let ignored = get_ignored(root_name);
+    let root_dir = root_dir.canonicalize().unwrap_or_else(|_| root_dir.clone());
+    build_tree_raw(&root_dir, &root_dir, &ignored)
+}
+
 pub fn get_root_tree(root_name: &str) -> Vec<TreeNode> {
     let roots = get_roots();
     let Some(root_dir) = roots.get(root_name) else {
@@ -376,5 +389,18 @@ mod tests {
         let files = collect_all_files(&raw);
         assert_eq!(files.len(), 2);
         assert!(files.iter().all(|f| f.node_type == NodeType::File));
+    }
+
+    #[test]
+    fn raw_tree_preserves_single_file_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = make_dir(tmp.path(), "guides");
+        make_file(&sub, "intro.md", "# Intro");
+        let ignored = HashSet::new();
+        let raw = build_tree_raw(tmp.path(), tmp.path(), &ignored);
+        // raw should keep guides/ as a dir, not collapse it
+        assert_eq!(raw.len(), 1);
+        assert_eq!(raw[0].node_type, NodeType::Dir);
+        assert_eq!(raw[0].name, "guides");
     }
 }
