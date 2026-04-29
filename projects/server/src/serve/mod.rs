@@ -30,6 +30,23 @@ pub async fn run(dev: bool, port: u16, mcp_servers: Vec<brain_utils::config::Mcp
     })?;
     println!("[brain] listening on http://localhost:{port}");
 
+    // Register as the active dev process so the parked daemon won't auto-reclaim.
+    // Use BRAIN_DEV_PARENT_PID (the shell script PID) so the registration stays
+    // valid across cargo-watch rebuilds — the shell script outlives each server instance.
+    if dev {
+        if let Ok(Some(s)) = state::read() {
+            let active_pid = std::env::var("BRAIN_DEV_PARENT_PID")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(std::process::id);
+            let _ = state::write(&DaemonState {
+                mode: DaemonMode::Dev,
+                active_pid,
+                ..s
+            });
+        }
+    }
+
     // Non-blocking update check — prints a notice if a newer version is available.
     tokio::spawn(brain_commands::startup_update_check());
 
