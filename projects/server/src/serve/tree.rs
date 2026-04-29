@@ -11,6 +11,7 @@ pub struct TreeNode {
     #[serde(rename = "type")]
     pub node_type: NodeType,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(no_recursion)]
     pub children: Option<Vec<TreeNode>>,
 }
 
