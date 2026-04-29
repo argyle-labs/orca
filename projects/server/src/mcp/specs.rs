@@ -70,3 +70,18 @@ pub fn get_rebuy_graphql_schema(args: &Value) -> Result<String> {
         anyhow::anyhow!("no GraphQL schema for '{repo}' — check ~/brain/openapi/{repo}.graphql")
     })
 }
+
+pub fn get_graphql_info(args: &Value) -> Result<String> {
+    let repo = args["repo"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("repo is required"))?;
+    if !validate_spec_repo(repo) {
+        anyhow::bail!("invalid repo name");
+    }
+    let path = spec_dir().join(format!("{repo}.graphql"));
+    let sdl = std::fs::read_to_string(&path).map_err(|_| {
+        anyhow::anyhow!("no GraphQL schema for '{repo}' — check ~/brain/openapi/{repo}.graphql")
+    })?;
+    let info = brain_scanner::parse_graphql_sdl(repo, &sdl)?;
+    Ok(serde_json::to_string_pretty(&info)?)
+}

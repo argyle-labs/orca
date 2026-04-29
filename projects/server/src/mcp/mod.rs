@@ -17,7 +17,7 @@ use docs::{get_tree, list_commands, list_roots, read_doc, search_docs};
 use handlers::{
     agents, get_agent, get_context, list_services, run, run_tests, search_logs, service_logs,
 };
-use specs::{get_rebuy_graphql_schema, get_rebuy_spec, get_rebuy_spec_public, list_rebuy_specs};
+use specs::{get_graphql_info, get_rebuy_graphql_schema, get_rebuy_spec, get_rebuy_spec_public, list_rebuy_specs};
 
 pub async fn serve(config: &Config) -> Result<()> {
     let stdin = tokio::io::stdin();
@@ -107,6 +107,7 @@ async fn dispatch(name: &str, args: &Value, config: &Config) -> Result<String> {
         "get_rebuy_spec" => get_rebuy_spec(args),
         "get_rebuy_spec_public" => get_rebuy_spec_public(args),
         "get_rebuy_graphql_schema" => get_rebuy_graphql_schema(args),
+        "get_graphql_info" => get_graphql_info(args),
         "resolve-library-id" | "get-library-docs" => {
             context7::proxy_context7(name, args, config).await
         }

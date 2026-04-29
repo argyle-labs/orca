@@ -83,15 +83,74 @@ pub fn cmd_spec(action: SpecAction) -> Result<()> {
         }
 
         SpecAction::Sync { repo } => {
-            println!(
-                "{}",
-                format!("sync not yet implemented for '{repo}' — snapshot automation coming soon")
-                    .yellow()
-            );
-            println!(
-                "{}",
-                format!("  manually update ~/brain/openapi/{repo}.json for now").dimmed()
-            );
+            match repo.as_str() {
+                "admin-api" => {
+                    let home = std::env::var("HOME").unwrap_or_default();
+                    let rebuy_root = std::env::var("REBUY_ROOT")
+                        .unwrap_or_else(|_| format!("{home}/code/rebuy"));
+                    let repo_path = std::path::PathBuf::from(&rebuy_root).join("admin-api");
+                    if !repo_path.exists() {
+                        anyhow::bail!(
+                            "admin-api not found at {} — set REBUY_ROOT or clone the repo",
+                            repo_path.display()
+                        );
+                    }
+                    print!("  scanning routes and schemas");
+                    let spec = scanner::ci4_generator::generate(&repo_path)?;
+                    let out_path = std::path::PathBuf::from(&home)
+                        .join("brain/openapi/admin-api.json");
+                    std::fs::create_dir_all(out_path.parent().unwrap())?;
+                    std::fs::write(&out_path, serde_json::to_string_pretty(&spec)?)?;
+                    let path_count = spec["paths"].as_object().map(|p| p.len()).unwrap_or(0);
+                    let schema_count = spec["components"]["schemas"]
+                        .as_object()
+                        .map(|s| s.len())
+                        .unwrap_or(0);
+                    println!(
+                        "\n{} synced admin-api → {} ({} paths, {} schemas)",
+                        "✓".green(),
+                        out_path.display(),
+                        path_count,
+                        schema_count,
+                    );
+                }
+                "rebuyengine" => {
+                    let home = std::env::var("HOME").unwrap_or_default();
+                    let rebuy_root = std::env::var("REBUY_ROOT")
+                        .unwrap_or_else(|_| format!("{home}/code/rebuy"));
+                    let repo_path = std::path::PathBuf::from(&rebuy_root).join("rebuyengine.com");
+                    if !repo_path.exists() {
+                        anyhow::bail!(
+                            "rebuyengine.com not found at {} — set REBUY_ROOT or clone the repo",
+                            repo_path.display()
+                        );
+                    }
+                    print!("  scanning api.php dispatch chains");
+                    let spec = scanner::ci2_generator::generate(&repo_path)?;
+                    let out_path = std::path::PathBuf::from(&home)
+                        .join("brain/openapi/rebuyengine.json");
+                    std::fs::create_dir_all(out_path.parent().unwrap())?;
+                    std::fs::write(&out_path, serde_json::to_string_pretty(&spec)?)?;
+                    let path_count = spec["paths"].as_object().map(|p| p.len()).unwrap_or(0);
+                    println!(
+                        "\n{} synced rebuyengine → {} ({} paths)",
+                        "✓".green(),
+                        out_path.display(),
+                        path_count,
+                    );
+                }
+                _ => {
+                    println!(
+                        "{}",
+                        format!("sync not implemented for '{repo}' — valid: admin-api, rebuyengine")
+                            .yellow()
+                    );
+                    println!(
+                        "{}",
+                        format!("  manually update ~/brain/openapi/{repo}.json for now").dimmed()
+                    );
+                }
+            }
         }
 
         SpecAction::Dump => {

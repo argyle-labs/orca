@@ -7,10 +7,12 @@ pub mod tree;
 pub use openapi::brain_spec_json as openapi_spec_json;
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use anyhow::Result;
 use axum::Router;
 use axum::routing::{get, post};
+use brain_utils::state::{self, DaemonMode, DaemonState};
 use tower_http::cors::{Any, CorsLayer};
 
 pub async fn run(dev: bool, port: u16, mcp_servers: Vec<brain_utils::config::McpServerEntry>) -> Result<()> {
@@ -30,6 +32,148 @@ pub async fn run(dev: bool, port: u16, mcp_servers: Vec<brain_utils::config::Mcp
 
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Daemon serve loop with cooperative port handoff via UNIX signals.
+///
+/// SIGUSR1 → drop listener (release port), write mode=parked, wait.
+/// SIGUSR2 → rebind port, write mode=daemon, resume serving.
+/// SIGTERM / Ctrl-C → clean shutdown, remove state file.
+///
+/// While parked, polls every 5 s: if the active dev process has died,
+/// auto-reclaims the port without waiting for a signal.
+pub async fn run_daemon(port: u16, mcp_servers: Vec<brain_utils::config::McpServerEntry>) -> Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let addr: SocketAddr = format!("0.0.0.0:{port}").parse()?;
+    let app = build_router(false, mcp_servers);
+
+    let binary = std::env::current_exe()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    let _ = state::write(&DaemonState {
+        daemon_pid: std::process::id(),
+        active_pid: std::process::id(),
+        port,
+        mode: DaemonMode::Daemon,
+        binary,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        started_at: chrono::Utc::now(),
+    });
+
+    let mut sigterm = signal(SignalKind::terminate())?;
+
+    // Crash-restart recovery: if launchd restarted us while a dev session was active,
+    // wait for the dev server to finish rather than immediately fighting it for the port.
+    if let Ok(Some(mut s)) = state::read() {
+        if s.mode == DaemonMode::Dev {
+            println!("[brain] restarted while dev session active — waiting for dev to exit");
+            s.daemon_pid = std::process::id();
+            let _ = state::write(&s);
+
+            // Register SIGUSR2 now so dev can signal us at the new PID
+            let mut sigusr2 = signal(SignalKind::user_defined2())?;
+            loop {
+                tokio::select! {
+                    _ = sigusr2.recv() => break,
+                    _ = sigterm.recv() => {
+                        let _ = state::clear();
+                        return Ok(());
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                        if let Ok(Some(s)) = state::read() {
+                            if s.mode != DaemonMode::Dev || !pid_alive(s.active_pid) { break; }
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            println!("[brain] dev session ended — binding port {port}");
+        }
+    }
+
+    loop {
+        let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+            anyhow::anyhow!("failed to bind {addr}: {e} — is port {port} already in use?")
+        })?;
+        println!("[brain] daemon listening on http://localhost:{port}");
+        let _ = state::set_mode(DaemonMode::Daemon);
+        let _ = state::set_active_pid(std::process::id());
+
+        let mut sigusr1 = signal(SignalKind::user_defined1())?;
+
+        let parked = tokio::select! {
+            result = axum::serve(listener, app.clone()) => { result?; false }
+            _ = sigusr1.recv() => true,
+            _ = sigterm.recv() => {
+                println!("[brain] daemon shutting down");
+                let _ = state::clear();
+                return Ok(());
+            }
+            _ = tokio::signal::ctrl_c() => {
+                println!("[brain] daemon shutting down");
+                let _ = state::clear();
+                return Ok(());
+            }
+        };
+
+        if !parked {
+            break;
+        }
+
+        // A5 fix: register SIGUSR2 handler BEFORE writing Parked to state.
+        // Default SIGUSR2 disposition is process termination — if the signal
+        // arrives between set_mode(Parked) and the handler registration it kills us.
+        let mut sigusr2 = signal(SignalKind::user_defined2())?;
+
+        // Port released (listener dropped by select! cancellation)
+        let _ = state::set_mode(DaemonMode::Parked);
+        println!("[brain] daemon parked — port {port} released");
+
+        loop {
+            tokio::select! {
+                _ = sigusr2.recv() => {
+                    println!("[brain] daemon reclaiming port {port}");
+                    break;
+                }
+                _ = sigterm.recv() => {
+                    println!("[brain] daemon shutting down (while parked)");
+                    let _ = state::clear();
+                    return Ok(());
+                }
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                    // Auto-reclaim if dev process died OR nobody ever took the port
+                    if let Ok(Some(s)) = state::read() {
+                        let abandoned = match s.mode {
+                            DaemonMode::Dev => !pid_alive(s.active_pid),
+                            // Parked with active_pid still pointing at daemon → dev never started
+                            DaemonMode::Parked => s.active_pid == s.daemon_pid,
+                            DaemonMode::Daemon => false,
+                        };
+                        if abandoned {
+                            println!("[brain] auto-reclaiming port {port} (dev abandoned)");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        // Outer loop: rebind and serve again
+    }
+
+    let _ = state::clear();
+    Ok(())
+}
+
+fn pid_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 // frontend/dist is compiled into the binary at build time so the binary ships alone —
@@ -87,6 +231,10 @@ fn build_router(dev: bool, mcp_servers: Vec<brain_utils::config::McpServerEntry>
         .route(
             "/api/specs/:repo/public",
             get(api::specs_get_public_handler),
+        )
+        .route(
+            "/api/specs/:repo/graphql/info",
+            get(api::specs_graphql_info_handler),
         )
         .route(
             "/api/specs/:repo/graphql",

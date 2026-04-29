@@ -5,7 +5,7 @@
 use serde_json::{Value, json};
 
 #[derive(rust_embed::RustEmbed)]
-#[folder = "."]
+#[folder = "src"]
 struct BrainDocs;
 
 pub fn list() -> Vec<String> {

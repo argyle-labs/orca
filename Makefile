@@ -1,4 +1,4 @@
-.PHONY: build install deploy dev watch clean check release audit lint format test
+.PHONY: build install deploy dev watch clean check release audit lint format test daemon-install daemon-uninstall
 
 INSTALL_PATH := $(HOME)/.local/bin/brain
 
@@ -55,6 +55,15 @@ dev:
 	 (cd projects/frontend && npm run dev 2>&1 | sed 's/^/[frontend] /') & \
 	 wait
 
+# Build and install as a system daemon (launchd on macOS, systemd on Linux)
+daemon-install: deploy
+	$(INSTALL_PATH) daemon install
+	@echo "daemon installed — check status with: brain daemon status"
+
+# Remove daemon service file and stop the service
+daemon-uninstall:
+	$(INSTALL_PATH) daemon uninstall
+
 clean:
 	cargo clean --manifest-path projects/server/Cargo.toml
 	rm -rf projects/frontend/dist projects/frontend/node_modules
@@ -109,5 +118,10 @@ install:
 	@cargo install --list 2>/dev/null | grep -q "^cargo-audit" || cargo install cargo-audit
 	@echo "→ frontend deps..."
 	@cd projects/frontend && npm install
+	@echo "→ shopify admin graphql schema (2026-04)..."
+	@mkdir -p "$(HOME)/brain/openapi"
+	@npx --yes get-graphql-schema https://shopify.dev/admin-graphql-direct-proxy/2026-04 2>/dev/null \
+	  | grep -v "^npm " > "$(HOME)/brain/openapi/shopify-admin.graphql"
+	@echo "  updated → ~/brain/openapi/shopify-admin.graphql"
 	@echo ""
 	@echo "ready — run 'make dev' to start, 'make deploy' to build and install"

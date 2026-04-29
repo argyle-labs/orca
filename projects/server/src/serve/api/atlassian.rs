@@ -6,8 +6,9 @@ use axum::{
 use brain_utils::config::Config;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use utoipa::ToSchema;
 
-use super::err;
+use super::prelude::*;
 
 // ── Credential helper ─────────────────────────────────────────────────────────
 
@@ -49,14 +50,28 @@ pub(super) fn atlassian_creds(config: &Config) -> anyhow::Result<(String, String
 
 // ── Jira ──────────────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct JiraIssuesQuery {
     pub jql: Option<String>,
     #[serde(rename = "maxResults")]
     pub max_results: Option<u32>,
 }
 
-/// GET /api/jira/issues?jql=...&maxResults=50
+#[utoipa::path(
+    get,
+    path = "/api/jira/issues",
+    operation_id = "listJiraIssues",
+    params(
+        ("jql" = Option<String>, Query, description = "JQL query (default: assignee = currentUser() ORDER BY updated DESC)"),
+        ("maxResults" = Option<u32>, Query, description = "Max results to return (default: 50)"),
+    ),
+    responses(
+        (status = 200, description = "Jira search result", body = serde_json::Value),
+        (status = 500, description = "Config or credential error", body = ErrorResponse),
+        (status = 502, description = "Upstream Jira API error", body = ErrorResponse),
+    ),
+    tag = "jira"
+)]
 pub async fn jira_issues_handler(Query(q): Query<JiraIssuesQuery>) -> impl IntoResponse {
     let config = match Config::load() {
         Ok(c) => c,
@@ -100,13 +115,26 @@ pub async fn jira_issues_handler(Query(q): Query<JiraIssuesQuery>) -> impl IntoR
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct TransitionBody {
     #[serde(rename = "transitionId")]
     pub transition_id: String,
 }
 
-/// GET /api/jira/issues/:key/transitions
+#[utoipa::path(
+    get,
+    path = "/api/jira/issues/{key}/transitions",
+    operation_id = "getJiraTransitions",
+    params(
+        ("key" = String, Path, description = "Jira issue key (e.g. PROJ-123)"),
+    ),
+    responses(
+        (status = 200, description = "Available transitions for the issue", body = serde_json::Value),
+        (status = 500, description = "Config or credential error", body = ErrorResponse),
+        (status = 502, description = "Upstream Jira API error", body = ErrorResponse),
+    ),
+    tag = "jira"
+)]
 pub async fn jira_get_transitions_handler(Path(key): Path<String>) -> impl IntoResponse {
     let config = match Config::load() {
         Ok(c) => c,
@@ -132,7 +160,21 @@ pub async fn jira_get_transitions_handler(Path(key): Path<String>) -> impl IntoR
     }
 }
 
-/// POST /api/jira/issues/:key/transitions  body: { transitionId: "31" }
+#[utoipa::path(
+    post,
+    path = "/api/jira/issues/{key}/transitions",
+    operation_id = "transitionJiraIssue",
+    params(
+        ("key" = String, Path, description = "Jira issue key (e.g. PROJ-123)"),
+    ),
+    request_body = TransitionBody,
+    responses(
+        (status = 200, description = "Transition applied", body = OkResponse),
+        (status = 500, description = "Config or credential error", body = ErrorResponse),
+        (status = 502, description = "Upstream Jira API error", body = ErrorResponse),
+    ),
+    tag = "jira"
+)]
 pub async fn jira_transition_handler(
     Path(key): Path<String>,
     Json(body): Json<TransitionBody>,
@@ -171,13 +213,27 @@ pub async fn jira_transition_handler(
 
 // ── Confluence ────────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct ConfluenceSearchQuery {
     pub cql: Option<String>,
     pub limit: Option<u32>,
 }
 
-/// GET /api/confluence/search?cql=...&limit=25
+#[utoipa::path(
+    get,
+    path = "/api/confluence/search",
+    operation_id = "searchConfluence",
+    params(
+        ("cql" = Option<String>, Query, description = "CQL query (default: type = page ORDER BY lastModified DESC)"),
+        ("limit" = Option<u32>, Query, description = "Max results (default: 25)"),
+    ),
+    responses(
+        (status = 200, description = "Confluence search results with expanded space and excerpt", body = serde_json::Value),
+        (status = 500, description = "Config or credential error", body = ErrorResponse),
+        (status = 502, description = "Upstream Confluence API error", body = ErrorResponse),
+    ),
+    tag = "confluence"
+)]
 pub async fn confluence_search_handler(
     Query(q): Query<ConfluenceSearchQuery>,
 ) -> impl IntoResponse {

@@ -8,6 +8,7 @@ use serde_json::json;
 use utoipa::ToSchema;
 
 use super::prelude::*;
+use crate::markdown::to_llm_text;
 use crate::serve::tree::{build_tree_raw, collect_all_files, get_root_tree, get_roots, get_search_ignored};
 
 // ── GET /api/tree ─────────────────────────────────────────────────────────────
@@ -115,6 +116,9 @@ pub async fn search_handler(Query(params): Query<SearchQuery>) -> Response {
 pub struct DocQuery {
     pub root: String,
     pub path: String,
+    /// Pass `llm` to strip decorative markdown syntax (bold, italic, images, HRs) and collapse
+    /// whitespace. Reduces token usage when the content will be consumed by a language model.
+    pub format: Option<String>,
 }
 
 #[utoipa::path(
@@ -122,8 +126,9 @@ pub struct DocQuery {
     path = "/api/doc",
     operation_id = "getDoc",
     params(
-        ("root" = String, Query, description = "Vault root name (brain/rebuy)"),
+        ("root" = String, Query, description = "Vault root name (brain/rebuy/docs)"),
         ("path" = String, Query, description = "File path relative to root"),
+        ("format" = Option<String>, Query, description = "Pass `llm` to strip decorative markdown (bold, italic, images, HRs) and collapse whitespace — reduces token usage when the content will be read by a language model"),
     ),
     responses(
         (status = 200, description = "Document content as plain text", content_type = "text/plain"),
@@ -133,12 +138,18 @@ pub struct DocQuery {
     tag = "docs"
 )]
 pub async fn doc_handler(Query(params): Query<DocQuery>) -> Response {
+    let llm_mode = params.format.as_deref() == Some("llm");
+
+    let apply = |content: String| -> String {
+        if llm_mode { to_llm_text(&content) } else { content }
+    };
+
     if params.root == "docs" {
         return match brain_docs::read(&params.path) {
             Some(content) => (
                 StatusCode::OK,
                 [("content-type", "text/plain; charset=utf-8")],
-                content,
+                apply(content),
             )
                 .into_response(),
             None => err(StatusCode::NOT_FOUND, "not found"),
@@ -157,7 +168,7 @@ pub async fn doc_handler(Query(params): Query<DocQuery>) -> Response {
         Ok(content) => (
             StatusCode::OK,
             [("content-type", "text/plain; charset=utf-8")],
-            content,
+            apply(content),
         )
             .into_response(),
         Err(_) => err(StatusCode::NOT_FOUND, "not found"),

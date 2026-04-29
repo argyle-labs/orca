@@ -8,6 +8,7 @@
 //! - `tui`      — split-pane terminal UI (crossterm/ratatui), keybindings, layout
 
 pub mod context;
+pub mod markdown;
 pub mod mcp;
 pub mod serve;
 pub mod session;

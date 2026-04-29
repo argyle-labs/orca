@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::markdown::to_llm_text;
 use crate::serve::tree::{TreeNode, build_tree_raw};
 
 pub struct DocRoot {
@@ -225,9 +226,13 @@ pub fn read_doc(args: &Value, config: &Config) -> Result<String> {
     let doc_path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("path is required"))?;
+    let llm_mode = args["format"].as_str() == Some("llm");
+
+    let apply = |s: String| if llm_mode { to_llm_text(&s) } else { s };
 
     if root_name == "docs" {
         return brain_docs::read(doc_path)
+            .map(apply)
             .ok_or_else(|| anyhow::anyhow!("not found: docs/{doc_path}"));
     }
 
@@ -240,7 +245,7 @@ pub fn read_doc(args: &Value, config: &Config) -> Result<String> {
     let full = resolve_doc_file(&root.path, doc_path)
         .ok_or_else(|| anyhow::anyhow!("not found: {root_name}/{doc_path}"))?;
 
-    Ok(std::fs::read_to_string(full)?)
+    Ok(apply(std::fs::read_to_string(full)?))
 }
 
 pub fn search_docs(args: &Value, config: &Config) -> Result<String> {
@@ -248,6 +253,7 @@ pub fn search_docs(args: &Value, config: &Config) -> Result<String> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("query is required"))?;
     let filter = args["root"].as_str().unwrap_or("all");
+    let llm_mode = args["format"].as_str() == Some("llm");
 
     let all_roots = doc_roots(config);
     let roots: Vec<&DocRoot> = all_roots
@@ -275,17 +281,34 @@ pub fn search_docs(args: &Value, config: &Config) -> Result<String> {
                 .enumerate()
                 .filter(|(_, l)| l.to_lowercase().contains(&query_lower))
                 .take(5)
-                .map(|(i, l)| format!("L{}: {}", i + 1, l.trim()))
+                .map(|(i, l)| {
+                    let line = if llm_mode {
+                        to_llm_text(l.trim()).trim_end_matches('\n').to_string()
+                    } else {
+                        l.trim().to_string()
+                    };
+                    format!("L{}: {}", i + 1, line)
+                })
                 .collect();
             if !matches.is_empty() {
-                results.push(format!("## {}/{}\n{}", root.name, rel, matches.join("\n")));
+                results.push(format!("{}/{}\n{}", root.name, rel, matches.join("\n")));
             }
         }
     }
 
     if filter == "all" || filter == "docs" {
         for (path, matches) in brain_docs::search(query) {
-            results.push(format!("## docs/{}\n{}", path, matches.join("\n")));
+            let matches: Vec<String> = matches
+                .into_iter()
+                .map(|l| {
+                    if llm_mode {
+                        to_llm_text(l.trim()).trim_end_matches('\n').to_string()
+                    } else {
+                        l
+                    }
+                })
+                .collect();
+            results.push(format!("docs/{}\n{}", path, matches.join("\n")));
         }
     }
 

@@ -90,8 +90,9 @@ pub fn tool_defs() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "root": { "type": "string", "description": "Root name: rebuy | brain" },
-                    "path": { "type": "string", "description": "Path relative to root, without extension" }
+                    "root": { "type": "string", "description": "Root name: rebuy | brain | docs" },
+                    "path": { "type": "string", "description": "Path relative to root, without extension" },
+                    "format": { "type": "string", "description": "Pass \"llm\" when this content will be consumed by a language model — strips decorative markdown (bold, italic, images, horizontal rules) and collapses whitespace to reduce token usage while preserving semantic structure" }
                 },
                 "required": ["root", "path"]
             }
@@ -103,7 +104,8 @@ pub fn tool_defs() -> Value {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Search term (case-insensitive)" },
-                    "root": { "type": "string", "description": "Limit to root: rebuy | brain | all (default: all)" }
+                    "root": { "type": "string", "description": "Limit to root: rebuy | brain | docs | all (default: all)" },
+                    "format": { "type": "string", "description": "Pass \"llm\" when results will be consumed by a language model — strips decorative markdown from matched lines to reduce token usage" }
                 },
                 "required": ["query"]
             }
@@ -182,7 +184,18 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "get_rebuy_graphql_schema",
-            "description": "Read the GraphQL SDL schema for a rebuy repo that exposes a GraphQL API (e.g. admin-api).",
+            "description": "Read the raw GraphQL SDL schema for a rebuy repo. Returns the full SDL text.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repo": { "type": "string", "description": "Repo name (e.g. admin-api)" }
+                },
+                "required": ["repo"]
+            }
+        },
+        {
+            "name": "get_graphql_info",
+            "description": "Parse and return structured GraphQL schema info for a rebuy repo: queries, mutations, subscriptions, types, inputs, and enums — each with field names, types, and descriptions. Use this instead of get_rebuy_graphql_schema when you need to reason about the schema rather than read the raw SDL.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

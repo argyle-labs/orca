@@ -5,20 +5,33 @@ use axum::{
 use brain_utils::config::Config;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use utoipa::ToSchema;
 
-#[derive(Serialize)]
+#[allow(unused_imports)]
+use super::prelude::*;
+
+#[derive(Serialize, ToSchema)]
 pub struct RepoInfo {
     pub workspace: String,
     pub slug: String,
     pub remote: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct PrQuery {
     pub workspace: String,
     pub slug: String,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/bitbucket/repos",
+    operation_id = "listBitbucketRepos",
+    responses(
+        (status = 200, description = "Bitbucket repos found under REBUY_ROOT", body = Vec<RepoInfo>),
+    ),
+    tag = "bitbucket"
+)]
 /// GET /api/bitbucket/repos
 /// Scans REBUY_ROOT (or ~/code/rebuy) for git dirs with Bitbucket remotes.
 pub async fn repos_handler() -> impl IntoResponse {
@@ -26,6 +39,20 @@ pub async fn repos_handler() -> impl IntoResponse {
     Json(repos)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/bitbucket/prs",
+    operation_id = "listBitbucketPRs",
+    params(
+        ("workspace" = String, Query, description = "Bitbucket workspace slug"),
+        ("slug" = String, Query, description = "Repository slug"),
+    ),
+    responses(
+        (status = 200, description = "Open pull requests from Bitbucket API (pagelen=50)", body = serde_json::Value),
+        (status = 500, description = "Credential or upstream error", body = ErrorResponse),
+    ),
+    tag = "bitbucket"
+)]
 /// GET /api/bitbucket/prs?workspace=X&slug=Y
 /// Proxies to the Bitbucket REST API using stored Atlassian credentials.
 pub async fn prs_handler(Query(q): Query<PrQuery>) -> impl IntoResponse {

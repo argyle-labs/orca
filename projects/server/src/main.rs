@@ -4,7 +4,7 @@ use brain::mcp;
 use brain::serve;
 use brain::serve::openapi_spec_json;
 use brain::session::Session;
-use brain_commands::{self as cmd, LogAction, McpAction, SpecAction};
+use brain_commands::{self as cmd, DaemonAction, LogAction, McpAction, SpecAction};
 use brain_core::backend::{ClaudeBackend, ModelBackend, stdout_sink};
 use brain_utils::config::Config;
 use brain_utils::types::Message;
@@ -85,6 +85,19 @@ enum Command {
         port: u16,
     },
 
+    /// Run as daemon with cooperative port handoff (SIGUSR1 park / SIGUSR2 reclaim)
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+
+    /// Start dev server, superseding any running daemon on the port.
+    /// Parks the stable daemon, runs dev mode, reclaims on exit.
+    Dev {
+        #[arg(short, long, default_value = "12000")]
+        port: u16,
+    },
+
     /// Generate TypeScript types and hooks from the OpenAPI schema
     Gen {
         /// Backend URL to fetch the spec from
@@ -157,6 +170,11 @@ async fn main() -> Result<()> {
         Some(Command::InstallAgents) => cmd::cmd_install_agents(&config),
         Some(Command::McpServe) => mcp::serve(&config).await,
         Some(Command::Serve { dev, port }) => serve::run(dev, port, config.mcp_servers.clone()).await,
+        Some(Command::Daemon { action }) => match action {
+            DaemonAction::Start { port } => serve::run_daemon(port, config.mcp_servers).await,
+            other => cmd::cmd_daemon(other),
+        },
+        Some(Command::Dev { port }) => cmd_dev(port, &config).await,
         Some(Command::Mcp { action }) => cmd::cmd_mcp(&config, action),
         Some(Command::Gen { url, out }) => cmd::cmd_gen(&url, &out).await,
         Some(Command::Spec { action }) => match action {
@@ -218,6 +236,81 @@ async fn run_one_shot(config: &Config, agent: &str, prompt: &str) -> Result<()> 
     let mut session = Session::new(config.clone(), ctx).await?;
     session.set_agent(agent);
     session.one_shot(prompt.to_string()).await
+}
+
+/// Park the stable daemon (if running), start dev server, reclaim on exit.
+async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
+    use brain_utils::state::{self, DaemonMode};
+    use std::process::Command;
+
+    // Park daemon if it's running
+    let (daemon_pid, daemon_binary) = match state::read()? {
+        Some(s) if s.mode == DaemonMode::Daemon => {
+            // Capture binary now — state file may be gone by the time we need it
+            let binary = s.binary.clone();
+            let pid = s.daemon_pid;
+            Command::new("kill")
+                .args(["-USR1", &pid.to_string()])
+                .status()?;
+            if let Err(e) = state::wait_for_mode(DaemonMode::Parked, 5).await {
+                // Parking timed out — reclaim immediately so daemon isn't stuck parked
+                let _ = Command::new("kill").args(["-USR2", &pid.to_string()]).status();
+                return Err(e.context("daemon did not park in time; reclaim sent"));
+            }
+            println!("[brain] daemon parked — dev server taking port {port}");
+            (Some(pid), Some(binary))
+        }
+        _ => (None, None),
+    };
+
+    // Mark ourselves as the active dev process
+    if let Some(mut s) = state::read()? {
+        s.mode = DaemonMode::Dev;
+        s.active_pid = std::process::id();
+        let _ = state::write(&s);
+    }
+
+    // Run dev server (Ctrl-C will exit)
+    let result = serve::run(true, port, config.mcp_servers.clone()).await;
+
+    // Reclaim: read current state (daemon may have been restarted by launchd with a new PID)
+    if daemon_pid.is_some() {
+        let current_pid = state::read()
+            .ok()
+            .flatten()
+            .map(|s| s.daemon_pid)
+            .or(daemon_pid);
+
+        let reclaimed = current_pid
+            .and_then(|pid| {
+                Command::new("kill")
+                    .args(["-USR2", &pid.to_string()])
+                    .status()
+                    .ok()
+                    .filter(|s| s.success())
+                    .map(|_| pid)
+            })
+            .is_some();
+
+        if reclaimed {
+            println!("[brain] daemon reclaimed port {port}");
+        } else {
+            // Daemon is not alive and was not restarted by launchd — spawn fresh
+            let binary = state::read()
+                .ok()
+                .flatten()
+                .map(|s| s.binary)
+                .or(daemon_binary);
+            if let Some(bin) = binary {
+                println!("[brain] daemon gone — respawning {bin}");
+                let _ = Command::new(&bin)
+                    .args(["daemon", "start", "--port", &port.to_string()])
+                    .spawn();
+            }
+        }
+    }
+
+    result
 }
 
 fn detect_project_from_cwd(config: &Config) -> Option<String> {

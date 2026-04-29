@@ -8,6 +8,7 @@
 //! - `agents`   — list available agents, install embedded agents into ~/.claude/agents/
 //! - `auth`     — login/logout/auth (keychain read/write via brain_utils::auth)
 //! - `codegen`  — `brain gen`: fetch OpenAPI spec, run openapi-typescript codegen
+//! - `daemon`   — daemon lifecycle: status/stop/park/reclaim/install/uninstall
 //! - `doctor`   — validate agent files, symlinks, config, and tool availability
 //! - `log_cmd`  — session log subcommands: list, search, recall, tail
 //! - `mcp_cmd`  — MCP registry subcommands: add/remove/list external MCP servers
@@ -17,6 +18,7 @@
 pub mod agents;
 pub mod auth;
 pub mod codegen;
+pub mod daemon;
 pub mod doctor;
 pub mod log_cmd;
 pub mod mcp_cmd;
@@ -27,6 +29,7 @@ pub use spec::{SpecAction, cmd_spec};
 pub use log_cmd::{LogAction, cmd_log};
 pub use auth::{cmd_login, cmd_logout, cmd_auth};
 pub use agents::{cmd_agents, cmd_install_agents};
+pub use daemon::{DaemonAction, cmd_daemon};
 pub use doctor::cmd_doctor;
 pub use projects::cmd_projects;
 pub use codegen::cmd_gen;

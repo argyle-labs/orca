@@ -165,6 +165,11 @@ pub struct LogsResponse {
     pub output: String,
 }
 
+#[derive(Serialize, ToSchema)]
+pub struct OkResponse {
+    pub ok: bool,
+}
+
 #[derive(Deserialize, ToSchema)]
 pub struct TestRunQuery {
     /// Which suite to run: rust | frontend | e2e | all
@@ -188,7 +193,7 @@ pub struct TestRunResponse {
 // `super::SomeType` inside a utoipa macro; always import it via this prelude.
 pub(super) mod prelude {
     #[allow(unused_imports)]
-    pub use super::{ErrorResponse, McpState, err};
+    pub use super::{ErrorResponse, McpState, OkResponse, err};
 }
 
 // ── Sub-modules ───────────────────────────────────────────────────────────────

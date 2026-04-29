@@ -2,6 +2,10 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use utoipa::ToSchema;
+
+pub mod ci4_generator;
+pub mod ci2_generator;
 
 pub fn openapi_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -193,4 +197,146 @@ pub fn filter_brain_public(spec: Value) -> Value {
     }
 
     filtered
+}
+
+// ── GraphQL schema parser ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct GraphQlField {
+    pub name: String,
+    #[serde(rename = "typeName")]
+    pub type_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct GraphQlOperation {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub args: Vec<GraphQlField>,
+    pub returns: String,
+    pub deprecated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct GraphQlType {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub fields: Vec<GraphQlField>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct GraphQlEnum {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub values: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct GraphQlInfo {
+    pub repo: String,
+    pub queries: Vec<GraphQlOperation>,
+    pub mutations: Vec<GraphQlOperation>,
+    pub subscriptions: Vec<GraphQlOperation>,
+    pub types: Vec<GraphQlType>,
+    pub inputs: Vec<GraphQlType>,
+    pub enums: Vec<GraphQlEnum>,
+}
+
+fn gql_type_str(t: &graphql_parser::schema::Type<String>) -> (String, bool) {
+    use graphql_parser::schema::Type;
+    match t {
+        Type::NonNullType(inner) => {
+            let (s, _) = gql_type_str(inner);
+            (s, true)
+        }
+        Type::ListType(inner) => {
+            let (s, _) = gql_type_str(inner);
+            (format!("[{s}]"), false)
+        }
+        Type::NamedType(n) => (n.clone(), false),
+    }
+}
+
+fn map_field(f: &graphql_parser::schema::Field<String>) -> GraphQlField {
+    let (type_name, required) = gql_type_str(&f.field_type);
+    GraphQlField {
+        name: f.name.clone(),
+        type_name,
+        description: f.description.clone(),
+        required,
+    }
+}
+
+fn map_input_field(f: &graphql_parser::schema::InputValue<String>) -> GraphQlField {
+    let (type_name, required) = gql_type_str(&f.value_type);
+    GraphQlField {
+        name: f.name.clone(),
+        type_name,
+        description: f.description.clone(),
+        required,
+    }
+}
+
+fn map_operation(f: &graphql_parser::schema::Field<String>) -> GraphQlOperation {
+    let (returns, _) = gql_type_str(&f.field_type);
+    let deprecated = f.directives.iter().any(|d| d.name == "deprecated");
+    GraphQlOperation {
+        name: f.name.clone(),
+        description: f.description.clone(),
+        args: f.arguments.iter().map(map_input_field).collect(),
+        returns,
+        deprecated,
+    }
+}
+
+/// Parse a GraphQL SDL string into a structured `GraphQlInfo`.
+pub fn parse_graphql_sdl(repo: &str, sdl: &str) -> Result<GraphQlInfo> {
+    use graphql_parser::schema::{Definition, TypeDefinition, parse_schema};
+
+    let doc = parse_schema::<String>(sdl)
+        .map_err(|e| anyhow::anyhow!("GraphQL parse error: {e}"))?;
+
+    let mut queries = Vec::new();
+    let mut mutations = Vec::new();
+    let mut subscriptions = Vec::new();
+    let mut types = Vec::new();
+    let mut inputs = Vec::new();
+    let mut enums = Vec::new();
+
+    for def in &doc.definitions {
+        match def {
+            Definition::TypeDefinition(td) => match td {
+                TypeDefinition::Object(obj) => match obj.name.as_str() {
+                    "Query" => queries = obj.fields.iter().map(map_operation).collect(),
+                    "Mutation" => mutations = obj.fields.iter().map(map_operation).collect(),
+                    "Subscription" => subscriptions = obj.fields.iter().map(map_operation).collect(),
+                    _ => types.push(GraphQlType {
+                        name: obj.name.clone(),
+                        description: obj.description.clone(),
+                        fields: obj.fields.iter().map(map_field).collect(),
+                    }),
+                },
+                TypeDefinition::InputObject(inp) => inputs.push(GraphQlType {
+                    name: inp.name.clone(),
+                    description: inp.description.clone(),
+                    fields: inp.fields.iter().map(map_input_field).collect(),
+                }),
+                TypeDefinition::Enum(e) => enums.push(GraphQlEnum {
+                    name: e.name.clone(),
+                    description: e.description.clone(),
+                    values: e.values.iter().map(|v| v.name.clone()).collect(),
+                }),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    Ok(GraphQlInfo { repo: repo.to_string(), queries, mutations, subscriptions, types, inputs, enums })
 }

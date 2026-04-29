@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use utoipa::ToSchema;
 
 use super::prelude::*;
+pub use brain_scanner::{GraphQlEnum, GraphQlField, GraphQlInfo, GraphQlOperation, GraphQlType};
 
 // ── External spec registry ────────────────────────────────────────────────────
 // Brain's own spec lives at /api/openapi.json and /api/openapi/public.json.
@@ -97,13 +98,29 @@ fn serve_spec(raw: &str, filename_base: &str, query: &SpecQuery) -> Response {
 )]
 pub async fn specs_list_handler() -> Response {
     let path = specs_dir().join("registry.json");
-    match std::fs::read_to_string(&path) {
-        Ok(raw) => match serde_json::from_str::<Value>(&raw) {
-            Ok(v) => Json(v).into_response(),
-            Err(_) => Json(json!([])).into_response(),
-        },
-        Err(_) => Json(json!([])).into_response(),
-    }
+    let entries: Vec<Value> = match std::fs::read_to_string(&path) {
+        Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+        Err(_) => vec![],
+    };
+    // Augment each entry with file presence and hasGraphql (checked at serve time)
+    let augmented: Vec<Value> = entries
+        .into_iter()
+        .map(|mut e| {
+            if let Some(repo) = e["repo"].as_str() {
+                let dir = specs_dir();
+                let has_full = dir.join(format!("{repo}.json")).exists();
+                let has_public = dir.join(format!("{repo}.public.json")).exists();
+                let has_graphql = dir.join(format!("{repo}.graphql")).exists();
+                e["hasGraphql"] = json!(has_graphql);
+                e["files"] = json!({
+                    "full":   if has_full   { Value::Bool(true) } else { Value::Null },
+                    "public": if has_public { Value::Bool(true) } else { Value::Null },
+                });
+            }
+            e
+        })
+        .collect();
+    Json(augmented).into_response()
 }
 
 #[utoipa::path(
@@ -215,5 +232,37 @@ pub async fn specs_get_graphql_handler(
             StatusCode::NOT_FOUND,
             &format!("no GraphQL schema for '{repo}' — create {repo}.graphql in ~/brain/openapi/"),
         ),
+    }
+}
+
+// ── GET /api/specs/{repo}/graphql/info ────────────────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/api/specs/{repo}/graphql/info",
+    operation_id = "getSpecGraphqlInfo",
+    params(
+        ("repo" = String, Path, description = "Repository name (e.g. admin-api)"),
+    ),
+    responses(
+        (status = 200, description = "Parsed GraphQL schema — types, queries, mutations, subscriptions", body = GraphQlInfo),
+        (status = 400, description = "Invalid repo name", body = ErrorResponse),
+        (status = 404, description = "GraphQL schema not found", body = ErrorResponse),
+        (status = 422, description = "SDL parse error", body = ErrorResponse),
+    ),
+    tag = "specs"
+)]
+pub async fn specs_graphql_info_handler(Path(repo): Path<String>) -> Response {
+    if !validate_repo(&repo) {
+        return err(StatusCode::BAD_REQUEST, "invalid repo name");
+    }
+    let path = specs_dir().join(format!("{repo}.graphql"));
+    let sdl = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return err(StatusCode::NOT_FOUND, &format!("no GraphQL schema for '{repo}'")),
+    };
+    match brain_scanner::parse_graphql_sdl(&repo, &sdl) {
+        Ok(info) => Json(info).into_response(),
+        Err(e) => err(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string()),
     }
 }

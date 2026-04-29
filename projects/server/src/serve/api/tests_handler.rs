@@ -4,10 +4,23 @@ use axum::{
     response::{IntoResponse, Json, Response},
 };
 
-use super::{TestRunQuery, TestRunResponse, err};
+use super::{TestRunQuery, TestRunResponse, prelude::*};
 
 // ── GET /api/tests/run ────────────────────────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/api/tests/run",
+    operation_id = "runTests",
+    params(
+        ("suite" = String, Query, description = "Test suite to run: rust | frontend | e2e | all"),
+    ),
+    responses(
+        (status = 200, description = "Test run result", body = TestRunResponse),
+        (status = 500, description = "Runner error", body = ErrorResponse),
+    ),
+    tag = "tests"
+)]
 pub async fn tests_run_handler(Query(params): Query<TestRunQuery>) -> Response {
     let result = run_test_suite(&params.suite).await;
     match result {
