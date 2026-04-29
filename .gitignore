@@ -5,3 +5,4 @@ site/dist/
 site/node_modules/
 site/.env.local
 site/.env.*.local
+.worktrees/
