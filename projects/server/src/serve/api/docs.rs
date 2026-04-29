@@ -9,29 +9,41 @@ use utoipa::ToSchema;
 
 use super::prelude::*;
 use crate::markdown::to_llm_text;
-use crate::serve::tree::{build_tree_raw, collect_all_files, get_root_tree, get_roots, get_search_ignored};
+use crate::serve::tree::{build_tree_raw, collect_all_files, get_roots, get_search_ignored};
 
 // ── GET /api/tree ─────────────────────────────────────────────────────────────
+
+#[derive(Deserialize, ToSchema)]
+pub struct TreeQuery {
+    /// Pass `true` to skip compaction and return the raw filesystem tree.
+    pub raw: Option<bool>,
+}
 
 #[utoipa::path(
     get,
     path = "/api/tree",
     operation_id = "getTree",
+    params(
+        ("raw" = Option<bool>, Query, description = "Skip compaction — return raw filesystem tree"),
+    ),
     responses(
         (status = 200, description = "Document tree indexed by root name", body = serde_json::Value),
         (status = 500, description = "Error", body = ErrorResponse),
     ),
     tag = "docs"
 )]
-pub async fn tree_handler() -> impl IntoResponse {
+pub async fn tree_handler(Query(params): Query<TreeQuery>) -> impl IntoResponse {
+    let raw = params.raw.unwrap_or(false);
     let mut result = serde_json::Map::new();
-    for name in ["rebuy", "brain", "learning"] {
-        result.insert(
-            name.to_string(),
-            serde_json::to_value(get_root_tree(name)).unwrap_or_default(),
-        );
+    for name in ["brain", "rebuy"] {
+        let tree = if raw {
+            crate::serve::tree::get_root_tree_raw(name)
+        } else {
+            crate::serve::tree::get_root_tree(name)
+        };
+        result.insert(name.to_string(), serde_json::to_value(tree).unwrap_or_default());
     }
-    result.insert("docs".to_string(), brain_docs::tree());
+    result.insert("brain_docs".to_string(), brain_docs::tree());
     Json(serde_json::Value::Object(result))
 }
 
