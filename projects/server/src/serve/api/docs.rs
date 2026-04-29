@@ -71,10 +71,11 @@ pub async fn search_handler(Query(params): Query<SearchQuery>) -> Response {
             continue;
         }
         let ignored = get_search_ignored(name);
-        let tree = build_tree_raw(root_dir, root_dir, &ignored);
+        let canonical_root = root_dir.canonicalize().unwrap_or_else(|_| root_dir.clone());
+        let tree = build_tree_raw(&canonical_root, &canonical_root, &ignored);
         let files = collect_all_files(&tree);
         for file in files {
-            let full = root_dir.join(&file.path);
+            let full = canonical_root.join(&file.path);
             if let Ok(content) = std::fs::read_to_string(&full) {
                 let matches: Vec<String> = content
                     .lines()
