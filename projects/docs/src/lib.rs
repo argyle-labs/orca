@@ -50,24 +50,56 @@ pub fn search(query: &str) -> Vec<(String, Vec<String>)> {
     results
 }
 
-pub fn tree() -> Value {
-    let nodes: Vec<Value> = list()
-        .into_iter()
-        .map(|f| {
-            let stem = f.trim_end_matches(".md");
-            // Use the H1 heading as the display name if present
-            let title = BrainDocs::get(&f)
-                .and_then(|file| {
-                    let content = String::from_utf8_lossy(&file.data);
-                    content
-                        .lines()
-                        .find(|l| l.starts_with("# "))
-                        .map(|l| l[2..].trim().to_string())
-                })
-                .unwrap_or_else(|| stem.to_string());
-            json!({ "name": title, "path": f, "type": "file" })
+fn doc_title(path: &str) -> String {
+    BrainDocs::get(path)
+        .and_then(|f| {
+            let content = String::from_utf8_lossy(&f.data);
+            content
+                .lines()
+                .find(|l| l.starts_with("# "))
+                .map(|l| l[2..].trim().to_string())
         })
-        .collect();
+        .unwrap_or_else(|| {
+            let stem = path.rsplit('/').next().unwrap_or(path).trim_end_matches(".md");
+            stem.replace('-', " ")
+        })
+}
+
+pub fn tree() -> Value {
+    use std::collections::BTreeMap;
+
+    let mut top_files: Vec<Value> = Vec::new();
+    let mut dirs: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+
+    for path in list() {
+        match path.splitn(2, '/').collect::<Vec<_>>().as_slice() {
+            [dir, _] if path.contains('/') => {
+                let dir = dir.to_string();
+                dirs.entry(dir).or_default().push(json!({
+                    "name": doc_title(&path),
+                    "path": path,
+                    "type": "file"
+                }));
+            }
+            _ => {
+                top_files.push(json!({
+                    "name": doc_title(&path),
+                    "path": path,
+                    "type": "file"
+                }));
+            }
+        }
+    }
+
+    let mut nodes = top_files;
+    for (dir_name, children) in dirs {
+        nodes.push(json!({
+            "name": dir_name,
+            "path": dir_name,
+            "type": "dir",
+            "children": children
+        }));
+    }
     json!(nodes)
 }
 

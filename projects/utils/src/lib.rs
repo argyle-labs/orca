@@ -7,9 +7,11 @@
 //! - `log`    — `SessionLog` JSONL writer; `search_logs`, `list_sessions`, `recall_session`
 //! - `tools`  — filesystem and search helpers used by `ToolRegistry` (read/write/edit/glob/grep)
 //! - `types`  — `Message`, `ToolCall`, `ToolResult`, `ToolDef`, `truncate_preview`
+//! - `db`     — encrypted SQLite via SQLCipher; session event indexing + FTS
 
 pub mod auth;
 pub mod config;
+pub mod db;
 pub mod ledger;
 pub mod log;
 pub mod state;

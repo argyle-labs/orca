@@ -1,4 +1,5 @@
 use anyhow::Result;
+use brain_commands::list_embedded_commands;
 use brain_utils::config::Config;
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -319,24 +320,10 @@ pub fn search_docs(args: &Value, config: &Config) -> Result<String> {
     }
 }
 
-pub fn list_commands(config: &Config) -> Result<String> {
-    let dir = config.brain_vault.join("ai/claude/commands");
-    if !dir.exists() {
-        return Ok("Commands dir not found.".into());
+pub fn list_commands(_config: &Config) -> Result<String> {
+    let names = list_embedded_commands();
+    if names.is_empty() {
+        return Ok("No commands embedded.".into());
     }
-    let mut files: Vec<_> = std::fs::read_dir(&dir)?
-        .flatten()
-        .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
-        .collect();
-    files.sort_by_key(|e| e.file_name());
-    let names: Vec<String> = files
-        .iter()
-        .map(|e| {
-            format!(
-                "/{}",
-                e.path().file_stem().unwrap_or_default().to_string_lossy()
-            )
-        })
-        .collect();
     Ok(names.join("\n"))
 }

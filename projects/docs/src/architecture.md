@@ -28,7 +28,9 @@ src/
   jobs.rs        Background job queue for async side-effects
   tui.rs         ratatui split-pane UI
   scanner/       File scanner utilities used by tools
-  mcp.rs         MCP stdio server — JSON-RPC dispatch + tool implementations
+  mcp/
+    mod.rs       MCP stdio server — JSON-RPC dispatch + tool implementations
+    docs.rs      MCP tool: read_doc, get_tree, search_docs (embedded docs root)
   backend/
     mod.rs       ModelBackend trait (stream_response)
     lmstudio.rs  LM Studio via OpenAI-compatible API (default)
@@ -39,12 +41,17 @@ src/
     tree.rs      Vault filesystem tree + full-text search
     mcp_client.rs  Spawns MCP server processes and proxies calls over stdio
     openapi.rs   utoipa spec assembly
-  tools/
-    mod.rs       ToolRegistry — registers tool definitions and routes calls
-    bash.rs      Shell execution with interactive permission prompt
-    fs.rs        read_file, write_file, edit_file
-    search.rs    glob, grep
-build.rs         Compiles agent .md files into the binary as a fallback
+projects/core/src/tools/
+  mod.rs         ToolRegistry — registers tool definitions and routes calls
+  bash.rs        Shell execution with interactive permission prompt
+projects/utils/src/tools/
+  fs.rs          read_file, write_file, edit_file
+  search.rs      glob, grep
+
+build.rs files:
+  projects/agents/build.rs    Embeds ~/brain/ai/claude/agents/*.md into the binary as a fallback
+  projects/commands/build.rs  Embeds slash command .md files as a compile-time fallback
+  projects/server/build.rs    Ensures frontend/dist/ stub exists so rust-embed doesn't fail
 ```
 
 ## Request flow (web)

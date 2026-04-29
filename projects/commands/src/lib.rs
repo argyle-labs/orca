@@ -14,6 +14,19 @@
 //! - `mcp_cmd`  — MCP registry subcommands: add/remove/list external MCP servers
 //! - `projects` — list projects from brain vault memory directory
 //! - `spec`     — manage external OpenAPI spec registry (add, remove, list, refresh)
+//! - `update`   — self-update from GitHub releases; startup update check
+//! - `oauth`    — GitHub device flow + Atlassian PKCE OAuth; token keychain storage
+
+// Slash command prompts embedded at build time.
+include!(concat!(env!("OUT_DIR"), "/embedded_commands.rs"));
+
+/// List all embedded slash commands as `/name` strings.
+pub fn list_embedded_commands() -> Vec<String> {
+    embedded_command_names()
+        .iter()
+        .map(|name| format!("/{name}"))
+        .collect()
+}
 
 pub mod agents;
 pub mod auth;
@@ -24,6 +37,8 @@ pub mod log_cmd;
 pub mod mcp_cmd;
 pub mod projects;
 pub mod spec;
+pub mod oauth;
+pub mod update;
 
 pub use spec::{SpecAction, cmd_spec};
 pub use log_cmd::{LogAction, cmd_log};
@@ -34,3 +49,5 @@ pub use doctor::cmd_doctor;
 pub use projects::cmd_projects;
 pub use codegen::cmd_gen;
 pub use mcp_cmd::{McpAction, cmd_mcp};
+pub use update::{cmd_update, startup_update_check};
+pub use oauth::{cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian, load_github_token, load_atlassian_access_token};

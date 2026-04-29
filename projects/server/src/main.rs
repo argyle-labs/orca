@@ -4,7 +4,7 @@ use brain::mcp;
 use brain::serve;
 use brain::serve::openapi_spec_json;
 use brain::session::Session;
-use brain_commands::{self as cmd, DaemonAction, LogAction, McpAction, SpecAction};
+use brain_commands::{self as cmd, DaemonAction, LogAction, McpAction, SpecAction, cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian};
 use brain_core::backend::{ClaudeBackend, ModelBackend, stdout_sink};
 use brain_utils::config::Config;
 use brain_utils::types::Message;
@@ -27,14 +27,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Store Anthropic API key for Claude escalation
-    Login,
+    /// Authenticate with a service and store tokens in keychain
+    Login {
+        #[command(subcommand)]
+        service: LoginService,
+    },
 
     /// Check authentication and connectivity status
     Auth,
 
-    /// Remove stored API key from keychain
-    Logout,
+    /// Remove stored credentials from keychain
+    Logout {
+        #[command(subcommand)]
+        service: LoginService,
+    },
 
     /// List projects (memory dirs in brain vault)
     Projects,
@@ -122,6 +128,19 @@ enum Command {
         #[command(subcommand)]
         action: McpAction,
     },
+
+    /// Check for and apply updates from GitHub releases
+    Update,
+}
+
+#[derive(Subcommand)]
+enum LoginService {
+    /// Store Anthropic API key for Claude escalation
+    Anthropic,
+    /// Authenticate with GitHub via device flow
+    Github,
+    /// Authenticate with Atlassian (Jira + Confluence) via OAuth
+    Atlassian,
 }
 
 #[tokio::main]
@@ -144,8 +163,16 @@ async fn main() -> Result<()> {
     let config = Config::load()?;
 
     match cli.command {
-        Some(Command::Login) => cmd::cmd_login(&config),
-        Some(Command::Logout) => cmd::cmd_logout(),
+        Some(Command::Login { service }) => match service {
+            LoginService::Anthropic => cmd::cmd_login(&config),
+            LoginService::Github => cmd_oauth_github().await,
+            LoginService::Atlassian => cmd_oauth_atlassian().await,
+        },
+        Some(Command::Logout { service }) => match service {
+            LoginService::Anthropic => { cmd::cmd_logout(); Ok(()) },
+            LoginService::Github => cmd_logout_github(),
+            LoginService::Atlassian => cmd_logout_atlassian(),
+        },
         Some(Command::Auth) => cmd::cmd_auth(&config),
         Some(Command::Projects) => cmd::cmd_projects(&config),
         Some(Command::Agents) => cmd::cmd_agents(&config),
@@ -176,6 +203,7 @@ async fn main() -> Result<()> {
         },
         Some(Command::Dev { port }) => cmd_dev(port, &config).await,
         Some(Command::Mcp { action }) => cmd::cmd_mcp(&config, action),
+        Some(Command::Update) => cmd::cmd_update().await,
         Some(Command::Gen { url, out }) => cmd::cmd_gen(&url, &out).await,
         Some(Command::Spec { action }) => match action {
             SpecAction::Dump => {

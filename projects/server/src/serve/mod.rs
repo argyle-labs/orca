@@ -30,6 +30,9 @@ pub async fn run(dev: bool, port: u16, mcp_servers: Vec<brain_utils::config::Mcp
     })?;
     println!("[brain] listening on http://localhost:{port}");
 
+    // Non-blocking update check — prints a notice if a newer version is available.
+    tokio::spawn(brain_commands::startup_update_check());
+
     axum::serve(listener, app).await?;
     Ok(())
 }

@@ -1,0 +1,296 @@
+use anyhow::{Context, Result, bail};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use keyring::Entry;
+use rand::RngCore;
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::time::Duration;
+
+const KEYRING_SERVICE: &str = "brain";
+
+// ── Keychain helpers ─────────────────────────────────────────────────────────
+
+fn store_token(account: &str, token: &str) -> Result<()> {
+    Entry::new(KEYRING_SERVICE, account)
+        .context("keyring entry")?
+        .set_password(token)
+        .context("failed to store token in keychain")?;
+    Ok(())
+}
+
+pub fn load_token(account: &str) -> Option<String> {
+    Entry::new(KEYRING_SERVICE, account)
+        .ok()?
+        .get_password()
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+fn delete_token(account: &str) {
+    let _ = Entry::new(KEYRING_SERVICE, account).map(|e| e.delete_credential());
+}
+
+// Convenience aliases used by the rest of brain
+pub fn load_github_token() -> Option<String> {
+    load_token("github_token")
+}
+
+pub fn load_atlassian_access_token() -> Option<String> {
+    load_token("atlassian_access_token")
+}
+
+pub fn load_atlassian_refresh_token() -> Option<String> {
+    load_token("atlassian_refresh_token")
+}
+
+// ── GitHub Device Flow ───────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct DeviceCodeResponse {
+    device_code: String,
+    user_code: String,
+    verification_uri: String,
+    expires_in: u64,
+    interval: u64,
+}
+
+#[derive(Deserialize)]
+struct DeviceTokenResponse {
+    access_token: Option<String>,
+    error: Option<String>,
+}
+
+pub async fn cmd_oauth_github() -> Result<()> {
+    let client_id = std::env::var("GITHUB_OAUTH_CLIENT_ID")
+        .context("GITHUB_OAUTH_CLIENT_ID not set — add to .env.brain.tpl and 1Password")?;
+
+    let client = reqwest::Client::new();
+
+    // Step 1: request device code
+    let resp: DeviceCodeResponse = client
+        .post("https://github.com/login/device/code")
+        .header("Accept", "application/json")
+        .form(&[("client_id", &client_id), ("scope", &"repo".to_string())])
+        .send()
+        .await
+        .context("device code request failed")?
+        .error_for_status()
+        .context("GitHub API error")?
+        .json()
+        .await
+        .context("failed to parse device code response")?;
+
+    println!();
+    println!("  Open:  {}", resp.verification_uri);
+    println!("  Code:  {}", resp.user_code);
+    println!();
+    println!("Waiting for authorization...");
+
+    open_browser(&resp.verification_uri);
+
+    // Step 2: poll for token
+    let deadline = std::time::Instant::now() + Duration::from_secs(resp.expires_in);
+    let poll_interval = Duration::from_secs(resp.interval.max(5));
+
+    loop {
+        if std::time::Instant::now() > deadline {
+            bail!("authorization timed out — run 'brain login github' again");
+        }
+        tokio::time::sleep(poll_interval).await;
+
+        let token_resp: DeviceTokenResponse = client
+            .post("https://github.com/login/oauth/access_token")
+            .header("Accept", "application/json")
+            .form(&[
+                ("client_id", &client_id),
+                ("device_code", &resp.device_code),
+                ("grant_type", &"urn:ietf:params:oauth:grant-type:device_code".to_string()),
+            ])
+            .send()
+            .await
+            .context("token poll request failed")?
+            .json()
+            .await
+            .context("failed to parse token response")?;
+
+        match (token_resp.access_token, token_resp.error.as_deref()) {
+            (Some(token), _) => {
+                store_token("github_token", &token)?;
+                println!("GitHub token stored in keychain.");
+                return Ok(());
+            }
+            (_, Some("authorization_pending" | "slow_down")) => continue,
+            (_, Some(err)) => bail!("authorization failed: {err}"),
+            _ => continue,
+        }
+    }
+}
+
+pub fn cmd_logout_github() -> Result<()> {
+    delete_token("github_token");
+    println!("GitHub token removed from keychain.");
+    Ok(())
+}
+
+// ── Atlassian OAuth 2.0 (3LO) with PKCE ─────────────────────────────────────
+
+const ATLASSIAN_AUTH_URL: &str = "https://auth.atlassian.com/authorize";
+const ATLASSIAN_TOKEN_URL: &str = "https://auth.atlassian.com/oauth/token";
+const ATLASSIAN_SCOPES: &str =
+    "read:jira-work write:jira-work read:confluence-space.summary read:confluence-content.all offline_access";
+
+#[derive(Deserialize)]
+struct AtlassianTokenResponse {
+    access_token: String,
+    refresh_token: Option<String>,
+}
+
+pub async fn cmd_oauth_atlassian() -> Result<()> {
+    let client_id = std::env::var("ATLASSIAN_OAUTH_CLIENT_ID")
+        .context("ATLASSIAN_OAUTH_CLIENT_ID not set — add to .env.brain.tpl and 1Password")?;
+    let client_secret = std::env::var("ATLASSIAN_OAUTH_CLIENT_SECRET")
+        .context("ATLASSIAN_OAUTH_CLIENT_SECRET not set")?;
+
+    // Bind a random local port for the callback
+    let listener = TcpListener::bind("127.0.0.1:0").context("failed to bind callback port")?;
+    let port = listener.local_addr()?.port();
+    let redirect_uri = format!("http://localhost:{port}/callback");
+
+    // Generate PKCE challenge
+    let (verifier, challenge) = pkce_pair();
+
+    // Generate random state
+    let state = random_hex(16);
+
+    // Build auth URL
+    let auth_url = format!(
+        "{ATLASSIAN_AUTH_URL}?\
+         audience=api.atlassian.com\
+         &client_id={client_id}\
+         &scope={scopes}\
+         &redirect_uri={redirect_uri}\
+         &state={state}\
+         &response_type=code\
+         &prompt=consent\
+         &code_challenge_method=S256\
+         &code_challenge={challenge}",
+        scopes = url::form_urlencoded::byte_serialize(ATLASSIAN_SCOPES.as_bytes()).collect::<String>(),
+        redirect_uri = url::form_urlencoded::byte_serialize(redirect_uri.as_bytes()).collect::<String>(),
+    );
+
+    println!("\nOpening browser for Atlassian authorization...");
+    println!("If the browser doesn't open, visit:\n  {auth_url}\n");
+    open_browser(&auth_url);
+
+    // Wait for callback
+    let code = receive_callback(listener, &state)?;
+
+    // Exchange code for tokens
+    let client = reqwest::Client::new();
+    let token_resp: AtlassianTokenResponse = client
+        .post(ATLASSIAN_TOKEN_URL)
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("client_id", &client_id),
+            ("client_secret", &client_secret),
+            ("code", &code),
+            ("redirect_uri", &redirect_uri),
+            ("code_verifier", &verifier),
+        ])
+        .send()
+        .await
+        .context("token exchange request failed")?
+        .error_for_status()
+        .context("Atlassian token exchange error")?
+        .json()
+        .await
+        .context("failed to parse token response")?;
+
+    store_token("atlassian_access_token", &token_resp.access_token)?;
+    if let Some(refresh) = &token_resp.refresh_token {
+        store_token("atlassian_refresh_token", refresh)?;
+    }
+    println!("Atlassian tokens stored in keychain.");
+    Ok(())
+}
+
+pub fn cmd_logout_atlassian() -> Result<()> {
+    delete_token("atlassian_access_token");
+    delete_token("atlassian_refresh_token");
+    println!("Atlassian tokens removed from keychain.");
+    Ok(())
+}
+
+// ── PKCE helpers ─────────────────────────────────────────────────────────────
+
+fn pkce_pair() -> (String, String) {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let verifier = URL_SAFE_NO_PAD.encode(bytes);
+    let digest = Sha256::digest(verifier.as_bytes());
+    let challenge = URL_SAFE_NO_PAD.encode(digest.as_slice());
+    (verifier, challenge)
+}
+
+fn random_hex(bytes: usize) -> String {
+    let mut buf = vec![0u8; bytes];
+    rand::thread_rng().fill_bytes(&mut buf);
+    buf.iter().fold(String::new(), |mut s, b| {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+// ── Callback server ───────────────────────────────────────────────────────────
+
+fn receive_callback(listener: TcpListener, expected_state: &str) -> Result<String> {
+    listener.set_nonblocking(false)?;
+    let (mut stream, _) = listener.accept().context("failed to accept callback")?;
+
+    let mut buf = [0u8; 8192];
+    let n = stream.read(&mut buf).context("failed to read callback")?;
+    let request = String::from_utf8_lossy(&buf[..n]);
+
+    // Send a success page
+    let body = b"<html><body><h2>Authorized!</h2><p>You can close this tab.</p></body></html>";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.write_all(body);
+
+    // Parse GET /callback?code=...&state=... from the request line
+    let first_line = request.lines().next().unwrap_or("");
+    let path = first_line.split_whitespace().nth(1).unwrap_or("");
+    let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+
+    let mut code = None;
+    let mut state = None;
+    for pair in query.split('&') {
+        if let Some(v) = pair.strip_prefix("code=") {
+            code = Some(v.to_string());
+        } else if let Some(v) = pair.strip_prefix("state=") {
+            state = Some(v.to_string());
+        }
+    }
+
+    if state.as_deref() != Some(expected_state) {
+        bail!("state mismatch — possible CSRF; try again");
+    }
+    code.context("no code in callback URL")
+}
+
+// ── Browser opener ────────────────────────────────────────────────────────────
+
+fn open_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    eprintln!("Cannot open browser automatically on this platform — visit the URL manually.");
+}

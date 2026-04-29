@@ -1,6 +1,17 @@
-.PHONY: build install deploy dev watch clean check release audit lint format test daemon-install daemon-uninstall
+.PHONY: build install deploy dev run watch clean check release audit lint format test daemon-install daemon-uninstall
 
 INSTALL_PATH := $(HOME)/.local/bin/brain
+ENV_TPL      := .env.brain.tpl
+
+# 1Password: CI uses OP_SERVICE_ACCOUNT_TOKEN (set in GitHub Secrets) — op picks it up
+# automatically. Local dev pins to the personal account UUID so the right account is used
+# when multiple accounts are signed in (personal + Rebuy).
+# Token lives in: 1Password → automations → brain → ci_service_account_token
+ifdef OP_SERVICE_ACCOUNT_TOKEN
+OP_RUN := op run --env-file $(ENV_TPL) --
+else
+OP_RUN := OP_ACCOUNT=ATLH3ZKQ2JA2DMGPRD3JW3NDVE op run --env-file $(ENV_TPL) --
+endif
 
 # Build frontend + release binary (single self-contained binary with embedded assets)
 build:
@@ -29,31 +40,14 @@ watch:
 check:
 	cargo check --manifest-path projects/server/Cargo.toml
 
-# Run in dev mode with hot reload — Rust API on :12000, Vite on :12001, gen on each restart
+# Dev mode — Rust API :12000 + Vite :12001 + hot reload, secrets injected from 1Password
+# Requires: op CLI authenticated (run `op signin` first)
 dev:
-	@for port in 12000 12001; do \
-	  pid=$$(lsof -ti tcp:$$port 2>/dev/null); \
-	  if [ -n "$$pid" ]; then \
-	    echo "  killing stale process on :$$port (pid $$pid)"; \
-	    kill -9 $$pid 2>/dev/null || true; \
-	  fi; \
-	done
-	@echo ""
-	@echo "  brain API   →  http://localhost:12000  (cargo-watch)"
-	@echo "  brain UI    →  http://localhost:12001  (vite HMR)"
-	@echo "  brain gen   →  runs after each backend restart"
-	@echo ""
-	@trap 'kill 0' SIGINT SIGTERM; \
-	 BRAIN_LOG=trace cargo watch -q -c -C projects/server \
-	   -w src -w Cargo.toml \
-	   -x 'run -- serve --dev' 2>&1 | \
-	   while IFS= read -r line; do \
-	     echo "[server]   $$line"; \
-	     echo "$$line" | grep -q "listening on" && \
-	       (sleep 0.5 && cd projects/frontend && npm run gen 2>&1 | sed 's/^/[gen]      /') & \
-	   done & \
-	 (cd projects/frontend && npm run dev 2>&1 | sed 's/^/[frontend] /') & \
-	 wait
+	$(OP_RUN) bash scripts/dev.sh
+
+# Run the installed binary with secrets from 1Password
+run:
+	$(OP_RUN) $(INSTALL_PATH) serve
 
 # Build and install as a system daemon (launchd on macOS, systemd on Linux)
 daemon-install: deploy
