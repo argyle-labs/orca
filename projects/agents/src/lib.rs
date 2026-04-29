@@ -30,10 +30,27 @@ pub fn list_embedded_agents() -> Vec<(String, String)> {
 ///
 /// A manifest file (`.brain-agents`) tracks which names were installed by brain so we never
 /// touch user-created agent files.
-pub fn install_agents(target_dir: &Path) -> anyhow::Result<InstallReport> {
-    if !target_dir.is_dir() {
-        std::fs::create_dir_all(target_dir)?;
+fn ensure_agents_dir(path: &Path) -> anyhow::Result<()> {
+    if path.is_dir() {
+        return Ok(());
     }
+    // Broken symlink — create the directory the symlink points to, not the symlink itself.
+    if path.is_symlink() {
+        let dest = std::fs::read_link(path)?;
+        let resolved = if dest.is_absolute() {
+            dest
+        } else {
+            path.parent().unwrap_or(path).join(dest)
+        };
+        std::fs::create_dir_all(resolved)?;
+        return Ok(());
+    }
+    std::fs::create_dir_all(path)?;
+    Ok(())
+}
+
+pub fn install_agents(target_dir: &Path) -> anyhow::Result<InstallReport> {
+    ensure_agents_dir(target_dir)?;
 
     let manifest_path = target_dir.join(".brain-agents");
     let old_names = read_manifest(&manifest_path);

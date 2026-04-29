@@ -47,6 +47,11 @@ pub fn open_default() -> Result<Connection> {
 fn apply_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
+        CREATE TABLE IF NOT EXISTS learning_progress (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS session_events (
             id          TEXT PRIMARY KEY,
             session     TEXT NOT NULL,
@@ -104,6 +109,30 @@ fn load_or_create_key() -> Result<String> {
             Ok(hex)
         }
     }
+}
+
+// ── Learning progress ─────────────────────────────────────────────────────────
+
+/// Retrieve the last saved learning page, if any.
+pub fn get_learning_progress(conn: &Connection) -> Result<Option<String>> {
+    let page = conn
+        .query_row(
+            "SELECT value FROM learning_progress WHERE key = 'current_page'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(page)
+}
+
+/// Save (upsert) the current learning page.
+pub fn save_learning_progress(conn: &Connection, page: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO learning_progress(key, value) VALUES('current_page', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![page],
+    )?;
+    Ok(())
 }
 
 // ── Write helpers ─────────────────────────────────────────────────────────────

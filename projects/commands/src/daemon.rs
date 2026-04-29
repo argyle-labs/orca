@@ -195,6 +195,8 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
         <key>Crashed</key>
         <true/>
     </dict>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
     <key>StandardOutPath</key>
     <string>/tmp/brain-daemon.log</string>
     <key>StandardErrorPath</key>

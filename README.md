@@ -9,6 +9,12 @@ make init     # install rust, node, cargo-watch, cargo-audit; npm install
 make install  # build site + release binary, install to ~/.local/bin/brain
 ```
 
+### Local dev secrets
+
+`make dev` uses the 1Password CLI to inject secrets. It requires `OP_ACCOUNT` set in your environment — this is configured in `dotfiles/.zshrc`. On a new machine, ensure dotfiles are installed (`~/dotfiles/install.sh`) before running `make dev`.
+
+Find your account UUID: `op account list`
+
 ## Usage
 
 ```sh

@@ -270,6 +270,8 @@ fn build_router(dev: bool, mcp_servers: Vec<brain_utils::config::McpServerEntry>
         .route("/api/docker/action", post(api::docker_action_handler))
         .route("/api/ctx7", get(api::ctx7_handler))
         .route("/api/doc", get(api::doc_handler))
+        .route("/api/learning/progress", get(api::get_progress_handler))
+        .route("/api/learning/progress", post(api::save_progress_handler))
         .route("/api/schema", get(api::schema_handler))
         .route("/api/schema/domains", get(api::schema_domains_handler))
         .route("/api/rebuy/health/local", get(api::rebuy_health_handler))

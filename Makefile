@@ -4,14 +4,9 @@ INSTALL_PATH := $(HOME)/.local/bin/brain
 ENV_TPL      := .env.brain.tpl
 
 # 1Password: CI uses OP_SERVICE_ACCOUNT_TOKEN (set in GitHub Secrets) — op picks it up
-# automatically. Local dev pins to the personal account UUID so the right account is used
-# when multiple accounts are signed in (personal + Rebuy).
+# automatically. Local dev requires OP_ACCOUNT set in dotfiles/.zshrc.
 # Token lives in: 1Password → automations → brain → ci_service_account_token
-ifdef OP_SERVICE_ACCOUNT_TOKEN
 OP_RUN := op run --env-file $(ENV_TPL) --
-else
-OP_RUN := OP_ACCOUNT=ATLH3ZKQ2JA2DMGPRD3JW3NDVE op run --env-file $(ENV_TPL) --
-endif
 
 # Build frontend + release binary (single self-contained binary with embedded assets)
 build:
@@ -25,6 +20,7 @@ build:
 deploy: build
 	cp target/release/brain $(INSTALL_PATH)
 	$(INSTALL_PATH) install-agents
+	$(INSTALL_PATH) daemon install
 	@echo "deployed → $(INSTALL_PATH)"
 
 # Build debug binary and install to ~/.local/bin/brain (dev workflow, no frontend embed)
@@ -41,8 +37,9 @@ check:
 	cargo check --manifest-path projects/server/Cargo.toml
 
 # Dev mode — Rust API :12000 + Vite :12001 + hot reload, secrets injected from 1Password
-# Requires: op CLI authenticated (run `op signin` first)
+# Requires: OP_ACCOUNT set in dotfiles/.zshrc (see README)
 dev:
+	op signin --account $(OP_ACCOUNT)
 	$(OP_RUN) bash scripts/dev.sh
 
 # Run the installed binary with secrets from 1Password
