@@ -243,7 +243,9 @@ pub fn get_root_tree(root_name: &str) -> Vec<TreeNode> {
         return vec![];
     };
     let ignored = get_ignored(root_name);
-    compact_tree(build_tree_raw(root_dir, root_dir, &ignored))
+    // Canonicalize so strip_prefix works correctly when root_dir is a symlink
+    let root_dir = root_dir.canonicalize().unwrap_or_else(|_| root_dir.clone());
+    compact_tree(build_tree_raw(&root_dir, &root_dir, &ignored))
 }
 
 pub fn collect_all_files(nodes: &[TreeNode]) -> Vec<TreeNode> {
