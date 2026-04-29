@@ -282,6 +282,8 @@ fn build_router(dev: bool, mcp_servers: Vec<brain_utils::config::McpServerEntry>
         .route("/api/jira/issues/:key/transitions", get(api::jira_get_transitions_handler))
         .route("/api/jira/issues/:key/transitions", post(api::jira_transition_handler))
         .route("/api/confluence/search", get(api::confluence_search_handler))
+        .route("/api/system/status", get(api::system_status_handler))
+        .route("/api/system/action", post(api::system_action_handler))
         .with_state(mcp_pool)
         .layer(axum::middleware::from_fn(middleware::log_requests))
         .layer(cors);

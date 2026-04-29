@@ -7,6 +7,7 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 pub struct LMStudioBackend {
@@ -18,7 +19,10 @@ pub struct LMStudioBackend {
 impl LMStudioBackend {
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
         LMStudioBackend {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(Duration::from_secs(60))
+                .build()
+                .unwrap_or_default(),
             base_url: base_url.into(),
             model: model.into(),
         }

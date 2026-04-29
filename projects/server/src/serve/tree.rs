@@ -36,6 +36,10 @@ pub fn get_roots() -> HashMap<String, PathBuf> {
             std::env::var("DOTFILES_ROOT").unwrap_or_else(|_| format!("{home}/dotfiles")),
         ),
     );
+    roots.insert(
+        "teaching".to_string(),
+        PathBuf::from(format!("{home}/brain/ai/claude/teaching")),
+    );
     roots
 }
 
@@ -65,6 +69,7 @@ pub fn get_ignored(root_name: &str) -> HashSet<String> {
         .iter()
         .map(|s| s.to_string())
         .collect(),
+        "teaching" => [".git"].iter().map(|s| s.to_string()).collect(),
         _ => HashSet::new(),
     }
 }

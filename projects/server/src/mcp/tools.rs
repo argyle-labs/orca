@@ -23,7 +23,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "brain_run",
-            "description": "Delegate a task to a local brain agent running on the local LLM. Use for tasks that don't need Claude-level reasoning — code explanation, note-taking, file ops, quick lookups. Returns the agent's full response.",
+            "description": "Delegate a task to a brain agent running on the local LLM (LM Studio). ONLY use this when the task genuinely requires language model reasoning — summarization, explanation, drafting, inference. Do NOT use for: file reads (use read_doc), searches (use search_docs), log lookup (use brain_search_logs), service state (use brain_list_services), schema queries (use get_graphql_info / get_rebuy_spec), or any operation with a deterministic tool that already handles it. Deterministic tools are always preferred over LLM calls. Falls back to Claude Haiku if LM Studio is unreachable.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

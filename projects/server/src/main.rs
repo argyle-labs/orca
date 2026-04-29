@@ -4,7 +4,7 @@ use brain::mcp;
 use brain::serve;
 use brain::serve::openapi_spec_json;
 use brain::session::Session;
-use brain_commands::{self as cmd, DaemonAction, LogAction, McpAction, SpecAction, cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian};
+use brain_commands::{self as cmd, DaemonAction, LogAction, McpAction, SpecAction, cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian, cmd_install, cmd_uninstall};
 use brain_core::backend::{ClaudeBackend, ModelBackend, stdout_sink};
 use brain_utils::config::Config;
 use brain_utils::types::Message;
@@ -131,6 +131,12 @@ enum Command {
 
     /// Check for and apply updates from GitHub releases
     Update,
+
+    /// Install brain: wire symlinks, register MCP server, install binary
+    Install,
+
+    /// Uninstall brain: remove binary, MCP registration, and CLAUDE.md symlinks
+    Uninstall,
 }
 
 #[derive(Subcommand)]
@@ -169,7 +175,7 @@ async fn main() -> Result<()> {
             LoginService::Atlassian => cmd_oauth_atlassian().await,
         },
         Some(Command::Logout { service }) => match service {
-            LoginService::Anthropic => { cmd::cmd_logout(); Ok(()) },
+            LoginService::Anthropic => { let _ = cmd::cmd_logout(); Ok(()) },
             LoginService::Github => cmd_logout_github(),
             LoginService::Atlassian => cmd_logout_atlassian(),
         },
@@ -204,6 +210,8 @@ async fn main() -> Result<()> {
         Some(Command::Dev { port }) => cmd_dev(port, &config).await,
         Some(Command::Mcp { action }) => cmd::cmd_mcp(&config, action),
         Some(Command::Update) => cmd::cmd_update().await,
+        Some(Command::Install) => cmd_install(),
+        Some(Command::Uninstall) => cmd_uninstall(),
         Some(Command::Gen { url, out }) => cmd::cmd_gen(&url, &out).await,
         Some(Command::Spec { action }) => match action {
             SpecAction::Dump => {

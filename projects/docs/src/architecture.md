@@ -11,47 +11,47 @@ brain is a single Rust binary that serves four roles simultaneously:
 
 Deployment is `cp brain ~/.local/bin/brain`. No Docker, no node runtime at the install target, no separate web server process. The React site is compiled into the binary at build time via `rust-embed`. See [single-binary.md](single-binary.md).
 
-## Module map
+## Crate map
+
+The repo is a Cargo workspace. Each crate has a single responsibility.
 
 ```
-src/
-  main.rs        CLI entry (clap), subcommand dispatch
-  session.rs     Chat loop — sends messages, receives streaming tokens, handles tool calls
-  config.rs      Loads brain.toml from ~/brain/config/; resolves all paths
-  context.rs     Assembles the system prompt from project memory + agent definitions
-  agents.rs      Loads agent .md files from ~/brain/ai/claude/agents/ (+ build-time fallback)
-  log.rs         JSONL session logging, search, recall
-  ledger.rs      Token accounting per session
-  types.rs       Shared types: Message, ToolCall, ToolResult, BackendResponse
-  auth.rs        macOS Keychain — stores/retrieves the Anthropic API key
-  docs.rs        Embedded repo docs (this docs/ directory, compiled in at build time)
-  jobs.rs        Background job queue for async side-effects
-  tui.rs         ratatui split-pane UI
-  scanner/       File scanner utilities used by tools
-  mcp/
-    mod.rs       MCP stdio server — JSON-RPC dispatch + tool implementations
-    docs.rs      MCP tool: read_doc, get_tree, search_docs (embedded docs root)
-  backend/
-    mod.rs       ModelBackend trait (stream_response)
-    lmstudio.rs  LM Studio via OpenAI-compatible API (default)
-    claude.rs    Anthropic Messages API (escalation only)
-  serve/
-    mod.rs       axum router; embeds site/dist via rust-embed
-    api.rs       All HTTP handlers
-    tree.rs      Vault filesystem tree + full-text search
-    mcp_client.rs  Spawns MCP server processes and proxies calls over stdio
-    openapi.rs   utoipa spec assembly
-projects/core/src/tools/
-  mod.rs         ToolRegistry — registers tool definitions and routes calls
-  bash.rs        Shell execution with interactive permission prompt
-projects/utils/src/tools/
-  fs.rs          read_file, write_file, edit_file
-  search.rs      glob, grep
+projects/
+  core/          brain-core — ModelBackend trait, LM Studio + Claude backends, tool types
+  utils/         brain-utils — Config, types, logging, ledger, auth, state
+  agents/        brain-agents — embedded agent definitions (build-time fallback)
+  jobs/          brain-jobs — background job queue
+  scanner/       brain-scanner — file scanner utilities
+  server/        brain (binary) — CLI, session, web server, MCP server
+  frontend/      React site (compiled into server binary via rust-embed)
+  docs/          WHY documentation (compiled into server binary via rust-embed)
+```
 
-build.rs files:
-  projects/agents/build.rs    Embeds ~/brain/ai/claude/agents/*.md into the binary as a fallback
-  projects/commands/build.rs  Embeds slash command .md files as a compile-time fallback
-  projects/server/build.rs    Ensures frontend/dist/ stub exists so rust-embed doesn't fail
+### Key files in `projects/server/src/`
+
+```
+main.rs               CLI entry (clap), subcommand dispatch, project auto-detection
+context.rs            Assembles system prompt from project memory + agent definition
+tui.rs                ratatui split-pane TUI
+session/
+  mod.rs              Session struct (config, backend, messages, tools, ledger, log)
+  chat.rs             Chat loop — sends messages, handles tool calls, agentic rounds
+  commands.rs         Slash commands (/model, /flag, /search, /escalate, /context…)
+  delegate.rs         delegate tool — sub-session for one-shot agent calls
+  util.rs             resolve_model() (LM Studio → Claude fallback), history, git check
+mcp/
+  mod.rs              JSON-RPC 2.0 dispatcher (stdin → stdout)
+  tools.rs            Tool definitions (JSON schemas)
+  handlers.rs         Tool implementations
+  docs.rs             Doc tree helpers (runs without axum)
+  specs.rs            OpenAPI spec helpers
+  context7.rs         Context7 MCP proxy
+serve/
+  mod.rs              axum router; rust-embed serves site/dist in release
+  api/                HTTP handlers (one file per domain, all utoipa-annotated)
+  openapi.rs          utoipa spec assembly
+  tree.rs             TreeNode type, vault tree builder
+  mcp_client.rs       Spawns MCP server subprocesses, pools them
 ```
 
 ## Request flow (web)

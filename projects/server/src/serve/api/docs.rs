@@ -25,7 +25,7 @@ use crate::serve::tree::{build_tree_raw, collect_all_files, get_root_tree, get_r
 )]
 pub async fn tree_handler() -> impl IntoResponse {
     let mut result = serde_json::Map::new();
-    for name in ["rebuy", "brain"] {
+    for name in ["rebuy", "brain", "teaching"] {
         result.insert(
             name.to_string(),
             serde_json::to_value(get_root_tree(name)).unwrap_or_default(),

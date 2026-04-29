@@ -12,7 +12,7 @@ pub fn generate(repo_path: &Path) -> Result<Value> {
     let api_php = repo_path.join("application/controllers/api.php");
     let src = std::fs::read_to_string(&api_php)?;
 
-    let mut endpoints = extract_endpoints(&src);
+    let endpoints = extract_endpoints(&src);
 
     // Merge with existing api.json if present
     let existing_path = repo_path.join("api.json");
@@ -43,6 +43,7 @@ struct Endpoint {
 struct Param {
     name: String,
     required: bool,
+    #[allow(dead_code)]
     in_query: bool, // true = query, false = body
 }
 
@@ -51,6 +52,7 @@ enum Auth {
     Public,
     ApiKey,
     ShopifyJwt,
+    #[allow(dead_code)]
     RebuyPro,
 }
 
@@ -127,7 +129,7 @@ fn extract_v1_private_functions(src: &str, out: &mut Vec<Endpoint>) {
     }
 
     // v1_integration: /api/v1/integration/{integration}/{event}
-    if let Some(body) = extract_function_body(src, "private function v1_integration(") {
+    if let Some(_body) = extract_function_body(src, "private function v1_integration(") {
         out.push(Endpoint {
             path: "/api/v1/integration/{integration}/{event}".to_string(),
             methods: vec!["POST".to_string()],
@@ -454,7 +456,7 @@ fn extract_balanced(src: &str, open: char, close: char) -> Option<&str> {
     None
 }
 
-fn dedup_endpoints(mut endpoints: Vec<Endpoint>) -> Vec<Endpoint> {
+fn dedup_endpoints(endpoints: Vec<Endpoint>) -> Vec<Endpoint> {
     let mut seen: BTreeMap<String, usize> = BTreeMap::new();
     let mut result: Vec<Endpoint> = Vec::new();
     for ep in endpoints {

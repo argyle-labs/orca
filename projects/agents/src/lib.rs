@@ -31,7 +31,9 @@ pub fn list_embedded_agents() -> Vec<(String, String)> {
 /// A manifest file (`.brain-agents`) tracks which names were installed by brain so we never
 /// touch user-created agent files.
 pub fn install_agents(target_dir: &Path) -> anyhow::Result<InstallReport> {
-    std::fs::create_dir_all(target_dir)?;
+    if !target_dir.is_dir() {
+        std::fs::create_dir_all(target_dir)?;
+    }
 
     let manifest_path = target_dir.join(".brain-agents");
     let old_names = read_manifest(&manifest_path);

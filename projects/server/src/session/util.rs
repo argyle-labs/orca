@@ -1,9 +1,11 @@
 use brain_core::backend::LMStudioBackend;
 use brain_utils::config::Model;
 use brain_utils::types::truncate_preview;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use colored::Colorize;
 
+/// Resolve which model to use. Priority: explicit config > LM Studio auto-discover > Claude fallback.
+/// LM Studio is always attempted first — Claude is escalation only.
 pub async fn resolve_model(config: &brain_utils::config::Config) -> Result<Model> {
     match &config.default_model {
         Model::Claude(id) if !id.is_empty() => return Ok(Model::Claude(id.clone())),
@@ -13,12 +15,6 @@ pub async fn resolve_model(config: &brain_utils::config::Config) -> Result<Model
 
     let lms = LMStudioBackend::new(&config.lmstudio_url, "");
     match lms.list_models().await {
-        Err(e) => {
-            anyhow::bail!(
-                "LM Studio not reachable at {}: {e}\nStart the local server in LM Studio.",
-                config.lmstudio_url
-            );
-        }
         Ok(models) => {
             let chat_models: Vec<&str> = models
                 .iter()
@@ -27,7 +23,10 @@ pub async fn resolve_model(config: &brain_utils::config::Config) -> Result<Model
                 .collect();
 
             if chat_models.is_empty() {
-                anyhow::bail!("LM Studio is running but no chat models are loaded.");
+                eprintln!(
+                    "warning: LM Studio is running but no chat models are loaded — falling back to Claude"
+                );
+                return claude_fallback(config);
             }
             if chat_models.len() == 1 {
                 return Ok(Model::LMStudio(chat_models[0].to_string()));
@@ -47,7 +46,23 @@ pub async fn resolve_model(config: &brain_utils::config::Config) -> Result<Model
                 .unwrap_or(&chat_models[0]);
             Ok(Model::LMStudio(selected.to_string()))
         }
+        Err(e) => {
+            eprintln!(
+                "warning: LM Studio not reachable at {} ({e}) — falling back to Claude",
+                config.lmstudio_url
+            );
+            claude_fallback(config)
+        }
     }
+}
+
+/// Cheapest Claude model as fallback when LM Studio is unavailable.
+fn claude_fallback(config: &brain_utils::config::Config) -> Result<Model> {
+    config
+        .anthropic_api_key
+        .as_ref()
+        .context("LM Studio unreachable and no Anthropic API key — run `brain login` or start LM Studio")?;
+    Ok(Model::Claude("claude-haiku-4-5-20251001".to_string()))
 }
 
 pub fn estimate_context_window(model: &Model) -> usize {

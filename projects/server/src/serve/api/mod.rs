@@ -208,6 +208,7 @@ pub mod logs;
 pub mod mcp;
 pub mod schema;
 pub mod specs;
+pub mod system;
 pub mod tests_handler;
 
 pub use atlassian::*;
@@ -220,4 +221,5 @@ pub use logs::*;
 pub use mcp::*;
 pub use schema::*;
 pub use specs::*;
+pub use system::*;
 pub use tests_handler::*;

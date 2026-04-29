@@ -40,6 +40,9 @@ use utoipa::OpenApi;
         super::api::confluence_search_handler,
         super::api::repos_handler,
         super::api::prs_handler,
+        // system install/uninstall
+        super::api::system_status_handler,
+        super::api::system_action_handler,
     ),
     components(schemas(
         super::api::TreeNode,
@@ -79,6 +82,11 @@ use utoipa::OpenApi;
         super::api::GraphQlField,
         super::api::GraphQlType,
         super::api::GraphQlEnum,
+        super::api::SystemStatusResponse,
+        super::api::ComponentStatus,
+        super::api::MpcStatus,
+        super::api::SystemActionResponse,
+        super::api::SystemActionRequest,
     )),
     tags(
         // Public domains — served at /api/openapi/public.json
@@ -95,6 +103,7 @@ use utoipa::OpenApi;
         (name = "jira",       description = "Jira issue management via Atlassian REST API"),
         (name = "confluence", description = "Confluence search via Atlassian REST API"),
         (name = "bitbucket",  description = "Bitbucket repo and PR listing"),
+        (name = "system",     description = "Brain installation status and install/uninstall actions"),
     )
 )]
 pub struct ApiDoc;

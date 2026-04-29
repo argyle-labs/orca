@@ -235,7 +235,7 @@ fn visit_dir(dir: &Path, out: &mut Vec<Ci4Route>) -> Result<()> {
 fn parse_routes(src: &str, out: &mut Vec<Ci4Route>) {
     let methods = ["get", "post", "put", "delete", "patch", "options", "head"];
     let mut pos = 0;
-    let bytes = src.as_bytes();
+    let _bytes = src.as_bytes();
 
     while pos < src.len() {
         // Find `$routes->`
