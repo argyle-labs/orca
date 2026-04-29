@@ -410,8 +410,16 @@ fn build_router(dev: bool, mcp_servers: Vec<brain_utils::config::McpServerEntry>
             get(api::specs_graphql_info_handler),
         )
         .route(
+            "/api/specs/:repo/graphql/download",
+            get(api::graphql_download_handler),
+        )
+        .route(
             "/api/specs/:repo/graphql",
             get(api::specs_get_graphql_handler),
+        )
+        .route(
+            "/api/specs/:repo/download",
+            get(api::spec_download_handler),
         )
         .route("/api/specs/:repo", get(api::specs_get_handler))
         .route("/api/tree", get(api::tree_handler))
