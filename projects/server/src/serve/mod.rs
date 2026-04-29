@@ -2,6 +2,7 @@ pub mod api;
 pub mod mcp_client;
 pub mod middleware;
 mod openapi;
+pub mod pdf_gen;
 pub mod tree;
 
 pub use openapi::brain_spec_json as openapi_spec_json;
