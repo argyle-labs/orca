@@ -227,6 +227,143 @@ async fn static_handler(uri: axum::http::Uri) -> axum::response::Response {
     }
 }
 
+// ── Dev proxy ─────────────────────────────────────────────────────────────────
+// In dev mode, Rust owns port 12000 and proxies non-API requests to Vite at
+// :12001. This means the browser always uses one port for both API and UI,
+// matching the prod layout exactly.
+
+const VITE_ORIGIN: &str = "http://127.0.0.1:12001";
+const VITE_WS_ORIGIN: &str = "ws://127.0.0.1:12001";
+
+// Hop-by-hop headers that must not be forwarded.
+fn is_hop_by_hop(name: &str) -> bool {
+    matches!(
+        name,
+        "connection" | "keep-alive" | "transfer-encoding" | "te"
+            | "trailer" | "upgrade" | "proxy-authorization"
+            | "proxy-authenticate"
+    )
+}
+
+async fn dev_proxy_handler(req: axum::extract::Request) -> axum::response::Response {
+    use axum::extract::ws::WebSocketUpgrade;
+
+    let is_ws = req
+        .headers()
+        .get(axum::http::header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("websocket"))
+        .unwrap_or(false);
+
+    if is_ws {
+        let path = req
+            .uri()
+            .path_and_query()
+            .map(|p| p.as_str())
+            .unwrap_or("/")
+            .to_string();
+        use axum::extract::FromRequest;
+        use axum::response::IntoResponse;
+        return match WebSocketUpgrade::from_request(req, &()).await {
+            Ok(ws) => ws.on_upgrade(move |sock| proxy_ws_to_vite(sock, path)),
+            Err(e) => e.into_response(),
+        };
+    }
+
+    proxy_http_to_vite(req).await
+}
+
+async fn proxy_http_to_vite(req: axum::extract::Request) -> axum::response::Response {
+    use axum::body::Body;
+    use axum::http::Response;
+
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/")
+        .to_string();
+    let url = format!("{VITE_ORIGIN}{path_and_query}");
+
+    let method = reqwest::Method::from_bytes(req.method().as_str().as_bytes())
+        .unwrap_or(reqwest::Method::GET);
+
+    let client = reqwest::Client::new();
+    let mut rb = client.request(method, &url);
+
+    for (k, v) in req.headers() {
+        if is_hop_by_hop(k.as_str()) || k == axum::http::header::HOST {
+            continue;
+        }
+        rb = rb.header(k.as_str(), v);
+    }
+
+    let body = axum::body::to_bytes(req.into_body(), 32 * 1024 * 1024)
+        .await
+        .unwrap_or_default();
+    rb = rb.body(body);
+
+    match rb.send().await {
+        Ok(resp) => {
+            let status = axum::http::StatusCode::from_u16(resp.status().as_u16())
+                .unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
+            let mut builder = Response::builder().status(status);
+            for (k, v) in resp.headers() {
+                if is_hop_by_hop(k.as_str()) {
+                    continue;
+                }
+                builder = builder.header(k.as_str(), v);
+            }
+            let bytes = resp.bytes().await.unwrap_or_default();
+            builder
+                .body(Body::from(bytes))
+                .unwrap_or_else(|_| Response::builder().status(502).body(Body::empty()).unwrap())
+        }
+        Err(_) => Response::builder()
+            .status(502)
+            .body(Body::from(
+                "brain: vite dev server unreachable — is it running on :12001?",
+            ))
+            .unwrap(),
+    }
+}
+
+async fn proxy_ws_to_vite(mut browser: axum::extract::ws::WebSocket, path: String) {
+    use axum::extract::ws::Message as BMsg;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::{connect_async, tungstenite::Message as VMsg};
+
+    let url = format!("{VITE_WS_ORIGIN}{path}");
+    let (mut vite, _) = match connect_async(&url).await {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = browser.close().await;
+            return;
+        }
+    };
+
+    loop {
+        tokio::select! {
+            msg = browser.recv() => match msg {
+                Some(Ok(BMsg::Text(t)))   => { let _ = vite.send(VMsg::Text(t)).await; }
+                Some(Ok(BMsg::Binary(b))) => { let _ = vite.send(VMsg::Binary(b)).await; }
+                Some(Ok(BMsg::Ping(p)))   => { let _ = vite.send(VMsg::Ping(p)).await; }
+                Some(Ok(BMsg::Pong(p)))   => { let _ = vite.send(VMsg::Pong(p)).await; }
+                _ => break,
+            },
+            msg = vite.next() => match msg {
+                Some(Ok(VMsg::Text(t)))   => { let _ = browser.send(BMsg::Text(t)).await; }
+                Some(Ok(VMsg::Binary(b))) => { let _ = browser.send(BMsg::Binary(b)).await; }
+                Some(Ok(VMsg::Ping(p)))   => { let _ = browser.send(BMsg::Ping(p)).await; }
+                Some(Ok(VMsg::Pong(p)))   => { let _ = browser.send(BMsg::Pong(p)).await; }
+                _ => break,
+            },
+        }
+    }
+
+    let _ = browser.close().await;
+}
+
 fn build_router(dev: bool, mcp_servers: Vec<brain_utils::config::McpServerEntry>) -> Router {
     use std::sync::Arc;
 
@@ -291,7 +428,7 @@ fn build_router(dev: bool, mcp_servers: Vec<brain_utils::config::McpServerEntry>
         .layer(cors);
 
     if dev {
-        api
+        api.fallback(dev_proxy_handler)
     } else {
         api.fallback(static_handler)
     }

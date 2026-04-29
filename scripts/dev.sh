@@ -13,8 +13,7 @@ for port in 12000 12001; do
 done
 
 echo ""
-echo "  brain API   →  http://localhost:12000  (cargo-watch)"
-echo "  brain UI    →  http://localhost:12001  (vite HMR)"
+echo "  brain       →  http://localhost:12000  (rust proxies → vite HMR)"
 echo "  brain gen   →  runs after each backend restart"
 echo ""
 
