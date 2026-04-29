@@ -1,48 +1,24 @@
-use utoipa::OpenApi;
+use std::sync::OnceLock;
 
+use utoipa::OpenApi;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
+
+use super::api;
+use super::mcp_client::McpPool;
+
+/// Static OpenAPI doc skeleton — info, tags, and shared schemas.
+///
+/// Paths are NOT listed here. They are registered automatically by
+/// `utoipa-axum` when each handler is added to the router via
+/// `routes!(handler)`. The `#[utoipa::path]` attribute on the handler
+/// is the single source of truth for the route.
 #[derive(OpenApi)]
 #[openapi(
     info(
         title = "brain API",
         version = "0.1.0",
         description = "brain local dev tool — docs, services, schema, MCP proxy"
-    ),
-    paths(
-        // public
-        super::api::tree_handler,
-        super::api::search_handler,
-        super::api::doc_handler,
-        super::api::ctx7_handler,
-        // internal
-        super::api::ping_handler,
-        super::api::mcp_tools_handler,
-        super::api::mcp_run_handler,
-        super::api::docker_engine_handler,
-        super::api::docker_engine_start_handler,
-        super::api::docker_services_handler,
-        super::api::docker_action_handler,
-        super::api::schema_handler,
-        super::api::schema_domains_handler,
-        super::api::rebuy_health_handler,
-        super::api::log_services_handler,
-        super::api::log_fetch_handler,
-        super::api::tests_run_handler,
-        // registry (internal — brain-local only)
-        super::api::specs_list_handler,
-        super::api::specs_get_handler,
-        super::api::specs_get_public_handler,
-        super::api::specs_get_graphql_handler,
-        super::api::specs_graphql_info_handler,
-        // jira / confluence / bitbucket proxies
-        super::api::jira_issues_handler,
-        super::api::jira_get_transitions_handler,
-        super::api::jira_transition_handler,
-        super::api::confluence_search_handler,
-        super::api::repos_handler,
-        super::api::prs_handler,
-        // system install/uninstall
-        super::api::system_status_handler,
-        super::api::system_action_handler,
     ),
     components(schemas(
         super::api::TreeNode,
@@ -87,6 +63,11 @@ use utoipa::OpenApi;
         super::api::MpcStatus,
         super::api::SystemActionResponse,
         super::api::SystemActionRequest,
+        super::api::SpecDownloadQuery,
+        super::api::GraphqlDownloadQuery,
+        super::api::ProgressRequest,
+        super::api::ProgressResponse,
+        super::api::PdfQuery,
     )),
     tags(
         // Public domains — served at /api/openapi/public.json
@@ -104,22 +85,81 @@ use utoipa::OpenApi;
         (name = "confluence", description = "Confluence search via Atlassian REST API"),
         (name = "bitbucket",  description = "Bitbucket repo and PR listing"),
         (name = "system",     description = "Brain installation status and install/uninstall actions"),
+        (name = "learning",   description = "Learning progress tracking"),
     )
 )]
 pub struct ApiDoc;
 
+/// The fully assembled OpenAPI spec — populated once at router build time
+/// from `OpenApiRouter::split_for_parts()`. Read by the spec handlers.
+static SPEC: OnceLock<utoipa::openapi::OpenApi> = OnceLock::new();
+
+/// Build the `OpenApiRouter` used by both the live server and offline spec
+/// dump. Each handler's `#[utoipa::path]` attribute is the single source of
+/// truth — `routes!(handler)` registers the axum route AND the OpenAPI
+/// metadata. Multi-method paths combine handlers in one `routes!()` call.
+pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
+    OpenApiRouter::with_openapi(ApiDoc::openapi())
+        .routes(routes!(api::ping_handler))
+        .routes(routes!(api::specs_list_handler))
+        .routes(routes!(api::specs_get_public_handler))
+        .routes(routes!(api::specs_graphql_info_handler))
+        .routes(routes!(api::graphql_download_handler))
+        .routes(routes!(api::specs_get_graphql_handler))
+        .routes(routes!(api::spec_download_handler))
+        .routes(routes!(api::specs_get_handler))
+        .routes(routes!(api::tree_handler))
+        .routes(routes!(api::search_handler))
+        .routes(routes!(api::mcp_tools_handler))
+        .routes(routes!(api::mcp_run_handler))
+        .routes(routes!(api::docker_engine_handler))
+        .routes(routes!(api::docker_engine_start_handler))
+        .routes(routes!(api::docker_services_handler))
+        .routes(routes!(api::docker_action_handler))
+        .routes(routes!(api::ctx7_handler))
+        .routes(routes!(api::doc_handler))
+        .routes(routes!(api::get_progress_handler, api::save_progress_handler))
+        .routes(routes!(api::schema_handler))
+        .routes(routes!(api::schema_domains_handler))
+        .routes(routes!(api::rebuy_health_handler))
+        .routes(routes!(api::log_services_handler))
+        .routes(routes!(api::log_fetch_handler))
+        .routes(routes!(api::tests_run_handler))
+        .routes(routes!(api::repos_handler))
+        .routes(routes!(api::prs_handler))
+        .routes(routes!(api::jira_issues_handler))
+        .routes(routes!(
+            api::jira_get_transitions_handler,
+            api::jira_transition_handler
+        ))
+        .routes(routes!(api::confluence_search_handler))
+        .routes(routes!(api::system_status_handler))
+        .routes(routes!(api::system_action_handler))
+        .routes(routes!(api::pdf_handler))
+}
+
+pub(super) fn install_spec(mut spec: utoipa::openapi::OpenApi) {
+    spec.info.version = env!("CARGO_PKG_VERSION").to_string();
+    let _ = SPEC.set(spec);
+}
+
+/// Build the OpenAPI spec on demand without starting the server.
+/// Used by the `brain spec dump` CLI command.
+fn build_spec() -> utoipa::openapi::OpenApi {
+    let (_, mut spec) = openapi_router().split_for_parts();
+    spec.info.version = env!("CARGO_PKG_VERSION").to_string();
+    spec
+}
+
 pub fn brain_spec_json() -> serde_json::Value {
-    use utoipa::OpenApi as _;
-    let mut doc = ApiDoc::openapi();
-    doc.info.version = env!("CARGO_PKG_VERSION").to_string();
-    // Stamp with brain identity so consumers know the source.
-    let mut spec = serde_json::to_value(&doc).unwrap_or_default();
-    spec["x-brain"] = serde_json::json!({
+    let spec = SPEC.get().cloned().unwrap_or_else(build_spec);
+    let mut value = serde_json::to_value(&spec).unwrap_or_default();
+    value["x-brain"] = serde_json::json!({
         "repo": "brain",
         "project": "brain",
         "source": "live"
     });
-    spec
+    value
 }
 
 pub async fn openapi_handler() -> impl axum::response::IntoResponse {

@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::get;
 use brain_utils::state::{self, DaemonMode, DaemonState};
 use tower_http::cors::{Any, CorsLayer};
 
@@ -363,17 +363,17 @@ async fn proxy_ws_to_vite(mut browser: axum::extract::ws::WebSocket, path: Strin
     loop {
         tokio::select! {
             msg = browser.recv() => match msg {
-                Some(Ok(BMsg::Text(t)))   => { let _ = vite.send(VMsg::Text(t)).await; }
-                Some(Ok(BMsg::Binary(b))) => { let _ = vite.send(VMsg::Binary(b)).await; }
-                Some(Ok(BMsg::Ping(p)))   => { let _ = vite.send(VMsg::Ping(p)).await; }
-                Some(Ok(BMsg::Pong(p)))   => { let _ = vite.send(VMsg::Pong(p)).await; }
+                Some(Ok(BMsg::Text(t)))   => { let _ = vite.send(VMsg::Text(t.as_str().into())).await; }
+                Some(Ok(BMsg::Binary(b))) => { let _ = vite.send(VMsg::Binary(b.to_vec().into())).await; }
+                Some(Ok(BMsg::Ping(p)))   => { let _ = vite.send(VMsg::Ping(p.to_vec().into())).await; }
+                Some(Ok(BMsg::Pong(p)))   => { let _ = vite.send(VMsg::Pong(p.to_vec().into())).await; }
                 _ => break,
             },
             msg = vite.next() => match msg {
-                Some(Ok(VMsg::Text(t)))   => { let _ = browser.send(BMsg::Text(t)).await; }
-                Some(Ok(VMsg::Binary(b))) => { let _ = browser.send(BMsg::Binary(b)).await; }
-                Some(Ok(VMsg::Ping(p)))   => { let _ = browser.send(BMsg::Ping(p)).await; }
-                Some(Ok(VMsg::Pong(p)))   => { let _ = browser.send(BMsg::Pong(p)).await; }
+                Some(Ok(VMsg::Text(t)))   => { let _ = browser.send(BMsg::Text(t.as_str().into())).await; }
+                Some(Ok(VMsg::Binary(b))) => { let _ = browser.send(BMsg::Binary(b.to_vec().into())).await; }
+                Some(Ok(VMsg::Ping(p)))   => { let _ = browser.send(BMsg::Ping(p.to_vec().into())).await; }
+                Some(Ok(VMsg::Pong(p)))   => { let _ = browser.send(BMsg::Pong(p.to_vec().into())).await; }
                 _ => break,
             },
         }
@@ -392,63 +392,15 @@ fn build_router(dev: bool, mcp_servers: Vec<brain_utils::config::McpServerEntry>
 
     let mcp_pool = Arc::new(mcp_client::McpPool::new(mcp_servers));
 
-    let api = Router::new()
-        .route("/api/health", get(api::ping_handler))
-        // brain's own spec — separate from the external registry
+    let (api, spec) = openapi::openapi_router().split_for_parts();
+    // Stash the assembled spec so the spec-serving handlers can read it.
+    openapi::install_spec(spec);
+
+    let api = api
+        // Spec endpoints — registered after split so they are not themselves
+        // documented in the spec (would be circular and noisy).
         .route("/api/openapi.json", get(openapi::openapi_handler))
-        .route(
-            "/api/openapi/public.json",
-            get(openapi::openapi_public_handler),
-        )
-        // external repo spec registry
-        .route("/api/specs", get(api::specs_list_handler))
-        .route(
-            "/api/specs/:repo/public",
-            get(api::specs_get_public_handler),
-        )
-        .route(
-            "/api/specs/:repo/graphql/info",
-            get(api::specs_graphql_info_handler),
-        )
-        .route(
-            "/api/specs/:repo/graphql/download",
-            get(api::graphql_download_handler),
-        )
-        .route(
-            "/api/specs/:repo/graphql",
-            get(api::specs_get_graphql_handler),
-        )
-        .route(
-            "/api/specs/:repo/download",
-            get(api::spec_download_handler),
-        )
-        .route("/api/specs/:repo", get(api::specs_get_handler))
-        .route("/api/tree", get(api::tree_handler))
-        .route("/api/search", get(api::search_handler))
-        .route("/api/mcp/tools", get(api::mcp_tools_handler))
-        .route("/api/mcp/run", post(api::mcp_run_handler))
-        .route("/api/docker/engine", get(api::docker_engine_handler))
-        .route("/api/docker/engine/start", post(api::docker_engine_start_handler))
-        .route("/api/docker/services", get(api::docker_services_handler))
-        .route("/api/docker/action", post(api::docker_action_handler))
-        .route("/api/ctx7", get(api::ctx7_handler))
-        .route("/api/doc", get(api::doc_handler))
-        .route("/api/learning/progress", get(api::get_progress_handler))
-        .route("/api/learning/progress", post(api::save_progress_handler))
-        .route("/api/schema", get(api::schema_handler))
-        .route("/api/schema/domains", get(api::schema_domains_handler))
-        .route("/api/rebuy/health/local", get(api::rebuy_health_handler))
-        .route("/api/logs/services", get(api::log_services_handler))
-        .route("/api/logs", get(api::log_fetch_handler))
-        .route("/api/tests/run", get(api::tests_run_handler))
-        .route("/api/bitbucket/repos", get(api::repos_handler))
-        .route("/api/bitbucket/prs", get(api::prs_handler))
-        .route("/api/jira/issues", get(api::jira_issues_handler))
-        .route("/api/jira/issues/:key/transitions", get(api::jira_get_transitions_handler))
-        .route("/api/jira/issues/:key/transitions", post(api::jira_transition_handler))
-        .route("/api/confluence/search", get(api::confluence_search_handler))
-        .route("/api/system/status", get(api::system_status_handler))
-        .route("/api/system/action", post(api::system_action_handler))
+        .route("/api/openapi/public.json", get(openapi::openapi_public_handler))
         .with_state(mcp_pool)
         .layer(axum::middleware::from_fn(middleware::log_requests))
         .layer(cors);
