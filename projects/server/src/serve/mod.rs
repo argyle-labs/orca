@@ -48,10 +48,7 @@ pub async fn run_daemon(port: u16, mcp_servers: Vec<brain_utils::config::McpServ
     let addr: SocketAddr = format!("0.0.0.0:{port}").parse()?;
     let app = build_router(false, mcp_servers);
 
-    let binary = std::env::current_exe()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
+    let binary = resolve_daemon_binary();
 
     let _ = state::write(&DaemonState {
         daemon_pid: std::process::id(),
@@ -174,6 +171,25 @@ fn pid_alive(pid: u32) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Returns the path to the brain binary suitable for respawning after a redeploy.
+/// Prefers `which brain` (the symlink on PATH) over `current_exe()` (the canonical
+/// resolved path). After a redeploy, the symlink is updated to the new binary;
+/// the canonical path from current_exe() points to the old binary on disk.
+fn resolve_daemon_binary() -> String {
+    if let Ok(out) = std::process::Command::new("which").arg("brain").output() {
+        if out.status.success() {
+            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !path.is_empty() {
+                return path;
+            }
+        }
+    }
+    std::env::current_exe()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string()
 }
 
 // frontend/dist is compiled into the binary at build time so the binary ships alone —

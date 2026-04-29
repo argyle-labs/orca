@@ -3,7 +3,7 @@
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
@@ -69,6 +69,89 @@ pub fn generate(repo_path: &Path) -> Result<Value> {
         path_entry[route.method.as_str()] = operation;
     }
 
+    // Second pass: fill in requestBody for write routes that had no json-schema filter
+    for route in &routes {
+        let method = route.method.as_str();
+        if !matches!(method, "post" | "put" | "patch") {
+            continue;
+        }
+        let oas_path = ci4_path_to_oas(&route.path);
+        // Skip if requestBody already set
+        if let Some(path_item) = paths.get(&oas_path) {
+            if path_item[method].get("requestBody").is_some() {
+                continue;
+            }
+        } else {
+            continue;
+        }
+
+        if route.controller.is_empty() {
+            continue;
+        }
+
+        // Derive method name from controller ref (e.g. Api\V1\Foo::postCreate → postCreate)
+        let method_name = route.controller
+            .rsplit("::")
+            .next()
+            .unwrap_or("")
+            .to_string();
+
+        let schema = if let Some(ctrl_path) = resolve_controller_file(repo_path, &route.controller) {
+            if let Ok(ctrl_src) = std::fs::read_to_string(&ctrl_path) {
+                let mut found_schema: Option<Value> = None;
+
+                // Try Payload class first
+                if let Some(payload_class) = find_payload_class(&ctrl_src, &method_name) {
+                    if let Some(payload_path) = resolve_payload_file(repo_path, &payload_class, &ctrl_src) {
+                        if let Ok(payload_src) = std::fs::read_to_string(&payload_path) {
+                            let s = extract_payload_schema(&payload_src);
+                            if s.get("properties")
+                                .and_then(|p| p.as_object())
+                                .map(|p| !p.is_empty())
+                                .unwrap_or(false)
+                            {
+                                found_schema = Some(s);
+                            }
+                        }
+                    }
+                }
+
+                // Fallback: getJSON field extraction
+                if found_schema.is_none() {
+                    if let Some(body) = extract_method_body(&ctrl_src, &method_name) {
+                        let s = extract_getjson_fields(&body);
+                        if s.get("properties")
+                            .and_then(|p| p.as_object())
+                            .map(|p| !p.is_empty())
+                            .unwrap_or(false)
+                        {
+                            found_schema = Some(s);
+                        }
+                    }
+                }
+
+                found_schema
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(schema) = schema {
+            if let Some(path_item) = paths.get_mut(&oas_path) {
+                path_item[method]["requestBody"] = json!({
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": schema
+                        }
+                    }
+                });
+            }
+        }
+    }
+
     // Inject standard envelope schemas
     components_schemas.insert(
         "ApiResponse".to_string(),
@@ -122,6 +205,7 @@ struct Ci4Route {
     method: String,
     path: String,
     filters: Vec<String>,
+    controller: String,
 }
 
 fn collect_routes(routes_root: &Path) -> Result<Vec<Ci4Route>> {
@@ -219,6 +303,18 @@ fn parse_route_call(method: &str, call: &str) -> Option<Ci4Route> {
     //   'admin/api/v1/shop', 'Api\V1\Shop::getShopObject', ['filter' => ['auth']]
     let path = extract_first_quoted(call)?;
 
+    // Extract second quoted string: the controller ref
+    let controller = extract_second_quoted(call)
+        .map(|s| {
+            // Strip /$1, /$2, etc. suffixes
+            if let Some(slash_pos) = s.find("/$") {
+                s[..slash_pos].to_string()
+            } else {
+                s
+            }
+        })
+        .unwrap_or_default();
+
     // Extract filter array: look for 'filter' => [...]
     let filters = extract_filters(call);
 
@@ -226,11 +322,11 @@ fn parse_route_call(method: &str, call: &str) -> Option<Ci4Route> {
         method: method.to_string(),
         path,
         filters,
+        controller,
     })
 }
 
 fn extract_first_quoted(src: &str) -> Option<String> {
-    // Find first ' or "
     let mut chars = src.char_indices().peekable();
     while let Some((i, ch)) = chars.next() {
         if ch == '\'' || ch == '"' {
@@ -242,15 +338,54 @@ fn extract_first_quoted(src: &str) -> Option<String> {
                     result.push(c);
                     escaped = false;
                 } else if c == '\\' {
+                    // Preserve backslash — PHP single-quoted strings only escape \\ and \'
                     escaped = true;
+                    result.push('\\');
                 } else if c == quote {
                     return Some(result);
                 } else {
                     result.push(c);
                 }
             }
-            let _ = i; // suppress warning
+            let _ = i;
             break;
+        }
+    }
+    None
+}
+
+fn extract_second_quoted(src: &str) -> Option<String> {
+    let mut quote_count = 0;
+    let mut chars = src.char_indices().peekable();
+    while let Some((_, ch)) = chars.next() {
+        if ch == '\'' || ch == '"' {
+            quote_count += 1;
+            let quote = ch;
+            let mut escaped = false;
+            let mut result = String::new();
+            let is_second = quote_count == 2;
+            for (_, c) in chars.by_ref() {
+                if escaped {
+                    if is_second {
+                        result.push(c);
+                    }
+                    escaped = false;
+                } else if c == '\\' {
+                    // Keep backslash — PHP namespace separators are literal backslashes
+                    // in single-quoted strings. Losing them breaks controller file lookup.
+                    escaped = true;
+                    if is_second {
+                        result.push('\\');
+                    }
+                } else if c == quote {
+                    if is_second {
+                        return Some(result);
+                    }
+                    break;
+                } else if is_second {
+                    result.push(c);
+                }
+            }
         }
     }
     None
@@ -291,7 +426,9 @@ fn extract_filters(src: &str) -> Vec<String> {
                     val.push(c);
                     escaped = false;
                 } else if c == '\\' {
+                    // Preserve backslash — PHP single-quoted strings only escape \\ and \'
                     escaped = true;
+                    val.push('\\');
                 } else if c == quote {
                     break;
                 } else {
@@ -554,6 +691,235 @@ fn schemas_to_value(schemas: BTreeMap<String, Value>) -> Value {
         obj.insert(k, v);
     }
     Value::Object(obj)
+}
+
+// ── Controller / Payload resolution ──────────────────────────────────────────
+
+/// Resolve a controller ref like `Api\V1\RebuyAssistant` to its PHP file path.
+fn resolve_controller_file(repo_path: &Path, ctrl_ref: &str) -> Option<PathBuf> {
+    // Strip everything after and including `::`
+    let class_part = if let Some(pos) = ctrl_ref.find("::") {
+        &ctrl_ref[..pos]
+    } else {
+        ctrl_ref
+    };
+    // `Api\V1\RebuyAssistant` → `apps/ci4/app/Controllers/Api/V1/RebuyAssistant.php`
+    let rel = class_part.replace('\\', "/");
+    let path = repo_path.join("apps/ci4/app/Controllers").join(&rel).with_extension("php");
+    if path.exists() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+/// Extract the body of a named method from PHP source.
+fn extract_method_body<'a>(src: &'a str, method_name: &str) -> Option<&'a str> {
+    let needle = format!("function {}(", method_name);
+    let func_pos = src.find(&needle)?;
+    // Advance past the function signature to the opening `{`
+    let after_sig = &src[func_pos + needle.len()..];
+    let brace_pos = after_sig.find('{')?;
+    let body_start = func_pos + needle.len() + brace_pos;
+    extract_balanced(&src[body_start..], '{', '}')
+        .map(|s| {
+            // Return a slice of the original src rather than a derived slice
+            let offset = body_start + 1; // skip the opening brace
+            let end = offset + s.len();
+            &src[offset..end]
+        })
+}
+
+/// Find the Payload class name used in a method body.
+fn find_payload_class(ctrl_src: &str, method_name: &str) -> Option<String> {
+    let body = extract_method_body(ctrl_src, method_name)?;
+
+    // Pattern 1: SomePayload::buildFromRequestPayload
+    if let Some(pos) = body.find("::buildFromRequestPayload") {
+        let before = &body[..pos];
+        let class = before.split_whitespace().last()?;
+        // Clean off any `$var = ` prefix if it leaked in
+        let class = class.split('=').last().unwrap_or(class).trim();
+        if !class.is_empty() && class.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return Some(class.to_string());
+        }
+    }
+
+    // Pattern 2: new SomePayload(
+    if let Some(pos) = body.find("new ") {
+        let after = &body[pos + 4..];
+        let end = after.find('(')?;
+        let class = after[..end].trim();
+        if class.ends_with("Payload") && class.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return Some(class.to_string());
+        }
+    }
+
+    // Pattern 3: any SomePayload:: usage
+    let mut search = body;
+    while let Some(pos) = search.find("Payload::") {
+        let before = &search[..pos];
+        let class = before.split_whitespace().last().unwrap_or("").trim();
+        let class = class.split('(').last().unwrap_or(class).trim();
+        if !class.is_empty() && class.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return Some(class.to_string());
+        }
+        search = &search[pos + 1..];
+    }
+
+    None
+}
+
+/// Resolve a Payload class name to its file path by scanning `use` statements.
+fn resolve_payload_file(repo_path: &Path, payload_class: &str, ctrl_src: &str) -> Option<PathBuf> {
+    // Scan `use` statements for one ending in the payload class name
+    for line in ctrl_src.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("use ") {
+            continue;
+        }
+        // Strip "use " prefix and trailing ";"
+        let ns = trimmed
+            .trim_start_matches("use ")
+            .trim_end_matches(';')
+            .trim();
+        // The last component must match the payload class
+        let last = ns.split('\\').last().unwrap_or("");
+        if last != payload_class {
+            continue;
+        }
+
+        let path = namespace_to_path(repo_path, ns);
+        if let Some(p) = path {
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Map a fully-qualified PHP namespace to a filesystem path.
+fn namespace_to_path(repo_path: &Path, ns: &str) -> Option<PathBuf> {
+    if let Some(rest) = ns.strip_prefix("App\\") {
+        // App\Payloads\... → apps/ci4/app/Payloads/...
+        let rel = rest.replace('\\', "/");
+        return Some(repo_path.join("apps/ci4/app").join(&rel).with_extension("php"));
+    }
+    if let Some(rest) = ns.strip_prefix("RebuyCore\\") {
+        // RebuyCore\... → apps/ci4/vendor/rebuy/core-ci4/src/...
+        let rel = rest.replace('\\', "/");
+        return Some(
+            repo_path
+                .join("apps/ci4/vendor/rebuy/core-ci4/src")
+                .join(&rel)
+                .with_extension("php"),
+        );
+    }
+    None
+}
+
+/// Extract a JSON Schema from a PHP Payload class source.
+fn extract_payload_schema(payload_src: &str) -> Value {
+    let skip_fields = ["id", "owner"];
+    let mut properties = serde_json::Map::new();
+    let mut required: Vec<Value> = Vec::new();
+
+    for line in payload_src.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("protected ") {
+            continue;
+        }
+        // Match: protected ?TYPE $field or protected TYPE $field
+        // Regex-free: parse by splitting on whitespace
+        let rest = &trimmed["protected ".len()..];
+        let nullable = rest.starts_with('?');
+        let rest = if nullable { &rest[1..] } else { rest };
+
+        let mut parts = rest.splitn(2, '$');
+        let type_part = parts.next().unwrap_or("").trim();
+        let name_part = parts.next().unwrap_or("");
+        // Name ends at whitespace or `=` or `;`
+        let field_name = name_part
+            .split(|c: char| c.is_whitespace() || c == '=' || c == ';')
+            .next()
+            .unwrap_or("")
+            .trim();
+
+        if field_name.is_empty() || type_part.is_empty() {
+            continue;
+        }
+        if skip_fields.contains(&field_name) {
+            continue;
+        }
+
+        let json_type = php_type_to_json(type_part);
+        properties.insert(field_name.to_string(), json!({ "type": json_type }));
+
+        if !nullable {
+            required.push(Value::String(field_name.to_string()));
+        }
+    }
+
+    let mut schema = serde_json::Map::new();
+    schema.insert("type".to_string(), Value::String("object".to_string()));
+    schema.insert("properties".to_string(), Value::Object(properties));
+    if !required.is_empty() {
+        schema.insert("required".to_string(), Value::Array(required));
+    }
+    Value::Object(schema)
+}
+
+fn php_type_to_json(php_type: &str) -> &'static str {
+    match php_type {
+        "int" | "integer" => "integer",
+        "string" => "string",
+        "bool" | "boolean" => "boolean",
+        "float" | "double" => "number",
+        "array" => "array",
+        _ => "object",
+    }
+}
+
+/// Extract fields from getJSON(true) usage in a method body.
+fn extract_getjson_fields(method_body: &str) -> Value {
+    let mut properties = serde_json::Map::new();
+
+    // Patterns: $body['field'], $payload['field'], $data['field'],
+    // or $this->request->getJSON(true)['field']
+    let mut search = method_body;
+    while let Some(pos) = search.find("['") {
+        let after = &search[pos + 2..];
+        if let Some(end) = after.find("']") {
+            let field = &after[..end];
+            if !field.is_empty()
+                && field.chars().all(|c| c.is_alphanumeric() || c == '_')
+                && !properties.contains_key(field)
+            {
+                // Only include if preceded by a typical body variable or getJSON call
+                let before = &search[..pos];
+                let last_token = before
+                    .split(|c: char| c.is_whitespace() || c == '(' || c == ',')
+                    .filter(|s| !s.is_empty())
+                    .last()
+                    .unwrap_or("");
+                if last_token.starts_with('$')
+                    || last_token.ends_with("getJSON(true)")
+                    || last_token.contains("getJSON")
+                {
+                    properties.insert(field.to_string(), json!({ "type": "string" }));
+                }
+            }
+            search = &search[pos + 2 + end + 2..];
+        } else {
+            break;
+        }
+    }
+
+    let mut schema = serde_json::Map::new();
+    schema.insert("type".to_string(), Value::String("object".to_string()));
+    schema.insert("properties".to_string(), Value::Object(properties));
+    Value::Object(schema)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

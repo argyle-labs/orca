@@ -162,6 +162,8 @@ fn resolve_binary() -> Result<String> {
 #[cfg(target_os = "macos")]
 fn install_service(binary: &str, port: u16) -> Result<()> {
     let home = std::env::var("HOME")?;
+    let uid = launchd_uid()?;
+    let domain = format!("gui/{uid}");
     let agents_dir = format!("{home}/Library/LaunchAgents");
     std::fs::create_dir_all(&agents_dir)?;
     let plist_path = format!("{agents_dir}/com.brain.daemon.plist");
@@ -190,7 +192,6 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     <true/>
     <key>KeepAlive</key>
     <dict>
-        <!-- Only restart on crash (non-zero exit). Clean SIGTERM exits do not restart. -->
         <key>Crashed</key>
         <true/>
     </dict>
@@ -206,17 +207,17 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     std::fs::write(&plist_path, &plist)?;
     println!("{} wrote {}", "✓".green(), plist_path);
 
-    // Unload first in case it's already registered
+    // Remove any existing registration before bootstrapping
     let _ = Command::new("launchctl")
-        .args(["unload", &plist_path])
+        .args(["bootout", &domain, &plist_path])
         .status();
 
     let status = Command::new("launchctl")
-        .args(["load", "-w", &plist_path])
+        .args(["bootstrap", &domain, &plist_path])
         .status()?;
 
     if !status.success() {
-        anyhow::bail!("launchctl load failed");
+        anyhow::bail!("launchctl bootstrap {domain} failed");
     }
     println!("{} brain daemon installed — starts now and on login", "✓".green());
     println!("  logs: tail -f /tmp/brain-daemon.log");
@@ -226,10 +227,12 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
 #[cfg(target_os = "macos")]
 fn uninstall_service() -> Result<()> {
     let home = std::env::var("HOME")?;
+    let uid = launchd_uid().unwrap_or(0);
+    let domain = format!("gui/{uid}");
     let plist_path = format!("{home}/Library/LaunchAgents/com.brain.daemon.plist");
 
     let _ = Command::new("launchctl")
-        .args(["unload", &plist_path])
+        .args(["bootout", &domain, &plist_path])
         .status();
 
     if std::path::Path::new(&plist_path).exists() {
@@ -238,6 +241,16 @@ fn uninstall_service() -> Result<()> {
     }
     println!("{} brain daemon uninstalled", "✓".green());
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn launchd_uid() -> Result<u32> {
+    let out = Command::new("id").arg("-u").output()?;
+    let uid: u32 = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("could not parse UID from `id -u`"))?;
+    Ok(uid)
 }
 
 #[cfg(target_os = "linux")]

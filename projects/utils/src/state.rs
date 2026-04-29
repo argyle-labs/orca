@@ -35,7 +35,7 @@ pub fn state_path() -> PathBuf {
 
 // ── path-parameterised internals (used by tests and public API alike) ─────────
 
-pub(crate) fn read_from(path: &Path) -> Result<Option<DaemonState>> {
+pub fn read_from(path: &Path) -> Result<Option<DaemonState>> {
     if !path.exists() {
         return Ok(None);
     }
