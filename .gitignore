@@ -6,3 +6,4 @@ site/node_modules/
 site/.env.local
 site/.env.*.local
 .worktrees/
+projects/frontend/
