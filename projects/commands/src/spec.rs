@@ -2,6 +2,7 @@ use anyhow::Result;
 use brain_scanner as scanner;
 use clap::Subcommand;
 use colored::Colorize;
+use serde::Deserialize;
 
 #[derive(Subcommand)]
 pub enum SpecAction {
@@ -278,14 +279,33 @@ fn collect_graphql(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> 
 
 /// Fetch the published Shopify Admin GraphQL schema and write it to the specs
 /// dir so /api/specs/shopify-admin/graphql serves it.
+fn load_shopify_admin_version() -> String {
+    #[derive(Deserialize, Default)]
+    struct SpecsSection {
+        shopify_admin_version: Option<String>,
+    }
+    #[derive(Deserialize, Default)]
+    struct BrainConfig {
+        specs: Option<SpecsSection>,
+    }
+
+    let home = std::env::var("HOME").unwrap_or_default();
+    let toml_path = std::env::var("BRAIN_CONFIG")
+        .unwrap_or_else(|_| format!("{home}/brain/config/brain.toml"));
+
+    std::fs::read_to_string(&toml_path)
+        .ok()
+        .and_then(|raw| toml::from_str::<BrainConfig>(&raw).ok())
+        .and_then(|cfg| cfg.specs?.shopify_admin_version)
+        .unwrap_or_else(|| "2026-01".to_string())
+}
+
 fn sync_shopify_admin() -> Result<()> {
-    print!("  fetching Shopify Admin GraphQL schema (2026-04)");
+    let version = load_shopify_admin_version();
+    print!("  fetching Shopify Admin GraphQL schema ({version})");
+    let url = format!("https://shopify.dev/admin-graphql-direct-proxy/{version}");
     let output = std::process::Command::new("npx")
-        .args([
-            "--yes",
-            "get-graphql-schema",
-            "https://shopify.dev/admin-graphql-direct-proxy/2026-04",
-        ])
+        .args(["--yes", "get-graphql-schema", &url])
         .output()?;
     if !output.status.success() {
         anyhow::bail!(

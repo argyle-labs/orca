@@ -202,6 +202,11 @@ Context skills load repo docs on demand — invoke them directly or let `@rebuy-
 | **/rebuy-env** | Set up local dev environment for any rebuy project |
 | **/rebuy-pr** | Create a Bitbucket PR with context-aware template |
 
+## Frontend (projects/frontend)
+
+- **Always use generated hooks over raw fetch or direct client calls.** The `src/api/hooks.ts` file is auto-generated from the OpenAPI spec via `npm run gen`. Use those hooks (`useGetTree`, `useListSpecs`, etc.) in components instead of calling `client.*` directly or using `fetch`. Raw fetch is only acceptable when a hook does not exist yet — in that case, run `brain gen` to regenerate first.
+- **Types come from `src/api/types.ts`.** Never define local interfaces that duplicate generated types.
+
 ## Shared infrastructure
 
 These reference documents are the source of truth for system-wide rules. Agents reference them instead of duplicating the content inline.
