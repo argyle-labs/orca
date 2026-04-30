@@ -7,6 +7,56 @@ set -m  # job control: each background job gets its own pgid (so we can signal w
 
 BRAIN="$HOME/.local/bin/brain"
 _CLEANUP_DONE=0
+_DAEMON_WAS_LOADED=0  # set by stop_system_daemon() if we need to restart on cleanup
+
+# ── System daemon control (cross-platform) ────────────────────────────────────
+# The brain system daemon (launchd on macOS, systemd --user on Linux) holds
+# port 12000 and is configured to auto-restart. During dev we MUST stop it
+# completely — the in-process "park via signals" handoff has been unreliable
+# (KeepAlive respawns it within seconds, racing the dev binary for the port).
+# We unload it on start, reload it on cleanup so the system returns to its
+# normal state when the dev session ends.
+
+OS_KIND=""
+case "$(uname -s)" in
+  Darwin)  OS_KIND="macos" ;;
+  Linux)   OS_KIND="linux" ;;
+  *)       OS_KIND="other" ;;
+esac
+
+stop_system_daemon() {
+  case "$OS_KIND" in
+    macos)
+      local plist="$HOME/Library/LaunchAgents/com.brain.daemon.plist"
+      if [[ -f "$plist" ]] && launchctl list 2>/dev/null | grep -q "com.brain.daemon"; then
+        echo "  stopping launchd daemon (com.brain.daemon)..."
+        launchctl unload "$plist" 2>/dev/null || true
+        _DAEMON_WAS_LOADED=1
+      fi
+      ;;
+    linux)
+      # `is-enabled` returns 0 only for enabled units; covers the install case.
+      if systemctl --user is-enabled brain.service >/dev/null 2>&1; then
+        echo "  stopping systemd --user daemon (brain.service)..."
+        systemctl --user stop brain.service 2>/dev/null || true
+        _DAEMON_WAS_LOADED=1
+      fi
+      ;;
+  esac
+}
+
+start_system_daemon() {
+  [[ $_DAEMON_WAS_LOADED -eq 1 ]] || return 0
+  case "$OS_KIND" in
+    macos)
+      local plist="$HOME/Library/LaunchAgents/com.brain.daemon.plist"
+      [[ -f "$plist" ]] && launchctl load "$plist" 2>/dev/null || true
+      ;;
+    linux)
+      systemctl --user start brain.service 2>/dev/null || true
+      ;;
+  esac
+}
 
 cleanup() {
   [[ $_CLEANUP_DONE -eq 1 ]] && return
@@ -20,41 +70,29 @@ cleanup() {
   kill -TERM 0 2>/dev/null || true
   sleep 0.3
   kill -KILL 0 2>/dev/null || true
-  "$BRAIN" daemon reclaim 2>/dev/null || true
+  start_system_daemon
 }
 trap 'cleanup; exit 0' INT TERM
 
 # ── Refresh external rebuy specs ──────────────────────────────────────────────
-# Done BEFORE the daemon-park handoff: the parked daemon auto-reclaims port
-# 12000 every 5s if no dev session has registered yet, so anything between
-# `daemon park` and `cargo watch` racing for >5s will lose the port.
 echo "  syncing rebuy specs..."
 "$BRAIN" spec sync --all 2>&1 | sed 's/^/[specs]    /' || true
 
-# ── Hand off port 12000 to dev ────────────────────────────────────────────────
-daemon_mode=$("$BRAIN" daemon status 2>/dev/null | awk '/mode:/ {print $2}' || echo "offline")
-
-if [[ "$daemon_mode" == "running" ]]; then
-  echo "  parking daemon..."
-  "$BRAIN" daemon park 2>/dev/null && sleep 0.3 || {
-    echo "  park failed — clearing port directly"
-    while IFS= read -r pid; do kill "$pid" 2>/dev/null || true; done \
-      < <(lsof -ti tcp:12000 2>/dev/null)
-    sleep 0.3
-  }
-else
-  # Daemon not in running mode (offline / parked / dev-superseded) — clear ports directly
-  for port in 12000 12001; do
-    while IFS= read -r pid; do
-      echo "  clearing :$port (pid $pid)"
-      kill "$pid" 2>/dev/null || true
-    done < <(lsof -ti tcp:"$port" 2>/dev/null)
-  done
-  sleep 0.3
-fi
+# ── Take port 12000 ───────────────────────────────────────────────────────────
+stop_system_daemon
+# Belt-and-braces: clear the stale state file the (now-stopped) daemon left
+# behind, plus anything still listening on dev ports.
+rm -f "$HOME/.brain/state.json"
+for port in 12000 12001; do
+  while IFS= read -r pid; do
+    echo "  clearing :$port (pid $pid)"
+    kill "$pid" 2>/dev/null || true
+  done < <(lsof -ti tcp:"$port" 2>/dev/null)
+done
+sleep 0.3
 
 # This script's PID stays alive across cargo-watch rebuilds — used by 'brain serve --dev'
-# to register the dev session in state, preventing the daemon from auto-reclaiming the port.
+# to register the dev session in state.
 export BRAIN_DEV_PARENT_PID=$$
 
 echo ""

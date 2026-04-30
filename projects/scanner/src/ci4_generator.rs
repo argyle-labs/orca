@@ -152,6 +152,51 @@ pub fn generate(repo_path: &Path) -> Result<Value> {
         }
     }
 
+    // Third pass: override the 200 response for endpoints with #[ApiResponse(Class::class)].
+    for route in &routes {
+        let oas_path = ci4_path_to_oas(&route.path);
+        if route.controller.is_empty() {
+            continue;
+        }
+        let method_name = route.controller
+            .rsplit("::")
+            .next()
+            .unwrap_or("")
+            .to_string();
+
+        let resolved = resolve_controller_file(repo_path, &route.controller)
+            .and_then(|ctrl_path| std::fs::read_to_string(&ctrl_path).ok())
+            .and_then(|ctrl_src| {
+                let response_class = find_response_class(&ctrl_src, &method_name)?;
+                // Simple name for the component key (last segment of any FQN).
+                let simple = response_class.split('\\').last().unwrap_or(&response_class).to_string();
+                let response_path = resolve_response_file(repo_path, &response_class, &ctrl_src)?;
+                let response_src = std::fs::read_to_string(&response_path).ok()?;
+                let schema = extract_payload_schema(&response_src);
+                // Only use the schema if it has at least one property.
+                let has_props = schema.get("properties")
+                    .and_then(|p| p.as_object())
+                    .map(|p| !p.is_empty())
+                    .unwrap_or(false);
+                has_props.then_some((simple, schema))
+            });
+
+        if let Some((cname, schema)) = resolved {
+            components_schemas.insert(cname.clone(), schema);
+            if let Some(path_item) = paths.get_mut(&oas_path) {
+                let method = route.method.as_str();
+                path_item[method]["responses"]["200"] = json!({
+                    "description": "Success",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": format!("#/components/schemas/{cname}") }
+                        }
+                    }
+                });
+            }
+        }
+    }
+
     // Inject standard envelope schemas
     components_schemas.insert(
         "ApiResponse".to_string(),
@@ -693,7 +738,7 @@ fn schemas_to_value(schemas: BTreeMap<String, Value>) -> Value {
     Value::Object(obj)
 }
 
-// ── Controller / Payload resolution ──────────────────────────────────────────
+// ── Controller / Payload / Response resolution ───────────────────────────────
 
 /// Resolve a controller ref like `Api\V1\RebuyAssistant` to its PHP file path.
 fn resolve_controller_file(repo_path: &Path, ctrl_ref: &str) -> Option<PathBuf> {
@@ -767,6 +812,71 @@ fn find_payload_class(ctrl_src: &str, method_name: &str) -> Option<String> {
         search = &search[pos + 1..];
     }
 
+    None
+}
+
+/// Find the response class declared via `#[ApiResponse(ClassName::class)]` above a method.
+fn find_response_class(ctrl_src: &str, method_name: &str) -> Option<String> {
+    let needle = format!("function {}(", method_name);
+    let method_pos = ctrl_src.find(&needle)?;
+
+    let before = &ctrl_src[..method_pos];
+    let attr_prefix = "#[ApiResponse(";
+    let attr_pos = before.rfind(attr_prefix)?;
+
+    // Reject if another function declaration sits between the attribute and this method.
+    let between = &ctrl_src[attr_pos + attr_prefix.len()..method_pos];
+    if between.contains("function ") {
+        return None;
+    }
+
+    // Extract the class name from #[ApiResponse(ClassName::class)]
+    let after_attr = &ctrl_src[attr_pos + attr_prefix.len()..];
+    let end = after_attr.find("::class")?;
+    let raw = after_attr[..end].trim();
+
+    // Strip a leading backslash from fully-qualified names (\App\...).
+    let class_name = raw.trim_start_matches('\\').to_string();
+
+    if class_name.is_empty() {
+        return None;
+    }
+    Some(class_name)
+}
+
+/// Resolve a Response class to its file path.
+/// Accepts either a simple name (resolved via `use` statements) or a FQN.
+fn resolve_response_file(repo_path: &Path, response_class: &str, ctrl_src: &str) -> Option<PathBuf> {
+    // FQN path: App\Responses\... → resolve directly without needing a use stmt.
+    if response_class.contains('\\') {
+        if let Some(p) = namespace_to_path(repo_path, response_class) {
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        return None;
+    }
+
+    // Simple name: scan `use` statements for one whose last component matches.
+    for line in ctrl_src.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("use ") {
+            continue;
+        }
+        let ns = trimmed
+            .trim_start_matches("use ")
+            .trim_end_matches(';')
+            .trim();
+        let last = ns.split('\\').last().unwrap_or("");
+        if last != response_class {
+            continue;
+        }
+        if let Some(p) = namespace_to_path(repo_path, ns) {
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
     None
 }
 
