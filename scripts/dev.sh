@@ -102,7 +102,8 @@ echo ""
 # ── Start dev servers ─────────────────────────────────────────────────────────
 BRAIN_LOG=trace cargo watch -q -c -C projects/server \
   -w src -w Cargo.toml \
-  -x 'run -- serve --dev' 2>&1 | \
+  -x build \
+  -s 'BRAIN_LOG=trace ./target/debug/brain serve --dev' 2>&1 | \
   while IFS= read -r line; do
     echo "[server]   $line"
     echo "$line" | grep -q "listening on" && \
