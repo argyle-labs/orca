@@ -12,9 +12,15 @@ OP_RUN := op run --env-file $(ENV_TPL) --
 build:
 	cargo build --manifest-path projects/server/Cargo.toml
 	target/debug/brain spec dump > /tmp/brain-openapi.json
+	target/debug/brain spec sync --all || true
 	cd projects/frontend && npm ci && npx tsx scripts/gen.ts --file /tmp/brain-openapi.json && npm run build
 	cargo build --release --manifest-path projects/server/Cargo.toml
 	@echo "built → target/release/brain"
+
+# Refresh external rebuy specs without a full build — useful between rebuys
+specs:
+	cargo build --manifest-path projects/server/Cargo.toml
+	target/debug/brain spec sync --all
 
 # Build release binary and deploy to current system (~/.local/bin/brain)
 deploy: build

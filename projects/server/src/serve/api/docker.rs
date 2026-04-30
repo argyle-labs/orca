@@ -277,16 +277,13 @@ async fn detect_docker_engine() -> (&'static str, bool) {
     let colima_ok = Command::new("which").arg("colima").output().await
         .map(|o| o.status.success()).unwrap_or(false);
     if colima_ok {
+        // `colima status` exits 0 when running, non-zero when not. The output
+        // text contains "running" in BOTH states ("colima is running" vs
+        // "colima is not running"), so a substring match is unreliable —
+        // the exit code is the source of truth.
         let status = Command::new("colima").arg("status").output().await;
-        if let Ok(out) = status {
-            let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
-            let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
-            let combined = format!("{text}{stderr}");
-            if combined.contains("running") {
-                return ("colima", true);
-            }
-        }
-        return ("colima", false);
+        let running = status.map(|o| o.status.success()).unwrap_or(false);
+        return ("colima", running);
     }
 
     // Fall back: probe Docker Desktop by pinging the daemon.

@@ -6,6 +6,7 @@ use utoipa::ToSchema;
 
 pub mod ci4_generator;
 pub mod ci2_generator;
+pub mod nextjs_generator;
 
 pub fn openapi_dir() -> PathBuf {
     // Spec files live under the brain vault at brain/rebuy/openapi/specs/.
