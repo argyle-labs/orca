@@ -7,6 +7,23 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use utoipa::ToSchema;
 
+fn shopify_admin_version() -> String {
+    #[derive(Deserialize, Default)]
+    struct SpecsSection { shopify_admin_version: Option<String> }
+    #[derive(Deserialize, Default)]
+    struct BrainConfig { specs: Option<SpecsSection> }
+
+    let home = std::env::var("HOME").unwrap_or_default();
+    let toml_path = std::env::var("BRAIN_CONFIG")
+        .unwrap_or_else(|_| format!("{home}/brain/config/brain.toml"));
+
+    std::fs::read_to_string(&toml_path)
+        .ok()
+        .and_then(|raw| toml::from_str::<BrainConfig>(&raw).ok())
+        .and_then(|cfg| cfg.specs?.shopify_admin_version)
+        .unwrap_or_else(|| "2026-01".to_string())
+}
+
 use super::prelude::*;
 pub use brain_scanner::{GraphQlEnum, GraphQlField, GraphQlInfo, GraphQlOperation, GraphQlType};
 
@@ -113,8 +130,9 @@ pub async fn specs_list_handler() -> Response {
         })
         .collect();
 
-    // Walk the specs dir and surface every *.json that isn't a `.public.json`
-    // shadow. This is the source of truth — registry.json only adds metadata.
+    // Walk the specs dir and surface every *.json and *.graphql file.
+    // .graphql-only repos (e.g. shopify-admin) have no .json counterpart — they
+    // must still appear in the list so the UI can show the GraphQL viewer.
     let read = match std::fs::read_dir(&dir) {
         Ok(r) => r,
         Err(_) => return Json::<Vec<Value>>(vec![]).into_response(),
@@ -124,9 +142,15 @@ pub async fn specs_list_handler() -> Response {
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().to_string();
             if name == "registry.json" { return None; }
-            let stem = name.strip_suffix(".json")?.to_string();
-            if stem.ends_with(".public") { return None; }
-            Some(stem)
+            // Accept .json (excluding .public.json) and .graphql
+            if let Some(stem) = name.strip_suffix(".json") {
+                if stem.ends_with(".public") { return None; }
+                return Some(stem.to_string());
+            }
+            if let Some(stem) = name.strip_suffix(".graphql") {
+                return Some(stem.to_string());
+            }
+            None
         })
         .collect();
     repos.sort();
@@ -265,6 +289,86 @@ pub async fn specs_get_graphql_handler(
             StatusCode::NOT_FOUND,
             &format!("no GraphQL schema for '{repo}' — create {repo}.graphql in ~/brain/openapi/"),
         ),
+    }
+}
+
+// ── POST /api/specs/{repo}/graphql/proxy ─────────────────────────────────────
+
+#[derive(Deserialize, ToSchema)]
+pub struct GraphqlProxyRequest {
+    /// Shopify shop domain (e.g. "myshop.myshopify.com" or "myshop")
+    pub shop: String,
+    /// Shopify Admin API access token
+    pub token: String,
+    /// GraphQL query or mutation document
+    pub query: String,
+    /// Query variables
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variables: Option<Value>,
+    /// Operation name
+    #[serde(rename = "operationName", skip_serializing_if = "Option::is_none")]
+    pub operation_name: Option<String>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/specs/{repo}/graphql/proxy",
+    operation_id = "proxyGraphql",
+    params(
+        ("repo" = String, Path, description = "Repository name (e.g. shopify-admin)"),
+    ),
+    request_body = GraphqlProxyRequest,
+    responses(
+        (status = 200, description = "GraphQL response JSON from the upstream shop"),
+        (status = 400, description = "Invalid repo name or request body", body = ErrorResponse),
+        (status = 502, description = "Upstream request failed", body = ErrorResponse),
+    ),
+    tag = "specs"
+)]
+pub async fn specs_graphql_proxy_handler(
+    Path(repo): Path<String>,
+    Json(body): Json<GraphqlProxyRequest>,
+) -> Response {
+    if !validate_repo(&repo) {
+        return err(StatusCode::BAD_REQUEST, "invalid repo name");
+    }
+
+    let version = shopify_admin_version();
+    let shop = body.shop.trim().trim_end_matches('/');
+    let shop_domain = if shop.contains('.') {
+        shop.to_string()
+    } else {
+        format!("{shop}.myshopify.com")
+    };
+    let url = format!("https://{shop_domain}/admin/api/{version}/graphql.json");
+
+    let mut payload = json!({ "query": body.query });
+    if let Some(vars) = body.variables {
+        payload["variables"] = vars;
+    }
+    if let Some(op) = body.operation_name {
+        payload["operationName"] = Value::String(op);
+    }
+
+    let client = reqwest::Client::new();
+    match client.post(&url)
+        .header("X-Shopify-Access-Token", &body.token)
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = StatusCode::from_u16(resp.status().as_u16())
+                .unwrap_or(StatusCode::BAD_GATEWAY);
+            let bytes = resp.bytes().await.unwrap_or_default();
+            axum::http::Response::builder()
+                .status(status)
+                .header(axum::http::header::CONTENT_TYPE, "application/json; charset=utf-8")
+                .body(axum::body::Body::from(bytes))
+                .unwrap()
+        }
+        Err(e) => err(StatusCode::BAD_GATEWAY, &format!("proxy error: {e}")),
     }
 }
 

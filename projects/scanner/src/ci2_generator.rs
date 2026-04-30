@@ -339,7 +339,7 @@ fn extract_method_dispatch_routes(body: &str, base: &str, auth: Auth, out: &mut 
 
 fn scan_params(block: &str) -> Vec<Param> {
     let re = regex::Regex::new(
-        r#"(?:\$_GET|\$_REQUEST|\$_POST|\$this->input->(?:get|request|post))\s*\(\s*'([^']+)'"#
+        r#"(?:\$_GET|\$_REQUEST|\$_POST)\s*\[\s*'([^']+)'"#
     ).unwrap();
     let mut seen = BTreeSet::new();
     let mut params = Vec::new();
