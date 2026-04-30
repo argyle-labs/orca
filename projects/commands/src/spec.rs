@@ -184,8 +184,133 @@ fn sync_one(repo: &str, _strict: bool) -> Result<()> {
             );
             Ok(())
         }
+        "admin-nextjs" => sync_admin_nextjs(),
+        "rebuy-shopify-client" => sync_rebuy_shopify_client(),
+        "shopify-admin" => sync_shopify_admin(),
         other => anyhow::bail!("sync not implemented for '{other}'"),
     }
+}
+
+fn sync_admin_nextjs() -> Result<()> {
+    let repo_path = rebuy_repo_path("admin-nextjs");
+    if !repo_path.exists() {
+        anyhow::bail!(
+            "admin-nextjs not found at {} — set REBUY_ROOT or clone the repo",
+            repo_path.display()
+        );
+    }
+    print!("  scanning admin-nextjs route handlers");
+    let spec = scanner::nextjs_generator::generate(&repo_path)?;
+    let out_path = write_spec("admin-nextjs", &spec)?;
+    let path_count = spec["paths"].as_object().map(|p| p.len()).unwrap_or(0);
+    println!(
+        "\n{} synced admin-nextjs → {} ({} paths)",
+        "✓".green(),
+        out_path.display(),
+        path_count,
+    );
+    Ok(())
+}
+
+/// Aggregate every `*.graphql` operation file under
+/// `rebuy-shopify-client/resources/http/**` into a single SDL-ish file the server
+/// can serve at /api/specs/rebuy-shopify-client/graphql.
+fn sync_rebuy_shopify_client() -> Result<()> {
+    let repo_path = rebuy_repo_path("rebuy-shopify-client");
+    if !repo_path.exists() {
+        anyhow::bail!(
+            "rebuy-shopify-client not found at {} — set REBUY_ROOT or clone the repo",
+            repo_path.display()
+        );
+    }
+    let resources = repo_path.join("resources/http");
+    if !resources.is_dir() {
+        anyhow::bail!(
+            "rebuy-shopify-client/resources/http not found at {}",
+            resources.display()
+        );
+    }
+
+    print!("  collecting rebuy-shopify-client .graphql operations");
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    collect_graphql(&resources, &mut files)?;
+    files.sort();
+
+    let mut out = String::new();
+    out.push_str("# Aggregated from rebuy-shopify-client/resources/http/**\n");
+    out.push_str(&format!("# Files: {}\n", files.len()));
+    out.push_str(&format!("# Generated: {}\n\n", chrono::Utc::now().to_rfc3339()));
+    for f in &files {
+        let rel = f.strip_prefix(&repo_path).unwrap_or(f);
+        out.push_str(&format!("# ── {} ──\n", rel.display()));
+        out.push_str(&std::fs::read_to_string(f)?);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+
+    let dir = scanner::openapi_dir();
+    std::fs::create_dir_all(&dir)?;
+    let out_path = dir.join("rebuy-shopify-client.graphql");
+    std::fs::write(&out_path, out)?;
+    println!(
+        "\n{} synced rebuy-shopify-client → {} ({} ops)",
+        "✓".green(),
+        out_path.display(),
+        files.len(),
+    );
+    Ok(())
+}
+
+fn collect_graphql(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let p = entry.path();
+        if p.is_dir() {
+            collect_graphql(&p, out)?;
+        } else if p.extension().and_then(|s| s.to_str()) == Some("graphql") {
+            out.push(p);
+        }
+    }
+    Ok(())
+}
+
+/// Fetch the published Shopify Admin GraphQL schema and write it to the specs
+/// dir so /api/specs/shopify-admin/graphql serves it.
+fn sync_shopify_admin() -> Result<()> {
+    print!("  fetching Shopify Admin GraphQL schema (2026-04)");
+    let output = std::process::Command::new("npx")
+        .args([
+            "--yes",
+            "get-graphql-schema",
+            "https://shopify.dev/admin-graphql-direct-proxy/2026-04",
+        ])
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "get-graphql-schema failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    // Strip stray `npm ` lines (npx noise) the way the Makefile does.
+    let sdl: String = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.starts_with("npm "))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let dir = scanner::openapi_dir();
+    std::fs::create_dir_all(&dir)?;
+    let out_path = dir.join("shopify-admin.graphql");
+    std::fs::write(&out_path, &sdl)?;
+    println!(
+        "\n{} synced shopify-admin → {} ({} bytes)",
+        "✓".green(),
+        out_path.display(),
+        sdl.len(),
+    );
+    Ok(())
 }
 
 fn sync_ci4(label: &str, dirname: &str) -> Result<()> {

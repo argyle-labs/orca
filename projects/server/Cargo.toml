@@ -80,13 +80,5 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
-[profile.release]
-opt-level = 3
-lto = true
-strip = true
-
 [dev-dependencies]
 tempfile = "3"
-
-[profile.dev]
-opt-level = 0

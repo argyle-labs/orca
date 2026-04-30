@@ -10,3 +10,11 @@ members = [
     "projects/utils",
 ]
 resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+
+[profile.dev]
+opt-level = 0
