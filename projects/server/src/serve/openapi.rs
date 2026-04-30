@@ -65,6 +65,7 @@ use super::mcp_client::McpPool;
         super::api::SystemActionRequest,
         super::api::SpecDownloadQuery,
         super::api::GraphqlDownloadQuery,
+        super::api::GraphqlProxyRequest,
         super::api::ProgressRequest,
         super::api::ProgressResponse,
         super::api::PdfQuery,
@@ -104,6 +105,7 @@ pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
         .routes(routes!(api::specs_list_handler))
         .routes(routes!(api::specs_get_public_handler))
         .routes(routes!(api::specs_graphql_info_handler))
+        .routes(routes!(api::specs_graphql_proxy_handler))
         .routes(routes!(api::graphql_download_handler))
         .routes(routes!(api::specs_get_graphql_handler))
         .routes(routes!(api::spec_download_handler))

@@ -33,20 +33,10 @@ pub struct PdfQuery {
     responses(
         (status = 200, description = "PDF or ZIP download"),
         (status = 404, description = "Path not found", body = ErrorResponse),
-        (status = 503, description = "PDF binary not available", body = ErrorResponse),
     ),
     tag = "docs"
 )]
 pub async fn pdf_handler(Query(params): Query<PdfQuery>) -> Response {
-    use crate::serve::pdf_gen::pdf_bin;
-
-    if pdf_bin().is_none() {
-        return err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "PDF generation requires wkhtmltopdf or chromium — install one and restart the server",
-        );
-    }
-
     let roots = get_roots();
     let Some(root_dir) = roots.get(params.root.as_str()) else {
         return err(StatusCode::BAD_REQUEST, "unknown root");
