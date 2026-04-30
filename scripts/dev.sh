@@ -3,29 +3,33 @@
 # Invoked via: op run --env-file .env.brain.tpl -- bash scripts/dev.sh
 
 set -uo pipefail
+set -m  # job control: each background job gets its own pgid (so we can signal whole trees)
 
 BRAIN="$HOME/.local/bin/brain"
 _CLEANUP_DONE=0
-
-kill_jobs() {
-  local sig="${1:--TERM}"
-  while IFS= read -r pid; do
-    [[ -n "$pid" ]] && kill "$sig" "$pid" 2>/dev/null || true
-  done < <(jobs -p 2>/dev/null)
-}
 
 cleanup() {
   [[ $_CLEANUP_DONE -eq 1 ]] && return
   _CLEANUP_DONE=1
   echo ""
   echo "  stopping dev session..."
-  kill_jobs -TERM
+  # Ignore TERM in this shell so killing our own pgid doesn't re-enter cleanup.
+  trap '' TERM
+  # Signal every process in our process group — catches cargo-watch, the cargo-run
+  # child it spawns, vite, npm, and the pipeline subshells that `jobs -p` misses.
+  kill -TERM 0 2>/dev/null || true
   sleep 0.3
-  kill_jobs -KILL
+  kill -KILL 0 2>/dev/null || true
   "$BRAIN" daemon reclaim 2>/dev/null || true
 }
-# Only trap INT to avoid TERM→cleanup→kill→TERM→cleanup infinite loop
 trap 'cleanup; exit 0' INT TERM
+
+# ── Refresh external rebuy specs ──────────────────────────────────────────────
+# Done BEFORE the daemon-park handoff: the parked daemon auto-reclaims port
+# 12000 every 5s if no dev session has registered yet, so anything between
+# `daemon park` and `cargo watch` racing for >5s will lose the port.
+echo "  syncing rebuy specs..."
+"$BRAIN" spec sync --all 2>&1 | sed 's/^/[specs]    /' || true
 
 # ── Hand off port 12000 to dev ────────────────────────────────────────────────
 daemon_mode=$("$BRAIN" daemon status 2>/dev/null | awk '/mode:/ {print $2}' || echo "offline")
