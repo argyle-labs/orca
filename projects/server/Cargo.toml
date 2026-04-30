@@ -66,6 +66,11 @@ mime_guess = "2"
 rust-embed = "8"
 serde_yaml = "0.9"
 pulldown-cmark = "0.12"
+
+# PDF generation (pure Rust, no external binary required)
+typst        = "0.14"
+typst-pdf    = "0.14"
+typst-assets = { version = "0.14", features = ["fonts"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # OpenAPI
