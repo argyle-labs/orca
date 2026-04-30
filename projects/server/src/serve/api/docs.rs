@@ -35,15 +35,17 @@ pub struct TreeQuery {
 pub async fn tree_handler(Query(params): Query<TreeQuery>) -> impl IntoResponse {
     let raw = params.raw.unwrap_or(false);
     let mut result = serde_json::Map::new();
-    for name in ["brain", "rebuy"] {
+    // Iterate over the live root registry so tree output stays in lockstep
+    // with `get_roots()`. Adding a root in tree.rs surfaces it here without
+    // touching this handler.
+    for name in get_roots().keys() {
         let tree = if raw {
             crate::serve::tree::get_root_tree_raw(name)
         } else {
             crate::serve::tree::get_root_tree(name)
         };
-        result.insert(name.to_string(), serde_json::to_value(tree).unwrap_or_default());
+        result.insert(name.clone(), serde_json::to_value(tree).unwrap_or_default());
     }
-    result.insert("brain_docs".to_string(), brain_docs::tree());
     Json(serde_json::Value::Object(result))
 }
 

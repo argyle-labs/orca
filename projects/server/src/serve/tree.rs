@@ -30,16 +30,11 @@ pub fn get_roots() -> HashMap<String, PathBuf> {
         PathBuf::from(std::env::var("REBUY_ROOT").unwrap_or_else(|_| format!("{home}/code/rebuy"))),
     );
     roots.insert("brain".to_string(), PathBuf::from(format!("{home}/brain")));
-    roots.insert("claude".to_string(), PathBuf::from(format!("{home}/.claude")));
     roots.insert(
         "dotfiles".to_string(),
         PathBuf::from(
             std::env::var("DOTFILES_ROOT").unwrap_or_else(|_| format!("{home}/dotfiles")),
         ),
-    );
-    roots.insert(
-        "learning".to_string(),
-        PathBuf::from(format!("{home}/brain/ai/claude/learning")),
     );
     roots
 }
@@ -72,7 +67,20 @@ pub fn get_ignored(root_name: &str) -> HashSet<String> {
         .iter()
         .map(|s| s.to_string())
         .collect(),
-        "learning" => [".git"].iter().map(|s| s.to_string()).collect(),
+        "dotfiles" => [
+            ".git",
+            "node_modules",
+            "obsidian/.obsidian",
+            "obsidian/.trash",
+            "obsidian/ai/claude/memory",
+            "obsidian/ai/claude/logs",
+            "obsidian/ai/claude/plugins/cache",
+            "obsidian/ai/claude/plugins/marketplaces",
+            "obsidian/ai/claude/plugins/data",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
         _ => HashSet::new(),
     }
 }

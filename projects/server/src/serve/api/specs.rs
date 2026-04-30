@@ -97,27 +97,60 @@ fn serve_spec(raw: &str, filename_base: &str, query: &SpecQuery) -> Response {
     tag = "specs"
 )]
 pub async fn specs_list_handler() -> Response {
-    let path = specs_dir().join("registry.json");
-    let entries: Vec<Value> = match std::fs::read_to_string(&path) {
+    let dir = specs_dir();
+
+    // Optional registry.json provides metadata (project, description, base_url).
+    // If absent, we auto-discover from *.json files in the directory.
+    let registry: Vec<Value> = match std::fs::read_to_string(dir.join("registry.json")) {
         Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
         Err(_) => vec![],
     };
-    // Augment each entry with file presence and hasGraphql (checked at serve time)
-    let augmented: Vec<Value> = entries
+    let mut by_repo: std::collections::HashMap<String, Value> = registry
         .into_iter()
-        .map(|mut e| {
-            if let Some(repo) = e["repo"].as_str() {
-                let dir = specs_dir();
-                let has_full = dir.join(format!("{repo}.json")).exists();
-                let has_public = dir.join(format!("{repo}.public.json")).exists();
-                let has_graphql = dir.join(format!("{repo}.graphql")).exists();
-                e["hasGraphql"] = json!(has_graphql);
-                e["files"] = json!({
-                    "full":   if has_full   { Value::Bool(true) } else { Value::Null },
-                    "public": if has_public { Value::Bool(true) } else { Value::Null },
-                });
-            }
-            e
+        .filter_map(|e| {
+            let repo = e.get("repo")?.as_str()?.to_string();
+            Some((repo, e))
+        })
+        .collect();
+
+    // Walk the specs dir and surface every *.json that isn't a `.public.json`
+    // shadow. This is the source of truth — registry.json only adds metadata.
+    let read = match std::fs::read_dir(&dir) {
+        Ok(r) => r,
+        Err(_) => return Json::<Vec<Value>>(vec![]).into_response(),
+    };
+    let mut repos: Vec<String> = read
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "registry.json" { return None; }
+            let stem = name.strip_suffix(".json")?.to_string();
+            if stem.ends_with(".public") { return None; }
+            Some(stem)
+        })
+        .collect();
+    repos.sort();
+    repos.dedup();
+
+    let augmented: Vec<Value> = repos
+        .into_iter()
+        .map(|repo| {
+            let mut entry = by_repo.remove(&repo).unwrap_or_else(|| {
+                json!({
+                    "repo": repo,
+                    "project": repo,
+                    "source": "manual",
+                })
+            });
+            let has_full = dir.join(format!("{repo}.json")).exists();
+            let has_public = dir.join(format!("{repo}.public.json")).exists();
+            let has_graphql = dir.join(format!("{repo}.graphql")).exists();
+            entry["hasGraphql"] = json!(has_graphql);
+            entry["files"] = json!({
+                "full":   if has_full   { Value::Bool(true) } else { Value::Null },
+                "public": if has_public { Value::Bool(true) } else { Value::Null },
+            });
+            entry
         })
         .collect();
     Json(augmented).into_response()
