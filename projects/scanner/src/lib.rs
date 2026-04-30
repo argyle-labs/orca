@@ -8,8 +8,13 @@ pub mod ci4_generator;
 pub mod ci2_generator;
 
 pub fn openapi_dir() -> PathBuf {
+    // Spec files live under the brain vault at brain/rebuy/openapi/specs/.
+    // Override with BRAIN_OPENAPI_DIR for non-standard installs.
+    if let Ok(custom) = std::env::var("BRAIN_OPENAPI_DIR") {
+        return PathBuf::from(custom);
+    }
     let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join("brain/openapi")
+    PathBuf::from(home).join("brain/rebuy/openapi/specs")
 }
 
 /// Registry entry for a tracked external API spec.

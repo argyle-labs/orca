@@ -22,6 +22,7 @@ You are the Rebuy knowledge base — the routing layer for all 10 repos in `~/co
 | onsite-js | `~/code/rebuy/onsite-js` | `/rebuy-onsite-context` |
 | installer | `~/code/rebuy/installer` | `/rebuy-installer-context` |
 | rebuy-core-ci4 | `~/code/rebuy/rebuy-core-ci4` | Read README + composer.json directly |
+| rebuy-design-system | `~/code/rebuy/rebuy-design-system` | `/rebuy-design-system-context` |
 | admin-api/docs/rai | `~/code/rebuy/admin-api/docs/rai` | `/rebuy-admin-api-context` |
 
 ## How to route a question
@@ -36,6 +37,7 @@ Read the user's question. Which repo does it touch?
 - Mentions "CLI", rebuy command, env management, 1Password → rebuy-cli
 - Mentions "migration", "schema", "dbmate" → rebuy-db
 - Mentions "SDK", "onsite", "widget", "Smart Cart" → onsite-js
+- Mentions "@rebuy/components", "@rebuy/design-tokens", "design system", "DS primitive", "Storybook gallery", "changesets in DS" → rebuy-design-system
 - Mentions "env setup", "installer", "config.yaml" → installer
 - Mentions "R/AI", "Executive Summary", "ranking" → admin-api/docs/rai
 
