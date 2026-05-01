@@ -204,7 +204,7 @@ async fn main() -> Result<()> {
             other => cmd::cmd_daemon(other),
         },
         Some(Command::Dev { port }) => cmd_dev(port, &config).await,
-        Some(Command::Mcp { action }) => cmd::cmd_mcp(&config, action),
+        Some(Command::Mcp { action }) => cmd::cmd_mcp(action),
         Some(Command::Update) => cmd::cmd_update().await,
         Some(Command::Install) => cmd_install(),
         Some(Command::Uninstall) => cmd_uninstall(),

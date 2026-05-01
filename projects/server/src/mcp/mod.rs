@@ -16,8 +16,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use docs::{get_tree, list_commands, list_roots, read_doc, search_docs};
 use handlers::{
-    agents, get_agent, get_config, get_context, list_services, run, run_tests, search_logs,
-    service_logs,
+    agents, get_agent, get_config, get_context, list_services, mcp_add_server, mcp_list_servers,
+    mcp_remove_server, run, run_tests, search_logs, service_logs,
 };
 use specs::{get_graphql_info, get_rebuy_graphql_schema, get_rebuy_spec, get_rebuy_spec_public, list_rebuy_specs};
 
@@ -188,6 +188,9 @@ async fn dispatch(name: &str, args: &Value, config: &Config) -> Result<String> {
         "get_rebuy_spec_public" => get_rebuy_spec_public(args),
         "get_rebuy_graphql_schema" => get_rebuy_graphql_schema(args),
         "get_graphql_info" => get_graphql_info(args),
+        "brain_mcp_list" => mcp_list_servers(),
+        "brain_mcp_add" => mcp_add_server(args),
+        "brain_mcp_remove" => mcp_remove_server(args),
         "resolve-library-id" | "get-library-docs" => {
             context7::proxy_context7(name, args, config).await
         }

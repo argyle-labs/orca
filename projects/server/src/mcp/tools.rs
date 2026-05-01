@@ -54,6 +54,19 @@ pub fn tool_defs() -> Value {
             }
         },
         {
+            "name": "brain_get_config",
+            "description": "Read a Brain configuration/reference document by name (e.g. TOOL_RULES, DELEGATION, SEVERITY_RUBRIC, CANONICAL_SOURCES, CODING_RULES). Call with no name to list available files.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Config file name without extension (e.g. TOOL_RULES). Omit to list all available files."
+                    }
+                }
+            }
+        },
+        {
             "name": "brain_get_context",
             "description": "Load the memory context for a brain project. Returns MEMORY.md index and all memory files for the project.",
             "inputSchema": {
@@ -202,6 +215,36 @@ pub fn tool_defs() -> Value {
                     "repo": { "type": "string", "description": "Repo name (e.g. admin-api)" }
                 },
                 "required": ["repo"]
+            }
+        },
+        {
+            "name": "brain_mcp_list",
+            "description": "List all MCP servers registered in brain.db (brain's own managed registry). Does not include ~/.claude.json servers managed by Claude Code directly.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "brain_mcp_add",
+            "description": "Add or update an MCP server in brain.db. Use this when the user wants to register a new MCP server for brain to federate.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name":    { "type": "string", "description": "Server name (e.g. rebuy-cli)" },
+                    "command": { "type": "string", "description": "Executable command (e.g. node)" },
+                    "args":    { "type": "array", "items": { "type": "string" }, "description": "Arguments" },
+                    "env":     { "type": "object", "description": "Environment variables as key/value pairs" }
+                },
+                "required": ["name", "command"]
+            }
+        },
+        {
+            "name": "brain_mcp_remove",
+            "description": "Remove an MCP server from brain.db by name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Server name to remove" }
+                },
+                "required": ["name"]
             }
         },
         {

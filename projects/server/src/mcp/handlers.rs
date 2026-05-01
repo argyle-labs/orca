@@ -119,6 +119,58 @@ pub fn get_context(args: &Value, config: &Config) -> Result<String> {
     Ok(parts.join("\n"))
 }
 
+pub fn get_config(args: &Value, config: &Config) -> Result<String> {
+    let dir = config.config_dir();
+
+    if !dir.exists() {
+        return Ok(format!("Config dir not found: {}", dir.display()));
+    }
+
+    let name = args["name"].as_str().unwrap_or("").trim();
+
+    if name.is_empty() {
+        // List available config files
+        let mut names: Vec<String> = std::fs::read_dir(&dir)?
+            .flatten()
+            .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
+            .filter_map(|e| {
+                e.path()
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+            })
+            .collect();
+        names.sort();
+        let list = names.join(", ");
+        return Ok(format!("Available config files: {list}\n\nUse brain_get_config with a name to read one."));
+    }
+
+    // Try exact match, then case-insensitive
+    let candidates = [
+        dir.join(format!("{name}.md")),
+        dir.join(format!("{}.md", name.to_uppercase())),
+    ];
+    for path in &candidates {
+        if path.exists() {
+            return Ok(std::fs::read_to_string(path)?);
+        }
+    }
+
+    // Fallback: case-insensitive scan
+    let found = std::fs::read_dir(&dir)?
+        .flatten()
+        .find(|e| {
+            e.path()
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_uppercase() == name.to_uppercase())
+                .unwrap_or(false)
+        });
+
+    match found {
+        Some(e) => Ok(std::fs::read_to_string(e.path())?),
+        None => Ok(format!("Config file '{name}' not found. Available: use brain_get_config with no name to list.")),
+    }
+}
+
 pub async fn list_services() -> Result<String> {
     let resp = reqwest::get("http://127.0.0.1:12000/api/logs/services")
         .await?
@@ -195,4 +247,54 @@ pub async fn run_tests(args: &Value) -> Result<String> {
         "Suite: {}\nPassed: {} | Failed: {}\nDuration: {}ms\n\n{}",
         resp.suite, resp.passed, resp.failed, resp.duration_ms, resp.output
     ))
+}
+
+pub fn mcp_list_servers() -> Result<String> {
+    let conn = brain_utils::db::open_default()?;
+    let servers = brain_utils::db::list_mcp_servers(&conn)?;
+    if servers.is_empty() {
+        return Ok("No MCP servers registered in brain.db.".to_string());
+    }
+    let mut lines = vec!["Registered MCP servers:".to_string(), String::new()];
+    for s in &servers {
+        lines.push(format!("  {} → {} {}", s.name, s.command, s.args.join(" ")));
+    }
+    Ok(lines.join("\n"))
+}
+
+pub fn mcp_add_server(args: &Value) -> Result<String> {
+    let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name required"))?;
+    let command = args["command"].as_str().ok_or_else(|| anyhow::anyhow!("command required"))?;
+    let mcp_args: Vec<String> = args["args"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    let env: std::collections::HashMap<String, String> = args["env"]
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    let row = brain_utils::db::McpServerRow {
+        name: name.to_string(),
+        command: command.to_string(),
+        args: mcp_args,
+        env,
+        enabled: true,
+    };
+    let conn = brain_utils::db::open_default()?;
+    brain_utils::db::upsert_mcp_server(&conn, &row)?;
+    Ok(format!("Registered MCP server '{name}' in brain.db."))
+}
+
+pub fn mcp_remove_server(args: &Value) -> Result<String> {
+    let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name required"))?;
+    let conn = brain_utils::db::open_default()?;
+    if brain_utils::db::remove_mcp_server(&conn, name)? {
+        Ok(format!("Removed MCP server '{name}' from brain.db."))
+    } else {
+        Ok(format!("Server '{name}' not found in brain.db."))
+    }
 }
