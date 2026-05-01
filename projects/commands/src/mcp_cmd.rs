@@ -1,5 +1,4 @@
 use anyhow::Result;
-use brain_utils::config::Config;
 use brain_utils::db::{self, McpServerRow};
 use clap::Subcommand;
 use std::collections::HashMap;
@@ -28,10 +27,10 @@ pub enum McpAction {
     },
 }
 
-pub fn cmd_mcp(config: &Config, action: McpAction) -> Result<()> {
+pub fn cmd_mcp(action: McpAction) -> Result<()> {
     match action {
         McpAction::List => {
-            let conn = db::open(&config.db_path)?;
+            let conn = db::open_default()?;
             let servers = db::list_mcp_servers(&conn)?;
             if servers.is_empty() {
                 println!("brain.db servers: (none)");
@@ -65,13 +64,13 @@ pub fn cmd_mcp(config: &Config, action: McpAction) -> Result<()> {
                 .collect();
 
             let row = McpServerRow { name: name.clone(), command, args, env: env_map, enabled: true };
-            let conn = db::open(&config.db_path)?;
+            let conn = db::open_default()?;
             db::upsert_mcp_server(&conn, &row)?;
             println!("added {name} to brain.db");
             Ok(())
         }
         McpAction::Remove { name } => {
-            let conn = db::open(&config.db_path)?;
+            let conn = db::open_default()?;
             let removed = db::remove_mcp_server(&conn, &name)?;
             if removed {
                 println!("removed {name}");
