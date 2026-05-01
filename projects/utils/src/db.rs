@@ -38,7 +38,7 @@ pub fn open(path: &Path) -> Result<Connection> {
 /// Open brain database using the default path (`~/brain/brain.db`).
 pub fn open_default() -> Result<Connection> {
     let home = dirs::home_dir().context("no home dir")?;
-    let path = home.join("brain").join("brain.db");
+    let path = home.join(".brain").join("brain.db");
     open(&path)
 }
 
