@@ -1,4 +1,4 @@
-.PHONY: build install deploy dev run watch clean check release audit lint format test daemon-install daemon-uninstall
+.PHONY: build install deploy dev run watch clean check release audit lint format test daemon-install daemon-uninstall kill-dev
 
 INSTALL_PATH := $(HOME)/.local/bin/brain
 ENV_TPL      := .env.brain.tpl
@@ -22,10 +22,21 @@ specs:
 	cargo build --manifest-path projects/server/Cargo.toml
 	target/debug/brain spec sync --all
 
+# Kill all dev processes (cargo-watch, op run dev.sh, brain serve --dev, dev daemon)
+kill-dev:
+	@echo "→ killing dev processes..."
+	@pkill -f 'cargo-watch.*projects/server' 2>/dev/null || true
+	@pkill -f 'op run --env-file .env.brain.tpl' 2>/dev/null || true
+	@pkill -f 'scripts/dev.sh' 2>/dev/null || true
+	@pkill -f 'brain serve --dev' 2>/dev/null || true
+	@pkill -f 'brain daemon start' 2>/dev/null || true
+	@sleep 1
+	@echo "→ dev processes cleared"
+
 # Build release binary and deploy to current system (~/.local/bin/brain)
-deploy: build
+deploy: kill-dev build
 	cp target/release/brain $(INSTALL_PATH)
-	$(INSTALL_PATH) install-agents
+	codesign --force --sign - $(INSTALL_PATH)
 	$(INSTALL_PATH) daemon install
 	@echo "deployed → $(INSTALL_PATH)"
 

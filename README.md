@@ -2,12 +2,33 @@
 
 Local-first AI agent orchestrator. Single self-contained binary with an embedded web UI. LM Studio runs everything by default — Claude is escalation only.
 
-## Setup
+## Installation
+
+**From a GitHub release** (pre-built binary):
+
+```sh
+# Apple Silicon
+curl -Lo brain https://github.com/scottdkey/brain/releases/latest/download/brain-aarch64-apple-darwin
+
+# Intel Mac
+curl -Lo brain https://github.com/scottdkey/brain/releases/latest/download/brain-x86_64-apple-darwin
+
+chmod +x brain && mv brain ~/.local/bin/brain
+```
+
+macOS blocks unsigned binaries downloaded from the internet. Clear the quarantine flag before running:
+```sh
+xattr -d com.apple.quarantine ~/.local/bin/brain
+```
+
+**From source:**
 
 ```sh
 make init     # install rust, node, cargo-watch, cargo-audit; npm install
 make install  # build site + release binary, install to ~/.local/bin/brain
 ```
+
+## Setup
 
 ### Local dev secrets
 

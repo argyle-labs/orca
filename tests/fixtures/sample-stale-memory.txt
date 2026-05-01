@@ -1,0 +1,20 @@
+## Memory Record
+
+---
+name: Tax calculation utility location
+description: Where the tax calculation logic lives in the codebase
+type: reference
+---
+
+The function `calculateTax` is defined in `src/utils/tax.ts`. It handles all tax computation for order totals including state tax lookup, exemption handling, and international VAT.
+
+## Current File Listing (actual filesystem)
+
+src/
+  services/
+    tax-calculator.ts    <-- exists
+    order-service.ts
+  utils/
+    format.ts
+    validation.ts
+    (no tax.ts file)

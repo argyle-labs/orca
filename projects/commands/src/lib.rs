@@ -5,7 +5,7 @@
 //! (those need the server crate which commands cannot import).
 //!
 //! Modules:
-//! - `agents`   — list available agents, install embedded agents into ~/.claude/agents/
+//! - `agents`   — list available agents
 //! - `auth`     — login/logout/auth (keychain read/write via brain_utils::auth)
 //! - `codegen`  — `brain gen`: fetch OpenAPI spec, run openapi-typescript codegen
 //! - `daemon`   — daemon lifecycle: status/stop/park/reclaim/install/uninstall
@@ -44,7 +44,7 @@ pub mod update;
 pub use spec::{SpecAction, cmd_spec};
 pub use log_cmd::{LogAction, cmd_log};
 pub use auth::{cmd_login, cmd_logout, cmd_auth};
-pub use agents::{cmd_agents, cmd_install_agents};
+pub use agents::cmd_agents;
 pub use daemon::{DaemonAction, cmd_daemon};
 pub use doctor::cmd_doctor;
 pub use install::{cmd_install, cmd_uninstall, install_status, InstallReport};

@@ -1,0 +1,22 @@
+{
+  "name": "claude-agent-tests",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run --reporter=verbose --project=structural --project=behavioral",
+    "test:structural": "vitest run --reporter=verbose --project=structural",
+    "test:behavioral": "vitest run --reporter=verbose --project=behavioral",
+    "test:local": "vitest run --reporter=verbose --project=local",
+    "test:local:ollama": "LOCAL_LLM_URL=http://localhost:11434/v1 vitest run --reporter=verbose --project=local",
+    "test:all": "vitest run --reporter=verbose",
+    "test:watch": "vitest",
+    "test:save": "vitest run --reporter=json --outputFile=results/latest.json --project=structural --project=behavioral"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.36.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^3.0.0"
+  }
+}

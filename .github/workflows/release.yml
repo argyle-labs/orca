@@ -167,6 +167,27 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
+          body: |
+            ## Installation
+
+            Download the binary for your platform, make it executable, and place it on your PATH:
+
+            ```sh
+            # Apple Silicon
+            curl -Lo brain https://github.com/${{ github.repository }}/releases/download/v${{ needs.version.outputs.version }}/brain-aarch64-apple-darwin
+
+            # Intel Mac
+            curl -Lo brain https://github.com/${{ github.repository }}/releases/download/v${{ needs.version.outputs.version }}/brain-x86_64-apple-darwin
+
+            chmod +x brain && mv brain ~/.local/bin/brain
+            ```
+
+            **macOS — clear the quarantine flag** before running (Gatekeeper blocks unsigned binaries downloaded from the internet):
+            ```sh
+            xattr -d com.apple.quarantine ~/.local/bin/brain
+            ```
+
+            Verify checksums against `checksums.sha256` before running.
           files: |
             artifacts/brain-*
             artifacts/checksums.sha256
