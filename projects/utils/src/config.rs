@@ -37,9 +37,9 @@ impl Model {
 impl Config {
     pub fn load() -> Result<Self> {
         let home = dirs::home_dir().context("no home dir")?;
-        let brain_vault = home.join("brain");
-        let memory_root = brain_vault.join("ai/claude/memory");
-        let db_path = home.join(".brain/brain.db");
+        let brain_vault = home.join(".brain");
+        let memory_root = brain_vault.join("memory");
+        let db_path = brain_vault.join("brain.db");
 
         // API key: env var takes priority, then macOS Keychain
         let api_key = std::env::var("ANTHROPIC_API_KEY")
@@ -54,7 +54,7 @@ impl Config {
         let default_model = Model::LMStudio(String::new());
 
         // One-time migration: if brain.toml has [[mcp.servers]], write them to DB.
-        let toml_path = brain_vault.join("config/brain.toml");
+        let toml_path = brain_vault.join("brain.toml");
         if toml_path.exists() {
             migrate_toml_servers_to_db(&toml_path, &db_path);
         }
@@ -70,7 +70,7 @@ impl Config {
     }
 
     pub fn brain_toml_path(&self) -> PathBuf {
-        self.brain_vault.join("config/brain.toml")
+        self.brain_vault.join("brain.toml")
     }
 
     pub fn agents_dir(&self) -> PathBuf {

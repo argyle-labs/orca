@@ -3,9 +3,6 @@ use rand::RngCore;
 use rusqlite::Connection;
 use std::path::Path;
 
-const KEYRING_SERVICE: &str = "brain";
-const KEYRING_ACCOUNT: &str = "db_key";
-
 /// Open (or create) the encrypted brain database.
 ///
 /// Key is loaded from the OS keychain on first call; generated and stored if not found.
@@ -98,26 +95,49 @@ fn apply_schema(conn: &Connection) -> Result<()> {
 
 // ── Key management ───────────────────────────────────────────────────────────
 
+/// Load the DB encryption key from `~/.brain/.db_key`, generating it on first run.
+///
+/// The key file is the backup unit alongside brain.db — copy both to restore.
+/// Never regenerate silently: if the file exists but is unreadable/corrupt, bail
+/// so the user knows they need to restore the key rather than destroying their data.
 fn load_or_create_key() -> Result<String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .context("keyring entry creation failed")?;
+    let home = dirs::home_dir().context("no home dir")?;
+    let key_path = home.join(".brain").join(".db_key");
 
-    match entry.get_password() {
-        Ok(k) if !k.is_empty() => Ok(k),
-        _ => {
-            let mut bytes = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut bytes);
-            let hex: String = bytes.iter().fold(String::new(), |mut s, b| {
-                use std::fmt::Write;
-                let _ = write!(s, "{b:02x}");
-                s
-            });
-            entry
-                .set_password(&hex)
-                .context("failed to store database key in keychain")?;
-            Ok(hex)
-        }
+    if key_path.exists() {
+        let raw = std::fs::read_to_string(&key_path)
+            .context("failed to read ~/.brain/.db_key — restore from backup or run `brain db reset` to wipe and start fresh")?;
+        let key = raw.trim().to_string();
+        anyhow::ensure!(
+            key.len() == 64 && key.chars().all(|c| c.is_ascii_hexdigit()),
+            "~/.brain/.db_key is corrupt (expected 64 hex chars) — restore from backup"
+        );
+        return Ok(key);
     }
+
+    // First run: generate key, write with restricted permissions
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let hex: String = bytes.iter().fold(String::new(), |mut s, b| {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+        s
+    });
+
+    if let Some(parent) = key_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&key_path, &hex).context("failed to write ~/.brain/.db_key")?;
+
+    // Restrict to owner-read/write only (0600)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    tracing::info!("generated new DB encryption key at ~/.brain/.db_key — back this up alongside brain.db");
+    Ok(hex)
 }
 
 // ── Learning progress ─────────────────────────────────────────────────────────
