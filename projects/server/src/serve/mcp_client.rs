@@ -11,6 +11,54 @@ fn colima_docker_host() -> Option<String> {
     }
 }
 
+/// Resolve a bare command name to an absolute path.
+///
+/// Launchd and other minimal environments strip PATH down to system directories,
+/// so `node`, `npx`, etc. won't be found even when they're installed. Try `which`
+/// first (works in interactive shells), then probe well-known install locations.
+fn resolve_command(command: &str) -> String {
+    if command.starts_with('/') {
+        return command.to_string();
+    }
+    // which works when PATH is rich (interactive shell, dev mode)
+    if let Ok(out) = std::process::Command::new("which").arg(command).output() {
+        if out.status.success() {
+            let resolved = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !resolved.is_empty() && std::path::Path::new(&resolved).exists() {
+                return resolved;
+            }
+        }
+    }
+    // Probe known install paths — covers launchd/systemd daemon environments
+    let mut candidates: Vec<String> = vec![
+        format!("/opt/homebrew/bin/{command}"),  // Apple Silicon Homebrew
+        format!("/usr/local/bin/{command}"),     // Intel Homebrew + manual installs
+        format!("/usr/bin/{command}"),
+        format!("/bin/{command}"),
+    ];
+    if let Ok(home) = std::env::var("HOME") {
+        // nvm: read the default alias to find the active version
+        let nvm_default = format!("{home}/.nvm/alias/default");
+        if let Ok(ver) = std::fs::read_to_string(&nvm_default) {
+            let ver = ver.trim().to_string();
+            candidates.push(format!("{home}/.nvm/versions/node/{ver}/bin/{command}"));
+            if !ver.starts_with('v') {
+                candidates.push(format!("{home}/.nvm/versions/node/v{ver}/bin/{command}"));
+            }
+        }
+        candidates.push(format!("{home}/.local/bin/{command}"));
+        candidates.push(format!("{home}/.volta/bin/{command}")); // Volta
+        candidates.push(format!("{home}/.fnm/current/bin/{command}")); // fnm
+    }
+    for path in &candidates {
+        if std::path::Path::new(path).exists() {
+            return path.clone();
+        }
+    }
+    tracing::warn!("could not resolve '{command}' to an absolute path; using as-is (may fail in daemon mode)");
+    command.to_string()
+}
+
 use anyhow::Result;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -44,7 +92,8 @@ pub struct McpTool {
 
 impl McpClient {
     pub async fn connect(cfg: &McpServerConfig) -> Result<Self> {
-        let mut cmd = tokio::process::Command::new(&cfg.command);
+        let resolved = resolve_command(&cfg.command);
+        let mut cmd = tokio::process::Command::new(&resolved);
         cmd.args(&cfg.args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -213,27 +262,36 @@ impl McpClient {
 
 pub struct McpPool {
     clients: Mutex<HashMap<String, Arc<McpClient>>>,
-    brain_servers: Vec<brain_utils::config::McpServerEntry>,
+    db_path: Option<std::path::PathBuf>,
 }
 
 impl McpPool {
-    pub fn new(brain_servers: Vec<brain_utils::config::McpServerEntry>) -> Self {
-        McpPool {
-            clients: Mutex::new(HashMap::new()),
-            brain_servers,
-        }
+    pub fn new() -> Self {
+        McpPool { clients: Mutex::new(HashMap::new()), db_path: None }
+    }
+
+    pub fn new_with_db(db_path: std::path::PathBuf) -> Self {
+        McpPool { clients: Mutex::new(HashMap::new()), db_path: Some(db_path) }
     }
 
     pub fn read_configs(&self) -> HashMap<String, McpServerConfig> {
         let mut configs = Self::read_claude_configs();
-        // brain.toml servers take precedence — override same-named claude configs
-        for entry in &self.brain_servers {
-            configs.insert(entry.name.clone(), McpServerConfig {
-                command: entry.command.clone(),
-                args: entry.args.clone(),
-                env: entry.env.clone(),
-            });
+
+        // DB servers take precedence over ~/.claude.json
+        if let Some(db_path) = &self.db_path {
+            if let Ok(conn) = brain_utils::db::open(db_path) {
+                if let Ok(rows) = brain_utils::db::list_mcp_servers(&conn) {
+                    for row in rows {
+                        configs.insert(row.name.clone(), McpServerConfig {
+                            command: row.command,
+                            args: row.args,
+                            env: row.env,
+                        });
+                    }
+                }
+            }
         }
+
         configs
     }
 
@@ -259,7 +317,15 @@ impl McpPool {
                     .iter()
                     .filter_map(|a| a.as_str().map(|s| s.to_string()))
                     .collect();
-                Some((k.clone(), McpServerConfig { command, args, env: Default::default() }))
+                let env = v["env"]
+                    .as_object()
+                    .map(|m| {
+                        m.iter()
+                            .filter_map(|(ek, ev)| ev.as_str().map(|s| (ek.clone(), s.to_string())))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some((k.clone(), McpServerConfig { command, args, env }))
             })
             .collect()
     }
@@ -286,6 +352,30 @@ impl McpPool {
         let configs = self.read_configs();
         let mut result = Vec::new();
         for server_name in configs.keys() {
+            if let Ok(client) = self.get_or_connect(server_name).await {
+                for tool in &client.tools {
+                    result.push(json!({
+                        "server": server_name,
+                        "name": tool.name,
+                        "description": tool.description,
+                        "inputSchema": tool.input_schema,
+                    }));
+                }
+            }
+        }
+        result
+    }
+
+    /// Like `all_tools` but skips named servers entirely — avoids connecting to them.
+    /// Use this when federating to exclude the brain server itself and any servers
+    /// whose tools brain already exposes natively (e.g. context7).
+    pub async fn all_tools_filtered(&self, skip: &[&str]) -> Vec<Value> {
+        let configs = self.read_configs();
+        let mut result = Vec::new();
+        for server_name in configs.keys() {
+            if skip.contains(&server_name.as_str()) {
+                continue;
+            }
             if let Ok(client) = self.get_or_connect(server_name).await {
                 for tool in &client.tools {
                     result.push(json!({
