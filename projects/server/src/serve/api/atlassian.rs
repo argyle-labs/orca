@@ -12,13 +12,14 @@ use super::prelude::*;
 
 // ── Credential helper ─────────────────────────────────────────────────────────
 
-/// Returns (domain, email, token) from the "atlassian" MCP server config in brain.toml.
+/// Returns (domain, email, token) from the "atlassian" MCP server config in brain.db.
 pub(super) fn atlassian_creds(config: &Config) -> anyhow::Result<(String, String, String)> {
-    let server = config
-        .mcp_servers
-        .iter()
+    let conn = brain_utils::db::open(&config.db_path)?;
+    let servers = brain_utils::db::list_mcp_servers(&conn)?;
+    let server = servers
+        .into_iter()
         .find(|s| s.name == "atlassian")
-        .ok_or_else(|| anyhow::anyhow!("atlassian not configured in brain.toml"))?;
+        .ok_or_else(|| anyhow::anyhow!("atlassian not configured — add via `brain mcp add`"))?;
 
     let args = &server.args;
 
@@ -35,7 +36,7 @@ pub(super) fn atlassian_creds(config: &Config) -> anyhow::Result<(String, String
         .and_then(|w| w.get(1))
         .map(|s| s.to_string())
         .or_else(|| server.env.get("ATLASSIAN_USERNAME").cloned())
-        .ok_or_else(|| anyhow::anyhow!("no Atlassian email in brain.toml"))?;
+        .ok_or_else(|| anyhow::anyhow!("no Atlassian email in server config"))?;
 
     let token = args
         .windows(2)
@@ -43,7 +44,7 @@ pub(super) fn atlassian_creds(config: &Config) -> anyhow::Result<(String, String
         .and_then(|w| w.get(1))
         .map(|s| s.to_string())
         .or_else(|| server.env.get("ATLASSIAN_API_TOKEN").cloned())
-        .ok_or_else(|| anyhow::anyhow!("no Atlassian token in brain.toml"))?;
+        .ok_or_else(|| anyhow::anyhow!("no Atlassian token in server config"))?;
 
     Ok((domain, email, token))
 }

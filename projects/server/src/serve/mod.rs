@@ -16,8 +16,8 @@ use axum::routing::get;
 use brain_utils::state::{self, DaemonMode, DaemonState};
 use tower_http::cors::{Any, CorsLayer};
 
-pub async fn run(dev: bool, port: u16, mcp_servers: Vec<brain_utils::config::McpServerEntry>) -> Result<()> {
-    let app = build_router(dev, mcp_servers);
+pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()> {
+    let app = build_router(dev, db_path);
 
     let addr: SocketAddr = if dev {
         format!("127.0.0.1:{port}").parse()?
@@ -63,11 +63,11 @@ pub async fn run(dev: bool, port: u16, mcp_servers: Vec<brain_utils::config::Mcp
 ///
 /// While parked, polls every 5 s: if the active dev process has died,
 /// auto-reclaims the port without waiting for a signal.
-pub async fn run_daemon(port: u16, mcp_servers: Vec<brain_utils::config::McpServerEntry>) -> Result<()> {
+pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
 
     let addr: SocketAddr = format!("0.0.0.0:{port}").parse()?;
-    let app = build_router(false, mcp_servers);
+    let app = build_router(false, db_path);
 
     let binary = resolve_daemon_binary();
 
@@ -382,7 +382,7 @@ async fn proxy_ws_to_vite(mut browser: axum::extract::ws::WebSocket, path: Strin
     let _ = browser.close().await;
 }
 
-fn build_router(dev: bool, mcp_servers: Vec<brain_utils::config::McpServerEntry>) -> Router {
+fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
     use std::sync::Arc;
 
     let cors = CorsLayer::new()
@@ -390,7 +390,7 @@ fn build_router(dev: bool, mcp_servers: Vec<brain_utils::config::McpServerEntry>
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let mcp_pool = Arc::new(mcp_client::McpPool::new(mcp_servers));
+    let mcp_pool = Arc::new(mcp_client::McpPool::new_with_db(db_path));
 
     let (api, spec) = openapi::openapi_router().split_for_parts();
     // Stash the assembled spec so the spec-serving handlers can read it.

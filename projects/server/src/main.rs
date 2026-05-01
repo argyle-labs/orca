@@ -114,9 +114,6 @@ enum Command {
         out: String,
     },
 
-    /// Install embedded agents into ~/.claude/agents/ (removes orphans from prior versions)
-    InstallAgents,
-
     /// Manage the external API spec registry (~/brain/openapi/)
     Spec {
         #[command(subcommand)]
@@ -200,11 +197,10 @@ async fn main() -> Result<()> {
             run_one_shot(&config, "bear", &prompt).await
         }
         Some(Command::Run { agent, prompt }) => run_one_shot(&config, &agent, &prompt).await,
-        Some(Command::InstallAgents) => cmd::cmd_install_agents(&config),
         Some(Command::McpServe) => mcp::serve(&config).await,
-        Some(Command::Serve { dev, port }) => serve::run(dev, port, config.mcp_servers.clone()).await,
+        Some(Command::Serve { dev, port }) => serve::run(dev, port, config.db_path.clone()).await,
         Some(Command::Daemon { action }) => match action {
-            DaemonAction::Start { port } => serve::run_daemon(port, config.mcp_servers).await,
+            DaemonAction::Start { port } => serve::run_daemon(port, config.db_path.clone()).await,
             other => cmd::cmd_daemon(other),
         },
         Some(Command::Dev { port }) => cmd_dev(port, &config).await,
@@ -307,7 +303,7 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
     }
 
     // Run dev server (Ctrl-C will exit)
-    let result = serve::run(true, port, config.mcp_servers.clone()).await;
+    let result = serve::run(true, port, config.db_path.clone()).await;
 
     // Reclaim: read current state (daemon may have been restarted by launchd with a new PID)
     if daemon_pid.is_some() {

@@ -1,14 +1,16 @@
 use anyhow::Result;
 use brain_utils::config::Config;
+use brain_utils::db::{self, McpServerRow};
 use clap::Subcommand;
+use std::collections::HashMap;
 
 #[derive(Subcommand, Debug)]
 pub enum McpAction {
-    /// List all registered MCP servers (brain.toml + ~/.claude.json)
+    /// List all registered MCP servers (brain.db + ~/.claude.json)
     List,
-    /// Add an MCP server to brain.toml
+    /// Add an MCP server to brain.db
     Add {
-        /// Server name (used in /api/mcp/run calls)
+        /// Server name
         name: String,
         /// Command to run the server
         #[arg(long)]
@@ -20,7 +22,7 @@ pub enum McpAction {
         #[arg(long = "env", num_args = 0..)]
         env: Vec<String>,
     },
-    /// Remove an MCP server from brain.toml
+    /// Remove an MCP server from brain.db
     Remove {
         name: String,
     },
@@ -29,9 +31,15 @@ pub enum McpAction {
 pub fn cmd_mcp(config: &Config, action: McpAction) -> Result<()> {
     match action {
         McpAction::List => {
-            println!("brain.toml servers:");
-            for s in &config.mcp_servers {
-                println!("  {} → {} {}", s.name, s.command, s.args.join(" "));
+            let conn = db::open(&config.db_path)?;
+            let servers = db::list_mcp_servers(&conn)?;
+            if servers.is_empty() {
+                println!("brain.db servers: (none)");
+            } else {
+                println!("brain.db servers:");
+                for s in &servers {
+                    println!("  {} → {} {}", s.name, s.command, s.args.join(" "));
+                }
             }
             let home = std::env::var("HOME").unwrap_or_default();
             let claude_path = format!("{home}/.claude.json");
@@ -48,10 +56,7 @@ pub fn cmd_mcp(config: &Config, action: McpAction) -> Result<()> {
             Ok(())
         }
         McpAction::Add { name, command, args, env } => {
-            let path = config.brain_toml_path();
-            let mut raw = std::fs::read_to_string(&path).unwrap_or_default();
-
-            let env_pairs: Vec<(String, String)> = env
+            let env_map: HashMap<String, String> = env
                 .iter()
                 .filter_map(|e| {
                     let mut parts = e.splitn(2, '=');
@@ -59,41 +64,20 @@ pub fn cmd_mcp(config: &Config, action: McpAction) -> Result<()> {
                 })
                 .collect();
 
-            let args_toml = args
-                .iter()
-                .map(|a| format!("{:?}", a))
-                .collect::<Vec<_>>()
-                .join(", ");
-
-            let env_toml = if env_pairs.is_empty() {
-                String::new()
-            } else {
-                let pairs = env_pairs
-                    .iter()
-                    .map(|(k, v)| format!("{} = {:?}", k, v))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("\nenv     = {{ {} }}", pairs)
-            };
-
-            let entry = format!(
-                "\n[[mcp.servers]]\nname    = {:?}\ncommand = {:?}\nargs    = [{}]{}\n",
-                name, command, args_toml, env_toml
-            );
-            raw.push_str(&entry);
-            std::fs::write(&path, &raw)?;
-            println!("added {} to brain.toml", name);
+            let row = McpServerRow { name: name.clone(), command, args, env: env_map, enabled: true };
+            let conn = db::open(&config.db_path)?;
+            db::upsert_mcp_server(&conn, &row)?;
+            println!("added {name} to brain.db");
             Ok(())
         }
         McpAction::Remove { name } => {
-            let path = config.brain_toml_path();
-            let raw = std::fs::read_to_string(&path)?;
-            let mut doc: toml::Value = toml::from_str(&raw)?;
-            if let Some(servers) = doc["mcp"]["servers"].as_array_mut() {
-                servers.retain(|s| s["name"].as_str() != Some(&name));
+            let conn = db::open(&config.db_path)?;
+            let removed = db::remove_mcp_server(&conn, &name)?;
+            if removed {
+                println!("removed {name}");
+            } else {
+                println!("{name} not found in brain.db");
             }
-            std::fs::write(&path, toml::to_string_pretty(&doc)?)?;
-            println!("removed {}", name);
             Ok(())
         }
     }
