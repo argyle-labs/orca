@@ -1,0 +1,130 @@
+use axum::{
+    extract::Query,
+    http::StatusCode,
+    response::{IntoResponse, Json, Response},
+};
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+
+use super::prelude::*;
+
+#[derive(Serialize, ToSchema)]
+pub struct MappingRow {
+    pub brain_tool: String,
+    pub mcp_name: String,
+    pub external_tool: String,
+    pub match_type: String,
+    pub confidence: Option<f64>,
+    pub enabled: bool,
+}
+
+#[derive(Deserialize)]
+pub struct MappingsQuery {
+    pub name: Option<String>,
+}
+
+// ── GET /api/mcp/mappings ─────────────────────────────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/api/mcp/mappings",
+    operation_id = "listMcpMappings",
+    params(("name" = Option<String>, Query, description = "Filter by MCP server name")),
+    responses(
+        (status = 200, body = Vec<MappingRow>),
+        (status = 500, body = ErrorResponse),
+    ),
+    tag = "mcp"
+)]
+pub async fn mcp_mappings_list_handler(Query(q): Query<MappingsQuery>) -> Response {
+    match brain_utils::db::open_default() {
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Ok(conn) => {
+            let result = if let Some(name) = &q.name {
+                brain_utils::db::list_mcp_tool_mappings(&conn, name)
+            } else {
+                brain_utils::db::all_mcp_tool_mappings(&conn)
+            };
+            match result {
+                Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+                Ok(rows) => {
+                    let mapped: Vec<MappingRow> = rows
+                        .into_iter()
+                        .map(|r| MappingRow {
+                            brain_tool: r.brain_tool,
+                            mcp_name: r.mcp_name,
+                            external_tool: r.external_tool,
+                            match_type: r.match_type,
+                            confidence: r.confidence,
+                            enabled: r.enabled,
+                        })
+                        .collect();
+                    Json(mapped).into_response()
+                }
+            }
+        }
+    }
+}
+
+// ── POST /api/mcp/mappings ────────────────────────────────────────────────────
+
+#[derive(Deserialize, ToSchema)]
+pub struct MapRequest {
+    pub name: String,
+    pub brain_tool: String,
+    pub external_tool: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/mcp/mappings",
+    operation_id = "createMcpMapping",
+    request_body = MapRequest,
+    responses(
+        (status = 200, body = OkResponse),
+        (status = 500, body = ErrorResponse),
+    ),
+    tag = "mcp"
+)]
+pub async fn mcp_mappings_create_handler(Json(body): Json<MapRequest>) -> Response {
+    let row = brain_utils::db::McpToolMappingRow {
+        brain_tool: body.brain_tool.clone(),
+        mcp_name: body.name,
+        external_tool: body.external_tool,
+        match_type: "explicit".to_string(),
+        confidence: None,
+        enabled: true,
+    };
+    match brain_utils::db::open_default()
+        .and_then(|conn| brain_utils::db::upsert_mcp_tool_mapping(&conn, &row))
+    {
+        Ok(()) => Json(OkResponse { ok: true }).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+// ── DELETE /api/mcp/mappings/:brain_tool ──────────────────────────────────────
+
+#[utoipa::path(
+    delete,
+    path = "/api/mcp/mappings/{brain_tool}",
+    operation_id = "deleteMcpMapping",
+    params(("brain_tool" = String, Path, description = "Brain tool name to unmap")),
+    responses(
+        (status = 200, body = OkResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 500, body = ErrorResponse),
+    ),
+    tag = "mcp"
+)]
+pub async fn mcp_mappings_delete_handler(
+    axum::extract::Path(brain_tool): axum::extract::Path<String>,
+) -> Response {
+    match brain_utils::db::open_default()
+        .and_then(|conn| brain_utils::db::remove_mcp_tool_mapping(&conn, &brain_tool))
+    {
+        Ok(true) => Json(OkResponse { ok: true }).into_response(),
+        Ok(false) => err(StatusCode::NOT_FOUND, &format!("mapping '{brain_tool}' not found")),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}

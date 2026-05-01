@@ -195,6 +195,75 @@ pub struct TestRunQuery {
     pub suite: String,
 }
 
+#[derive(Serialize, Deserialize, ToSchema, Clone)]
+pub struct DockerRuntimeInfo {
+    pub name: String,
+    #[serde(rename = "socketPath", skip_serializing_if = "Option::is_none")]
+    pub socket_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// HTTP URL for web-based orchestrators (Dockge, Portainer)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub enabled: bool,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct DockerRuntimeAddRequest {
+    pub name: String,
+    #[serde(rename = "socketPath")]
+    pub socket_path: Option<String>,
+    pub host: Option<String>,
+    /// HTTP URL for web-based orchestrators (Dockge, Portainer)
+    pub url: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, ToSchema, Clone)]
+pub struct SchemaDbInfo {
+    pub name: String,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub user: String,
+    pub database: String,
+    pub container: Option<String>,
+    #[serde(rename = "domainsFile", skip_serializing_if = "Option::is_none")]
+    pub domains_file: Option<String>,
+    pub enabled: bool,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct SchemaDbAddRequest {
+    pub name: String,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub user: String,
+    pub password: String,
+    pub database: String,
+    pub container: Option<String>,
+    #[serde(rename = "domainsFile")]
+    pub domains_file: Option<String>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct SpecRegisterRequest {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SpecInfo {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(rename = "sourceMcp", skip_serializing_if = "Option::is_none")]
+    pub source_mcp: Option<String>,
+    #[serde(rename = "pathCount", skip_serializing_if = "Option::is_none")]
+    pub path_count: Option<u32>,
+    #[serde(rename = "cachedAt", skip_serializing_if = "Option::is_none")]
+    pub cached_at: Option<String>,
+    pub enabled: bool,
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct TestRunResponse {
     pub suite: String,
@@ -212,7 +281,7 @@ pub struct TestRunResponse {
 // `super::SomeType` inside a utoipa macro; always import it via this prelude.
 pub(super) mod prelude {
     #[allow(unused_imports)]
-    pub use super::{ErrorResponse, McpServerAddRequest, McpServerInfo, McpState, OkResponse, err};
+    pub use super::{DockerRuntimeAddRequest, DockerRuntimeInfo, ErrorResponse, McpServerAddRequest, McpServerInfo, McpState, OkResponse, SchemaDbAddRequest, SchemaDbInfo, SpecInfo, SpecRegisterRequest, err};
 }
 
 // ── Sub-modules ───────────────────────────────────────────────────────────────
@@ -228,7 +297,10 @@ pub mod health;
 pub mod learning;
 pub mod logs;
 pub mod mcp;
+pub mod mcp_mappings;
 pub mod schema;
+pub mod docker_registry;
+pub mod schema_registry;
 pub mod specs;
 pub mod system;
 pub mod tests_handler;
@@ -244,7 +316,10 @@ pub use health::*;
 pub use learning::*;
 pub use logs::*;
 pub use mcp::*;
+pub use mcp_mappings::*;
 pub use schema::*;
+pub use docker_registry::*;
+pub use schema_registry::*;
 pub use specs::*;
 pub use system::*;
 pub use tests_handler::*;

@@ -50,6 +50,10 @@ use super::mcp_client::McpPool;
         super::api::TestRunResponse,
         super::api::McpServerInfo,
         super::api::McpServerAddRequest,
+        super::api::SchemaDbInfo,
+        super::api::SchemaDbAddRequest,
+        super::api::DockerRuntimeInfo,
+        super::api::DockerRuntimeAddRequest,
         super::api::JiraIssuesQuery,
         super::api::TransitionBody,
         super::api::ConfluenceSearchQuery,
@@ -71,6 +75,8 @@ use super::mcp_client::McpPool;
         super::api::ProgressRequest,
         super::api::ProgressResponse,
         super::api::PdfQuery,
+        super::api::SpecRegisterRequest,
+        super::api::SpecInfo,
     )),
     tags(
         // Public domains — served at /api/openapi/public.json
@@ -105,19 +111,27 @@ pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(api::ping_handler))
         .routes(routes!(api::specs_list_handler))
+        .routes(routes!(api::specs_db_list_handler))
+        .routes(routes!(api::specs_register_handler))
         .routes(routes!(api::specs_get_public_handler))
         .routes(routes!(api::specs_graphql_info_handler))
         .routes(routes!(api::specs_graphql_proxy_handler))
         .routes(routes!(api::graphql_download_handler))
         .routes(routes!(api::specs_get_graphql_handler))
         .routes(routes!(api::spec_download_handler))
+        .routes(routes!(api::specs_refresh_handler))
+        .routes(routes!(api::specs_unregister_handler))
         .routes(routes!(api::specs_get_handler))
         .routes(routes!(api::tree_handler))
         .routes(routes!(api::search_handler))
         .routes(routes!(api::mcp_servers_handler, api::mcp_add_handler))
         .routes(routes!(api::mcp_remove_handler))
+        .routes(routes!(api::mcp_mappings_list_handler, api::mcp_mappings_create_handler))
+        .routes(routes!(api::mcp_mappings_delete_handler))
         .routes(routes!(api::mcp_tools_handler))
         .routes(routes!(api::mcp_run_handler))
+        .routes(routes!(api::docker_runtimes_handler, api::docker_runtimes_add_handler))
+        .routes(routes!(api::docker_runtimes_remove_handler))
         .routes(routes!(api::docker_engine_handler))
         .routes(routes!(api::docker_engine_start_handler))
         .routes(routes!(api::docker_services_handler))
@@ -127,6 +141,8 @@ pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
         .routes(routes!(api::get_progress_handler, api::save_progress_handler))
         .routes(routes!(api::schema_handler))
         .routes(routes!(api::schema_domains_handler))
+        .routes(routes!(api::schema_databases_handler, api::schema_databases_add_handler))
+        .routes(routes!(api::schema_databases_remove_handler))
         .routes(routes!(api::rebuy_health_handler))
         .routes(routes!(api::log_services_handler))
         .routes(routes!(api::log_fetch_handler))
