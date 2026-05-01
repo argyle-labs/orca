@@ -17,30 +17,3 @@ pub fn cmd_agents(_config: &Config) -> Result<()> {
     }
     Ok(())
 }
-
-pub fn cmd_install_agents(config: &Config) -> Result<()> {
-    let target = config.agents_dir();
-    println!(
-        "{} installing agents into {}",
-        "brain".cyan(),
-        target.display()
-    );
-
-    let report = agents::install_agents(&target)?;
-
-    for name in &report.written {
-        println!("  {} {name}", "↑".green());
-    }
-    for name in &report.removed {
-        println!("  {} {name}", "✗".red());
-    }
-
-    println!(
-        "\n{} {} written, {} removed, {} unchanged",
-        "✓".green(),
-        report.written.len(),
-        report.removed.len(),
-        report.unchanged,
-    );
-    Ok(())
-}

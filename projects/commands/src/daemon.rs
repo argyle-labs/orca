@@ -191,10 +191,7 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <dict>
-        <key>Crashed</key>
-        <true/>
-    </dict>
+    <true/>
     <key>ThrottleInterval</key>
     <integer>30</integer>
     <key>StandardOutPath</key>
@@ -209,9 +206,10 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     std::fs::write(&plist_path, &plist)?;
     println!("{} wrote {}", "✓".green(), plist_path);
 
-    // Remove any existing registration before bootstrapping
+    // Remove any existing registration before bootstrapping; ignore failure when not loaded
     let _ = Command::new("launchctl")
         .args(["bootout", &domain, &plist_path])
+        .stderr(std::process::Stdio::null())
         .status();
 
     let status = Command::new("launchctl")
