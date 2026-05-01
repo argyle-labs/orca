@@ -82,6 +82,15 @@ fn apply_schema(conn: &Connection) -> Result<()> {
                 INSERT INTO session_events_fts(session_events_fts, rowid, id, content)
                 VALUES ('delete', old.rowid, old.id, old.content);
             END;
+
+        CREATE TABLE IF NOT EXISTS mcp_servers (
+            name       TEXT PRIMARY KEY,
+            command    TEXT NOT NULL,
+            args       TEXT NOT NULL DEFAULT '[]',
+            env        TEXT NOT NULL DEFAULT '{}',
+            enabled    INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
         ",
     )?;
     Ok(())
@@ -236,4 +245,75 @@ pub fn important_events(conn: &Connection, project: &str, limit: usize) -> Resul
     })?;
 
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+// ── MCP server registry ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct McpServerRow {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: std::collections::HashMap<String, String>,
+    pub enabled: bool,
+}
+
+pub fn list_mcp_servers(conn: &Connection) -> Result<Vec<McpServerRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT name, command, args, env, enabled FROM mcp_servers WHERE enabled = 1 ORDER BY name",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, i32>(4)?,
+        ))
+    })?;
+    let mut result = Vec::new();
+    for r in rows {
+        let (name, command, args_json, env_json, enabled) = r?;
+        let args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
+        let env: std::collections::HashMap<String, String> =
+            serde_json::from_str(&env_json).unwrap_or_default();
+        result.push(McpServerRow {
+            name,
+            command,
+            args,
+            env,
+            enabled: enabled != 0,
+        });
+    }
+    Ok(result)
+}
+
+pub fn upsert_mcp_server(conn: &Connection, server: &McpServerRow) -> Result<()> {
+    let args_json = serde_json::to_string(&server.args).unwrap_or_else(|_| "[]".into());
+    let env_json = serde_json::to_string(&server.env).unwrap_or_else(|_| "{}".into());
+    conn.execute(
+        "INSERT INTO mcp_servers (name, command, args, env, enabled)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(name) DO UPDATE SET
+             command = excluded.command,
+             args    = excluded.args,
+             env     = excluded.env,
+             enabled = excluded.enabled",
+        rusqlite::params![
+            server.name,
+            server.command,
+            args_json,
+            env_json,
+            server.enabled as i32
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn remove_mcp_server(conn: &Connection, name: &str) -> Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM mcp_servers WHERE name = ?1",
+        rusqlite::params![name],
+    )?;
+    Ok(n > 0)
 }
