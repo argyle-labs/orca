@@ -1,29 +1,5 @@
 use anyhow::{Context, Result};
-use serde::Deserialize;
-use std::collections::HashMap;
 use std::path::PathBuf;
-
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct McpServerEntry {
-    pub name: String,
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub env: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct BrainToml {
-    #[serde(default)]
-    pub mcp: McpSection,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct McpSection {
-    #[serde(default)]
-    pub servers: Vec<McpServerEntry>,
-}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -32,7 +8,7 @@ pub struct Config {
     pub default_model: Model,
     pub brain_vault: PathBuf,
     pub memory_root: PathBuf,
-    pub mcp_servers: Vec<McpServerEntry>,
+    pub db_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +39,7 @@ impl Config {
         let home = dirs::home_dir().context("no home dir")?;
         let brain_vault = home.join("brain");
         let memory_root = brain_vault.join("ai/claude/memory");
+        let db_path = home.join(".brain/brain.db");
 
         // API key: env var takes priority, then macOS Keychain
         let api_key = std::env::var("ANTHROPIC_API_KEY")
@@ -76,16 +53,11 @@ impl Config {
         // Model ID resolved at session start from /v1/models.
         let default_model = Model::LMStudio(String::new());
 
+        // One-time migration: if brain.toml has [[mcp.servers]], write them to DB.
         let toml_path = brain_vault.join("config/brain.toml");
-        let mcp_servers = if toml_path.exists() {
-            std::fs::read_to_string(&toml_path)
-                .ok()
-                .and_then(|s| toml::from_str::<BrainToml>(&s).ok())
-                .map(|t| t.mcp.servers)
-                .unwrap_or_default()
-        } else {
-            vec![]
-        };
+        if toml_path.exists() {
+            migrate_toml_servers_to_db(&toml_path, &db_path);
+        }
 
         Ok(Config {
             anthropic_api_key: api_key,
@@ -93,7 +65,7 @@ impl Config {
             default_model,
             brain_vault,
             memory_root,
-            mcp_servers,
+            db_path,
         })
     }
 
@@ -106,8 +78,53 @@ impl Config {
     }
 
     pub fn logs_dir(&self) -> PathBuf {
-        self.brain_vault.join("ai/claude/logs/sessions")
+        dirs::home_dir().unwrap_or_default().join(".brain/logs/sessions")
     }
+
+    pub fn config_dir(&self) -> PathBuf {
+        dirs::home_dir().unwrap_or_default().join("code/brain/config")
+    }
+}
+
+fn migrate_toml_servers_to_db(toml_path: &std::path::Path, db_path: &std::path::Path) {
+    #[derive(serde::Deserialize, Default)]
+    struct LegacyToml {
+        #[serde(default)]
+        mcp: LegacyMcp,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct LegacyMcp {
+        #[serde(default)]
+        servers: Vec<LegacyServer>,
+    }
+    #[derive(serde::Deserialize)]
+    struct LegacyServer {
+        name: String,
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: std::collections::HashMap<String, String>,
+    }
+
+    let Ok(raw) = std::fs::read_to_string(toml_path) else { return };
+    let Ok(parsed) = toml::from_str::<LegacyToml>(&raw) else { return };
+    if parsed.mcp.servers.is_empty() { return }
+
+    let Ok(conn) = crate::db::open(db_path) else { return };
+    for s in &parsed.mcp.servers {
+        let args_json = serde_json::to_string(&s.args).unwrap_or_else(|_| "[]".into());
+        let env_json = serde_json::to_string(&s.env).unwrap_or_else(|_| "{}".into());
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO mcp_servers (name, command, args, env, enabled)
+             VALUES (?1, ?2, ?3, ?4, 1)",
+            rusqlite::params![s.name, s.command, args_json, env_json],
+        );
+    }
+    tracing::info!(
+        "migrated {} mcp server(s) from brain.toml to brain.db",
+        parsed.mcp.servers.len()
+    );
 }
 
 #[cfg(test)]
