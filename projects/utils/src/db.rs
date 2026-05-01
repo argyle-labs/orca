@@ -88,8 +88,55 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             enabled    INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         );
+
+        CREATE TABLE IF NOT EXISTS mcp_tool_mappings (
+            brain_tool      TEXT PRIMARY KEY,
+            mcp_name        TEXT NOT NULL REFERENCES mcp_servers(name) ON DELETE CASCADE,
+            external_tool   TEXT NOT NULL,
+            match_type      TEXT NOT NULL DEFAULT 'explicit',
+            confidence      REAL,
+            enabled         INTEGER NOT NULL DEFAULT 1,
+            created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            verified_at     TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_mtm_mcp     ON mcp_tool_mappings(mcp_name);
+        CREATE INDEX IF NOT EXISTS idx_mtm_enabled ON mcp_tool_mappings(enabled);
+
+        CREATE TABLE IF NOT EXISTS schema_databases (
+            name         TEXT PRIMARY KEY,
+            host         TEXT,
+            port         INTEGER,
+            user         TEXT NOT NULL DEFAULT '',
+            password     TEXT NOT NULL DEFAULT '',
+            database     TEXT NOT NULL DEFAULT '',
+            container    TEXT,
+            domains_file TEXT,
+            enabled      INTEGER NOT NULL DEFAULT 1,
+            created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS openapi_specs (
+            name        TEXT PRIMARY KEY,
+            url         TEXT,
+            source_mcp  TEXT,
+            spec_json   TEXT,
+            cached_at   TEXT,
+            enabled     INTEGER NOT NULL DEFAULT 1,
+            created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS docker_runtimes (
+            name        TEXT PRIMARY KEY,
+            socket_path TEXT,
+            host        TEXT,
+            url         TEXT,
+            enabled     INTEGER NOT NULL DEFAULT 1,
+            created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
         ",
     )?;
+    // Idempotent column migration for DBs created before the url column existed
+    let _ = conn.execute_batch("ALTER TABLE docker_runtimes ADD COLUMN url TEXT;");
     Ok(())
 }
 
@@ -334,6 +381,357 @@ pub fn remove_mcp_server(conn: &Connection, name: &str) -> Result<bool> {
     let n = conn.execute(
         "DELETE FROM mcp_servers WHERE name = ?1",
         rusqlite::params![name],
+    )?;
+    Ok(n > 0)
+}
+
+// ── Schema database registry ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct SchemaDbRow {
+    pub name: String,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub user: String,
+    pub password: String,
+    pub database: String,
+    pub container: Option<String>,
+    pub domains_file: Option<String>,
+    pub enabled: bool,
+}
+
+pub fn list_schema_databases(conn: &Connection) -> Result<Vec<SchemaDbRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT name, host, port, user, password, database, container, domains_file, enabled
+         FROM schema_databases WHERE enabled = 1 ORDER BY name",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(SchemaDbRow {
+            name: row.get(0)?,
+            host: row.get(1)?,
+            port: row.get::<_, Option<i64>>(2)?.map(|p| p as u16),
+            user: row.get(3)?,
+            password: row.get(4)?,
+            database: row.get(5)?,
+            container: row.get(6)?,
+            domains_file: row.get(7)?,
+            enabled: row.get::<_, i32>(8)? != 0,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+pub fn upsert_schema_database(conn: &Connection, db: &SchemaDbRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO schema_databases (name, host, port, user, password, database, container, domains_file, enabled)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(name) DO UPDATE SET
+             host         = excluded.host,
+             port         = excluded.port,
+             user         = excluded.user,
+             password     = excluded.password,
+             database     = excluded.database,
+             container    = excluded.container,
+             domains_file = excluded.domains_file,
+             enabled      = excluded.enabled",
+        rusqlite::params![
+            db.name,
+            db.host,
+            db.port.map(|p| p as i64),
+            db.user,
+            db.password,
+            db.database,
+            db.container,
+            db.domains_file,
+            db.enabled as i32,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn remove_schema_database(conn: &Connection, name: &str) -> Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM schema_databases WHERE name = ?1",
+        rusqlite::params![name],
+    )?;
+    Ok(n > 0)
+}
+
+// ── Docker runtime registry ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct DockerRuntimeRow {
+    pub name: String,
+    /// Path to the unix socket (e.g. `~/.colima/default/docker.sock`)
+    pub socket_path: Option<String>,
+    /// Full DOCKER_HOST URL for TCP remotes (e.g. `tcp://remote:2376`)
+    pub host: Option<String>,
+    /// HTTP URL for web-based orchestrators (Dockge, Portainer, etc.)
+    pub url: Option<String>,
+    pub enabled: bool,
+}
+
+impl DockerRuntimeRow {
+    /// Returns the DOCKER_HOST value to inject into subprocess environments.
+    /// Only applies to socket/tcp runtimes — web-based runtimes (url only) return None.
+    pub fn docker_host(&self) -> Option<String> {
+        if let Some(sock) = &self.socket_path {
+            let expanded = if let Some(rest) = sock.strip_prefix("~/") {
+                let home = std::env::var("HOME").unwrap_or_default();
+                format!("{home}/{rest}")
+            } else {
+                sock.clone()
+            };
+            Some(format!("unix://{expanded}"))
+        } else {
+            self.host.clone()
+        }
+    }
+}
+
+pub fn list_docker_runtimes(conn: &Connection) -> Result<Vec<DockerRuntimeRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT name, socket_path, host, url, enabled FROM docker_runtimes ORDER BY name",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(DockerRuntimeRow {
+            name: row.get(0)?,
+            socket_path: row.get(1)?,
+            host: row.get(2)?,
+            url: row.get(3)?,
+            enabled: row.get::<_, i32>(4)? != 0,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+/// Returns the first enabled socket/tcp runtime's DOCKER_HOST value for subprocess injection.
+/// Web-only runtimes (url, no socket_path/host) are skipped.
+pub fn active_docker_host(conn: &Connection) -> Option<String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT socket_path, host FROM docker_runtimes
+             WHERE enabled = 1 AND (socket_path IS NOT NULL OR host IS NOT NULL)
+             ORDER BY name LIMIT 1",
+        )
+        .ok()?;
+    let (socket_path, host) = stmt
+        .query_row([], |row| {
+            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .ok()?;
+    if let Some(sock) = socket_path {
+        let expanded = if let Some(rest) = sock.strip_prefix("~/") {
+            let home = std::env::var("HOME").unwrap_or_default();
+            format!("{home}/{rest}")
+        } else {
+            sock
+        };
+        Some(format!("unix://{expanded}"))
+    } else {
+        host
+    }
+}
+
+pub fn upsert_docker_runtime(conn: &Connection, rt: &DockerRuntimeRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO docker_runtimes (name, socket_path, host, url, enabled)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(name) DO UPDATE SET
+             socket_path = excluded.socket_path,
+             host        = excluded.host,
+             url         = excluded.url,
+             enabled     = excluded.enabled",
+        rusqlite::params![rt.name, rt.socket_path, rt.host, rt.url, rt.enabled as i32],
+    )?;
+    Ok(())
+}
+
+pub fn remove_docker_runtime(conn: &Connection, name: &str) -> Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM docker_runtimes WHERE name = ?1",
+        rusqlite::params![name],
+    )?;
+    Ok(n > 0)
+}
+
+// ── OpenAPI spec registry ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct OpenApiSpecRow {
+    pub name: String,
+    pub url: Option<String>,
+    pub source_mcp: Option<String>,
+    pub spec_json: Option<String>,
+    pub cached_at: Option<String>,
+    pub enabled: bool,
+}
+
+pub fn list_openapi_specs(conn: &Connection) -> Result<Vec<OpenApiSpecRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT name, url, source_mcp, spec_json, cached_at, enabled
+         FROM openapi_specs ORDER BY name",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(OpenApiSpecRow {
+            name: row.get(0)?,
+            url: row.get(1)?,
+            source_mcp: row.get(2)?,
+            spec_json: row.get(3)?,
+            cached_at: row.get(4)?,
+            enabled: row.get::<_, i32>(5)? != 0,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+pub fn get_openapi_spec(conn: &Connection, name: &str) -> Result<Option<OpenApiSpecRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT name, url, source_mcp, spec_json, cached_at, enabled
+         FROM openapi_specs WHERE name = ?1",
+    )?;
+    let mut rows = stmt.query_map(rusqlite::params![name], |row| {
+        Ok(OpenApiSpecRow {
+            name: row.get(0)?,
+            url: row.get(1)?,
+            source_mcp: row.get(2)?,
+            spec_json: row.get(3)?,
+            cached_at: row.get(4)?,
+            enabled: row.get::<_, i32>(5)? != 0,
+        })
+    })?;
+    Ok(rows.next().transpose()?)
+}
+
+pub fn upsert_openapi_spec(conn: &Connection, spec: &OpenApiSpecRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO openapi_specs (name, url, source_mcp, spec_json, cached_at, enabled)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(name) DO UPDATE SET
+             url        = excluded.url,
+             source_mcp = excluded.source_mcp,
+             spec_json  = excluded.spec_json,
+             cached_at  = excluded.cached_at,
+             enabled    = excluded.enabled",
+        rusqlite::params![
+            spec.name,
+            spec.url,
+            spec.source_mcp,
+            spec.spec_json,
+            spec.cached_at,
+            spec.enabled as i32,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn remove_openapi_spec(conn: &Connection, name: &str) -> Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM openapi_specs WHERE name = ?1",
+        rusqlite::params![name],
+    )?;
+    Ok(n > 0)
+}
+
+// ── MCP tool mapping registry ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct McpToolMappingRow {
+    pub brain_tool: String,
+    pub mcp_name: String,
+    pub external_tool: String,
+    pub match_type: String,
+    pub confidence: Option<f64>,
+    pub enabled: bool,
+}
+
+pub fn list_mcp_tool_mappings(conn: &Connection, mcp_name: &str) -> Result<Vec<McpToolMappingRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT brain_tool, mcp_name, external_tool, match_type, confidence, enabled
+         FROM mcp_tool_mappings WHERE mcp_name = ?1 ORDER BY brain_tool",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![mcp_name], |row| {
+        Ok(McpToolMappingRow {
+            brain_tool: row.get(0)?,
+            mcp_name: row.get(1)?,
+            external_tool: row.get(2)?,
+            match_type: row.get(3)?,
+            confidence: row.get(4)?,
+            enabled: row.get::<_, i32>(5)? != 0,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+pub fn all_mcp_tool_mappings(conn: &Connection) -> Result<Vec<McpToolMappingRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT brain_tool, mcp_name, external_tool, match_type, confidence, enabled
+         FROM mcp_tool_mappings WHERE enabled = 1 ORDER BY brain_tool",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(McpToolMappingRow {
+            brain_tool: row.get(0)?,
+            mcp_name: row.get(1)?,
+            external_tool: row.get(2)?,
+            match_type: row.get(3)?,
+            confidence: row.get(4)?,
+            enabled: row.get::<_, i32>(5)? != 0,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+pub fn lookup_mcp_mapping(conn: &Connection, brain_tool: &str) -> Result<Option<McpToolMappingRow>> {
+    let result = conn.query_row(
+        "SELECT brain_tool, mcp_name, external_tool, match_type, confidence, enabled
+         FROM mcp_tool_mappings WHERE brain_tool = ?1 AND enabled = 1",
+        rusqlite::params![brain_tool],
+        |row| Ok(McpToolMappingRow {
+            brain_tool: row.get(0)?,
+            mcp_name: row.get(1)?,
+            external_tool: row.get(2)?,
+            match_type: row.get(3)?,
+            confidence: row.get(4)?,
+            enabled: row.get::<_, i32>(5)? != 0,
+        }),
+    );
+    match result {
+        Ok(row) => Ok(Some(row)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn upsert_mcp_tool_mapping(conn: &Connection, row: &McpToolMappingRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO mcp_tool_mappings (brain_tool, mcp_name, external_tool, match_type, confidence, enabled)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(brain_tool) DO UPDATE SET
+             mcp_name      = excluded.mcp_name,
+             external_tool = excluded.external_tool,
+             match_type    = excluded.match_type,
+             confidence    = excluded.confidence,
+             enabled       = excluded.enabled",
+        rusqlite::params![
+            row.brain_tool, row.mcp_name, row.external_tool,
+            row.match_type, row.confidence, row.enabled as i32
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn remove_mcp_tool_mapping(conn: &Connection, brain_tool: &str) -> Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM mcp_tool_mappings WHERE brain_tool = ?1",
+        rusqlite::params![brain_tool],
+    )?;
+    Ok(n > 0)
+}
+
+pub fn set_mcp_tool_mapping_enabled(conn: &Connection, brain_tool: &str, enabled: bool) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE mcp_tool_mappings SET enabled = ?1 WHERE brain_tool = ?2",
+        rusqlite::params![enabled as i32, brain_tool],
     )?;
     Ok(n > 0)
 }
