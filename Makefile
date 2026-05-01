@@ -3,10 +3,14 @@
 INSTALL_PATH := $(HOME)/.local/bin/brain
 ENV_TPL      := .env.brain.tpl
 
+# Local overrides (gitignored) — use OP_ACCOUNT here to select the correct 1P account
+-include .env.local
+export
+
 # 1Password: CI uses OP_SERVICE_ACCOUNT_TOKEN (set in GitHub Secrets) — op picks it up
-# automatically. Local dev requires OP_ACCOUNT set in dotfiles/.zshrc.
-# Token lives in: 1Password → automations → brain → ci_service_account_token
-OP_RUN := op run --env-file $(ENV_TPL) --
+# automatically. Local dev: .env.local sets OP_ACCOUNT to the account where brain
+# secrets live (automations vault).
+OP_RUN := op run --account $(OP_ACCOUNT) --env-file $(ENV_TPL) --
 
 # Build frontend + release binary (single self-contained binary with embedded assets)
 build:
@@ -54,9 +58,8 @@ check:
 	cargo check --manifest-path projects/server/Cargo.toml
 
 # Dev mode — Rust API :12000 + Vite :12001 + hot reload, secrets injected from 1Password
-# Requires: OP_ACCOUNT set in dotfiles/.zshrc (see README)
+# Secrets live in the account set by OP_ACCOUNT (.env.local overrides .zshrc default)
 dev:
-	op signin --account $(OP_ACCOUNT)
 	$(OP_RUN) bash scripts/dev.sh
 
 # Run the installed binary with secrets from 1Password
