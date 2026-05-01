@@ -170,6 +170,25 @@ pub struct OkResponse {
     pub ok: bool,
 }
 
+#[derive(Serialize, Deserialize, ToSchema, Clone)]
+pub struct McpServerInfo {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: std::collections::HashMap<String, String>,
+    pub enabled: bool,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct McpServerAddRequest {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+}
+
 #[derive(Deserialize, ToSchema)]
 pub struct TestRunQuery {
     /// Which suite to run: rust | frontend | e2e | all
@@ -193,7 +212,7 @@ pub struct TestRunResponse {
 // `super::SomeType` inside a utoipa macro; always import it via this prelude.
 pub(super) mod prelude {
     #[allow(unused_imports)]
-    pub use super::{ErrorResponse, McpState, OkResponse, err};
+    pub use super::{ErrorResponse, McpServerAddRequest, McpServerInfo, McpState, OkResponse, err};
 }
 
 // ── Sub-modules ───────────────────────────────────────────────────────────────

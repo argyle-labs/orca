@@ -48,6 +48,8 @@ use super::mcp_client::McpPool;
         super::api::SpecQuery,
         super::api::TestRunQuery,
         super::api::TestRunResponse,
+        super::api::McpServerInfo,
+        super::api::McpServerAddRequest,
         super::api::JiraIssuesQuery,
         super::api::TransitionBody,
         super::api::ConfluenceSearchQuery,
@@ -112,6 +114,8 @@ pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
         .routes(routes!(api::specs_get_handler))
         .routes(routes!(api::tree_handler))
         .routes(routes!(api::search_handler))
+        .routes(routes!(api::mcp_servers_handler, api::mcp_add_handler))
+        .routes(routes!(api::mcp_remove_handler))
         .routes(routes!(api::mcp_tools_handler))
         .routes(routes!(api::mcp_run_handler))
         .routes(routes!(api::docker_engine_handler))
