@@ -16,10 +16,16 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use docs::{get_tree, list_commands, list_roots, read_doc, search_docs};
 use handlers::{
-    agents, get_agent, get_config, get_context, list_services, mcp_add_server, mcp_list_servers,
-    mcp_remove_server, run, run_tests, search_logs, service_logs,
+    agents, docker_add_runtime, docker_list_runtimes, docker_remove_runtime, get_agent, get_config,
+    get_context, list_services, mcp_add_server, mcp_list_servers, mcp_list_mappings,
+    mcp_map_tool, mcp_remove_server, mcp_sync_tools, mcp_unmap_tool, run,
+    run_tests, schema_add_database, schema_list_databases, schema_remove_database, search_logs,
+    service_logs,
 };
-use specs::{get_graphql_info, get_rebuy_graphql_schema, get_rebuy_spec, get_rebuy_spec_public, list_rebuy_specs};
+use specs::{
+    get_graphql_info, get_rebuy_graphql_schema, get_rebuy_spec, get_rebuy_spec_public,
+    list_rebuy_specs, spec_refresh, spec_register, spec_unregister,
+};
 
 /// Servers whose tools brain already exposes natively or that must not be proxied back.
 /// - brain-local: brain itself — proxying would spawn a recursive child
@@ -191,6 +197,19 @@ async fn dispatch(name: &str, args: &Value, config: &Config) -> Result<String> {
         "brain_mcp_list" => mcp_list_servers(),
         "brain_mcp_add" => mcp_add_server(args),
         "brain_mcp_remove" => mcp_remove_server(args),
+        "brain_mcp_map" => mcp_map_tool(args),
+        "brain_mcp_unmap" => mcp_unmap_tool(args),
+        "brain_mcp_sync" => mcp_sync_tools(args),
+        "brain_mcp_mappings" => mcp_list_mappings(args),
+        "brain_schema_list" => schema_list_databases(),
+        "brain_schema_add" => schema_add_database(args),
+        "brain_schema_remove" => schema_remove_database(args),
+        "brain_docker_list" => docker_list_runtimes(),
+        "brain_docker_add" => docker_add_runtime(args),
+        "brain_docker_remove" => docker_remove_runtime(args),
+        "brain_spec_register" => spec_register(args).await,
+        "brain_spec_refresh"  => spec_refresh(args).await,
+        "brain_spec_unregister" => spec_unregister(args),
         "resolve-library-id" | "get-library-docs" => {
             context7::proxy_context7(name, args, config).await
         }

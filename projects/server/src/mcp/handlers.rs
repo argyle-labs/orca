@@ -298,3 +298,177 @@ pub fn mcp_remove_server(args: &Value) -> Result<String> {
         Ok(format!("Server '{name}' not found in brain.db."))
     }
 }
+
+pub fn mcp_map_tool(args: &Value) -> Result<String> {
+    let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name required"))?;
+    let brain_tool = args["brain_tool"].as_str().ok_or_else(|| anyhow::anyhow!("brain_tool required"))?;
+    let external_tool = args["external_tool"].as_str().ok_or_else(|| anyhow::anyhow!("external_tool required"))?;
+    let conn = brain_utils::db::open_default()?;
+    let servers = brain_utils::db::list_mcp_servers(&conn)?;
+    if !servers.iter().any(|s| s.name == name) {
+        anyhow::bail!("MCP server '{name}' not found in brain.db — register it first with brain_mcp_add");
+    }
+    let row = brain_utils::db::McpToolMappingRow {
+        brain_tool: brain_tool.to_string(),
+        mcp_name: name.to_string(),
+        external_tool: external_tool.to_string(),
+        match_type: "explicit".to_string(),
+        confidence: None,
+        enabled: true,
+    };
+    brain_utils::db::upsert_mcp_tool_mapping(&conn, &row)?;
+    Ok(format!("Mapped {brain_tool} → {name}::{external_tool}"))
+}
+
+pub fn mcp_unmap_tool(args: &Value) -> Result<String> {
+    let brain_tool = args["brain_tool"].as_str().ok_or_else(|| anyhow::anyhow!("brain_tool required"))?;
+    let conn = brain_utils::db::open_default()?;
+    if brain_utils::db::remove_mcp_tool_mapping(&conn, brain_tool)? {
+        Ok(format!("Unmapped {brain_tool}"))
+    } else {
+        Ok(format!("{brain_tool} not found in mcp_tool_mappings"))
+    }
+}
+
+pub fn mcp_sync_tools(args: &Value) -> Result<String> {
+    let all = args["all"].as_bool().unwrap_or(false);
+    let name = args["name"].as_str();
+    let threshold = args["threshold"].as_f64().unwrap_or(0.8);
+    if !all && name.is_none() {
+        anyhow::bail!("provide name or set all=true");
+    }
+    let conn = brain_utils::db::open_default()?;
+    let servers = brain_utils::db::list_mcp_servers(&conn)?;
+    let targets: Vec<&brain_utils::db::McpServerRow> = if all {
+        servers.iter().collect()
+    } else {
+        let n = name.unwrap();
+        let s = servers.iter().find(|s| s.name == n)
+            .ok_or_else(|| anyhow::anyhow!("server '{n}' not found"))?;
+        vec![s]
+    };
+    let mut lines = Vec::new();
+    for server in targets {
+        match brain_commands::mcp_sync_server(server, threshold) {
+            Ok((added, skipped)) => lines.push(format!("{}: {} added, {} skipped", server.name, added, skipped)),
+            Err(e) => lines.push(format!("{}: error — {e}", server.name)),
+        }
+    }
+    Ok(lines.join("\n"))
+}
+
+pub fn mcp_list_mappings(args: &Value) -> Result<String> {
+    let name = args["name"].as_str();
+    let conn = brain_utils::db::open_default()?;
+    let rows: Vec<brain_utils::db::McpToolMappingRow> = if let Some(n) = name {
+        brain_utils::db::list_mcp_tool_mappings(&conn, n)?
+    } else {
+        brain_utils::db::all_mcp_tool_mappings(&conn)?
+    };
+    if rows.is_empty() {
+        return Ok("(no mappings)".to_string());
+    }
+    let mut lines = Vec::new();
+    for r in &rows {
+        let conf = r.confidence.map(|c| format!(" [{:.0}%]", c * 100.0)).unwrap_or_default();
+        let status = if r.enabled { "" } else { " [disabled]" };
+        lines.push(format!("  {} → {}::{}{}{}", r.brain_tool, r.mcp_name, r.external_tool, conf, status));
+    }
+    Ok(lines.join("\n"))
+}
+
+pub fn schema_list_databases() -> Result<String> {
+    let conn = brain_utils::db::open_default()?;
+    let dbs = brain_utils::db::list_schema_databases(&conn)?;
+    if dbs.is_empty() {
+        return Ok("No schema databases registered. Use `brain schema add` or brain_schema_add to register one.".to_string());
+    }
+    let mut lines = vec!["Registered schema databases:".to_string(), String::new()];
+    for d in &dbs {
+        let conn_info = match (&d.container, &d.host) {
+            (Some(c), _) => format!("container:{c}"),
+            (None, Some(h)) => format!("{h}:{}", d.port.unwrap_or(3306)),
+            _ => "unknown".to_string(),
+        };
+        lines.push(format!("  {} → {} @ {}", d.name, d.database, conn_info));
+    }
+    Ok(lines.join("\n"))
+}
+
+pub fn schema_add_database(args: &Value) -> Result<String> {
+    let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name required"))?;
+    let database = args["database"].as_str().ok_or_else(|| anyhow::anyhow!("database required"))?;
+    let user = args["user"].as_str().ok_or_else(|| anyhow::anyhow!("user required"))?;
+    let password = args["password"].as_str().ok_or_else(|| anyhow::anyhow!("password required"))?;
+    let row = brain_utils::db::SchemaDbRow {
+        name: name.to_string(),
+        host: args["host"].as_str().map(|s| s.to_string()),
+        port: args["port"].as_u64().map(|p| p as u16),
+        user: user.to_string(),
+        password: password.to_string(),
+        database: database.to_string(),
+        container: args["container"].as_str().map(|s| s.to_string()),
+        domains_file: args["domainsFile"].as_str().map(|s| s.to_string()),
+        enabled: true,
+    };
+    let conn = brain_utils::db::open_default()?;
+    brain_utils::db::upsert_schema_database(&conn, &row)?;
+    Ok(format!("Registered schema database '{name}' in brain.db."))
+}
+
+pub fn schema_remove_database(args: &Value) -> Result<String> {
+    let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name required"))?;
+    let conn = brain_utils::db::open_default()?;
+    if brain_utils::db::remove_schema_database(&conn, name)? {
+        Ok(format!("Removed schema database '{name}' from brain.db."))
+    } else {
+        Ok(format!("Database '{name}' not found in brain.db."))
+    }
+}
+
+pub fn docker_list_runtimes() -> Result<String> {
+    let conn = brain_utils::db::open_default()?;
+    let rts = brain_utils::db::list_docker_runtimes(&conn)?;
+    if rts.is_empty() {
+        return Ok("No Docker runtimes registered. Use `brain docker add` or brain_docker_add to register one.".to_string());
+    }
+    let mut lines = vec!["Registered Docker runtimes:".to_string(), String::new()];
+    for r in &rts {
+        let target = r.docker_host()
+            .or_else(|| r.url.clone())
+            .unwrap_or_else(|| "(no connection)".to_string());
+        let flag = if r.enabled { " [enabled]" } else { " [disabled]" };
+        lines.push(format!("  {}{} → {}", r.name, flag, target));
+    }
+    Ok(lines.join("\n"))
+}
+
+pub fn docker_add_runtime(args: &Value) -> Result<String> {
+    let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name required"))?;
+    let socket_path = args["socketPath"].as_str().map(|s| s.to_string());
+    let host = args["host"].as_str().map(|s| s.to_string());
+    let url = args["url"].as_str().map(|s| s.to_string());
+    if socket_path.is_none() && host.is_none() && url.is_none() {
+        anyhow::bail!("provide socketPath, host, or url");
+    }
+    let row = brain_utils::db::DockerRuntimeRow {
+        name: name.to_string(),
+        socket_path,
+        host,
+        url,
+        enabled: true,
+    };
+    let conn = brain_utils::db::open_default()?;
+    brain_utils::db::upsert_docker_runtime(&conn, &row)?;
+    Ok(format!("Registered Docker runtime '{name}' in brain.db."))
+}
+
+pub fn docker_remove_runtime(args: &Value) -> Result<String> {
+    let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name required"))?;
+    let conn = brain_utils::db::open_default()?;
+    if brain_utils::db::remove_docker_runtime(&conn, name)? {
+        Ok(format!("Removed Docker runtime '{name}' from brain.db."))
+    } else {
+        Ok(format!("Runtime '{name}' not found in brain.db."))
+    }
+}

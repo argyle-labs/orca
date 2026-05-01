@@ -248,6 +248,150 @@ pub fn tool_defs() -> Value {
             }
         },
         {
+            "name": "brain_schema_list",
+            "description": "List all MySQL/MariaDB schema databases registered in brain.db.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "brain_schema_add",
+            "description": "Add or update a schema database in brain.db. Use container OR host/port, not both.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name":        { "type": "string", "description": "Display name" },
+                    "database":    { "type": "string", "description": "Database name" },
+                    "user":        { "type": "string", "description": "MySQL user" },
+                    "password":    { "type": "string", "description": "MySQL password" },
+                    "container":   { "type": "string", "description": "Docker container name (for docker exec connection)" },
+                    "host":        { "type": "string", "description": "Host for direct TCP connection" },
+                    "port":        { "type": "integer", "description": "Port (default 3306)" },
+                    "domainsFile": { "type": "string", "description": "Path to JSON domains file" }
+                },
+                "required": ["name", "database", "user", "password"]
+            }
+        },
+        {
+            "name": "brain_schema_remove",
+            "description": "Remove a schema database from brain.db by name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Database name to remove" }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "brain_docker_list",
+            "description": "List all Docker runtimes registered in brain.db. The first enabled runtime is used as the active DOCKER_HOST for MCP subprocesses.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "brain_docker_add",
+            "description": "Add or update a Docker runtime in brain.db. Use socketPath for local unix socket (Colima, Docker Desktop), host for remote TCP daemon, or url for web-based orchestrators (Dockge, Portainer). Multiple runtimes can be registered; the first enabled socket/host runtime is injected as DOCKER_HOST for MCP subprocesses.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name":       { "type": "string", "description": "Runtime name (e.g. colima, docker-desktop, dockge, portainer)" },
+                    "socketPath": { "type": "string", "description": "Unix socket path (e.g. ~/.colima/default/docker.sock)" },
+                    "host":       { "type": "string", "description": "DOCKER_HOST URL for TCP (e.g. tcp://remote:2376)" },
+                    "url":        { "type": "string", "description": "HTTP URL for web-based orchestrators (e.g. https://dockge.internal)" }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "brain_docker_remove",
+            "description": "Remove a Docker runtime from brain.db by name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Runtime name to remove" }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "brain_spec_register",
+            "description": "Fetch an OpenAPI JSON spec from a URL and store it in brain.db. Use this to register an external API spec for use with get_rebuy_spec.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Display name for the spec (e.g. rebuy-cli)" },
+                    "url":  { "type": "string", "description": "URL to fetch the OpenAPI JSON from" }
+                },
+                "required": ["name", "url"]
+            }
+        },
+        {
+            "name": "brain_spec_refresh",
+            "description": "Re-fetch one or all URL-registered specs from their source URLs and update brain.db.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Spec name to refresh. Omit with all=true to refresh all." },
+                    "all":  { "type": "boolean", "description": "Set true to refresh all URL-registered specs" }
+                }
+            }
+        },
+        {
+            "name": "brain_spec_unregister",
+            "description": "Remove a URL-registered spec from brain.db by name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Spec name to remove" }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "brain_mcp_map",
+            "description": "Map a brain tool name to an equivalent tool on a registered external MCP server. Use this to wire brain tool calls through to a specific MCP server's tool.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name":          { "type": "string", "description": "Registered MCP server name (e.g. rebuy-cli)" },
+                    "brain_tool":    { "type": "string", "description": "Brain tool name callers will use" },
+                    "external_tool": { "type": "string", "description": "Actual tool name on the external MCP server" }
+                },
+                "required": ["name", "brain_tool", "external_tool"]
+            }
+        },
+        {
+            "name": "brain_mcp_unmap",
+            "description": "Remove a tool mapping by brain tool name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "brain_tool": { "type": "string", "description": "Brain tool name to unmap" }
+                },
+                "required": ["brain_tool"]
+            }
+        },
+        {
+            "name": "brain_mcp_sync",
+            "description": "Auto-discover tool mappings for a registered MCP server by interrogating its tools/list endpoint.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name":      { "type": "string", "description": "Server name to sync (omit with all=true to sync all)" },
+                    "all":       { "type": "boolean", "description": "Set true to sync all registered servers" },
+                    "threshold": { "type": "number", "description": "Confidence threshold for accepting matches (0.0–1.0, default 0.8)" }
+                }
+            }
+        },
+        {
+            "name": "brain_mcp_mappings",
+            "description": "List all tool mappings, optionally filtered by MCP server name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Server name to filter by (omit for all)" }
+                }
+            }
+        },
+        {
             "name": "resolve-library-id",
             "description": "Resolve a library name to its context7-compatible library ID. Call this before get-library-docs.",
             "inputSchema": {
