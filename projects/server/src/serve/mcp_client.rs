@@ -1,14 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-fn colima_docker_host() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let sock = format!("{home}/.colima/default/docker.sock");
-    if std::path::Path::new(&sock).exists() {
-        Some(format!("unix://{sock}"))
-    } else {
-        None
-    }
+fn active_docker_host() -> Option<String> {
+    let conn = brain_utils::db::open_default().ok()?;
+    brain_utils::db::active_docker_host(&conn)
 }
 
 /// Resolve a bare command name to an absolute path.
@@ -99,9 +94,8 @@ impl McpClient {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
 
-        // Inject DOCKER_HOST so child processes (e.g. rebuy-cli running docker
-        // compose) find the Colima socket instead of Docker Desktop's.
-        if let Some(host) = colima_docker_host() {
+        // Inject DOCKER_HOST so child processes find the registered docker runtime.
+        if let Some(host) = active_docker_host() {
             cmd.env("DOCKER_HOST", host);
         }
 

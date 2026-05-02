@@ -53,11 +53,14 @@ impl Config {
         // Model ID resolved at session start from /v1/models.
         let default_model = Model::LMStudio(String::new());
 
-        // One-time migration: if brain.toml has [[mcp.servers]], write them to DB.
         let toml_path = brain_vault.join("brain.toml");
         if toml_path.exists() {
+            // One-time migration: [[mcp.servers]] and [[schema.databases]] → brain.db
             migrate_toml_servers_to_db(&toml_path, &db_path);
+            migrate_toml_schema_databases_to_db(&toml_path, &db_path);
         }
+        // Auto-register Colima if it's running and no runtimes are in the DB yet.
+        migrate_colima_runtime(&db_path);
 
         Ok(Config {
             anthropic_api_key: api_key,
@@ -124,6 +127,84 @@ fn migrate_toml_servers_to_db(toml_path: &std::path::Path, db_path: &std::path::
     tracing::info!(
         "migrated {} mcp server(s) from brain.toml to brain.db",
         parsed.mcp.servers.len()
+    );
+}
+
+fn migrate_colima_runtime(db_path: &std::path::Path) {
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let sock = format!("{home}/.colima/default/docker.sock");
+    if !std::path::Path::new(&sock).exists() {
+        return;
+    }
+    let Ok(conn) = crate::db::open(db_path) else { return };
+    // Only auto-register if no runtimes exist yet
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM docker_runtimes", [], |r| r.get(0))
+        .unwrap_or(0);
+    if count > 0 {
+        return;
+    }
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO docker_runtimes (name, socket_path, host, enabled)
+         VALUES ('colima', ?1, NULL, 1)",
+        rusqlite::params![format!("~/.colima/default/docker.sock")],
+    );
+    tracing::info!("auto-registered colima docker runtime in brain.db");
+}
+
+fn migrate_toml_schema_databases_to_db(toml_path: &std::path::Path, db_path: &std::path::Path) {
+    #[derive(serde::Deserialize, Default)]
+    struct LegacyToml {
+        schema: Option<LegacySchema>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct LegacySchema {
+        #[serde(default)]
+        databases: Vec<LegacySchemaDb>,
+    }
+    #[derive(serde::Deserialize)]
+    struct LegacySchemaDb {
+        name: String,
+        #[serde(default)]
+        host: String,
+        #[serde(default)]
+        port: u16,
+        #[serde(default)]
+        user: String,
+        #[serde(default)]
+        password: String,
+        #[serde(default)]
+        database: String,
+        container: Option<String>,
+        #[serde(alias = "domainsFile")]
+        domains_file: Option<String>,
+    }
+
+    let Ok(raw) = std::fs::read_to_string(toml_path) else { return };
+    let Ok(parsed) = toml::from_str::<LegacyToml>(&raw) else { return };
+    let dbs = parsed.schema.map(|s| s.databases).unwrap_or_default();
+    if dbs.is_empty() { return }
+
+    let Ok(conn) = crate::db::open(db_path) else { return };
+    for d in &dbs {
+        let host: Option<&str> = if d.host.is_empty() { None } else { Some(&d.host) };
+        let port: Option<i64> = if d.port == 0 { None } else { Some(d.port as i64) };
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO schema_databases
+                (name, host, port, user, password, database, container, domains_file, enabled)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)",
+            rusqlite::params![
+                d.name, host, port, d.user, d.password, d.database,
+                d.container, d.domains_file,
+            ],
+        );
+    }
+    tracing::info!(
+        "migrated {} schema database(s) from brain.toml to brain.db",
+        dbs.len()
     );
 }
 
