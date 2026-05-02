@@ -1,11 +1,21 @@
+//! Token accounting for a single brain session.
+//!
+//! `TokenLedger` accumulates input/output token counts across all model calls so
+//! the TUI status bar and session summaries can show live usage.
+
+/// Tracks cumulative token usage for one interactive session.
 #[derive(Debug, Default)]
 pub struct TokenLedger {
+    /// Total input tokens sent to the model across all calls this session.
     pub session_input: u32,
+    /// Total output tokens received from the model across all calls this session.
     pub session_output: u32,
+    /// Number of `chat()` calls made this session.
     pub total_calls: u32,
 }
 
 impl TokenLedger {
+    /// Record token counts from one model call.
     pub fn record(&mut self, input: u32, output: u32) {
         self.session_input += input;
         self.session_output += output;
@@ -25,6 +35,7 @@ impl TokenLedger {
     }
 }
 
+/// Format a raw token count as a human-readable string (e.g. "1.5k", "2.3M").
 pub fn fmt_tokens(n: u32) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)

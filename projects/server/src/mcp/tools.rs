@@ -3,12 +3,12 @@ use serde_json::{Value, json};
 pub fn tool_defs() -> Value {
     json!([
         {
-            "name": "brain_agents",
+            "name": "orca_agents",
             "description": "List all available brain agents with their names and descriptions.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
-            "name": "brain_get_agent",
+            "name": "orca_get_agent",
             "description": "Return the full system prompt for a named brain agent. Use this to invoke an agent programmatically via Agent(general-purpose, prompt=<result>+task).",
             "inputSchema": {
                 "type": "object",
@@ -22,8 +22,8 @@ pub fn tool_defs() -> Value {
             }
         },
         {
-            "name": "brain_run",
-            "description": "Delegate a task to a brain agent running on the local LLM (LM Studio). ONLY use this when the task genuinely requires language model reasoning — summarization, explanation, drafting, inference. Do NOT use for: file reads (use read_doc), searches (use search_docs), log lookup (use brain_search_logs), service state (use brain_list_services), schema queries (use get_graphql_info / get_rebuy_spec), or any operation with a deterministic tool that already handles it. Deterministic tools are always preferred over LLM calls. Falls back to Claude Haiku if LM Studio is unreachable.",
+            "name": "orca_run",
+            "description": "Delegate a task to a brain agent running on the local LLM (LM Studio). ONLY use this when the task genuinely requires language model reasoning — summarization, explanation, drafting, inference. Do NOT use for: file reads (use read_doc), searches (use search_docs), log lookup (use orca_search_logs), service state (use orca_list_services), schema queries (use get_graphql_info / get_rebuy_spec), or any operation with a deterministic tool that already handles it. Deterministic tools are always preferred over LLM calls. Falls back to Claude Haiku if LM Studio is unreachable.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -40,7 +40,7 @@ pub fn tool_defs() -> Value {
             }
         },
         {
-            "name": "brain_search_logs",
+            "name": "orca_search_logs",
             "description": "Search brain session history for a keyword. Returns matching log entries with session ID, role, and content preview.",
             "inputSchema": {
                 "type": "object",
@@ -54,7 +54,7 @@ pub fn tool_defs() -> Value {
             }
         },
         {
-            "name": "brain_get_config",
+            "name": "orca_get_config",
             "description": "Read a Brain configuration/reference document by name (e.g. TOOL_RULES, DELEGATION, SEVERITY_RUBRIC, CANONICAL_SOURCES, CODING_RULES). Call with no name to list available files.",
             "inputSchema": {
                 "type": "object",
@@ -67,7 +67,7 @@ pub fn tool_defs() -> Value {
             }
         },
         {
-            "name": "brain_get_context",
+            "name": "orca_get_context",
             "description": "Load the memory context for a brain project. Returns MEMORY.md index and all memory files for the project.",
             "inputSchema": {
                 "type": "object",
@@ -129,12 +129,12 @@ pub fn tool_defs() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
-            "name": "brain_list_services",
+            "name": "orca_list_services",
             "description": "List all running docker compose services across all rebuy projects. Returns project name, path, and per-service state/health/ports.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
-            "name": "brain_service_logs",
+            "name": "orca_service_logs",
             "description": "Fetch docker compose logs for a running rebuy service. Specify the project path and service name.",
             "inputSchema": {
                 "type": "object",
@@ -156,7 +156,7 @@ pub fn tool_defs() -> Value {
             }
         },
         {
-            "name": "brain_run_tests",
+            "name": "orca_run_tests",
             "description": "Run the brain project test suite. Returns test output with pass/fail counts. Suites: rust (cargo test), frontend (vitest), e2e (playwright), all.",
             "inputSchema": {
                 "type": "object",
@@ -218,12 +218,12 @@ pub fn tool_defs() -> Value {
             }
         },
         {
-            "name": "brain_mcp_list",
+            "name": "orca_mcp_list",
             "description": "List all MCP servers registered in brain.db (brain's own managed registry). Does not include ~/.claude.json servers managed by Claude Code directly.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
-            "name": "brain_mcp_add",
+            "name": "orca_mcp_add",
             "description": "Add or update an MCP server in brain.db. Use this when the user wants to register a new MCP server for brain to federate.",
             "inputSchema": {
                 "type": "object",
@@ -237,7 +237,7 @@ pub fn tool_defs() -> Value {
             }
         },
         {
-            "name": "brain_mcp_remove",
+            "name": "orca_mcp_remove",
             "description": "Remove an MCP server from brain.db by name.",
             "inputSchema": {
                 "type": "object",
@@ -248,12 +248,12 @@ pub fn tool_defs() -> Value {
             }
         },
         {
-            "name": "brain_schema_list",
+            "name": "orca_schema_list",
             "description": "List all MySQL/MariaDB schema databases registered in brain.db.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
-            "name": "brain_schema_add",
+            "name": "orca_schema_add",
             "description": "Add or update a schema database in brain.db. Use container OR host/port, not both.",
             "inputSchema": {
                 "type": "object",
@@ -271,7 +271,7 @@ pub fn tool_defs() -> Value {
             }
         },
         {
-            "name": "brain_schema_remove",
+            "name": "orca_schema_remove",
             "description": "Remove a schema database from brain.db by name.",
             "inputSchema": {
                 "type": "object",
@@ -282,12 +282,12 @@ pub fn tool_defs() -> Value {
             }
         },
         {
-            "name": "brain_docker_list",
+            "name": "orca_docker_list",
             "description": "List all Docker runtimes registered in brain.db. The first enabled runtime is used as the active DOCKER_HOST for MCP subprocesses.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
-            "name": "brain_docker_add",
+            "name": "orca_docker_add",
             "description": "Add or update a Docker runtime in brain.db. Use socketPath for local unix socket (Colima, Docker Desktop), host for remote TCP daemon, or url for web-based orchestrators (Dockge, Portainer). Multiple runtimes can be registered; the first enabled socket/host runtime is injected as DOCKER_HOST for MCP subprocesses.",
             "inputSchema": {
                 "type": "object",
@@ -301,7 +301,7 @@ pub fn tool_defs() -> Value {
             }
         },
         {
-            "name": "brain_docker_remove",
+            "name": "orca_docker_remove",
             "description": "Remove a Docker runtime from brain.db by name.",
             "inputSchema": {
                 "type": "object",
@@ -312,7 +312,7 @@ pub fn tool_defs() -> Value {
             }
         },
         {
-            "name": "brain_spec_register",
+            "name": "orca_spec_register",
             "description": "Fetch an OpenAPI JSON spec from a URL and store it in brain.db. Use this to register an external API spec for use with get_rebuy_spec.",
             "inputSchema": {
                 "type": "object",
@@ -324,7 +324,7 @@ pub fn tool_defs() -> Value {
             }
         },
         {
-            "name": "brain_spec_refresh",
+            "name": "orca_spec_refresh",
             "description": "Re-fetch one or all URL-registered specs from their source URLs and update brain.db.",
             "inputSchema": {
                 "type": "object",
@@ -335,7 +335,7 @@ pub fn tool_defs() -> Value {
             }
         },
         {
-            "name": "brain_spec_unregister",
+            "name": "orca_spec_unregister",
             "description": "Remove a URL-registered spec from brain.db by name.",
             "inputSchema": {
                 "type": "object",
@@ -346,31 +346,31 @@ pub fn tool_defs() -> Value {
             }
         },
         {
-            "name": "brain_mcp_map",
-            "description": "Map a brain tool name to an equivalent tool on a registered external MCP server. Use this to wire brain tool calls through to a specific MCP server's tool.",
+            "name": "orca_mcp_map",
+            "description": "Map an orca tool name to an equivalent tool on a registered external MCP server. Use this to wire orca tool calls through to a specific MCP server's tool.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "name":          { "type": "string", "description": "Registered MCP server name (e.g. rebuy-cli)" },
-                    "brain_tool":    { "type": "string", "description": "Brain tool name callers will use" },
+                    "orca_tool":     { "type": "string", "description": "Orca tool name callers will use" },
                     "external_tool": { "type": "string", "description": "Actual tool name on the external MCP server" }
                 },
-                "required": ["name", "brain_tool", "external_tool"]
+                "required": ["name", "orca_tool", "external_tool"]
             }
         },
         {
-            "name": "brain_mcp_unmap",
-            "description": "Remove a tool mapping by brain tool name.",
+            "name": "orca_mcp_unmap",
+            "description": "Remove a tool mapping by orca tool name.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "brain_tool": { "type": "string", "description": "Brain tool name to unmap" }
+                    "orca_tool": { "type": "string", "description": "Orca tool name to unmap" }
                 },
-                "required": ["brain_tool"]
+                "required": ["orca_tool"]
             }
         },
         {
-            "name": "brain_mcp_sync",
+            "name": "orca_mcp_sync",
             "description": "Auto-discover tool mappings for a registered MCP server by interrogating its tools/list endpoint.",
             "inputSchema": {
                 "type": "object",
@@ -382,7 +382,7 @@ pub fn tool_defs() -> Value {
             }
         },
         {
-            "name": "brain_mcp_mappings",
+            "name": "orca_mcp_mappings",
             "description": "List all tool mappings, optionally filtered by MCP server name.",
             "inputSchema": {
                 "type": "object",

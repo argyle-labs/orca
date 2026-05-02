@@ -1,6 +1,7 @@
 use anyhow::Result;
 use brain_utils::auth;
 use brain_utils::config::Config;
+use brain_utils::consts::APP_NAME;
 use colored::Colorize;
 
 pub fn cmd_login(config: &Config) -> Result<()> {
@@ -67,7 +68,7 @@ pub fn cmd_auth(config: &Config) -> Result<()> {
             println!("{} Anthropic API key: not set", "✗".red());
             println!(
                 "{}",
-                "  run `brain login` to store one for Claude escalation".dimmed()
+                format!("  run `{APP_NAME} login` to store one for Claude escalation").dimmed()
             );
         }
     }

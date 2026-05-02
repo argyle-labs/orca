@@ -1,10 +1,10 @@
 use anyhow::{Context, Result, bail};
+use brain_utils::consts::{APP_NAME, APP_REPO_API_URL};
 use serde::Deserialize;
 use std::path::PathBuf;
 
-const GITHUB_REPO: &str = "scottdkey/brain";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const BUILD_TARGET: &str = env!("BRAIN_BUILD_TARGET");
+const BUILD_TARGET: &str = env!("ORCA_BUILD_TARGET");
 
 #[derive(Debug)]
 pub struct UpdateInfo {
@@ -33,14 +33,14 @@ pub async fn check_for_update() -> Result<Option<UpdateInfo>> {
         _ => bail!("GITHUB_TOKEN not set — cannot check for updates"),
     };
 
-    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
+    let url = format!("{APP_REPO_API_URL}/releases/latest");
     let client = reqwest::Client::new();
     let resp = client
         .get(&url)
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("User-Agent", format!("brain/{CURRENT_VERSION}"))
+        .header("User-Agent", format!("{APP_NAME}/{CURRENT_VERSION}"))
         .send()
         .await
         .context("GitHub API request failed")?;
@@ -61,7 +61,7 @@ pub async fn check_for_update() -> Result<Option<UpdateInfo>> {
         return Ok(None);
     }
 
-    let asset_name = format!("brain-{BUILD_TARGET}");
+    let asset_name = format!("{APP_NAME}-{BUILD_TARGET}");
     let checksum_name = format!("{asset_name}.sha256");
 
     let asset_url = release
@@ -101,7 +101,7 @@ pub async fn apply_update(info: &UpdateInfo) -> Result<()> {
     };
 
     // Download the binary
-    println!("[brain] downloading v{}...", info.version);
+    println!("[orca] downloading v{}...", info.version);
     let binary = download_asset(&client, &info.asset_url, &token).await?;
 
     // Verify checksum
@@ -115,7 +115,7 @@ pub async fn apply_update(info: &UpdateInfo) -> Result<()> {
         if got != expected {
             bail!("checksum mismatch — expected {expected}, got {got}");
         }
-        println!("[brain] checksum OK");
+        println!("[orca] checksum OK");
     }
 
     // Write to a temp file beside the current binary, then atomic rename
@@ -134,19 +134,19 @@ pub async fn apply_update(info: &UpdateInfo) -> Result<()> {
     }
 
     std::fs::rename(&tmp, &current).context("failed to replace binary")?;
-    println!("[brain] updated to v{} — restart to activate", info.version);
+    println!("[orca] updated to v{} — restart to activate", info.version);
 
     Ok(())
 }
 
 pub async fn cmd_update() -> Result<()> {
-    println!("[brain] current version: v{CURRENT_VERSION} ({BUILD_TARGET})");
-    println!("[brain] checking for updates...");
+    println!("[orca] current version: v{CURRENT_VERSION} ({BUILD_TARGET})");
+    println!("[orca] checking for updates...");
 
     match check_for_update().await? {
-        None => println!("[brain] already up to date"),
+        None => println!("[orca] already up to date"),
         Some(info) => {
-            println!("[brain] new version available: v{}", info.version);
+            println!("[orca] new version available: v{}", info.version);
             apply_update(&info).await?;
         }
     }
@@ -162,7 +162,7 @@ pub async fn startup_update_check() {
     match check_for_update().await {
         Ok(Some(info)) => {
             println!(
-                "[brain] update available: v{} → run 'brain update' to upgrade",
+                "[orca] update available: v{} → run 'orca update' to upgrade",
                 info.version
             );
         }
@@ -191,7 +191,7 @@ async fn download_asset(client: &reqwest::Client, url: &str, token: &str) -> Res
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/octet-stream")
         .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("User-Agent", format!("brain/{CURRENT_VERSION}"))
+        .header("User-Agent", format!("{APP_NAME}/{CURRENT_VERSION}"))
         .send()
         .await
         .context("download request failed")?

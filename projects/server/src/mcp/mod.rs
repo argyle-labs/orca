@@ -1,7 +1,7 @@
-/// MCP stdio server — exposes brain tools to Claude Code via JSON-RPC 2.0.
+/// MCP stdio server — exposes orca tools to Claude Code via JSON-RPC 2.0.
 ///
-/// Usage: brain mcp-serve
-/// Register: claude mcp add brain-local -- brain mcp-serve
+/// Usage: orca mcp-serve
+/// Register: claude mcp add orca-local -- orca mcp-serve
 mod context7;
 mod docs;
 mod handlers;
@@ -28,9 +28,9 @@ use specs::{
 };
 
 /// Servers whose tools brain already exposes natively or that must not be proxied back.
-/// - brain-local: brain itself — proxying would spawn a recursive child
+/// - orca-local: orca itself — proxying would spawn a recursive child
 /// - context7: brain exposes resolve-library-id / get-library-docs natively
-const FEDERATION_SKIP: &[&str] = &["brain-local", "context7"];
+const FEDERATION_SKIP: &[&str] = &["orca-local", "context7"];
 
 pub async fn serve(config: &Config) -> Result<()> {
     let pool = crate::serve::mcp_client::McpPool::new_with_db(config.db_path.clone());
@@ -67,33 +67,33 @@ pub async fn serve(config: &Config) -> Result<()> {
                 json!({
                     "protocolVersion": "2024-11-05",
                     "capabilities": { "tools": {} },
-                    "serverInfo": { "name": "brain", "version": env!("CARGO_PKG_VERSION") }
+                    "serverInfo": { "name": "orca", "version": env!("CARGO_PKG_VERSION") }
                 }),
             ),
             "ping" => reply(id, json!({})),
             "tools/list" => {
-                let brain_tools = tools::tool_defs();
-                let brain_names: std::collections::HashSet<&str> = brain_tools
+                let orca_tools = tools::tool_defs();
+                let orca_names: std::collections::HashSet<&str> = orca_tools
                     .as_array()
                     .map(|a| a.iter().filter_map(|t| t["name"].as_str()).collect())
                     .unwrap_or_default();
 
-                // Discover tools from federated servers, skipping brain-local and context7
+                // Discover tools from federated servers, skipping orca-local and context7
                 let external = pool.all_tools_filtered(FEDERATION_SKIP).await;
 
-                // Rebuild registry: federated tools that don't conflict with brain's own
+                // Rebuild registry: federated tools that don't conflict with orca's own
                 tool_registry.clear();
                 for tool in &external {
                     let name = tool["name"].as_str().unwrap_or("");
                     let server = tool["server"].as_str().unwrap_or("");
-                    if !name.is_empty() && !server.is_empty() && !brain_names.contains(name) {
+                    if !name.is_empty() && !server.is_empty() && !orca_names.contains(name) {
                         tool_registry.insert(name.to_string(), server.to_string());
                     }
                 }
 
-                // Merge brain tools + federated tools (strip internal "server" field)
+                // Merge orca tools + federated tools (strip internal "server" field)
                 let mut all_tools: Vec<Value> =
-                    brain_tools.as_array().cloned().unwrap_or_default();
+                    orca_tools.as_array().cloned().unwrap_or_default();
                 for mut tool in external {
                     let name = tool["name"].as_str().unwrap_or("").to_string();
                     if tool_registry.contains_key(&name) {
@@ -175,41 +175,41 @@ pub async fn serve(config: &Config) -> Result<()> {
 
 async fn dispatch(name: &str, args: &Value, config: &Config) -> Result<String> {
     match name {
-        "brain_agents" => agents(),
-        "brain_get_agent" => get_agent(args, config),
-        "brain_run" => run(args, config).await,
-        "brain_search_logs" => search_logs(args, config),
-        "brain_get_config" => get_config(args, config),
-        "brain_get_context" => get_context(args, config),
+        "orca_agents" => agents(),
+        "orca_get_agent" => get_agent(args, config),
+        "orca_run" => run(args, config).await,
+        "orca_search_logs" => search_logs(args, config),
+        "orca_get_config" => get_config(args, config),
+        "orca_get_context" => get_context(args, config),
         "list_roots" => list_roots(config),
         "get_tree" => get_tree(args, config),
         "read_doc" => read_doc(args, config),
         "search_docs" => search_docs(args, config),
         "list_commands" => list_commands(config),
-        "brain_list_services" => list_services().await,
-        "brain_service_logs" => service_logs(args).await,
-        "brain_run_tests" => run_tests(args).await,
+        "orca_list_services" => list_services().await,
+        "orca_service_logs" => service_logs(args).await,
+        "orca_run_tests" => run_tests(args).await,
         "list_rebuy_specs" => list_rebuy_specs(),
         "get_rebuy_spec" => get_rebuy_spec(args),
         "get_rebuy_spec_public" => get_rebuy_spec_public(args),
         "get_rebuy_graphql_schema" => get_rebuy_graphql_schema(args),
         "get_graphql_info" => get_graphql_info(args),
-        "brain_mcp_list" => mcp_list_servers(),
-        "brain_mcp_add" => mcp_add_server(args),
-        "brain_mcp_remove" => mcp_remove_server(args),
-        "brain_mcp_map" => mcp_map_tool(args),
-        "brain_mcp_unmap" => mcp_unmap_tool(args),
-        "brain_mcp_sync" => mcp_sync_tools(args),
-        "brain_mcp_mappings" => mcp_list_mappings(args),
-        "brain_schema_list" => schema_list_databases(),
-        "brain_schema_add" => schema_add_database(args),
-        "brain_schema_remove" => schema_remove_database(args),
-        "brain_docker_list" => docker_list_runtimes(),
-        "brain_docker_add" => docker_add_runtime(args),
-        "brain_docker_remove" => docker_remove_runtime(args),
-        "brain_spec_register" => spec_register(args).await,
-        "brain_spec_refresh"  => spec_refresh(args).await,
-        "brain_spec_unregister" => spec_unregister(args),
+        "orca_mcp_list" => mcp_list_servers(),
+        "orca_mcp_add" => mcp_add_server(args),
+        "orca_mcp_remove" => mcp_remove_server(args),
+        "orca_mcp_map" => mcp_map_tool(args),
+        "orca_mcp_unmap" => mcp_unmap_tool(args),
+        "orca_mcp_sync" => mcp_sync_tools(args),
+        "orca_mcp_mappings" => mcp_list_mappings(args),
+        "orca_schema_list" => schema_list_databases(),
+        "orca_schema_add" => schema_add_database(args),
+        "orca_schema_remove" => schema_remove_database(args),
+        "orca_docker_list" => docker_list_runtimes(),
+        "orca_docker_add" => docker_add_runtime(args),
+        "orca_docker_remove" => docker_remove_runtime(args),
+        "orca_spec_register" => spec_register(args).await,
+        "orca_spec_refresh"  => spec_refresh(args).await,
+        "orca_spec_unregister" => spec_unregister(args),
         "resolve-library-id" | "get-library-docs" => {
             context7::proxy_context7(name, args, config).await
         }

@@ -120,7 +120,7 @@ Every technology choice is listed here with the reason it was selected and any k
 
 ## Frontend Language — TypeScript 6
 
-**Why:** Type safety across the API boundary. The `gen` script produces typed hooks and types from the OpenAPI spec so the frontend and backend can't drift.
+**Why:** Type safety across the API boundary. The `gen` script produces typed client functions and types from the OpenAPI spec so the frontend and backend can't drift.
 
 **Version:** `typescript = "^6.0.3"`
 
@@ -130,82 +130,46 @@ Every technology choice is listed here with the reason it was selected and any k
 
 **Why:** Vite 8 uses Rolldown (a Rust-based bundler) for significantly faster builds than Rollup/webpack. ESM-native. HMR for dev. The upgrade from Vite 6 → 8 happened when Rolldown stabilized.
 
-**Version:** `vite = "^8.0.10"`, `@vitejs/plugin-react = "^6.0.1"`
+**Version:** `vite = "^8.0.10"`
 
 ---
 
-## UI Framework — React 19
+## UI Framework — Svelte 5 + SvelteKit 2
 
-**Why:** The entire component ecosystem (Mantine, TanStack, XyFlow, Scalar) targets React. React 19 adds the compiler and improved streaming primitives.
+**Why:** Svelte compiles components to vanilla JS — no virtual DOM, smaller runtime, faster updates. Svelte 5's rune system (`$state`, `$derived`, `$effect`, `$props`) makes reactivity explicit and debuggable. SvelteKit adds file-based routing, typed load functions, and a static adapter that produces a pure client-side bundle that embeds cleanly into the Rust binary.
 
-**Version:** `react = "^19.0.0"`
+**Why not React:** The React ecosystem adds TanStack Router + TanStack Query + Mantine on top of React itself — four dependencies to do what SvelteKit handles natively. Svelte components compile to smaller output with less client-side overhead.
 
----
-
-## Component Library — Mantine v9
-
-**Why:** Comprehensive component set (modals, notifications, tables, forms) with a consistent dark/light theming API. CSS Modules mean JS is tree-shaken by Vite — only imported components are bundled. CSS is imported via `@mantine/core/styles.css` (includes all component styles).
-
-**Known tradeoff:** The full CSS import (~300KB) cannot be tree-shaken. Per-component CSS imports are possible but require manual tracking of every used component.
-
-**Version:** `@mantine/core = "^9.1.1"`
+**Versions:** `svelte = "^5.55.5"`, `@sveltejs/kit = "^2.59.0"`, `@sveltejs/adapter-static = "^3.0.10"`
 
 ---
 
-## Routing — TanStack Router v1
+## Graph Visualization — @xyflow/svelte
 
-**Why:** Type-safe routes with first-class TypeScript inference. File-based or code-based routing. Integrates cleanly with TanStack Query for route-level data loading.
+**Why:** Interactive node/edge graphs for visualizing service dependencies and doc relationships. The Svelte port of the XyFlow (formerly ReactFlow) library — same layout primitives, Svelte-native component integration.
 
-**Version:** `@tanstack/react-router = "^1.120.5"`
-
----
-
-## Data Fetching — TanStack Query v5
-
-**Why:** Declarative server state management — cache, background refetch, stale time, and loading states without manual `useState`/`useEffect` boilerplate. Used for every `/api/` call.
-
-**Version:** `@tanstack/react-query = "^5.100.6"`
+**Version:** `@xyflow/svelte = "^0.1.39"`, `@dagrejs/dagre = "^3.0.0"` (layout algorithm)
 
 ---
 
-## Tables — TanStack Table v8
+## API Documentation Viewer — @scalar/sveltekit
 
-**Why:** Headless table logic (sorting, filtering, pagination) that integrates with Mantine's table components for rendering.
+**Why:** Renders the OpenAPI spec at `/api-docs` with a polished interactive UI. The SvelteKit integration (`@scalar/sveltekit`) drops in as a SvelteKit route handler — no adapter layer needed.
 
-**Version:** `@tanstack/react-table = "^8.21.3"`
-
----
-
-## Graph Visualization — XyFlow v12
-
-**Why:** Interactive node/edge graphs for visualizing service dependencies and doc relationships. The only maintained React graph library with a complete feature set.
-
-**Known tradeoff:** ~80KB gzipped, monolithic — the entire core loads if you use the library at all. Deferred via lazy route loading.
-
-**Version:** `@xyflow/react = "^12.10.2"`, `@dagrejs/dagre = "^3.0.0"` (layout algorithm)
+**Version:** `@scalar/sveltekit = "^0.2.13"`
 
 ---
 
-## API Documentation Viewer — @scalar/api-reference
+## Markdown Rendering — marked
 
-**Why:** Renders the OpenAPI spec at `/api-docs` with a polished interactive UI. Theme variables are overridden via CSS custom properties to match the app's theme.
+**Why:** Converts markdown strings to HTML for the doc viewer. Lightweight synchronous parser (no VDOM dependency like react-markdown). Used in `[...slug]/+page.svelte` via `{@html marked(content)}`.
 
-**Known tradeoff:** ~200KB gzipped. Deferred via lazy route loading so it only loads when `/api-docs` is visited.
-
-**Version:** `@scalar/api-reference-react = "^0.9.29"`
-
----
-
-## Markdown Rendering — react-markdown + remark-gfm
-
-**Why:** Renders markdown content (vault docs, session logs) in the browser. `remark-gfm` adds GitHub Flavored Markdown (tables, task lists, strikethrough).
-
-**Version:** `react-markdown = "^10.1.0"`, `remark-gfm = "^4.0.0"`
+**Version:** `marked = "^15.0.12"`
 
 ---
 
 ## Script Runner — tsx
 
-**Why:** Executes TypeScript scripts directly without a separate compile step. Used by the `gen` script that calls the OpenAPI spec and generates typed hooks.
+**Why:** Executes TypeScript scripts directly without a separate compile step. Used by the `gen` script that calls the OpenAPI spec and generates the typed API client.
 
 **Version:** `tsx = "^4.21.0"`

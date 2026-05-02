@@ -6,7 +6,7 @@ use clap::Subcommand;
 pub enum DockerAction {
     /// List all registered Docker runtimes
     List,
-    /// Add a Docker runtime to brain.db
+    /// Add a Docker runtime to orca.db
     Add {
         /// Runtime name (e.g. colima, docker-desktop, dockge, portainer)
         name: String,
@@ -20,7 +20,7 @@ pub enum DockerAction {
         #[arg(long)]
         url: Option<String>,
     },
-    /// Remove a Docker runtime from brain.db
+    /// Remove a Docker runtime from orca.db
     Remove {
         name: String,
     },
@@ -32,7 +32,7 @@ pub fn cmd_docker(action: DockerAction) -> Result<()> {
             let conn = db::open_default()?;
             let rts = db::list_docker_runtimes(&conn)?;
             if rts.is_empty() {
-                println!("No Docker runtimes registered. Use `brain docker add` to add one.");
+                println!("No Docker runtimes registered. Use `orca docker add` to add one.");
             } else {
                 println!("Docker runtimes:");
                 for r in &rts {
@@ -58,7 +58,7 @@ pub fn cmd_docker(action: DockerAction) -> Result<()> {
             };
             let conn = db::open_default()?;
             db::upsert_docker_runtime(&conn, &row)?;
-            println!("added docker runtime '{name}' to brain.db");
+            println!("added docker runtime '{name}' to orca.db");
             Ok(())
         }
         DockerAction::Remove { name } => {
@@ -66,7 +66,7 @@ pub fn cmd_docker(action: DockerAction) -> Result<()> {
             if db::remove_docker_runtime(&conn, &name)? {
                 println!("removed '{name}'");
             } else {
-                println!("'{name}' not found in brain.db");
+                println!("'{name}' not found in orca.db");
             }
             Ok(())
         }

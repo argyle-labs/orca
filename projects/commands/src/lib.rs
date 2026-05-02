@@ -7,15 +7,16 @@
 //! Modules:
 //! - `agents`   — list available agents
 //! - `auth`     — login/logout/auth (keychain read/write via brain_utils::auth)
-//! - `codegen`  — `brain gen`: fetch OpenAPI spec, run openapi-typescript codegen
+//! - `codegen`  — `orca gen`: fetch OpenAPI spec, run openapi-typescript codegen
 //! - `daemon`   — daemon lifecycle: status/stop/park/reclaim/install/uninstall
 //! - `doctor`   — validate agent files, symlinks, config, and tool availability
 //! - `log_cmd`  — session log subcommands: list, search, recall, tail
 //! - `mcp_cmd`  — MCP registry subcommands: add/remove/list external MCP servers
-//! - `projects` — list projects from brain vault memory directory
+//! - `projects` — list projects from orca vault memory directory
 //! - `spec`     — manage external OpenAPI spec registry (add, remove, list, refresh)
 //! - `update`   — self-update from GitHub releases; startup update check
 //! - `oauth`    — GitHub device flow + Atlassian PKCE OAuth; token keychain storage
+//! - `plugin_cmd` — plugin registry: add/remove/list/enable/disable from orca-plugin.toml
 
 // Slash command prompts embedded at build time.
 include!(concat!(env!("OUT_DIR"), "/embedded_commands.rs"));
@@ -32,11 +33,13 @@ pub mod agents;
 pub mod auth;
 pub mod codegen;
 pub mod daemon;
+pub mod db_cmd;
 pub mod docker_cmd;
 pub mod doctor;
 pub mod install;
 pub mod log_cmd;
 pub mod mcp_cmd;
+pub mod plugin_cmd;
 pub mod projects;
 pub mod schema_cmd;
 pub mod spec;
@@ -53,6 +56,8 @@ pub use install::{cmd_install, cmd_uninstall, install_status, InstallReport};
 pub use projects::cmd_projects;
 pub use codegen::cmd_gen;
 pub use mcp_cmd::{McpAction, cmd_mcp, mcp_sync_server};
+pub use plugin_cmd::{PluginAction, cmd_plugin};
+pub use db_cmd::{DbAction, cmd_db};
 pub use docker_cmd::{DockerAction, cmd_docker};
 pub use schema_cmd::{SchemaAction, cmd_schema};
 pub use update::{cmd_update, startup_update_check};

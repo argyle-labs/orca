@@ -1,11 +1,12 @@
 use anyhow::Result;
 use brain_utils::config::Config;
+use brain_utils::consts::APP_NAME;
 use colored::Colorize;
 
 pub fn cmd_projects(config: &Config) -> Result<()> {
     let root = &config.memory_root;
     if !root.exists() {
-        println!("{}", "brain vault not found at ~/brain".red());
+        println!("{}", format!("{APP_NAME} vault not found at ~/.{APP_NAME}").red());
         return Ok(());
     }
     println!("{}", "Projects:".green());

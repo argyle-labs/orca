@@ -60,5 +60,5 @@ fn main() {
 
     // Expose the Rust target triple as a compile-time constant for self-update.
     let target = env::var("TARGET").unwrap_or_else(|_| "unknown".into());
-    println!("cargo:rustc-env=BRAIN_BUILD_TARGET={target}");
+    println!("cargo:rustc-env=ORCA_BUILD_TARGET={target}");
 }

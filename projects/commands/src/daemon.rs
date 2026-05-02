@@ -1,4 +1,7 @@
 use anyhow::Result;
+use brain_utils::consts::{APP_DAEMON_LOG, APP_NAME, APP_PLIST_LABEL, APP_STATE_DIR};
+#[cfg(target_os = "linux")]
+use brain_utils::consts::APP_SYSTEMD_SERVICE;
 use brain_utils::state::{self, DaemonMode};
 use clap::Subcommand;
 use colored::Colorize;
@@ -56,7 +59,7 @@ fn status() -> Result<()> {
     let alive = pid_alive(s.daemon_pid);
     let dot = if alive { "●".green() } else { "●".red() };
 
-    println!("{} brain daemon", dot);
+    println!("{} {APP_NAME} daemon", dot);
     println!("  mode:    {}", mode_label);
     println!("  pid:     {}", s.daemon_pid);
     if s.mode != DaemonMode::Daemon {
@@ -80,7 +83,7 @@ fn status() -> Result<()> {
 
     if !alive {
         println!("  {}", "warning: PID not found — daemon may have crashed".yellow());
-        println!("  {}", "hint: remove ~/.brain/state.json and restart".dimmed());
+        println!("  {}", format!("hint: remove ~/{APP_STATE_DIR}/state.json and restart").dimmed());
     }
     Ok(())
 }
@@ -148,7 +151,7 @@ fn resolve_binary() -> Result<String> {
             return Ok(s.binary);
         }
     }
-    let out = Command::new("which").arg("brain").output()?;
+    let out = Command::new("which").arg(APP_NAME).output()?;
     if out.status.success() {
         let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !path.is_empty() {
@@ -156,7 +159,7 @@ fn resolve_binary() -> Result<String> {
         }
     }
     let home = std::env::var("HOME").unwrap_or_default();
-    Ok(format!("{home}/.local/bin/brain"))
+    Ok(format!("{home}/.local/bin/{APP_NAME}"))
 }
 
 #[cfg(target_os = "macos")]
@@ -166,7 +169,7 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     let domain = format!("gui/{uid}");
     let agents_dir = format!("{home}/Library/LaunchAgents");
     std::fs::create_dir_all(&agents_dir)?;
-    let plist_path = format!("{agents_dir}/com.brain.daemon.plist");
+    let plist_path = format!("{agents_dir}/{APP_PLIST_LABEL}.plist");
 
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -174,7 +177,7 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.brain.daemon</string>
+    <string>{APP_PLIST_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
         <string>{binary}</string>
@@ -195,9 +198,9 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     <key>ThrottleInterval</key>
     <integer>30</integer>
     <key>StandardOutPath</key>
-    <string>/tmp/brain-daemon.log</string>
+    <string>{APP_DAEMON_LOG}</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/brain-daemon.log</string>
+    <string>{APP_DAEMON_LOG}</string>
 </dict>
 </plist>
 "#
@@ -219,8 +222,8 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     if !status.success() {
         anyhow::bail!("launchctl bootstrap {domain} failed");
     }
-    println!("{} brain daemon installed — starts now and on login", "✓".green());
-    println!("  logs: tail -f /tmp/brain-daemon.log");
+    println!("{} {APP_NAME} daemon installed — starts now and on login", "✓".green());
+    println!("  logs: tail -f {APP_DAEMON_LOG}");
     Ok(())
 }
 
@@ -229,7 +232,7 @@ fn uninstall_service() -> Result<()> {
     let home = std::env::var("HOME")?;
     let uid = launchd_uid().unwrap_or(0);
     let domain = format!("gui/{uid}");
-    let plist_path = format!("{home}/Library/LaunchAgents/com.brain.daemon.plist");
+    let plist_path = format!("{home}/Library/LaunchAgents/{APP_PLIST_LABEL}.plist");
 
     let _ = Command::new("launchctl")
         .args(["bootout", &domain, &plist_path])
@@ -239,7 +242,7 @@ fn uninstall_service() -> Result<()> {
         std::fs::remove_file(&plist_path)?;
         println!("{} removed {}", "✓".green(), plist_path);
     }
-    println!("{} brain daemon uninstalled", "✓".green());
+    println!("{} {APP_NAME} daemon uninstalled", "✓".green());
     Ok(())
 }
 
@@ -258,10 +261,10 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     let home = std::env::var("HOME")?;
     let service_dir = format!("{home}/.config/systemd/user");
     std::fs::create_dir_all(&service_dir)?;
-    let service_path = format!("{service_dir}/brain.service");
+    let service_path = format!("{service_dir}/{APP_SYSTEMD_SERVICE}.service");
 
     let service = format!(
-        "[Unit]\nDescription=Brain AI daemon\nAfter=network.target\n\n\
+        "[Unit]\nDescription=Orca AI daemon\nAfter=network.target\n\n\
          [Service]\nExecStart={binary} daemon start --port {port}\n\
          Environment=HOME={home}\nRestart=on-failure\nRestartSec=5\n\n\
          [Install]\nWantedBy=default.target\n"
@@ -275,24 +278,24 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
         .status();
 
     let status = Command::new("systemctl")
-        .args(["--user", "enable", "--now", "brain"])
+        .args(["--user", "enable", "--now", APP_SYSTEMD_SERVICE])
         .status()?;
 
     if !status.success() {
-        anyhow::bail!("systemctl enable --now brain failed");
+        anyhow::bail!("systemctl enable --now {APP_SYSTEMD_SERVICE} failed");
     }
-    println!("{} brain daemon enabled and started", "✓".green());
+    println!("{} {APP_NAME} daemon enabled and started", "✓".green());
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
 fn uninstall_service() -> Result<()> {
     let _ = Command::new("systemctl")
-        .args(["--user", "disable", "--now", "brain"])
+        .args(["--user", "disable", "--now", APP_SYSTEMD_SERVICE])
         .status();
 
     let home = std::env::var("HOME")?;
-    let service_path = format!("{home}/.config/systemd/user/brain.service");
+    let service_path = format!("{home}/.config/systemd/user/{APP_SYSTEMD_SERVICE}.service");
     if std::path::Path::new(&service_path).exists() {
         std::fs::remove_file(&service_path)?;
         println!("{} removed {}", "✓".green(), service_path);
@@ -301,7 +304,7 @@ fn uninstall_service() -> Result<()> {
     let _ = Command::new("systemctl")
         .args(["--user", "daemon-reload"])
         .status();
-    println!("{} brain daemon uninstalled", "✓".green());
+    println!("{} {APP_NAME} daemon uninstalled", "✓".green());
     Ok(())
 }
 
@@ -345,9 +348,9 @@ mod tests {
 
     #[test]
     fn resolve_binary_falls_back_to_local_bin_when_no_state() {
-        // When there is no state file and `brain` is not on PATH, resolve_binary
-        // should return the ~/.local/bin/brain fallback rather than an error.
-        // We cannot guarantee `brain` is on PATH in CI, so we only assert the
+        // When there is no state file and `orca` is not on PATH, resolve_binary
+        // should return the ~/.local/bin/orca fallback rather than an error.
+        // We cannot guarantee `orca` is on PATH in CI, so we only assert the
         // result is non-empty and is either a real path or the fallback path.
         let result = resolve_binary();
         assert!(result.is_ok(), "resolve_binary should never error: {:?}", result);

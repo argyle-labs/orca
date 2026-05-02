@@ -22,25 +22,20 @@ use crate::serve::middleware::CorrelationId;
     tag = "mcp"
 )]
 pub async fn mcp_servers_handler() -> Response {
-    match brain_utils::db::open_default() {
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-        Ok(conn) => match brain_utils::db::list_mcp_servers(&conn) {
-            Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-            Ok(rows) => {
-                let servers: Vec<McpServerInfo> = rows
-                    .into_iter()
-                    .map(|r| McpServerInfo {
-                        name: r.name,
-                        command: r.command,
-                        args: r.args,
-                        env: r.env,
-                        enabled: r.enabled,
-                    })
-                    .collect();
-                Json(servers).into_response()
-            }
-        },
-    }
+    db_json(|| {
+        let conn = brain_utils::db::open_default()?;
+        let servers: Vec<McpServerInfo> = brain_utils::db::list_mcp_servers(&conn)?
+            .into_iter()
+            .map(|r| McpServerInfo {
+                name: r.name,
+                command: r.command,
+                args: r.args,
+                env: r.env,
+                enabled: r.enabled,
+            })
+            .collect();
+        Ok(servers)
+    })
 }
 
 // ── POST /api/mcp/servers ─────────────────────────────────────────────────────
@@ -57,19 +52,17 @@ pub async fn mcp_servers_handler() -> Response {
     tag = "mcp"
 )]
 pub async fn mcp_add_handler(Json(body): Json<McpServerAddRequest>) -> Response {
-    let row = brain_utils::db::McpServerRow {
-        name: body.name,
-        command: body.command,
-        args: body.args,
-        env: body.env,
-        enabled: true,
-    };
-    match brain_utils::db::open_default()
-        .and_then(|conn| brain_utils::db::upsert_mcp_server(&conn, &row))
-    {
-        Ok(()) => Json(OkResponse { ok: true }).into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
+    db_ok(|| {
+        let row = brain_utils::db::McpServerRow {
+            name: body.name,
+            command: body.command,
+            args: body.args,
+            env: body.env,
+            enabled: true,
+        };
+        let conn = brain_utils::db::open_default()?;
+        brain_utils::db::upsert_mcp_server(&conn, &row)
+    })
 }
 
 // ── DELETE /api/mcp/servers/:name ─────────────────────────────────────────────
@@ -87,13 +80,10 @@ pub async fn mcp_add_handler(Json(body): Json<McpServerAddRequest>) -> Response 
     tag = "mcp"
 )]
 pub async fn mcp_remove_handler(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
-    match brain_utils::db::open_default()
-        .and_then(|conn| brain_utils::db::remove_mcp_server(&conn, &name))
-    {
-        Ok(true) => Json(OkResponse { ok: true }).into_response(),
-        Ok(false) => err(StatusCode::NOT_FOUND, &format!("server '{name}' not found")),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
+    db_remove("server", &name, || {
+        let conn = brain_utils::db::open_default()?;
+        brain_utils::db::remove_mcp_server(&conn, &name)
+    })
 }
 
 // ── GET /api/mcp/tools ────────────────────────────────────────────────────────

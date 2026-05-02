@@ -1,6 +1,15 @@
+//! Runtime configuration for the brain binary.
+//!
+//! `Config::load()` is called once at startup. It reads `brain.toml` from the vault,
+//! API keys from env/keychain, and runs one-time TOML → DB migrations.
+
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
+/// All runtime configuration for the brain binary.
+///
+/// Static config (API keys, LLM endpoints) lives here.
+/// Dynamic registries (MCP servers, Docker runtimes, etc.) live in `brain.db` — see `db.rs`.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub anthropic_api_key: Option<String>,
@@ -11,9 +20,14 @@ pub struct Config {
     pub db_path: PathBuf,
 }
 
+/// Which model backend and model ID to use for a session.
+///
+/// Defaults to `LMStudio` (local-first). Claude is escalation-only.
 #[derive(Debug, Clone)]
 pub enum Model {
+    /// Anthropic Claude API — requires `ANTHROPIC_API_KEY` or a keychain entry.
     Claude(String),
+    /// LM Studio (OpenAI-compatible local server) — no API key needed.
     LMStudio(String),
 }
 

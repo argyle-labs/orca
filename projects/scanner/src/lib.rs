@@ -4,18 +4,18 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use utoipa::ToSchema;
 
+pub mod php_parse;
 pub mod ci4_generator;
 pub mod ci2_generator;
 pub mod nextjs_generator;
 
 pub fn openapi_dir() -> PathBuf {
-    // Spec files live under the brain vault at brain/rebuy/openapi/specs/.
-    // Override with BRAIN_OPENAPI_DIR for non-standard installs.
-    if let Ok(custom) = std::env::var("BRAIN_OPENAPI_DIR") {
+    // Override with ORCA_OPENAPI_DIR for non-standard installs.
+    if let Ok(custom) = std::env::var("ORCA_OPENAPI_DIR") {
         return PathBuf::from(custom);
     }
     let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join("brain/rebuy/openapi/specs")
+    PathBuf::from(home).join(".orca/openapi/specs")
 }
 
 /// Registry entry for a tracked external API spec.
@@ -301,12 +301,102 @@ fn map_operation(f: &graphql_parser::schema::Field<String>) -> GraphQlOperation 
     }
 }
 
+/// Parse a GraphQL **operations document** (named queries/mutations/subscriptions with selection
+/// sets) into `GraphQlInfo`. Used for client operation files like `rebuy-shopify-client.graphql`.
+pub fn parse_graphql_operations(repo: &str, src: &str) -> Result<GraphQlInfo> {
+    use graphql_parser::query::{Definition, OperationDefinition, parse_query};
+
+    fn op_type_str(t: &graphql_parser::query::Type<String>) -> (String, bool) {
+        use graphql_parser::query::Type;
+        match t {
+            Type::NonNullType(inner) => {
+                let (s, _) = op_type_str(inner);
+                (s, true)
+            }
+            Type::ListType(inner) => {
+                let (s, _) = op_type_str(inner);
+                (format!("[{s}]"), false)
+            }
+            Type::NamedType(n) => (n.clone(), false),
+        }
+    }
+
+    let doc = parse_query::<String>(src)
+        .map_err(|e| anyhow::anyhow!("GraphQL parse error: {e}"))?;
+
+    let mut queries = Vec::new();
+    let mut mutations = Vec::new();
+    let mut subscriptions = Vec::new();
+
+    for def in &doc.definitions {
+        let Definition::Operation(op) = def else { continue };
+        let (name, vars, bucket) = match op {
+            OperationDefinition::Query(q) => (
+                q.name.clone().unwrap_or_else(|| "anonymous".into()),
+                &q.variable_definitions,
+                &mut queries,
+            ),
+            OperationDefinition::Mutation(m) => (
+                m.name.clone().unwrap_or_else(|| "anonymous".into()),
+                &m.variable_definitions,
+                &mut mutations,
+            ),
+            OperationDefinition::Subscription(s) => (
+                s.name.clone().unwrap_or_else(|| "anonymous".into()),
+                &s.variable_definitions,
+                &mut subscriptions,
+            ),
+            OperationDefinition::SelectionSet(_) => continue,
+        };
+        let args: Vec<GraphQlField> = vars
+            .iter()
+            .map(|v| {
+                let (type_name, required) = op_type_str(&v.var_type);
+                GraphQlField { name: v.name.clone(), type_name, description: None, required }
+            })
+            .collect();
+        bucket.push(GraphQlOperation {
+            name,
+            description: None,
+            args,
+            returns: String::new(),
+            deprecated: false,
+        });
+    }
+
+    Ok(GraphQlInfo {
+        repo: repo.to_string(),
+        queries,
+        mutations,
+        subscriptions,
+        types: vec![],
+        inputs: vec![],
+        enums: vec![],
+    })
+}
+
 /// Parse a GraphQL SDL string into a structured `GraphQlInfo`.
+/// Auto-detects format: schema SDL (`type Query { ... }`) vs operation document
+/// (`mutation Foo(...) { ... }`). Falls back to operation parsing if SDL parse fails.
 pub fn parse_graphql_sdl(repo: &str, sdl: &str) -> Result<GraphQlInfo> {
     use graphql_parser::schema::{Definition, TypeDefinition, parse_schema};
 
-    let doc = parse_schema::<String>(sdl)
-        .map_err(|e| anyhow::anyhow!("GraphQL parse error: {e}"))?;
+    // Detect operation documents by presence of named operations without type definitions.
+    // If SDL parse fails, try operations parser before returning the error.
+    let schema_result = parse_schema::<String>(sdl);
+    let doc = match schema_result {
+        Ok(d) => d,
+        Err(_) => return parse_graphql_operations(repo, sdl),
+    };
+
+    // SDL parsed — but it may be an operations file that happened to parse (unlikely).
+    // Check if it has any type definitions; if not, treat as operations.
+    let has_type_defs = doc.definitions.iter().any(|d| {
+        matches!(d, Definition::TypeDefinition(_) | Definition::SchemaDefinition(_))
+    });
+    if !has_type_defs {
+        return parse_graphql_operations(repo, sdl);
+    }
 
     let mut queries = Vec::new();
     let mut mutations = Vec::new();

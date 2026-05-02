@@ -1,6 +1,6 @@
 ---
 name: halvor-backup-validate
-description: Halvor backup health validator. Reads the backup status JSON, checks git commit recency, queries PBS, and surfaces any failures or pending gaps. Use when you want to confirm backups are healthy or investigate a backup failure.
+description: "[MIGRATE TO HALVOR PLUGIN] Source of truth: ~/code/halvor/agents/halvor-backup-validate.md. Halvor backup health validator. Reads the backup status JSON, checks git commit recency, queries PBS, and surfaces any failures or pending gaps."
 tools: Bash, Read, Glob, Grep
 model: inherit
 color: blue

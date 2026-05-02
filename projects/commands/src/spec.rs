@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 #[derive(Subcommand)]
 pub enum SpecAction {
-    /// List all registered external specs (disk + brain.db)
+    /// List all registered external specs (disk + orca.db)
     List,
     /// Register a repo and scaffold a spec file if one doesn't exist
     Add {
@@ -23,7 +23,7 @@ pub enum SpecAction {
         #[arg(long)]
         description: Option<String>,
     },
-    /// Fetch an OpenAPI spec from a URL and store it in brain.db
+    /// Fetch an OpenAPI spec from a URL and store it in orca.db
     Register {
         /// Display name for the spec (e.g. rebuy-cli)
         name: String,
@@ -39,7 +39,7 @@ pub enum SpecAction {
         #[arg(long)]
         all: bool,
     },
-    /// Remove a URL-registered spec from brain.db
+    /// Remove a URL-registered spec from orca.db
     Unregister {
         name: String,
     },
@@ -55,7 +55,7 @@ pub enum SpecAction {
         all: bool,
     },
 
-    /// Dump brain's own OpenAPI spec to stdout (no server required — used by `make build`)
+    /// Dump orca's own OpenAPI spec to stdout (no server required — used by `make build`)
     Dump,
 }
 
@@ -102,7 +102,7 @@ pub fn cmd_spec(action: SpecAction) -> Result<()> {
             if registry.entries.is_empty() && db_specs.is_empty() {
                 println!(
                     "{}",
-                    "no specs registered — use `brain spec add <repo>` or `brain spec register --url <url> <name>`".dimmed()
+                    "no specs registered — use `orca spec add <repo>` or `orca spec register --url <url> <name>`".dimmed()
                 );
             }
         }
@@ -131,7 +131,7 @@ pub fn cmd_spec(action: SpecAction) -> Result<()> {
             );
             println!(
                 "{}",
-                "  edit the scaffolded spec manually, then restart `brain serve`".dimmed()
+                "  edit the scaffolded spec manually, then restart `orca serve`".dimmed()
             );
         }
 
@@ -151,7 +151,7 @@ pub fn cmd_spec(action: SpecAction) -> Result<()> {
             } else {
                 match repo.as_deref() {
                     Some(r) => vec![sync_known_repo(r)?],
-                    None => anyhow::bail!("usage: brain spec sync <repo> | --all"),
+                    None => anyhow::bail!("usage: orca spec sync <repo> | --all"),
                 }
             };
             // `strict` controls whether a missing repo aborts the run. With
@@ -213,7 +213,7 @@ pub fn cmd_spec(action: SpecAction) -> Result<()> {
                         }
                         vec![s]
                     }
-                    None => anyhow::bail!("usage: brain spec refresh <name> | --all"),
+                    None => anyhow::bail!("usage: orca spec refresh <name> | --all"),
                 }
             };
             if to_refresh.is_empty() {
@@ -433,17 +433,17 @@ fn load_shopify_admin_version() -> String {
         shopify_admin_version: Option<String>,
     }
     #[derive(Deserialize, Default)]
-    struct BrainConfig {
+    struct OrcaConfig {
         specs: Option<SpecsSection>,
     }
 
     let home = std::env::var("HOME").unwrap_or_default();
-    let toml_path = std::env::var("BRAIN_CONFIG")
-        .unwrap_or_else(|_| format!("{home}/brain/config/brain.toml"));
+    let toml_path = std::env::var("ORCA_CONFIG")
+        .unwrap_or_else(|_| format!("{home}/.orca/config/orca.toml"));
 
     std::fs::read_to_string(&toml_path)
         .ok()
-        .and_then(|raw| toml::from_str::<BrainConfig>(&raw).ok())
+        .and_then(|raw| toml::from_str::<OrcaConfig>(&raw).ok())
         .and_then(|cfg| cfg.specs?.shopify_admin_version)
         .unwrap_or_else(|| "2026-01".to_string())
 }

@@ -10,6 +10,7 @@
 //! - `db`     — encrypted SQLite via SQLCipher; session event indexing + FTS
 
 pub mod auth;
+pub mod consts;
 pub mod config;
 pub mod db;
 pub mod ledger;

@@ -25,40 +25,50 @@ In development, you run `make dev` which starts cargo-watch (rebuilds on save) a
 
 Let's follow what happens when you navigate to `/docs/architecture` in the browser.
 
-### 1. Browser → React Router
+### 1. Browser → SvelteKit router
 
-TanStack Router matches `/docs/architecture`. No named route matches, so the catch-all `$` route fires, rendering `DocPage`:
-
-```
-projects/frontend/src/routes/DocPage.tsx
-```
-
-### 2. DocPage parses the URL
-
-```tsx
-const parts = pathname.replace(/^\//, '').split('/');
-const root    = parts[0];     // "docs"
-const docPath = parts.slice(1).join('/');  // "architecture"
-```
-
-It tries candidates in order: `architecture.md`, `architecture.mdx`, `architecture`. The first that gets a 200 OK wins.
-
-### 3. DocPage → fetch → axum
+SvelteKit matches `/docs/architecture`. No named route matches, so the catch-all `[...slug]` route fires.
 
 ```
-GET /api/doc?root=docs&path=architecture.md
+projects/frontend/src/routes/[...slug]/+page.ts     ← load function
+projects/frontend/src/routes/[...slug]/+page.svelte ← component
+```
+
+### 2. The load function parses the URL and fetches
+
+SvelteKit calls the `load` function in `+page.ts` before rendering the component:
+
+```typescript
+// projects/frontend/src/routes/[...slug]/+page.ts
+export const load: PageLoad = async ({ params }) => {
+  const slug = params.slug ?? '';           // "docs/architecture"
+  const parts = slug.split('/').filter(Boolean);
+  const root = parts[0] ?? 'brain';         // "docs"
+  const path = parts.slice(1).join('/');    // "architecture"
+
+  const raw = await getDoc({ root, path }); // calls GET /api/doc?root=docs&path=architecture
+  return { content: String(raw ?? ''), root, path };
+};
+```
+
+`getDoc` is a generated function from `src/lib/api/client.ts` — typed, no raw `fetch()`.
+
+### 3. +page.ts → GET /api/doc → axum
+
+```
+GET /api/doc?root=docs&path=architecture
 ```
 
 This hits the axum router in:
 
 ```
-projects/server/src/serve/mod.rs   (route registration)
-projects/server/src/serve/api.rs   (handler implementation)
+projects/server/src/serve/openapi.rs   (route registration)
+projects/server/src/serve/api/docs.rs  (handler implementation)
 ```
 
 ### 4. axum → rust-embed
 
-The handler sees `root=docs` and delegates to `brain_docs::read("architecture.md")`:
+The handler sees `root=docs` and delegates to `brain_docs::read("architecture")`:
 
 ```
 projects/docs/src/lib.rs  →  BrainDocs::get("architecture.md")
@@ -66,17 +76,23 @@ projects/docs/src/lib.rs  →  BrainDocs::get("architecture.md")
 
 `BrainDocs` is a `#[derive(RustEmbed)]` struct. At compile time, every `.md` file in `projects/docs/src/` was read from disk and baked into the binary as a static byte slice. At runtime, `BrainDocs::get(...)` does a hashmap lookup — zero filesystem I/O.
 
-### 5. axum → browser
+### 5. axum → load function → component
 
-The handler returns `200 OK` with the markdown content as `text/plain`.
+The handler returns `200 OK` with markdown text. The load function receives it and returns `{ content, root, path }` to the component.
 
-### 6. DocPage renders
+### 6. +page.svelte renders
 
-```tsx
-setContent(raw.replace(/^---[\s\S]*?---\n?/, ''));  // strip frontmatter
+```svelte
+<script lang="ts">
+  import { marked } from 'marked';
+  let { data } = $props();
+  const html = $derived(data.content ? marked(data.content) : '');
+</script>
+
+<article class="doc">{@html html}</article>
 ```
 
-Then passes `content` to `MarkdownRenderer`, which calls `react-markdown` to convert the markdown to HTML, rendered inside `<article className="markdown">`.
+`marked(data.content)` converts markdown to HTML. `{@html html}` renders it directly — Svelte bypasses escaping when you explicitly ask for raw HTML output.
 
 ---
 
@@ -235,6 +251,6 @@ Browser renders
 ## Where to go next
 
 - [`rust-primer`](learn/rust-primer) — understand the Rust syntax in the files above
-- [`react-primer`](learn/react-primer) — understand the component patterns
+- [`svelte-primer`](learn/svelte-primer) — understand the Svelte 5 component patterns
 - [`frontend-guide`](learn/frontend-guide) — add a new page or API endpoint yourself
-- `projects/server/src/serve/api.rs` — browse the full handler list
+- `projects/server/src/serve/api/` — browse the full handler directory

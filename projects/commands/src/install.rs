@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use brain_utils::consts::{APP_MCP_SERVER, APP_NAME, APP_STATE_DIR};
 use colored::Colorize;
 use std::path::{Path, PathBuf};
 
@@ -8,7 +9,7 @@ const CLAUDE_MD: &str = include_str!("../../../CLAUDE.md");
 // Format: (macos_slug, linux_slug, vault_name)
 const MEMORY_PROJECTS: &[(&str, &str, &str)] = &[
     ("-Users-scottkey",                         "-home-skey",                              "global"),
-    ("-Users-scottkey-code-brain",              "-home-skey-code-brain",                   "brain"),
+    ("-Users-scottkey-code-orca",               "-home-skey-code-orca",                    "orca"),
     ("-Users-scottkey-code-halvor",             "-home-skey-code-halvor",                  "halvor"),
     ("-Users-scottkey-code-bardbase",           "-home-skey-code-bardbase",                "bardbase"),
     ("-Users-scottkey-dotfiles",                "-home-skey-dotfiles",                     "dotfiles"),
@@ -100,14 +101,14 @@ pub fn cmd_uninstall_report() -> InstallReport {
 }
 
 pub fn cmd_install() -> Result<()> {
-    println!("{}", "brain install".bold());
+    println!("{}", format!("{APP_NAME} install").bold());
     println!();
     let report = cmd_install_report();
     report.print();
     println!();
     if report.success() {
-        println!("{}", "brain installed successfully.".green().bold());
-        println!("Run {} to start.", "brain".cyan());
+        println!("{}", format!("{APP_NAME} installed successfully.").green().bold());
+        println!("Run {} to start.", APP_NAME.cyan());
     } else {
         println!("{}", "Install completed with errors — see above.".yellow());
     }
@@ -115,13 +116,13 @@ pub fn cmd_install() -> Result<()> {
 }
 
 pub fn cmd_uninstall() -> Result<()> {
-    println!("{}", "brain uninstall".bold());
+    println!("{}", format!("{APP_NAME} uninstall").bold());
     println!();
     let report = cmd_uninstall_report();
     report.print();
     println!();
     println!("{}", "Memory files and vault contents were NOT removed.".dimmed());
-    println!("{}", "brain uninstalled.".yellow().bold());
+    println!("{}", format!("{APP_NAME} uninstalled.").yellow().bold());
     Ok(())
 }
 
@@ -134,7 +135,7 @@ pub fn install_status() -> serde_json::Value {
 
     let binary_path = install_bin_path(&home);
     let claude_md_path = home.join(".claude/CLAUDE.md");
-    let vault_dir = home.join("brain/ai/claude");
+    let vault_dir = home.join(APP_STATE_DIR);
     let agents_link = home.join(".claude/agents");
     let mcp_registered = check_mcp_registered();
 
@@ -190,7 +191,7 @@ fn step_install_binary(home: &Path, report: &mut InstallReport) {
 }
 
 fn step_vault_dirs(home: &Path, report: &mut InstallReport) {
-    let vault = home.join("brain/ai/claude");
+    let vault = home.join(APP_STATE_DIR);
     let dirs = [
         vault.join("memory"),
         vault.join("agents"),
@@ -208,11 +209,11 @@ fn step_claude_md(home: &Path, report: &mut InstallReport) {
     let claude_dir = home.join(".claude");
     let _ = std::fs::create_dir_all(&claude_dir);
 
-    let vault_claude_md = home.join("brain/ai/claude/CLAUDE.md");
+    let vault_claude_md = home.join(APP_STATE_DIR).join("CLAUDE.md");
     let dot_claude_md   = claude_dir.join("CLAUDE.md");
 
     // If brain repo is present, symlink through the vault. Otherwise write embedded content.
-    let brain_repo_md = home.join("code/brain/CLAUDE.md");
+    let brain_repo_md = home.join("code/orca/CLAUDE.md");
     if brain_repo_md.exists() {
         // vault → repo
         force_symlink(&brain_repo_md, &vault_claude_md, report, "vault CLAUDE.md → repo");
@@ -229,7 +230,7 @@ fn step_claude_md(home: &Path, report: &mut InstallReport) {
 }
 
 fn step_claude_agents(home: &Path, report: &mut InstallReport) {
-    let agents_src  = home.join("brain/ai/claude/agents");
+    let agents_src  = home.join(APP_STATE_DIR).join("agents");
     let agents_link = home.join(".claude/agents");
 
     let _ = std::fs::create_dir_all(&agents_src);
@@ -247,7 +248,7 @@ fn step_claude_agents(home: &Path, report: &mut InstallReport) {
 
 fn step_memory_symlinks(home: &Path, report: &mut InstallReport) {
     let claude_projects = home.join(".claude/projects");
-    let brain_memory    = home.join("brain/ai/claude/memory");
+    let brain_memory    = home.join(APP_STATE_DIR).join("memory");
     let on_macos        = cfg!(target_os = "macos");
 
     for (macos_slug, linux_slug, vault_name) in MEMORY_PROJECTS {
@@ -275,7 +276,7 @@ fn step_memory_symlinks(home: &Path, report: &mut InstallReport) {
 
 fn step_mcp_registration(report: &mut InstallReport) {
     if check_mcp_registered() {
-        report.skip("MCP: brain-local already registered");
+        report.skip(format!("MCP: {APP_MCP_SERVER} already registered"));
         return;
     }
 
@@ -285,11 +286,11 @@ fn step_mcp_registration(report: &mut InstallReport) {
     };
 
     let status = std::process::Command::new("claude")
-        .args(["mcp", "add", "brain-local", "--", brain_bin.to_str().unwrap_or("brain"), "mcp-serve"])
+        .args(["mcp", "add", APP_MCP_SERVER, "--", brain_bin.to_str().unwrap_or(APP_NAME), "mcp-serve"])
         .status();
 
     match status {
-        Ok(s) if s.success() => report.ok("MCP: brain-local registered with Claude Code"),
+        Ok(s) if s.success() => report.ok(format!("MCP: {APP_MCP_SERVER} registered with Claude Code")),
         Ok(s) => report.err(format!("MCP: claude mcp add exited {s}")),
         Err(e) => report.err(format!("MCP: claude not found or failed: {e}")),
     }
@@ -299,23 +300,23 @@ fn step_mcp_registration(report: &mut InstallReport) {
 
 fn step_remove_mcp(report: &mut InstallReport) {
     if !check_mcp_registered() {
-        report.skip("MCP: brain-local not registered");
+        report.skip(format!("MCP: {APP_MCP_SERVER} not registered"));
         return;
     }
 
     let status = std::process::Command::new("claude")
-        .args(["mcp", "remove", "brain-local"])
+        .args(["mcp", "remove", APP_MCP_SERVER])
         .status();
 
     match status {
-        Ok(s) if s.success() => report.ok("MCP: brain-local removed"),
+        Ok(s) if s.success() => report.ok(format!("MCP: {APP_MCP_SERVER} removed")),
         Ok(s) => report.err(format!("MCP: claude mcp remove exited {s}")),
         Err(e) => report.err(format!("MCP: claude not found or failed: {e}")),
     }
 }
 
 fn step_remove_claude_md(home: &Path, report: &mut InstallReport) {
-    let vault_link  = home.join("brain/ai/claude/CLAUDE.md");
+    let vault_link  = home.join(APP_STATE_DIR).join("CLAUDE.md");
     let dot_link    = home.join(".claude/CLAUDE.md");
 
     for (path, label) in [(&dot_link, "~/.claude/CLAUDE.md"), (&vault_link, "vault CLAUDE.md")] {
@@ -353,7 +354,7 @@ fn home_dir() -> Result<PathBuf> {
 }
 
 fn install_bin_path(home: &Path) -> PathBuf {
-    home.join(".local/bin/brain")
+    home.join(format!(".local/bin/{APP_NAME}"))
 }
 
 fn is_symlink(path: &Path) -> bool {
@@ -387,7 +388,7 @@ fn check_mcp_registered() -> bool {
         .args(["mcp", "list"])
         .output();
     match out {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).contains("brain-local"),
+        Ok(o) => String::from_utf8_lossy(&o.stdout).contains(APP_MCP_SERVER),
         Err(_) => false,
     }
 }

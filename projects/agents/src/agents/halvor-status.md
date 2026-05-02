@@ -1,6 +1,6 @@
 ---
 name: halvor-status
-description: Halvor homelab health sweep. SSHes to all nodes and produces a prioritized summary of stopped services, unhealthy containers, NFS mount state, and backup status. Use when you need a quick "is everything OK?" answer before troubleshooting or at the start of a homelab session.
+description: "[MIGRATE TO HALVOR PLUGIN] Source of truth: ~/code/halvor/agents/halvor-status.md. Halvor homelab health sweep — stopped services, unhealthy containers, NFS mount state, backup status."
 tools: Bash, Read
 model: inherit
 color: green

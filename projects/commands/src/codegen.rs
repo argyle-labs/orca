@@ -1,4 +1,5 @@
 use anyhow::Result;
+use brain_utils::consts::APP_NAME;
 use colored::Colorize;
 
 pub async fn cmd_gen(url: &str, out: &str) -> Result<()> {
@@ -38,7 +39,7 @@ pub async fn cmd_gen(url: &str, out: &str) -> Result<()> {
 
     println!(
         "{} generating types and hooks from {spec_url}",
-        "brain gen".cyan()
+        format!("{APP_NAME} gen").cyan()
     );
 
     let status = std::process::Command::new("npx")

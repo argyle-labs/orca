@@ -1,6 +1,6 @@
 ---
 name: halvor-deploy
-description: Halvor deploy workflow. Syncs the halvor repo to a target host and restarts the affected service. Use after pushing a config or compose change to deploy it to freyr or baldur without manually SSHing and running commands.
+description: "[MIGRATE TO HALVOR PLUGIN] Source of truth: ~/code/halvor/agents/halvor-deploy.md. Halvor deploy workflow. Syncs the halvor repo to a target host and restarts the affected service."
 tools: Bash, Read
 model: inherit
 color: orange

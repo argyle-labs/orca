@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use brain_utils::consts::{APP_KEYRING_SERVICE, APP_NAME};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use keyring::Entry;
 use rand::RngCore;
@@ -8,7 +9,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::time::Duration;
 
-const KEYRING_SERVICE: &str = "brain";
+const KEYRING_SERVICE: &str = APP_KEYRING_SERVICE;
 
 // ── Keychain helpers ─────────────────────────────────────────────────────────
 
@@ -96,7 +97,7 @@ pub async fn cmd_oauth_github() -> Result<()> {
 
     loop {
         if std::time::Instant::now() > deadline {
-            bail!("authorization timed out — run 'brain login github' again");
+            bail!("authorization timed out — run '{APP_NAME} login github' again");
         }
         tokio::time::sleep(poll_interval).await;
 

@@ -1,6 +1,6 @@
 ---
 name: rebuy-deploy
-description: Rebuy deployment specialist. Handles Bitbucket Pipelines, Kubernetes deployments, environment tagging, and release workflows for all rebuy repos. Use for anything involving deploying or releasing rebuy code.
+description: "[MIGRATE TO REBUY ADAPTER] Source of truth: ~/code/brain/projects/adapters/rebuy/agents/rebuy-deploy.md. Rebuy deployment specialist — Bitbucket Pipelines, Kubernetes, tagging, release workflows."
 tools: Read, Glob, Grep, Bash
 model: inherit
 ---
