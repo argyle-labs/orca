@@ -4,7 +4,7 @@ use brain::mcp;
 use brain::serve;
 use brain::serve::openapi_spec_json;
 use brain::session::Session;
-use brain_commands::{self as cmd, DaemonAction, LogAction, McpAction, SpecAction, cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian, cmd_install, cmd_uninstall};
+use brain_commands::{self as cmd, DaemonAction, DockerAction, LogAction, McpAction, SchemaAction, SpecAction, cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian, cmd_install, cmd_uninstall};
 use brain_core::backend::{ClaudeBackend, ModelBackend, stdout_sink};
 use brain_utils::config::Config;
 use brain_utils::types::Message;
@@ -126,6 +126,18 @@ enum Command {
         action: McpAction,
     },
 
+    /// Manage schema databases registered with brain
+    Schema {
+        #[command(subcommand)]
+        action: SchemaAction,
+    },
+
+    /// Manage Docker runtimes registered with brain
+    Docker {
+        #[command(subcommand)]
+        action: DockerAction,
+    },
+
     /// Check for and apply updates from GitHub releases
     Update,
 
@@ -205,6 +217,8 @@ async fn main() -> Result<()> {
         },
         Some(Command::Dev { port }) => cmd_dev(port, &config).await,
         Some(Command::Mcp { action }) => cmd::cmd_mcp(action),
+        Some(Command::Schema { action }) => cmd::cmd_schema(action),
+        Some(Command::Docker { action }) => cmd::cmd_docker(action),
         Some(Command::Update) => cmd::cmd_update().await,
         Some(Command::Install) => cmd_install(),
         Some(Command::Uninstall) => cmd_uninstall(),

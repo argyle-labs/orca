@@ -29,11 +29,11 @@ pub async fn cmd_gen(url: &str, out: &str) -> Result<()> {
         .unwrap_or(std::path::Path::new("."))
         .to_path_buf();
 
-    // Fall back to cwd-relative frontend/ if the exe path heuristic fails
-    let site_dir = if repo_root.join("frontend/scripts/gen.ts").exists() {
-        repo_root.join("frontend")
+    // Fall back to cwd-relative projects/frontend/ if the exe path heuristic fails
+    let site_dir = if repo_root.join("projects/frontend/scripts/gen.ts").exists() {
+        repo_root.join("projects/frontend")
     } else {
-        std::env::current_dir()?.join("frontend")
+        std::env::current_dir()?.join("projects/frontend")
     };
 
     println!(

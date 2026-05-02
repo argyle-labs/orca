@@ -8,6 +8,8 @@ set -m  # job control: each background job gets its own pgid (so we can signal w
 BRAIN="$HOME/.local/bin/brain"
 _CLEANUP_DONE=0
 _DAEMON_WAS_LOADED=0  # set by stop_system_daemon() if we need to restart on cleanup
+_SERVER_PID=
+_FRONTEND_PID=
 
 # ── System daemon control (cross-platform) ────────────────────────────────────
 # The brain system daemon (launchd on macOS, systemd --user on Linux) holds
@@ -63,13 +65,14 @@ cleanup() {
   _CLEANUP_DONE=1
   echo ""
   echo "  stopping dev session..."
-  # Ignore TERM in this shell so killing our own pgid doesn't re-enter cleanup.
   trap '' TERM
-  # Signal every process in our process group — catches cargo-watch, the cargo-run
-  # child it spawns, vite, npm, and the pipeline subshells that `jobs -p` misses.
-  kill -TERM 0 2>/dev/null || true
+  # set -m gives each background job its own pgid; kill -TERM 0 only reaches
+  # the shell's own pgid. Kill each process group explicitly via negative PID.
+  [[ -n "${_SERVER_PID:-}" ]]   && kill -- -"$_SERVER_PID"   2>/dev/null || true
+  [[ -n "${_FRONTEND_PID:-}" ]] && kill -- -"$_FRONTEND_PID" 2>/dev/null || true
   sleep 0.3
-  kill -KILL 0 2>/dev/null || true
+  [[ -n "${_SERVER_PID:-}" ]]   && kill -KILL -- -"$_SERVER_PID"   2>/dev/null || true
+  [[ -n "${_FRONTEND_PID:-}" ]] && kill -KILL -- -"$_FRONTEND_PID" 2>/dev/null || true
   start_system_daemon
 }
 trap 'cleanup; exit 0' INT TERM
@@ -107,9 +110,11 @@ BRAIN_LOG=trace cargo watch -q -c -C projects/server \
   while IFS= read -r line; do
     echo "[server]   $line"
     echo "$line" | grep -q "listening on" && \
-      (sleep 0.5 && cd projects/frontend && npm run gen 2>&1 | sed 's/^/[gen]      /') &
+      (sleep 0.5 && brain gen 2>&1 | sed 's/^/[gen]      /') &
   done &
+_SERVER_PID=$!
 
 (cd projects/frontend && npm run dev 2>&1 | sed 's/^/[frontend] /') &
+_FRONTEND_PID=$!
 
 wait

@@ -12,8 +12,37 @@ use super::prelude::*;
 
 // ── Schema database config ────────────────────────────────────────────────────
 
-#[derive(Deserialize, Clone)]
+#[derive(Clone)]
 struct DbConfig {
+    name: String,
+    host: String,
+    port: u16,
+    user: String,
+    password: String,
+    database: String,
+    container: Option<String>,
+    domains_file: Option<String>,
+}
+
+impl From<brain_utils::db::SchemaDbRow> for DbConfig {
+    fn from(r: brain_utils::db::SchemaDbRow) -> Self {
+        DbConfig {
+            name: r.name,
+            host: r.host.unwrap_or_default(),
+            port: r.port.unwrap_or(3306),
+            user: r.user,
+            password: r.password,
+            database: r.database,
+            container: r.container,
+            domains_file: r.domains_file,
+        }
+    }
+}
+
+// ── TOML migration types (used only for one-shot import) ─────────────────────
+
+#[derive(Deserialize, Clone)]
+struct TomlDbConfig {
     name: String,
     #[serde(default)]
     host: String,
@@ -28,35 +57,70 @@ struct DbConfig {
 }
 
 #[derive(Deserialize, Default)]
-struct SchemaSection {
-    databases: Vec<DbConfig>,
+struct TomlSchemaSection {
+    databases: Vec<TomlDbConfig>,
 }
 
 #[derive(Deserialize, Default)]
-struct BrainConfig {
-    schema: Option<SchemaSection>,
+struct TomlBrainConfig {
+    schema: Option<TomlSchemaSection>,
 }
 
+/// Load schema DB configs from brain.db. If the table is empty, attempt a
+/// one-shot migration from brain.toml (idempotent: INSERT OR IGNORE).
 fn load_db_configs() -> Vec<DbConfig> {
-    let home = std::env::var("HOME").unwrap_or_default();
+    let Ok(conn) = brain_utils::db::open_default() else {
+        return vec![];
+    };
 
-    // 1. BRAIN_CONFIG env var override, or default brain.toml path
-    let toml_path =
-        std::env::var("BRAIN_CONFIG").unwrap_or_else(|_| format!("{home}/brain/config/brain.toml"));
-
-    if let Ok(raw) = std::fs::read_to_string(&toml_path)
-        && let Ok(cfg) = toml::from_str::<BrainConfig>(&raw)
-    {
-        let dbs = cfg.schema.map(|s| s.databases).unwrap_or_default();
-        if !dbs.is_empty() {
-            return dbs;
+    // Try DB first
+    if let Ok(rows) = brain_utils::db::list_schema_databases(&conn) {
+        if !rows.is_empty() {
+            return rows.into_iter().map(DbConfig::from).collect();
         }
     }
 
-    // 2. Legacy JSON fallback
-    let json_path = format!("{home}/brain/config/schema-databases.json");
-    let raw = std::fs::read_to_string(&json_path).unwrap_or_default();
-    serde_json::from_str(&raw).unwrap_or_default()
+    // DB empty — attempt one-shot migration from brain.toml
+    let home = std::env::var("HOME").unwrap_or_default();
+    let toml_path =
+        std::env::var("BRAIN_CONFIG").unwrap_or_else(|_| format!("{home}/.brain/brain.toml"));
+
+    if let Ok(raw) = std::fs::read_to_string(&toml_path)
+        && let Ok(cfg) = toml::from_str::<TomlBrainConfig>(&raw)
+    {
+        let dbs = cfg.schema.map(|s| s.databases).unwrap_or_default();
+        for d in &dbs {
+            let row = brain_utils::db::SchemaDbRow {
+                name: d.name.clone(),
+                host: if d.host.is_empty() { None } else { Some(d.host.clone()) },
+                port: if d.port == 0 { None } else { Some(d.port) },
+                user: d.user.clone(),
+                password: d.password.clone(),
+                database: d.database.clone(),
+                container: d.container.clone(),
+                domains_file: d.domains_file.clone(),
+                enabled: true,
+            };
+            let _ = brain_utils::db::upsert_schema_database(&conn, &row);
+        }
+        if !dbs.is_empty() {
+            return dbs
+                .into_iter()
+                .map(|d| DbConfig {
+                    name: d.name,
+                    host: d.host,
+                    port: d.port,
+                    user: d.user,
+                    password: d.password,
+                    database: d.database,
+                    container: d.container,
+                    domains_file: d.domains_file,
+                })
+                .collect();
+        }
+    }
+
+    vec![]
 }
 
 fn expand_tilde(path: &str) -> String {
@@ -97,7 +161,7 @@ pub async fn schema_handler() -> Response {
     if configs.is_empty() {
         return err(
             StatusCode::NOT_FOUND,
-            "No databases configured — add [[schema.databases]] entries to ~/brain/config/brain.toml (or set BRAIN_CONFIG to a custom path)",
+            "No databases configured — use `brain schema add` or POST /api/schema/databases",
         );
     }
 

@@ -6,6 +6,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use utoipa::ToSchema;
+use brain_utils::db;
 
 fn shopify_admin_version() -> String {
     #[derive(Deserialize, Default)]
@@ -156,7 +157,7 @@ pub async fn specs_list_handler() -> Response {
     repos.sort();
     repos.dedup();
 
-    let augmented: Vec<Value> = repos
+    let mut augmented: Vec<Value> = repos
         .into_iter()
         .map(|repo| {
             let mut entry = by_repo.remove(&repo).unwrap_or_else(|| {
@@ -177,6 +178,34 @@ pub async fn specs_list_handler() -> Response {
             entry
         })
         .collect();
+
+    // Append DB-registered specs (URL-fetched) that aren't already in the disk list
+    if let Ok(conn) = db::open_default() {
+        if let Ok(db_specs) = db::list_openapi_specs(&conn) {
+            let disk_names: std::collections::HashSet<String> = augmented
+                .iter()
+                .filter_map(|e| e["repo"].as_str().map(|s| s.to_string()))
+                .collect();
+            for s in db_specs {
+                if !disk_names.contains(&s.name) {
+                    let path_count = s.spec_json.as_deref()
+                        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                        .and_then(|v| v["paths"].as_object().map(|p| p.len() as u64));
+                    augmented.push(json!({
+                        "repo": s.name,
+                        "project": s.name,
+                        "source": "url",
+                        "baseUrl": s.url,
+                        "capturedAt": s.cached_at,
+                        "pathCount": path_count,
+                        "hasGraphql": false,
+                        "files": { "full": true, "public": null },
+                    }));
+                }
+            }
+        }
+    }
+
     Json(augmented).into_response()
 }
 
@@ -204,14 +233,19 @@ pub async fn specs_get_handler(
     if !validate_repo(&repo) {
         return err(StatusCode::BAD_REQUEST, "invalid repo name");
     }
+    // Check disk first; fall back to DB-cached spec
     let path = specs_dir().join(format!("{repo}.json"));
-    match std::fs::read_to_string(&path) {
-        Ok(raw) => serve_spec(&raw, &repo, &query),
-        Err(_) => err(
-            StatusCode::NOT_FOUND,
-            &format!("no spec registered for '{repo}'"),
-        ),
+    if let Ok(raw) = std::fs::read_to_string(&path) {
+        return serve_spec(&raw, &repo, &query);
     }
+    if let Ok(conn) = db::open_default() {
+        if let Ok(Some(row)) = db::get_openapi_spec(&conn, &repo) {
+            if let Some(raw) = row.spec_json {
+                return serve_spec(&raw, &repo, &query);
+            }
+        }
+    }
+    err(StatusCode::NOT_FOUND, &format!("no spec registered for '{repo}'"))
 }
 
 #[utoipa::path(
@@ -402,4 +436,206 @@ pub async fn specs_graphql_info_handler(Path(repo): Path<String>) -> Response {
         Ok(info) => Json(info).into_response(),
         Err(e) => err(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string()),
     }
+}
+
+// ── POST /api/specs/register ─────────────────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/api/specs/register",
+    operation_id = "registerSpec",
+    request_body = SpecRegisterRequest,
+    responses(
+        (status = 200, description = "Spec fetched and stored", body = SpecInfo),
+        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 502, description = "Failed to fetch spec from URL", body = ErrorResponse),
+    ),
+    tag = "specs"
+)]
+pub async fn specs_register_handler(Json(body): Json<SpecRegisterRequest>) -> Response {
+    if body.name.is_empty() || body.url.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "name and url are required");
+    }
+    let resp = match reqwest::get(&body.url).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("fetch failed: {e}")),
+    };
+    if !resp.status().is_success() {
+        return err(StatusCode::BAD_GATEWAY, &format!("HTTP {}", resp.status()));
+    }
+    let spec_json: Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("invalid JSON: {e}")),
+    };
+    let spec_text = match serde_json::to_string(&spec_json) {
+        Ok(s) => s,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let path_count = spec_json["paths"].as_object().map(|p| p.len() as u32);
+    let cached_at = chrono::Utc::now().to_rfc3339();
+    let conn = match db::open_default() {
+        Ok(c) => c,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let row = db::OpenApiSpecRow {
+        name: body.name.clone(),
+        url: Some(body.url.clone()),
+        source_mcp: None,
+        spec_json: Some(spec_text),
+        cached_at: Some(cached_at.clone()),
+        enabled: true,
+    };
+    if let Err(e) = db::upsert_openapi_spec(&conn, &row) {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+    }
+    Json(SpecInfo {
+        name: body.name,
+        url: Some(body.url),
+        source_mcp: None,
+        path_count,
+        cached_at: Some(cached_at),
+        enabled: true,
+    })
+    .into_response()
+}
+
+// ── POST /api/specs/{name}/refresh ────────────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/api/specs/{name}/refresh",
+    operation_id = "refreshSpec",
+    params(
+        ("name" = String, Path, description = "Spec name to refresh"),
+    ),
+    responses(
+        (status = 200, description = "Spec refreshed from stored URL", body = SpecInfo),
+        (status = 404, description = "Spec not found or has no URL", body = ErrorResponse),
+        (status = 502, description = "Failed to fetch spec from URL", body = ErrorResponse),
+    ),
+    tag = "specs"
+)]
+pub async fn specs_refresh_handler(Path(name): Path<String>) -> Response {
+    if !validate_repo(&name) {
+        return err(StatusCode::BAD_REQUEST, "invalid spec name");
+    }
+    let conn = match db::open_default() {
+        Ok(c) => c,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let row = match db::get_openapi_spec(&conn, &name) {
+        Ok(Some(r)) => r,
+        Ok(None) => return err(StatusCode::NOT_FOUND, &format!("no spec named '{name}'")),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let url = match &row.url {
+        Some(u) => u.clone(),
+        None => return err(StatusCode::BAD_REQUEST, &format!("spec '{name}' has no URL — cannot refresh")),
+    };
+    let resp = match reqwest::get(&url).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("fetch failed: {e}")),
+    };
+    if !resp.status().is_success() {
+        return err(StatusCode::BAD_GATEWAY, &format!("HTTP {}", resp.status()));
+    }
+    let spec_json: Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("invalid JSON: {e}")),
+    };
+    let spec_text = match serde_json::to_string(&spec_json) {
+        Ok(s) => s,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let path_count = spec_json["paths"].as_object().map(|p| p.len() as u32);
+    let cached_at = chrono::Utc::now().to_rfc3339();
+    let updated = db::OpenApiSpecRow {
+        name: row.name.clone(),
+        url: row.url.clone(),
+        source_mcp: row.source_mcp.clone(),
+        spec_json: Some(spec_text),
+        cached_at: Some(cached_at.clone()),
+        enabled: row.enabled,
+    };
+    if let Err(e) = db::upsert_openapi_spec(&conn, &updated) {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+    }
+    Json(SpecInfo {
+        name: row.name,
+        url: row.url,
+        source_mcp: row.source_mcp,
+        path_count,
+        cached_at: Some(cached_at),
+        enabled: row.enabled,
+    })
+    .into_response()
+}
+
+// ── DELETE /api/specs/{name}/unregister ──────────────────────────────────────
+
+#[utoipa::path(
+    delete,
+    path = "/api/specs/{name}/unregister",
+    operation_id = "unregisterSpec",
+    params(
+        ("name" = String, Path, description = "Spec name to unregister"),
+    ),
+    responses(
+        (status = 200, description = "Spec removed from DB", body = OkResponse),
+        (status = 404, description = "Spec not found", body = ErrorResponse),
+    ),
+    tag = "specs"
+)]
+pub async fn specs_unregister_handler(Path(name): Path<String>) -> Response {
+    if !validate_repo(&name) {
+        return err(StatusCode::BAD_REQUEST, "invalid spec name");
+    }
+    let conn = match db::open_default() {
+        Ok(c) => c,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    match db::remove_openapi_spec(&conn, &name) {
+        Ok(true) => Json(OkResponse { ok: true }).into_response(),
+        Ok(false) => err(StatusCode::NOT_FOUND, &format!("no spec named '{name}'")),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+// ── GET /api/specs/db ─────────────────────────────────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/api/specs/db",
+    operation_id = "listDbSpecs",
+    responses(
+        (status = 200, description = "All URL-registered specs from brain.db", body = Vec<SpecInfo>),
+    ),
+    tag = "specs"
+)]
+pub async fn specs_db_list_handler() -> Response {
+    let conn = match db::open_default() {
+        Ok(c) => c,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let rows = match db::list_openapi_specs(&conn) {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let infos: Vec<SpecInfo> = rows
+        .into_iter()
+        .map(|r| {
+            let path_count = r.spec_json.as_deref()
+                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                .and_then(|v| v["paths"].as_object().map(|p| p.len() as u32));
+            SpecInfo {
+                name: r.name,
+                url: r.url,
+                source_mcp: r.source_mcp,
+                path_count,
+                cached_at: r.cached_at,
+                enabled: r.enabled,
+            }
+        })
+        .collect();
+    Json(infos).into_response()
 }
