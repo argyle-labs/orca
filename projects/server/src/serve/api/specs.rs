@@ -245,7 +245,23 @@ pub async fn specs_get_handler(
             }
         }
     }
-    err(StatusCode::NOT_FOUND, &format!("no spec registered for '{repo}'"))
+    // Spec file missing — attempt a background sync via the brain CLI.
+    // The CLI is authoritative on which repos are syncable; if unsupported it exits non-zero
+    // and the next request will still 404. Return 202 so the client can retry.
+    let exe = std::env::current_exe().unwrap_or_else(|_| "brain".into());
+    let repo_clone = repo.clone();
+    tokio::spawn(async move {
+        let _ = tokio::process::Command::new(&exe)
+            .args(["spec", "sync", &repo_clone])
+            .output()
+            .await;
+    });
+    (
+        StatusCode::ACCEPTED,
+        [("content-type", "application/json")],
+        format!(r#"{{"generating":true,"repo":"{repo}","message":"Spec not found — generating now, retry in a few seconds"}}"#),
+    )
+        .into_response()
 }
 
 #[utoipa::path(

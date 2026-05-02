@@ -6,7 +6,8 @@ use clap::Subcommand;
 pub enum SchemaAction {
     /// List all registered schema databases
     List,
-    /// Add a schema database to brain.db
+    /// Add a schema database to orca.db
+
     Add {
         /// Display name
         name: String,
@@ -29,7 +30,7 @@ pub enum SchemaAction {
         #[arg(long)]
         domains_file: Option<String>,
     },
-    /// Remove a schema database from brain.db
+    /// Remove a schema database from orca.db
     Remove {
         name: String,
     },
@@ -41,7 +42,7 @@ pub fn cmd_schema(action: SchemaAction) -> Result<()> {
             let conn = db::open_default()?;
             let dbs = db::list_schema_databases(&conn)?;
             if dbs.is_empty() {
-                println!("No schema databases registered. Use `brain schema add` to add one.");
+                println!("No schema databases registered. Use `orca schema add` to add one.");
             } else {
                 println!("Schema databases:");
                 for d in &dbs {
@@ -71,7 +72,7 @@ pub fn cmd_schema(action: SchemaAction) -> Result<()> {
             };
             let conn = db::open_default()?;
             db::upsert_schema_database(&conn, &row)?;
-            println!("added schema database '{name}' to brain.db");
+            println!("added schema database '{name}' to orca.db");
             Ok(())
         }
         SchemaAction::Remove { name } => {
@@ -79,7 +80,7 @@ pub fn cmd_schema(action: SchemaAction) -> Result<()> {
             if db::remove_schema_database(&conn, &name)? {
                 println!("removed '{name}'");
             } else {
-                println!("'{name}' not found in brain.db");
+                println!("'{name}' not found in orca.db");
             }
             Ok(())
         }

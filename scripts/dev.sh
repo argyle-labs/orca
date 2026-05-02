@@ -110,7 +110,7 @@ BRAIN_LOG=trace cargo watch -q -c -C projects/server \
   while IFS= read -r line; do
     echo "[server]   $line"
     echo "$line" | grep -q "listening on" && \
-      (sleep 0.5 && brain gen 2>&1 | sed 's/^/[gen]      /') &
+      (sleep 0.5 && brain gen 2>&1 | sed 's/^/[gen]      /') </dev/null &
   done &
 _SERVER_PID=$!
 

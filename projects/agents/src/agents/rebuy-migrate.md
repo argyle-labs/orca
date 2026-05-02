@@ -1,6 +1,6 @@
 ---
 name: rebuy-migrate
-description: Rebuy database migration specialist. Guides the full lifecycle — create, edit, test, lint, commit, and deploy — for rebuy-db MySQL migrations. Knows the safety rules cold. Use for any schema change to the rebuy MySQL database.
+description: "[MIGRATE TO REBUY ADAPTER] Source of truth: ~/code/brain/projects/adapters/rebuy/agents/rebuy-migrate.md. Rebuy database migration specialist — full lifecycle for rebuy-db MySQL migrations."
 tools: Read, Glob, Grep, Bash
 model: inherit
 ---

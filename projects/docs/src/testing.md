@@ -5,8 +5,8 @@
 ```sh
 make test          # run all tests (vitest + cargo test)
 cargo test         # Rust tests only
-cd site && npx vitest run   # frontend tests only (vitest)
-cd site && npx playwright test  # e2e tests (playwright)
+cd projects/frontend && npx vitest run   # frontend tests only (vitest)
+cd projects/frontend && npx playwright test  # e2e tests (playwright)
 ```
 
 ## Rust tests
@@ -88,31 +88,35 @@ async fn my_async_test() {
 
 ### Vitest (unit / component)
 
-`make test` runs `npx vitest run` in the `site/` directory. Test files are `*.test.ts` or `*.test.tsx` co-located with the source they test.
+`make test` runs `npx vitest run` in `projects/frontend/`. Test files are `*.test.ts` co-located with the source they test. `@testing-library/svelte` is installed.
 
-**No frontend tests exist yet.** The components in `site/src/components/` and the data hooks in `site/src/hooks/` are the highest-value targets for coverage. Priority:
+Example Svelte component test (matches the existing `Button.test.ts` pattern):
 
-1. `MarkdownRenderer.tsx` — pure rendering logic, easy to snapshot test
-2. `SearchBar.tsx` / `SearchModal.tsx` — user interaction tests
-3. Custom hooks in `site/src/hooks/` — query result transformation logic
+```typescript
+// projects/frontend/src/lib/components/MyComponent.test.ts
+import { render } from '@testing-library/svelte';
+import MyComponent from './MyComponent.svelte';
 
-Adding a test:
-```tsx
-// site/src/components/MarkdownRenderer.test.tsx
-import { render, screen } from '@testing-library/react';
-import { MarkdownRenderer } from './MarkdownRenderer';
-
-test('renders markdown content', () => {
-  render(<MarkdownRenderer content="# Hello" />);
-  expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Hello');
+test('renders label', () => {
+  const { getByText } = render(MyComponent, { props: { label: 'Click me' } });
+  expect(getByText('Click me')).toBeTruthy();
 });
 ```
 
-You'll need to add `@testing-library/react` and `jsdom` to devDependencies when writing the first component test.
+Run with `svelte-check` first to catch template type errors that Vitest alone won't catch:
+
+```sh
+cd projects/frontend && npm run check && npm run test:run
+```
+
+Priority components for coverage:
+1. `Sidebar.svelte` — tree loading, collapse state, localStorage persistence
+2. `SearchModal.svelte` — keyboard interaction, query debounce
+3. `DataTable.svelte` — sort/filter logic
 
 ### Playwright (e2e)
 
-`package.json` includes `test:e2e` and `test:e2e:run` scripts. No e2e tests exist yet. Playwright tests would live in `site/e2e/` and test full user flows against a running `brain serve` instance.
+`package.json` includes `test:e2e` scripts. E2e tests would live in `projects/frontend/e2e/` and test full user flows against a running `brain serve` instance. Not yet written.
 
 ## What is NOT tested
 

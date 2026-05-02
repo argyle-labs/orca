@@ -10,13 +10,42 @@ use super::mcp_client::McpPool;
 pub type McpState = Arc<McpPool>;
 
 pub fn err(code: StatusCode, msg: &str) -> Response {
-    (
-        code,
-        Json(ErrorResponse {
-            error: msg.to_string(),
-        }),
-    )
-        .into_response()
+    (code, Json(ErrorResponse { error: msg.to_string() })).into_response()
+}
+
+/// Run a DB closure and return the result as JSON, or a 500 on error.
+pub fn db_json<T, F>(f: F) -> Response
+where
+    T: serde::Serialize,
+    F: FnOnce() -> anyhow::Result<T>,
+{
+    match f() {
+        Ok(val) => Json(val).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+/// Run a DB closure that returns `()` and respond with `{ ok: true }`, or 500.
+pub fn db_ok<F>(f: F) -> Response
+where
+    F: FnOnce() -> anyhow::Result<()>,
+{
+    match f() {
+        Ok(()) => Json(OkResponse { ok: true }).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+/// Run a DB remove closure (returns `bool` = found) and respond with ok/404/500.
+pub fn db_remove<F>(kind: &str, name: &str, f: F) -> Response
+where
+    F: FnOnce() -> anyhow::Result<bool>,
+{
+    match f() {
+        Ok(true) => Json(OkResponse { ok: true }).into_response(),
+        Ok(false) => err(StatusCode::NOT_FOUND, &format!("{kind} '{name}' not found")),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
 }
 
 // ── Shared response schemas ───────────────────────────────────────────────────
@@ -281,7 +310,7 @@ pub struct TestRunResponse {
 // `super::SomeType` inside a utoipa macro; always import it via this prelude.
 pub(super) mod prelude {
     #[allow(unused_imports)]
-    pub use super::{DockerRuntimeAddRequest, DockerRuntimeInfo, ErrorResponse, McpServerAddRequest, McpServerInfo, McpState, OkResponse, SchemaDbAddRequest, SchemaDbInfo, SpecInfo, SpecRegisterRequest, err};
+    pub use super::{DockerRuntimeAddRequest, DockerRuntimeInfo, ErrorResponse, McpServerAddRequest, McpServerInfo, McpState, OkResponse, SchemaDbAddRequest, SchemaDbInfo, SpecInfo, SpecRegisterRequest, db_json, db_ok, db_remove, err};
 }
 
 // ── Sub-modules ───────────────────────────────────────────────────────────────

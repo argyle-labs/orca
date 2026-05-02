@@ -1,3 +1,8 @@
+//! Shared data types used across all brain crates.
+//!
+//! These are the canonical wire types — every backend and tool converts to/from these.
+//! Keeping them in `brain-utils` (the leaf crate) prevents circular dependencies.
+
 use serde::{Deserialize, Serialize};
 
 /// Canonical internal message representation.
@@ -15,6 +20,7 @@ pub enum Message {
 }
 
 impl Message {
+    /// Construct a user-role message.
     pub fn user(content: impl Into<String>) -> Self {
         Message::User {
             content: content.into(),
@@ -22,17 +28,23 @@ impl Message {
     }
 }
 
+/// A model-requested tool invocation — name, id, and JSON input from the model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
+    /// Opaque identifier the model uses to correlate results back to this call.
     pub id: String,
     pub name: String,
+    /// Raw JSON arguments as returned by the model.
     pub input: serde_json::Value,
 }
 
+/// The result of executing a tool, returned to the model in the next turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
+    /// Must match the `id` from the originating `ToolCall`.
     pub tool_use_id: String,
     pub content: String,
+    /// Set `true` when the tool failed — the model will see the error and can recover.
     pub is_error: bool,
 }
 
@@ -46,11 +58,15 @@ pub struct BackendResponse {
     pub stop_reason: StopReason,
 }
 
+/// Why the model stopped generating — determines whether to execute tools or end the turn.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum StopReason {
+    /// Normal completion — no tool calls, session can continue or end.
     #[default]
     EndTurn,
+    /// Model emitted tool calls — execute them and send results back.
     ToolUse,
+    /// Context window exhausted — may need to summarize or truncate history.
     MaxTokens,
 }
 

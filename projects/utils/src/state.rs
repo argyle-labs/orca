@@ -1,17 +1,28 @@
+//! Daemon state file: cooperative port handoff between stable daemon and dev server.
+//!
+//! `DaemonState` is written to `~/.brain/state.json`. The dev server reads it to find
+//! the daemon's PID, sends SIGUSR1 to park it, then reclaims with SIGUSR2 on exit.
+//! All writes go through a tmp-then-rename so readers never see a torn file.
+
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+/// Current operating mode of the `brain` process that owns the port.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DaemonMode {
+    /// Stable background daemon — handles all traffic.
     Daemon,
+    /// Parked by SIGUSR1 — port released, waiting for SIGUSR2 to reclaim.
     Parked,
+    /// Dev server has the port — hot reload active.
     Dev,
 }
 
+/// Persisted runtime state for the brain daemon/dev handoff protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonState {
     /// PID of the stable daemon process — persists across park/dev cycles
@@ -26,6 +37,7 @@ pub struct DaemonState {
     pub started_at: DateTime<Utc>,
 }
 
+/// Canonical path for the daemon state file: `~/.brain/state.json`.
 pub fn state_path() -> PathBuf {
     dirs::home_dir()
         .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
@@ -72,18 +84,22 @@ pub(crate) fn set_mode_at(path: &Path, mode: DaemonMode) -> Result<()> {
 
 // ── public API (thin wrappers over the path-parameterised internals) ──────────
 
+/// Read the current daemon state, or `None` if the state file does not exist.
 pub fn read() -> Result<Option<DaemonState>> {
     read_from(&state_path())
 }
 
+/// Persist daemon state to `~/.brain/state.json` (atomic write).
 pub fn write(state: &DaemonState) -> Result<()> {
     write_to(&state_path(), state)
 }
 
+/// Update only the `mode` field in the state file, leaving all other fields unchanged.
 pub fn set_mode(mode: DaemonMode) -> Result<()> {
     set_mode_at(&state_path(), mode)
 }
 
+/// Update only the `active_pid` field in the state file.
 pub fn set_active_pid(pid: u32) -> Result<()> {
     if let Some(mut s) = read()? {
         s.active_pid = pid;
@@ -92,6 +108,7 @@ pub fn set_active_pid(pid: u32) -> Result<()> {
     Ok(())
 }
 
+/// Remove the state file (called on clean shutdown).
 pub fn clear() -> Result<()> {
     clear_at(&state_path())
 }

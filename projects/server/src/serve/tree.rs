@@ -54,7 +54,6 @@ pub fn get_ignored(root_name: &str) -> HashSet<String> {
             "build",
             "vendor",
             "www",
-            "docs",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -87,7 +86,6 @@ pub fn get_search_ignored(root_name: &str) -> HashSet<String> {
             "build",
             "vendor",
             "www",
-            "docs",
         ]
         .iter()
         .map(|s| s.to_string())

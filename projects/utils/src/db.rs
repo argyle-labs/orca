@@ -1,7 +1,19 @@
+//! Encrypted SQLite database (`brain.db`) — the runtime registry for all dynamic config.
+//!
+//! `open_default()` is the standard entry point. It opens (or creates) `~/.brain/brain.db`,
+//! applies the SQLCipher encryption key, runs `apply_schema` to ensure all tables exist,
+//! then applies any pending schema migrations via `run_pending_migrations`.
+//!
+//! Adding a new registry feature means adding a table in `apply_schema`, CRUD helpers at
+//! the bottom of this file, and a migration entry in `MIGRATIONS` if the table was added
+//! to an already-deployed database.
+
 use anyhow::{Context, Result};
 use rand::RngCore;
 use rusqlite::Connection;
 use std::path::Path;
+
+use crate::consts::{APP_DB_FILE, APP_STATE_DIR};
 
 /// Open (or create) the encrypted brain database.
 ///
@@ -28,6 +40,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
 
     apply_schema(&conn)?;
+    run_pending_migrations(&conn)?;
 
     Ok(conn)
 }
@@ -35,8 +48,133 @@ pub fn open(path: &Path) -> Result<Connection> {
 /// Open brain database using the default path (`~/brain/brain.db`).
 pub fn open_default() -> Result<Connection> {
     let home = dirs::home_dir().context("no home dir")?;
-    let path = home.join(".brain").join("brain.db");
+    let path = home.join(APP_STATE_DIR).join(APP_DB_FILE);
     open(&path)
+}
+
+// ── Migrations ───────────────────────────────────────────────────────────────
+
+/// Direction to migrate: one step up or one step down.
+pub enum MigrateDirection {
+    Up,
+    Down,
+}
+
+struct Migration {
+    version: u32,
+    description: &'static str,
+    up: &'static str,
+    /// `None` means the migration cannot be reversed (e.g. SQLite DROP COLUMN unavailable).
+    down: Option<&'static str>,
+}
+
+/// All schema migrations in version order.
+///
+/// Rules:
+/// - Never modify an existing entry — add new entries at the end.
+/// - `up` must be idempotent-safe: use `IF NOT EXISTS`, `IF EXISTS`, or handle
+///   `duplicate column` errors in `run_pending_migrations`.
+/// - `down` is `None` when rollback is impossible (SQLite < 3.35 has no DROP COLUMN).
+static MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        description: "add url column to docker_runtimes",
+        up: "ALTER TABLE docker_runtimes ADD COLUMN url TEXT;",
+        down: None,
+    },
+    Migration {
+        version: 2,
+        description: "rename orca_tool column to orca_tool in mcp_tool_mappings",
+        up: "ALTER TABLE mcp_tool_mappings RENAME COLUMN orca_tool TO orca_tool;",
+        down: None,
+    },
+];
+
+/// Return the currently applied migration version (0 = baseline, no migrations run).
+pub fn schema_version(conn: &Connection) -> Result<u32> {
+    Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
+}
+
+/// Total number of migrations defined (applied + pending combined).
+pub fn migration_count() -> usize {
+    MIGRATIONS.len()
+}
+
+/// Run pending up-migrations automatically after `apply_schema`.
+///
+/// Handles the "duplicate column" case for `ALTER TABLE ADD COLUMN` migrations so
+/// existing databases that were mutated by the pre-migration `let _` hack continue
+/// to work.
+fn run_pending_migrations(conn: &Connection) -> Result<()> {
+    migrate(conn, MigrateDirection::Up, usize::MAX)?;
+    Ok(())
+}
+
+/// Apply or revert migrations.
+///
+/// - `Up` with `steps = usize::MAX` runs all pending migrations (idiomatic for startup).
+/// - `Up` with `steps = 1` applies the next pending migration.
+/// - `Down` with `steps = 1` reverts the most recently applied migration.
+///
+/// Returns the new `user_version` after all steps are applied.
+pub fn migrate(conn: &Connection, direction: MigrateDirection, steps: usize) -> Result<u32> {
+    let current = schema_version(conn)?;
+
+    match direction {
+        MigrateDirection::Up => {
+            let pending: Vec<&Migration> = MIGRATIONS
+                .iter()
+                .filter(|m| m.version > current)
+                .take(steps)
+                .collect();
+
+            if pending.is_empty() {
+                eprintln!("  nothing to migrate (schema at v{current})");
+            }
+
+            for m in pending {
+                if let Err(e) = conn.execute_batch(m.up) {
+                    let msg = e.to_string().to_lowercase();
+                    if msg.contains("duplicate column") || msg.contains("already exists") {
+                        // Column/table already present — idempotent, mark as done.
+                    } else {
+                        return Err(anyhow::anyhow!("migration v{} failed: {e}", m.version));
+                    }
+                }
+                conn.execute_batch(&format!("PRAGMA user_version = {};", m.version))?;
+                eprintln!("  ↑  v{}: {}", m.version, m.description);
+            }
+        }
+
+        MigrateDirection::Down => {
+            let to_rollback: Vec<&Migration> = MIGRATIONS
+                .iter()
+                .filter(|m| m.version <= current)
+                .rev()
+                .take(steps)
+                .collect();
+
+            if to_rollback.is_empty() {
+                eprintln!("  nothing to roll back (schema at v{current})");
+            }
+
+            for m in to_rollback {
+                match m.down {
+                    Some(sql) => {
+                        conn.execute_batch(sql)?;
+                        eprintln!("  ↓  v{}: {}", m.version, m.description);
+                    }
+                    None => {
+                        eprintln!("  ~  v{}: no down migration — {}", m.version, m.description);
+                    }
+                }
+                let new_version = m.version.saturating_sub(1);
+                conn.execute_batch(&format!("PRAGMA user_version = {};", new_version))?;
+            }
+        }
+    }
+
+    schema_version(conn)
 }
 
 // ── Schema ───────────────────────────────────────────────────────────────────
@@ -90,7 +228,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         );
 
         CREATE TABLE IF NOT EXISTS mcp_tool_mappings (
-            brain_tool      TEXT PRIMARY KEY,
+            orca_tool      TEXT PRIMARY KEY,
             mcp_name        TEXT NOT NULL REFERENCES mcp_servers(name) ON DELETE CASCADE,
             external_tool   TEXT NOT NULL,
             match_type      TEXT NOT NULL DEFAULT 'explicit',
@@ -133,10 +271,20 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             enabled     INTEGER NOT NULL DEFAULT 1,
             created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         );
+
+        CREATE TABLE IF NOT EXISTS plugins (
+            id                TEXT PRIMARY KEY,
+            manifest_path     TEXT NOT NULL,
+            tier              TEXT NOT NULL DEFAULT 'personal',
+            mcp_command       TEXT,
+            mcp_args          TEXT NOT NULL DEFAULT '[]',
+            mcp_env           TEXT NOT NULL DEFAULT '{}',
+            context_injection TEXT NOT NULL DEFAULT 'minimal',
+            enabled           INTEGER NOT NULL DEFAULT 1,
+            created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
         ",
     )?;
-    // Idempotent column migration for DBs created before the url column existed
-    let _ = conn.execute_batch("ALTER TABLE docker_runtimes ADD COLUMN url TEXT;");
     Ok(())
 }
 
@@ -149,15 +297,15 @@ fn apply_schema(conn: &Connection) -> Result<()> {
 /// so the user knows they need to restore the key rather than destroying their data.
 fn load_or_create_key() -> Result<String> {
     let home = dirs::home_dir().context("no home dir")?;
-    let key_path = home.join(".brain").join(".db_key");
+    let key_path = home.join(APP_STATE_DIR).join(".db_key");
 
     if key_path.exists() {
         let raw = std::fs::read_to_string(&key_path)
-            .context("failed to read ~/.brain/.db_key — restore from backup or run `brain db reset` to wipe and start fresh")?;
+            .context("failed to read ~/.orca/.db_key — restore from backup or run `orca db reset` to wipe and start fresh")?;
         let key = raw.trim().to_string();
         anyhow::ensure!(
             key.len() == 64 && key.chars().all(|c| c.is_ascii_hexdigit()),
-            "~/.brain/.db_key is corrupt (expected 64 hex chars) — restore from backup"
+            "~/.orca/.db_key is corrupt (expected 64 hex chars) — restore from backup"
         );
         return Ok(key);
     }
@@ -174,7 +322,7 @@ fn load_or_create_key() -> Result<String> {
     if let Some(parent) = key_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&key_path, &hex).context("failed to write ~/.brain/.db_key")?;
+    std::fs::write(&key_path, &hex).context("failed to write ~/.orca/.db_key")?;
 
     // Restrict to owner-read/write only (0600)
     #[cfg(unix)]
@@ -183,7 +331,7 @@ fn load_or_create_key() -> Result<String> {
         std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
     }
 
-    tracing::info!("generated new DB encryption key at ~/.brain/.db_key — back this up alongside brain.db");
+    tracing::info!("generated new DB encryption key at ~/.orca/.db_key — back this up alongside orca.db");
     Ok(hex)
 }
 
@@ -637,7 +785,7 @@ pub fn remove_openapi_spec(conn: &Connection, name: &str) -> Result<bool> {
 
 #[derive(Debug, Clone)]
 pub struct McpToolMappingRow {
-    pub brain_tool: String,
+    pub orca_tool: String,
     pub mcp_name: String,
     pub external_tool: String,
     pub match_type: String,
@@ -647,12 +795,12 @@ pub struct McpToolMappingRow {
 
 pub fn list_mcp_tool_mappings(conn: &Connection, mcp_name: &str) -> Result<Vec<McpToolMappingRow>> {
     let mut stmt = conn.prepare(
-        "SELECT brain_tool, mcp_name, external_tool, match_type, confidence, enabled
-         FROM mcp_tool_mappings WHERE mcp_name = ?1 ORDER BY brain_tool",
+        "SELECT orca_tool, mcp_name, external_tool, match_type, confidence, enabled
+         FROM mcp_tool_mappings WHERE mcp_name = ?1 ORDER BY orca_tool",
     )?;
     let rows = stmt.query_map(rusqlite::params![mcp_name], |row| {
         Ok(McpToolMappingRow {
-            brain_tool: row.get(0)?,
+            orca_tool: row.get(0)?,
             mcp_name: row.get(1)?,
             external_tool: row.get(2)?,
             match_type: row.get(3)?,
@@ -665,12 +813,12 @@ pub fn list_mcp_tool_mappings(conn: &Connection, mcp_name: &str) -> Result<Vec<M
 
 pub fn all_mcp_tool_mappings(conn: &Connection) -> Result<Vec<McpToolMappingRow>> {
     let mut stmt = conn.prepare(
-        "SELECT brain_tool, mcp_name, external_tool, match_type, confidence, enabled
-         FROM mcp_tool_mappings WHERE enabled = 1 ORDER BY brain_tool",
+        "SELECT orca_tool, mcp_name, external_tool, match_type, confidence, enabled
+         FROM mcp_tool_mappings WHERE enabled = 1 ORDER BY orca_tool",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(McpToolMappingRow {
-            brain_tool: row.get(0)?,
+            orca_tool: row.get(0)?,
             mcp_name: row.get(1)?,
             external_tool: row.get(2)?,
             match_type: row.get(3)?,
@@ -681,13 +829,13 @@ pub fn all_mcp_tool_mappings(conn: &Connection) -> Result<Vec<McpToolMappingRow>
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
 
-pub fn lookup_mcp_mapping(conn: &Connection, brain_tool: &str) -> Result<Option<McpToolMappingRow>> {
+pub fn lookup_mcp_mapping(conn: &Connection, orca_tool: &str) -> Result<Option<McpToolMappingRow>> {
     let result = conn.query_row(
-        "SELECT brain_tool, mcp_name, external_tool, match_type, confidence, enabled
-         FROM mcp_tool_mappings WHERE brain_tool = ?1 AND enabled = 1",
-        rusqlite::params![brain_tool],
+        "SELECT orca_tool, mcp_name, external_tool, match_type, confidence, enabled
+         FROM mcp_tool_mappings WHERE orca_tool = ?1 AND enabled = 1",
+        rusqlite::params![orca_tool],
         |row| Ok(McpToolMappingRow {
-            brain_tool: row.get(0)?,
+            orca_tool: row.get(0)?,
             mcp_name: row.get(1)?,
             external_tool: row.get(2)?,
             match_type: row.get(3)?,
@@ -704,34 +852,168 @@ pub fn lookup_mcp_mapping(conn: &Connection, brain_tool: &str) -> Result<Option<
 
 pub fn upsert_mcp_tool_mapping(conn: &Connection, row: &McpToolMappingRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO mcp_tool_mappings (brain_tool, mcp_name, external_tool, match_type, confidence, enabled)
+        "INSERT INTO mcp_tool_mappings (orca_tool, mcp_name, external_tool, match_type, confidence, enabled)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(brain_tool) DO UPDATE SET
+         ON CONFLICT(orca_tool) DO UPDATE SET
              mcp_name      = excluded.mcp_name,
              external_tool = excluded.external_tool,
              match_type    = excluded.match_type,
              confidence    = excluded.confidence,
              enabled       = excluded.enabled",
         rusqlite::params![
-            row.brain_tool, row.mcp_name, row.external_tool,
+            row.orca_tool, row.mcp_name, row.external_tool,
             row.match_type, row.confidence, row.enabled as i32
         ],
     )?;
     Ok(())
 }
 
-pub fn remove_mcp_tool_mapping(conn: &Connection, brain_tool: &str) -> Result<bool> {
+pub fn remove_mcp_tool_mapping(conn: &Connection, orca_tool: &str) -> Result<bool> {
     let n = conn.execute(
-        "DELETE FROM mcp_tool_mappings WHERE brain_tool = ?1",
-        rusqlite::params![brain_tool],
+        "DELETE FROM mcp_tool_mappings WHERE orca_tool = ?1",
+        rusqlite::params![orca_tool],
     )?;
     Ok(n > 0)
 }
 
-pub fn set_mcp_tool_mapping_enabled(conn: &Connection, brain_tool: &str, enabled: bool) -> Result<bool> {
+pub fn set_mcp_tool_mapping_enabled(conn: &Connection, orca_tool: &str, enabled: bool) -> Result<bool> {
     let n = conn.execute(
-        "UPDATE mcp_tool_mappings SET enabled = ?1 WHERE brain_tool = ?2",
-        rusqlite::params![enabled as i32, brain_tool],
+        "UPDATE mcp_tool_mappings SET enabled = ?1 WHERE orca_tool = ?2",
+        rusqlite::params![enabled as i32, orca_tool],
+    )?;
+    Ok(n > 0)
+}
+
+// ── Plugin registry ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct PluginRow {
+    pub id: String,
+    pub manifest_path: String,
+    pub tier: String,
+    pub mcp_command: Option<String>,
+    pub mcp_args: Vec<String>,
+    pub mcp_env: std::collections::HashMap<String, String>,
+    pub context_injection: String,
+    pub enabled: bool,
+}
+
+pub fn list_plugins(conn: &Connection) -> Result<Vec<PluginRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, manifest_path, tier, mcp_command, mcp_args, mcp_env, context_injection, enabled
+         FROM plugins ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, i32>(7)?,
+        ))
+    })?;
+    let mut result = Vec::new();
+    for r in rows {
+        let (id, manifest_path, tier, mcp_command, args_json, env_json, context_injection, enabled) = r?;
+        let mcp_args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
+        let mcp_env: std::collections::HashMap<String, String> =
+            serde_json::from_str(&env_json).unwrap_or_default();
+        result.push(PluginRow {
+            id,
+            manifest_path,
+            tier,
+            mcp_command,
+            mcp_args,
+            mcp_env,
+            context_injection,
+            enabled: enabled != 0,
+        });
+    }
+    Ok(result)
+}
+
+pub fn get_plugin(conn: &Connection, id: &str) -> Result<Option<PluginRow>> {
+    let result = conn.query_row(
+        "SELECT id, manifest_path, tier, mcp_command, mcp_args, mcp_env, context_injection, enabled
+         FROM plugins WHERE id = ?1",
+        rusqlite::params![id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, i32>(7)?,
+            ))
+        },
+    );
+    match result {
+        Ok((id, manifest_path, tier, mcp_command, args_json, env_json, context_injection, enabled)) => {
+            let mcp_args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
+            let mcp_env: std::collections::HashMap<String, String> =
+                serde_json::from_str(&env_json).unwrap_or_default();
+            Ok(Some(PluginRow {
+                id,
+                manifest_path,
+                tier,
+                mcp_command,
+                mcp_args,
+                mcp_env,
+                context_injection,
+                enabled: enabled != 0,
+            }))
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn upsert_plugin(conn: &Connection, plugin: &PluginRow) -> Result<()> {
+    let args_json = serde_json::to_string(&plugin.mcp_args).unwrap_or_else(|_| "[]".into());
+    let env_json = serde_json::to_string(&plugin.mcp_env).unwrap_or_else(|_| "{}".into());
+    conn.execute(
+        "INSERT INTO plugins (id, manifest_path, tier, mcp_command, mcp_args, mcp_env, context_injection, enabled)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(id) DO UPDATE SET
+             manifest_path     = excluded.manifest_path,
+             tier              = excluded.tier,
+             mcp_command       = excluded.mcp_command,
+             mcp_args          = excluded.mcp_args,
+             mcp_env           = excluded.mcp_env,
+             context_injection = excluded.context_injection,
+             enabled           = excluded.enabled",
+        rusqlite::params![
+            plugin.id,
+            plugin.manifest_path,
+            plugin.tier,
+            plugin.mcp_command,
+            args_json,
+            env_json,
+            plugin.context_injection,
+            plugin.enabled as i32,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn remove_plugin(conn: &Connection, id: &str) -> Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM plugins WHERE id = ?1",
+        rusqlite::params![id],
+    )?;
+    Ok(n > 0)
+}
+
+pub fn set_plugin_enabled(conn: &Connection, id: &str, enabled: bool) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE plugins SET enabled = ?1 WHERE id = ?2",
+        rusqlite::params![enabled as i32, id],
     )?;
     Ok(n > 0)
 }

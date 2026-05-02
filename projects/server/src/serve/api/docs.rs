@@ -175,17 +175,24 @@ pub async fn doc_handler(Query(params): Query<DocQuery>) -> Response {
     let Some(root_dir) = roots.get(&params.root) else {
         return err(StatusCode::BAD_REQUEST, "unknown root");
     };
-    let full = root_dir.join(&params.path);
-    if !full.starts_with(root_dir) {
-        return err(StatusCode::FORBIDDEN, "path traversal");
+    // Try exact path, then with .md / .mdx extensions (sidebar strips extensions from URLs)
+    let candidates = [
+        root_dir.join(&params.path),
+        root_dir.join(format!("{}.md", params.path)),
+        root_dir.join(format!("{}.mdx", params.path)),
+    ];
+    for full in &candidates {
+        if !full.starts_with(root_dir) {
+            return err(StatusCode::FORBIDDEN, "path traversal");
+        }
+        if let Ok(content) = std::fs::read_to_string(full) {
+            return (
+                StatusCode::OK,
+                [("content-type", "text/plain; charset=utf-8")],
+                apply(content),
+            )
+                .into_response();
+        }
     }
-    match std::fs::read_to_string(&full) {
-        Ok(content) => (
-            StatusCode::OK,
-            [("content-type", "text/plain; charset=utf-8")],
-            apply(content),
-        )
-            .into_response(),
-        Err(_) => err(StatusCode::NOT_FOUND, "not found"),
-    }
+    err(StatusCode::NOT_FOUND, "not found")
 }

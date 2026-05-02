@@ -1,6 +1,6 @@
 ---
 name: boar
-description: BOD development environment operations via the carl CLI. Use for starting/stopping dev environment, building containers, running migrations, deploying, checking vulnerabilities, managing kubernetes contexts, or any carl command.
+description: "[MIGRATE TO REBUY ADAPTER] Source of truth: ~/code/brain/projects/adapters/rebuy/agents/boar.md. BOD development environment operations via the carl CLI."
 tools: Bash, Read
 model: inherit
 color: red

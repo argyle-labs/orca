@@ -1,9 +1,38 @@
-/// CI4 OpenAPI generator — Option B: parse route files + JSON schemas directly,
-/// no changes to admin-api source required.
+//! CI4 (CodeIgniter 4) OpenAPI spec generator.
+//!
+//! Produces an OpenAPI 3.1.0 document by static analysis of the admin-api PHP
+//! source — no PHP runtime required.
+//!
+//! ## Five-pass architecture
+//!
+//! The CI4 admin-api uses several distinct patterns for request validation and
+//! response serialization.  A single-pass approach would miss most of them, so
+//! the generator refines the spec incrementally:
+//!
+//! | Pass | Covers | Source |
+//! |------|--------|--------|
+//! | 1 | Route paths, HTTP methods, auth filters, JSON-Schema request bodies | `app/Config/Routes/*.php` + `app/Schemas/*.json` |
+//! | 2 | Typed request bodies for write routes (Payload DTO or `getJSON` fields) | Controller source |
+//! | 3 | Typed response wrappers declared with `#[ApiResponse(Class::class)]` | Controller attribute + response class source |
+//! | 4 | Response schemas from `->setJSON([literal array])` return statements; engine-proxy routes marked `data: array` | Controller source (AST-free, string scan) |
+//! | 5 | Response schemas via 3-hop trace: `$var->toArray()` → model `$returnType` → entity `$casts` | Controller + model + entity sources |
+//!
+//! Routes that survive all passes without a typed schema fall back to
+//! `#/components/schemas/ApiResponse` — the generic envelope.
+//!
+//! ## AST-first, string fallback
+//!
+//! When the `php-ast` Cargo feature is enabled, each pass delegates to
+//! [`crate::php_parse::PhpFile`] for accurate tree-sitter-based extraction.
+//! When the feature is disabled (or `PhpFile::parse` returns `None` due to a
+//! parse error), the string-scanning fallback functions below take over.
+//! This means the scanner compiles and works in all configurations; the AST
+//! path simply produces higher-fidelity results.
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use crate::php_parse::PhpFile;
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
@@ -183,17 +212,144 @@ pub fn generate(repo_path: &Path) -> Result<Value> {
 
         if let Some((cname, schema)) = resolved {
             components_schemas.insert(cname.clone(), schema);
+            // Wrap the data class inside an ApiResponse envelope schema.
+            let wrapped_cname = format!("ApiResponse{cname}");
+            components_schemas.insert(wrapped_cname.clone(), json!({
+                "type": "object",
+                "properties": {
+                    "successful": { "type": "boolean" },
+                    "data": { "$ref": format!("#/components/schemas/{cname}") },
+                    "status": { "type": "integer" },
+                    "errorMessage": { "type": ["string", "null"] }
+                }
+            }));
             if let Some(path_item) = paths.get_mut(&oas_path) {
                 let method = route.method.as_str();
                 path_item[method]["responses"]["200"] = json!({
                     "description": "Success",
                     "content": {
                         "application/json": {
-                            "schema": { "$ref": format!("#/components/schemas/{cname}") }
+                            "schema": { "$ref": format!("#/components/schemas/{wrapped_cname}") }
                         }
                     }
                 });
             }
+        }
+    }
+
+    // ── Pass 4: setJSON literal array schema + engine proxy ──────────────────
+    for route in &routes {
+        let oas_path = ci4_path_to_oas(&route.path);
+        let is_generic = paths.get(&oas_path)
+            .and_then(|p| p[route.method.as_str()].get("responses"))
+            .and_then(|r| r["200"]["content"]["application/json"]["schema"]["$ref"].as_str())
+            .map(|r| r == "#/components/schemas/ApiResponse")
+            .unwrap_or(false);
+        if !is_generic { continue; }
+        if route.controller.is_empty() { continue; }
+
+        let method_name = route.controller.rsplit("::").next().unwrap_or("").to_string();
+        let Some(ctrl_path) = resolve_controller_file(repo_path, &route.controller) else { continue };
+        let Ok(ctrl_src) = std::fs::read_to_string(&ctrl_path) else { continue };
+        let Some(body) = extract_method_body(&ctrl_src, &method_name) else { continue };
+
+        if body.contains("setEngineResponseData(") {
+            if let Some(path_item) = paths.get_mut(&oas_path) {
+                path_item[route.method.as_str()]["responses"]["200"] = json!({
+                    "description": "Success",
+                    "content": { "application/json": { "schema": engine_proxy_response() } }
+                });
+            }
+            continue;
+        }
+
+        // Try AST extraction first; fall back to string scan.
+        let schema = if let Some(php) = PhpFile::parse(&ctrl_src) {
+            php.set_json_schema(&method_name).map(|props| json!({
+                "type": "object",
+                "properties": Value::Object(props)
+            }))
+        } else {
+            infer_set_json_schema(body)
+        };
+        if let Some(schema) = schema {
+            if let Some(path_item) = paths.get_mut(&oas_path) {
+                path_item[route.method.as_str()]["responses"]["200"] = json!({
+                    "description": "Success",
+                    "content": { "application/json": { "schema": schema } }
+                });
+            }
+        }
+    }
+
+    // ── Pass 5: sendResponse(data: $var->toArray()) → entity $casts ──────────
+    for route in &routes {
+        let oas_path = ci4_path_to_oas(&route.path);
+        let is_generic = paths.get(&oas_path)
+            .and_then(|p| p[route.method.as_str()].get("responses"))
+            .and_then(|r| r["200"]["content"]["application/json"]["schema"]["$ref"].as_str())
+            .map(|r| r == "#/components/schemas/ApiResponse")
+            .unwrap_or(false);
+        if !is_generic { continue; }
+        if route.controller.is_empty() { continue; }
+
+        let method_name = route.controller.rsplit("::").next().unwrap_or("").to_string();
+        let Some(ctrl_path) = resolve_controller_file(repo_path, &route.controller) else { continue };
+        let Ok(ctrl_src) = std::fs::read_to_string(&ctrl_path) else { continue };
+        let Some(body) = extract_method_body(&ctrl_src, &method_name) else { continue };
+
+        // Try AST var extraction first; fall back to string scan.
+        let var_name = if let Some(php) = PhpFile::parse(&ctrl_src) {
+            php.send_response_to_array_var(&method_name)
+        } else {
+            find_send_response_var_to_array(body)
+        };
+        let Some(var_name) = var_name else { continue };
+
+        // Entity file tracing is a multi-file hop — still string-based.
+        let Some((entity_class, entity_file)) =
+            trace_var_to_entity_file(body, &ctrl_src, &var_name, repo_path) else { continue };
+        let Ok(entity_src) = std::fs::read_to_string(&entity_file) else { continue };
+
+        // Try AST $casts extraction first; fall back to string scan.
+        let entity_schema = if let Some(php) = PhpFile::parse(&entity_src) {
+            php.casts_array().map(|casts| {
+                let mut props = serde_json::Map::new();
+                for (k, v) in &casts {
+                    props.insert(
+                        crate::php_parse::snake_to_camel(k),
+                        crate::php_parse::ci4_cast_to_json_schema(v),
+                    );
+                }
+                json!({ "type": "object", "properties": props })
+            })
+        } else {
+            extract_casts_schema(&entity_src)
+        };
+        let Some(entity_schema) = entity_schema else { continue };
+
+        let has_props = entity_schema["properties"].as_object().map(|p| !p.is_empty()).unwrap_or(false);
+        if !has_props { continue; }
+
+        let wrapped_name = format!("ApiResponse{entity_class}");
+        components_schemas.entry(entity_class.clone()).or_insert(entity_schema);
+        components_schemas.entry(wrapped_name.clone()).or_insert_with(|| json!({
+            "type": "object",
+            "properties": {
+                "successful": { "type": "boolean" },
+                "data": { "$ref": format!("#/components/schemas/{entity_class}") },
+                "status": { "type": "integer" },
+                "errorMessage": { "type": ["string", "null"] }
+            }
+        }));
+
+        if let Some(path_item) = paths.get_mut(&oas_path) {
+            path_item[route.method.as_str()]["responses"]["200"] = json!({
+                "description": "Success",
+                "content": { "application/json": {
+                    "schema": { "$ref": format!("#/components/schemas/{wrapped_name}") }
+                }}
+            });
         }
     }
 
@@ -204,7 +360,7 @@ pub fn generate(repo_path: &Path) -> Result<Value> {
             "type": "object",
             "properties": {
                 "successful": { "type": "boolean" },
-                "data": {},
+                "data": { "description": "Response payload — type varies by endpoint" },
                 "status":    { "type": "integer" },
                 "errorMessage": { "type": ["string", "null"] }
             }
@@ -270,7 +426,20 @@ fn visit_dir(dir: &Path, out: &mut Vec<Ci4Route>) -> Result<()> {
             visit_dir(&path, out)?;
         } else if path.extension().and_then(|e| e.to_str()) == Some("php") {
             let src = std::fs::read_to_string(&path)?;
-            parse_routes(&src, out);
+            // Prefer AST-based extraction; fall back to string scanning when
+            // the php-ast feature is disabled or tree-sitter can't parse the file.
+            if let Some(php) = PhpFile::parse(&src) {
+                for r in php.route_registrations() {
+                    out.push(Ci4Route {
+                        method: r.method,
+                        path: r.path,
+                        filters: r.filters,
+                        controller: r.controller,
+                    });
+                }
+            } else {
+                parse_routes(&src, out);
+            }
         }
     }
     Ok(())
@@ -323,6 +492,10 @@ fn parse_routes(src: &str, out: &mut Vec<Ci4Route>) {
 }
 
 /// Extract balanced delimiters content (not including the delimiters).
+/// Extract the content between the first matched pair of `open`/`close`
+/// delimiters in `src`, where `src` must start with `open`.
+/// Returns the inner content (not including the delimiters themselves).
+/// Used to isolate PHP argument lists `(...)` and array literals `[...]`.
 fn extract_balanced(src: &str, open: char, close: char) -> Option<&str> {
     let mut chars = src.char_indices();
     let (_, first) = chars.next()?;
@@ -343,6 +516,10 @@ fn extract_balanced(src: &str, open: char, close: char) -> Option<&str> {
     None
 }
 
+/// Parse a single `$routes->METHOD(...)` call body into a `Ci4Route`.
+/// The first quoted string is the path, the second is the controller ref
+/// (stripped of capture-group suffixes like `/$1`), and the third argument
+/// (if present) is the options array from which we extract auth filters.
 fn parse_route_call(method: &str, call: &str) -> Option<Ci4Route> {
     // call is the content inside the outer parens, e.g.:
     //   'admin/api/v1/shop', 'Api\V1\Shop::getShopObject', ['filter' => ['auth']]
@@ -436,6 +613,11 @@ fn extract_second_quoted(src: &str) -> Option<String> {
     None
 }
 
+/// Extract the string values from the `'filter'` key of a CI4 route options
+/// array.  The filter list drives both auth security requirements
+/// (`auth`, `shop-admin`, …) and JSON-Schema body validation
+/// (`json-schema:/V1/Foo/Bar.json`).  Both are single-string and array forms:
+/// `'filter' => 'auth'` and `'filter' => ['auth', 'csrf']`.
 fn extract_filters(src: &str) -> Vec<String> {
     // Find 'filter' => [...] and extract the quoted strings inside
     let mut filters = Vec::new();
@@ -582,6 +764,9 @@ fn path_params(ci4_path: &str) -> Value {
 
 // ── Auth → security ───────────────────────────────────────────────────────────
 
+/// Map CI4 auth filter names to OAS security requirement objects.
+/// admin-api uses several filter names that all imply bearer token auth;
+/// routes without any recognised auth filter get no security requirement.
 fn auth_security(filters: &[String]) -> Vec<Value> {
     let has_auth = filters.iter().any(|f| {
         f.starts_with("auth") || f == "shop-admin" || f == "rebuy-admin" || f == "auth-clt"
@@ -615,6 +800,9 @@ fn standard_responses() -> Value {
 
 // ── Tags ──────────────────────────────────────────────────────────────────────
 
+/// Derive an OAS tag from a CI4 path.  We strip the versioned API prefix
+/// (`admin/api/v1/`) and use the first remaining segment as the domain tag
+/// so that Swagger UI and API consumers can group by resource type.
 fn path_tag(ci4_path: &str) -> String {
     // Use the first meaningful path segment after "admin/api/v1/" or "admin/api/v2/"
     for prefix in &["admin/api/v1/", "admin/api/v2/", "admin/api/"] {
@@ -929,6 +1117,322 @@ fn namespace_to_path(repo_path: &Path, ns: &str) -> Option<PathBuf> {
     None
 }
 
+// ── Pass 4/5 helpers ──────────────────────────────────────────────────────────
+
+/// Inline engine-proxy response schema: data is a runtime-assembled array
+/// from the engine layer — we can't know the element shape without deep tracing.
+fn engine_proxy_response() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "successful": { "type": "boolean" },
+            "data": { "type": "array", "items": {} },
+            "status": { "type": "integer" },
+            "errorMessage": { "type": ["string", "null"] }
+        }
+    })
+}
+
+/// Find the best-typed schema from `->setJSON([literal array])` return
+/// statements in a method body.  Picks the schema with the most properties
+/// (the "richest" success path).
+///
+/// Handles both single-line `->setJSON([` and multiline `->setJSON(\n    [`
+/// formats — the latter is common in the admin-api reports controllers.
+fn infer_set_json_schema(body: &str) -> Option<Value> {
+    let mut best: serde_json::Map<String, Value> = serde_json::Map::new();
+    for call_pat in &["->setJSON(", "->setJson("] {
+        let mut pos = 0;
+        while let Some(rel) = body[pos..].find(call_pat) {
+            let after_paren = pos + rel + call_pat.len();
+            // Skip whitespace (including newlines) between `(` and `[`
+            let trimmed = body[after_paren..].trim_start();
+            if trimmed.starts_with('[') {
+                let array_start = after_paren + (body[after_paren..].len() - trimmed.len());
+                if let Some(inner) = extract_balanced(&body[array_start..], '[', ']') {
+                    let props = parse_php_array_schema(inner);
+                    if props.len() > best.len() {
+                        best = props;
+                    }
+                }
+            }
+            pos += rel + 1;
+        }
+    }
+    if best.is_empty() { return None; }
+    Some(json!({ "type": "object", "properties": best }))
+}
+
+/// Parse a PHP associative array body (content between `[` and `]`) into a
+/// JSON Schema `properties` map.  Only processes literal scalar values to
+/// infer types; variables are emitted as `{}` (unknown).
+fn parse_php_array_schema(inner: &str) -> serde_json::Map<String, Value> {
+    let mut props = serde_json::Map::new();
+    let mut remaining = inner;
+    loop {
+        let qp = match remaining.find(|c: char| c == '\'' || c == '"') {
+            Some(p) => p,
+            None => break,
+        };
+        let quote = remaining.as_bytes()[qp] as char;
+        let after = &remaining[qp + 1..];
+        let Some(key_end) = find_closing_quote(after, quote) else { break };
+        let key = &after[..key_end];
+        if key.is_empty() { remaining = &after[key_end + 1..]; continue; }
+
+        let after_key = after[key_end + 1..].trim_start();
+        if !after_key.starts_with("=>") { remaining = after_key; continue; }
+        let val_src = after_key[2..].trim_start();
+
+        props.insert(key.to_string(), infer_php_literal_schema(val_src));
+        remaining = skip_php_value_to_comma(val_src);
+    }
+    props
+}
+
+/// Find the closing quote character in `src`, skipping backslash escapes.
+fn find_closing_quote(src: &str, quote: char) -> Option<usize> {
+    let mut i = 0;
+    let bytes = src.as_bytes();
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if c == '\\' { i += 2; continue; }
+        if c == quote { return Some(i); }
+        i += 1;
+    }
+    None
+}
+
+/// Map a PHP literal value to a JSON Schema type fragment.
+/// Variables and expressions not recognizable at parse time emit `{}`.
+fn infer_php_literal_schema(val: &str) -> Value {
+    if val.starts_with("true") || val.starts_with("false") {
+        json!({ "type": "boolean" })
+    } else if val.starts_with(['\'', '"']) {
+        json!({ "type": "string" })
+    } else if val.starts_with(|c: char| c.is_ascii_digit()) {
+        if val.contains('.') { json!({ "type": "number" }) } else { json!({ "type": "integer" }) }
+    } else if val.starts_with("null") {
+        json!({ "type": "null" })
+    } else if val.starts_with('[') {
+        json!({ "type": "array" })
+    } else {
+        json!({})
+    }
+}
+
+/// Advance past the current PHP value to the character after the next
+/// depth-0 comma, or to "" if the array ends.
+fn skip_php_value_to_comma(src: &str) -> &str {
+    let mut depth: i32 = 0;
+    let mut in_str = false;
+    let mut str_char = '\0';
+    let bytes = src.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if in_str {
+            if c == '\\' { i += 2; continue; }
+            if c == str_char { in_str = false; }
+        } else {
+            match c {
+                '\'' | '"' => { in_str = true; str_char = c; }
+                '[' | '(' | '{' => depth += 1,
+                ']' | ')' | '}' => { depth -= 1; if depth < 0 { return &src[i..]; } }
+                ',' if depth == 0 => return &src[i + 1..],
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    ""
+}
+
+/// Locate `sendResponse(data: $varName->toArray(` and return `varName`.
+/// Named-argument form is standard in CI4 admin-api controllers.
+fn find_send_response_var_to_array(body: &str) -> Option<String> {
+    let mut search = body;
+    while let Some(rel) = search.find("sendResponse(") {
+        let after_sr = &search[rel + "sendResponse(".len()..];
+        if let Some(data_rel) = after_sr.find("data:") {
+            // Guard: ensure no unmatched `)` between sendResponse( and data:
+            let depth: i32 = after_sr[..data_rel]
+                .chars()
+                .map(|c| match c { '(' => 1, ')' => -1, _ => 0 })
+                .sum();
+            if depth >= 0 {
+                let after_data = after_sr[data_rel + "data:".len()..].trim_start();
+                if let Some(v) = extract_var_to_array(after_data) {
+                    return Some(v);
+                }
+            }
+        }
+        search = &search[rel + 1..];
+    }
+    None
+}
+
+/// If `src` starts with `$varName->toArray(`, return `varName`.
+fn extract_var_to_array(src: &str) -> Option<String> {
+    if !src.starts_with('$') { return None; }
+    let rest = &src[1..];
+    let var_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(rest.len());
+    let var_name = &rest[..var_end];
+    if var_name.is_empty() { return None; }
+    let after_var = rest[var_end..].trim_start();
+    if after_var.starts_with("->") && after_var[2..].trim_start().starts_with("toArray(") {
+        return Some(var_name.to_string());
+    }
+    None
+}
+
+/// 3-hop trace: `$var` → `$model->method()` → `new ModelClass()` →
+/// `$returnType = Entity::class` → entity file.
+/// Falls back to `$var = new Entity()` (1-hop).
+fn trace_var_to_entity_file(
+    body: &str,
+    ctrl_src: &str,
+    var_name: &str,
+    repo_path: &Path,
+) -> Option<(String, PathBuf)> {
+    let assign_pat = format!("${var_name} = $");
+    if let Some(pos) = body.find(&assign_pat) {
+        let after = &body[pos + assign_pat.len()..];
+        let model_end = after.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after.len());
+        let model_var = &after[..model_end];
+        if !model_var.is_empty() {
+            if let Some(r) = resolve_via_model(body, ctrl_src, model_var, repo_path) {
+                return Some(r);
+            }
+        }
+    }
+    let new_pat = format!("${var_name} = new ");
+    if let Some(pos) = body.find(&new_pat) {
+        let after = &body[pos + new_pat.len()..];
+        let class_end = after.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '\\').unwrap_or(after.len());
+        let class_name = &after[..class_end];
+        if !class_name.is_empty() {
+            if let Some(f) = resolve_class_file(repo_path, class_name, ctrl_src) {
+                let ec = class_name.split('\\').last().unwrap_or(class_name).to_string();
+                return Some((ec, f));
+            }
+        }
+    }
+    None
+}
+
+/// `$modelVar = new ModelClass()` → read `$returnType` → resolve entity.
+fn resolve_via_model(
+    body: &str,
+    ctrl_src: &str,
+    model_var: &str,
+    repo_path: &Path,
+) -> Option<(String, PathBuf)> {
+    let new_pat = format!("${model_var} = new ");
+    let pos = body.find(&new_pat)?;
+    let after = &body[pos + new_pat.len()..];
+    let class_end = after.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '\\').unwrap_or(after.len());
+    let model_class = &after[..class_end];
+    if model_class.is_empty() { return None; }
+
+    let model_file = resolve_class_file(repo_path, model_class, ctrl_src)?;
+    let model_src = std::fs::read_to_string(&model_file).ok()?;
+
+    let full_entity = extract_return_type(&model_src)?;
+    let entity_class = full_entity.split('\\').last().unwrap_or(&full_entity).to_string();
+    let entity_file = resolve_class_file(repo_path, &full_entity, &model_src)?;
+    Some((entity_class, entity_file))
+}
+
+/// Extract `protected $returnType = ClassName::class` (or quoted form) from a
+/// CI4 model source.
+fn extract_return_type(src: &str) -> Option<String> {
+    let needle = "protected $returnType = ";
+    let pos = src.find(needle)?;
+    let after = src[pos + needle.len()..].trim_start();
+    if let Some(cc) = after.find("::class") {
+        let class = after[..cc].trim().trim_start_matches('\\');
+        if !class.is_empty() { return Some(class.to_string()); }
+    }
+    if after.starts_with(['\'', '"']) {
+        let q = after.as_bytes()[0] as char;
+        if let Some(end) = find_closing_quote(&after[1..], q) {
+            return Some(after[1..end + 1].to_string());
+        }
+    }
+    None
+}
+
+/// Resolve a simple class name (or FQN) to a filesystem path, honouring
+/// `use ClassName as Alias` imports in `src_with_uses`.
+fn resolve_class_file(repo_path: &Path, class_name: &str, src_with_uses: &str) -> Option<PathBuf> {
+    if class_name.contains('\\') {
+        let p = namespace_to_path(repo_path, class_name)?;
+        return p.exists().then_some(p);
+    }
+    for line in src_with_uses.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("use ") { continue; }
+        let ns_raw = trimmed.trim_start_matches("use ").trim_end_matches(';').trim();
+        let (actual_ns, resolved_name) = if let Some(as_pos) = ns_raw.find(" as ") {
+            (ns_raw[..as_pos].trim(), ns_raw[as_pos + " as ".len()..].trim())
+        } else {
+            let last = ns_raw.split('\\').last().unwrap_or("");
+            (ns_raw, last)
+        };
+        if resolved_name != class_name { continue; }
+        if let Some(p) = namespace_to_path(repo_path, actual_ns) {
+            if p.exists() { return Some(p); }
+        }
+    }
+    None
+}
+
+/// Parse `protected $casts = [...]` from a CI4 Entity source into a JSON
+/// Schema properties map.  Keys are snake_case → camelCase converted.
+/// CI4 cast types: `?int`, `?string`, `?datetime`, `?json-array`, etc.
+fn extract_casts_schema(entity_src: &str) -> Option<Value> {
+    let needle = "protected $casts = [";
+    let pos = entity_src.find(needle)?;
+    let array_start = pos + needle.len() - 1;
+    let inner = extract_balanced(&entity_src[array_start..], '[', ']')?;
+
+    let mut properties = serde_json::Map::new();
+    let mut remaining = inner;
+    loop {
+        let qp = match remaining.find(|c: char| c == '\'' || c == '"') {
+            Some(p) => p,
+            None => break,
+        };
+        let quote = remaining.as_bytes()[qp] as char;
+        let after = &remaining[qp + 1..];
+        let Some(key_end) = find_closing_quote(after, quote) else { break };
+        let key = &after[..key_end];
+        if key.is_empty() { remaining = &after[key_end + 1..]; continue; }
+
+        let after_key = after[key_end + 1..].trim_start();
+        if !after_key.starts_with("=>") { remaining = after_key; continue; }
+        let val_src = after_key[2..].trim_start();
+
+        if val_src.starts_with(['\'', '"']) {
+            let vq = val_src.as_bytes()[0] as char;
+            if let Some(val_end) = find_closing_quote(&val_src[1..], vq) {
+                let cast_type = &val_src[1..val_end + 1];
+                properties.insert(
+                    crate::php_parse::snake_to_camel(key),
+                    crate::php_parse::ci4_cast_to_json_schema(cast_type),
+                );
+                remaining = skip_php_value_to_comma(&val_src[val_end + 2..]);
+                continue;
+            }
+        }
+        remaining = skip_php_value_to_comma(val_src);
+    }
+
+    if properties.is_empty() { return None; }
+    Some(json!({ "type": "object", "properties": properties }))
+}
+
 /// Extract a JSON Schema from a PHP Payload class source.
 fn extract_payload_schema(payload_src: &str) -> Value {
     let skip_fields = ["id", "owner"];
@@ -980,6 +1484,9 @@ fn extract_payload_schema(payload_src: &str) -> Value {
     Value::Object(schema)
 }
 
+/// Map PHP scalar type hints to JSON Schema type strings.
+/// Used for Payload class property inference; does not handle nullable (`?`)
+/// since that's handled by the caller via `required` array presence.
 fn php_type_to_json(php_type: &str) -> &'static str {
     match php_type {
         "int" | "integer" => "integer",

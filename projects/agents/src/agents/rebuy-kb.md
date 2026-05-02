@@ -1,6 +1,6 @@
 ---
 name: rebuy-kb
-description: Rebuy platform knowledge base. Routes questions about any of the 10 repos in ~/code/rebuy to the right context skill or specialist. First stop for any rebuy codebase question — identifies the target repo and loads context on demand.
+description: "[MIGRATE TO REBUY ADAPTER] Source of truth: ~/code/brain/projects/adapters/rebuy/agents/rebuy-kb.md. Rebuy platform knowledge base — routes questions to the right context skill for any of the 10 rebuy repos."
 tools: Read, Glob, Grep, Bash, Agent
 model: inherit
 ---

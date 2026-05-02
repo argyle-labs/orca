@@ -1,3 +1,12 @@
+//! Model backend abstraction for the brain binary.
+//!
+//! `ModelBackend` is the core trait all LLM clients implement.
+//! `build_backend()` is the factory — everything else in the codebase interacts
+//! only with `Box<dyn ModelBackend>`, never with concrete backend types.
+//!
+//! `OutputSink` is the streaming output target: stdout for interactive sessions,
+//! a memory buffer (`buffer_sink`) for background jobs.
+
 use brain_utils::config::{Config, Model};
 use brain_utils::types::{BackendResponse, Message, ToolDef};
 use anyhow::{Context, Result};

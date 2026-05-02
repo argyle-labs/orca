@@ -1,7 +1,7 @@
-.PHONY: build install deploy dev run watch clean check release audit lint format test daemon-install daemon-uninstall kill-dev
+.PHONY: build install deploy dev run watch clean check release audit lint format test daemon-install daemon-uninstall kill-dev migrate up down
 
-INSTALL_PATH := $(HOME)/.local/bin/brain
-ENV_TPL      := .env.brain.tpl
+INSTALL_PATH := $(HOME)/.local/bin/orca
+ENV_TPL      := .env.orca.tpl
 
 # Local overrides (gitignored) — use OP_ACCOUNT here to select the correct 1P account
 -include .env.local
@@ -15,43 +15,43 @@ OP_RUN := op run --account $(OP_ACCOUNT) --env-file $(ENV_TPL) --
 # Build frontend + release binary (single self-contained binary with embedded assets)
 build:
 	cargo build --manifest-path projects/server/Cargo.toml
-	target/debug/brain spec dump > /tmp/brain-openapi.json
-	target/debug/brain spec sync --all || true
-	cd projects/frontend && npm ci && npx tsx scripts/gen.ts --file /tmp/brain-openapi.json && npm run build
+	target/debug/orca spec dump > /tmp/orca-openapi.json
+	target/debug/orca spec sync --all || true
+	cd projects/frontend && npm ci && npx tsx scripts/gen.ts --file /tmp/orca-openapi.json && npm run build
 	cargo build --release --manifest-path projects/server/Cargo.toml
-	@echo "built → target/release/brain"
+	@echo "built → target/release/orca"
 
 # Refresh external rebuy specs without a full build — useful between rebuys
 specs:
 	cargo build --manifest-path projects/server/Cargo.toml
-	target/debug/brain spec sync --all
+	target/debug/orca spec sync --all
 
-# Kill all dev processes (cargo-watch, op run dev.sh, brain serve --dev, dev daemon)
+# Kill all dev processes (cargo-watch, op run dev.sh, orca serve --dev, dev daemon)
 kill-dev:
 	@echo "→ killing dev processes..."
 	@pkill -f 'cargo-watch.*projects/server' 2>/dev/null || true
-	@pkill -f 'op run --env-file .env.brain.tpl' 2>/dev/null || true
+	@pkill -f 'op run --env-file .env.orca.tpl' 2>/dev/null || true
 	@pkill -f 'scripts/dev.sh' 2>/dev/null || true
-	@pkill -f 'brain serve --dev' 2>/dev/null || true
-	@pkill -f 'brain daemon start' 2>/dev/null || true
+	@pkill -f 'orca serve --dev' 2>/dev/null || true
+	@pkill -f 'orca daemon start' 2>/dev/null || true
 	@sleep 1
 	@echo "→ dev processes cleared"
 
 # Build release binary and deploy to current system (~/.local/bin/brain)
 deploy: kill-dev build
-	cp target/release/brain $(INSTALL_PATH)
+	cp target/release/orca $(INSTALL_PATH)
 	codesign --force --sign - $(INSTALL_PATH)
 	$(INSTALL_PATH) daemon install
 	@echo "deployed → $(INSTALL_PATH)"
 
 # Build debug binary and install to ~/.local/bin/brain (dev workflow, no frontend embed)
 install-dev:
-	cargo build --manifest-path projects/server/Cargo.toml 2>&1 && cp target/debug/brain $(INSTALL_PATH) && echo "installed → $(INSTALL_PATH)"
+	cargo build --manifest-path projects/server/Cargo.toml 2>&1 && cp target/debug/orca $(INSTALL_PATH) && echo "installed → $(INSTALL_PATH)"
 
 # Watch for changes and rebuild+install on save (requires cargo-watch)
 # Install with: cargo install cargo-watch
 watch:
-	cargo watch -C projects/server -x 'build' -s 'cp target/debug/brain $(INSTALL_PATH) && echo "→ reloaded"'
+	cargo watch -C projects/server -x 'build' -s 'cp target/debug/orca $(INSTALL_PATH) && echo "→ reloaded"'
 
 # Just check for compile errors without linking
 check:
@@ -69,11 +69,37 @@ run:
 # Build and install as a system daemon (launchd on macOS, systemd on Linux)
 daemon-install: deploy
 	$(INSTALL_PATH) daemon install
-	@echo "daemon installed — check status with: brain daemon status"
+	@echo "daemon installed — check status with: orca daemon status"
 
 # Remove daemon service file and stop the service
 daemon-uninstall:
 	$(INSTALL_PATH) daemon uninstall
+
+# Database migrations
+# Usage:
+#   make migrate        — apply all pending migrations
+#   make migrate up     — apply one migration step up
+#   make migrate down   — revert one migration step down
+#   make migrate status — show current schema version
+#
+# $(MAKECMDGOALS) contains all targets from the command line.
+# When the user runs "make migrate up", both 'migrate' and 'up' are goals;
+# 'migrate' reads UP_OR_DOWN and dispatches accordingly, 'up'/'down' are no-ops.
+UP_OR_DOWN := $(filter up down status,$(MAKECMDGOALS))
+
+migrate:
+ifeq ($(UP_OR_DOWN),up)
+	$(INSTALL_PATH) db up
+else ifeq ($(UP_OR_DOWN),down)
+	$(INSTALL_PATH) db down
+else ifeq ($(UP_OR_DOWN),status)
+	$(INSTALL_PATH) db status
+else
+	$(INSTALL_PATH) db migrate
+endif
+
+up down status:
+	@: # handled by the migrate target above
 
 clean:
 	cargo clean --manifest-path projects/server/Cargo.toml
@@ -130,9 +156,9 @@ install:
 	@echo "→ frontend deps..."
 	@cd projects/frontend && npm install
 	@echo "→ shopify admin graphql schema (2026-04)..."
-	@mkdir -p "$(HOME)/brain/openapi"
+	@mkdir -p "$(HOME)/.orca/openapi"
 	@npx --yes get-graphql-schema https://shopify.dev/admin-graphql-direct-proxy/2026-04 2>/dev/null \
-	  | grep -v "^npm " > "$(HOME)/brain/openapi/shopify-admin.graphql"
-	@echo "  updated → ~/brain/openapi/shopify-admin.graphql"
+	  | grep -v "^npm " > "$(HOME)/.orca/openapi/shopify-admin.graphql"
+	@echo "  updated → ~/.orca/openapi/shopify-admin.graphql"
 	@echo ""
 	@echo "ready — run 'make dev' to start, 'make deploy' to build and install"

@@ -1,17 +1,17 @@
 use anyhow::Result;
-use brain::context::ProjectContext;
-use brain::mcp;
-use brain::serve;
-use brain::serve::openapi_spec_json;
-use brain::session::Session;
-use brain_commands::{self as cmd, DaemonAction, DockerAction, LogAction, McpAction, SchemaAction, SpecAction, cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian, cmd_install, cmd_uninstall};
+use orca::context::ProjectContext;
+use orca::mcp;
+use orca::serve;
+use orca::serve::openapi_spec_json;
+use orca::session::Session;
+use brain_commands::{self as cmd, DaemonAction, DbAction, DockerAction, LogAction, McpAction, PluginAction, SchemaAction, SpecAction, cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian, cmd_install, cmd_uninstall};
 use brain_core::backend::{ClaudeBackend, ModelBackend, stdout_sink};
 use brain_utils::config::Config;
 use brain_utils::types::Message;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "brain", about = "Context-first AI agent orchestrator", version)]
+#[command(name = "orca", about = "Context-first AI agent orchestrator", version)]
 struct Cli {
     /// Project context to load (e.g. "halvor"). Omit for general session.
     #[arg(value_name = "PROJECT")]
@@ -138,6 +138,18 @@ enum Command {
         action: DockerAction,
     },
 
+    /// Manage Brain plugins (register, list, enable/disable)
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
+
+    /// Manage the brain.db schema (migrate, status)
+    Db {
+        #[command(subcommand)]
+        action: DbAction,
+    },
+
     /// Check for and apply updates from GitHub releases
     Update,
 
@@ -162,16 +174,16 @@ enum LoginService {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("BRAIN_LOG")
+            tracing_subscriber::EnvFilter::try_from_env("ORCA_LOG")
                 .unwrap_or_else(|_| {
-                    // Quiet external crates; only surface brain's own info/warn/error.
                     tracing_subscriber::EnvFilter::new(
-                        "warn,brain=info,tower_http=warn,axum=warn",
+                        "warn,orca=info,tower_http=warn,axum=warn",
                     )
                 }),
         )
         .with_target(false)
         .compact()
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();
@@ -219,6 +231,8 @@ async fn main() -> Result<()> {
         Some(Command::Mcp { action }) => cmd::cmd_mcp(action),
         Some(Command::Schema { action }) => cmd::cmd_schema(action),
         Some(Command::Docker { action }) => cmd::cmd_docker(action),
+        Some(Command::Plugin { action }) => cmd::cmd_plugin(action),
+        Some(Command::Db { action }) => cmd::cmd_db(action),
         Some(Command::Update) => cmd::cmd_update().await,
         Some(Command::Install) => cmd_install(),
         Some(Command::Uninstall) => cmd_uninstall(),

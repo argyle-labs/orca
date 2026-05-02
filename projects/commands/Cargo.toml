@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 brain-utils   = { path = "../utils" }
 brain-agents  = { path = "../agents" }
-brain-scanner = { path = "../scanner" }
+brain-scanner = { path = "../scanner", features = ["php-ast"] }
 brain-core    = { path = "../core" }
 
 anyhow = "1"

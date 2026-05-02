@@ -1,5 +1,6 @@
 use anyhow::Result;
 use brain_utils::config::Config;
+use brain_utils::consts::APP_NAME;
 use colored::Colorize;
 
 pub fn cmd_doctor(config: &Config) -> Result<()> {
@@ -9,14 +10,14 @@ pub fn cmd_doctor(config: &Config) -> Result<()> {
     // 1. Brain vault exists
     if config.brain_vault.exists() {
         println!(
-            "  {} brain vault: {}",
+            "  {} {APP_NAME} vault: {}",
             "✓".green(),
             config.brain_vault.display()
         );
         ok_count += 1;
     } else {
         issues.push(format!(
-            "brain vault not found at {}",
+            "{APP_NAME} vault not found at {}",
             config.brain_vault.display()
         ));
     }

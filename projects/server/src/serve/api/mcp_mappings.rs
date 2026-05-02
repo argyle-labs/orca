@@ -10,7 +10,7 @@ use super::prelude::*;
 
 #[derive(Serialize, ToSchema)]
 pub struct MappingRow {
-    pub brain_tool: String,
+    pub orca_tool: String,
     pub mcp_name: String,
     pub external_tool: String,
     pub match_type: String,
@@ -51,7 +51,7 @@ pub async fn mcp_mappings_list_handler(Query(q): Query<MappingsQuery>) -> Respon
                     let mapped: Vec<MappingRow> = rows
                         .into_iter()
                         .map(|r| MappingRow {
-                            brain_tool: r.brain_tool,
+                            orca_tool: r.orca_tool,
                             mcp_name: r.mcp_name,
                             external_tool: r.external_tool,
                             match_type: r.match_type,
@@ -71,7 +71,7 @@ pub async fn mcp_mappings_list_handler(Query(q): Query<MappingsQuery>) -> Respon
 #[derive(Deserialize, ToSchema)]
 pub struct MapRequest {
     pub name: String,
-    pub brain_tool: String,
+    pub orca_tool: String,
     pub external_tool: String,
 }
 
@@ -88,7 +88,7 @@ pub struct MapRequest {
 )]
 pub async fn mcp_mappings_create_handler(Json(body): Json<MapRequest>) -> Response {
     let row = brain_utils::db::McpToolMappingRow {
-        brain_tool: body.brain_tool.clone(),
+        orca_tool: body.orca_tool.clone(),
         mcp_name: body.name,
         external_tool: body.external_tool,
         match_type: "explicit".to_string(),
@@ -103,13 +103,13 @@ pub async fn mcp_mappings_create_handler(Json(body): Json<MapRequest>) -> Respon
     }
 }
 
-// ── DELETE /api/mcp/mappings/:brain_tool ──────────────────────────────────────
+// ── DELETE /api/mcp/mappings/:orca_tool ──────────────────────────────────────
 
 #[utoipa::path(
     delete,
-    path = "/api/mcp/mappings/{brain_tool}",
+    path = "/api/mcp/mappings/{orca_tool}",
     operation_id = "deleteMcpMapping",
-    params(("brain_tool" = String, Path, description = "Brain tool name to unmap")),
+    params(("orca_tool" = String, Path, description = "Orca tool name to unmap")),
     responses(
         (status = 200, body = OkResponse),
         (status = 404, body = ErrorResponse),
@@ -118,13 +118,13 @@ pub async fn mcp_mappings_create_handler(Json(body): Json<MapRequest>) -> Respon
     tag = "mcp"
 )]
 pub async fn mcp_mappings_delete_handler(
-    axum::extract::Path(brain_tool): axum::extract::Path<String>,
+    axum::extract::Path(orca_tool): axum::extract::Path<String>,
 ) -> Response {
     match brain_utils::db::open_default()
-        .and_then(|conn| brain_utils::db::remove_mcp_tool_mapping(&conn, &brain_tool))
+        .and_then(|conn| brain_utils::db::remove_mcp_tool_mapping(&conn, &orca_tool))
     {
         Ok(true) => Json(OkResponse { ok: true }).into_response(),
-        Ok(false) => err(StatusCode::NOT_FOUND, &format!("mapping '{brain_tool}' not found")),
+        Ok(false) => err(StatusCode::NOT_FOUND, &format!("mapping '{orca_tool}' not found")),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }

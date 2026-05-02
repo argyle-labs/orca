@@ -5,9 +5,9 @@ use std::collections::HashMap;
 
 #[derive(Subcommand, Debug)]
 pub enum McpAction {
-    /// List all registered MCP servers (brain.db + ~/.claude.json)
+    /// List all registered MCP servers (orca.db + ~/.claude.json)
     List,
-    /// Add an MCP server to brain.db
+    /// Add an MCP server to orca.db
     Add {
         /// Server name
         name: String,
@@ -21,7 +21,7 @@ pub enum McpAction {
         #[arg(long = "env", num_args = 0..)]
         env: Vec<String>,
     },
-    /// Remove an MCP server from brain.db
+    /// Remove an MCP server from orca.db
     Remove {
         name: String,
     },
@@ -30,14 +30,14 @@ pub enum McpAction {
         /// Registered MCP server name (e.g. rebuy)
         name: String,
         /// Brain tool name (the name callers use)
-        brain_tool: String,
+        orca_tool: String,
         /// External tool name on the MCP server
         external_tool: String,
     },
     /// Remove a tool mapping
     Unmap {
         /// Brain tool name to unmap
-        brain_tool: String,
+        orca_tool: String,
     },
     /// Discover or verify tool mappings for a registered MCP server
     Sync {
@@ -62,9 +62,9 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
             let conn = db::open_default()?;
             let servers = db::list_mcp_servers(&conn)?;
             if servers.is_empty() {
-                println!("brain.db servers: (none)");
+                println!("orca.db servers: (none)");
             } else {
-                println!("brain.db servers:");
+                println!("orca.db servers:");
                 for s in &servers {
                     println!("  {} → {} {}", s.name, s.command, s.args.join(" "));
                 }
@@ -95,7 +95,7 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
             let row = McpServerRow { name: name.clone(), command, args, env: env_map, enabled: true };
             let conn = db::open_default()?;
             db::upsert_mcp_server(&conn, &row)?;
-            println!("added {name} to brain.db");
+            println!("added {name} to orca.db");
             Ok(())
         }
         McpAction::Remove { name } => {
@@ -104,19 +104,19 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
             if removed {
                 println!("removed {name}");
             } else {
-                println!("{name} not found in brain.db");
+                println!("{name} not found in orca.db");
             }
             Ok(())
         }
 
-        McpAction::Map { name, brain_tool, external_tool } => {
+        McpAction::Map { name, orca_tool, external_tool } => {
             let conn = db::open_default()?;
             let servers = db::list_mcp_servers(&conn)?;
             if !servers.iter().any(|s| s.name == name) {
-                anyhow::bail!("MCP server '{name}' not found in brain.db — add it first with `brain mcp add`");
+                anyhow::bail!("MCP server '{name}' not found in orca.db — add it first with `orca mcp add`");
             }
             let row = db::McpToolMappingRow {
-                brain_tool: brain_tool.clone(),
+                orca_tool: orca_tool.clone(),
                 mcp_name: name.clone(),
                 external_tool: external_tool.clone(),
                 match_type: "explicit".to_string(),
@@ -124,24 +124,24 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
                 enabled: true,
             };
             db::upsert_mcp_tool_mapping(&conn, &row)?;
-            println!("mapped {brain_tool} → {name}::{external_tool}");
+            println!("mapped {orca_tool} → {name}::{external_tool}");
             Ok(())
         }
 
-        McpAction::Unmap { brain_tool } => {
+        McpAction::Unmap { orca_tool } => {
             let conn = db::open_default()?;
-            let removed = db::remove_mcp_tool_mapping(&conn, &brain_tool)?;
+            let removed = db::remove_mcp_tool_mapping(&conn, &orca_tool)?;
             if removed {
-                println!("unmapped {brain_tool}");
+                println!("unmapped {orca_tool}");
             } else {
-                println!("{brain_tool} not found in mcp_tool_mappings");
+                println!("{orca_tool} not found in mcp_tool_mappings");
             }
             Ok(())
         }
 
         McpAction::Sync { name, all, threshold } => {
             if !all && name.is_none() {
-                anyhow::bail!("usage: brain mcp sync <name> | --all");
+                anyhow::bail!("usage: orca mcp sync <name> | --all");
             }
             let conn = db::open_default()?;
             let servers = db::list_mcp_servers(&conn)?;
@@ -177,7 +177,7 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
             for r in &rows {
                 let conf = r.confidence.map(|c| format!(" [{:.0}%]", c * 100.0)).unwrap_or_default();
                 let status = if r.enabled { "" } else { " [disabled]" };
-                println!("  {} → {}::{}{}{}", r.brain_tool, r.mcp_name, r.external_tool, conf, status);
+                println!("  {} → {}::{}{}{}", r.orca_tool, r.mcp_name, r.external_tool, conf, status);
             }
             Ok(())
         }
@@ -207,7 +207,7 @@ pub fn mcp_sync_server(
     let init = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": { "protocolVersion": "2024-11-05", "capabilities": {},
-                    "clientInfo": { "name": "brain-sync", "version": "0.1.0" } }
+                    "clientInfo": { "name": "orca-sync", "version": "0.1.0" } }
     });
     writeln!(stdin, "{}", init)?;
     writeln!(stdin, "{}", serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))?;
@@ -239,7 +239,7 @@ pub fn mcp_sync_server(
     let existing = db::list_mcp_tool_mappings(&conn, &server.name)?;
     let already_mapped: std::collections::HashSet<String> = existing.iter()
         .filter(|r| r.match_type == "explicit")
-        .map(|r| r.brain_tool.clone())
+        .map(|r| r.orca_tool.clone())
         .collect();
 
     let mut added = 0usize;
@@ -249,7 +249,7 @@ pub fn mcp_sync_server(
         if already_mapped.contains(ext_name) { skipped += 1; continue; }
         if let Ok(Some(_)) = db::lookup_mcp_mapping(&conn, ext_name) { skipped += 1; continue; }
         let row = db::McpToolMappingRow {
-            brain_tool: ext_name.to_string(),
+            orca_tool: ext_name.to_string(),
             mcp_name: server.name.clone(),
             external_tool: ext_name.to_string(),
             match_type: "auto_discovered".to_string(),

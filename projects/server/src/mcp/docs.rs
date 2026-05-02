@@ -36,7 +36,7 @@ pub fn doc_roots(config: &Config) -> Vec<DocRoot> {
             .collect(),
         },
         DocRoot {
-            name: "brain",
+            name: "orca",
             path: config.brain_vault.clone(),
             ignored: [
                 ".git",
