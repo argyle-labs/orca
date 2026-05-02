@@ -10,7 +10,7 @@ const CLAUDE_MD: &str = include_str!("../../../CLAUDE.md");
 const MEMORY_PROJECTS: &[(&str, &str, &str)] = &[
     ("-Users-scottkey",                         "-home-skey",                              "global"),
     ("-Users-scottkey-code-orca",               "-home-skey-code-orca",                    "orca"),
-    ("-Users-scottkey-code-halvor",             "-home-skey-code-halvor",                  "halvor"),
+    ("-Users-scottkey-code-meerkat",            "-home-skey-code-meerkat",                 "meerkat"),
     ("-Users-scottkey-code-bardbase",           "-home-skey-code-bardbase",                "bardbase"),
     ("-Users-scottkey-dotfiles",                "-home-skey-dotfiles",                     "dotfiles"),
     ("-Users-scottkey-code-rebuy-bod",          "-home-skey-code-rebuy-bod",               "rebuy-bod-root"),

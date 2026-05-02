@@ -1,6 +1,6 @@
 ---
-name: halvor-deploy
-description: "[MIGRATE TO HALVOR PLUGIN] Source of truth: ~/code/halvor/agents/halvor-deploy.md. Halvor deploy workflow. Syncs the halvor repo to a target host and restarts the affected service."
+name: meerkat-deploy
+description: "[MEERKAT PLUGIN] Source of truth: ~/code/meerkat/agents/halvor-deploy.md. Halvor deploy workflow. Syncs the halvor repo to a target host and restarts the affected service."
 tools: Bash, Read
 model: inherit
 color: orange
@@ -33,15 +33,15 @@ If there are uncommitted changes, stop and tell the user to commit and push firs
 
 ### 3. Sync the repo on the target host
 
-The halvor repo is deployed to `/opt/halvor` on each Docker host:
+The halvor repo is deployed to `/opt/meerkat` on each Docker host:
 ```bash
-ssh root@<host> 'cd /opt/halvor && git pull'
+ssh root@<host> 'cd /opt/meerkat && git pull'
 ```
 
 ### 4. Restart the container
 
 ```bash
-ssh root@<host> 'docker compose -f /opt/halvor/compose/<service>/docker-compose.yml up -d'
+ssh root@<host> 'docker compose -f /opt/meerkat/compose/<service>/docker-compose.yml up -d'
 ```
 
 For simple restarts (no compose change):

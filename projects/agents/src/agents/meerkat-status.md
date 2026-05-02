@@ -1,6 +1,6 @@
 ---
-name: halvor-status
-description: "[MIGRATE TO HALVOR PLUGIN] Source of truth: ~/code/halvor/agents/halvor-status.md. Halvor homelab health sweep — stopped services, unhealthy containers, NFS mount state, backup status."
+name: meerkat-status
+description: "[MEERKAT PLUGIN] Source of truth: ~/code/meerkat/agents/halvor-status.md. Halvor homelab health sweep — stopped services, unhealthy containers, NFS mount state, backup status."
 tools: Bash, Read
 model: inherit
 color: green
