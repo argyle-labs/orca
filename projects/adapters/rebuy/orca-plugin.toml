@@ -1,0 +1,9 @@
+[plugin]
+id = "rebuy"
+version = "0.1.0"
+tier = "work"
+context_injection = "full"
+
+[plugin.mcp]
+command = "node"
+args = ["/Users/scottkey/code/rebuy/rebuy-cli-mcp-server/build/index.js"]

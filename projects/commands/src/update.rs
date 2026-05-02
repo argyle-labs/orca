@@ -6,10 +6,42 @@ use std::path::PathBuf;
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TARGET: &str = env!("ORCA_BUILD_TARGET");
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum Channel {
+    Stable,
+    Rc,
+    Beta,
+    Alpha,
+}
+
+impl Channel {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "rc"    => Self::Rc,
+            "beta"  => Self::Beta,
+            "alpha" => Self::Alpha,
+            _       => Self::Stable,
+        }
+    }
+
+    fn accepts(&self, tag: &str) -> bool {
+        match self {
+            // stable: only tags with no pre-release suffix
+            Self::Stable => !tag.contains('-'),
+            // rc: stable + rc tags
+            Self::Rc     => !tag.contains('-') || tag.contains("-rc."),
+            // beta: stable + rc + beta
+            Self::Beta   => !tag.contains('-') || tag.contains("-rc.") || tag.contains("-beta."),
+            // alpha: everything
+            Self::Alpha  => true,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct UpdateInfo {
     pub version: String,
-    pub asset_url: String,  // API URL (requires auth to download)
+    pub asset_url: String,
     pub checksum_url: String,
 }
 
@@ -25,36 +57,66 @@ struct Asset {
     url: String, // API asset URL
 }
 
-/// Check GitHub for a newer release. Returns None if already up to date.
+/// Check GitHub for a newer release on the given channel.
+/// Stable channel: skips any pre-release tags.
+/// Rc/beta/alpha: also accepts pre-releases of that tier and below.
 /// Requires GITHUB_TOKEN env var for private repo access.
-pub async fn check_for_update() -> Result<Option<UpdateInfo>> {
+pub async fn check_for_update(channel: &Channel) -> Result<Option<UpdateInfo>> {
     let token = match std::env::var("GITHUB_TOKEN") {
         Ok(t) if !t.is_empty() => t,
         _ => bail!("GITHUB_TOKEN not set — cannot check for updates"),
     };
 
-    let url = format!("{APP_REPO_API_URL}/releases/latest");
     let client = reqwest::Client::new();
-    let resp = client
-        .get(&url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("User-Agent", format!("{APP_NAME}/{CURRENT_VERSION}"))
-        .send()
-        .await
-        .context("GitHub API request failed")?;
 
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None); // no releases yet
-    }
+    // For stable we can use /releases/latest (always returns stable).
+    // For pre-release channels we must scan /releases (paginated list).
+    let releases: Vec<Release> = if *channel == Channel::Stable {
+        let url = format!("{APP_REPO_API_URL}/releases/latest");
+        let resp = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", format!("{APP_NAME}/{CURRENT_VERSION}"))
+            .send()
+            .await
+            .context("GitHub API request failed")?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        vec![resp.error_for_status()?.json().await?]
+    } else {
+        let url = format!("{APP_REPO_API_URL}/releases?per_page=20");
+        client
+            .get(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", format!("{APP_NAME}/{CURRENT_VERSION}"))
+            .send()
+            .await
+            .context("GitHub API request failed")?
+            .error_for_status()?
+            .json()
+            .await
+            .context("failed to parse releases JSON")?
+    };
 
-    let release: Release = resp
-        .error_for_status()
-        .context("GitHub API error")?
-        .json()
-        .await
-        .context("failed to parse release JSON")?;
+    // Find the best matching release for this channel
+    let release = releases
+        .into_iter()
+        .filter(|r| channel.accepts(&r.tag_name))
+        .max_by(|a, b| {
+            let va = a.tag_name.trim_start_matches('v');
+            let vb = b.tag_name.trim_start_matches('v');
+            semver_cmp(va, vb)
+        });
+
+    let release = match release {
+        Some(r) => r,
+        None => return Ok(None),
+    };
 
     let latest = release.tag_name.trim_start_matches('v');
     if !is_newer(latest, CURRENT_VERSION) {
@@ -69,7 +131,7 @@ pub async fn check_for_update() -> Result<Option<UpdateInfo>> {
         .iter()
         .find(|a| a.name == asset_name)
         .map(|a| a.url.clone())
-        .with_context(|| format!("no asset named '{asset_name}' in release {}", release.tag_name))?;
+        .with_context(|| format!("no asset '{asset_name}' in release {}", release.tag_name))?;
 
     let checksum_url = release
         .assets
@@ -139,11 +201,17 @@ pub async fn apply_update(info: &UpdateInfo) -> Result<()> {
     Ok(())
 }
 
-pub async fn cmd_update() -> Result<()> {
-    println!("[orca] current version: v{CURRENT_VERSION} ({BUILD_TARGET})");
+pub async fn cmd_update(channel: Channel) -> Result<()> {
+    let channel_label = match &channel {
+        Channel::Stable => "stable".to_string(),
+        Channel::Rc     => "rc".to_string(),
+        Channel::Beta   => "beta".to_string(),
+        Channel::Alpha  => "alpha".to_string(),
+    };
+    println!("[orca] current version: v{CURRENT_VERSION} ({BUILD_TARGET}, channel={channel_label})");
     println!("[orca] checking for updates...");
 
-    match check_for_update().await? {
+    match check_for_update(&channel).await? {
         None => println!("[orca] already up to date"),
         Some(info) => {
             println!("[orca] new version available: v{}", info.version);
@@ -154,12 +222,12 @@ pub async fn cmd_update() -> Result<()> {
     Ok(())
 }
 
-/// Non-blocking startup update check — just prints a notice, does not download.
+/// Non-blocking startup update check (stable only) — prints a notice, does not download.
 pub async fn startup_update_check() {
     if std::env::var("GITHUB_TOKEN").is_err() {
         return;
     }
-    match check_for_update().await {
+    match check_for_update(&Channel::Stable).await {
         Ok(Some(info)) => {
             println!(
                 "[orca] update available: v{} → run 'orca update' to upgrade",
@@ -167,11 +235,19 @@ pub async fn startup_update_check() {
             );
         }
         Ok(None) => {}
-        Err(_) => {} // silent on startup — network may not be available
+        Err(_) => {}
     }
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+fn semver_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let parse = |s: &str| -> (u64, u64, u64) {
+        let mut parts = s.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
+        (parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0))
+    };
+    parse(a).cmp(&parse(b))
+}
 
 fn is_newer(candidate: &str, current: &str) -> bool {
     let parse = |s: &str| -> (u64, u64, u64) {
