@@ -4,7 +4,7 @@ use orca::mcp;
 use orca::serve;
 use orca::serve::openapi_spec_json;
 use orca::session::Session;
-use brain_commands::{self as cmd, DaemonAction, DbAction, DockerAction, LogAction, McpAction, PluginAction, SchemaAction, SpecAction, cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian, cmd_install, cmd_uninstall};
+use brain_commands::{self as cmd, DaemonAction, DbAction, DockerAction, HookAction, LogAction, McpAction, PluginAction, SchemaAction, SpecAction, cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian, cmd_install, cmd_uninstall};
 use brain_core::backend::{ClaudeBackend, ModelBackend, stdout_sink};
 use brain_utils::config::Config;
 use brain_utils::types::Message;
@@ -120,13 +120,19 @@ enum Command {
         action: SpecAction,
     },
 
-    /// Manage MCP servers registered with brain
+    /// Claude Code hook handlers (session-start, bash-guard, pii-scan, etc.)
+    Hook {
+        #[command(subcommand)]
+        action: HookAction,
+    },
+
+    /// Manage MCP servers registered with orca
     Mcp {
         #[command(subcommand)]
         action: McpAction,
     },
 
-    /// Manage schema databases registered with brain
+    /// Manage schema databases registered with orca
     Schema {
         #[command(subcommand)]
         action: SchemaAction,
@@ -151,7 +157,11 @@ enum Command {
     },
 
     /// Check for and apply updates from GitHub releases
-    Update,
+    Update {
+        /// Release channel: stable (default), rc, beta, alpha
+        #[arg(long, default_value = "stable")]
+        channel: String,
+    },
 
     /// Install brain: wire symlinks, register MCP server, install binary
     Install,
@@ -228,12 +238,16 @@ async fn main() -> Result<()> {
             other => cmd::cmd_daemon(other),
         },
         Some(Command::Dev { port }) => cmd_dev(port, &config).await,
+        Some(Command::Hook { action }) => cmd::cmd_hook(action),
         Some(Command::Mcp { action }) => cmd::cmd_mcp(action),
         Some(Command::Schema { action }) => cmd::cmd_schema(action),
         Some(Command::Docker { action }) => cmd::cmd_docker(action),
         Some(Command::Plugin { action }) => cmd::cmd_plugin(action),
         Some(Command::Db { action }) => cmd::cmd_db(action),
-        Some(Command::Update) => cmd::cmd_update().await,
+        Some(Command::Update { channel }) => {
+            let ch = brain_commands::update::Channel::from_str(&channel);
+            cmd::cmd_update(ch).await
+        }
         Some(Command::Install) => cmd_install(),
         Some(Command::Uninstall) => cmd_uninstall(),
         Some(Command::Gen { url, out }) => cmd::cmd_gen(&url, &out).await,

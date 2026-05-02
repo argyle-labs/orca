@@ -399,8 +399,8 @@ fn secrets_scan() -> Result<()> {
 
     let secret_patterns: &[(&str, &str)] = &[
         (r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}", "JWT token"),
-        (r"[Aa]uthorization['\": ]+[Bb]earer [A-Za-z0-9_.\\-]{20,}", "Bearer token"),
-        (r"[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]['\": =]+[A-Za-z0-9_.\\-]{16,}", "API key"),
+        (r#"[Aa]uthorization["': ]+[Bb]earer [A-Za-z0-9_.\-]{20,}"#, "Bearer token"),
+        (r#"[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]["': =]+[A-Za-z0-9_.\-]{16,}"#, "API key"),
         (r"-----BEGIN (RSA|EC|OPENSSH|PGP) PRIVATE KEY", "Private key"),
         (r"[Aa][Ww][Ss]_[Aa][Cc][Cc][Ee][Ss][Ss][_-]?[Kk][Ee][Yy]", "AWS key"),
     ];

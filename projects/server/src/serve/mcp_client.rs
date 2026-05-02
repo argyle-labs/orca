@@ -283,6 +283,20 @@ impl McpPool {
                         });
                     }
                 }
+                // Enabled plugins that declare an MCP server are auto-federated.
+                // Plugin entries take precedence over ~/.claude.json but not over explicit mcp_servers rows.
+                if let Ok(plugins) = brain_utils::db::list_plugins(&conn) {
+                    for p in plugins {
+                        if !p.enabled { continue; }
+                        let Some(cmd) = p.mcp_command else { continue; };
+                        if cmd.is_empty() { continue; }
+                        configs.entry(p.id).or_insert(McpServerConfig {
+                            command: cmd,
+                            args: p.mcp_args,
+                            env: p.mcp_env,
+                        });
+                    }
+                }
             }
         }
 
