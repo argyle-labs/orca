@@ -310,7 +310,7 @@ pub struct TestRunResponse {
 // `super::SomeType` inside a utoipa macro; always import it via this prelude.
 pub(super) mod prelude {
     #[allow(unused_imports)]
-    pub use super::{DockerRuntimeAddRequest, DockerRuntimeInfo, ErrorResponse, McpServerAddRequest, McpServerInfo, McpState, OkResponse, SchemaDbAddRequest, SchemaDbInfo, SpecInfo, SpecRegisterRequest, db_json, db_ok, db_remove, err};
+    pub use super::{CredInfo, DockerRuntimeAddRequest, DockerRuntimeInfo, ErrorResponse, McpServerAddRequest, McpServerInfo, McpState, OkResponse, PluginInfo, SchemaDbAddRequest, SchemaDbInfo, SetCredRequest, SpecInfo, SpecRegisterRequest, db_json, db_ok, db_remove, err};
 }
 
 // ── Sub-modules ───────────────────────────────────────────────────────────────
@@ -330,11 +330,13 @@ pub mod mcp_mappings;
 pub mod schema;
 pub mod docker_registry;
 pub mod schema_registry;
+pub mod plugins;
 pub mod specs;
 pub mod system;
 pub mod tests_handler;
 
 pub use atlassian::*;
+pub use plugins::*;
 pub use download::*;
 pub use pdf::*;
 pub use bitbucket::*;

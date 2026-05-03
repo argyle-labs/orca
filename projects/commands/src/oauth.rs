@@ -33,7 +33,7 @@ fn delete_token(account: &str) {
     let _ = Entry::new(KEYRING_SERVICE, account).map(|e| e.delete_credential());
 }
 
-// Convenience aliases used by the rest of brain
+// Convenience aliases used by the rest of orca
 pub fn load_github_token() -> Option<String> {
     load_token("github_token")
 }

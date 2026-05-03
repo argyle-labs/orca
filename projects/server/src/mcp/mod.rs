@@ -18,9 +18,10 @@ use docs::{get_tree, list_commands, list_roots, read_doc, search_docs};
 use handlers::{
     agents, docker_add_runtime, docker_list_runtimes, docker_remove_runtime, get_agent, get_config,
     get_context, list_services, mcp_add_server, mcp_list_servers, mcp_list_mappings,
-    mcp_map_tool, mcp_remove_server, mcp_sync_tools, mcp_unmap_tool, run,
-    run_tests, schema_add_database, schema_list_databases, schema_remove_database, search_logs,
-    service_logs,
+    mcp_map_tool, mcp_remove_server, mcp_sync_tools, mcp_unmap_tool,
+    plugin_creds_list, plugin_creds_remove, plugin_creds_set, plugin_creds_sync, plugin_list,
+    run, run_tests, schema_add_database, schema_list_databases, schema_remove_database,
+    search_logs, service_logs,
 };
 use specs::{
     get_graphql_info, get_rebuy_graphql_schema, get_rebuy_spec, get_rebuy_spec_public,
@@ -211,6 +212,11 @@ async fn dispatch(name: &str, args: &Value, config: &Config) -> Result<String> {
         "list_docker_runtimes" => docker_list_runtimes(),
         "add_docker_runtime"  => docker_add_runtime(args),
         "remove_docker_runtime" => docker_remove_runtime(args),
+        "list_plugins"        => plugin_list(args),
+        "list_plugin_creds"   => plugin_creds_list(args),
+        "set_plugin_cred"     => plugin_creds_set(args),
+        "remove_plugin_cred"  => plugin_creds_remove(args),
+        "sync_plugin_creds"   => plugin_creds_sync(args),
         "register_spec"       => spec_register(args).await,
         "refresh_spec"        => spec_refresh(args).await,
         "unregister_spec"     => spec_unregister(args),

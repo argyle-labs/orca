@@ -392,6 +392,66 @@ pub fn tool_defs() -> Value {
             }
         },
         {
+            "name": "list_plugins",
+            "description": "List all registered orca plugins with their tier (workspace), enabled state, and MCP endpoint.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace": {
+                        "type": "string",
+                        "description": "Filter by workspace tier: homelab | personal | work (omit for all)"
+                    }
+                }
+            }
+        },
+        {
+            "name": "list_plugin_creds",
+            "description": "List credential keys stored for a plugin. Values are never returned — only key names and sync status.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "plugin": { "type": "string", "description": "Plugin ID (e.g. meerkat-willow)" }
+                },
+                "required": ["plugin"]
+            }
+        },
+        {
+            "name": "set_plugin_cred",
+            "description": "Store or update a credential for a plugin. The value is encrypted at rest in orca.db.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "plugin": { "type": "string", "description": "Plugin ID (e.g. meerkat-willow)" },
+                    "key":    { "type": "string", "description": "Credential key (e.g. MEERKAT_TOKEN)" },
+                    "value":  { "type": "string", "description": "Credential value" }
+                },
+                "required": ["plugin", "key", "value"]
+            }
+        },
+        {
+            "name": "remove_plugin_cred",
+            "description": "Remove a stored credential from a plugin.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "plugin": { "type": "string", "description": "Plugin ID" },
+                    "key":    { "type": "string", "description": "Credential key to remove" }
+                },
+                "required": ["plugin", "key"]
+            }
+        },
+        {
+            "name": "sync_plugin_creds",
+            "description": "Push all stored credentials for a plugin to its running HTTP instance via PUT /creds.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "plugin": { "type": "string", "description": "Plugin ID (e.g. meerkat-willow)" }
+                },
+                "required": ["plugin"]
+            }
+        },
+        {
             "name": "resolve_library",
             "description": "Resolve a library name to its context7-compatible library ID. Call this before get-library-docs.",
             "inputSchema": {

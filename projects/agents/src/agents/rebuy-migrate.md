@@ -1,6 +1,6 @@
 ---
 name: rebuy-migrate
-description: "[MIGRATE TO REBUY ADAPTER] Source of truth: ~/code/brain/projects/adapters/rebuy/agents/rebuy-migrate.md. Rebuy database migration specialist — full lifecycle for rebuy-db MySQL migrations."
+description: "[MIGRATE TO REBUY ADAPTER] Source of truth: ~/code/orca/projects/adapters/rebuy/agents/rebuy-migrate.md. Rebuy database migration specialist — full lifecycle for rebuy-db MySQL migrations."
 tools: Read, Glob, Grep, Bash
 model: inherit
 ---

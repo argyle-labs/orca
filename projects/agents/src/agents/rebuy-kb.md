@@ -1,6 +1,6 @@
 ---
 name: rebuy-kb
-description: "[MIGRATE TO REBUY ADAPTER] Source of truth: ~/code/brain/projects/adapters/rebuy/agents/rebuy-kb.md. Rebuy platform knowledge base — routes questions to the right context skill for any of the 10 rebuy repos."
+description: "[MIGRATE TO REBUY ADAPTER] Source of truth: ~/code/orca/projects/adapters/rebuy/agents/rebuy-kb.md. Rebuy platform knowledge base — routes questions to the right context skill for any of the 10 rebuy repos."
 tools: Read, Glob, Grep, Bash, Agent
 model: inherit
 ---

@@ -63,7 +63,7 @@ pub struct SearchQuery {
     operation_id = "searchDocs",
     params(
         ("q" = Option<String>, Query, description = "Search query"),
-        ("root" = Option<String>, Query, description = "Limit search to a specific root (brain/rebuy)"),
+        ("root" = Option<String>, Query, description = "Limit search to a specific root (orca/rebuy)"),
     ),
     responses(
         (status = 200, description = "Search results", body = Vec<super::SearchResult>),
@@ -141,7 +141,7 @@ pub struct DocQuery {
     path = "/api/doc",
     operation_id = "getDoc",
     params(
-        ("root" = String, Query, description = "Vault root name (brain/rebuy/docs)"),
+        ("root" = String, Query, description = "Vault root name (orca/rebuy/docs)"),
         ("path" = String, Query, description = "File path relative to root"),
         ("format" = Option<String>, Query, description = "Pass `llm` to strip decorative markdown (bold, italic, images, HRs) and collapse whitespace — reduces token usage when the content will be read by a language model"),
     ),

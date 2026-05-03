@@ -29,7 +29,7 @@ brain_get_agent name="fox"    # MCP tool: returns the full system prompt
 There are 39+ agents defined. Key entry points:
 - **wolf** — orchestrator, entry point for all sessions. Routes to specialists.
 - **lynx** — task planner, breaks work into steps
-- **pinky** — I/O sub-orchestrator: reads, writes, notes, file-finding, session logs
+- **otter** — I/O sub-orchestrator: reads, writes, notes, file-finding, session logs
 - **fox** — debugging, root cause analysis
 - **owl** — reasoning and explanation
 - **crow** — code writing

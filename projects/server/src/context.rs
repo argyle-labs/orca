@@ -10,7 +10,7 @@ pub struct ProjectContext {
 
 impl ProjectContext {
     /// Try to resolve a project name to its memory dir.
-    /// Matches: "halvor" → ~/brain/ai/claude/memory/halvor/MEMORY.md
+    /// Matches: "halvor" → ~/orca/memory/halvor/MEMORY.md
     pub fn resolve(name: &str, config: &Config) -> Result<Self> {
         let memory_root = &config.memory_root;
 

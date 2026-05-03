@@ -26,7 +26,7 @@ pub struct PdfQuery {
     path = "/api/pdf",
     operation_id = "downloadPdf",
     params(
-        ("root" = String, Query, description = "Root name (brain | rebuy)"),
+        ("root" = String, Query, description = "Root name (orca | rebuy)"),
         ("path" = String, Query, description = "File path or directory path relative to root"),
         ("output" = Option<String>, Query, description = "merged (default) or zip"),
     ),

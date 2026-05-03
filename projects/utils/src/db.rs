@@ -107,6 +107,12 @@ static MIGRATIONS: &[Migration] = &[
         );",
         down: Some("DROP TABLE IF EXISTS plugin_credentials;"),
     },
+    Migration {
+        version: 5,
+        description: "add mcp_token_env to plugins — env var name carrying Bearer token for HTTP/SSE transport",
+        up: "ALTER TABLE plugins ADD COLUMN mcp_token_env TEXT;",
+        down: None,
+    },
 ];
 
 /// Return the currently applied migration version (0 = baseline, no migrations run).
@@ -913,6 +919,8 @@ pub struct PluginRow {
     pub mcp_command: Option<String>,
     pub mcp_args: Vec<String>,
     pub mcp_env: std::collections::HashMap<String, String>,
+    /// Env var name whose value is the Bearer token for HTTP/SSE transport.
+    pub mcp_token_env: Option<String>,
     pub context_injection: String,
     pub enabled: bool,
     /// Maps universal command name → plugin's internal MCP tool name.
@@ -922,7 +930,7 @@ pub struct PluginRow {
 
 pub fn list_plugins(conn: &Connection) -> Result<Vec<PluginRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, manifest_path, tier, mcp_command, mcp_args, mcp_env, context_injection, enabled, command_map
+        "SELECT id, manifest_path, tier, mcp_command, mcp_args, mcp_env, context_injection, enabled, command_map, mcp_token_env
          FROM plugins ORDER BY id",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -936,11 +944,12 @@ pub fn list_plugins(conn: &Connection) -> Result<Vec<PluginRow>> {
             row.get::<_, String>(6)?,
             row.get::<_, i32>(7)?,
             row.get::<_, String>(8)?,
+            row.get::<_, Option<String>>(9)?,
         ))
     })?;
     let mut result = Vec::new();
     for r in rows {
-        let (id, manifest_path, tier, mcp_command, args_json, env_json, context_injection, enabled, map_json) = r?;
+        let (id, manifest_path, tier, mcp_command, args_json, env_json, context_injection, enabled, map_json, mcp_token_env) = r?;
         let mcp_args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
         let mcp_env: std::collections::HashMap<String, String> =
             serde_json::from_str(&env_json).unwrap_or_default();
@@ -953,6 +962,7 @@ pub fn list_plugins(conn: &Connection) -> Result<Vec<PluginRow>> {
             mcp_command,
             mcp_args,
             mcp_env,
+            mcp_token_env,
             context_injection,
             enabled: enabled != 0,
             command_map,
@@ -963,7 +973,7 @@ pub fn list_plugins(conn: &Connection) -> Result<Vec<PluginRow>> {
 
 pub fn get_plugin(conn: &Connection, id: &str) -> Result<Option<PluginRow>> {
     let result = conn.query_row(
-        "SELECT id, manifest_path, tier, mcp_command, mcp_args, mcp_env, context_injection, enabled, command_map
+        "SELECT id, manifest_path, tier, mcp_command, mcp_args, mcp_env, context_injection, enabled, command_map, mcp_token_env
          FROM plugins WHERE id = ?1",
         rusqlite::params![id],
         |row| {
@@ -977,11 +987,12 @@ pub fn get_plugin(conn: &Connection, id: &str) -> Result<Option<PluginRow>> {
                 row.get::<_, String>(6)?,
                 row.get::<_, i32>(7)?,
                 row.get::<_, String>(8)?,
+                row.get::<_, Option<String>>(9)?,
             ))
         },
     );
     match result {
-        Ok((id, manifest_path, tier, mcp_command, args_json, env_json, context_injection, enabled, map_json)) => {
+        Ok((id, manifest_path, tier, mcp_command, args_json, env_json, context_injection, enabled, map_json, mcp_token_env)) => {
             let mcp_args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
             let mcp_env: std::collections::HashMap<String, String> =
                 serde_json::from_str(&env_json).unwrap_or_default();
@@ -994,6 +1005,7 @@ pub fn get_plugin(conn: &Connection, id: &str) -> Result<Option<PluginRow>> {
                 mcp_command,
                 mcp_args,
                 mcp_env,
+                mcp_token_env,
                 context_injection,
                 enabled: enabled != 0,
                 command_map,
@@ -1009,8 +1021,8 @@ pub fn upsert_plugin(conn: &Connection, plugin: &PluginRow) -> Result<()> {
     let env_json = serde_json::to_string(&plugin.mcp_env).unwrap_or_else(|_| "{}".into());
     let map_json = serde_json::to_string(&plugin.command_map).unwrap_or_else(|_| "{}".into());
     conn.execute(
-        "INSERT INTO plugins (id, manifest_path, tier, mcp_command, mcp_args, mcp_env, context_injection, enabled, command_map)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        "INSERT INTO plugins (id, manifest_path, tier, mcp_command, mcp_args, mcp_env, context_injection, enabled, command_map, mcp_token_env)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(id) DO UPDATE SET
              manifest_path     = excluded.manifest_path,
              tier              = excluded.tier,
@@ -1019,7 +1031,8 @@ pub fn upsert_plugin(conn: &Connection, plugin: &PluginRow) -> Result<()> {
              mcp_env           = excluded.mcp_env,
              context_injection = excluded.context_injection,
              enabled           = excluded.enabled,
-             command_map       = excluded.command_map",
+             command_map       = excluded.command_map,
+             mcp_token_env     = excluded.mcp_token_env",
         rusqlite::params![
             plugin.id,
             plugin.manifest_path,
@@ -1030,6 +1043,7 @@ pub fn upsert_plugin(conn: &Connection, plugin: &PluginRow) -> Result<()> {
             plugin.context_injection,
             plugin.enabled as i32,
             map_json,
+            plugin.mcp_token_env,
         ],
     )?;
     Ok(())

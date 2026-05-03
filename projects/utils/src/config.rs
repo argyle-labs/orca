@@ -16,7 +16,10 @@ pub struct Config {
     pub anthropic_api_key: Option<String>,
     pub lmstudio_url: String,
     pub default_model: Model,
+    /// State/config dir: ~/.orca (db, logs, memory, config)
     pub orca_vault: PathBuf,
+    /// Obsidian knowledge vault root: ~/orca (or $ORCA_VAULT_ROOT)
+    pub vault_root: PathBuf,
     pub memory_root: PathBuf,
     pub db_path: PathBuf,
 }
@@ -53,6 +56,9 @@ impl Config {
     pub fn load() -> Result<Self> {
         let home = dirs::home_dir().context("no home dir")?;
         let orca_vault = home.join(APP_STATE_DIR);
+        let vault_root = std::env::var("ORCA_VAULT_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home.join("orca"));
         let memory_root = orca_vault.join("memory");
         let db_path = orca_vault.join(APP_DB_FILE);
 
@@ -82,6 +88,7 @@ impl Config {
             lmstudio_url,
             default_model,
             orca_vault,
+            vault_root,
             memory_root,
             db_path,
         })

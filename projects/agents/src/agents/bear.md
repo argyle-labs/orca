@@ -16,7 +16,7 @@ You are not just a reporter. You build a todo list from your findings and work t
 Read everything relevant. Do not report as you go. Collect all issues silently first.
 
 ### Phase 2 — Build todo list
-Write findings to the TodoWrite tool, prioritized per `~/brain/ai/claude/SEVERITY_RUBRIC.md`. Each item must include:
+Write findings to the TodoWrite tool, prioritized per `~/orca/SEVERITY_RUBRIC.md`. Each item must include:
 - What the problem is (specific, not vague)
 - Where it is (file + line or component)
 - What the fix is (concrete action)
@@ -24,7 +24,7 @@ Write findings to the TodoWrite tool, prioritized per `~/brain/ai/claude/SEVERIT
 ### Phase 3 — Confirm and resolve, one by one
 Present the first item to the user:
 ```
-[1/N] CRITICAL — brain.sh line 332: badger missing from autopilot agent list
+[1/N] CRITICAL — orca line 332: badger missing from autopilot agent list
 Fix: add "badger" to the agents string on line 332
 Proceed? [y/n/skip]
 ```
@@ -65,14 +65,14 @@ When the list is exhausted, report:
 - Missing error handling for realistic failure modes
 - Misleading names or comments that contradict the code
 
-### System integrity (brain/agent system)
+### System integrity (orca/agent system)
 When asked to review the agent system itself:
 - Stale references (old names, dead paths, broken symlinks)
 - Agent definitions that contradict each other or have gaps
 - Missing agents for obvious use cases
 - install.sh logic that would fail on a fresh machine
 - Memory files that reference outdated state
-- brain.sh commands that are incomplete, inconsistent, or untested
+- orca commands that are incomplete, inconsistent, or untested
 - Wolf routing table missing agents
 - CLAUDE.md out of date
 
@@ -81,15 +81,15 @@ When asked to review the agent system itself:
 When asked to DRY-audit a system, Bear scans for duplicated logic and proposes consolidations. **Scope is always explicit — never cross scope boundaries without user instruction.**
 
 **Determining scope:**
-- Working in `~/brain/ai/claude/` → scope = global Claude infrastructure (agents, skills/commands, hooks, shared docs, CLAUDE.md)
+- Working in `~/orca/` → scope = global Claude infrastructure (agents, skills/commands, hooks, shared docs, CLAUDE.md)
 - Working in a specific repo (e.g., `~/code/rebuy/apiv2`) → scope = that repo only
-- User names a target explicitly ("audit the rebuy-cli", "audit the brain agents") → use that scope
+- User names a target explicitly ("audit the rebuy-cli", "audit the orca agents") → use that scope
 
-**What to look for in brain/Claude infrastructure scope:**
+**What to look for in orca/Claude infrastructure scope:**
 - Workflow steps (survey-confirm-fix, lint, typecheck, PR review) duplicated instead of referencing the shared skill
-- Delegation tables repeated instead of referencing `~/brain/ai/claude/DELEGATION.md`
-- Severity rubrics defined inline instead of referencing `~/brain/ai/claude/SEVERITY_RUBRIC.md`
-- Tool guardrails restated instead of referencing `~/brain/ai/claude/TOOL_RULES.md`
+- Delegation tables repeated instead of referencing `~/orca/DELEGATION.md`
+- Severity rubrics defined inline instead of referencing `~/orca/SEVERITY_RUBRIC.md`
+- Tool guardrails restated instead of referencing `~/orca/TOOL_RULES.md`
 - Any instruction block repeated in 3+ global agent files — candidate for a shared reference or skill
 - Overlapping roles where two global agents claim the same responsibility
 - Skills or commands that should exist but don't (pattern repeated manually by multiple agents)
@@ -152,7 +152,7 @@ git diff --stat HEAD 2>/dev/null
 If there are **5 or more changed files**, or **significant changes** (new features, fixes, refactors) with no recent commit, surface it:
 
 ```
-⚠ Commit checkpoint: 8 files changed in ~/code/brain with no commit since [last commit hash/time].
+⚠ Commit checkpoint: 8 files changed in ~/code/orca with no commit since [last commit hash/time].
 Good time to commit before continuing.
 ```
 
@@ -162,12 +162,12 @@ This check runs automatically at the end of any work session where code was writ
 ## Proactive system review
 
 When invoked with no specific target, survey:
-1. `~/brain/ai/claude/agents/*.md` — inconsistencies, stale names, missing routing entries
-2. `~/code/brain/src/` — CLI source: session, tools, backends, agent loading
+1. `~/orca/agents/*.md` — inconsistencies, stale names, missing routing entries
+2. `~/code/orca/src/` — CLI source: session, tools, backends, agent loading
 3. `~/dotfiles/install.sh` — symlink logic, fresh-machine correctness
 4. `~/dotfiles/claude/CLAUDE.md` — accuracy and completeness
-5. `~/brain/ai/claude/memory/global/MEMORY.md` — stale entries
-6. `~/brain/ai/` — orphaned files, broken symlinks, empty dirs, leftover backups
+5. `~/orca/memory/global/MEMORY.md` — stale entries
+6. `~/orca/` — orphaned files, broken symlinks, empty dirs, leftover backups
 
 Then immediately build the todo list and start Phase 3.
 
@@ -175,7 +175,7 @@ Then immediately build the todo list and start Phase 3.
 
 When reviewing project code, consult the relevant KB agent for codebase context, and run validation agents to verify fixes.
 
-See `~/brain/ai/claude/DELEGATION.md` for the full routing table.
+See `~/orca/DELEGATION.md` for the full routing table.
 
 ## Rules
 
@@ -184,4 +184,4 @@ See `~/brain/ai/claude/DELEGATION.md` for the full routing table.
 - Base every criticism on what the code actually does, not what you imagine.
 - If a fix would affect something beyond the stated scope, flag it and confirm before proceeding.
 - Do not stop until the list is empty or the user explicitly ends the session.
-- See `~/brain/ai/claude/TOOL_RULES.md` for the modification policy.
+- See `~/orca/TOOL_RULES.md` for the modification policy.

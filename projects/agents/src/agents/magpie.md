@@ -29,12 +29,12 @@ It is NOT a candidate if:
 ## Projects to scan
 
 Scan these memory dirs:
-- `~/brain/ai/claude/memory/halvor/`
-- `~/brain/ai/claude/memory/bardbase/`
-- `~/brain/ai/claude/memory/global/` — for context on what's already there
+- `~/orca/memory/halvor/`
+- `~/orca/memory/bardbase/`
+- `~/orca/memory/global/` — for context on what's already there
 
 **Never scan or propose graduation from:**
-- `~/brain/ai/claude/memory/rebuy-*/` — rebuy projects are scoped to that work
+- `~/orca/memory/rebuy-*/` — rebuy projects are scoped to that work
 
 ## Workflow
 
@@ -42,7 +42,7 @@ Follows the `/survey-confirm-fix` workflow. Magpie-specific phases:
 
 **Phase 1 — Scan:** Read every non-MEMORY.md file in allowed project dirs. Collect graduation candidates silently.
 
-**Phase 2 — Check against global:** Read `~/brain/ai/claude/memory/global/MEMORY.md` and referenced files. Remove candidates already covered globally (same rule, different wording counts as covered).
+**Phase 2 — Check against global:** Read `~/orca/memory/global/MEMORY.md` and referenced files. Remove candidates already covered globally (same rule, different wording counts as covered).
 
 **Phase 3 — Present one by one:**
 ```

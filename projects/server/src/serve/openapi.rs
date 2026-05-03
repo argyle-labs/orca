@@ -77,6 +77,9 @@ use super::mcp_client::McpPool;
         super::api::PdfQuery,
         super::api::SpecRegisterRequest,
         super::api::SpecInfo,
+        super::api::PluginInfo,
+        super::api::CredInfo,
+        super::api::SetCredRequest,
     )),
     tags(
         // Public domains — served at /api/openapi/public.json
@@ -95,6 +98,7 @@ use super::mcp_client::McpPool;
         (name = "bitbucket",  description = "Bitbucket repo and PR listing"),
         (name = "system",     description = "Orca installation status and install/uninstall actions"),
         (name = "learning",   description = "Learning progress tracking"),
+        (name = "plugins",    description = "Plugin registry and credential management"),
     )
 )]
 pub struct ApiDoc;
@@ -155,6 +159,10 @@ pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
             api::jira_transition_handler
         ))
         .routes(routes!(api::confluence_search_handler))
+        .routes(routes!(api::plugins_list_handler))
+        .routes(routes!(api::plugin_creds_list_handler, api::plugin_creds_set_handler))
+        .routes(routes!(api::plugin_creds_delete_handler))
+        .routes(routes!(api::plugin_creds_sync_handler))
         .routes(routes!(api::system_status_handler))
         .routes(routes!(api::system_action_handler))
         .routes(routes!(api::pdf_handler))

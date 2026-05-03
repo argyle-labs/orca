@@ -278,9 +278,6 @@ fn new_uuid() -> String {
 
 const PII_PATTERNS: &[(&str, &str)] = &[
     (r"\+?1[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", "US phone number"),
-    (r"435[-.\s]?590", "known personal area code + prefix"),
-    (r"scottdkey\+contact", "personal email alias"),
-    (r"scott\.key@gmail\.com", "personal Gmail"),
     (r"\b\d{3}-\d{2}-\d{4}\b", "SSN pattern"),
     (r"yuber\.app", "staging domain"),
     (r"re_[A-Za-z0-9]{20,}", "Resend API key"),
@@ -290,13 +287,8 @@ const PII_PATTERNS: &[(&str, &str)] = &[
     (r"0x[A-Fa-f0-9]{32,}", "hex secret (Turnstile/CF)"),
 ];
 
+
 const PII_SCAN_EXCLUDES: &[&str] = &[
-    "brain/ai/claude/agents",
-    "brain/ai/claude/commands",
-    "dotfiles/obsidian/ai/claude",
-    ".claude/CLAUDE.md",
-    "code/orca/hooks",
-    "code/orca/projects/commands/src/hook_cmd.rs",
 ];
 
 fn pii_scan() -> Result<()> {

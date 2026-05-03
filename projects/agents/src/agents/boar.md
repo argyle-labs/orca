@@ -1,6 +1,6 @@
 ---
 name: boar
-description: "[MIGRATE TO REBUY ADAPTER] Source of truth: ~/code/brain/projects/adapters/rebuy/agents/boar.md. BOD development environment operations via the carl CLI."
+description: "[MIGRATE TO REBUY ADAPTER] Source of truth: ~/code/orca/projects/adapters/rebuy/agents/boar.md. BOD development environment operations via the carl CLI."
 tools: Bash, Read
 model: inherit
 color: red

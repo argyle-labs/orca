@@ -26,7 +26,7 @@ pub fn generate(repo_path: &Path) -> Result<Value> {
             "version": "0.0.0",
             "description": "Auto-generated from Next.js App Router route handlers"
         },
-        "x-brain": {
+        "x-orca": {
             "repo": "admin-nextjs",
             "project": "rebuy",
             "source": "scanned",
@@ -132,7 +132,7 @@ fn scan_route_file(root: &Path, file: &Path) -> Result<Option<(String, Value)>> 
                     "responses": {
                         "200": { "description": "OK" }
                     },
-                    "x-brain-source": file
+                    "x-orca-source": file
                         .strip_prefix(root.parent().unwrap_or(root))
                         .unwrap_or(file)
                         .display()

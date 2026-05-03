@@ -1,7 +1,7 @@
-//! Shared data types used across all brain crates.
+//! Shared data types used across all orca crates.
 //!
 //! These are the canonical wire types — every backend and tool converts to/from these.
-//! Keeping them in `brain-utils` (the leaf crate) prevents circular dependencies.
+//! Keeping them in `orca-utils` (the leaf crate) prevents circular dependencies.
 
 use serde::{Deserialize, Serialize};
 
