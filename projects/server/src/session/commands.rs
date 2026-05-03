@@ -255,7 +255,7 @@ impl Session {
             }
         } else {
             self.out(
-                &"  Claude: no API key (run `brain login`)"
+                &"  Claude: no API key (run `orca login`)"
                     .dimmed()
                     .to_string(),
             );
@@ -297,7 +297,7 @@ impl Session {
             .config
             .anthropic_api_key
             .clone()
-            .context("no API key — run `brain login` first")?;
+            .context("no API key — run `orca login` first")?;
 
         self.out(&"↑ escalating to Claude…".yellow().to_string());
 

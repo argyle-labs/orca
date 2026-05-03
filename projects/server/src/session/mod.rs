@@ -60,7 +60,7 @@ impl Session {
 
         Ok(Session {
             system_prompt,
-            active_agent: "brain".to_string(),
+            active_agent: "orca".to_string(),
             project,
             backend,
             current_model: model,

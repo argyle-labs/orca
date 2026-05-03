@@ -66,8 +66,8 @@ struct TomlBrainConfig {
     schema: Option<TomlSchemaSection>,
 }
 
-/// Load schema DB configs from brain.db. If the table is empty, attempt a
-/// one-shot migration from brain.toml (idempotent: INSERT OR IGNORE).
+/// Load schema DB configs from orca.db. If the table is empty, attempt a
+/// one-shot migration from orca.toml (idempotent: INSERT OR IGNORE).
 fn load_db_configs() -> Vec<DbConfig> {
     let Ok(conn) = brain_utils::db::open_default() else {
         return vec![];
@@ -80,10 +80,10 @@ fn load_db_configs() -> Vec<DbConfig> {
         }
     }
 
-    // DB empty — attempt one-shot migration from brain.toml
+    // DB empty — attempt one-shot migration from orca.toml
     let home = std::env::var("HOME").unwrap_or_default();
     let toml_path =
-        std::env::var("BRAIN_CONFIG").unwrap_or_else(|_| format!("{home}/.brain/brain.toml"));
+        std::env::var("ORCA_CONFIG").unwrap_or_else(|_| format!("{home}/.orca/orca.toml"));
 
     if let Ok(raw) = std::fs::read_to_string(&toml_path)
         && let Ok(cfg) = toml::from_str::<TomlBrainConfig>(&raw)
@@ -161,7 +161,7 @@ pub async fn schema_handler() -> Response {
     if configs.is_empty() {
         return err(
             StatusCode::NOT_FOUND,
-            "No databases configured — use `brain schema add` or POST /api/schema/databases",
+            "No databases configured — use `orca schema add` or POST /api/schema/databases",
         );
     }
 

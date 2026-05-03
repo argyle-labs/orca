@@ -13,12 +13,12 @@ pub async fn proxy_context7(tool: &str, args: &Value, config: &Config) -> Result
         .await
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "context7 not found — add it via `brain mcp add context7 --command npx -- -y @upstash/context7-mcp@latest`"
+                "context7 not found — add it via `orca plugin add ~/code/orca/projects/adapters/context7/orca-plugin.toml`"
             )
         })?;
 
     let client = pool.get_or_connect(&server_name).await?;
-    let result = client.call_tool(tool, args.clone(), "brain-mcp").await?;
+    let result = client.call_tool(tool, args.clone(), "orca-mcp").await?;
 
     let text = result["content"]
         .as_array()

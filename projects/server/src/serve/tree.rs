@@ -30,9 +30,9 @@ pub fn get_roots() -> HashMap<String, PathBuf> {
         PathBuf::from(std::env::var("REBUY_ROOT").unwrap_or_else(|_| format!("{home}/code/rebuy"))),
     );
     roots.insert(
-        "brain".to_string(),
+        "orca".to_string(),
         PathBuf::from(
-            std::env::var("BRAIN_CODE_ROOT").unwrap_or_else(|_| format!("{home}/code/brain")),
+            std::env::var("ORCA_CODE_ROOT").unwrap_or_else(|_| format!("{home}/code/orca")),
         ),
     );
     roots.insert(
@@ -58,7 +58,7 @@ pub fn get_ignored(root_name: &str) -> HashSet<String> {
         .iter()
         .map(|s| s.to_string())
         .collect(),
-        "brain" => [
+        "orca" => [
             ".git",
             "target",
             "node_modules",
@@ -90,7 +90,7 @@ pub fn get_search_ignored(root_name: &str) -> HashSet<String> {
         .iter()
         .map(|s| s.to_string())
         .collect(),
-        "brain" => [".git", "logs", ".trash", "node_modules", "plugins"]
+        "orca" => [".git", "logs", ".trash", "node_modules", "plugins"]
             .iter()
             .map(|s| s.to_string())
             .collect(),

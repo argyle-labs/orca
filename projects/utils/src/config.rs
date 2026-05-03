@@ -167,7 +167,7 @@ fn migrate_colima_runtime(db_path: &std::path::Path) {
          VALUES ('colima', ?1, NULL, 1)",
         rusqlite::params![format!("~/.colima/default/docker.sock")],
     );
-    tracing::info!("auto-registered colima docker runtime in brain.db");
+    tracing::info!("auto-registered colima docker runtime in orca.db");
 }
 
 fn migrate_toml_schema_databases_to_db(toml_path: &std::path::Path, db_path: &std::path::Path) {

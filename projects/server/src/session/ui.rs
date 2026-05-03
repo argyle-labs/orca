@@ -6,9 +6,9 @@ impl Session {
         let emoji = util::agent_emoji(&self.active_agent);
         self.out("");
         if let Some(p) = &self.project {
-            self.out_fmt(format!("  {emoji} brain  ·  {p}").bold());
+            self.out_fmt(format!("  {emoji} orca  ·  {p}").bold());
         } else {
-            self.out_fmt(format!("  {emoji} brain").bold());
+            self.out_fmt(format!("  {emoji} orca").bold());
         }
         self.out(&format!(
             "  {}  {}",
@@ -31,7 +31,7 @@ impl Session {
         self.out("  /agent            show active agent");
         self.out("  /system           show current system prompt");
         self.out("");
-        self.out(&"Logging (Pinky):".green().to_string());
+        self.out(&"Logging (Otter):".green().to_string());
         self.out("  /flag [note]      mark last message as important");
         self.out("  /log              show current session log path");
         self.out("  /search <query>   search all session logs for a keyword");
@@ -48,22 +48,22 @@ impl Session {
         self.out("  /escalate <q>     send question to Claude, inject answer into context");
         self.out("");
         self.out(&"Preferences:".green().to_string());
-        self.out("  /narration        toggle Brain/Pinky narration on/off");
+        self.out("  /narration        toggle Orca/Otter narration on/off");
         self.out("");
         self.out(&"Maintenance:".green().to_string());
-        self.out("  /cleanup          find and kill orphaned brain processes");
+        self.out("  /cleanup          find and kill orphaned orca processes");
         self.out("");
         self.out(&"Session:".green().to_string());
         self.out("  exit              quit  (also: quit, q, bye, ^D)");
     }
 
     pub(super) fn warn_phantom_processes(&self) {
-        let others = util::find_other_brain_pids();
+        let others = util::find_other_orca_pids();
         if !others.is_empty() {
             let pids: Vec<String> = others.iter().map(|p| p.to_string()).collect();
             self.out_fmt(
                 format!(
-                    "  {} other brain process(es) running: {}",
+                    "  {} other orca process(es) running: {}",
                     others.len(),
                     pids.join(", ")
                 )
@@ -75,13 +75,13 @@ impl Session {
     }
 
     pub(super) fn cleanup_phantom_processes(&self) {
-        let others = util::find_other_brain_pids();
+        let others = util::find_other_orca_pids();
         if others.is_empty() {
-            self.out(&"no phantom brain processes found.".green().to_string());
+            self.out(&"no phantom orca processes found.".green().to_string());
             return;
         }
 
-        self.out_fmt(format!("found {} other brain process(es):", others.len()).yellow());
+        self.out_fmt(format!("found {} other orca process(es):", others.len()).yellow());
         for pid in &others {
             let info = std::process::Command::new("ps")
                 .args(["-p", &pid.to_string(), "-o", "pid,etime,args"])

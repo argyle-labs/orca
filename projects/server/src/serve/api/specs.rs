@@ -12,15 +12,15 @@ fn shopify_admin_version() -> String {
     #[derive(Deserialize, Default)]
     struct SpecsSection { shopify_admin_version: Option<String> }
     #[derive(Deserialize, Default)]
-    struct BrainConfig { specs: Option<SpecsSection> }
+    struct OrcaConfig { specs: Option<SpecsSection> }
 
     let home = std::env::var("HOME").unwrap_or_default();
-    let toml_path = std::env::var("BRAIN_CONFIG")
-        .unwrap_or_else(|_| format!("{home}/brain/config/brain.toml"));
+    let toml_path = std::env::var("ORCA_CONFIG")
+        .unwrap_or_else(|_| format!("{home}/.orca/orca.toml"));
 
     std::fs::read_to_string(&toml_path)
         .ok()
-        .and_then(|raw| toml::from_str::<BrainConfig>(&raw).ok())
+        .and_then(|raw| toml::from_str::<OrcaConfig>(&raw).ok())
         .and_then(|cfg| cfg.specs?.shopify_admin_version)
         .unwrap_or_else(|| "2026-01".to_string())
 }
@@ -31,7 +31,7 @@ pub use brain_scanner::{GraphQlEnum, GraphQlField, GraphQlInfo, GraphQlOperation
 // ── External spec registry ────────────────────────────────────────────────────
 // Brain's own spec lives at /api/openapi.json and /api/openapi/public.json.
 // These endpoints serve specs for *external* repos (rebuy and others) that are
-// manually captured and stored in ~/brain/openapi/.
+// manually captured and stored in ~/orca/openapi/.
 
 #[derive(Serialize, Deserialize, ToSchema, Clone)]
 pub struct SpecFiles {
@@ -245,10 +245,10 @@ pub async fn specs_get_handler(
             }
         }
     }
-    // Spec file missing — attempt a background sync via the brain CLI.
+    // Spec file missing — attempt a background sync via the orca CLI.
     // The CLI is authoritative on which repos are syncable; if unsupported it exits non-zero
     // and the next request will still 404. Return 202 so the client can retry.
-    let exe = std::env::current_exe().unwrap_or_else(|_| "brain".into());
+    let exe = std::env::current_exe().unwrap_or_else(|_| "orca".into());
     let repo_clone = repo.clone();
     tokio::spawn(async move {
         let _ = tokio::process::Command::new(&exe)
@@ -293,7 +293,7 @@ pub async fn specs_get_public_handler(
         Ok(raw) => serve_spec(&raw, &format!("{repo}.public"), &query),
         Err(_) => err(
             StatusCode::NOT_FOUND,
-            &format!("no public spec for '{repo}' — create {repo}.public.json in ~/brain/openapi/"),
+            &format!("no public spec for '{repo}' — create {repo}.public.json in ~/orca/openapi/"),
         ),
     }
 }
@@ -337,7 +337,7 @@ pub async fn specs_get_graphql_handler(
         }
         Err(_) => err(
             StatusCode::NOT_FOUND,
-            &format!("no GraphQL schema for '{repo}' — create {repo}.graphql in ~/brain/openapi/"),
+            &format!("no GraphQL schema for '{repo}' — create {repo}.graphql in ~/orca/openapi/"),
         ),
     }
 }
@@ -624,7 +624,7 @@ pub async fn specs_unregister_handler(Path(name): Path<String>) -> Response {
     path = "/api/specs/db",
     operation_id = "listDbSpecs",
     responses(
-        (status = 200, description = "All URL-registered specs from brain.db", body = Vec<SpecInfo>),
+        (status = 200, description = "All URL-registered specs from orca.db", body = Vec<SpecInfo>),
     ),
     tag = "specs"
 )]

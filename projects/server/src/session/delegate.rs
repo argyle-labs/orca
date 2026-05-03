@@ -34,7 +34,7 @@ impl Session {
             self.out("");
             self.out_fmt(
                 format!(
-                    "  🧠 Brain: \"Pinky, I'm sending this to {agent_icon} @{agent}. {}\"",
+                    "  🧠 Brain: \"Otter, I'm sending this to {agent_icon} @{agent}. {}\"",
                     match agent {
                         "fox" => "Something is broken and Fox will sniff out the root cause.",
                         "owl" => "Owl will read the code and explain what's happening.",
@@ -48,7 +48,7 @@ impl Session {
                         "elephant" => "Elephant never forgets the docs.",
                         "raven" => "Raven will capture this in the vault.",
                         "lynx" => "Lynx will plan the most efficient path.",
-                        "pinky" => "Pinky will search the session logs. NARF!",
+                        "otter" => "Otter will search the session logs.",
                         "boar" => "Boar will charge through the carl commands.",
                         _ => "This specialist knows what to do.",
                     }
@@ -57,7 +57,7 @@ impl Session {
             );
             self.out_fmt(
                 format!(
-                    "  🐭 Pinky: \"Ooh! {agent_icon} @{agent}! NARF! I'll write everything down!\""
+                    "  🦦 Otter: \"Ooh! {agent_icon} @{agent}!  I'll write everything down!\""
                 )
                 .dimmed(),
             );
@@ -181,24 +181,24 @@ impl Session {
             let (brain_line, pinky_line) = match agent {
                 "fox" => (
                     format!("\"Excellent work, {agent_icon} Fox. The trail was well-traced.\""),
-                    "\"Ooh! Was it a mystery? I love mysteries! TROZ!\"".to_string(),
+                    "\"Ooh! Was it a mystery? I love mysteries! \"".to_string(),
                 ),
                 "bear" => (
                     format!("\"Thorough as always, {agent_icon} Bear. Nothing escapes you.\""),
-                    "\"Bear is scary when he does that, Brain! NARF!\"".to_string(),
+                    "\"Bear is thorough, Orca! \"".to_string(),
                 ),
                 "crow" => (
                     format!("\"Clean implementation, {agent_icon} Crow. Well built.\""),
-                    "\"Ooh! New code! Can I name a variable? POIT!\"".to_string(),
+                    "\"Ooh! New code! Can I name a variable? \"".to_string(),
                 ),
                 _ => (
-                    format!("\"Thank you, {agent_icon} @{agent}. Pinky, did you get all that?\""),
-                    "\"Every word, Brain! POIT!\"".to_string(),
+                    format!("\"Thank you, {agent_icon} @{agent}. Otter, did you get all that?\""),
+                    "\"Every word, Brain! \"".to_string(),
                 ),
             };
             self.out("");
             self.out_fmt(format!("  🧠 Brain: {brain_line}").dimmed());
-            self.out_fmt(format!("  🐭 Pinky: {pinky_line}").dimmed());
+            self.out_fmt(format!("  🦦 Otter: {pinky_line}").dimmed());
             self.out("");
         }
 

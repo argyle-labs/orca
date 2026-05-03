@@ -1,4 +1,4 @@
-/// Integration test for the `brain daemon start` signal loop.
+/// Integration test for the `orca daemon start` signal loop.
 ///
 /// Spawns the real binary with a temporary HOME so state.json is isolated,
 /// then drives SIGUSR1 (park) → SIGUSR2 (reclaim) → SIGTERM (shutdown) and
@@ -55,15 +55,15 @@ mod daemon_signal_tests {
     fn daemon_sigusr1_parks_sigusr2_reclaims_sigterm_exits() {
         let tmpdir = tempdir().expect("tempdir");
         let home = tmpdir.path().to_str().unwrap();
-        let state_path = tmpdir.path().join(".brain/state.json");
+        let state_path = tmpdir.path().join(".orca/state.json");
 
-        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_brain"))
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_orca"))
             .env("HOME", home)
             .args(["daemon", "start", "--port", &TEST_PORT.to_string()])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .expect("failed to spawn brain daemon");
+            .expect("failed to spawn orca daemon");
 
         // Wait for mode=Daemon (server bound and state written)
         let pid = wait_for_mode(&state_path, DaemonMode::Daemon);

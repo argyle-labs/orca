@@ -61,7 +61,7 @@ fn claude_fallback(config: &brain_utils::config::Config) -> Result<Model> {
     config
         .anthropic_api_key
         .as_ref()
-        .context("LM Studio unreachable and no Anthropic API key — run `brain login` or start LM Studio")?;
+        .context("LM Studio unreachable and no Anthropic API key — run `orca login` or start LM Studio")?;
     Ok(Model::Claude("claude-haiku-4-5-20251001".to_string()))
 }
 
@@ -76,7 +76,7 @@ pub fn estimate_context_window(model: &Model) -> usize {
 
 pub fn history_file() -> Option<std::path::PathBuf> {
     let home = dirs::home_dir()?;
-    let dir = home.join(".brain");
+    let dir = home.join(".orca");
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir.join("history"))
 }
@@ -98,8 +98,9 @@ pub fn check_git_changes(dir: &str) -> Option<usize> {
 
 pub fn agent_emoji(name: &str) -> &'static str {
     match name {
-        "brain" | "wolf" => "🧠",
-        "pinky" => "🐭",
+        "orca" => "🐋",
+        "wolf" => "🐺",
+        "otter" => "🦦",
         "owl" => "🦉",
         "fox" => "🦊",
         "crow" => "🐦‍⬛",
@@ -119,10 +120,10 @@ pub fn agent_emoji(name: &str) -> &'static str {
     }
 }
 
-pub fn find_other_brain_pids() -> Vec<u32> {
+pub fn find_other_orca_pids() -> Vec<u32> {
     let my_pid = std::process::id();
     let output = std::process::Command::new("pgrep")
-        .args(["-x", "brain"])
+        .args(["-x", "orca"])
         .output();
     match output {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)

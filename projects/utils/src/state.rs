@@ -1,6 +1,6 @@
 //! Daemon state file: cooperative port handoff between stable daemon and dev server.
 //!
-//! `DaemonState` is written to `~/.brain/state.json` (orca's state dir). The dev server reads it to find
+//! `DaemonState` is written to `~/.orca/state.json` (orca's state dir). The dev server reads it to find
 //! the daemon's PID, sends SIGUSR1 to park it, then reclaims with SIGUSR2 on exit.
 //! All writes go through a tmp-then-rename so readers never see a torn file.
 
@@ -37,12 +37,12 @@ pub struct DaemonState {
     pub started_at: DateTime<Utc>,
 }
 
-/// Canonical path for the daemon state file: `~/.brain/state.json` (orca's state dir).
+/// Canonical path for the daemon state file: `~/.orca/state.json` (orca's state dir).
 pub fn state_path() -> PathBuf {
     dirs::home_dir()
         .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".brain/state.json")
+        .join(".orca/state.json")
 }
 
 // ── path-parameterised internals (used by tests and public API alike) ─────────
@@ -89,7 +89,7 @@ pub fn read() -> Result<Option<DaemonState>> {
     read_from(&state_path())
 }
 
-/// Persist daemon state to `~/.brain/state.json` — orca's state dir (atomic write).
+/// Persist daemon state to `~/.orca/state.json` — orca's state dir (atomic write).
 pub fn write(state: &DaemonState) -> Result<()> {
     write_to(&state_path(), state)
 }
