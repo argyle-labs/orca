@@ -14,6 +14,8 @@ struct ManifestMcp {
     args: Vec<String>,
     #[serde(default)]
     env: HashMap<String, String>,
+    /// Env var name whose value is the Bearer token for HTTP/SSE transport.
+    token_env: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -51,7 +53,7 @@ fn parse_manifest(path: &str) -> Result<(Manifest, String)> {
         .with_context(|| format!("failed to read {}", abs.display()))?;
 
     let manifest: Manifest = toml::from_str(&text)
-        .with_context(|| format!("invalid brain-plugin.toml at {}", abs.display()))?;
+        .with_context(|| format!("invalid orca-plugin.toml at {}", abs.display()))?;
 
     Ok((manifest, abs.to_string_lossy().into_owned()))
 }
@@ -60,9 +62,9 @@ fn parse_manifest(path: &str) -> Result<(Manifest, String)> {
 
 #[derive(Subcommand)]
 pub enum PluginAction {
-    /// Register a plugin from its brain-plugin.toml manifest
+    /// Register a plugin from its orca-plugin.toml manifest
     Add {
-        /// Path to brain-plugin.toml (supports ~/)
+        /// Path to orca-plugin.toml (supports ~/)
         manifest: String,
     },
     /// List all registered plugins
@@ -94,6 +96,7 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
                 mcp_command: m.plugin.mcp.as_ref().map(|mcp| mcp.command.clone()),
                 mcp_args: m.plugin.mcp.as_ref().map(|mcp| mcp.args.clone()).unwrap_or_default(),
                 mcp_env: m.plugin.mcp.as_ref().map(|mcp| mcp.env.clone()).unwrap_or_default(),
+                mcp_token_env: m.plugin.mcp.as_ref().and_then(|mcp| mcp.token_env.clone()),
                 context_injection: m
                     .plugin
                     .context_injection

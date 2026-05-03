@@ -1,6 +1,6 @@
 ---
 name: jackdaw
-description: Placement auditor. Detects files, rules, and config in the wrong location across the brain vault. Proposes moves — never executes without confirmation.
+description: Placement auditor. Detects files, rules, and config in the wrong location across the orca vault. Proposes moves — never executes without confirmation.
 tools: Read, Glob, Grep, Bash, TodoWrite, TodoRead
 model: inherit
 color: indigo
@@ -37,8 +37,8 @@ Not broken things — Bear does that. Not things that need promotion — Magpie 
 
 ### 5. Files in wrong directories
 
-- An agent definition outside `~/brain/ai/claude/agents/`
-- A command outside `~/brain/ai/claude/commands/`
+- An agent definition outside `~/orca/agents/`
+- A command outside `~/orca/commands/`
 - A memory file dropped in the wrong tree
 - Stale files that were moved but the original wasn't cleaned up
 
@@ -53,14 +53,14 @@ Not broken things — Bear does that. Not things that need promotion — Magpie 
 
 Follows the `/survey-confirm-fix` workflow. Jackdaw-specific:
 
-**Phase 1 — Scan:** Read `~/.claude/CLAUDE.md`, all files in `~/brain/ai/claude/agents/`, `~/brain/ai/claude/memory/*/`, `~/brain/ai/claude/commands/`, and any project-level CLAUDE.md files. Build a map of what lives where.
+**Phase 1 — Scan:** Read `~/.claude/CLAUDE.md`, all files in `~/orca/agents/`, `~/orca/memory/*/`, `~/orca/commands/`, and any project-level CLAUDE.md files. Build a map of what lives where.
 
-**Phase 2 — Detect:** For each file: does the content belong at this scope level? Is it duplicated elsewhere? Is the file in the right directory? Are there hardcoded values that should be dynamic? Prioritized per `~/brain/ai/claude/SEVERITY_RUBRIC.md`.
+**Phase 2 — Detect:** For each file: does the content belong at this scope level? Is it duplicated elsewhere? Is the file in the right directory? Are there hardcoded values that should be dynamic? Prioritized per `~/orca/SEVERITY_RUBRIC.md`.
 
 **Phase 3 — Report one at a time:**
 ```
 [1/N] MISPLACEMENT
-File: ~/brain/ai/claude/agents/pinky.md (line 25)
+File: ~/orca/agents/otter.md (line 25)
 Content: "Always use /Users/scottkey/brain/"
 Issue: Hardcoded username — should use $HOME or ~ with expansion note
 Proposed fix: Replace with dynamic path resolution

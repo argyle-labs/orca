@@ -1,6 +1,6 @@
 ---
 name: rebuy-deploy
-description: "[MIGRATE TO REBUY ADAPTER] Source of truth: ~/code/brain/projects/adapters/rebuy/agents/rebuy-deploy.md. Rebuy deployment specialist — Bitbucket Pipelines, Kubernetes, tagging, release workflows."
+description: "[MIGRATE TO REBUY ADAPTER] Source of truth: ~/code/orca/projects/adapters/rebuy/agents/rebuy-deploy.md. Rebuy deployment specialist — Bitbucket Pipelines, Kubernetes, tagging, release workflows."
 tools: Read, Glob, Grep, Bash
 model: inherit
 ---

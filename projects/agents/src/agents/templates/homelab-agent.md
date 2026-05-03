@@ -88,4 +88,4 @@ Before publishing an agent built on this template, verify every item:
 - [ ] Output format uses `━━━ CATEGORY ━━━` section headers
 - [ ] Full topology references `@badger` rather than embedding its own copy
 - [ ] Agent added to wolf.md routing table
-- [ ] Agent added to `~/brain/ai/claude/DELEGATION.md` specialist table
+- [ ] Agent added to `~/orca/DELEGATION.md` specialist table

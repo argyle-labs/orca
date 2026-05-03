@@ -98,7 +98,7 @@ fn base_spec_info(entry: &SpecEntry, title_suffix: &str) -> Value {
             "version": "0.0.0",
             "description": entry.description.as_deref().unwrap_or("")
         },
-        "x-brain": {
+        "x-orca": {
             "repo": entry.repo,
             "project": entry.project,
             "source": entry.source,
@@ -135,7 +135,7 @@ const METHODS: &[&str] = &[
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
 
-/// Domain tags in brain's own spec that are publicly accessible.
+/// Domain tags in orca's own spec that are publicly accessible.
 /// utoipa 4.x only supports one tag per path, so we classify by domain name.
 const BRAIN_PUBLIC_DOMAINS: &[&str] = &["docs", "library"];
 
@@ -165,7 +165,7 @@ fn filter_ops(mut spec: Value, keep: impl Fn(&Value) -> bool) -> Value {
     spec
 }
 
-/// Filter brain's own spec to only operations in publicly accessible domain groups.
+/// Filter orca's own spec to only operations in publicly accessible domain groups.
 /// Uses domain tags (docs, library) since utoipa 4.x doesn't support multi-tag paths.
 pub fn filter_brain_public(spec: Value) -> Value {
     let mut filtered = filter_ops(spec, |op| {

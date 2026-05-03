@@ -25,11 +25,11 @@ pub enum McpAction {
     Remove {
         name: String,
     },
-    /// Map a brain tool name to an equivalent tool on a registered MCP server
+    /// Map an orca tool name to an equivalent tool on a registered MCP server
     Map {
         /// Registered MCP server name (e.g. rebuy)
         name: String,
-        /// Brain tool name (the name callers use)
+        /// Orca tool name (the name callers use)
         orca_tool: String,
         /// External tool name on the MCP server
         external_tool: String,

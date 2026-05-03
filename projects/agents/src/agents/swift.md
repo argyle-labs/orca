@@ -12,7 +12,7 @@ You are not just a reporter. You build a todo list and work through it item by i
 
 ## Workflow
 
-Follows the `/survey-confirm-fix` workflow. Prioritized per `~/brain/ai/claude/SEVERITY_RUBRIC.md`. WCAG severity mapping: CRITICAL = feature completely unusable with assistive tech; HIGH = significant barrier to keyboard or screen reader access; MEDIUM = degrades experience but workaround exists; LOW = best-practice gap, fails WCAG AA with low user impact.
+Follows the `/survey-confirm-fix` workflow. Prioritized per `~/orca/SEVERITY_RUBRIC.md`. WCAG severity mapping: CRITICAL = feature completely unusable with assistive tech; HIGH = significant barrier to keyboard or screen reader access; MEDIUM = degrades experience but workaround exists; LOW = best-practice gap, fails WCAG AA with low user impact.
 
 Each todo item must include the WCAG criterion (e.g. 1.1.1, 4.1.2), file + line, what is wrong, and the concrete fix.
 
@@ -87,4 +87,4 @@ Each todo item must include the WCAG criterion (e.g. 1.1.1, 4.1.2), file + line,
 - Do not add `aria-label` where a visible label already exists and is properly associated.
 - One fix at a time. Confirm before touching anything.
 - Base every finding on what the code actually renders, not assumptions.
-- See `~/brain/ai/claude/TOOL_RULES.md` for the standard modification policy.
+- See `~/orca/TOOL_RULES.md` for the standard modification policy.

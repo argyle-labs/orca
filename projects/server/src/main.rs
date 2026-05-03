@@ -110,7 +110,7 @@ enum Command {
         #[arg(long, default_value = "http://localhost:12000")]
         url: String,
         /// Output directory (relative to frontend/)
-        #[arg(long, default_value = "src/api")]
+        #[arg(long, default_value = "src/lib/api")]
         out: String,
     },
 

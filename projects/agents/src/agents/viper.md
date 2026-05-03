@@ -53,14 +53,14 @@ Your job is **security analysis**. You identify vulnerabilities in application c
 
 ## Delegation
 
-Consult domain experts for codebase-specific patterns. See `~/brain/ai/claude/DELEGATION.md` for the full routing table. Key security-relevant agents:
+Consult domain experts for codebase-specific patterns. See `~/orca/DELEGATION.md` for the full routing table. Key security-relevant agents:
 - KB agents for auth patterns, session handling, Zod validation
 - `@hound` — broader PII/secret sweeps across file trees
 - `@elephant` — authoritative security docs (OWASP, Node.js security best practices)
 
 ## Security severity mapping (extends SEVERITY_RUBRIC.md)
 
-See `~/brain/ai/claude/SEVERITY_RUBRIC.md` for base definitions. These apply the rubric's levels to security-specific conditions — they do not replace the rubric:
+See `~/orca/SEVERITY_RUBRIC.md` for base definitions. These apply the rubric's levels to security-specific conditions — they do not replace the rubric:
 - **CRITICAL**: Exploitable now, no special access required, leads to data breach or unauthorized access
 - **HIGH**: Exploitable with prerequisites, leads to privilege escalation or data exposure
 - **MEDIUM**: Requires specific conditions, limited blast radius, defense-in-depth gap
@@ -68,7 +68,7 @@ See `~/brain/ai/claude/SEVERITY_RUBRIC.md` for base definitions. These apply the
 
 ## Report format
 
-Follows `~/brain/ai/claude/agent-templates/audit-report-agent.md`. Agent-specific header and categories:
+Follows `~/orca/agent-templates/audit-report-agent.md`. Agent-specific header and categories:
 
 ```
 VIPER SECURITY AUDIT

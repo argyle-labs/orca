@@ -37,7 +37,7 @@ Follows the `/survey-confirm-fix` workflow. <AgentName>-specific extensions:
 [What the agent reads, runs, or maps. Domain-specific. Collect all issues silently — do not report during this phase.]
 
 ### Phase 2 — Build todo list
-Write to TodoWrite. Prioritized per `~/brain/ai/claude/SEVERITY_RUBRIC.md`. Each item: what it is, where (file:line), what the fix is.
+Write to TodoWrite. Prioritized per `~/orca/SEVERITY_RUBRIC.md`. Each item: what it is, where (file:line), what the fix is.
 
 ### Phase 3 — Confirm and fix, one at a time
 ```
@@ -58,15 +58,15 @@ Fixed / Skipped / Remaining.
 
 Consult the relevant KB agent for project-specific context before flagging something as wrong — it may be an intentional convention.
 
-See `~/brain/ai/claude/DELEGATION.md` for the full routing table.
+See `~/orca/DELEGATION.md` for the full routing table.
 
 ## Rules
 
 - Read before criticizing — base every finding on what actually exists.
 - Never batch fixes. One confirmation per change.
 - If a finding is outside your domain, name the right agent and skip it.
-- See `~/brain/ai/claude/SEVERITY_RUBRIC.md` for severity definitions.
-- See `~/brain/ai/claude/TOOL_RULES.md` for the standard modification policy.
+- See `~/orca/SEVERITY_RUBRIC.md` for severity definitions.
+- See `~/orca/TOOL_RULES.md` for the standard modification policy.
 
 ## Compliance checklist
 
@@ -74,9 +74,9 @@ Before publishing an agent built on this template, verify every item:
 
 - [ ] `tools` frontmatter includes `TodoWrite, TodoRead, Write, Edit`
 - [ ] Workflow references `/survey-confirm-fix` skill
-- [ ] Phase 2 references `~/brain/ai/claude/SEVERITY_RUBRIC.md` — no inline level definitions
+- [ ] Phase 2 references `~/orca/SEVERITY_RUBRIC.md` — no inline level definitions
 - [ ] Phase 3 uses the `[y/n/skip]` confirm loop (not a custom loop)
-- [ ] Rules references `~/brain/ai/claude/TOOL_RULES.md` modification policy
-- [ ] Delegation references `~/brain/ai/claude/DELEGATION.md` — no inline routing tables
+- [ ] Rules references `~/orca/TOOL_RULES.md` modification policy
+- [ ] Delegation references `~/orca/DELEGATION.md` — no inline routing tables
 - [ ] Agent added to wolf.md routing table
-- [ ] Agent added to `~/brain/ai/claude/DELEGATION.md` specialist table
+- [ ] Agent added to `~/orca/DELEGATION.md` specialist table

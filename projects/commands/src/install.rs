@@ -212,11 +212,11 @@ fn step_claude_md(home: &Path, report: &mut InstallReport) {
     let vault_claude_md = home.join(APP_STATE_DIR).join("CLAUDE.md");
     let dot_claude_md   = claude_dir.join("CLAUDE.md");
 
-    // If brain repo is present, symlink through the vault. Otherwise write embedded content.
-    let brain_repo_md = home.join("code/orca/CLAUDE.md");
-    if brain_repo_md.exists() {
+    // If orca repo is present, symlink through the vault. Otherwise write embedded content.
+    let orca_repo_md = home.join("code/orca/CLAUDE.md");
+    if orca_repo_md.exists() {
         // vault → repo
-        force_symlink(&brain_repo_md, &vault_claude_md, report, "vault CLAUDE.md → repo");
+        force_symlink(&orca_repo_md, &vault_claude_md, report, "vault CLAUDE.md → repo");
         // ~/.claude/CLAUDE.md → vault
         force_symlink(&vault_claude_md, &dot_claude_md, report, "~/.claude/CLAUDE.md → vault");
     } else {

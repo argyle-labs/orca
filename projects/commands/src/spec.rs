@@ -271,7 +271,7 @@ pub fn cmd_spec(action: SpecAction) -> Result<()> {
         }
 
         SpecAction::Dump => {
-            // Handled by the server binary (main.rs) which has access to brain::serve::openapi.
+            // Handled by the server binary (main.rs) which has access to serve::openapi.
             // Should not reach here.
             anyhow::bail!("spec dump must be dispatched from main.rs")
         }

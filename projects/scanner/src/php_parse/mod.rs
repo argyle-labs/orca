@@ -19,7 +19,7 @@
 //! Enable it with:
 //!
 //! ```toml
-//! brain-scanner = { ..., features = ["php-ast"] }
+//! orca-scanner = { ..., features = ["php-ast"] }
 //! ```
 
 use serde_json::{Map, Value, json};

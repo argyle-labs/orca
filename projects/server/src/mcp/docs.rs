@@ -37,7 +37,7 @@ pub fn doc_roots(config: &Config) -> Vec<DocRoot> {
         },
         DocRoot {
             name: "orca",
-            path: config.orca_vault.clone(),
+            path: config.vault_root.clone(),
             ignored: [
                 ".git",
                 "logs",

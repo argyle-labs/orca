@@ -35,7 +35,7 @@ pub struct TuiApp {
     saved_input: String,
     /// Whether a chat is in progress.
     pub busy: bool,
-    /// Prompt prefix (e.g. "🧠 brain ›").
+    /// Prompt prefix (e.g. "🐋 orca ›").
     prompt: String,
     /// Whether the app should quit.
     pub should_quit: bool,

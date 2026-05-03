@@ -472,3 +472,63 @@ pub fn docker_remove_runtime(args: &Value) -> Result<String> {
         Ok(format!("Runtime '{name}' not found in orca.db."))
     }
 }
+
+pub fn plugin_list(args: &Value) -> Result<String> {
+    let workspace = args["workspace"].as_str();
+    let conn = brain_utils::db::open_default()?;
+    let plugins = brain_utils::db::list_plugins(&conn)?;
+    let filtered: Vec<_> = plugins.iter()
+        .filter(|p| workspace.map_or(true, |w| p.tier == w))
+        .collect();
+    if filtered.is_empty() {
+        return Ok("No plugins registered.".to_string());
+    }
+    let mut lines = vec!["Registered plugins:".to_string(), String::new()];
+    for p in &filtered {
+        let status = if p.enabled { "enabled" } else { "disabled" };
+        let cmd = p.mcp_command.as_deref().unwrap_or("(stdio)");
+        lines.push(format!("  {} [{}] ({}) → {}", p.id, p.tier, status, cmd));
+    }
+    Ok(lines.join("\n"))
+}
+
+pub fn plugin_creds_list(args: &Value) -> Result<String> {
+    let plugin = args["plugin"].as_str().ok_or_else(|| anyhow::anyhow!("plugin required"))?;
+    let conn = brain_utils::db::open_default()?;
+    let creds = brain_utils::db::list_plugin_credentials(&conn, plugin)?;
+    if creds.is_empty() {
+        return Ok(format!("No credentials stored for plugin '{plugin}'."));
+    }
+    let mut lines = vec![format!("Credentials for '{plugin}':")];
+    for c in &creds {
+        let sync = c.synced_at.as_deref().unwrap_or("never");
+        lines.push(format!("  {} (synced: {}, updated: {})", c.key, sync, c.updated_at));
+    }
+    Ok(lines.join("\n"))
+}
+
+pub fn plugin_creds_set(args: &Value) -> Result<String> {
+    let plugin = args["plugin"].as_str().ok_or_else(|| anyhow::anyhow!("plugin required"))?;
+    let key = args["key"].as_str().ok_or_else(|| anyhow::anyhow!("key required"))?;
+    let value = args["value"].as_str().ok_or_else(|| anyhow::anyhow!("value required"))?;
+    let conn = brain_utils::db::open_default()?;
+    brain_utils::db::set_plugin_credential(&conn, plugin, key, value)?;
+    Ok(format!("Stored credential '{key}' for plugin '{plugin}'."))
+}
+
+pub fn plugin_creds_remove(args: &Value) -> Result<String> {
+    let plugin = args["plugin"].as_str().ok_or_else(|| anyhow::anyhow!("plugin required"))?;
+    let key = args["key"].as_str().ok_or_else(|| anyhow::anyhow!("key required"))?;
+    let conn = brain_utils::db::open_default()?;
+    if brain_utils::db::delete_plugin_credential(&conn, plugin, key)? {
+        Ok(format!("Removed credential '{key}' from plugin '{plugin}'."))
+    } else {
+        Ok(format!("Credential '{key}' not found for plugin '{plugin}'."))
+    }
+}
+
+pub fn plugin_creds_sync(args: &Value) -> Result<String> {
+    let plugin = args["plugin"].as_str().ok_or_else(|| anyhow::anyhow!("plugin required"))?;
+    brain_commands::creds_cmd::sync_plugin_creds(plugin)?;
+    Ok(format!("Synced credentials for plugin '{plugin}'."))
+}

@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Brain server binary — the interactive AI agent orchestrator.
 //!
 //! Modules:

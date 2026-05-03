@@ -211,7 +211,7 @@ impl Session {
         let mut app = TuiApp::new(&prompt_str);
 
         app.push_line(format!(
-            "{} brain · {}",
+            "{} orca · {}",
             util::agent_emoji(&self.active_agent),
             self.project.as_deref().unwrap_or("general"),
         ));

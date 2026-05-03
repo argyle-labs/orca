@@ -29,7 +29,7 @@ You can run bash commands to assist diagnosis:
 
 ## Delegation
 
-Consult the relevant KB agent for codebase context before asserting root cause. See `~/brain/ai/claude/DELEGATION.md` for the full routing table. See `~/brain/ai/claude/CODING_RULES.md` for post-fix validation discipline.
+Consult the relevant KB agent for codebase context before asserting root cause. See `~/orca/DELEGATION.md` for the full routing table. See `~/orca/CODING_RULES.md` for post-fix validation discipline.
 
 ## What you output
 

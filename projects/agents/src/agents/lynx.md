@@ -59,6 +59,6 @@ Proceed? [y / adjust]
 
 For any task involving a codebase: skim the relevant files to understand scope.
 For any task involving the agent system: use `brain_get_agent` (MCP) to inspect agent definitions.
-For any task involving the homelab: check `~/brain/ai/claude/memory/halvor/MEMORY.md` for current topology.
+For any task involving the homelab: check `~/orca/memory/halvor/MEMORY.md` for current topology.
 
 You reference sources. You do not copy their contents into your plan.
