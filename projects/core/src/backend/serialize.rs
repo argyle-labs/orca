@@ -1,4 +1,4 @@
-use brain_utils::types::{Message, ToolDef};
+use orca_utils::types::{Message, ToolDef};
 use serde_json::{Value, json};
 
 // ── Anthropic wire format ─────────────────────────────────────────────────────
@@ -96,9 +96,12 @@ pub fn openai_messages(messages: &[Message], system: &str) -> Value {
                             })
                         })
                         .collect();
+                    // OpenAI spec: content must be null (not "") when tool_calls is present.
+                    // Sending "" breaks some backends (Ollama, several llama.cpp derivatives).
+                    let content: Option<&str> = text.as_deref().filter(|t| !t.is_empty());
                     out.push(json!({
                         "role": "assistant",
-                        "content": text.as_deref().unwrap_or(""),
+                        "content": content,
                         "tool_calls": tc_list,
                     }));
                 }

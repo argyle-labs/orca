@@ -1,4 +1,4 @@
-//! Brain commands — CLI subcommand handlers.
+//! Orca commands — CLI subcommand handlers.
 //!
 //! Each module owns one or more `cmd_*` functions called directly from `main.rs`.
 //! Commands that require `Session` or `ProjectContext` live in `main.rs` instead
@@ -6,7 +6,7 @@
 //!
 //! Modules:
 //! - `agents`   — list available agents
-//! - `auth`     — login/logout/auth (keychain read/write via brain_utils::auth)
+//! - `auth`     — login/logout/auth (keychain read/write via orca_utils::auth)
 //! - `codegen`  — `orca gen`: fetch OpenAPI spec, run openapi-typescript codegen
 //! - `daemon`   — daemon lifecycle: status/stop/park/reclaim/install/uninstall
 //! - `doctor`   — validate agent files, symlinks, config, and tool availability

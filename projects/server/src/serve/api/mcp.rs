@@ -23,8 +23,8 @@ use crate::serve::middleware::CorrelationId;
 )]
 pub async fn mcp_servers_handler() -> Response {
     db_json(|| {
-        let conn = brain_utils::db::open_default()?;
-        let servers: Vec<McpServerInfo> = brain_utils::db::list_mcp_servers(&conn)?
+        let conn = orca_utils::db::open_default()?;
+        let servers: Vec<McpServerInfo> = orca_utils::db::list_mcp_servers(&conn)?
             .into_iter()
             .map(|r| McpServerInfo {
                 name: r.name,
@@ -53,15 +53,15 @@ pub async fn mcp_servers_handler() -> Response {
 )]
 pub async fn mcp_add_handler(Json(body): Json<McpServerAddRequest>) -> Response {
     db_ok(|| {
-        let row = brain_utils::db::McpServerRow {
+        let row = orca_utils::db::McpServerRow {
             name: body.name,
             command: body.command,
             args: body.args,
             env: body.env,
             enabled: true,
         };
-        let conn = brain_utils::db::open_default()?;
-        brain_utils::db::upsert_mcp_server(&conn, &row)
+        let conn = orca_utils::db::open_default()?;
+        orca_utils::db::upsert_mcp_server(&conn, &row)
     })
 }
 
@@ -81,8 +81,8 @@ pub async fn mcp_add_handler(Json(body): Json<McpServerAddRequest>) -> Response 
 )]
 pub async fn mcp_remove_handler(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
     db_remove("server", &name, || {
-        let conn = brain_utils::db::open_default()?;
-        brain_utils::db::remove_mcp_server(&conn, &name)
+        let conn = orca_utils::db::open_default()?;
+        orca_utils::db::remove_mcp_server(&conn, &name)
     })
 }
 

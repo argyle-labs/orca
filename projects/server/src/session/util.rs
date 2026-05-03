@@ -1,12 +1,12 @@
-use brain_core::backend::LMStudioBackend;
-use brain_utils::config::Model;
-use brain_utils::types::truncate_preview;
+use orca_core::backend::LMStudioBackend;
+use orca_utils::config::Model;
+use orca_utils::types::truncate_preview;
 use anyhow::{Context, Result};
 use colored::Colorize;
 
 /// Resolve which model to use. Priority: explicit config > LM Studio auto-discover > Claude fallback.
 /// LM Studio is always attempted first — Claude is escalation only.
-pub async fn resolve_model(config: &brain_utils::config::Config) -> Result<Model> {
+pub async fn resolve_model(config: &orca_utils::config::Config) -> Result<Model> {
     match &config.default_model {
         Model::Claude(id) if !id.is_empty() => return Ok(Model::Claude(id.clone())),
         Model::LMStudio(id) if !id.is_empty() => return Ok(Model::LMStudio(id.clone())),
@@ -30,6 +30,17 @@ pub async fn resolve_model(config: &brain_utils::config::Config) -> Result<Model
             }
             if chat_models.len() == 1 {
                 return Ok(Model::LMStudio(chat_models[0].to_string()));
+            }
+
+            // In non-interactive contexts (MCP server, piped stdin) we cannot prompt —
+            // blocking on read_line would hang the caller indefinitely.
+            use std::io::IsTerminal;
+            if !std::io::stdin().is_terminal() {
+                let first = chat_models[0].to_string();
+                eprintln!(
+                    "warning: multiple LM Studio models available, auto-selecting first: {first}"
+                );
+                return Ok(Model::LMStudio(first));
             }
 
             println!("{}", "Select a model:".green());
@@ -57,7 +68,7 @@ pub async fn resolve_model(config: &brain_utils::config::Config) -> Result<Model
 }
 
 /// Cheapest Claude model as fallback when LM Studio is unavailable.
-fn claude_fallback(config: &brain_utils::config::Config) -> Result<Model> {
+fn claude_fallback(config: &orca_utils::config::Config) -> Result<Model> {
     config
         .anthropic_api_key
         .as_ref()

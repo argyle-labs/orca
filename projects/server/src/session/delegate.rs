@@ -1,6 +1,6 @@
 use super::{Session, util};
-use brain_core::tools::ToolRegistry;
-use brain_utils::types::{Message, ToolResult};
+use orca_core::tools::ToolRegistry;
+use orca_utils::types::{Message, ToolResult};
 use colored::Colorize;
 use tokio_util::sync::CancellationToken;
 
@@ -18,7 +18,7 @@ impl Session {
         }
 
         let agent_prompt =
-            match brain_agents::load_agent_prompt(agent, &self.config.agents_dir()) {
+            match orca_agents::load_agent_prompt(agent, &self.config.agents_dir()) {
                 Some(prompt) => prompt,
                 None => {
                     return ToolResult {
@@ -34,7 +34,7 @@ impl Session {
             self.out("");
             self.out_fmt(
                 format!(
-                    "  🧠 Brain: \"Otter, I'm sending this to {agent_icon} @{agent}. {}\"",
+                    "  🐳 Orca: \"Otter, I'm sending this to {agent_icon} @{agent}. {}\"",
                     match agent {
                         "fox" => "Something is broken and Fox will sniff out the root cause.",
                         "owl" => "Owl will read the code and explain what's happening.",
@@ -178,7 +178,7 @@ impl Session {
 
         self.out_fmt(format!("  └─ {agent_icon} @{agent} done ──────────────────────").cyan());
         if self.narration {
-            let (brain_line, pinky_line) = match agent {
+            let (orca_line, otter_line) = match agent {
                 "fox" => (
                     format!("\"Excellent work, {agent_icon} Fox. The trail was well-traced.\""),
                     "\"Ooh! Was it a mystery? I love mysteries! \"".to_string(),
@@ -193,12 +193,12 @@ impl Session {
                 ),
                 _ => (
                     format!("\"Thank you, {agent_icon} @{agent}. Otter, did you get all that?\""),
-                    "\"Every word, Brain! \"".to_string(),
+                    "\"Every word, Orca! \"".to_string(),
                 ),
             };
             self.out("");
-            self.out_fmt(format!("  🧠 Brain: {brain_line}").dimmed());
-            self.out_fmt(format!("  🦦 Otter: {pinky_line}").dimmed());
+            self.out_fmt(format!("  🐳 Orca: {orca_line}").dimmed());
+            self.out_fmt(format!("  🦦 Otter: {otter_line}").dimmed());
             self.out("");
         }
 

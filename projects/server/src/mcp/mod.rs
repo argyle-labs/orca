@@ -9,11 +9,12 @@ mod specs;
 mod tools;
 
 use anyhow::Result;
-use brain_utils::config::Config;
+use orca_utils::config::Config;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+use crate::serve::api::llm as local_llm;
 use docs::{get_tree, list_commands, list_roots, read_doc, search_docs};
 use handlers::{
     agents, docker_add_runtime, docker_list_runtimes, docker_remove_runtime, get_agent, get_config,
@@ -146,7 +147,7 @@ pub async fn serve(config: &Config) -> Result<()> {
                         }
                     }
                 } else {
-                    // Brain's own tools
+                    // Orca's own tools
                     let result = dispatch(name, args, config).await;
                     match result {
                         Ok(text) => reply(
@@ -183,13 +184,31 @@ async fn dispatch(name: &str, args: &Value, config: &Config) -> Result<String> {
         "list_agents"         => agents(),
         "get_agent"           => get_agent(args, config),
         "run_agent"           => run(args, config).await,
-        "search_logs"         => search_logs(args, config),
+        "search_logs"         => {
+            let raw = search_logs(args, config)?;
+            let query = args["query"].as_str().unwrap_or_default();
+            if let Some(llm) = local_llm::discover_local_llm().await {
+                if let Some(enhanced) = local_llm::present_text_results(&llm, query, &raw, 8000).await {
+                    return Ok(enhanced);
+                }
+            }
+            Ok(raw)
+        }
         "get_config"          => get_config(args, config),
         "get_context"         => get_context(args, config),
         "list_roots"          => list_roots(config),
         "get_tree"            => get_tree(args, config),
         "read_doc"            => read_doc(args, config),
-        "search_docs"         => search_docs(args, config),
+        "search_docs"         => {
+            let raw = search_docs(args, config)?;
+            let query = args["query"].as_str().unwrap_or_default();
+            if let Some(llm) = local_llm::discover_local_llm().await {
+                if let Some(enhanced) = local_llm::present_text_results(&llm, query, &raw, 8000).await {
+                    return Ok(enhanced);
+                }
+            }
+            Ok(raw)
+        }
         "list_commands"       => list_commands(config),
         "list_services"       => list_services().await,
         "get_service_logs"    => service_logs(args).await,

@@ -11,6 +11,8 @@ pub struct TreeNode {
     #[serde(rename = "type")]
     pub node_type: NodeType,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(no_recursion)]
     pub children: Option<Vec<TreeNode>>,
 }
@@ -98,6 +100,25 @@ pub fn get_search_ignored(root_name: &str) -> HashSet<String> {
     }
 }
 
+fn parse_numeric_prefix(name: &str) -> (Option<u32>, String) {
+    if let Some((prefix, rest)) = name.split_once('-') {
+        if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) {
+            let order = prefix.parse::<u32>().ok();
+            return (order, rest.to_string());
+        }
+    }
+    (None, name.to_string())
+}
+
+fn strip_app_prefix(title: &str) -> String {
+    // Strip "AppName — " prefix from titles like "rebuy-cli-mcp-server — Patterns"
+    if let Some((_, rest)) = title.split_once(" \u{2014} ") {
+        rest.trim().to_string()
+    } else {
+        title.to_string()
+    }
+}
+
 fn extract_title(path: &Path) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
     // Prefer frontmatter `name:` — authoritative for agent/command files
@@ -117,7 +138,7 @@ fn extract_title(path: &Path) -> Option<String> {
     content
         .lines()
         .find(|l| l.starts_with("# "))
-        .map(|l| l[2..].trim().to_string())
+        .map(|l| strip_app_prefix(l[2..].trim()))
 }
 
 fn is_dir(full: &Path) -> bool {
@@ -149,9 +170,15 @@ pub fn build_tree_raw(dir: &Path, root_dir: &Path, ignored: &HashSet<String>) ->
         if is_dir(&full) {
             let children = build_tree_raw(&full, root_dir, ignored);
             if !children.is_empty() {
+                let (order, stripped) = parse_numeric_prefix(&name);
+                let display_name = match order {
+                    Some(n) => format!("{n}. {stripped}"),
+                    None => stripped,
+                };
                 nodes.push(TreeNode {
-                    name,
+                    name: display_name,
                     path: rel,
+                    order,
                     node_type: NodeType::Dir,
                     children: Some(children),
                 });
@@ -164,20 +191,27 @@ pub fn build_tree_raw(dir: &Path, root_dir: &Path, ignored: &HashSet<String>) ->
                     .and_then(|s| s.to_str())
                     .unwrap_or(&name)
                     .to_string();
-                let title = extract_title(&full).unwrap_or(stem);
+                let (order, stem_stripped) = parse_numeric_prefix(&stem);
+                let base_title = extract_title(&full).unwrap_or(stem_stripped);
+                let title = match order {
+                    Some(n) => format!("{n}. {base_title}"),
+                    None => base_title,
+                };
                 nodes.push(TreeNode {
                     name: title,
                     path: rel,
+                    order,
                     node_type: NodeType::File,
                     children: None,
                 });
             }
         }
     }
-    nodes.sort_by(|a, b| match (&a.node_type, &b.node_type) {
-        (NodeType::Dir, NodeType::File) => std::cmp::Ordering::Less,
-        (NodeType::File, NodeType::Dir) => std::cmp::Ordering::Greater,
-        _ => a.name.cmp(&b.name),
+    nodes.sort_by(|a, b| match (a.order, b.order) {
+        (Some(oa), Some(ob)) => oa.cmp(&ob),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.path.cmp(&b.path),
     });
     nodes
 }
@@ -221,7 +255,7 @@ fn compact_tree(nodes: Vec<TreeNode>) -> Vec<TreeNode> {
             continue;
         }
         if children.len() == 1 && children[0].node_type == NodeType::Dir {
-            let child = children.into_iter().next().unwrap();
+            let child = children.into_iter().next().expect("checked len == 1");
             result.push(TreeNode {
                 name: format!("{}/{}", node.name, child.name),
                 ..child
@@ -399,5 +433,21 @@ mod tests {
         assert_eq!(raw.len(), 1);
         assert_eq!(raw[0].node_type, NodeType::Dir);
         assert_eq!(raw[0].name, "guides");
+    }
+
+    #[test]
+    fn extract_title_strips_app_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("doc.md");
+        fs::write(&f, "# rebuy-cli-mcp-server \u{2014} Patterns: Idioms and Conventions\nContent.").unwrap();
+        assert_eq!(extract_title(&f), Some("Patterns: Idioms and Conventions".to_string()));
+    }
+
+    #[test]
+    fn extract_title_no_prefix_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("doc.md");
+        fs::write(&f, "# Just A Title\nContent.").unwrap();
+        assert_eq!(extract_title(&f), Some("Just A Title".to_string()));
     }
 }

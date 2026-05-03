@@ -14,6 +14,25 @@ use rusqlite::Connection;
 use std::path::Path;
 
 use crate::consts::{APP_DB_FILE, APP_STATE_DIR};
+use crate::tools::fs::expand_tilde;
+
+fn to_json_arr<T: serde::Serialize>(v: &T) -> String {
+    serde_json::to_string(v).unwrap_or_else(|_| "[]".into())
+}
+
+fn to_json_obj<T: serde::Serialize>(v: &T) -> String {
+    serde_json::to_string(v).unwrap_or_else(|_| "{}".into())
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PluginSearchTool {
+    pub tool: String,
+    #[serde(default = "default_search_arg")]
+    pub arg: String,
+    pub root: String,
+}
+
+fn default_search_arg() -> String { "query".to_string() }
 
 /// Open (or create) the encrypted orca database.
 ///
@@ -112,6 +131,77 @@ static MIGRATIONS: &[Migration] = &[
         description: "add mcp_token_env to plugins — env var name carrying Bearer token for HTTP/SSE transport",
         up: "ALTER TABLE plugins ADD COLUMN mcp_token_env TEXT;",
         down: None,
+    },
+    Migration {
+        version: 6,
+        description: "add driver column to schema_databases (mysql/postgres/sqlite)",
+        up: "ALTER TABLE schema_databases ADD COLUMN driver TEXT NOT NULL DEFAULT 'mysql';",
+        down: None,
+    },
+    Migration {
+        version: 7,
+        description: "add oauth_tokens table — service access/refresh tokens with expiry",
+        up: "CREATE TABLE IF NOT EXISTS oauth_tokens (
+            service       TEXT PRIMARY KEY,
+            access_token  TEXT NOT NULL,
+            refresh_token TEXT,
+            expires_at    TEXT,
+            updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );",
+        down: Some("DROP TABLE IF EXISTS oauth_tokens;"),
+    },
+    Migration {
+        version: 8,
+        description: "add mode + nav_links to plugins — plugins declare which mode they belong to and what nav links they contribute",
+        up: "ALTER TABLE plugins ADD COLUMN mode TEXT NOT NULL DEFAULT 'orca'; \
+             ALTER TABLE plugins ADD COLUMN nav_links TEXT NOT NULL DEFAULT '[]';",
+        down: None,
+    },
+    Migration {
+        version: 9,
+        description: "add plugin_data table — generic KV store for plugin-owned data in Orca",
+        up: "CREATE TABLE IF NOT EXISTS plugin_data (
+            plugin_id  TEXT NOT NULL,
+            key        TEXT NOT NULL,
+            value      TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            PRIMARY KEY (plugin_id, key)
+        );",
+        down: Some("DROP TABLE IF EXISTS plugin_data;"),
+    },
+    Migration {
+        version: 10,
+        description: "add search_tools to plugins — MCP tool names this plugin exposes for unified orca search",
+        up: "ALTER TABLE plugins ADD COLUMN search_tools TEXT NOT NULL DEFAULT '[]';",
+        down: None,
+    },
+    Migration {
+        version: 11,
+        description: "add specs_dir to plugins — filesystem path where plugin-owned spec files live",
+        up: "ALTER TABLE plugins ADD COLUMN specs_dir TEXT;",
+        down: None,
+    },
+    Migration {
+        version: 12,
+        description: "add llm_providers — registered local LLM backends (LM Studio, Ollama, …)",
+        up: "CREATE TABLE IF NOT EXISTS llm_providers (
+            name       TEXT PRIMARY KEY,
+            url        TEXT NOT NULL,
+            kind       TEXT NOT NULL DEFAULT 'lmstudio',
+            enabled    INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );",
+        down: Some("DROP TABLE IF EXISTS llm_providers;"),
+    },
+    Migration {
+        version: 13,
+        description: "add plugin_deps — tracks which plugins were auto-installed as dependencies of another",
+        up: "CREATE TABLE IF NOT EXISTS plugin_deps (
+            parent_id  TEXT NOT NULL,
+            dep_id     TEXT NOT NULL,
+            PRIMARY KEY (parent_id, dep_id)
+        );",
+        down: Some("DROP TABLE IF EXISTS plugin_deps;"),
     },
 ];
 
@@ -307,6 +397,14 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             context_injection TEXT NOT NULL DEFAULT 'minimal',
             enabled           INTEGER NOT NULL DEFAULT 1,
             created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS plugin_data (
+            plugin_id  TEXT NOT NULL,
+            key        TEXT NOT NULL,
+            value      TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            PRIMARY KEY (plugin_id, key)
         );
         ",
     )?;
@@ -529,8 +627,8 @@ pub fn list_mcp_servers(conn: &Connection) -> Result<Vec<McpServerRow>> {
 }
 
 pub fn upsert_mcp_server(conn: &Connection, server: &McpServerRow) -> Result<()> {
-    let args_json = serde_json::to_string(&server.args).unwrap_or_else(|_| "[]".into());
-    let env_json = serde_json::to_string(&server.env).unwrap_or_else(|_| "{}".into());
+    let args_json = to_json_arr(&server.args);
+    let env_json = to_json_obj(&server.env);
     conn.execute(
         "INSERT INTO mcp_servers (name, command, args, env, enabled)
          VALUES (?1, ?2, ?3, ?4, ?5)
@@ -563,6 +661,7 @@ pub fn remove_mcp_server(conn: &Connection, name: &str) -> Result<bool> {
 #[derive(Debug, Clone)]
 pub struct SchemaDbRow {
     pub name: String,
+    pub driver: String,
     pub host: Option<String>,
     pub port: Option<u16>,
     pub user: String,
@@ -575,7 +674,8 @@ pub struct SchemaDbRow {
 
 pub fn list_schema_databases(conn: &Connection) -> Result<Vec<SchemaDbRow>> {
     let mut stmt = conn.prepare(
-        "SELECT name, host, port, user, password, database, container, domains_file, enabled
+        "SELECT name, host, port, user, password, database, container, domains_file, enabled,
+                COALESCE(driver, 'mysql')
          FROM schema_databases WHERE enabled = 1 ORDER BY name",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -589,6 +689,7 @@ pub fn list_schema_databases(conn: &Connection) -> Result<Vec<SchemaDbRow>> {
             container: row.get(6)?,
             domains_file: row.get(7)?,
             enabled: row.get::<_, i32>(8)? != 0,
+            driver: row.get(9)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
@@ -596,8 +697,8 @@ pub fn list_schema_databases(conn: &Connection) -> Result<Vec<SchemaDbRow>> {
 
 pub fn upsert_schema_database(conn: &Connection, db: &SchemaDbRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO schema_databases (name, host, port, user, password, database, container, domains_file, enabled)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        "INSERT INTO schema_databases (name, host, port, user, password, database, container, domains_file, enabled, driver)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(name) DO UPDATE SET
              host         = excluded.host,
              port         = excluded.port,
@@ -606,7 +707,8 @@ pub fn upsert_schema_database(conn: &Connection, db: &SchemaDbRow) -> Result<()>
              database     = excluded.database,
              container    = excluded.container,
              domains_file = excluded.domains_file,
-             enabled      = excluded.enabled",
+             enabled      = excluded.enabled,
+             driver       = excluded.driver",
         rusqlite::params![
             db.name,
             db.host,
@@ -617,6 +719,7 @@ pub fn upsert_schema_database(conn: &Connection, db: &SchemaDbRow) -> Result<()>
             db.container,
             db.domains_file,
             db.enabled as i32,
+            db.driver,
         ],
     )?;
     Ok(())
@@ -649,12 +752,7 @@ impl DockerRuntimeRow {
     /// Only applies to socket/tcp runtimes — web-based runtimes (url only) return None.
     pub fn docker_host(&self) -> Option<String> {
         if let Some(sock) = &self.socket_path {
-            let expanded = if let Some(rest) = sock.strip_prefix("~/") {
-                let home = std::env::var("HOME").unwrap_or_default();
-                format!("{home}/{rest}")
-            } else {
-                sock.clone()
-            };
+            let expanded = expand_tilde(sock);
             Some(format!("unix://{expanded}"))
         } else {
             self.host.clone()
@@ -694,13 +792,7 @@ pub fn active_docker_host(conn: &Connection) -> Option<String> {
         })
         .ok()?;
     if let Some(sock) = socket_path {
-        let expanded = if let Some(rest) = sock.strip_prefix("~/") {
-            let home = std::env::var("HOME").unwrap_or_default();
-            format!("{home}/{rest}")
-        } else {
-            sock
-        };
-        Some(format!("unix://{expanded}"))
+        Some(format!("unix://{}", expand_tilde(&sock)))
     } else {
         host
     }
@@ -916,6 +1008,9 @@ pub struct PluginRow {
     pub id: String,
     pub manifest_path: String,
     pub tier: String,
+    /// UI mode this plugin belongs to: "orca" (default) or any custom mode string (e.g. "rebuy").
+    /// Plugins with the same mode group together in the sidebar.
+    pub mode: String,
     pub mcp_command: Option<String>,
     pub mcp_args: Vec<String>,
     pub mcp_env: std::collections::HashMap<String, String>,
@@ -924,92 +1019,109 @@ pub struct PluginRow {
     pub context_injection: String,
     pub enabled: bool,
     /// Maps universal command name → plugin's internal MCP tool name.
-    /// Empty map means no universal command routing for this plugin.
     pub command_map: std::collections::HashMap<String, String>,
+    /// Sidebar nav links this plugin contributes when its mode is active.
+    /// JSON array of {href, label} objects, optionally with {section} for grouping.
+    pub nav_links: Vec<serde_json::Value>,
+    /// MCP tools this plugin exposes for orca's unified search (Cmd+K).
+    pub search_tools: Vec<PluginSearchTool>,
+    /// Filesystem path to the directory containing this plugin's spec files.
+    /// Files here are served by orca's spec system with the plugin's id as namespace.
+    pub specs_dir: Option<String>,
+}
+
+const PLUGIN_COLS: &str =
+    "id, manifest_path, tier, COALESCE(mode,'orca'), mcp_command, mcp_args, mcp_env,
+     context_injection, enabled, command_map, mcp_token_env, COALESCE(nav_links,'[]'),
+     COALESCE(search_tools,'[]'), specs_dir";
+
+fn parse_plugin_row(
+    id: String, manifest_path: String, tier: String, mode: String,
+    mcp_command: Option<String>, args_json: String, env_json: String,
+    context_injection: String, enabled: i32, map_json: String,
+    mcp_token_env: Option<String>, nav_links_json: String,
+    search_tools_json: String, specs_dir: Option<String>,
+) -> PluginRow {
+    PluginRow {
+        id,
+        manifest_path,
+        tier,
+        mode,
+        mcp_command,
+        mcp_args: serde_json::from_str(&args_json).unwrap_or_default(),
+        mcp_env: serde_json::from_str(&env_json).unwrap_or_default(),
+        mcp_token_env,
+        context_injection,
+        enabled: enabled != 0,
+        command_map: serde_json::from_str(&map_json).unwrap_or_default(),
+        nav_links: serde_json::from_str(&nav_links_json).unwrap_or_default(),
+        search_tools: serde_json::from_str(&search_tools_json).unwrap_or_default(),
+        specs_dir,
+    }
 }
 
 pub fn list_plugins(conn: &Connection) -> Result<Vec<PluginRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, manifest_path, tier, mcp_command, mcp_args, mcp_env, context_injection, enabled, command_map, mcp_token_env
-         FROM plugins ORDER BY id",
+        &format!("SELECT {PLUGIN_COLS} FROM plugins ORDER BY id"),
     )?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, String>(4)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
             row.get::<_, String>(5)?,
             row.get::<_, String>(6)?,
-            row.get::<_, i32>(7)?,
-            row.get::<_, String>(8)?,
-            row.get::<_, Option<String>>(9)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, i32>(8)?,
+            row.get::<_, String>(9)?,
+            row.get::<_, Option<String>>(10)?,
+            row.get::<_, String>(11)?,
+            row.get::<_, String>(12)?,
+            row.get::<_, Option<String>>(13)?,
         ))
     })?;
     let mut result = Vec::new();
     for r in rows {
-        let (id, manifest_path, tier, mcp_command, args_json, env_json, context_injection, enabled, map_json, mcp_token_env) = r?;
-        let mcp_args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
-        let mcp_env: std::collections::HashMap<String, String> =
-            serde_json::from_str(&env_json).unwrap_or_default();
-        let command_map: std::collections::HashMap<String, String> =
-            serde_json::from_str(&map_json).unwrap_or_default();
-        result.push(PluginRow {
-            id,
-            manifest_path,
-            tier,
-            mcp_command,
-            mcp_args,
-            mcp_env,
-            mcp_token_env,
-            context_injection,
-            enabled: enabled != 0,
-            command_map,
-        });
+        let (id, manifest_path, tier, mode, mcp_command, args_json, env_json,
+             context_injection, enabled, map_json, mcp_token_env, nav_links_json,
+             search_tools_json, specs_dir) = r?;
+        result.push(parse_plugin_row(id, manifest_path, tier, mode, mcp_command,
+            args_json, env_json, context_injection, enabled, map_json, mcp_token_env,
+            nav_links_json, search_tools_json, specs_dir));
     }
     Ok(result)
 }
 
 pub fn get_plugin(conn: &Connection, id: &str) -> Result<Option<PluginRow>> {
     let result = conn.query_row(
-        "SELECT id, manifest_path, tier, mcp_command, mcp_args, mcp_env, context_injection, enabled, command_map, mcp_token_env
-         FROM plugins WHERE id = ?1",
+        &format!("SELECT {PLUGIN_COLS} FROM plugins WHERE id = ?1"),
         rusqlite::params![id],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, i32>(7)?,
-                row.get::<_, String>(8)?,
-                row.get::<_, Option<String>>(9)?,
-            ))
-        },
+        |row| Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, i32>(8)?,
+            row.get::<_, String>(9)?,
+            row.get::<_, Option<String>>(10)?,
+            row.get::<_, String>(11)?,
+            row.get::<_, String>(12)?,
+            row.get::<_, Option<String>>(13)?,
+        )),
     );
     match result {
-        Ok((id, manifest_path, tier, mcp_command, args_json, env_json, context_injection, enabled, map_json, mcp_token_env)) => {
-            let mcp_args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
-            let mcp_env: std::collections::HashMap<String, String> =
-                serde_json::from_str(&env_json).unwrap_or_default();
-            let command_map: std::collections::HashMap<String, String> =
-                serde_json::from_str(&map_json).unwrap_or_default();
-            Ok(Some(PluginRow {
-                id,
-                manifest_path,
-                tier,
-                mcp_command,
-                mcp_args,
-                mcp_env,
-                mcp_token_env,
-                context_injection,
-                enabled: enabled != 0,
-                command_map,
-            }))
+        Ok((id, manifest_path, tier, mode, mcp_command, args_json, env_json,
+            context_injection, enabled, map_json, mcp_token_env, nav_links_json,
+            search_tools_json, specs_dir)) => {
+            Ok(Some(parse_plugin_row(id, manifest_path, tier, mode, mcp_command,
+                args_json, env_json, context_injection, enabled, map_json, mcp_token_env,
+                nav_links_json, search_tools_json, specs_dir)))
         }
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
@@ -1017,33 +1129,33 @@ pub fn get_plugin(conn: &Connection, id: &str) -> Result<Option<PluginRow>> {
 }
 
 pub fn upsert_plugin(conn: &Connection, plugin: &PluginRow) -> Result<()> {
-    let args_json = serde_json::to_string(&plugin.mcp_args).unwrap_or_else(|_| "[]".into());
-    let env_json = serde_json::to_string(&plugin.mcp_env).unwrap_or_else(|_| "{}".into());
-    let map_json = serde_json::to_string(&plugin.command_map).unwrap_or_else(|_| "{}".into());
+    let args_json = to_json_arr(&plugin.mcp_args);
+    let env_json = to_json_obj(&plugin.mcp_env);
+    let map_json = to_json_obj(&plugin.command_map);
+    let nav_json = to_json_arr(&plugin.nav_links);
+    let search_tools_json = to_json_arr(&plugin.search_tools);
     conn.execute(
-        "INSERT INTO plugins (id, manifest_path, tier, mcp_command, mcp_args, mcp_env, context_injection, enabled, command_map, mcp_token_env)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        "INSERT INTO plugins (id, manifest_path, tier, mode, mcp_command, mcp_args, mcp_env, context_injection, enabled, command_map, mcp_token_env, nav_links, search_tools, specs_dir)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(id) DO UPDATE SET
              manifest_path     = excluded.manifest_path,
              tier              = excluded.tier,
+             mode              = excluded.mode,
              mcp_command       = excluded.mcp_command,
              mcp_args          = excluded.mcp_args,
              mcp_env           = excluded.mcp_env,
              context_injection = excluded.context_injection,
              enabled           = excluded.enabled,
              command_map       = excluded.command_map,
-             mcp_token_env     = excluded.mcp_token_env",
+             mcp_token_env     = excluded.mcp_token_env,
+             nav_links         = excluded.nav_links,
+             search_tools      = excluded.search_tools,
+             specs_dir         = excluded.specs_dir",
         rusqlite::params![
-            plugin.id,
-            plugin.manifest_path,
-            plugin.tier,
-            plugin.mcp_command,
-            args_json,
-            env_json,
-            plugin.context_injection,
-            plugin.enabled as i32,
-            map_json,
-            plugin.mcp_token_env,
+            plugin.id, plugin.manifest_path, plugin.tier, plugin.mode,
+            plugin.mcp_command, args_json, env_json, plugin.context_injection,
+            plugin.enabled as i32, map_json, plugin.mcp_token_env, nav_json, search_tools_json,
+            plugin.specs_dir,
         ],
     )?;
     Ok(())
@@ -1053,6 +1165,43 @@ pub fn remove_plugin(conn: &Connection, id: &str) -> Result<bool> {
     let n = conn.execute(
         "DELETE FROM plugins WHERE id = ?1",
         rusqlite::params![id],
+    )?;
+    Ok(n > 0)
+}
+
+/// Record that `dep_id` was installed as a dependency of `parent_id`.
+pub fn add_plugin_dep(conn: &Connection, parent_id: &str, dep_id: &str) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO plugin_deps (parent_id, dep_id) VALUES (?1, ?2)",
+        rusqlite::params![parent_id, dep_id],
+    )?;
+    Ok(())
+}
+
+/// Return all dep_ids that were pulled in by `parent_id`.
+pub fn list_plugin_deps(conn: &Connection, parent_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT dep_id FROM plugin_deps WHERE parent_id = ?1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![parent_id], |r| r.get(0))?;
+    rows.map(|r| r.map_err(Into::into)).collect()
+}
+
+/// Remove all dep records for `parent_id` (called when parent is removed).
+pub fn remove_plugin_deps(conn: &Connection, parent_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM plugin_deps WHERE parent_id = ?1",
+        rusqlite::params![parent_id],
+    )?;
+    Ok(())
+}
+
+/// Return true if `dep_id` is depended on by any other plugin.
+pub fn plugin_has_parent(conn: &Connection, dep_id: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM plugin_deps WHERE dep_id = ?1",
+        rusqlite::params![dep_id],
+        |r| r.get(0),
     )?;
     Ok(n > 0)
 }
@@ -1129,4 +1278,169 @@ pub fn mark_plugin_credentials_synced(conn: &Connection, plugin_id: &str) -> Res
         rusqlite::params![plugin_id],
     )?;
     Ok(())
+}
+
+// ── OAuth token storage ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct OAuthTokenRow {
+    pub service: String,
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_at: Option<String>,
+}
+
+pub fn upsert_oauth_token(conn: &Connection, row: &OAuthTokenRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO oauth_tokens (service, access_token, refresh_token, expires_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(service) DO UPDATE SET
+             access_token  = excluded.access_token,
+             refresh_token = excluded.refresh_token,
+             expires_at    = excluded.expires_at,
+             updated_at    = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+        rusqlite::params![row.service, row.access_token, row.refresh_token, row.expires_at],
+    )?;
+    Ok(())
+}
+
+pub fn get_oauth_token(conn: &Connection, service: &str) -> Result<Option<OAuthTokenRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT service, access_token, refresh_token, expires_at
+         FROM oauth_tokens WHERE service = ?1",
+    )?;
+    let mut rows = stmt.query_map(rusqlite::params![service], |row| {
+        Ok(OAuthTokenRow {
+            service:       row.get(0)?,
+            access_token:  row.get(1)?,
+            refresh_token: row.get(2)?,
+            expires_at:    row.get(3)?,
+        })
+    })?;
+    Ok(rows.next().transpose()?)
+}
+
+pub fn delete_oauth_token(conn: &Connection, service: &str) -> Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM oauth_tokens WHERE service = ?1",
+        rusqlite::params![service],
+    )?;
+    Ok(n > 0)
+}
+
+// ── Plugin data store ─────────────────────────────────────────────────────────
+// Generic encrypted KV store scoped per plugin. Plugins use this to persist
+// their own state in Orca's database instead of managing their own files.
+
+#[derive(Debug, Clone)]
+pub struct PluginDataRow {
+    pub plugin_id: String,
+    pub key: String,
+    pub value: String,
+    pub updated_at: String,
+}
+
+pub fn get_plugin_data(conn: &Connection, plugin_id: &str, key: &str) -> Result<Option<PluginDataRow>> {
+    let result = conn.query_row(
+        "SELECT plugin_id, key, value, updated_at FROM plugin_data WHERE plugin_id = ?1 AND key = ?2",
+        rusqlite::params![plugin_id, key],
+        |row| Ok(PluginDataRow {
+            plugin_id: row.get(0)?,
+            key:       row.get(1)?,
+            value:     row.get(2)?,
+            updated_at: row.get(3)?,
+        }),
+    );
+    match result {
+        Ok(row) => Ok(Some(row)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn set_plugin_data(conn: &Connection, plugin_id: &str, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO plugin_data (plugin_id, key, value, updated_at)
+         VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+         ON CONFLICT(plugin_id, key) DO UPDATE SET
+             value      = excluded.value,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+        rusqlite::params![plugin_id, key, value],
+    )?;
+    Ok(())
+}
+
+pub fn list_plugin_data(conn: &Connection, plugin_id: &str) -> Result<Vec<PluginDataRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT plugin_id, key, value, updated_at FROM plugin_data WHERE plugin_id = ?1 ORDER BY key",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![plugin_id], |row| {
+        Ok(PluginDataRow {
+            plugin_id:  row.get(0)?,
+            key:        row.get(1)?,
+            value:      row.get(2)?,
+            updated_at: row.get(3)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+pub fn delete_plugin_data(conn: &Connection, plugin_id: &str, key: &str) -> Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM plugin_data WHERE plugin_id = ?1 AND key = ?2",
+        rusqlite::params![plugin_id, key],
+    )?;
+    Ok(n > 0)
+}
+
+// ── LLM providers ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct LlmProvider {
+    pub name:       String,
+    pub url:        String,
+    pub kind:       String,
+    pub enabled:    bool,
+    pub created_at: String,
+}
+
+pub fn list_llm_providers(conn: &Connection) -> Result<Vec<LlmProvider>> {
+    let mut stmt = conn.prepare(
+        "SELECT name, url, kind, enabled, created_at FROM llm_providers ORDER BY created_at",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(LlmProvider {
+            name:       row.get(0)?,
+            url:        row.get(1)?,
+            kind:       row.get(2)?,
+            enabled:    row.get::<_, i64>(3)? != 0,
+            created_at: row.get(4)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+pub fn upsert_llm_provider(conn: &Connection, name: &str, url: &str, kind: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO llm_providers (name, url, kind) VALUES (?1, ?2, ?3)
+         ON CONFLICT(name) DO UPDATE SET url = excluded.url, kind = excluded.kind, enabled = 1",
+        rusqlite::params![name, url, kind],
+    )?;
+    Ok(())
+}
+
+pub fn set_llm_provider_enabled(conn: &Connection, name: &str, enabled: bool) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE llm_providers SET enabled = ?2 WHERE name = ?1",
+        rusqlite::params![name, enabled as i64],
+    )?;
+    Ok(n > 0)
+}
+
+pub fn remove_llm_provider(conn: &Connection, name: &str) -> Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM llm_providers WHERE name = ?1",
+        rusqlite::params![name],
+    )?;
+    Ok(n > 0)
 }

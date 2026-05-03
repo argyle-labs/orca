@@ -1,6 +1,6 @@
 ---
 name: badger
-description: "[MIGRATE TO HALVOR PLUGIN] Halvor homelab agent — source of truth is now ~/code/halvor/agents/badger.md. This copy stays in Brain core until the halvor plugin system is live. Use for anything involving the halvor infrastructure repo or the homelab itself — Proxmox nodes, OPNsense, NAS, containers, LXCs, VMs, networking, backups, smarthome, or services."
+description: "[MIGRATE TO HALVOR PLUGIN] Halvor homelab agent — source of truth is now ~/code/halvor/agents/badger.md. This copy stays in orca core until the halvor plugin system is live. Use for anything involving the halvor infrastructure repo or the homelab itself — Proxmox nodes, OPNsense, NAS, containers, LXCs, VMs, networking, backups, smarthome, or services."
 tools: Read, Glob, Grep, Bash, Write, Edit, TodoWrite, TodoRead
 model: inherit
 color: orange

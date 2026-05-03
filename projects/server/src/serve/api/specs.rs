@@ -1,12 +1,12 @@
 use axum::{
-    extract::{Path, Query},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Json, Response},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use utoipa::ToSchema;
-use brain_utils::db;
+use orca_utils::db;
 
 fn shopify_admin_version() -> String {
     #[derive(Deserialize, Default)]
@@ -26,10 +26,10 @@ fn shopify_admin_version() -> String {
 }
 
 use super::prelude::*;
-pub use brain_scanner::{GraphQlEnum, GraphQlField, GraphQlInfo, GraphQlOperation, GraphQlType};
+pub use orca_scanner::{GraphQlEnum, GraphQlField, GraphQlInfo, GraphQlOperation, GraphQlType};
 
 // ── External spec registry ────────────────────────────────────────────────────
-// Brain's own spec lives at /api/openapi.json and /api/openapi/public.json.
+// Orca's own spec lives at /api/openapi.json and /api/openapi/public.json.
 // These endpoints serve specs for *external* repos (rebuy and others) that are
 // manually captured and stored in ~/orca/openapi/.
 
@@ -66,16 +66,7 @@ pub struct SpecQuery {
     pub download: Option<bool>,
 }
 
-fn specs_dir() -> std::path::PathBuf {
-    brain_scanner::openapi_dir()
-}
-
-fn validate_repo(repo: &str) -> bool {
-    !repo.is_empty()
-        && repo
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
-}
+use super::{specs_dir, validate_repo};
 
 fn serve_spec(raw: &str, filename_base: &str, query: &SpecQuery) -> Response {
     use axum::http::header;
@@ -102,7 +93,7 @@ fn serve_spec(raw: &str, filename_base: &str, query: &SpecQuery) -> Response {
         builder = builder.header(header::CONTENT_DISPOSITION, disposition);
     }
 
-    builder.body(axum::body::Body::from(body)).unwrap()
+    builder.body(axum::body::Body::from(body)).expect("hardcoded headers are valid")
 }
 
 #[utoipa::path(
@@ -179,7 +170,14 @@ pub async fn specs_list_handler() -> Response {
         })
         .collect();
 
-    // Append DB-registered specs (URL-fetched) that aren't already in the disk list
+    // Disk specs belong to the "orca" namespace
+    for entry in &mut augmented {
+        if entry.get("namespace").is_none() {
+            entry["namespace"] = json!("orca");
+        }
+    }
+
+    // Append DB-registered specs (URL-fetched / MCP-synced)
     if let Ok(conn) = db::open_default() {
         if let Ok(db_specs) = db::list_openapi_specs(&conn) {
             let disk_names: std::collections::HashSet<String> = augmented
@@ -191,15 +189,64 @@ pub async fn specs_list_handler() -> Response {
                     let path_count = s.spec_json.as_deref()
                         .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
                         .and_then(|v| v["paths"].as_object().map(|p| p.len() as u64));
+                    // source_mcp names the plugin whose MCP provided this spec (e.g. "rebuy")
+                    let namespace = s.source_mcp.as_deref().unwrap_or("orca");
                     augmented.push(json!({
                         "repo": s.name,
                         "project": s.name,
-                        "source": "url",
+                        "source": if s.source_mcp.is_some() { "mcp" } else { "url" },
+                        "namespace": namespace,
+                        "sourceMcp": s.source_mcp,
                         "baseUrl": s.url,
                         "capturedAt": s.cached_at,
                         "pathCount": path_count,
                         "hasGraphql": false,
                         "files": { "full": true, "public": null },
+                    }));
+                }
+            }
+        }
+
+        // Append specs from plugin-declared spec directories (e.g. rebuy → ~/code/rebuy/rebuy-docs/docs/gen).
+        // No dedup against orca-namespace specs: same filename in two namespaces is intentional —
+        // orca's scanner and the plugin's own tooling may both cover the same service.
+        if let Ok(plugins) = db::list_plugins(&conn) {
+            for plugin in plugins.iter().filter(|p| p.specs_dir.is_some() && p.enabled) {
+                let plugin_dir = std::path::PathBuf::from(plugin.specs_dir.as_deref().unwrap());
+                let Ok(read) = std::fs::read_dir(&plugin_dir) else { continue };
+                // Track repos already added for THIS plugin to avoid intra-plugin dupes.
+                let mut seen_in_plugin: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut plugin_repos: Vec<String> = read
+                    .flatten()
+                    .filter_map(|entry| {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if let Some(stem) = name.strip_suffix(".json") {
+                            if stem.ends_with(".public") { return None; }
+                            return Some(stem.to_string());
+                        }
+                        if let Some(stem) = name.strip_suffix(".graphql") {
+                            return Some(stem.to_string());
+                        }
+                        None
+                    })
+                    .collect();
+                plugin_repos.sort();
+                plugin_repos.dedup();
+                for repo in plugin_repos {
+                    if !seen_in_plugin.insert(repo.clone()) { continue; }
+                    let has_full    = plugin_dir.join(format!("{repo}.json")).exists();
+                    let has_public  = plugin_dir.join(format!("{repo}.public.json")).exists();
+                    let has_graphql = plugin_dir.join(format!("{repo}.graphql")).exists();
+                    augmented.push(json!({
+                        "repo": repo,
+                        "project": repo,
+                        "source": "plugin",
+                        "namespace": plugin.id,
+                        "hasGraphql": has_graphql,
+                        "files": {
+                            "full":   if has_full   { Value::Bool(true) } else { Value::Null },
+                            "public": if has_public { Value::Bool(true) } else { Value::Null },
+                        },
                     }));
                 }
             }
@@ -233,15 +280,26 @@ pub async fn specs_get_handler(
     if !validate_repo(&repo) {
         return err(StatusCode::BAD_REQUEST, "invalid repo name");
     }
-    // Check disk first; fall back to DB-cached spec
+    // 1. Orca's own spec dir (~/.orca/openapi/specs/)
     let path = specs_dir().join(format!("{repo}.json"));
     if let Ok(raw) = std::fs::read_to_string(&path) {
         return serve_spec(&raw, &repo, &query);
     }
+    // 2. DB-cached spec (URL-fetched or MCP-synced)
     if let Ok(conn) = db::open_default() {
         if let Ok(Some(row)) = db::get_openapi_spec(&conn, &repo) {
             if let Some(raw) = row.spec_json {
                 return serve_spec(&raw, &repo, &query);
+            }
+        }
+        // 3. Plugin-declared spec dirs
+        if let Ok(plugins) = db::list_plugins(&conn) {
+            for plugin in plugins.iter().filter(|p| p.specs_dir.is_some() && p.enabled) {
+                let plugin_path = std::path::PathBuf::from(plugin.specs_dir.as_deref().unwrap())
+                    .join(format!("{repo}.json"));
+                if let Ok(raw) = std::fs::read_to_string(&plugin_path) {
+                    return serve_spec(&raw, &repo, &query);
+                }
             }
         }
     }
@@ -333,7 +391,7 @@ pub async fn specs_get_graphql_handler(
                     format!("attachment; filename=\"{repo}.graphql\""),
                 );
             }
-            builder.body(axum::body::Body::from(sdl)).unwrap()
+            builder.body(axum::body::Body::from(sdl)).expect("hardcoded headers are valid")
         }
         Err(_) => err(
             StatusCode::NOT_FOUND,
@@ -416,7 +474,7 @@ pub async fn specs_graphql_proxy_handler(
                 .status(status)
                 .header(axum::http::header::CONTENT_TYPE, "application/json; charset=utf-8")
                 .body(axum::body::Body::from(bytes))
-                .unwrap()
+                .expect("hardcoded headers are valid")
         }
         Err(e) => err(StatusCode::BAD_GATEWAY, &format!("proxy error: {e}")),
     }
@@ -448,7 +506,7 @@ pub async fn specs_graphql_info_handler(Path(repo): Path<String>) -> Response {
         Ok(s) => s,
         Err(_) => return err(StatusCode::NOT_FOUND, &format!("no GraphQL schema for '{repo}'")),
     };
-    match brain_scanner::parse_graphql_sdl(&repo, &sdl) {
+    match orca_scanner::parse_graphql_sdl(&repo, &sdl) {
         Ok(info) => Json(info).into_response(),
         Err(e) => err(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string()),
     }
@@ -615,6 +673,111 @@ pub async fn specs_unregister_handler(Path(name): Path<String>) -> Response {
         Ok(false) => err(StatusCode::NOT_FOUND, &format!("no spec named '{name}'")),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
+}
+
+// ── POST /api/specs/sync-mcp/{server} ────────────────────────────────────────
+// Calls the named MCP server's `{server}_spec_list` + `{server}_spec_schema`
+// tools and upserts the results into orca.db tagged with source_mcp = server.
+
+#[utoipa::path(
+    post,
+    path = "/api/specs/sync-mcp/{server}",
+    operation_id = "syncMcpSpecs",
+    params(
+        ("server" = String, Path, description = "MCP server name (e.g. rebuy-cli)")
+    ),
+    responses(
+        (status = 200, description = "Sync result", body = OkResponse),
+    ),
+    tag = "specs"
+)]
+pub async fn specs_sync_mcp_handler(
+    State(pool): State<super::McpState>,
+    Path(server): Path<String>,
+) -> Response {
+    // Derive tool name prefix from server name: "rebuy-cli" → "rebuy"
+    let prefix = server.split('-').next().unwrap_or(&server).to_string();
+    let list_tool = format!("{prefix}_spec_list");
+
+    let client = match pool.get_or_connect(&server).await {
+        Ok(c) => c,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("MCP connect failed: {e}")),
+    };
+
+    let list_result = match client.call_tool(&list_tool, json!({}), "sync-mcp").await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("{list_tool} failed: {e}")),
+    };
+
+    // The result is an array of content items; extract the text
+    let text = list_result["content"]
+        .as_array()
+        .and_then(|arr| arr.iter().find_map(|c| c["text"].as_str().map(|s| s.to_string())))
+        .unwrap_or_default();
+
+    // Parse JSON array of spec entries or newline-delimited repo names
+    let repos: Vec<String> = if let Ok(arr) = serde_json::from_str::<Vec<Value>>(&text) {
+        arr.into_iter()
+            .filter_map(|v| v["repo"].as_str().or_else(|| v["name"].as_str()).or_else(|| v.as_str()).map(|s| s.to_string()))
+            .collect()
+    } else {
+        text.lines()
+            .map(|l| l.trim().trim_start_matches("• ").split_whitespace().next().unwrap_or("").to_string())
+            .filter(|s| !s.is_empty() && !s.contains(':'))
+            .collect()
+    };
+
+    if repos.is_empty() {
+        return err(StatusCode::BAD_GATEWAY, "MCP spec list returned no repos");
+    }
+
+    let schema_tool = format!("{prefix}_spec_schema");
+    let conn = match db::open_default() {
+        Ok(c) => c,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+
+    let mut synced = 0usize;
+    let mut errors: Vec<String> = vec![];
+
+    for repo in &repos {
+        if repo.is_empty() { continue; }
+        let result = client.call_tool(&schema_tool, json!({ "repo": repo }), "sync-mcp").await;
+        match result {
+            Err(e) => { errors.push(format!("{repo}: {e}")); continue; }
+            Ok(r) => {
+                let spec_text = r["content"]
+                    .as_array()
+                    .and_then(|arr| arr.iter().find_map(|c| c["text"].as_str().map(|s| s.to_string())));
+                let Some(spec_text) = spec_text else {
+                    errors.push(format!("{repo}: empty schema response")); continue;
+                };
+                // Validate it's JSON
+                if serde_json::from_str::<Value>(&spec_text).is_err() {
+                    errors.push(format!("{repo}: non-JSON schema")); continue;
+                }
+                let row = db::OpenApiSpecRow {
+                    name: repo.clone(),
+                    url: None,
+                    source_mcp: Some(prefix.clone()),
+                    spec_json: Some(spec_text),
+                    cached_at: Some(chrono::Utc::now().to_rfc3339()),
+                    enabled: true,
+                };
+                match db::upsert_openapi_spec(&conn, &row) {
+                    Ok(_) => synced += 1,
+                    Err(e) => errors.push(format!("{repo}: db error: {e}")),
+                }
+            }
+        }
+    }
+
+    Json(json!({
+        "ok": true,
+        "server": server,
+        "synced": synced,
+        "errors": errors,
+    })).into_response()
 }
 
 // ── GET /api/specs/db ─────────────────────────────────────────────────────────

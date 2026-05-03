@@ -9,16 +9,7 @@ use utoipa::ToSchema;
 
 use super::prelude::*;
 
-fn specs_dir() -> std::path::PathBuf {
-    brain_scanner::openapi_dir()
-}
-
-fn validate_repo(repo: &str) -> bool {
-    !repo.is_empty()
-        && repo
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
-}
+use super::{specs_dir, validate_repo};
 
 #[derive(Deserialize, ToSchema)]
 pub struct SpecDownloadQuery {
@@ -87,7 +78,7 @@ pub async fn spec_download_handler(
         .header(header::CONTENT_TYPE, content_type)
         .header(header::CONTENT_DISPOSITION, disposition)
         .body(axum::body::Body::from(body))
-        .unwrap()
+        .expect("hardcoded headers are valid")
 }
 
 // ── GET /api/specs/:repo/graphql/download ─────────────────────────────────────
@@ -141,7 +132,7 @@ pub async fn graphql_download_handler(
                 format!("attachment; filename=\"{repo}-schema-introspection.json\""),
             )
             .body(axum::body::Body::from(body))
-            .unwrap()
+            .expect("hardcoded headers are valid")
     } else {
         axum::http::Response::builder()
             .status(StatusCode::OK)
@@ -151,6 +142,6 @@ pub async fn graphql_download_handler(
                 format!("attachment; filename=\"{repo}-schema.graphql\""),
             )
             .body(axum::body::Body::from(sdl))
-            .unwrap()
+            .expect("hardcoded headers are valid")
     }
 }

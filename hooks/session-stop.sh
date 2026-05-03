@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Stop hook — reads the last assistant message from the Claude transcript
-# and appends it to the Pinky session JSONL.
+# and appends it to the orca session JSONL.
 # Fires after every Claude response.
 
 set -euo pipefail
@@ -17,7 +17,7 @@ export HOOK_CWD=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.s
 export HOOK_PROJECT=$(basename "$HOOK_CWD" 2>/dev/null || echo "unknown")
 export HOOK_DATE=$(date +%Y-%m-%d)
 export HOOK_SHORT="${HOOK_SESSION_ID:0:8}"
-export HOOK_LOG_DIR="$HOME/brain/ai/claude/logs/sessions"
+export HOOK_LOG_DIR="$HOME/orca/ai/claude/logs/sessions"
 mkdir -p "$HOOK_LOG_DIR"
 
 python3 - <<'PYEOF'
@@ -73,7 +73,7 @@ record = {
     "timestamp": datetime.now(timezone.utc).isoformat(),
     "project": project,
     "role": "assistant",
-    "agent": "brain",
+    "agent": "orca",
     "content": content,
     "important": False,
     "tags": [],

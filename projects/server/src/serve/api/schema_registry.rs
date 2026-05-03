@@ -14,11 +14,12 @@ use super::prelude::*;
 )]
 pub async fn schema_databases_handler() -> axum::response::Response {
     db_json(|| {
-        let conn = brain_utils::db::open_default()?;
-        let dbs: Vec<SchemaDbInfo> = brain_utils::db::list_schema_databases(&conn)?
+        let conn = orca_utils::db::open_default()?;
+        let dbs: Vec<SchemaDbInfo> = orca_utils::db::list_schema_databases(&conn)?
             .into_iter()
             .map(|r| SchemaDbInfo {
                 name: r.name,
+                driver: r.driver,
                 host: r.host,
                 port: r.port,
                 user: r.user,
@@ -49,8 +50,9 @@ pub async fn schema_databases_add_handler(
     axum::Json(body): axum::Json<SchemaDbAddRequest>,
 ) -> axum::response::Response {
     db_ok(|| {
-        let row = brain_utils::db::SchemaDbRow {
+        let row = orca_utils::db::SchemaDbRow {
             name: body.name,
+            driver: body.driver,
             host: body.host,
             port: body.port,
             user: body.user,
@@ -60,8 +62,8 @@ pub async fn schema_databases_add_handler(
             domains_file: body.domains_file,
             enabled: true,
         };
-        let conn = brain_utils::db::open_default()?;
-        brain_utils::db::upsert_schema_database(&conn, &row)
+        let conn = orca_utils::db::open_default()?;
+        orca_utils::db::upsert_schema_database(&conn, &row)
     })
 }
 
@@ -83,7 +85,7 @@ pub async fn schema_databases_remove_handler(
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> axum::response::Response {
     db_remove("database", &name, || {
-        let conn = brain_utils::db::open_default()?;
-        brain_utils::db::remove_schema_database(&conn, &name)
+        let conn = orca_utils::db::open_default()?;
+        orca_utils::db::remove_schema_database(&conn, &name)
     })
 }

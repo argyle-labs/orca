@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use brain_utils::consts::{APP_NAME, APP_REPO_API_URL};
+use orca_utils::consts::{APP_NAME, APP_REPO_API_URL};
 use serde::Deserialize;
 use std::path::PathBuf;
 

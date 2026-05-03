@@ -1,4 +1,4 @@
-use brain_core::backend::OutputSink;
+use orca_core::backend::OutputSink;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame, Terminal,

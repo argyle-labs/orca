@@ -1,6 +1,6 @@
 use anyhow::Result;
-use brain_scanner as scanner;
-use brain_utils::db;
+use orca_scanner as scanner;
+use orca_utils::db;
 use clap::Subcommand;
 use colored::Colorize;
 use serde::Deserialize;
@@ -221,7 +221,7 @@ pub fn cmd_spec(action: SpecAction) -> Result<()> {
                 return Ok(());
             }
             for spec in to_refresh {
-                let url = spec.url.as_ref().unwrap();
+                let url = spec.url.as_ref().expect("pre-filtered list guarantees URL is present");
                 print!("  refreshing {}", spec.name.cyan());
                 let resp = match reqwest::blocking::get(url) {
                     Ok(r) => r,
@@ -304,7 +304,7 @@ fn rebuy_repo_path(name: &str) -> std::path::PathBuf {
 
 fn write_spec(repo: &str, spec: &serde_json::Value) -> Result<std::path::PathBuf> {
     let out_path = scanner::openapi_dir().join(format!("{repo}.json"));
-    std::fs::create_dir_all(out_path.parent().unwrap())?;
+    std::fs::create_dir_all(out_path.parent().expect("openapi_dir().join(...) always has a parent"))?;
     std::fs::write(&out_path, serde_json::to_string_pretty(spec)?)?;
     Ok(out_path)
 }

@@ -6,10 +6,10 @@ use serde_json::{Value, json};
 
 #[derive(rust_embed::RustEmbed)]
 #[folder = "src"]
-struct BrainDocs;
+struct OrcaDocs;
 
 pub fn list() -> Vec<String> {
-    let mut files: Vec<String> = BrainDocs::iter()
+    let mut files: Vec<String> = OrcaDocs::iter()
         .filter(|f| f.ends_with(".md"))
         .map(|f| f.into_owned())
         .collect();
@@ -23,17 +23,17 @@ pub fn read(path: &str) -> Option<String> {
     } else {
         format!("{path}.md")
     };
-    BrainDocs::get(&with_ext).map(|f| String::from_utf8_lossy(&f.data).into_owned())
+    OrcaDocs::get(&with_ext).map(|f| String::from_utf8_lossy(&f.data).into_owned())
 }
 
 pub fn search(query: &str) -> Vec<(String, Vec<String>)> {
     let q = query.to_lowercase();
     let mut results = Vec::new();
-    for name in BrainDocs::iter() {
+    for name in OrcaDocs::iter() {
         if !name.ends_with(".md") {
             continue;
         }
-        if let Some(file) = BrainDocs::get(&name) {
+        if let Some(file) = OrcaDocs::get(&name) {
             let content = String::from_utf8_lossy(&file.data);
             let matches: Vec<String> = content
                 .lines()
@@ -51,7 +51,7 @@ pub fn search(query: &str) -> Vec<(String, Vec<String>)> {
 }
 
 fn doc_title(path: &str) -> String {
-    BrainDocs::get(path)
+    OrcaDocs::get(path)
         .and_then(|f| {
             let content = String::from_utf8_lossy(&f.data);
             content

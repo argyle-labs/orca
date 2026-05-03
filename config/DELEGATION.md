@@ -61,8 +61,8 @@ Reference document for all agents. Agents reference this file instead of maintai
 | Homelab operations | @badger |
 | DevOps / CI/CD / infra | @falcon |
 | Note-taking / memory vault | @raven |
-| Session logging / search across logs | @pinky |
-| File reads, writes, finds, documentation | @pinky (delegates to owl/crow/raven/bloodhound/ibis) |
+| Session logging / search across logs | @otter |
+| File reads, writes, finds, documentation | @otter (delegates to owl/crow/raven/bloodhound/ibis) |
 | Filesystem index + path resolution | @bloodhound |
 | Documentation consistency | @ibis |
 | Agent file maintenance | @wren |

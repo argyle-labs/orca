@@ -1,6 +1,6 @@
 use anyhow::Result;
-use brain_agents as agents;
-use brain_utils::config::Config;
+use orca_agents as agents;
+use orca_utils::config::Config;
 use colored::Colorize;
 
 pub fn cmd_agents(_config: &Config) -> Result<()> {

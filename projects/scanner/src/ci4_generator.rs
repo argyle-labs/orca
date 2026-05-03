@@ -263,14 +263,15 @@ pub fn generate(repo_path: &Path) -> Result<Value> {
             continue;
         }
 
-        // Try AST extraction first; fall back to string scan.
+        // Try AST extraction first; fall back to context-aware string scan.
         let schema = if let Some(php) = PhpFile::parse(&ctrl_src) {
             php.set_json_schema(&method_name).map(|props| json!({
                 "type": "object",
                 "properties": Value::Object(props)
             }))
         } else {
-            infer_set_json_schema(body)
+            infer_set_json_schema_ctx(body, &ctrl_src, repo_path)
+                .or_else(|| infer_set_json_schema(body))
         };
         if let Some(schema) = schema {
             if let Some(path_item) = paths.get_mut(&oas_path) {
@@ -343,6 +344,58 @@ pub fn generate(repo_path: &Path) -> Result<Value> {
             }
         }));
 
+        if let Some(path_item) = paths.get_mut(&oas_path) {
+            path_item[route.method.as_str()]["responses"]["200"] = json!({
+                "description": "Success",
+                "content": { "application/json": {
+                    "schema": { "$ref": format!("#/components/schemas/{wrapped_name}") }
+                }}
+            });
+        }
+    }
+
+    // ── Pass 6: multi-hop service method return type tracing ─────────────────
+    // Handles `sendResponse(data: $var)` and `sendResponse(data: $obj->method())`
+    // where the data comes from a service/model method with a @return annotation.
+    for route in &routes {
+        let oas_path = ci4_path_to_oas(&route.path);
+        let is_generic = paths.get(&oas_path)
+            .and_then(|p| p[route.method.as_str()].get("responses"))
+            .and_then(|r| r["200"]["content"]["application/json"]["schema"]["$ref"].as_str())
+            .map(|r| r == "#/components/schemas/ApiResponse")
+            .unwrap_or(false);
+        if !is_generic { continue; }
+        if route.controller.is_empty() { continue; }
+
+        let method_name = route.controller.rsplit("::").next().unwrap_or("").to_string();
+        let Some(ctrl_path) = resolve_controller_file(repo_path, &route.controller) else { continue };
+        let Ok(ctrl_src) = std::fs::read_to_string(&ctrl_path) else { continue };
+        let Some(body) = extract_method_body(&ctrl_src, &method_name) else { continue };
+
+        let Some((data_schema, schema_name)) =
+            resolve_send_response_schema(&body, &ctrl_src, repo_path) else { continue };
+
+        // Only use schemas that have meaningful content
+        let has_props = data_schema.get("properties")
+            .and_then(|p| p.as_object())
+            .map(|p| !p.is_empty())
+            .unwrap_or_else(|| data_schema.get("type")
+                .and_then(|t| t.as_str())
+                .map(|t| t == "array" || t == "string" || t == "integer" || t == "boolean" || t == "number")
+                .unwrap_or(false));
+        if !has_props { continue; }
+
+        let wrapped_name = format!("ApiResponse{schema_name}");
+        components_schemas.entry(schema_name.clone()).or_insert(data_schema);
+        components_schemas.entry(wrapped_name.clone()).or_insert_with(|| json!({
+            "type": "object",
+            "properties": {
+                "successful": { "type": "boolean" },
+                "data": { "$ref": format!("#/components/schemas/{schema_name}") },
+                "status": { "type": "integer" },
+                "errorMessage": { "type": ["string", "null"] }
+            }
+        }));
         if let Some(path_item) = paths.get_mut(&oas_path) {
             path_item[route.method.as_str()]["responses"]["200"] = json!({
                 "description": "Success",
@@ -1155,6 +1208,26 @@ fn infer_set_json_schema(body: &str) -> Option<Value> {
                         best = props;
                     }
                 }
+            // Pattern B: ->setJSON((new ApiResponse($ok, $data, $status, $msg))->toJson())
+            // Wrap data in the standard ApiResponse envelope using the variable name for $data.
+            } else if trimmed.starts_with("(new ApiResponse(") || trimmed.starts_with("(new \\ApiResponse(") {
+                if let Some(args_inner) = extract_balanced(trimmed, '(', ')') {
+                    // ApiResponse(bool $successful, mixed $data, int $status, ?string $errorMessage)
+                    let args: Vec<&str> = args_inner.splitn(4, ',').collect();
+                    if args.len() >= 2 {
+                        let data_arg = args[1].trim();
+                        let data_schema = infer_php_literal_schema(data_arg);
+                        // Build envelope properties with typed data field
+                        let mut props = serde_json::Map::new();
+                        props.insert("successful".to_string(), json!({ "type": "boolean" }));
+                        props.insert("data".to_string(), data_schema);
+                        props.insert("status".to_string(), json!({ "type": "integer" }));
+                        props.insert("errorMessage".to_string(), json!({ "type": ["string", "null"] }));
+                        if props.len() > best.len() {
+                            best = props;
+                        }
+                    }
+                }
             }
             pos += rel + 1;
         }
@@ -1184,7 +1257,18 @@ fn parse_php_array_schema(inner: &str) -> serde_json::Map<String, Value> {
         if !after_key.starts_with("=>") { remaining = after_key; continue; }
         let val_src = after_key[2..].trim_start();
 
-        props.insert(key.to_string(), infer_php_literal_schema(val_src));
+        // Value-based inference first; fall back to key-name hint when value is opaque.
+        let schema = {
+            let by_val = infer_php_literal_schema(val_src);
+            if by_val.as_object().map(|o| o.is_empty()).unwrap_or(false) {
+                // Value gave no info — try key name
+                let hint = infer_schema_from_name(key);
+                if !hint.as_object().map(|o| o.is_empty()).unwrap_or(true) { hint } else { by_val }
+            } else {
+                by_val
+            }
+        };
+        props.insert(key.to_string(), schema);
         remaining = skip_php_value_to_comma(val_src);
     }
     props
@@ -1203,8 +1287,60 @@ fn find_closing_quote(src: &str, quote: char) -> Option<usize> {
     None
 }
 
+/// Infer a JSON Schema type from a PHP name (variable or key name).
+/// Uses naming conventions when the actual value isn't statically knowable.
+fn infer_schema_from_name(name: &str) -> Value {
+    let lower = name.to_lowercase();
+    // Boolean indicators
+    if matches!(lower.as_str(),
+        "successful" | "success" | "ok" | "enabled" | "active" | "deleted" |
+        "found" | "exists" | "is_valid" | "valid" | "published" | "visible"
+    ) || lower.starts_with("is_") || lower.starts_with("has_") || lower.starts_with("can_")
+    {
+        return json!({ "type": "boolean" });
+    }
+    // Integer indicators
+    if matches!(lower.as_str(),
+        "count" | "total" | "id" | "status" | "code" | "page" | "limit" | "offset" |
+        "per_page" | "current_page" | "last_page" | "total_pages" | "size" | "length"
+    ) || lower.ends_with("_id") || lower.ends_with("_count") || lower.ends_with("_total")
+      || lower.ends_with("_status") || lower.ends_with("_code")
+    {
+        return json!({ "type": "integer" });
+    }
+    // String indicators
+    if matches!(lower.as_str(),
+        "error" | "errormessage" | "error_message" | "message" | "msg" | "name" | "title" |
+        "description" | "url" | "handle" | "type" | "key" | "token" | "value" | "label" |
+        "slug" | "email" | "phone" | "address" | "currency" | "locale" | "timezone" |
+        "format" | "mode" | "state" | "reason" | "note" | "comment" | "text"
+    ) || lower.ends_with("_name") || lower.ends_with("_title") || lower.ends_with("_url")
+      || lower.ends_with("_key") || lower.ends_with("_token") || lower.ends_with("_type")
+      || lower.ends_with("_id") && lower.len() > 3 && lower.ends_with("_id")
+    {
+        // Don't override integer for _id if already caught above
+        if lower.ends_with("_name") || lower.ends_with("_title") || lower.ends_with("_url")
+            || lower.ends_with("_key") || lower.ends_with("_token") || lower.ends_with("_type")
+        {
+            return json!({ "type": "string" });
+        }
+        return json!({ "type": "string" });
+    }
+    // Array indicators — plural nouns or common collection names
+    if matches!(lower.as_str(),
+        "data" | "items" | "results" | "list" | "records" | "rows" | "entries" |
+        "collection" | "set" | "batch" | "ids" | "tags" | "errors" | "warnings" |
+        "attributes" | "options" | "filters" | "params" | "headers" | "fields"
+    ) || (lower.ends_with('s') && lower.len() > 3
+          && !matches!(lower.as_str(), "status" | "class" | "process" | "address" | "access"))
+    {
+        return json!({ "type": "array", "items": {} });
+    }
+    json!({})
+}
+
 /// Map a PHP literal value to a JSON Schema type fragment.
-/// Variables and expressions not recognizable at parse time emit `{}`.
+/// Handles scalar literals, array literals, expressions, and variable name hints.
 fn infer_php_literal_schema(val: &str) -> Value {
     if val.starts_with("true") || val.starts_with("false") {
         json!({ "type": "boolean" })
@@ -1214,8 +1350,43 @@ fn infer_php_literal_schema(val: &str) -> Value {
         if val.contains('.') { json!({ "type": "number" }) } else { json!({ "type": "integer" }) }
     } else if val.starts_with("null") {
         json!({ "type": "null" })
-    } else if val.starts_with('[') {
-        json!({ "type": "array" })
+    } else if val.starts_with('[') || val.starts_with("array(") {
+        let (open, close) = if val.starts_with('[') { ('[', ']') } else { ('(', ')') };
+        if let Some(inner) = extract_balanced(val, open, close) {
+            // Associative array → object
+            let props = parse_php_array_schema(inner);
+            if !props.is_empty() {
+                return json!({ "type": "object", "properties": Value::Object(props) });
+            }
+            // Sequential array — try to infer item type from first element
+            let first = inner.trim();
+            if !first.is_empty() {
+                let item_schema = infer_php_literal_schema(first);
+                return json!({ "type": "array", "items": item_schema });
+            }
+        }
+        json!({ "type": "array", "items": {} })
+    // Expression-based inference: cast operators and well-known functions
+    } else if val.starts_with("(int)") || val.starts_with("(integer)") || val.starts_with("intval(")
+           || val.starts_with("count(") || val.starts_with("sizeof(") || val.starts_with("strlen(")
+    {
+        json!({ "type": "integer" })
+    } else if val.starts_with("(float)") || val.starts_with("(double)") || val.starts_with("floatval(") {
+        json!({ "type": "number" })
+    } else if val.starts_with("(bool)") || val.starts_with("(boolean)") || val.starts_with("boolval(") {
+        json!({ "type": "boolean" })
+    } else if val.starts_with("(string)") || val.starts_with("strval(") || val.starts_with("sprintf(")
+           || val.starts_with("implode(") || val.starts_with("json_encode(")
+    {
+        json!({ "type": "string" })
+    } else if val.starts_with("array_") || val.starts_with("array_merge(") || val.starts_with("array_map(")
+           || val.starts_with("array_filter(") || val.starts_with("array_values(")
+    {
+        json!({ "type": "array", "items": {} })
+    // Variable: use name-based heuristic
+    } else if val.starts_with('$') {
+        let name = val[1..].split(|c: char| !c.is_alphanumeric() && c != '_').next().unwrap_or("");
+        infer_schema_from_name(name)
     } else {
         json!({})
     }
@@ -1433,19 +1604,23 @@ fn extract_casts_schema(entity_src: &str) -> Option<Value> {
     Some(json!({ "type": "object", "properties": properties }))
 }
 
-/// Extract a JSON Schema from a PHP Payload class source.
+/// Extract a JSON Schema from a PHP Payload/Response class source.
+/// Handles:
+///   - `protected TYPE $field` / `protected ?TYPE $field`
+///   - `@var Type[]` docblock above the field → array with typed items
+///   - `@var Type` docblock → overrides the declared type
+///   - Object types → emitted as `{ "type": "object", "description": "ClassName" }`
 fn extract_payload_schema(payload_src: &str) -> Value {
     let skip_fields = ["id", "owner"];
     let mut properties = serde_json::Map::new();
     let mut required: Vec<Value> = Vec::new();
 
-    for line in payload_src.lines() {
+    let lines: Vec<&str> = payload_src.lines().collect();
+    for (idx, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
         if !trimmed.starts_with("protected ") {
             continue;
         }
-        // Match: protected ?TYPE $field or protected TYPE $field
-        // Regex-free: parse by splitting on whitespace
         let rest = &trimmed["protected ".len()..];
         let nullable = rest.starts_with('?');
         let rest = if nullable { &rest[1..] } else { rest };
@@ -1453,7 +1628,6 @@ fn extract_payload_schema(payload_src: &str) -> Value {
         let mut parts = rest.splitn(2, '$');
         let type_part = parts.next().unwrap_or("").trim();
         let name_part = parts.next().unwrap_or("");
-        // Name ends at whitespace or `=` or `;`
         let field_name = name_part
             .split(|c: char| c.is_whitespace() || c == '=' || c == ';')
             .next()
@@ -1467,8 +1641,45 @@ fn extract_payload_schema(payload_src: &str) -> Value {
             continue;
         }
 
-        let json_type = php_type_to_json(type_part);
-        properties.insert(field_name.to_string(), json!({ "type": json_type }));
+        // Scan backwards for the nearest @var docblock
+        let var_annotation = (0..idx).rev().take(8).find_map(|i| {
+            let l = lines[i].trim();
+            if l.contains("@var ") {
+                let after = &l[l.find("@var ").unwrap() + 5..];
+                let token = after.split_whitespace().next().unwrap_or("").trim_end_matches('*');
+                if !token.is_empty() { Some(token.to_string()) } else { None }
+            } else if !l.starts_with("*") && !l.starts_with("/**") && !l.starts_with("//") && !l.is_empty() {
+                None // stop at a non-comment line
+            } else {
+                None
+            }
+        });
+
+        let prop_schema = if let Some(var_type) = var_annotation {
+            // @var Type[] → array with items
+            if var_type.ends_with("[]") {
+                let inner = var_type.trim_end_matches("[]");
+                let item_schema = match php_type_to_json(inner) {
+                    "object" => json!({ "type": "object", "description": inner }),
+                    t => json!({ "type": t }),
+                };
+                json!({ "type": "array", "items": item_schema })
+            } else {
+                match php_type_to_json(&var_type) {
+                    "array" => json!({ "type": "array", "items": {} }),
+                    "object" => json!({ "type": "object", "description": var_type }),
+                    t => json!({ "type": t }),
+                }
+            }
+        } else {
+            match php_type_to_json(type_part) {
+                "array" => json!({ "type": "array", "items": {} }),
+                "object" => json!({ "type": "object", "description": type_part }),
+                t => json!({ "type": t }),
+            }
+        };
+
+        properties.insert(field_name.to_string(), prop_schema);
 
         if !nullable {
             required.push(Value::String(field_name.to_string()));
@@ -1537,6 +1748,635 @@ fn extract_getjson_fields(method_body: &str) -> Value {
     schema.insert("type".to_string(), Value::String("object".to_string()));
     schema.insert("properties".to_string(), Value::Object(properties));
     Value::Object(schema)
+}
+
+// ── Pass 4 context-aware helpers ─────────────────────────────────────────────
+
+/// Context-aware variant of `infer_set_json_schema`.
+/// Passes controller source and repo path into the array schema parser so that
+/// property values like `$this->service->method(...)` can be resolved.
+fn infer_set_json_schema_ctx(body: &str, ctrl_src: &str, repo_path: &Path) -> Option<Value> {
+    let mut best: serde_json::Map<String, Value> = serde_json::Map::new();
+    for call_pat in &["->setJSON(", "->setJson("] {
+        let mut pos = 0;
+        while let Some(rel) = body[pos..].find(call_pat) {
+            let after_paren = pos + rel + call_pat.len();
+            let rest = body[after_paren..].trim_start();
+            let open = if rest.starts_with('[') { '[' } else if rest.starts_with('(') { '(' } else { pos += rel + 1; continue };
+            let close = if open == '[' { ']' } else { ')' };
+            let inner = match extract_balanced(rest, open, close) {
+                Some(i) => i,
+                None => { pos += rel + 1; continue }
+            };
+            // Only process associative arrays
+            if !inner.contains("=>") { pos += rel + 1; continue }
+            let props = parse_array_schema_ctx(inner, body, ctrl_src, repo_path);
+            if props.len() > best.len() { best = props; }
+            pos += rel + 1;
+        }
+    }
+    if best.is_empty() { return None; }
+    Some(json!({ "type": "object", "properties": Value::Object(best) }))
+}
+
+/// Context-aware `parse_php_array_schema`: uses `infer_expr_ctx` for each value
+/// so that service method calls and other complex expressions can be resolved.
+fn parse_array_schema_ctx(
+    inner: &str,
+    body: &str,
+    ctrl_src: &str,
+    repo_path: &Path,
+) -> serde_json::Map<String, Value> {
+    let mut props = serde_json::Map::new();
+    let mut remaining = inner;
+    loop {
+        let qp = match remaining.find(|c: char| c == '\'' || c == '"') {
+            Some(p) => p,
+            None => break,
+        };
+        let quote = remaining.as_bytes()[qp] as char;
+        let after = &remaining[qp + 1..];
+        let Some(key_end) = find_closing_quote(after, quote) else { break };
+        let key = &after[..key_end];
+        if key.is_empty() { remaining = &after[key_end + 1..]; continue; }
+
+        let after_key = after[key_end + 1..].trim_start();
+        if !after_key.starts_with("=>") { remaining = after_key; continue; }
+        let val_src = after_key[2..].trim_start();
+
+        let schema = infer_expr_ctx(val_src, body, ctrl_src, repo_path);
+        props.insert(key.to_string(), schema);
+        remaining = skip_php_value_to_comma(val_src);
+    }
+    props
+}
+
+/// Context-aware expression inferrer. Extends `infer_php_literal_schema` with:
+/// - `$this->prop->method(...)` → resolve property class + method return type
+/// - `$var->method(...)` → resolve var class from body + method return type
+/// - Falls back to `infer_php_literal_schema` + key-name hint if resolution fails.
+fn infer_expr_ctx(val: &str, body: &str, ctrl_src: &str, repo_path: &Path) -> Value {
+    let trimmed = val.trim();
+
+    // $this->prop->method(...) — property access chain
+    if let Some(rest) = trimmed.strip_prefix("$this->") {
+        let prop_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(rest.len());
+        let prop = &rest[..prop_end];
+        let after_prop = rest[prop_end..].trim_start();
+
+        if let Some(method_chain) = after_prop.strip_prefix("->") {
+            let method_end = method_chain.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(method_chain.len());
+            let method = &method_chain[..method_end];
+            if !prop.is_empty() && !method.is_empty() {
+                if let Some(schema) = resolve_this_prop_method_schema(ctrl_src, prop, method, repo_path) {
+                    return schema;
+                }
+            }
+        }
+        // $this->prop alone or unresolved — name hint on prop
+        if !prop.is_empty() {
+            let hint = infer_schema_from_name(prop);
+            if !hint.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+                return hint;
+            }
+        }
+    }
+
+    // $var->method(...) — variable access chain
+    if trimmed.starts_with('$') && !trimmed.starts_with("$this") {
+        let rest = &trimmed[1..];
+        let var_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(rest.len());
+        let var_name = &rest[..var_end];
+        let after_var = rest[var_end..].trim_start();
+        if let Some(method_chain) = after_var.strip_prefix("->") {
+            let method_end = method_chain.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(method_chain.len());
+            let method = &method_chain[..method_end];
+            if !var_name.is_empty() && !method.is_empty() {
+                if let Some(class) = resolve_var_class(body, var_name, ctrl_src, repo_path) {
+                    if let Some(result) = resolve_method_schema(repo_path, &class, method, ctrl_src) {
+                        return result.0;
+                    }
+                }
+            }
+        }
+    }
+
+    // ClassName::staticMethod(...)
+    if let Some((class, method)) = parse_static_call(trimmed) {
+        if let Some(result) = resolve_method_schema(repo_path, &class, &method, ctrl_src) {
+            return result.0;
+        }
+    }
+
+    // Fall through to literal + key-name logic (no key here so literal only)
+    infer_php_literal_schema(trimmed)
+}
+
+/// Resolve the schema for `$this->propName->methodName(...)`.
+/// Steps:
+///  1. Find `propName`'s type from controller property declarations.
+///  2. Resolve the service/class file.
+///  3. Extract the method's `@return` annotation.
+///  4. If `@return` is plain `array`, trace the method body for entity type.
+fn resolve_this_prop_method_schema(
+    ctrl_src: &str,
+    prop_name: &str,
+    method_name: &str,
+    repo_path: &Path,
+) -> Option<Value> {
+    let class_name = resolve_this_property_class(ctrl_src, prop_name)?;
+    let class_file = resolve_service_file(repo_path, &class_name, ctrl_src)?;
+    let class_src = std::fs::read_to_string(&class_file).ok()?;
+
+    let return_type = extract_method_return_annotation(&class_src, method_name);
+
+    // If we have a specific typed return, use it
+    if let Some(ref rt) = return_type {
+        if rt != "array" && rt != "mixed" && !rt.is_empty() {
+            return schema_from_return_type(rt, repo_path, &class_src);
+        }
+    }
+
+    // Plain `@return array` or missing — trace the method body for entity type
+    let method_body = extract_method_body(&class_src, method_name)?;
+    if let Some(entity_schema) = find_entity_array_in_body(&method_body, &class_src, repo_path, 3) {
+        return Some(entity_schema);
+    }
+
+    // Last resort: name-based schema or generic array
+    return_type.map(|_| json!({ "type": "array", "items": {} }))
+}
+
+/// Find the PHP class name for `$this->propName` from controller property declarations.
+/// Looks for patterns like `private ClassName $propName` or `protected ?ClassName $propName`.
+fn resolve_this_property_class(ctrl_src: &str, prop_name: &str) -> Option<String> {
+    let search = format!("${prop_name}");
+    let mut search_start = 0;
+    while let Some(pos) = ctrl_src[search_start..].find(&search) {
+        let abs_pos = search_start + pos;
+        // Must be followed by a word boundary (space, ;, =, )
+        let after = ctrl_src[abs_pos + search.len()..].chars().next().unwrap_or(' ');
+        if after.is_alphanumeric() || after == '_' { search_start = abs_pos + 1; continue; }
+
+        let before = &ctrl_src[..abs_pos];
+        let last_line = before.lines().last().unwrap_or("").trim();
+        // e.g. `private PostPurchaseService $propName`
+        let words: Vec<&str> = last_line.split_whitespace().collect();
+        if words.len() >= 2 {
+            let type_word = words[words.len() - 2].trim_start_matches('?');
+            if type_word.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                && type_word.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '\\')
+            {
+                let simple = type_word.split('\\').last().unwrap_or(type_word);
+                return Some(simple.to_string());
+            }
+        }
+        search_start = abs_pos + 1;
+    }
+    None
+}
+
+/// Scan a method body for array-returning model call patterns and trace to entity schema.
+/// Returns `{ type: array, items: <entity schema> }` when found.
+/// `depth` limits recursive `$this->method()` following to avoid loops.
+fn find_entity_array_in_body(
+    body: &str,
+    src: &str,
+    repo_path: &Path,
+    depth: u8,
+) -> Option<Value> {
+    if depth == 0 { return None; }
+
+    // Pattern A: ModelClass::findAll/findBy/paginate/all/getAll(
+    let list_methods = ["::findAll(", "::findBy(", "::paginate(", "::getAll(", "::all(", "::get("];
+    for pat in &list_methods {
+        if let Some(pos) = body.find(pat) {
+            let before = &body[..pos];
+            let class_start = before
+                .rfind(|c: char| !c.is_alphanumeric() && c != '_' && c != '\\')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            let model_class = before[class_start..].trim();
+            if model_class.is_empty() || model_class.starts_with('$') { continue; }
+            let model_simple = model_class.split('\\').last().unwrap_or(model_class);
+            if let Some((entity_class, entity_file)) = resolve_model_to_entity(model_simple, src, repo_path) {
+                if let Ok(entity_src) = std::fs::read_to_string(&entity_file) {
+                    let entity_schema = extract_casts_schema(&entity_src).or_else(|| {
+                        let s = extract_payload_schema(&entity_src);
+                        let has_props = s.get("properties")
+                            .and_then(|p| p.as_object())
+                            .map(|p| !p.is_empty())
+                            .unwrap_or(false);
+                        if has_props { Some(s) } else { None }
+                    });
+                    if let Some(entity_schema) = entity_schema {
+                        let _ = entity_class;
+                        return Some(json!({ "type": "array", "items": entity_schema }));
+                    }
+                }
+            }
+        }
+    }
+
+    // Pattern B: $this->methodName() — recurse into that method
+    if let Some(pos) = body.rfind("$this->") {
+        let after = &body[pos + "$this->".len()..];
+        let end = after.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after.len());
+        let inner_method = &after[..end];
+        if !inner_method.is_empty() {
+            if let Some(inner_body) = extract_method_body(src, inner_method) {
+                if let Some(schema) = find_entity_array_in_body(&inner_body, src, repo_path, depth - 1) {
+                    return Some(schema);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Try to resolve a model class to its entity via `$returnType = EntityClass::class`.
+fn resolve_model_to_entity(
+    model_class: &str,
+    ctrl_src: &str,
+    repo_path: &Path,
+) -> Option<(String, std::path::PathBuf)> {
+    let model_file = resolve_service_file(repo_path, model_class, ctrl_src)?;
+    let model_src = std::fs::read_to_string(&model_file).ok()?;
+    let full_entity = extract_return_type(&model_src)?;
+    let entity_class = full_entity.split('\\').last().unwrap_or(&full_entity).to_string();
+    let entity_file = resolve_class_file(repo_path, &full_entity, &model_src)?;
+    Some((entity_class, entity_file))
+}
+
+// ── Pass 6 helpers ────────────────────────────────────────────────────────────
+
+/// Top-level resolver for Pass 6: extract the data expression from
+/// `sendResponse(data: EXPR)` and attempt to infer a schema from it.
+fn resolve_send_response_schema(
+    body: &str,
+    ctrl_src: &str,
+    repo_path: &Path,
+) -> Option<(Value, String)> {
+    let mut search = body;
+    while let Some(rel) = search.find("sendResponse(") {
+        let after_sr = &search[rel + "sendResponse(".len()..];
+        if let Some(data_rel) = after_sr.find("data:") {
+            let depth: i32 = after_sr[..data_rel]
+                .chars()
+                .map(|c| match c { '(' => 1, ')' => -1, _ => 0 })
+                .sum();
+            if depth >= 0 {
+                let after_data = after_sr[data_rel + "data:".len()..].trim_start();
+                if after_data.starts_with('$') {
+                    let rest = &after_data[1..];
+                    let var_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(rest.len());
+                    let var_name = &rest[..var_end];
+                    if var_name.is_empty() { search = &search[rel + 1..]; continue; }
+                    let after_var = rest[var_end..].trim_start();
+
+                    // Skip ->toArray() — handled by Pass 5
+                    if after_var.starts_with("->toArray(") { search = &search[rel + 1..]; continue; }
+
+                    // Sub-case A: $obj->method() inline
+                    if after_var.starts_with("->") {
+                        let after_arrow = after_var[2..].trim_start();
+                        let method_end = after_arrow.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after_arrow.len());
+                        let method = &after_arrow[..method_end];
+                        if !method.is_empty() {
+                            if let Some(class_name) = resolve_var_class(body, var_name, ctrl_src, repo_path) {
+                                if let Some(result) = resolve_method_schema(repo_path, &class_name, method, ctrl_src) {
+                                    return Some(result);
+                                }
+                            }
+                        }
+                        search = &search[rel + 1..]; continue;
+                    }
+
+                    // Sub-case B: plain $var — trace its assignment
+                    if let Some(result) = trace_var_assignment(body, ctrl_src, var_name, repo_path) {
+                        return Some(result);
+                    }
+                }
+            }
+        }
+        search = &search[rel + 1..];
+    }
+    None
+}
+
+/// Try to find the concrete class name of a local variable `$var_name`.
+/// Handles: `$var = new ClassName()`, `$var = model(ClassName::class)`.
+fn resolve_var_class(body: &str, var_name: &str, ctrl_src: &str, repo_path: &Path) -> Option<String> {
+    // Pattern: $var = new ClassName(
+    let new_pat = format!("${var_name} = new ");
+    if let Some(pos) = body.find(&new_pat) {
+        let after = &body[pos + new_pat.len()..];
+        let end = after.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '\\').unwrap_or(after.len());
+        let class = &after[..end];
+        if !class.is_empty() {
+            return Some(class.split('\\').last().unwrap_or(class).to_string());
+        }
+    }
+    // Pattern: $var = model(ClassName::class)
+    let model_pat = format!("${var_name} = model(");
+    if let Some(pos) = body.find(&model_pat) {
+        let after = &body[pos + model_pat.len()..];
+        let end = after.find("::class").unwrap_or(0);
+        if end > 0 {
+            let class = after[..end].trim().trim_start_matches('\\');
+            if !class.is_empty() {
+                return Some(class.split('\\').last().unwrap_or(class).to_string());
+            }
+        }
+    }
+    // Pattern: $var = $this->someService — look for use statement of the property type
+    let prop_pat = format!("${var_name} = $this->");
+    if let Some(pos) = body.find(&prop_pat) {
+        let after = &body[pos + prop_pat.len()..];
+        let end = after.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after.len());
+        let prop_name = &after[..end];
+        if !prop_name.is_empty() {
+            // Try to find `private|protected TypeHint $prop_name` in ctrl_src
+            let typed_pat = format!("${prop_name}");
+            if let Some(decl_pos) = ctrl_src.find(&typed_pat) {
+                let before = &ctrl_src[..decl_pos];
+                let last_line = before.lines().last().unwrap_or("").trim();
+                // e.g. `private SomeService $propName`
+                let words: Vec<&str> = last_line.split_whitespace().collect();
+                if words.len() >= 2 {
+                    let type_word = words[words.len() - 2].trim_start_matches('?');
+                    if type_word.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                        // Check if this class file exists
+                        if resolve_service_file(repo_path, type_word, ctrl_src).is_some() {
+                            return Some(type_word.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Trace `$var_name = EXPR` in the method body and resolve a schema from EXPR.
+fn trace_var_assignment(
+    body: &str,
+    ctrl_src: &str,
+    var_name: &str,
+    repo_path: &Path,
+) -> Option<(Value, String)> {
+    let assign_pat = format!("${var_name} =");
+    // Find last assignment to avoid picking up previous iterations' assignments
+    let pos = body.rfind(&assign_pat)?;
+    let rhs = body[pos + assign_pat.len()..].trim_start();
+
+    // json_decode(file_get_contents(APPPATH . 'path.json'))
+    if rhs.starts_with("json_decode(") && rhs.contains("APPPATH") {
+        return trace_json_data_file(rhs, repo_path);
+    }
+
+    // ClassName::staticMethod(...)
+    if let Some((class_name, method)) = parse_static_call(rhs) {
+        if let Some(result) = resolve_method_schema(repo_path, &class_name, &method, ctrl_src) {
+            return Some(result);
+        }
+    }
+
+    // (new ClassName(...))->method(...)
+    if let Some((class_name, method)) = parse_new_instance_call(rhs) {
+        if let Some(result) = resolve_method_schema(repo_path, &class_name, &method, ctrl_src) {
+            return Some(result);
+        }
+    }
+
+    // $otherVar->method(...)
+    if rhs.starts_with('$') {
+        let rest = &rhs[1..];
+        let var_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(rest.len());
+        let other_var = &rest[..var_end];
+        let after = rest[var_end..].trim_start();
+        if after.starts_with("->") {
+            let after_arrow = after[2..].trim_start();
+            let method_end = after_arrow.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after_arrow.len());
+            let method = &after_arrow[..method_end];
+            if !method.is_empty() && method != "toArray" {
+                if let Some(class_name) = resolve_var_class(body, other_var, ctrl_src, repo_path) {
+                    if let Some(result) = resolve_method_schema(repo_path, &class_name, method, ctrl_src) {
+                        return Some(result);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Parse `ClassName::method(` from the start of `rhs`. Returns (ClassName, method).
+fn parse_static_call(rhs: &str) -> Option<(String, String)> {
+    let cc_pos = rhs.find("::")?;
+    let class_part = rhs[..cc_pos].trim();
+    if class_part.starts_with('$') || class_part.is_empty() { return None; }
+    if !class_part.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '\\') { return None; }
+
+    let after_cc = rhs[cc_pos + 2..].trim_start();
+    let method_end = after_cc.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after_cc.len());
+    let method = &after_cc[..method_end];
+    if method.is_empty() || method == "class" { return None; }
+
+    let class_simple = class_part.split('\\').last().unwrap_or(class_part).to_string();
+    Some((class_simple, method.to_string()))
+}
+
+/// Parse `(new ClassName(...))->method(` from the start of `rhs`.
+fn parse_new_instance_call(rhs: &str) -> Option<(String, String)> {
+    let trimmed = rhs.trim_start();
+    if !trimmed.starts_with("(new ") { return None; }
+
+    let outer_inner = extract_balanced(trimmed, '(', ')')?;
+    // outer_inner = "new ClassName(args)"
+    let new_inner = outer_inner.trim_start_matches("new ").trim_start();
+    let class_end = new_inner.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '\\').unwrap_or(new_inner.len());
+    let class_name = &new_inner[..class_end];
+    if class_name.is_empty() { return None; }
+
+    let after_outer = &trimmed[outer_inner.len() + 2..].trim_start();
+    if !after_outer.starts_with("->") { return None; }
+    let after_arrow = after_outer[2..].trim_start();
+    let method_end = after_arrow.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after_arrow.len());
+    let method = &after_arrow[..method_end];
+    if method.is_empty() { return None; }
+
+    let class_simple = class_name.split('\\').last().unwrap_or(class_name).to_string();
+    Some((class_simple, method.to_string()))
+}
+
+/// Find a service/library/model class file — checks use statements first,
+/// then common CI4 app directories.
+fn resolve_service_file(repo_path: &Path, class_name: &str, ctrl_src: &str) -> Option<PathBuf> {
+    if let Some(p) = resolve_class_file(repo_path, class_name, ctrl_src) {
+        return Some(p);
+    }
+    for dir in &["Services", "Libraries", "Models", "Repositories", "Helpers"] {
+        let p = repo_path.join("apps/ci4/app").join(dir).join(format!("{class_name}.php"));
+        if p.exists() { return Some(p); }
+    }
+    None
+}
+
+/// Resolve `class_name::method_name` to a JSON schema by reading the `@return`
+/// docblock annotation from the class file. Returns (schema, schema_name).
+fn resolve_method_schema(
+    repo_path: &Path,
+    class_name: &str,
+    method_name: &str,
+    ctrl_src: &str,
+) -> Option<(Value, String)> {
+    let class_file = resolve_service_file(repo_path, class_name, ctrl_src)?;
+    let class_src = std::fs::read_to_string(&class_file).ok()?;
+    let return_type = extract_method_return_annotation(&class_src, method_name)?;
+    let schema = schema_from_return_type(&return_type, repo_path, &class_src)?;
+    let name = format!("{class_name}{}", php_capitalize(method_name));
+    Some((schema, name))
+}
+
+/// Read the `@return` annotation from the docblock immediately above `function method_name(`.
+fn extract_method_return_annotation(class_src: &str, method_name: &str) -> Option<String> {
+    let needle = format!("function {}(", method_name);
+    let method_pos = class_src.find(&needle)?;
+    let before = &class_src[..method_pos];
+    let docblock_end = before.rfind("*/")?;
+    let docblock_start = before[..docblock_end].rfind("/**")?;
+    let docblock = &before[docblock_start..docblock_end + 2];
+
+    for line in docblock.lines() {
+        let trimmed = line.trim().trim_start_matches('*').trim();
+        if trimmed.starts_with("@return ") {
+            let type_str = trimmed["@return ".len()..].split_whitespace().next().unwrap_or("").trim();
+            if !type_str.is_empty() && type_str != "void" && type_str != "null" && type_str != "mixed" {
+                return Some(type_str.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Convert a PHP `@return` type string to a JSON Schema value.
+fn schema_from_return_type(return_type: &str, repo_path: &Path, class_src: &str) -> Option<Value> {
+    // Type[] → array with typed items
+    if return_type.ends_with("[]") {
+        let inner = return_type.trim_end_matches("[]");
+        let item_schema = match php_type_to_json(inner) {
+            "object" => {
+                // Try to resolve and introspect the item class
+                resolve_service_file(repo_path, inner, class_src)
+                    .and_then(|f| std::fs::read_to_string(&f).ok())
+                    .map(|src| {
+                        let s = extract_payload_schema(&src);
+                        if s.get("properties").and_then(|p| p.as_object()).map(|p| !p.is_empty()).unwrap_or(false) {
+                            s
+                        } else {
+                            json!({ "type": "object", "description": inner })
+                        }
+                    })
+                    .unwrap_or_else(|| json!({ "type": "object", "description": inner }))
+            },
+            t => json!({ "type": t }),
+        };
+        return Some(json!({ "type": "array", "items": item_schema }));
+    }
+
+    // Collection<Type> or array<Type>
+    if let Some(inner) = return_type.strip_prefix("array<").and_then(|s| s.strip_suffix('>'))
+        .or_else(|| return_type.strip_prefix("Collection<").and_then(|s| s.strip_suffix('>')))
+    {
+        let item_schema = match php_type_to_json(inner) {
+            "object" => json!({ "type": "object", "description": inner }),
+            t => json!({ "type": t }),
+        };
+        return Some(json!({ "type": "array", "items": item_schema }));
+    }
+
+    match php_type_to_json(return_type) {
+        "array" => Some(json!({ "type": "array", "items": {} })),
+        "object" => {
+            // Try to resolve and introspect the returned class
+            let schema = resolve_service_file(repo_path, return_type, class_src)
+                .and_then(|f| std::fs::read_to_string(&f).ok())
+                .map(|src| {
+                    let s = extract_payload_schema(&src);
+                    if s.get("properties").and_then(|p| p.as_object()).map(|p| !p.is_empty()).unwrap_or(false) {
+                        s
+                    } else {
+                        json!({ "type": "object", "description": return_type })
+                    }
+                })
+                .unwrap_or_else(|| json!({ "type": "object", "description": return_type }));
+            Some(schema)
+        },
+        t => Some(json!({ "type": t })),
+    }
+}
+
+/// Read a JSON data file referenced by `json_decode(file_get_contents(APPPATH . 'path.json'))`
+/// and infer a schema from its structure.
+fn trace_json_data_file(rhs: &str, repo_path: &Path) -> Option<(Value, String)> {
+    let apppath_pos = rhs.find("APPPATH")?;
+    let after = rhs[apppath_pos + "APPPATH".len()..].trim_start();
+    let after_dot = after.trim_start_matches('.').trim_start();
+    if !after_dot.starts_with(['\'', '"']) { return None; }
+    let q = after_dot.as_bytes()[0] as char;
+    let qend = find_closing_quote(&after_dot[1..], q)?;
+    let rel_path = &after_dot[1..qend + 1];
+
+    let json_path = repo_path.join("apps/ci4/app").join(rel_path.trim_start_matches('/'));
+    if !json_path.exists() { return None; }
+    let json_src = std::fs::read_to_string(&json_path).ok()?;
+    let json_val: Value = serde_json::from_str(&json_src).ok()?;
+
+    let schema = infer_schema_from_json(&json_val);
+    let name = rel_path
+        .trim_end_matches(".json")
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(php_capitalize)
+        .collect::<Vec<_>>()
+        .join("");
+    let name = if name.is_empty() { "JsonData".to_string() } else { name };
+    Some((schema, name))
+}
+
+/// Recursively infer a JSON Schema from a concrete JSON value.
+fn infer_schema_from_json(val: &Value) -> Value {
+    match val {
+        Value::Object(map) => {
+            let mut props = serde_json::Map::new();
+            for (k, v) in map {
+                props.insert(k.clone(), infer_schema_from_json(v));
+            }
+            json!({ "type": "object", "properties": Value::Object(props) })
+        },
+        Value::Array(arr) => {
+            let item_schema = arr.first().map(infer_schema_from_json).unwrap_or(json!({}));
+            json!({ "type": "array", "items": item_schema })
+        },
+        Value::String(_) => json!({ "type": "string" }),
+        Value::Number(n) => {
+            if n.is_f64() { json!({ "type": "number" }) } else { json!({ "type": "integer" }) }
+        },
+        Value::Bool(_) => json!({ "type": "boolean" }),
+        Value::Null => json!({ "type": "null" }),
+    }
+}
+
+/// Capitalize the first letter of a string.
+fn php_capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

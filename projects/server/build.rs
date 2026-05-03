@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
-    let agents_dir = env::var("BRAIN_AGENTS_DIR").unwrap_or_else(|_| {
+    let agents_dir = env::var("ORCA_AGENTS_DIR").unwrap_or_else(|_| {
         let manifest = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
         format!("{manifest}/../agents")
     });
@@ -60,7 +60,7 @@ fn main() {
     fs::write(&dest, code).expect("failed to write embedded_agents.rs");
 
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-env-changed=BRAIN_AGENTS_DIR");
+    println!("cargo:rerun-if-env-changed=ORCA_AGENTS_DIR");
 
     // Ensure frontend/dist exists so RustEmbed doesn't fail before the frontend
     // is built. Dev mode (--dev flag) skips the static handler at runtime, so

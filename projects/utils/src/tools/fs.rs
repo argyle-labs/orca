@@ -1,6 +1,16 @@
 use anyhow::{Result, bail};
 use std::path::Path;
 
+/// Expand a leading `~/` to the user's home directory.
+pub fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{home}/{rest}")
+    } else {
+        path.to_string()
+    }
+}
+
 /// Read a file's contents. Returns an error message string on failure (not Err)
 /// so the model can see what went wrong.
 pub fn read_file(path: &str) -> Result<String> {

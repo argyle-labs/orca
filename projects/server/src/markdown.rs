@@ -15,15 +15,15 @@ pub fn to_llm_text(input: &str) -> String {
     static HR: OnceLock<Regex> = OnceLock::new();
     static HTML_TAG: OnceLock<Regex> = OnceLock::new();
 
-    let bold1 = BOLD1.get_or_init(|| Regex::new(r"\*\*(.+?)\*\*").unwrap());
-    let bold2 = BOLD2.get_or_init(|| Regex::new(r"__(.+?)__").unwrap());
+    let bold1 = BOLD1.get_or_init(|| Regex::new(r"\*\*(.+?)\*\*").expect("bold1 regex"));
+    let bold2 = BOLD2.get_or_init(|| Regex::new(r"__(.+?)__").expect("bold2 regex"));
     // Only match *x* when not a list bullet (requires a closing * on the same span)
-    let italic = ITALIC.get_or_init(|| Regex::new(r"\*([^*\n]+)\*").unwrap());
-    let image = IMAGE.get_or_init(|| Regex::new(r"!\[.*?\]\(.*?\)").unwrap());
+    let italic = ITALIC.get_or_init(|| Regex::new(r"\*([^*\n]+)\*").expect("italic regex"));
+    let image = IMAGE.get_or_init(|| Regex::new(r"!\[.*?\]\(.*?\)").expect("image regex"));
     // Keep link text, drop URL
-    let link = LINK.get_or_init(|| Regex::new(r"\[([^\]]+)\]\([^)]+\)").unwrap());
-    let hr = HR.get_or_init(|| Regex::new(r"^[-*_]{3,}\s*$").unwrap());
-    let html_tag = HTML_TAG.get_or_init(|| Regex::new(r"<[a-zA-Z/][^>]*>").unwrap());
+    let link = LINK.get_or_init(|| Regex::new(r"\[([^\]]+)\]\([^)]+\)").expect("link regex"));
+    let hr = HR.get_or_init(|| Regex::new(r"^[-*_]{3,}\s*$").expect("hr regex"));
+    let html_tag = HTML_TAG.get_or_init(|| Regex::new(r"<[a-zA-Z/][^>]*>").expect("html_tag regex"));
 
     let mut in_fence = false;
     let mut out = String::with_capacity(input.len());

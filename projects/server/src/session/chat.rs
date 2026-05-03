@@ -1,6 +1,6 @@
 use super::{Session, util};
-use brain_core::tools::ToolRegistry;
-use brain_utils::types::{Message, ToolResult};
+use orca_core::tools::ToolRegistry;
+use orca_utils::types::{Message, ToolResult};
 use anyhow::Result;
 use colored::Colorize;
 use tokio_util::sync::CancellationToken;

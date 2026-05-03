@@ -13,13 +13,13 @@ path = "src/main.rs"
 
 [dependencies]
 # Workspace crates
-brain-agents   = { path = "../agents" }
-brain-commands = { path = "../commands" }
-brain-core     = { path = "../core" }
-brain-docs     = { path = "../docs" }
-brain-jobs     = { path = "../jobs" }
-brain-scanner  = { path = "../scanner", features = ["php-ast"] }
-brain-utils    = { path = "../utils" }
+orca-agents   = { path = "../agents" }
+orca-commands = { path = "../commands" }
+orca-core     = { path = "../core" }
+orca-docs     = { path = "../docs" }
+orca-jobs     = { path = "../jobs" }
+orca-scanner  = { path = "../scanner", features = ["php-ast"] }
+orca-utils    = { path = "../utils" }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -73,6 +73,11 @@ typst-pdf    = "0.14"
 typst-assets = { version = "0.14", features = ["fonts"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+# Database drivers (schema introspection — pure Rust, no CLI dependency)
+mysql_async    = { version = "0.34", default-features = false, features = ["default-rustls"] }
+tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
+rusqlite       = { version = "0.32", features = ["bundled-sqlcipher"] }
+
 # OpenAPI
 utoipa = { version = "5", features = ["axum_extras"] }
 utoipa-axum = "0.2"
@@ -81,7 +86,7 @@ utoipa-axum = "0.2"
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 
-# Logging (off by default, enabled via BRAIN_LOG=debug)
+# Logging (off by default, enabled via ORCA_LOG=debug)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 

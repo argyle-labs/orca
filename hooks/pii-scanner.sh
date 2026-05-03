@@ -22,8 +22,8 @@ print(inp.get('file_path', ''))
 # Brain vault agent definitions and commands document PII patterns as examples;
 # they are private and never published.
 case "$FILE_PATH" in
-  "$HOME/brain/ai/claude/agents/"*) exit 0 ;;
-  "$HOME/brain/ai/claude/commands/"*) exit 0 ;;
+  "$HOME/orca/ai/claude/agents/"*) exit 0 ;;
+  "$HOME/orca/ai/claude/commands/"*) exit 0 ;;
   "$HOME/dotfiles/obsidian/ai/claude/agents/"*) exit 0 ;;
   "$HOME/dotfiles/obsidian/ai/claude/commands/"*) exit 0 ;;
   "$HOME/.claude/CLAUDE.md") exit 0 ;;

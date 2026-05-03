@@ -1,8 +1,8 @@
 use anyhow::Result;
-use brain_utils::consts::{APP_DAEMON_LOG, APP_NAME, APP_PLIST_LABEL, APP_STATE_DIR};
+use orca_utils::consts::{APP_DAEMON_LOG, APP_NAME, APP_PLIST_LABEL, APP_STATE_DIR};
 #[cfg(target_os = "linux")]
-use brain_utils::consts::APP_SYSTEMD_SERVICE;
-use brain_utils::state::{self, DaemonMode};
+use orca_utils::consts::APP_SYSTEMD_SERVICE;
+use orca_utils::state::{self, DaemonMode};
 use clap::Subcommand;
 use colored::Colorize;
 use std::process::Command;

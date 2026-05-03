@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use brain_utils::db::{self, McpServerRow};
+use orca_utils::db::{self, McpServerRow};
 use clap::Subcommand;
 use std::collections::HashMap;
 
@@ -36,7 +36,7 @@ pub enum McpAction {
     },
     /// Remove a tool mapping
     Unmap {
-        /// Brain tool name to unmap
+        /// Orca tool name to unmap
         orca_tool: String,
     },
     /// Discover or verify tool mappings for a registered MCP server
@@ -148,7 +148,7 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
             let targets: Vec<&McpServerRow> = if all {
                 servers.iter().collect()
             } else {
-                let n = name.as_deref().unwrap();
+                let n = name.as_deref().expect("name.is_none() rejected above");
                 let s = servers.iter().find(|s| s.name == n)
                     .ok_or_else(|| anyhow::anyhow!("server '{n}' not found"))?;
                 vec![s]
@@ -200,8 +200,8 @@ pub fn mcp_sync_server(
         .spawn()
         .with_context(|| format!("failed to spawn {}", server.command))?;
 
-    let mut stdin = child.stdin.take().unwrap();
-    let stdout = child.stdout.take().unwrap();
+    let mut stdin = child.stdin.take().context("MCP child process missing stdin pipe")?;
+    let stdout = child.stdout.take().context("MCP child process missing stdout pipe")?;
     let mut reader = BufReader::new(stdout);
 
     let init = serde_json::json!({

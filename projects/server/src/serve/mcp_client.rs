@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 fn active_docker_host() -> Option<String> {
-    let conn = brain_utils::db::open_default().ok()?;
-    brain_utils::db::active_docker_host(&conn)
+    let conn = orca_utils::db::open_default().ok()?;
+    orca_utils::db::active_docker_host(&conn)
 }
 
 /// Resolve a bare command name to an absolute path.
@@ -54,12 +54,12 @@ fn resolve_command(command: &str) -> String {
     command.to_string()
 }
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::Mutex;
 
 #[derive(Clone, serde::Deserialize)]
 pub struct McpServerConfig {
@@ -79,15 +79,13 @@ enum Transport {
         stdout: Mutex<BufReader<ChildStdout>>,
         _child: Child,
     },
+    /// HTTP/SSE transport (MCP over Server-Sent Events).
+    /// Each request opens a fresh /sse connection, gets a session endpoint, POSTs
+    /// the JSON-RPC message, then reads the response from that same SSE stream.
+    /// This is stateless per-request and matches meerkat's /sse + /message model.
     Sse {
-        /// Base URL of the remote MCP server (e.g. "http://10.10.10.10:12050").
         base_url: String,
-        /// Session-specific POST endpoint (e.g. "/message?sessionId=…").
-        post_path: Mutex<String>,
-        /// HTTP client with Authorization header pre-set.
         http: reqwest::Client,
-        /// Pending requests keyed by JSON-RPC id, resolved via oneshot channels.
-        pending: Mutex<HashMap<u64, oneshot::Sender<Value>>>,
     },
 }
 
@@ -131,8 +129,8 @@ impl McpClient {
         }
 
         let mut child = cmd.spawn()?;
-        let stdin = child.stdin.take().unwrap();
-        let stdout = BufReader::new(child.stdout.take().unwrap());
+        let stdin = child.stdin.take().context("MCP child process missing stdin pipe")?;
+        let stdout = BufReader::new(child.stdout.take().context("MCP child process missing stdout pipe")?);
 
         let mut client = McpClient {
             transport: Transport::Stdio {
@@ -166,122 +164,18 @@ impl McpClient {
             .timeout(std::time::Duration::from_secs(60))
             .build()?;
 
-        // Open the SSE stream — server sends `event: endpoint\ndata: /message?sessionId=…`
-        let sse_resp = http
-            .get(format!("{base_url}/sse"))
-            .header("Accept", "text/event-stream")
-            .send()
-            .await?;
-
-        if !sse_resp.status().is_success() {
-            anyhow::bail!("SSE connect failed: HTTP {}", sse_resp.status());
+        // Probe with a health check before attempting handshake.
+        let health = http.get(format!("{base_url}/health")).send().await?;
+        if !health.status().is_success() {
+            anyhow::bail!("SSE server health check failed: HTTP {}", health.status());
         }
-
-        let mut stream = sse_resp.bytes_stream();
-
-        // Buffer incoming bytes until we have the endpoint event.
-        let mut buf = String::new();
-        let mut post_path = String::new();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-
-        'outer: while std::time::Instant::now() < deadline {
-            match tokio::time::timeout(std::time::Duration::from_secs(5), stream.next()).await {
-                Ok(Some(Ok(chunk))) => {
-                    buf.push_str(&String::from_utf8_lossy(&chunk));
-                    for line in buf.lines() {
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            post_path = data.trim().to_string();
-                            break 'outer;
-                        }
-                    }
-                }
-                _ => break,
-            }
-        }
-
-        if post_path.is_empty() {
-            anyhow::bail!("SSE server did not send endpoint event within 10s");
-        }
-
-        let pending: Mutex<HashMap<u64, oneshot::Sender<Value>>> = Mutex::new(HashMap::new());
 
         let mut client = McpClient {
-            transport: Transport::Sse {
-                base_url: base_url.clone(),
-                post_path: Mutex::new(post_path.clone()),
-                http: http.clone(),
-                pending,
-            },
+            transport: Transport::Sse { base_url, http },
             request_lock: Mutex::new(()),
             next_id: Mutex::new(0),
             tools: vec![],
         };
-
-        // Spawn background task that reads SSE events and resolves pending requests.
-        let pending_arc = match &client.transport {
-            Transport::Sse { pending, .. } => {
-                // We can't move pending out of the enum arm, so we rebuild the http+path
-                // for the background task from the same values.
-                let _ = pending; // borrow released below
-                Arc::new(tokio::sync::Mutex::new(HashMap::<u64, oneshot::Sender<Value>>::new()))
-            }
-            _ => unreachable!(),
-        };
-
-        // Re-open a fresh SSE connection for the background reader (the first one was consumed).
-        let bg_http = http.clone();
-        let bg_base = base_url.clone();
-        let bg_pending = pending_arc.clone();
-
-        tokio::spawn(async move {
-            let Ok(resp) = bg_http
-                .get(format!("{bg_base}/sse"))
-                .header("Accept", "text/event-stream")
-                .send()
-                .await
-            else {
-                return;
-            };
-            let mut stream = resp.bytes_stream();
-            let mut buf = String::new();
-            while let Some(Ok(chunk)) = stream.next().await {
-                buf.push_str(&String::from_utf8_lossy(&chunk));
-                let mut consumed = 0;
-                for line in buf.lines() {
-                    consumed += line.len() + 1;
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        let data = data.trim();
-                        if let Ok(v) = serde_json::from_str::<Value>(data) {
-                            if let Some(id) = v["id"].as_u64() {
-                                let mut map = bg_pending.lock().await;
-                                if let Some(tx) = map.remove(&id) {
-                                    let _ = tx.send(v);
-                                }
-                            }
-                        }
-                    }
-                }
-                buf = buf[consumed.min(buf.len())..].to_string();
-            }
-        });
-
-        // Replace transport with one that uses the shared pending map.
-        client.transport = Transport::Sse {
-            base_url,
-            post_path: Mutex::new(post_path),
-            http,
-            pending: Mutex::new(HashMap::new()),
-        };
-
-        // Store the real pending arc — we need to rebuild since we can't mutate through enum.
-        // Simpler approach: use a shared Arc<Mutex<…>> in the transport variant.
-        // The background task above uses pending_arc; transport.pending is separate.
-        // For now, requests go through transport.pending which the background task doesn't know about.
-        // We need to unify them. Rebuild with Arc instead.
-
-        // The above design has a split-brain problem. Simplest fix: don't use a background task.
-        // Instead, do one request-response per SSE connection (open SSE, read until response, close).
-        // This matches meerkat's model exactly: each POST gets exactly one SSE response event.
 
         client.handshake().await?;
         Ok(client)
@@ -359,10 +253,9 @@ impl McpClient {
                 }
             }
 
-            Transport::Sse { base_url, post_path, http, .. } => {
-                // For SSE: open a fresh SSE connection, POST the request, read response event.
-                // Meerkat's /message sends the response back via the session's SSE channel.
-                // We use a per-request SSE connection so we get exactly our response.
+            Transport::Sse { base_url, http } => {
+                // Per-request SSE: open /sse, get session endpoint, POST request, read response.
+                // Each request gets its own isolated session so responses can't cross.
                 let sse_resp = http
                     .get(format!("{base_url}/sse"))
                     .header("Accept", "text/event-stream")
@@ -373,44 +266,39 @@ impl McpClient {
                     anyhow::bail!("SSE open failed: HTTP {}", sse_resp.status());
                 }
 
-                // Read the endpoint event to get our session's POST URL.
                 let mut stream = sse_resp.bytes_stream();
                 let mut buf = String::new();
-                let mut session_post = String::new();
 
-                let deadline = std::time::Duration::from_secs(10);
-                match tokio::time::timeout(deadline, async {
-                    while let Some(Ok(chunk)) = stream.next().await {
-                        buf.push_str(&String::from_utf8_lossy(&chunk));
-                        for line in buf.lines() {
-                            if let Some(data) = line.strip_prefix("data: ") {
-                                return Ok::<_, anyhow::Error>(data.trim().to_string());
+                // Read until we get the `data: /message?sessionId=…` endpoint line.
+                let session_post = match tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    async {
+                        while let Some(Ok(chunk)) = stream.next().await {
+                            buf.push_str(&String::from_utf8_lossy(&chunk));
+                            for line in buf.lines() {
+                                if let Some(data) = line.strip_prefix("data: ") {
+                                    return Ok::<_, anyhow::Error>(data.trim().to_string());
+                                }
                             }
                         }
-                    }
-                    anyhow::bail!("SSE closed before endpoint event")
-                }).await {
-                    Ok(Ok(path)) => session_post = path,
+                        anyhow::bail!("SSE closed before endpoint event")
+                    },
+                )
+                .await
+                {
+                    Ok(Ok(path)) => path,
                     Ok(Err(e)) => return Err(e),
                     Err(_) => anyhow::bail!("SSE endpoint event timed out"),
-                }
+                };
 
-                // Update the stored post_path for future notify() calls.
-                *post_path.lock().await = session_post.clone();
-
-                // POST the JSON-RPC request.
                 let post_url = if session_post.starts_with("http") {
-                    session_post.clone()
+                    session_post
                 } else {
                     format!("{base_url}{session_post}")
                 };
 
-                http.post(&post_url)
-                    .json(&msg)
-                    .send()
-                    .await?;
+                http.post(&post_url).json(&msg).send().await?;
 
-                // Read the response from the SSE stream.
                 match tokio::time::timeout(std::time::Duration::from_secs(30), async {
                     let mut buf = String::new();
                     while let Some(Ok(chunk)) = stream.next().await {
@@ -425,7 +313,9 @@ impl McpClient {
                         }
                     }
                     anyhow::bail!("SSE stream closed before response")
-                }).await {
+                })
+                .await
+                {
                     Ok(r) => r,
                     Err(_) => anyhow::bail!("MCP SSE request timed out"),
                 }
@@ -443,16 +333,46 @@ impl McpClient {
                 stdin.write_all(line.as_bytes()).await?;
                 stdin.flush().await?;
             }
-            Transport::Sse { base_url, post_path, http, .. } => {
-                let path = post_path.lock().await.clone();
-                if path.is_empty() { return Ok(()); }
-                let post_url = if path.starts_with("http") {
-                    path
-                } else {
-                    format!("{base_url}{path}")
-                };
-                // Notifications are fire-and-forget; ignore errors.
-                let _ = http.post(&post_url).json(&msg).send().await;
+            Transport::Sse { base_url, http } => {
+                // Notifications via SSE: open a session, POST the notification.
+                // Meerkat will ignore notifications that aren't JSON-RPC requests
+                // (no `id` field means no response expected). Fire and forget.
+                if let Ok(sse_resp) = http
+                    .get(format!("{base_url}/sse"))
+                    .header("Accept", "text/event-stream")
+                    .send()
+                    .await
+                {
+                    if sse_resp.status().is_success() {
+                        let mut stream = sse_resp.bytes_stream();
+                        let mut buf = String::new();
+                        // Read endpoint event.
+                        let mut session_post = String::new();
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            async {
+                                while let Some(Ok(chunk)) = stream.next().await {
+                                    buf.push_str(&String::from_utf8_lossy(&chunk));
+                                    for line in buf.lines() {
+                                        if let Some(data) = line.strip_prefix("data: ") {
+                                            session_post = data.trim().to_string();
+                                            return;
+                                        }
+                                    }
+                                }
+                            },
+                        )
+                        .await;
+                        if !session_post.is_empty() {
+                            let post_url = if session_post.starts_with("http") {
+                                session_post
+                            } else {
+                                format!("{base_url}{session_post}")
+                            };
+                            let _ = http.post(&post_url).json(&msg).send().await;
+                        }
+                    }
+                }
             }
         }
         Ok(())
@@ -519,8 +439,8 @@ impl McpPool {
 
         // DB servers take precedence over ~/.claude.json
         if let Some(db_path) = &self.db_path {
-            if let Ok(conn) = brain_utils::db::open(db_path) {
-                if let Ok(rows) = brain_utils::db::list_mcp_servers(&conn) {
+            if let Ok(conn) = orca_utils::db::open(db_path) {
+                if let Ok(rows) = orca_utils::db::list_mcp_servers(&conn) {
                     for row in rows {
                         configs.insert(row.name.clone(), McpServerConfig {
                             command: row.command,
@@ -532,7 +452,7 @@ impl McpPool {
                 }
                 // Enabled plugins that declare an MCP server are auto-federated.
                 // Plugin entries take precedence over ~/.claude.json but not over explicit mcp_servers rows.
-                if let Ok(plugins) = brain_utils::db::list_plugins(&conn) {
+                if let Ok(plugins) = orca_utils::db::list_plugins(&conn) {
                     for p in plugins {
                         if !p.enabled { continue; }
                         let Some(cmd) = p.mcp_command else { continue; };
@@ -541,7 +461,7 @@ impl McpPool {
                         // receives them without requiring the caller to export them manually.
                         let mut env = p.mcp_env;
                         let mut token: Option<String> = None;
-                        if let Ok(creds) = brain_utils::db::list_plugin_credentials(&conn, &p.id) {
+                        if let Ok(creds) = orca_utils::db::list_plugin_credentials(&conn, &p.id) {
                             for c in creds {
                                 // If this credential matches token_env, use it as Bearer token.
                                 if p.mcp_token_env.as_deref() == Some(c.key.as_str()) {
@@ -654,8 +574,8 @@ impl McpPool {
         let plugin_meta: HashMap<String, PluginMeta> = self
             .db_path
             .as_ref()
-            .and_then(|p| brain_utils::db::open(p).ok())
-            .and_then(|conn| brain_utils::db::list_plugins(&conn).ok())
+            .and_then(|p| orca_utils::db::open(p).ok())
+            .and_then(|conn| orca_utils::db::list_plugins(&conn).ok())
             .unwrap_or_default()
             .into_iter()
             .filter(|p| p.enabled)

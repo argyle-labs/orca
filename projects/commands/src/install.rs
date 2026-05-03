@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use brain_utils::consts::{APP_MCP_SERVER, APP_NAME, APP_STATE_DIR};
+use orca_utils::consts::{APP_MCP_SERVER, APP_NAME, APP_STATE_DIR};
 use colored::Colorize;
 use std::path::{Path, PathBuf};
 
@@ -176,7 +176,7 @@ fn step_install_binary(home: &Path, report: &mut InstallReport) {
         return;
     }
 
-    if let Err(e) = std::fs::create_dir_all(dest.parent().unwrap()) {
+    if let Err(e) = std::fs::create_dir_all(dest.parent().expect("install_bin_path always has a parent dir")) {
         report.err(format!("binary: cannot create ~/.local/bin: {e}"));
         return;
     }
@@ -248,14 +248,14 @@ fn step_claude_agents(home: &Path, report: &mut InstallReport) {
 
 fn step_memory_symlinks(home: &Path, report: &mut InstallReport) {
     let claude_projects = home.join(".claude/projects");
-    let brain_memory    = home.join(APP_STATE_DIR).join("memory");
+    let orca_memory    = home.join(APP_STATE_DIR).join("memory");
     let on_macos        = cfg!(target_os = "macos");
 
     for (macos_slug, linux_slug, vault_name) in MEMORY_PROJECTS {
         let slug = if on_macos { macos_slug } else { linux_slug };
         let project_dir = claude_projects.join(slug);
         let memory_link = project_dir.join("memory");
-        let vault_dir   = brain_memory.join(vault_name);
+        let vault_dir   = orca_memory.join(vault_name);
 
         let _ = std::fs::create_dir_all(&project_dir);
         let _ = std::fs::create_dir_all(&vault_dir);
@@ -280,13 +280,13 @@ fn step_mcp_registration(report: &mut InstallReport) {
         return;
     }
 
-    let brain_bin = match std::env::current_exe() {
+    let orca_bin = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => { report.err(format!("MCP: cannot resolve binary path: {e}")); return; }
     };
 
     let status = std::process::Command::new("claude")
-        .args(["mcp", "add", APP_MCP_SERVER, "--", brain_bin.to_str().unwrap_or(APP_NAME), "mcp-serve"])
+        .args(["mcp", "add", APP_MCP_SERVER, "--", orca_bin.to_str().unwrap_or(APP_NAME), "mcp-serve"])
         .status();
 
     match status {

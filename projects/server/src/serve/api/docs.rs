@@ -1,5 +1,5 @@
 use axum::{
-    extract::Query,
+    extract::{Extension, Query, State},
     http::StatusCode,
     response::{IntoResponse, Json, Response},
 };
@@ -7,8 +7,10 @@ use serde::Deserialize;
 use serde_json::json;
 use utoipa::ToSchema;
 
+use super::llm;
 use super::prelude::*;
 use crate::markdown::to_llm_text;
+use crate::serve::middleware::CorrelationId;
 use crate::serve::tree::{build_tree_raw, collect_all_files, get_roots, get_search_ignored};
 
 // ── GET /api/tree ─────────────────────────────────────────────────────────────
@@ -70,7 +72,11 @@ pub struct SearchQuery {
     ),
     tag = "docs"
 )]
-pub async fn search_handler(Query(params): Query<SearchQuery>) -> Response {
+pub async fn search_handler(
+    State(pool): State<McpState>,
+    Extension(CorrelationId(cid)): Extension<CorrelationId>,
+    Query(params): Query<SearchQuery>,
+) -> Response {
     let query = params.q.unwrap_or_default();
     if query.trim().is_empty() {
         return Json(json!([])).into_response();
@@ -110,19 +116,115 @@ pub async fn search_handler(Query(params): Query<SearchQuery>) -> Response {
         }
     }
     if root_filter == "all" || root_filter == "docs" {
-        for (path, matches) in brain_docs::search(&query) {
+        for (path, matches) in orca_docs::search(&query) {
             let file_path = path.trim_end_matches(".md").replace('\\', "/").to_string();
             results.push(json!({ "root": "docs", "path": file_path, "matches": matches }));
         }
     }
+
+    // Call search_tools declared by enabled plugins
+    let plugin_results = call_plugin_search_tools(&pool, &query, &cid).await;
+    results.extend(plugin_results);
 
     results.sort_by(|a, b| {
         let am = a["matches"].as_array().map(|a| a.len()).unwrap_or(0);
         let bm = b["matches"].as_array().map(|a| a.len()).unwrap_or(0);
         bm.cmp(&am)
     });
-    results.truncate(20);
+    results.truncate(30);
+
+    // Attempt LLM reranking when a local model is available.
+    // Short timeout (3s) keeps UI search responsive; falls back to raw results silently.
+    if !results.is_empty() && !query.trim().is_empty() {
+        if let Some(local_llm) = llm::discover_local_llm().await {
+            if let Some(reranked) = llm::rerank_results(&local_llm, &query, &results, 3000).await {
+                if !reranked.is_empty() {
+                    return Json(reranked).into_response();
+                }
+            }
+        }
+    }
+
     Json(results).into_response()
+}
+
+async fn call_plugin_search_tools(
+    pool: &McpState,
+    query: &str,
+    cid: &str,
+) -> Vec<serde_json::Value> {
+    use orca_utils::db;
+    let plugins = db::open_default()
+        .and_then(|conn| db::list_plugins(&conn))
+        .unwrap_or_default();
+
+    let mut out = Vec::new();
+    for plugin in plugins {
+        if !plugin.enabled || plugin.search_tools.is_empty() { continue; }
+        let Ok(client) = pool.get_or_connect(&plugin.id).await else { continue };
+        for st in &plugin.search_tools {
+            let args = serde_json::json!({ &st.arg: query });
+            let Ok(resp) = client.call_tool(&st.tool, args, cid).await else { continue };
+            let text = resp["content"]
+                .get(0)
+                .and_then(|c| c["text"].as_str())
+                .unwrap_or("");
+            parse_search_response(text, &st.root, &mut out);
+        }
+    }
+    out
+}
+
+/// Parse a plugin search tool response into SearchResult-compatible JSON.
+/// Tries JSON array `[{path, matches}]` first; falls back to text-headers format:
+/// `### path\n  [Ln] content`
+fn parse_search_response(text: &str, root: &str, out: &mut Vec<serde_json::Value>) {
+    // Try standard JSON format first
+    if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(text) {
+        for item in arr {
+            if item["path"].is_string() {
+                out.push(serde_json::json!({
+                    "root": root,
+                    "path": item["path"],
+                    "matches": item.get("matches").cloned().unwrap_or(serde_json::json!([])),
+                }));
+            }
+        }
+        return;
+    }
+
+    // Fall back to text-headers format: ### path\n  [Ln] content
+    let mut current_path: Option<&str> = None;
+    let mut snippets: Vec<String> = Vec::new();
+    let lines: Vec<&str> = text.lines().collect();
+
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(header) = line.strip_prefix("### ") {
+            if let Some(p) = current_path.take() {
+                if !snippets.is_empty() {
+                    out.push(serde_json::json!({ "root": root, "path": p, "matches": snippets }));
+                    snippets = Vec::new();
+                }
+            }
+            current_path = Some(header.trim_end_matches(" [inline-docs]"));
+        } else {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix('[') {
+                if let Some(end) = rest.find(']') {
+                    let content = rest[end + 1..].trim();
+                    if !content.is_empty() { snippets.push(content.to_string()); }
+                }
+            }
+        }
+        // Flush last entry at end
+        if i == lines.len() - 1 {
+            if let Some(p) = current_path.take() {
+                if !snippets.is_empty() {
+                    out.push(serde_json::json!({ "root": root, "path": p, "matches": snippets }));
+                }
+            }
+        }
+    }
 }
 
 // ── GET /api/doc ──────────────────────────────────────────────────────────────
@@ -160,7 +262,7 @@ pub async fn doc_handler(Query(params): Query<DocQuery>) -> Response {
     };
 
     if params.root == "docs" {
-        return match brain_docs::read(&params.path) {
+        return match orca_docs::read(&params.path) {
             Some(content) => (
                 StatusCode::OK,
                 [("content-type", "text/plain; charset=utf-8")],
