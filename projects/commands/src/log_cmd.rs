@@ -1,6 +1,6 @@
 use anyhow::Result;
-use brain_utils::config::Config;
-use brain_utils::log;
+use orca_utils::config::Config;
+use orca_utils::log;
 use clap::Subcommand;
 use colored::Colorize;
 

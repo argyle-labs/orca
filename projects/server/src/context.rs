@@ -1,4 +1,4 @@
-use brain_utils::config::Config;
+use orca_utils::config::Config;
 use anyhow::Result;
 
 /// Resolved project context: system prompt + memory content.
@@ -52,7 +52,7 @@ impl ProjectContext {
     /// Build the system prompt for this context.
     /// Loads Wolf's agent definition (filesystem first, embedded fallback) + injects memory.
     pub fn build_system_prompt(&self, config: &Config) -> String {
-        let wolf_prompt = brain_agents::load_agent_prompt("wolf", &config.agents_dir())
+        let wolf_prompt = orca_agents::load_agent_prompt("wolf", &config.agents_dir())
             .unwrap_or_else(|| {
                 eprintln!("warning: wolf.md not found — using minimal fallback prompt");
                 "You are an AI assistant. Be precise, efficient, and honest.".to_string()

@@ -1,4 +1,4 @@
-//! Brain core — model backends and tool execution.
+//! Orca core — model backends and tool execution.
 //!
 //! Modules:
 //! - `backend` — `ModelBackend` trait + Claude (Anthropic) and LM Studio (OpenAI-compat) impls,

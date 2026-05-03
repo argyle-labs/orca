@@ -1,8 +1,8 @@
 use super::{Session, util};
-use brain_core::backend::{ClaudeBackend, LMStudioBackend, ModelBackend, build_backend};
-use brain_utils::config::Model;
-use brain_utils::ledger::fmt_tokens;
-use brain_utils::types::Message;
+use orca_core::backend::{ClaudeBackend, LMStudioBackend, ModelBackend, build_backend};
+use orca_utils::config::Model;
+use orca_utils::ledger::fmt_tokens;
+use orca_utils::types::Message;
 use anyhow::{Context, Result};
 use colored::Colorize;
 use tokio_util::sync::CancellationToken;
@@ -28,7 +28,7 @@ impl Session {
             }
             "/context" | "/ctx" => self.cmd_context(),
             "/system" => self.out(&self.system_prompt.dimmed().to_string()),
-            "/agent" => self.out(&"you're talking to Brain.".cyan().to_string()),
+            "/agent" => self.out(&"you're talking to Orca.".cyan().to_string()),
             "/flag" => {
                 let note = parts.get(1).copied().unwrap_or("flagged as important");
                 if let Some(log) = &mut self.log {
@@ -343,7 +343,7 @@ impl Session {
 
     fn cmd_search_logs(&self, query: &str) {
         let logs_dir = self.config.logs_dir();
-        match brain_utils::log::search_logs(&logs_dir, query, 20) {
+        match orca_utils::log::search_logs(&logs_dir, query, 20) {
             Ok(matches) if matches.is_empty() => {
                 self.out(&format!("no matches for '{query}'").dimmed().to_string());
             }
@@ -377,7 +377,7 @@ impl Session {
 
     fn cmd_list_sessions(&self) {
         let logs_dir = self.config.logs_dir();
-        match brain_utils::log::list_sessions(&logs_dir, 15) {
+        match orca_utils::log::list_sessions(&logs_dir, 15) {
             Ok(sessions) if sessions.is_empty() => {
                 self.out(&"no sessions found".dimmed().to_string());
             }
@@ -403,7 +403,7 @@ impl Session {
 
     fn cmd_recall_session(&self, session_id: &str) {
         let logs_dir = self.config.logs_dir();
-        match brain_utils::log::recall_session(&logs_dir, session_id) {
+        match orca_utils::log::recall_session(&logs_dir, session_id) {
             Ok(records) => {
                 self.out(
                     &format!("session: {} ({} records)", session_id, records.len())

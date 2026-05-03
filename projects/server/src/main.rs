@@ -4,10 +4,10 @@ use orca::mcp;
 use orca::serve;
 use orca::serve::openapi_spec_json;
 use orca::session::Session;
-use brain_commands::{self as cmd, CredsAction, DaemonAction, DbAction, DockerAction, HookAction, LogAction, McpAction, PluginAction, SchemaAction, SpecAction, cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian, cmd_install, cmd_uninstall};
-use brain_core::backend::{ClaudeBackend, ModelBackend, stdout_sink};
-use brain_utils::config::Config;
-use brain_utils::types::Message;
+use orca_commands::{self as cmd, CredsAction, DaemonAction, DbAction, DockerAction, HookAction, LogAction, McpAction, PluginAction, SchemaAction, SpecAction, cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian, cmd_install, cmd_uninstall};
+use orca_core::backend::{ClaudeBackend, ModelBackend, stdout_sink};
+use orca_utils::config::Config;
+use orca_utils::types::Message;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -144,7 +144,7 @@ enum Command {
         action: DockerAction,
     },
 
-    /// Manage Brain plugins (register, list, enable/disable)
+    /// Manage orca plugins (register, list, enable/disable)
     Plugin {
         #[command(subcommand)]
         action: PluginAction,
@@ -252,7 +252,7 @@ async fn main() -> Result<()> {
         Some(Command::Creds { action }) => cmd::cmd_creds(action),
         Some(Command::Db { action }) => cmd::cmd_db(action),
         Some(Command::Update { channel }) => {
-            let ch = brain_commands::update::Channel::from_str(&channel);
+            let ch = orca_commands::update::Channel::from_str(&channel);
             cmd::cmd_update(ch).await
         }
         Some(Command::Install) => cmd_install(),
@@ -319,10 +319,61 @@ async fn run_one_shot(config: &Config, agent: &str, prompt: &str) -> Result<()> 
     session.one_shot(prompt.to_string()).await
 }
 
+/// Return true if something is already listening on `port`.
+fn port_in_use(port: u16) -> bool {
+    std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        std::time::Duration::from_millis(100),
+    )
+    .is_ok()
+}
+
 /// Park the stable daemon (if running), start dev server, reclaim on exit.
 async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
-    use brain_utils::state::{self, DaemonMode};
+    use orca_utils::state::{self, DaemonMode};
     use std::process::Command;
+
+    // Spawn Vite dev server if not already running on 12001
+    let vite_child = if !port_in_use(12001) {
+        let frontend_dir = std::env::current_dir()
+            .unwrap_or_default()
+            .join("projects/frontend");
+        if frontend_dir.exists() {
+            println!("[orca] starting vite dev server...");
+            // process_group(0) puts vite in its own process group so Ctrl-C
+            // (SIGINT to orca's foreground group) does not kill vite.
+            #[cfg(unix)]
+            let mut cmd = {
+                use std::os::unix::process::CommandExt;
+                let mut c = Command::new("npm");
+                c.args(["run", "dev"]).current_dir(&frontend_dir).process_group(0);
+                c
+            };
+            #[cfg(not(unix))]
+            let mut cmd = {
+                let mut c = Command::new("npm");
+                c.args(["run", "dev"]).current_dir(&frontend_dir);
+                c
+            };
+            match cmd.spawn()
+            {
+                Ok(child) => {
+                    println!("[orca] vite started (pid {})", child.id());
+                    Some(child)
+                }
+                Err(e) => {
+                    eprintln!("[orca] warning: could not start vite: {e}");
+                    None
+                }
+            }
+        } else {
+            eprintln!("[orca] warning: projects/frontend not found — run from orca workspace root");
+            None
+        }
+    } else {
+        println!("[orca] vite already running on :12001");
+        None
+    };
 
     // Park daemon if it's running
     let (daemon_pid, daemon_binary) = match state::read()? {
@@ -353,6 +404,10 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
 
     // Run dev server (Ctrl-C will exit)
     let result = serve::run(true, port, config.db_path.clone()).await;
+
+    // Leave vite running so the browser stays alive across orca restarts.
+    // port_in_use(12001) prevents double-spawning on next `orca dev`.
+    drop(vite_child);
 
     // Reclaim: read current state (daemon may have been restarted by launchd with a new PID)
     if daemon_pid.is_some() {

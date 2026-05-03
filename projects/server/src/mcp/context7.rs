@@ -1,5 +1,5 @@
 use anyhow::Result;
-use brain_utils::config::Config;
+use orca_utils::config::Config;
 use serde_json::Value;
 
 /// Proxy a context7 tool call through the configured context7 MCP server.

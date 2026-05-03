@@ -1,5 +1,5 @@
 use super::{ModelBackend, OutputSink, serialize, sink_write, sink_writeln};
-use brain_utils::types::{BackendResponse, Message, StopReason, ToolCall, ToolDef};
+use orca_utils::types::{BackendResponse, Message, StopReason, ToolCall, ToolDef};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use colored::Colorize;

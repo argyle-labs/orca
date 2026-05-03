@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{http::StatusCode, response::{IntoResponse, Json, Response}};
@@ -56,6 +57,19 @@ pub struct ErrorResponse {
 }
 
 pub use crate::serve::tree::{TreeNode, NodeType};
+
+// ── Shared spec/download helpers ─────────────────────────────────────────────
+
+pub(super) fn specs_dir() -> std::path::PathBuf {
+    orca_scanner::openapi_dir()
+}
+
+pub(super) fn validate_repo(repo: &str) -> bool {
+    !repo.is_empty()
+        && repo
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
 
 #[derive(Serialize, ToSchema)]
 pub struct SearchResult {
@@ -145,13 +159,55 @@ pub struct SchemaResponse {
 }
 
 #[derive(Serialize, ToSchema)]
+pub struct SchemaTableInfo {
+    pub name: String,
+    pub comment: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SchemaColumn {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub type_name: String,
+    #[schema(nullable = false)]
+    pub nullable: Option<bool>,
+    #[schema(nullable = false)]
+    pub key: Option<String>,
+    #[schema(nullable = false)]
+    pub extra: Option<String>,
+    pub fk_target: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SchemaForeignKey {
+    pub table: String,
+    pub column: String,
+    #[serde(rename = "refTable")]
+    pub ref_table: String,
+    #[serde(rename = "refColumn")]
+    pub ref_column: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SchemaDomain {
+    pub key: String,
+    pub label: String,
+    pub color: String,
+    pub tables: Vec<String>,
+    #[schema(nullable = false)]
+    pub group: Option<String>,
+    #[schema(nullable = false)]
+    pub subgroup: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
 pub struct SchemaTab {
     pub title: String,
-    pub tables: Vec<Value>,
-    pub columns: Value,
+    pub tables: Vec<SchemaTableInfo>,
+    pub columns: HashMap<String, Vec<SchemaColumn>>,
     #[serde(rename = "foreignKeys")]
-    pub foreign_keys: Vec<Value>,
-    pub domains: Value,
+    pub foreign_keys: Vec<SchemaForeignKey>,
+    pub domains: Vec<SchemaDomain>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -197,6 +253,19 @@ pub struct LogsResponse {
 #[derive(Serialize, ToSchema)]
 pub struct OkResponse {
     pub ok: bool,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct PluginDataEntry {
+    pub key: String,
+    pub value: String,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: String,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct SetPluginDataRequest {
+    pub value: String,
 }
 
 #[derive(Serialize, Deserialize, ToSchema, Clone)]
@@ -247,9 +316,30 @@ pub struct DockerRuntimeAddRequest {
     pub url: Option<String>,
 }
 
+#[derive(Serialize, ToSchema)]
+pub struct LlmProviderInfo {
+    pub name: String,
+    pub url: String,
+    /// "lmstudio" | "ollama"
+    pub kind: String,
+    pub enabled: bool,
+    #[serde(rename = "reachable", skip_serializing_if = "Option::is_none")]
+    pub reachable: Option<bool>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct LlmProviderAddRequest {
+    pub name: String,
+    pub url: String,
+    /// "lmstudio" | "ollama"
+    pub kind: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, ToSchema, Clone)]
 pub struct SchemaDbInfo {
     pub name: String,
+    /// mysql | postgres | sqlite
+    pub driver: String,
     pub host: Option<String>,
     pub port: Option<u16>,
     pub user: String,
@@ -263,15 +353,22 @@ pub struct SchemaDbInfo {
 #[derive(Deserialize, ToSchema)]
 pub struct SchemaDbAddRequest {
     pub name: String,
+    /// mysql | postgres | sqlite
+    #[serde(default = "default_driver")]
+    pub driver: String,
     pub host: Option<String>,
     pub port: Option<u16>,
+    #[serde(default)]
     pub user: String,
+    #[serde(default)]
     pub password: String,
     pub database: String,
     pub container: Option<String>,
     #[serde(rename = "domainsFile")]
     pub domains_file: Option<String>,
 }
+
+fn default_driver() -> String { "mysql".to_string() }
 
 #[derive(Deserialize, ToSchema)]
 pub struct SpecRegisterRequest {
@@ -310,15 +407,17 @@ pub struct TestRunResponse {
 // `super::SomeType` inside a utoipa macro; always import it via this prelude.
 pub(super) mod prelude {
     #[allow(unused_imports)]
-    pub use super::{CredInfo, DockerRuntimeAddRequest, DockerRuntimeInfo, ErrorResponse, McpServerAddRequest, McpServerInfo, McpState, OkResponse, PluginInfo, SchemaDbAddRequest, SchemaDbInfo, SetCredRequest, SpecInfo, SpecRegisterRequest, db_json, db_ok, db_remove, err};
+    pub use super::{CredInfo, DockerRuntimeAddRequest, DockerRuntimeInfo, ErrorResponse, LlmProviderAddRequest, LlmProviderInfo, McpServerAddRequest, McpServerInfo, McpState, OkResponse, PluginDataEntry, PluginInfo, SchemaDbAddRequest, SchemaDbInfo, SetCredRequest, SetPluginDataRequest, SpecInfo, SpecRegisterRequest, db_json, db_ok, db_remove, err};
 }
 
 // ── Sub-modules ───────────────────────────────────────────────────────────────
 
 pub mod atlassian;
 pub mod download;
+pub mod llm;
 pub mod pdf;
 pub mod bitbucket;
+pub mod github;
 pub mod ctx7;
 pub mod docker;
 pub mod docs;
@@ -340,6 +439,7 @@ pub use plugins::*;
 pub use download::*;
 pub use pdf::*;
 pub use bitbucket::*;
+pub use github::*;
 pub use ctx7::*;
 pub use docker::*;
 pub use docs::*;

@@ -4,15 +4,15 @@ mod delegate;
 mod ui;
 pub mod util;
 
-use brain_core::backend::{
+use orca_core::backend::{
     ModelBackend, OutputSink, build_backend, sink_write, sink_writeln, stdout_sink,
 };
-use brain_core::tools::ToolRegistry;
-use brain_jobs::JobManager;
-use brain_utils::config::{Config, Model};
-use brain_utils::ledger::TokenLedger;
-use brain_utils::log::SessionLog;
-use brain_utils::types::Message;
+use orca_core::tools::ToolRegistry;
+use orca_jobs::JobManager;
+use orca_utils::config::{Config, Model};
+use orca_utils::ledger::TokenLedger;
+use orca_utils::log::SessionLog;
+use orca_utils::types::Message;
 use crate::context::ProjectContext;
 use crate::tui::{self, TuiAction, TuiApp};
 use anyhow::{Context, Result};
@@ -100,7 +100,7 @@ impl Session {
     }
 
     pub fn set_agent(&mut self, agent: &str) {
-        if let Some(prompt) = brain_agents::load_agent_prompt(agent, &self.config.agents_dir()) {
+        if let Some(prompt) = orca_agents::load_agent_prompt(agent, &self.config.agents_dir()) {
             self.system_prompt = prompt;
         }
         self.active_agent = agent.to_string();

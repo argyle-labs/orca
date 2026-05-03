@@ -3,7 +3,7 @@
 //! Agent definitions are `.md` files with YAML frontmatter. They live in
 //! `projects/agents/src/agents/` and are embedded at compile time by `build.rs`.
 //! At runtime, `load_agent_prompt` tries the filesystem first so changes take
-//! effect without rebuilding (set `BRAIN_AGENTS_DIR` to override the lookup path).
+//! effect without rebuilding (set `ORCA_AGENTS_DIR` to override the lookup path).
 
 // Generated at build time by build.rs — embeds agent .md files into the binary.
 include!(concat!(env!("OUT_DIR"), "/embedded_agents.rs"));

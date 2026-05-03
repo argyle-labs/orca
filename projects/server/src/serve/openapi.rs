@@ -35,6 +35,10 @@ use super::mcp_client::McpPool;
         super::api::Ctx7Response,
         super::api::SchemaResponse,
         super::api::SchemaTab,
+        super::api::SchemaTableInfo,
+        super::api::SchemaColumn,
+        super::api::SchemaForeignKey,
+        super::api::SchemaDomain,
         super::api::HealthResponse,
         super::api::HealthCheck,
         super::api::LogService,
@@ -80,6 +84,8 @@ use super::mcp_client::McpPool;
         super::api::PluginInfo,
         super::api::CredInfo,
         super::api::SetCredRequest,
+        super::api::PluginDataEntry,
+        super::api::SetPluginDataRequest,
     )),
     tags(
         // Public domains — served at /api/openapi/public.json
@@ -96,6 +102,7 @@ use super::mcp_client::McpPool;
         (name = "jira",       description = "Jira issue management via Atlassian REST API"),
         (name = "confluence", description = "Confluence search via Atlassian REST API"),
         (name = "bitbucket",  description = "Bitbucket repo and PR listing"),
+        (name = "github",     description = "GitHub repos, pull requests, and issues"),
         (name = "system",     description = "Orca installation status and install/uninstall actions"),
         (name = "learning",   description = "Learning progress tracking"),
         (name = "plugins",    description = "Plugin registry and credential management"),
@@ -125,6 +132,7 @@ pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
         .routes(routes!(api::spec_download_handler))
         .routes(routes!(api::specs_refresh_handler))
         .routes(routes!(api::specs_unregister_handler))
+        .routes(routes!(api::specs_sync_mcp_handler))
         .routes(routes!(api::specs_get_handler))
         .routes(routes!(api::tree_handler))
         .routes(routes!(api::search_handler))
@@ -159,10 +167,18 @@ pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
             api::jira_transition_handler
         ))
         .routes(routes!(api::confluence_search_handler))
+        .routes(routes!(api::github_user_handler))
+        .routes(routes!(api::github_repos_handler))
+        .routes(routes!(api::github_prs_handler))
+        .routes(routes!(api::github_issues_handler))
+        .routes(routes!(api::github_orgs_handler))
         .routes(routes!(api::plugins_list_handler))
+        .routes(routes!(api::plugin_health_handler))
         .routes(routes!(api::plugin_creds_list_handler, api::plugin_creds_set_handler))
         .routes(routes!(api::plugin_creds_delete_handler))
         .routes(routes!(api::plugin_creds_sync_handler))
+        .routes(routes!(api::plugin_data_list_handler))
+        .routes(routes!(api::plugin_data_get_handler, api::plugin_data_set_handler, api::plugin_data_delete_handler))
         .routes(routes!(api::system_status_handler))
         .routes(routes!(api::system_action_handler))
         .routes(routes!(api::pdf_handler))
@@ -197,5 +213,5 @@ pub async fn openapi_handler() -> impl axum::response::IntoResponse {
 }
 
 pub async fn openapi_public_handler() -> impl axum::response::IntoResponse {
-    axum::Json(brain_scanner::filter_brain_public(orca_spec_json()))
+    axum::Json(orca_scanner::filter_orca_public(orca_spec_json()))
 }

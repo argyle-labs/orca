@@ -1,13 +1,13 @@
-//! Brain jobs — background agent execution.
+//! Orca jobs — background agent execution.
 //!
 //! `JobManager` spawns independent Tokio tasks that run a full chat+tool loop
 //! without blocking the foreground session. Results are buffered in memory and
 //! retrieved via `get_output`. Cancellation is handled via `CancellationToken`.
 
-use brain_core::backend::{ModelBackend, OutputSink, buffer_sink, sink_write};
-use brain_core::tools::ToolRegistry;
-use brain_utils::config::{Config, Model};
-use brain_utils::types::{Message, ToolResult, truncate_preview};
+use orca_core::backend::{ModelBackend, OutputSink, buffer_sink, sink_write};
+use orca_core::tools::ToolRegistry;
+use orca_utils::config::{Config, Model};
+use orca_utils::types::{Message, ToolResult, truncate_preview};
 use anyhow::Result;
 use colored::Colorize;
 use std::sync::{Arc, Mutex};
@@ -71,7 +71,7 @@ impl JobManager {
         let id = self.next_id;
         self.next_id += 1;
 
-        let backend = brain_core::backend::build_backend(config, model)?;
+        let backend = orca_core::backend::build_backend(config, model)?;
         let (sink, buffer) = buffer_sink();
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
@@ -172,7 +172,7 @@ async fn run_background_chat(
     let mut tools = ToolRegistry {
         output: output.clone(),
         permissions: {
-            let mut p = brain_core::tools::bash::BashPermissions::default();
+            let mut p = orca_core::tools::bash::BashPermissions::default();
             p.auto_approve = true;
             p
         },

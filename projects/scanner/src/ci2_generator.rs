@@ -211,8 +211,8 @@ fn extract_v1_no_auth_routes(body: &str, out: &mut Vec<Endpoint>) {
 /// Parse v1_api_key_required() for authenticated routes dispatched by arg1/arg2.
 fn extract_v1_key_routes(body: &str, out: &mut Vec<Endpoint>) {
     // Walk the function extracting contiguous if/else-if blocks on $arg1
-    let arg1_re = regex::Regex::new(r#"\(\$arg1\s*==\s*'([^']+)'"#).unwrap();
-    let arg2_re = regex::Regex::new(r#"\(\$arg2\s*==\s*'([^']+)'"#).unwrap();
+    let arg1_re = regex::Regex::new(r#"\(\$arg1\s*==\s*'([^']+)'"#).expect("arg1_re regex");
+    let arg2_re = regex::Regex::new(r#"\(\$arg2\s*==\s*'([^']+)'"#).expect("arg2_re regex");
 
     // Collect all arg1 values with their approximate position
     let arg1_positions: Vec<(usize, String)> = arg1_re
@@ -276,7 +276,7 @@ fn extract_v1_key_routes(body: &str, out: &mut Vec<Endpoint>) {
 
 /// Parse a public dispatch function like widgets(), products(), etc.
 fn extract_method_dispatch_routes(body: &str, base: &str, auth: Auth, out: &mut Vec<Endpoint>) {
-    let method_re = regex::Regex::new(r#"\$method[s]?\s*==\s*'([^']+)'"#).unwrap();
+    let method_re = regex::Regex::new(r#"\$method[s]?\s*==\s*'([^']+)'"#).expect("method_re regex");
     let method_positions: Vec<(usize, String)> = method_re
         .captures_iter(body)
         .filter_map(|c| {
@@ -340,7 +340,7 @@ fn extract_method_dispatch_routes(body: &str, base: &str, auth: Auth, out: &mut 
 fn scan_params(block: &str) -> Vec<Param> {
     let re = regex::Regex::new(
         r#"(?:\$_GET|\$_REQUEST|\$_POST)\s*\[\s*'([^']+)'"#
-    ).unwrap();
+    ).expect("scan_params re regex");
     let mut seen = BTreeSet::new();
     let mut params = Vec::new();
     for cap in re.captures_iter(block) {
@@ -350,7 +350,7 @@ fn scan_params(block: &str) -> Vec<Param> {
         }
     }
     // Also catch: ->input->get('X') style without the parens variation
-    let re2 = regex::Regex::new(r#"\$this->input->\w+\('([^']+)'\)"#).unwrap();
+    let re2 = regex::Regex::new(r#"\$this->input->\w+\('([^']+)'\)"#).expect("scan_params re2 regex");
     for cap in re2.captures_iter(block) {
         let name = cap[1].to_string();
         if seen.insert(name.clone()) {
@@ -365,7 +365,7 @@ fn scan_required_params(block: &str) -> Vec<String> {
     // or: if (empty($this->input->get('X')))
     let re = regex::Regex::new(
         r#"!isset\(\$_(?:REQUEST|GET|POST)\['([^']+)'\]\)|empty\(\$this->input->\w+\('([^']+)'\)"#
-    ).unwrap();
+    ).expect("scan_required_params re regex");
     let mut required = Vec::new();
     for cap in re.captures_iter(block) {
         let name = cap.get(1).or(cap.get(2)).map(|m| m.as_str().to_string());
@@ -380,15 +380,15 @@ fn scan_required_params(block: &str) -> Vec<String> {
 
 fn scan_response_keys(block: &str) -> Vec<String> {
     // Look for json_encode(array('key' => ...)) — top-level array keys
-    let re = regex::Regex::new(r#"json_encode\s*\(\s*(?:array\s*\(|\[)\s*'([^']+)'\s*=>"#).unwrap();
+    let re = regex::Regex::new(r#"json_encode\s*\(\s*(?:array\s*\(|\[)\s*'([^']+)'\s*=>"#).expect("scan_response_keys re regex");
     let mut keys = BTreeSet::new();
     for cap in re.captures_iter(block) {
         keys.insert(cap[1].to_string());
     }
     // Also catch: json_encode(['key' => ...]) multi-key
-    let re2 = regex::Regex::new(r#"'([^']+)'\s*=>"#).unwrap();
+    let re2 = regex::Regex::new(r#"'([^']+)'\s*=>"#).expect("scan_response_keys re2 regex");
     // Only look inside json_encode blocks
-    let json_re = regex::Regex::new(r#"json_encode\s*\(([^;]{0,500})\)"#).unwrap();
+    let json_re = regex::Regex::new(r#"json_encode\s*\(([^;]{0,500})\)"#).expect("scan_response_keys json_re regex");
     for jcap in json_re.captures_iter(block) {
         for cap in re2.captures_iter(&jcap[1]) {
             let k = cap[1].to_string();
@@ -613,7 +613,7 @@ fn build_parameters(path: &str, params: &[Param]) -> Value {
     let mut out: Vec<Value> = Vec::new();
 
     // Path params from {name} placeholders
-    let re = regex::Regex::new(r"\{([^}]+)\}").unwrap();
+    let re = regex::Regex::new(r"\{([^}]+)\}").expect("path_params re regex");
     for cap in re.captures_iter(path) {
         out.push(json!({
             "name": &cap[1],
@@ -640,13 +640,47 @@ fn build_parameters(path: &str, params: &[Param]) -> Value {
     json!(out)
 }
 
+/// Infer a JSON Schema type from a response key name using naming conventions.
+fn infer_key_schema(key: &str) -> Value {
+    let lower = key.to_lowercase();
+    if matches!(lower.as_str(),
+        "successful" | "success" | "ok" | "enabled" | "active" | "deleted" | "found" | "valid"
+    ) || lower.starts_with("is_") || lower.starts_with("has_") {
+        json!({ "type": "boolean" })
+    } else if matches!(lower.as_str(),
+        "count" | "total" | "id" | "status" | "code" | "page" | "limit" | "offset" |
+        "per_page" | "current_page" | "last_page" | "total_pages" | "size"
+    ) || lower.ends_with("_id") || lower.ends_with("_count") || lower.ends_with("_total")
+      || lower.ends_with("_status") || lower.ends_with("_code")
+    {
+        json!({ "type": "integer" })
+    } else if matches!(lower.as_str(),
+        "error" | "message" | "msg" | "name" | "title" | "description" | "url" | "handle" |
+        "type" | "key" | "token" | "value" | "label" | "slug" | "email" | "format" | "mode" |
+        "state" | "reason" | "note" | "text" | "currency" | "locale"
+    ) || lower.ends_with("_name") || lower.ends_with("_title") || lower.ends_with("_url")
+      || lower.ends_with("_key") || lower.ends_with("_token") || lower.ends_with("_type")
+    {
+        json!({ "type": "string" })
+    } else if matches!(lower.as_str(),
+        "data" | "items" | "results" | "list" | "records" | "rows" | "entries" |
+        "ids" | "tags" | "errors" | "warnings" | "attributes" | "options" | "fields"
+    ) || (lower.ends_with('s') && lower.len() > 3
+          && !matches!(lower.as_str(), "status" | "class" | "process" | "address" | "access"))
+    {
+        json!({ "type": "array", "items": {} })
+    } else {
+        json!({})
+    }
+}
+
 fn build_responses(keys: &[String]) -> Value {
     let schema = if keys.is_empty() {
         json!({ "type": "object" })
     } else {
         let props: serde_json::Map<String, Value> = keys
             .iter()
-            .map(|k| (k.clone(), json!({})))
+            .map(|k| (k.clone(), infer_key_schema(k)))
             .collect();
         json!({ "type": "object", "properties": props })
     };

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# UserPromptSubmit hook — logs the user's prompt to the Pinky session JSONL.
+# UserPromptSubmit hook — logs the user's prompt to the orca session JSONL.
 # Fires every time the user submits a message.
 
 set -euo pipefail
@@ -15,7 +15,7 @@ export HOOK_PROMPT=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sy
 export HOOK_PROJECT=$(basename "$HOOK_CWD" 2>/dev/null || echo "unknown")
 export HOOK_DATE=$(date +%Y-%m-%d)
 export HOOK_SHORT="${HOOK_SESSION_ID:0:8}"
-export HOOK_LOG_DIR="$HOME/brain/ai/claude/logs/sessions"
+export HOOK_LOG_DIR="$HOME/orca/ai/claude/logs/sessions"
 mkdir -p "$HOOK_LOG_DIR"
 
 python3 - <<'PYEOF'

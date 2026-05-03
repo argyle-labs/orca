@@ -68,8 +68,9 @@ pub async fn ctx7_handler(
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
 
-    let resolve_text = resolve_result["content"][0]["text"]
-        .as_str()
+    let resolve_text = resolve_result["content"]
+        .get(0)
+        .and_then(|v| v["text"].as_str())
         .unwrap_or("")
         .to_string();
     let Some((lib_id, lib_title)) = extract_library_id(&resolve_text) else {
@@ -86,8 +87,9 @@ pub async fn ctx7_handler(
 
     match client.call_tool("get-library-docs", docs_args, &cid).await {
         Ok(result) => {
-            let content = result["content"][0]["text"]
-                .as_str()
+            let content = result["content"]
+                .get(0)
+                .and_then(|v| v["text"].as_str())
                 .unwrap_or("")
                 .to_string();
             Json(Ctx7Response {

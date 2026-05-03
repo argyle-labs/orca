@@ -32,7 +32,7 @@ pub async fn ping_handler() -> impl IntoResponse {
     operation_id = "getHealth",
     responses(
         (status = 200, description = "All service health checks", body = HealthResponse),
-        (status = 503, description = "rebuy-cli MCP unavailable", body = ErrorResponse),
+        (status = 503, description = "rebuy MCP unavailable", body = ErrorResponse),
     ),
     tag = "health"
 )]
@@ -49,12 +49,12 @@ pub async fn rebuy_health_handler(
         ("Mode", "rebuy_mode_current"),
     ];
 
-    let client = match pool.get_or_connect("rebuy-cli").await {
+    let client = match pool.get_or_connect("rebuy").await {
         Ok(c) => c,
         Err(e) => {
             return err(
                 StatusCode::SERVICE_UNAVAILABLE,
-                &format!("rebuy-cli MCP unavailable: {e}"),
+                &format!("rebuy MCP unavailable: {e}"),
             );
         }
     };
@@ -69,7 +69,7 @@ pub async fn rebuy_health_handler(
             async move {
                 let result = client.call_tool(&tool, json!({}), &cid).await;
                 let output = match &result {
-                    Ok(v) => v["content"][0]["text"].as_str().unwrap_or("").to_string(),
+                    Ok(v) => v["content"].get(0).and_then(|c| c["text"].as_str()).unwrap_or("").to_string(),
                     Err(e) => format!("error: {e}"),
                 };
                 let ok = result.is_ok() && !output.to_lowercase().contains("error");

@@ -1,12 +1,15 @@
 use std::collections::HashMap;
 
+use orca_utils::tools::fs::expand_tilde;
+
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Json, Response},
 };
+use mysql_async::Pool;
+use mysql_async::prelude::Queryable;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::process::Command;
 
 use super::prelude::*;
 
@@ -15,6 +18,7 @@ use super::prelude::*;
 #[derive(Clone)]
 struct DbConfig {
     name: String,
+    driver: String,
     host: String,
     port: u16,
     user: String,
@@ -24,12 +28,14 @@ struct DbConfig {
     domains_file: Option<String>,
 }
 
-impl From<brain_utils::db::SchemaDbRow> for DbConfig {
-    fn from(r: brain_utils::db::SchemaDbRow) -> Self {
+impl From<orca_utils::db::SchemaDbRow> for DbConfig {
+    fn from(r: orca_utils::db::SchemaDbRow) -> Self {
+        let default_port = if r.driver == "postgres" { 5432 } else { 3306 };
         DbConfig {
             name: r.name,
+            driver: r.driver,
             host: r.host.unwrap_or_default(),
-            port: r.port.unwrap_or(3306),
+            port: r.port.unwrap_or(default_port),
             user: r.user,
             password: r.password,
             database: r.database,
@@ -62,19 +68,19 @@ struct TomlSchemaSection {
 }
 
 #[derive(Deserialize, Default)]
-struct TomlBrainConfig {
+struct TomlOrcaConfig {
     schema: Option<TomlSchemaSection>,
 }
 
 /// Load schema DB configs from orca.db. If the table is empty, attempt a
 /// one-shot migration from orca.toml (idempotent: INSERT OR IGNORE).
 fn load_db_configs() -> Vec<DbConfig> {
-    let Ok(conn) = brain_utils::db::open_default() else {
+    let Ok(conn) = orca_utils::db::open_default() else {
         return vec![];
     };
 
     // Try DB first
-    if let Ok(rows) = brain_utils::db::list_schema_databases(&conn) {
+    if let Ok(rows) = orca_utils::db::list_schema_databases(&conn) {
         if !rows.is_empty() {
             return rows.into_iter().map(DbConfig::from).collect();
         }
@@ -86,12 +92,13 @@ fn load_db_configs() -> Vec<DbConfig> {
         std::env::var("ORCA_CONFIG").unwrap_or_else(|_| format!("{home}/.orca/orca.toml"));
 
     if let Ok(raw) = std::fs::read_to_string(&toml_path)
-        && let Ok(cfg) = toml::from_str::<TomlBrainConfig>(&raw)
+        && let Ok(cfg) = toml::from_str::<TomlOrcaConfig>(&raw)
     {
         let dbs = cfg.schema.map(|s| s.databases).unwrap_or_default();
         for d in &dbs {
-            let row = brain_utils::db::SchemaDbRow {
+            let row = orca_utils::db::SchemaDbRow {
                 name: d.name.clone(),
+                driver: "mysql".to_string(),
                 host: if d.host.is_empty() { None } else { Some(d.host.clone()) },
                 port: if d.port == 0 { None } else { Some(d.port) },
                 user: d.user.clone(),
@@ -101,13 +108,14 @@ fn load_db_configs() -> Vec<DbConfig> {
                 domains_file: d.domains_file.clone(),
                 enabled: true,
             };
-            let _ = brain_utils::db::upsert_schema_database(&conn, &row);
+            let _ = orca_utils::db::upsert_schema_database(&conn, &row);
         }
         if !dbs.is_empty() {
             return dbs
                 .into_iter()
                 .map(|d| DbConfig {
                     name: d.name,
+                    driver: "mysql".to_string(),
                     host: d.host,
                     port: d.port,
                     user: d.user,
@@ -123,14 +131,6 @@ fn load_db_configs() -> Vec<DbConfig> {
     vec![]
 }
 
-fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        let home = std::env::var("HOME").unwrap_or_default();
-        format!("{home}/{rest}")
-    } else {
-        path.to_string()
-    }
-}
 
 pub(crate) fn load_domains(domains_file: &Option<String>) -> Value {
     let Some(path) = domains_file else {
@@ -192,7 +192,81 @@ pub async fn schema_handler() -> Response {
 }
 
 async fn query_database(cfg: &DbConfig) -> anyhow::Result<Value> {
+    match cfg.driver.as_str() {
+        "postgres" => query_database_postgres(cfg).await,
+        "sqlite" => query_database_sqlite(cfg).await,
+        _ => match cfg.container.as_deref() {
+            Some(container) => query_database_docker(cfg, container).await,
+            None => query_database_mysql_native(cfg).await,
+        },
+    }
+}
+
+/// Native MySQL connection via mysql_async (no CLI dependency).
+async fn query_database_mysql_native(cfg: &DbConfig) -> anyhow::Result<Value> {
+    let opts = mysql_async::OptsBuilder::default()
+        .ip_or_hostname(cfg.host.clone())
+        .tcp_port(cfg.port)
+        .user(Some(cfg.user.clone()))
+        .pass(Some(cfg.password.clone()))
+        .db_name(Some(cfg.database.clone()));
+
+    let pool = Pool::new(opts);
+    let mut conn = pool.get_conn().await?;
+
     let db = &cfg.database;
+
+    let raw_tables: Vec<(String, Option<String>)> = conn
+        .query(format!(
+            "SELECT TABLE_NAME, TABLE_COMMENT FROM information_schema.TABLES \
+             WHERE TABLE_SCHEMA='{db}' AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME"
+        ))
+        .await?;
+
+    let raw_cols: Vec<(String, String, String, String, String, String)> = conn
+        .query(format!(
+            "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_KEY, EXTRA \
+             FROM information_schema.COLUMNS \
+             WHERE TABLE_SCHEMA='{db}' ORDER BY TABLE_NAME, ORDINAL_POSITION"
+        ))
+        .await?;
+
+    let raw_fks: Vec<(String, String, String, String)> = conn
+        .query(format!(
+            "SELECT TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME \
+             FROM information_schema.KEY_COLUMN_USAGE \
+             WHERE TABLE_SCHEMA='{db}' AND REFERENCED_TABLE_NAME IS NOT NULL"
+        ))
+        .await?;
+
+    drop(conn);
+    pool.disconnect().await.ok();
+
+    Ok(build_schema_value(cfg, raw_tables, raw_cols, raw_fks))
+}
+
+/// Fallback for container-based configs: docker exec mysql CLI inside the container.
+async fn query_database_docker(cfg: &DbConfig, container: &str) -> anyhow::Result<Value> {
+    let db = &cfg.database;
+    let pass_arg = format!("-p{}", cfg.password);
+    let base_args: Vec<String> = vec![
+        "exec".into(), container.into(), "mysql".into(),
+        "-u".into(), cfg.user.clone(), pass_arg, cfg.database.clone(),
+        "--batch".into(), "--silent".into(),
+    ];
+
+    let run = |sql: String| {
+        let mut args = base_args.clone();
+        args.extend(["-e".into(), sql]);
+        async move {
+            let out = tokio::process::Command::new("docker").args(&args).output().await?;
+            if !out.status.success() {
+                anyhow::bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+            }
+            anyhow::Ok(String::from_utf8_lossy(&out.stdout).to_string())
+        }
+    };
+
     let tables_sql = format!(
         "SELECT TABLE_NAME, TABLE_COMMENT FROM information_schema.TABLES \
          WHERE TABLE_SCHEMA='{db}' AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME"
@@ -207,113 +281,241 @@ async fn query_database(cfg: &DbConfig) -> anyhow::Result<Value> {
          WHERE TABLE_SCHEMA='{db}' AND REFERENCED_TABLE_NAME IS NOT NULL"
     );
 
-    let (tables_raw, cols_raw, fk_raw) = tokio::try_join!(
-        mysql_query_cfg(cfg, &tables_sql),
-        mysql_query_cfg(cfg, &cols_sql),
-        mysql_query_cfg(cfg, &fk_sql),
-    )?;
+    let (tables_tsv, cols_tsv, fk_tsv) =
+        tokio::try_join!(run(tables_sql), run(cols_sql), run(fk_sql))?;
 
-    let tables: Vec<Value> = parse_mysql_tsv(&tables_raw, &["name", "comment"])
+    let raw_tables: Vec<(String, Option<String>)> = tsv_rows(&tables_tsv, 2)
         .into_iter()
-        .map(|mut row| {
-            let name = row.remove("name").unwrap_or_default();
-            json!({ "name": name, "comment": row.remove("comment").unwrap_or_default() })
+        .map(|mut r| (r.remove(0), r.into_iter().next().filter(|s| !s.is_empty())))
+        .collect();
+
+    let raw_cols: Vec<(String, String, String, String, String, String)> = tsv_rows(&cols_tsv, 6)
+        .into_iter()
+        .map(|mut r| {
+            let mut g = || r.remove(0);
+            (g(), g(), g(), g(), g(), g())
         })
         .collect();
 
-    let fk_rows = parse_mysql_tsv(&fk_raw, &["table", "column", "ref_table", "ref_column"]);
+    let raw_fks: Vec<(String, String, String, String)> = tsv_rows(&fk_tsv, 4)
+        .into_iter()
+        .map(|mut r| {
+            let mut g = || r.remove(0);
+            (g(), g(), g(), g())
+        })
+        .collect();
+
+    Ok(build_schema_value(cfg, raw_tables, raw_cols, raw_fks))
+}
+
+/// Native Postgres connection via tokio-postgres (no CLI dependency).
+async fn query_database_postgres(cfg: &DbConfig) -> anyhow::Result<Value> {
+    let conn_str = format!(
+        "host={} port={} user={} password={} dbname={}",
+        cfg.host, cfg.port, cfg.user, cfg.password, cfg.database
+    );
+    let (client, connection) =
+        tokio_postgres::connect(&conn_str, tokio_postgres::NoTls).await?;
+    tokio::spawn(connection);
+
+    let tables_rows = client
+        .query(
+            "SELECT table_name, '' FROM information_schema.tables \
+             WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name",
+            &[],
+        )
+        .await?;
+
+    let cols_rows = client
+        .query(
+            "SELECT table_name, column_name, data_type, is_nullable, '', '' \
+             FROM information_schema.columns \
+             WHERE table_schema='public' ORDER BY table_name, ordinal_position",
+            &[],
+        )
+        .await?;
+
+    let fk_rows = client
+        .query(
+            "SELECT tc.table_name, kcu.column_name, ccu.table_name, ccu.column_name \
+             FROM information_schema.table_constraints tc \
+             JOIN information_schema.key_column_usage kcu \
+               ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema \
+             JOIN information_schema.constraint_column_usage ccu \
+               ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema \
+             WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public'",
+            &[],
+        )
+        .await?;
+
+    let raw_tables: Vec<(String, Option<String>)> = tables_rows
+        .iter()
+        .map(|r| (r.get::<_, String>(0), None))
+        .collect();
+
+    let raw_cols: Vec<(String, String, String, String, String, String)> = cols_rows
+        .iter()
+        .map(|r| {
+            (
+                r.get::<_, String>(0),
+                r.get::<_, String>(1),
+                r.get::<_, String>(2),
+                r.get::<_, String>(3),
+                String::new(),
+                String::new(),
+            )
+        })
+        .collect();
+
+    let raw_fks: Vec<(String, String, String, String)> = fk_rows
+        .iter()
+        .map(|r| {
+            (
+                r.get::<_, String>(0),
+                r.get::<_, String>(1),
+                r.get::<_, String>(2),
+                r.get::<_, String>(3),
+            )
+        })
+        .collect();
+
+    Ok(build_schema_value(cfg, raw_tables, raw_cols, raw_fks))
+}
+
+/// SQLite introspection via rusqlite (no server, reads file directly).
+async fn query_database_sqlite(cfg: &DbConfig) -> anyhow::Result<Value> {
+    let path = cfg.database.clone();
+    let cfg_clone = cfg.clone();
+
+    tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+        let conn = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+
+        let table_names: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )?;
+            stmt.query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+
+        let raw_tables: Vec<(String, Option<String>)> =
+            table_names.iter().map(|n| (n.clone(), None)).collect();
+
+        let mut raw_cols: Vec<(String, String, String, String, String, String)> = Vec::new();
+        let mut raw_fks: Vec<(String, String, String, String)> = Vec::new();
+
+        for table in &table_names {
+            let cols: Vec<(String, String, String, String, String, String)> = {
+                let mut stmt = conn.prepare(&format!("PRAGMA table_info(\"{}\")", table))?;
+                stmt.query_map([], |r| {
+                    Ok((
+                        table.clone(),
+                        r.get::<_, String>(1)?,   // name
+                        r.get::<_, String>(2)?,   // type
+                        if r.get::<_, i32>(3)? != 0 { "NO".to_string() } else { "YES".to_string() },
+                        if r.get::<_, i32>(5)? != 0 { "PRI".to_string() } else { String::new() },
+                        String::new(),
+                    ))
+                })?
+                .collect::<rusqlite::Result<_>>()?
+            };
+            raw_cols.extend(cols);
+
+            let fks: Vec<(String, String, String, String)> = {
+                let mut stmt = conn.prepare(&format!("PRAGMA foreign_key_list(\"{}\")", table))?;
+                stmt.query_map([], |r| {
+                    Ok((
+                        table.clone(),
+                        r.get::<_, String>(3)?,  // from column
+                        r.get::<_, String>(2)?,  // referenced table
+                        r.get::<_, String>(4)?,  // to column
+                    ))
+                })?
+                .collect::<rusqlite::Result<_>>()?
+            };
+            raw_fks.extend(fks);
+        }
+
+        Ok(build_schema_value(&cfg_clone, raw_tables, raw_cols, raw_fks))
+    })
+    .await?
+}
+
+fn tsv_rows(raw: &str, ncols: usize) -> Vec<Vec<String>> {
+    raw.lines()
+        .filter(|l| !l.is_empty())
+        .map(|line| {
+            let mut parts: Vec<String> = line.split('\t').map(str::to_string).collect();
+            parts.resize(ncols, String::new());
+            parts
+        })
+        .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn parse_mysql_tsv(
+    raw: &str,
+    cols: &[&str],
+) -> Vec<serde_json::Map<String, serde_json::Value>> {
+    tsv_rows(raw, cols.len())
+        .into_iter()
+        .map(|row| {
+            cols.iter()
+                .zip(row)
+                .map(|(&k, v)| (k.to_string(), serde_json::Value::String(v)))
+                .collect()
+        })
+        .collect()
+}
+
+fn build_schema_value(
+    cfg: &DbConfig,
+    raw_tables: Vec<(String, Option<String>)>,
+    raw_cols: Vec<(String, String, String, String, String, String)>,
+    raw_fks: Vec<(String, String, String, String)>,
+) -> Value {
+    let tables: Vec<Value> = raw_tables
+        .into_iter()
+        .map(|(name, comment)| json!({ "name": name, "comment": comment.unwrap_or_default() }))
+        .collect();
+
     let mut fk_lookup: HashMap<(String, String), String> = HashMap::new();
-    for row in &fk_rows {
-        let key = (
-            row.get("table").cloned().unwrap_or_default(),
-            row.get("column").cloned().unwrap_or_default(),
-        );
-        fk_lookup.insert(key, row.get("ref_table").cloned().unwrap_or_default());
+    for (tbl, col, ref_tbl, _) in &raw_fks {
+        fk_lookup.insert((tbl.clone(), col.clone()), ref_tbl.clone());
     }
 
     let mut columns: HashMap<String, Vec<Value>> = HashMap::new();
-    for row in parse_mysql_tsv(
-        &cols_raw,
-        &["table", "name", "type", "nullable", "key", "extra"],
-    ) {
-        let table = row.get("table").cloned().unwrap_or_default();
-        let col_name = row.get("name").cloned().unwrap_or_default();
+    for (table, col_name, typ, nullable, key, extra) in raw_cols {
         let fk_target = fk_lookup.get(&(table.clone(), col_name.clone())).cloned();
         columns.entry(table).or_default().push(json!({
             "name": col_name,
-            "type": row.get("type"),
-            "nullable": row.get("nullable") == Some(&"YES".to_string()),
-            "key": row.get("key"),
-            "extra": row.get("extra"),
+            "type": typ,
+            "nullable": nullable == "YES",
+            "key": key,
+            "extra": extra,
             "fk_target": fk_target,
         }));
     }
 
-    let foreign_keys: Vec<Value> = fk_rows
+    let foreign_keys: Vec<Value> = raw_fks
         .into_iter()
-        .map(|row| {
-            json!({
-                "table": row.get("table"),
-                "column": row.get("column"),
-                "refTable": row.get("ref_table"),
-                "refColumn": row.get("ref_column"),
-            })
+        .map(|(table, column, ref_table, ref_column)| {
+            json!({ "table": table, "column": column, "refTable": ref_table, "refColumn": ref_column })
         })
         .collect();
 
     let domains = load_domains(&cfg.domains_file);
 
-    Ok(json!({
+    json!({
         "title": cfg.name,
         "tables": tables,
         "columns": columns,
         "foreignKeys": foreign_keys,
         "domains": domains,
-    }))
-}
-
-async fn mysql_query_cfg(cfg: &DbConfig, sql: &str) -> anyhow::Result<String> {
-    let pass_arg = format!("-p{}", cfg.password);
-    let mysql_args = [
-        "-u",
-        cfg.user.as_str(),
-        pass_arg.as_str(),
-        cfg.database.as_str(),
-        "--batch",
-        "--silent",
-        "-e",
-        sql,
-    ];
-
-    let out = if let Some(container) = &cfg.container {
-        let mut args = vec!["exec", container.as_str(), "mysql"];
-        args.extend_from_slice(&mysql_args);
-        Command::new("docker").args(&args).output().await?
-    } else {
-        let port_str = cfg.port.to_string();
-        let mut args = vec!["-h", cfg.host.as_str(), "-P", port_str.as_str()];
-        args.extend_from_slice(&mysql_args);
-        Command::new("mysql").args(&args).output().await?
-    };
-
-    if !out.status.success() {
-        let e = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!("{}", e.trim());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
-}
-
-pub(crate) fn parse_mysql_tsv(raw: &str, cols: &[&str]) -> Vec<HashMap<String, String>> {
-    raw.lines()
-        .filter(|l| !l.is_empty())
-        .map(|line| {
-            let values: Vec<&str> = line.split('\t').collect();
-            cols.iter()
-                .enumerate()
-                .map(|(i, &col)| (col.to_string(), values.get(i).unwrap_or(&"").to_string()))
-                .collect()
-        })
-        .collect()
+    })
 }
 
 // ── GET /api/schema/domains ───────────────────────────────────────────────────

@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, bail};
-use brain_utils::consts::{APP_KEYRING_SERVICE, APP_NAME};
+use orca_utils::consts::APP_NAME;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use keyring::Entry;
 use rand::RngCore;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -9,41 +8,50 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::time::Duration;
 
-const KEYRING_SERVICE: &str = APP_KEYRING_SERVICE;
+// ── DB token helpers ──────────────────────────────────────────────────────────
 
-// ── Keychain helpers ─────────────────────────────────────────────────────────
+fn open_db() -> anyhow::Result<rusqlite::Connection> {
+    orca_utils::db::open_default()
+}
 
-fn store_token(account: &str, token: &str) -> Result<()> {
-    Entry::new(KEYRING_SERVICE, account)
-        .context("keyring entry")?
-        .set_password(token)
-        .context("failed to store token in keychain")?;
+fn store_oauth(service: &str, access_token: &str, refresh_token: Option<&str>) -> Result<()> {
+    let conn = open_db()?;
+    orca_utils::db::upsert_oauth_token(&conn, &orca_utils::db::OAuthTokenRow {
+        service: service.to_string(),
+        access_token: access_token.to_string(),
+        refresh_token: refresh_token.map(str::to_string),
+        expires_at: None,
+    })?;
     Ok(())
 }
 
-pub fn load_token(account: &str) -> Option<String> {
-    Entry::new(KEYRING_SERVICE, account)
-        .ok()?
-        .get_password()
-        .ok()
-        .filter(|s| !s.is_empty())
+fn load_oauth(service: &str) -> Option<orca_utils::db::OAuthTokenRow> {
+    open_db().ok().and_then(|conn| orca_utils::db::get_oauth_token(&conn, service).ok().flatten())
 }
 
-fn delete_token(account: &str) {
-    let _ = Entry::new(KEYRING_SERVICE, account).map(|e| e.delete_credential());
+fn delete_oauth(service: &str) {
+    if let Ok(conn) = open_db() {
+        let _ = orca_utils::db::delete_oauth_token(&conn, service);
+    }
 }
 
-// Convenience aliases used by the rest of orca
+// Public aliases used across the codebase
 pub fn load_github_token() -> Option<String> {
-    load_token("github_token")
+    load_oauth("github").map(|r| r.access_token)
 }
 
 pub fn load_atlassian_access_token() -> Option<String> {
-    load_token("atlassian_access_token")
+    load_oauth("atlassian").map(|r| r.access_token)
 }
 
 pub fn load_atlassian_refresh_token() -> Option<String> {
-    load_token("atlassian_refresh_token")
+    load_oauth("atlassian").and_then(|r| r.refresh_token)
+}
+
+/// Update just the access token for Atlassian (used by server after token refresh).
+pub fn update_atlassian_access_token(access_token: &str) -> Result<()> {
+    let refresh = load_atlassian_refresh_token();
+    store_oauth("atlassian", access_token, refresh.as_deref())
 }
 
 // ── GitHub Device Flow ───────────────────────────────────────────────────────
@@ -65,11 +73,10 @@ struct DeviceTokenResponse {
 
 pub async fn cmd_oauth_github() -> Result<()> {
     let client_id = std::env::var("GITHUB_OAUTH_CLIENT_ID")
-        .context("GITHUB_OAUTH_CLIENT_ID not set — add to .env.brain.tpl and 1Password")?;
+        .context("GITHUB_OAUTH_CLIENT_ID not set — add to .env.orca.tpl and 1Password")?;
 
     let client = reqwest::Client::new();
 
-    // Step 1: request device code
     let resp: DeviceCodeResponse = client
         .post("https://github.com/login/device/code")
         .header("Accept", "application/json")
@@ -91,7 +98,6 @@ pub async fn cmd_oauth_github() -> Result<()> {
 
     open_browser(&resp.verification_uri);
 
-    // Step 2: poll for token
     let deadline = std::time::Instant::now() + Duration::from_secs(resp.expires_in);
     let poll_interval = Duration::from_secs(resp.interval.max(5));
 
@@ -118,8 +124,8 @@ pub async fn cmd_oauth_github() -> Result<()> {
 
         match (token_resp.access_token, token_resp.error.as_deref()) {
             (Some(token), _) => {
-                store_token("github_token", &token)?;
-                println!("GitHub token stored in keychain.");
+                store_oauth("github", &token, None)?;
+                println!("GitHub token stored in orca.db.");
                 return Ok(());
             }
             (_, Some("authorization_pending" | "slow_down")) => continue,
@@ -130,8 +136,8 @@ pub async fn cmd_oauth_github() -> Result<()> {
 }
 
 pub fn cmd_logout_github() -> Result<()> {
-    delete_token("github_token");
-    println!("GitHub token removed from keychain.");
+    delete_oauth("github");
+    println!("GitHub token removed from orca.db.");
     Ok(())
 }
 
@@ -150,22 +156,17 @@ struct AtlassianTokenResponse {
 
 pub async fn cmd_oauth_atlassian() -> Result<()> {
     let client_id = std::env::var("ATLASSIAN_OAUTH_CLIENT_ID")
-        .context("ATLASSIAN_OAUTH_CLIENT_ID not set — add to .env.brain.tpl and 1Password")?;
+        .context("ATLASSIAN_OAUTH_CLIENT_ID not set — add to .env.orca.tpl and 1Password")?;
     let client_secret = std::env::var("ATLASSIAN_OAUTH_CLIENT_SECRET")
         .context("ATLASSIAN_OAUTH_CLIENT_SECRET not set")?;
 
-    // Bind a random local port for the callback
     let listener = TcpListener::bind("127.0.0.1:0").context("failed to bind callback port")?;
     let port = listener.local_addr()?.port();
     let redirect_uri = format!("http://localhost:{port}/callback");
 
-    // Generate PKCE challenge
     let (verifier, challenge) = pkce_pair();
-
-    // Generate random state
     let state = random_hex(16);
 
-    // Build auth URL
     let auth_url = format!(
         "{ATLASSIAN_AUTH_URL}?\
          audience=api.atlassian.com\
@@ -185,12 +186,9 @@ pub async fn cmd_oauth_atlassian() -> Result<()> {
     println!("If the browser doesn't open, visit:\n  {auth_url}\n");
     open_browser(&auth_url);
 
-    // Wait for callback
     let code = receive_callback(listener, &state)?;
 
-    // Exchange code for tokens
-    let client = reqwest::Client::new();
-    let token_resp: AtlassianTokenResponse = client
+    let token_resp: AtlassianTokenResponse = reqwest::Client::new()
         .post(ATLASSIAN_TOKEN_URL)
         .form(&[
             ("grant_type", "authorization_code"),
@@ -209,18 +207,14 @@ pub async fn cmd_oauth_atlassian() -> Result<()> {
         .await
         .context("failed to parse token response")?;
 
-    store_token("atlassian_access_token", &token_resp.access_token)?;
-    if let Some(refresh) = &token_resp.refresh_token {
-        store_token("atlassian_refresh_token", refresh)?;
-    }
-    println!("Atlassian tokens stored in keychain.");
+    store_oauth("atlassian", &token_resp.access_token, token_resp.refresh_token.as_deref())?;
+    println!("Atlassian tokens stored in orca.db.");
     Ok(())
 }
 
 pub fn cmd_logout_atlassian() -> Result<()> {
-    delete_token("atlassian_access_token");
-    delete_token("atlassian_refresh_token");
-    println!("Atlassian tokens removed from keychain.");
+    delete_oauth("atlassian");
+    println!("Atlassian tokens removed from orca.db.");
     Ok(())
 }
 
@@ -255,7 +249,6 @@ fn receive_callback(listener: TcpListener, expected_state: &str) -> Result<Strin
     let n = stream.read(&mut buf).context("failed to read callback")?;
     let request = String::from_utf8_lossy(&buf[..n]);
 
-    // Send a success page
     let body = b"<html><body><h2>Authorized!</h2><p>You can close this tab.</p></body></html>";
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -264,7 +257,6 @@ fn receive_callback(listener: TcpListener, expected_state: &str) -> Result<Strin
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.write_all(body);
 
-    // Parse GET /callback?code=...&state=... from the request line
     let first_line = request.lines().next().unwrap_or("");
     let path = first_line.split_whitespace().nth(1).unwrap_or("");
     let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");

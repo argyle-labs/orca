@@ -13,8 +13,9 @@ use std::time::Duration;
 use anyhow::Result;
 use axum::Router;
 use axum::routing::get;
-use brain_utils::state::{self, DaemonMode, DaemonState};
+use orca_utils::state::{self, DaemonMode, DaemonState};
 use tower_http::cors::{Any, CorsLayer};
+use tracing::info;
 
 pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()> {
     let app = build_router(dev, db_path);
@@ -25,11 +26,11 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
         format!("0.0.0.0:{port}").parse()?
     };
 
-    println!("[orca] binding {}...", addr);
+    info!("[orca] binding {}...", addr);
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
         anyhow::anyhow!("failed to bind {addr}: {e} — is port {port} already in use?")
     })?;
-    println!("[orca] listening on http://localhost:{port}");
+    info!("[orca] listening on http://localhost:{port}");
 
     // Register as the active dev process so the parked daemon won't auto-reclaim.
     // Use ORCA_DEV_PARENT_PID (the shell script PID) so the registration stays
@@ -40,16 +41,18 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or_else(std::process::id);
-            let _ = state::write(&DaemonState {
+            if let Err(e) = state::write(&DaemonState {
                 mode: DaemonMode::Dev,
                 active_pid,
                 ..s
-            });
+            }) {
+                tracing::warn!("failed to write dev state: {e}");
+            }
         }
     }
 
     // Non-blocking update check — prints a notice if a newer version is available.
-    tokio::spawn(brain_commands::startup_update_check());
+    tokio::spawn(orca_commands::startup_update_check());
 
     axum::serve(listener, app).await?;
     Ok(())
@@ -71,7 +74,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
 
     let binary = resolve_daemon_binary();
 
-    let _ = state::write(&DaemonState {
+    if let Err(e) = state::write(&DaemonState {
         daemon_pid: std::process::id(),
         active_pid: std::process::id(),
         port,
@@ -79,7 +82,9 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         binary,
         version: env!("CARGO_PKG_VERSION").to_string(),
         started_at: chrono::Utc::now(),
-    });
+    }) {
+        tracing::warn!("failed to write initial daemon state: {e}");
+    }
 
     let mut sigterm = signal(SignalKind::terminate())?;
 
@@ -87,9 +92,11 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     // wait for the dev server to finish rather than immediately fighting it for the port.
     if let Ok(Some(mut s)) = state::read() {
         if s.mode == DaemonMode::Dev {
-            println!("[orca] restarted while dev session active — waiting for dev to exit");
+            info!("[orca] restarted while dev session active — waiting for dev to exit");
             s.daemon_pid = std::process::id();
-            let _ = state::write(&s);
+            if let Err(e) = state::write(&s) {
+                tracing::warn!("failed to update daemon_pid in state: {e}");
+            }
 
             // Register SIGUSR2 now so dev can signal us at the new PID
             let mut sigusr2 = signal(SignalKind::user_defined2())?;
@@ -109,7 +116,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                     }
                 }
             }
-            println!("[orca] dev session ended — binding port {port}");
+            info!("[orca] dev session ended — binding port {port}");
         }
     }
 
@@ -117,9 +124,13 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
             anyhow::anyhow!("failed to bind {addr}: {e} — is port {port} already in use?")
         })?;
-        println!("[orca] daemon listening on http://localhost:{port}");
-        let _ = state::set_mode(DaemonMode::Daemon);
-        let _ = state::set_active_pid(std::process::id());
+        info!("[orca] daemon listening on http://localhost:{port}");
+        if let Err(e) = state::set_mode(DaemonMode::Daemon) {
+            tracing::warn!("failed to set daemon mode: {e}");
+        }
+        if let Err(e) = state::set_active_pid(std::process::id()) {
+            tracing::warn!("failed to set active_pid: {e}");
+        }
 
         let mut sigusr1 = signal(SignalKind::user_defined1())?;
 
@@ -127,12 +138,12 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             result = axum::serve(listener, app.clone()) => { result?; false }
             _ = sigusr1.recv() => true,
             _ = sigterm.recv() => {
-                println!("[orca] daemon shutting down");
+                info!("[orca] daemon shutting down");
                 let _ = state::clear();
                 return Ok(());
             }
             _ = tokio::signal::ctrl_c() => {
-                println!("[orca] daemon shutting down");
+                info!("[orca] daemon shutting down");
                 let _ = state::clear();
                 return Ok(());
             }
@@ -148,17 +159,19 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         let mut sigusr2 = signal(SignalKind::user_defined2())?;
 
         // Port released (listener dropped by select! cancellation)
-        let _ = state::set_mode(DaemonMode::Parked);
-        println!("[orca] daemon parked — port {port} released");
+        if let Err(e) = state::set_mode(DaemonMode::Parked) {
+            tracing::warn!("failed to set parked mode: {e}");
+        }
+        info!("[orca] daemon parked — port {port} released");
 
         loop {
             tokio::select! {
                 _ = sigusr2.recv() => {
-                    println!("[orca] daemon reclaiming port {port}");
+                    info!("[orca] daemon reclaiming port {port}");
                     break;
                 }
                 _ = sigterm.recv() => {
-                    println!("[orca] daemon shutting down (while parked)");
+                    info!("[orca] daemon shutting down (while parked)");
                     let _ = state::clear();
                     return Ok(());
                 }
@@ -172,7 +185,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                             DaemonMode::Daemon => false,
                         };
                         if abandoned {
-                            println!("[orca] auto-reclaiming port {port} (dev abandoned)");
+                            info!("[orca] auto-reclaiming port {port} (dev abandoned)");
                             break;
                         }
                     }
@@ -184,6 +197,43 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
 
     let _ = state::clear();
     Ok(())
+}
+
+/// Serve the Scalar API reference viewer.
+/// The SvelteKit `routes/scalar/+server.ts` is SSR-only and doesn't survive
+/// the prerendered static build embedded in the orca binary. This handler
+/// replaces it, serving the same Scalar HTML with the spec URL from ?url=.
+async fn scalar_handler(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::body::Body;
+    use axum::http::{Response, header};
+
+    let spec_url = params
+        .get("url")
+        .cloned()
+        .unwrap_or_else(|| "/api/openapi.json".to_string());
+
+    let html = format!(
+        r#"<!doctype html>
+<html>
+<head>
+  <title>API Reference</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>body {{ margin: 0; }}</style>
+</head>
+<body>
+  <script id="api-reference" data-url="{spec_url}"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+</body>
+</html>"#
+    );
+
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(Body::from(html))
+        .expect("hardcoded headers are valid")
 }
 
 fn pid_alive(pid: u32) -> bool {
@@ -232,15 +282,15 @@ async fn static_handler(uri: axum::http::Uri) -> axum::response::Response {
             Response::builder()
                 .header(header::CONTENT_TYPE, mime.as_ref())
                 .body(Body::from(content.data))
-                .unwrap()
+                .expect("mime type is a valid header value")
         }
         // SPA: any unmatched path serves index.html so client-side routing handles it.
         None => match Assets::get("index.html") {
             Some(content) => Response::builder()
                 .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
                 .body(Body::from(content.data))
-                .unwrap(),
-            None => Response::builder().status(404).body(Body::empty()).unwrap(),
+                .expect("hardcoded headers are valid"),
+            None => Response::builder().status(404).body(Body::empty()).expect("404 response is valid"),
         },
     }
 }
@@ -335,14 +385,14 @@ async fn proxy_http_to_vite(req: axum::extract::Request) -> axum::response::Resp
             let bytes = resp.bytes().await.unwrap_or_default();
             builder
                 .body(Body::from(bytes))
-                .unwrap_or_else(|_| Response::builder().status(502).body(Body::empty()).unwrap())
+                .unwrap_or_else(|_| Response::builder().status(502).body(Body::empty()).expect("502 response is valid"))
         }
         Err(_) => Response::builder()
             .status(502)
             .body(Body::from(
                 "orca: vite dev server unreachable — is it running on :12001?",
             ))
-            .unwrap(),
+            .expect("502 response is valid"),
     }
 }
 
@@ -395,12 +445,17 @@ fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
     let (api, spec) = openapi::openapi_router().split_for_parts();
     // Stash the assembled spec so the spec-serving handlers can read it.
     openapi::install_spec(spec);
+    // Write orca's own spec to disk so it lives alongside rebuy's scanner-generated specs.
+    write_orca_spec_to_disk();
 
     let api = api
         // Spec endpoints — registered after split so they are not themselves
         // documented in the spec (would be circular and noisy).
         .route("/api/openapi.json", get(openapi::openapi_handler))
         .route("/api/openapi/public.json", get(openapi::openapi_public_handler))
+        // Scalar API reference viewer — served by Rust so it works in the
+        // prerendered static build (SvelteKit SSR routes don't survive embedding).
+        .route("/scalar", get(scalar_handler))
         .with_state(mcp_pool)
         .layer(axum::middleware::from_fn(middleware::log_requests))
         .layer(cors);
@@ -409,5 +464,25 @@ fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         api.fallback(dev_proxy_handler)
     } else {
         api.fallback(static_handler)
+    }
+}
+
+/// Write orca's generated OpenAPI spec to ~/.orca/openapi/specs/orca.json so it
+/// lives alongside rebuy's scanner-generated specs and can be compared to them.
+fn write_orca_spec_to_disk() {
+    let dir = orca_scanner::openapi_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!("could not create openapi dir {}: {e}", dir.display());
+        return;
+    }
+    let path = dir.join("orca.json");
+    let spec = openapi::orca_spec_json();
+    match serde_json::to_string_pretty(&spec) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                tracing::warn!("could not write orca spec to {}: {e}", path.display());
+            }
+        }
+        Err(e) => tracing::warn!("could not serialize orca spec: {e}"),
     }
 }

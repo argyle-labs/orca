@@ -1,6 +1,6 @@
 use anyhow::Result;
-use brain_utils::config::Config;
-use brain_utils::consts::APP_NAME;
+use orca_utils::config::Config;
+use orca_utils::consts::APP_NAME;
 use colored::Colorize;
 
 pub fn cmd_projects(config: &Config) -> Result<()> {

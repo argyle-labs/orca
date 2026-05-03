@@ -30,7 +30,7 @@ pub async fn tests_run_handler(Query(params): Query<TestRunQuery>) -> Response {
 }
 
 pub async fn run_test_suite(suite: &str) -> anyhow::Result<TestRunResponse> {
-    let source_root = std::env::var("BRAIN_SOURCE_ROOT")
+    let source_root = std::env::var("ORCA_SOURCE_ROOT")
         .unwrap_or_else(|_| env!("CARGO_MANIFEST_DIR").to_string());
     let site_root = format!("{source_root}/site");
 

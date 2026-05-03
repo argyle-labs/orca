@@ -1,5 +1,5 @@
 use super::{ModelBackend, OutputSink, serialize, sink_write, sink_writeln};
-use brain_utils::types::{BackendResponse, Message, StopReason, ToolCall, ToolDef};
+use orca_utils::types::{BackendResponse, Message, StopReason, ToolCall, ToolDef};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use colored::Colorize;
@@ -20,9 +20,11 @@ impl LMStudioBackend {
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
         LMStudioBackend {
             client: Client::builder()
-                .timeout(Duration::from_secs(60))
+                // Connect timeout only — no total-request timeout so slow local models
+                // can take as long as they need to stream a response.
+                .connect_timeout(Duration::from_secs(10))
                 .build()
-                .unwrap_or_default(),
+                .expect("failed to build HTTP client"),
             base_url: base_url.into(),
             model: model.into(),
         }
@@ -222,6 +224,12 @@ async fn parse_lmstudio_stream(
                 _ => {}
             }
         }
+    }
+
+    // If the stream ended without producing anything (and wasn't cancelled), surface a clear error
+    // rather than returning an empty Ok that silently swallows the failure downstream.
+    if result.text.is_empty() && tool_accum.is_empty() && !cancel.is_cancelled() {
+        bail!("model returned an empty response — is the model loaded and responding correctly?");
     }
 
     // Flush accumulated tool calls

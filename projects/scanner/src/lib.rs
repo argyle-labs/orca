@@ -167,7 +167,7 @@ fn filter_ops(mut spec: Value, keep: impl Fn(&Value) -> bool) -> Value {
 
 /// Filter orca's own spec to only operations in publicly accessible domain groups.
 /// Uses domain tags (docs, library) since utoipa 4.x doesn't support multi-tag paths.
-pub fn filter_brain_public(spec: Value) -> Value {
+pub fn filter_orca_public(spec: Value) -> Value {
     let mut filtered = filter_ops(spec, |op| {
         op["tags"]
             .as_array()

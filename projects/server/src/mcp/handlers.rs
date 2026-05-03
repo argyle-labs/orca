@@ -1,6 +1,6 @@
 use anyhow::Result;
-use brain_core::backend::buffer_sink;
-use brain_utils::config::Config;
+use orca_core::backend::buffer_sink;
+use orca_utils::config::Config;
 use serde_json::Value;
 
 use crate::context::ProjectContext;
@@ -8,7 +8,7 @@ use crate::session::Session;
 
 pub fn agents() -> Result<String> {
     let mut lines = vec!["Available orca agents:".to_string(), String::new()];
-    for (name, desc) in brain_agents::list_embedded_agents() {
+    for (name, desc) in orca_agents::list_embedded_agents() {
         let short: String = desc.chars().take(100).collect();
         let ellipsis = if desc.len() > 100 { "…" } else { "" };
         lines.push(format!("@{name}: {short}{ellipsis}"));
@@ -20,7 +20,7 @@ pub fn get_agent(args: &Value, config: &Config) -> Result<String> {
     let name = args["name"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("name is required"))?;
-    let prompt = brain_agents::load_agent_prompt(name, &config.agents_dir())
+    let prompt = orca_agents::load_agent_prompt(name, &config.agents_dir())
         .ok_or_else(|| anyhow::anyhow!("agent not found: {name}"))?;
     Ok(prompt)
 }
@@ -42,7 +42,7 @@ pub async fn run(args: &Value, config: &Config) -> Result<String> {
     let mut session = Session::new_with_output(config.clone(), ctx, sink).await?;
     session.one_shot(full_prompt).await?;
 
-    let bytes = buf.lock().unwrap();
+    let bytes = buf.lock().unwrap_or_else(|e| e.into_inner());
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -51,7 +51,7 @@ pub fn search_logs(args: &Value, config: &Config) -> Result<String> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("query is required"))?;
 
-    let matches = brain_utils::log::search_logs(&config.logs_dir(), query, 20)?;
+    let matches = orca_utils::log::search_logs(&config.logs_dir(), query, 20)?;
     if matches.is_empty() {
         return Ok(format!("No matches for '{query}'"));
     }
@@ -250,8 +250,8 @@ pub async fn run_tests(args: &Value) -> Result<String> {
 }
 
 pub fn mcp_list_servers() -> Result<String> {
-    let conn = brain_utils::db::open_default()?;
-    let servers = brain_utils::db::list_mcp_servers(&conn)?;
+    let conn = orca_utils::db::open_default()?;
+    let servers = orca_utils::db::list_mcp_servers(&conn)?;
     if servers.is_empty() {
         return Ok("No MCP servers registered in orca.db.".to_string());
     }
@@ -277,22 +277,22 @@ pub fn mcp_add_server(args: &Value) -> Result<String> {
                 .collect()
         })
         .unwrap_or_default();
-    let row = brain_utils::db::McpServerRow {
+    let row = orca_utils::db::McpServerRow {
         name: name.to_string(),
         command: command.to_string(),
         args: mcp_args,
         env,
         enabled: true,
     };
-    let conn = brain_utils::db::open_default()?;
-    brain_utils::db::upsert_mcp_server(&conn, &row)?;
+    let conn = orca_utils::db::open_default()?;
+    orca_utils::db::upsert_mcp_server(&conn, &row)?;
     Ok(format!("Registered MCP server '{name}' in orca.db."))
 }
 
 pub fn mcp_remove_server(args: &Value) -> Result<String> {
     let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name required"))?;
-    let conn = brain_utils::db::open_default()?;
-    if brain_utils::db::remove_mcp_server(&conn, name)? {
+    let conn = orca_utils::db::open_default()?;
+    if orca_utils::db::remove_mcp_server(&conn, name)? {
         Ok(format!("Removed MCP server '{name}' from orca.db."))
     } else {
         Ok(format!("Server '{name}' not found in orca.db."))
@@ -303,12 +303,12 @@ pub fn mcp_map_tool(args: &Value) -> Result<String> {
     let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name required"))?;
     let orca_tool = args["orca_tool"].as_str().ok_or_else(|| anyhow::anyhow!("orca_tool required"))?;
     let external_tool = args["external_tool"].as_str().ok_or_else(|| anyhow::anyhow!("external_tool required"))?;
-    let conn = brain_utils::db::open_default()?;
-    let servers = brain_utils::db::list_mcp_servers(&conn)?;
+    let conn = orca_utils::db::open_default()?;
+    let servers = orca_utils::db::list_mcp_servers(&conn)?;
     if !servers.iter().any(|s| s.name == name) {
         anyhow::bail!("MCP server '{name}' not found in orca.db — register it first with orca_mcp_add");
     }
-    let row = brain_utils::db::McpToolMappingRow {
+    let row = orca_utils::db::McpToolMappingRow {
         orca_tool: orca_tool.to_string(),
         mcp_name: name.to_string(),
         external_tool: external_tool.to_string(),
@@ -316,14 +316,14 @@ pub fn mcp_map_tool(args: &Value) -> Result<String> {
         confidence: None,
         enabled: true,
     };
-    brain_utils::db::upsert_mcp_tool_mapping(&conn, &row)?;
+    orca_utils::db::upsert_mcp_tool_mapping(&conn, &row)?;
     Ok(format!("Mapped {orca_tool} → {name}::{external_tool}"))
 }
 
 pub fn mcp_unmap_tool(args: &Value) -> Result<String> {
     let orca_tool = args["orca_tool"].as_str().ok_or_else(|| anyhow::anyhow!("orca_tool required"))?;
-    let conn = brain_utils::db::open_default()?;
-    if brain_utils::db::remove_mcp_tool_mapping(&conn, orca_tool)? {
+    let conn = orca_utils::db::open_default()?;
+    if orca_utils::db::remove_mcp_tool_mapping(&conn, orca_tool)? {
         Ok(format!("Unmapped {orca_tool}"))
     } else {
         Ok(format!("{orca_tool} not found in mcp_tool_mappings"))
@@ -337,19 +337,19 @@ pub fn mcp_sync_tools(args: &Value) -> Result<String> {
     if !all && name.is_none() {
         anyhow::bail!("provide name or set all=true");
     }
-    let conn = brain_utils::db::open_default()?;
-    let servers = brain_utils::db::list_mcp_servers(&conn)?;
-    let targets: Vec<&brain_utils::db::McpServerRow> = if all {
+    let conn = orca_utils::db::open_default()?;
+    let servers = orca_utils::db::list_mcp_servers(&conn)?;
+    let targets: Vec<&orca_utils::db::McpServerRow> = if all {
         servers.iter().collect()
     } else {
-        let n = name.unwrap();
+        let n = name.expect("name checked above via !all && name.is_none() guard");
         let s = servers.iter().find(|s| s.name == n)
             .ok_or_else(|| anyhow::anyhow!("server '{n}' not found"))?;
         vec![s]
     };
     let mut lines = Vec::new();
     for server in targets {
-        match brain_commands::mcp_sync_server(server, threshold) {
+        match orca_commands::mcp_sync_server(server, threshold) {
             Ok((added, skipped)) => lines.push(format!("{}: {} added, {} skipped", server.name, added, skipped)),
             Err(e) => lines.push(format!("{}: error — {e}", server.name)),
         }
@@ -359,11 +359,11 @@ pub fn mcp_sync_tools(args: &Value) -> Result<String> {
 
 pub fn mcp_list_mappings(args: &Value) -> Result<String> {
     let name = args["name"].as_str();
-    let conn = brain_utils::db::open_default()?;
-    let rows: Vec<brain_utils::db::McpToolMappingRow> = if let Some(n) = name {
-        brain_utils::db::list_mcp_tool_mappings(&conn, n)?
+    let conn = orca_utils::db::open_default()?;
+    let rows: Vec<orca_utils::db::McpToolMappingRow> = if let Some(n) = name {
+        orca_utils::db::list_mcp_tool_mappings(&conn, n)?
     } else {
-        brain_utils::db::all_mcp_tool_mappings(&conn)?
+        orca_utils::db::all_mcp_tool_mappings(&conn)?
     };
     if rows.is_empty() {
         return Ok("(no mappings)".to_string());
@@ -378,8 +378,8 @@ pub fn mcp_list_mappings(args: &Value) -> Result<String> {
 }
 
 pub fn schema_list_databases() -> Result<String> {
-    let conn = brain_utils::db::open_default()?;
-    let dbs = brain_utils::db::list_schema_databases(&conn)?;
+    let conn = orca_utils::db::open_default()?;
+    let dbs = orca_utils::db::list_schema_databases(&conn)?;
     if dbs.is_empty() {
         return Ok("No schema databases registered. Use `orca schema add` or orca_schema_add to register one.".to_string());
     }
@@ -400,8 +400,9 @@ pub fn schema_add_database(args: &Value) -> Result<String> {
     let database = args["database"].as_str().ok_or_else(|| anyhow::anyhow!("database required"))?;
     let user = args["user"].as_str().ok_or_else(|| anyhow::anyhow!("user required"))?;
     let password = args["password"].as_str().ok_or_else(|| anyhow::anyhow!("password required"))?;
-    let row = brain_utils::db::SchemaDbRow {
+    let row = orca_utils::db::SchemaDbRow {
         name: name.to_string(),
+        driver: args["driver"].as_str().unwrap_or("mysql").to_string(),
         host: args["host"].as_str().map(|s| s.to_string()),
         port: args["port"].as_u64().map(|p| p as u16),
         user: user.to_string(),
@@ -411,15 +412,15 @@ pub fn schema_add_database(args: &Value) -> Result<String> {
         domains_file: args["domainsFile"].as_str().map(|s| s.to_string()),
         enabled: true,
     };
-    let conn = brain_utils::db::open_default()?;
-    brain_utils::db::upsert_schema_database(&conn, &row)?;
+    let conn = orca_utils::db::open_default()?;
+    orca_utils::db::upsert_schema_database(&conn, &row)?;
     Ok(format!("Registered schema database '{name}' in orca.db."))
 }
 
 pub fn schema_remove_database(args: &Value) -> Result<String> {
     let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name required"))?;
-    let conn = brain_utils::db::open_default()?;
-    if brain_utils::db::remove_schema_database(&conn, name)? {
+    let conn = orca_utils::db::open_default()?;
+    if orca_utils::db::remove_schema_database(&conn, name)? {
         Ok(format!("Removed schema database '{name}' from orca.db."))
     } else {
         Ok(format!("Database '{name}' not found in orca.db."))
@@ -427,8 +428,8 @@ pub fn schema_remove_database(args: &Value) -> Result<String> {
 }
 
 pub fn docker_list_runtimes() -> Result<String> {
-    let conn = brain_utils::db::open_default()?;
-    let rts = brain_utils::db::list_docker_runtimes(&conn)?;
+    let conn = orca_utils::db::open_default()?;
+    let rts = orca_utils::db::list_docker_runtimes(&conn)?;
     if rts.is_empty() {
         return Ok("No Docker runtimes registered. Use `orca docker add` or orca_docker_add to register one.".to_string());
     }
@@ -451,22 +452,22 @@ pub fn docker_add_runtime(args: &Value) -> Result<String> {
     if socket_path.is_none() && host.is_none() && url.is_none() {
         anyhow::bail!("provide socketPath, host, or url");
     }
-    let row = brain_utils::db::DockerRuntimeRow {
+    let row = orca_utils::db::DockerRuntimeRow {
         name: name.to_string(),
         socket_path,
         host,
         url,
         enabled: true,
     };
-    let conn = brain_utils::db::open_default()?;
-    brain_utils::db::upsert_docker_runtime(&conn, &row)?;
+    let conn = orca_utils::db::open_default()?;
+    orca_utils::db::upsert_docker_runtime(&conn, &row)?;
     Ok(format!("Registered Docker runtime '{name}' in orca.db."))
 }
 
 pub fn docker_remove_runtime(args: &Value) -> Result<String> {
     let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name required"))?;
-    let conn = brain_utils::db::open_default()?;
-    if brain_utils::db::remove_docker_runtime(&conn, name)? {
+    let conn = orca_utils::db::open_default()?;
+    if orca_utils::db::remove_docker_runtime(&conn, name)? {
         Ok(format!("Removed Docker runtime '{name}' from orca.db."))
     } else {
         Ok(format!("Runtime '{name}' not found in orca.db."))
@@ -475,8 +476,8 @@ pub fn docker_remove_runtime(args: &Value) -> Result<String> {
 
 pub fn plugin_list(args: &Value) -> Result<String> {
     let workspace = args["workspace"].as_str();
-    let conn = brain_utils::db::open_default()?;
-    let plugins = brain_utils::db::list_plugins(&conn)?;
+    let conn = orca_utils::db::open_default()?;
+    let plugins = orca_utils::db::list_plugins(&conn)?;
     let filtered: Vec<_> = plugins.iter()
         .filter(|p| workspace.map_or(true, |w| p.tier == w))
         .collect();
@@ -494,8 +495,8 @@ pub fn plugin_list(args: &Value) -> Result<String> {
 
 pub fn plugin_creds_list(args: &Value) -> Result<String> {
     let plugin = args["plugin"].as_str().ok_or_else(|| anyhow::anyhow!("plugin required"))?;
-    let conn = brain_utils::db::open_default()?;
-    let creds = brain_utils::db::list_plugin_credentials(&conn, plugin)?;
+    let conn = orca_utils::db::open_default()?;
+    let creds = orca_utils::db::list_plugin_credentials(&conn, plugin)?;
     if creds.is_empty() {
         return Ok(format!("No credentials stored for plugin '{plugin}'."));
     }
@@ -511,16 +512,16 @@ pub fn plugin_creds_set(args: &Value) -> Result<String> {
     let plugin = args["plugin"].as_str().ok_or_else(|| anyhow::anyhow!("plugin required"))?;
     let key = args["key"].as_str().ok_or_else(|| anyhow::anyhow!("key required"))?;
     let value = args["value"].as_str().ok_or_else(|| anyhow::anyhow!("value required"))?;
-    let conn = brain_utils::db::open_default()?;
-    brain_utils::db::set_plugin_credential(&conn, plugin, key, value)?;
+    let conn = orca_utils::db::open_default()?;
+    orca_utils::db::set_plugin_credential(&conn, plugin, key, value)?;
     Ok(format!("Stored credential '{key}' for plugin '{plugin}'."))
 }
 
 pub fn plugin_creds_remove(args: &Value) -> Result<String> {
     let plugin = args["plugin"].as_str().ok_or_else(|| anyhow::anyhow!("plugin required"))?;
     let key = args["key"].as_str().ok_or_else(|| anyhow::anyhow!("key required"))?;
-    let conn = brain_utils::db::open_default()?;
-    if brain_utils::db::delete_plugin_credential(&conn, plugin, key)? {
+    let conn = orca_utils::db::open_default()?;
+    if orca_utils::db::delete_plugin_credential(&conn, plugin, key)? {
         Ok(format!("Removed credential '{key}' from plugin '{plugin}'."))
     } else {
         Ok(format!("Credential '{key}' not found for plugin '{plugin}'."))
@@ -529,6 +530,6 @@ pub fn plugin_creds_remove(args: &Value) -> Result<String> {
 
 pub fn plugin_creds_sync(args: &Value) -> Result<String> {
     let plugin = args["plugin"].as_str().ok_or_else(|| anyhow::anyhow!("plugin required"))?;
-    brain_commands::creds_cmd::sync_plugin_creds(plugin)?;
+    orca_commands::creds_cmd::sync_plugin_creds(plugin)?;
     Ok(format!("Synced credentials for plugin '{plugin}'."))
 }

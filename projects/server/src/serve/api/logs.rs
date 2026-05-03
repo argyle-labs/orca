@@ -58,11 +58,12 @@ pub async fn log_services_handler() -> Response {
                     Some(f) => f,
                     None => return json!({ "project": name, "path": path_str, "services": [] }),
                 };
+                let compose_str = compose_file.to_string_lossy().into_owned();
                 let ps_raw = run_docker(
                     &[
                         "compose",
                         "-f",
-                        compose_file.to_str().unwrap(),
+                        &compose_str,
                         "ps",
                         "--format",
                         "json",
@@ -121,7 +122,7 @@ pub async fn log_fetch_handler(Query(params): Query<LogsQuery>) -> Response {
         Some(f) => f,
         None => return err(StatusCode::NOT_FOUND, "no compose file found"),
     };
-    let cf = compose_file.to_str().unwrap().to_string();
+    let cf = compose_file.to_string_lossy().into_owned();
     let tail_str = params.tail.unwrap_or(200).to_string();
     let mut args = vec![
         "compose",

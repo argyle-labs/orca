@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
-use brain_utils::consts::APP_NAME;
-use brain_utils::db::{self, PluginRow};
+use orca_utils::consts::APP_NAME;
+use orca_utils::db::{self, PluginRow};
+use orca_utils::tools::fs::expand_tilde;
 use clap::Subcommand;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::Path;
 
 // ── Manifest parsing ──────────────────────────────────────────────────────────
 
@@ -18,20 +20,39 @@ struct ManifestMcp {
     token_env: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+struct ManifestSpecs {
+    /// Filesystem path (supports ~/) where this plugin's spec files live.
+    dir: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct ManifestPlugin {
     id: String,
     version: String,
     tier: String,
+    /// UI mode this plugin belongs to: "orca" (default) or a custom mode string (e.g. "rebuy").
+    #[serde(default = "default_mode")]
+    mode: String,
     #[serde(default)]
     context_injection: Option<String>,
     #[serde(default)]
     mcp: Option<ManifestMcp>,
     /// Maps universal command name → plugin's internal MCP tool name.
-    /// e.g. search_docs = "rebuy_docs_search"
     #[serde(default)]
     commands: HashMap<String, String>,
+    /// Sidebar nav links this plugin contributes: [{href, label, section?}]
+    #[serde(default)]
+    nav_links: Vec<serde_json::Value>,
+    /// MCP tools this plugin exposes for orca's unified search (Cmd+K).
+    #[serde(default)]
+    search_tools: Vec<db::PluginSearchTool>,
+    /// Optional directory containing spec files served with this plugin's namespace.
+    #[serde(default)]
+    specs: Option<ManifestSpecs>,
 }
+
+fn default_mode() -> String { "orca".to_string() }
 
 #[derive(Deserialize)]
 struct Manifest {
@@ -39,12 +60,7 @@ struct Manifest {
 }
 
 fn parse_manifest(path: &str) -> Result<(Manifest, String)> {
-    let resolved = if path.starts_with("~/") {
-        let home = std::env::var("HOME").context("no HOME env var")?;
-        format!("{}{}", home, &path[1..])
-    } else {
-        path.to_string()
-    };
+    let resolved = expand_tilde(path);
 
     let abs = std::fs::canonicalize(&resolved)
         .with_context(|| format!("manifest not found: {resolved}"))?;
@@ -82,6 +98,34 @@ pub enum PluginAction {
     Disable {
         id: String,
     },
+    /// Get a plugin data value
+    DataGet {
+        /// Plugin id
+        id: String,
+        /// Data key
+        key: String,
+    },
+    /// Set a plugin data value
+    DataSet {
+        /// Plugin id
+        id: String,
+        /// Data key
+        key: String,
+        /// Value to store
+        value: String,
+    },
+    /// List all data entries for a plugin
+    DataList {
+        /// Plugin id
+        id: String,
+    },
+    /// Delete a plugin data entry
+    DataDelete {
+        /// Plugin id
+        id: String,
+        /// Data key
+        key: String,
+    },
 }
 
 pub fn cmd_plugin(action: PluginAction) -> Result<()> {
@@ -89,6 +133,9 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
     match action {
         PluginAction::Add { manifest } => {
             let (m, abs_path) = parse_manifest(&manifest)?;
+            let specs_dir = m.plugin.specs.as_ref()
+                .and_then(|s| s.dir.as_deref())
+                .map(expand_tilde);
             let row = PluginRow {
                 id: m.plugin.id.clone(),
                 manifest_path: abs_path.clone(),
@@ -104,6 +151,10 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
                     .unwrap_or_else(|| "minimal".into()),
                 enabled: true,
                 command_map: m.plugin.commands.clone(),
+                mode: m.plugin.mode.clone(),
+                nav_links: m.plugin.nav_links.clone(),
+                search_tools: m.plugin.search_tools,
+                specs_dir,
             };
             db::upsert_plugin(&conn, &row)?;
             println!(
@@ -157,6 +208,37 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
             } else {
                 println!("plugin '{id}' not found");
             }
+        }
+
+        PluginAction::DataGet { id, key } => {
+            match db::get_plugin_data(&conn, &id, &key)? {
+                Some(row) => println!("{}", row.value),
+                None => println!("(not set)"),
+            }
+        }
+
+        PluginAction::DataSet { id, key, value } => {
+            db::set_plugin_data(&conn, &id, &key, &value)?;
+            println!("set {id}/{key}");
+        }
+
+        PluginAction::DataList { id } => {
+            let rows = db::list_plugin_data(&conn, &id)?;
+            if rows.is_empty() {
+                println!("no data for plugin '{id}'");
+            } else {
+                println!("{:<30} {:<24} {}", "KEY", "UPDATED", "VALUE");
+                println!("{}", "-".repeat(80));
+                for r in rows {
+                    let preview = if r.value.len() > 40 { format!("{}…", &r.value[..40]) } else { r.value.clone() };
+                    println!("{:<30} {:<24} {}", r.key, r.updated_at, preview);
+                }
+            }
+        }
+
+        PluginAction::DataDelete { id, key } => {
+            db::delete_plugin_data(&conn, &id, &key)?;
+            println!("deleted {id}/{key}");
         }
     }
     Ok(())

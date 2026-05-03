@@ -1,5 +1,5 @@
 #![recursion_limit = "256"]
-//! Brain server binary — the interactive AI agent orchestrator.
+//! Orca server binary — the interactive AI agent orchestrator.
 //!
 //! Modules:
 //! - `context`  — project context resolution (memory, system prompt, working dir)

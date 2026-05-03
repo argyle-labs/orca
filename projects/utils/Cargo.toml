@@ -1,5 +1,5 @@
 [package]
-name = "brain-utils"
+name = "orca-utils"
 version = "0.1.0"
 edition = "2024"
 

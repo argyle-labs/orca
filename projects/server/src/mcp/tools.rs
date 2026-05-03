@@ -55,7 +55,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "get_config",
-            "description": "Read a Brain configuration/reference document by name (e.g. TOOL_RULES, DELEGATION, SEVERITY_RUBRIC, CANONICAL_SOURCES, CODING_RULES). Call with no name to list available files.",
+            "description": "Read an orca configuration/reference document by name (e.g. TOOL_RULES, DELEGATION, SEVERITY_RUBRIC, CANONICAL_SOURCES, CODING_RULES). Call with no name to list available files.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

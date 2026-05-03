@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
-    let commands_dir = env::var("BRAIN_COMMANDS_DIR").unwrap_or_else(|_| {
+    let commands_dir = env::var("ORCA_COMMANDS_DIR").unwrap_or_else(|_| {
         let manifest = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
         format!("{manifest}/src/commands")
     });
@@ -56,7 +56,7 @@ fn main() {
 
     fs::write(&dest, code).expect("failed to write embedded_commands.rs");
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-env-changed=BRAIN_COMMANDS_DIR");
+    println!("cargo:rerun-if-env-changed=ORCA_COMMANDS_DIR");
 
     // Expose the Rust target triple as a compile-time constant for self-update.
     let target = env::var("TARGET").unwrap_or_else(|_| "unknown".into());

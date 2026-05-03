@@ -90,7 +90,7 @@ pub async fn docker_services_handler(Query(params): Query<DockerServicesQuery>) 
         &[
             "compose",
             "-f",
-            compose_file.to_str().unwrap(),
+            compose_file.to_string_lossy().as_ref(),
             "config",
             "--services",
         ],
@@ -113,7 +113,7 @@ pub async fn docker_services_handler(Query(params): Query<DockerServicesQuery>) 
         &[
             "compose",
             "-f",
-            compose_file.to_str().unwrap(),
+            compose_file.to_string_lossy().as_ref(),
             "ps",
             "--format",
             "json",
@@ -161,7 +161,7 @@ pub async fn docker_action_handler(Json(body): Json<DockerActionRequest>) -> Res
         Some(f) => f,
         None => return err(StatusCode::NOT_FOUND, "no compose file found"),
     };
-    let cf = compose_file.to_str().unwrap().to_string();
+    let cf = compose_file.to_string_lossy().as_ref().to_string();
     let svc: Vec<String> = body
         .service
         .as_deref()

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use brain_utils::db;
+use orca_utils::db;
 use clap::Subcommand;
 use rusqlite::Connection;
 
@@ -113,7 +113,7 @@ pub fn cmd_creds(action: CredsAction) -> Result<()> {
                     println!("{:<20} {:<8} {:<10} stdio/subprocess — no token required", p.id, "—", "—");
                     continue;
                 }
-                let url = url.unwrap();
+                let url = url.expect("url checked as Some above via is_none() guard");
 
                 let (token_ok, token_note) = validate_token(&conn, &p.id);
                 let (http_ok, http_note) = {
@@ -249,7 +249,7 @@ fn ping_plugin(base_url: &str, token: &str) -> (bool, String) {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
-        .unwrap();
+        .expect("reqwest client with only a timeout always builds");
     match client.get(&url).bearer_auth(token).send() {
         Ok(resp) if resp.status().is_success() => (true, format!("ok ({})", resp.status())),
         Ok(resp) => (false, format!("HTTP {}", resp.status())),

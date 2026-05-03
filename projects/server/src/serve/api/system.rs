@@ -49,7 +49,7 @@ pub struct SystemActionRequest {
     tag = "system"
 )]
 pub async fn system_status_handler() -> Response {
-    let status = brain_commands::install_status();
+    let status = orca_commands::install_status();
     Json(status).into_response()
 }
 
@@ -68,7 +68,7 @@ pub async fn system_status_handler() -> Response {
 pub async fn system_action_handler(
     Json(req): Json<SystemActionRequest>,
 ) -> Response {
-    use brain_commands::install::{InstallReport, cmd_install_report, cmd_uninstall_report};
+    use orca_commands::install::{InstallReport, cmd_install_report, cmd_uninstall_report};
 
     let report: InstallReport = match req.action.as_str() {
         "install" => cmd_install_report(),

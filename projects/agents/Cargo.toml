@@ -1,5 +1,5 @@
 [package]
-name = "brain-agents"
+name = "orca-agents"
 version = "0.1.0"
 edition = "2024"
 
