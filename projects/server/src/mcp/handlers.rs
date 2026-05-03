@@ -381,7 +381,7 @@ pub fn schema_list_databases() -> Result<String> {
     let conn = brain_utils::db::open_default()?;
     let dbs = brain_utils::db::list_schema_databases(&conn)?;
     if dbs.is_empty() {
-        return Ok("No schema databases registered. Use `brain schema add` or orca_schema_add to register one.".to_string());
+        return Ok("No schema databases registered. Use `orca schema add` or orca_schema_add to register one.".to_string());
     }
     let mut lines = vec!["Registered schema databases:".to_string(), String::new()];
     for d in &dbs {
@@ -430,7 +430,7 @@ pub fn docker_list_runtimes() -> Result<String> {
     let conn = brain_utils::db::open_default()?;
     let rts = brain_utils::db::list_docker_runtimes(&conn)?;
     if rts.is_empty() {
-        return Ok("No Docker runtimes registered. Use `brain docker add` or orca_docker_add to register one.".to_string());
+        return Ok("No Docker runtimes registered. Use `orca docker add` or orca_docker_add to register one.".to_string());
     }
     let mut lines = vec!["Registered Docker runtimes:".to_string(), String::new()];
     for r in &rts {

@@ -1,4 +1,4 @@
-//! Agent prompt registry for the brain binary.
+//! Agent prompt registry for the orca binary.
 //!
 //! Agent definitions are `.md` files with YAML frontmatter. They live in
 //! `projects/agents/src/agents/` and are embedded at compile time by `build.rs`.

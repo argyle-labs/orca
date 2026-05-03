@@ -1,4 +1,4 @@
-//! Model backend abstraction for the brain binary.
+//! Model backend abstraction for the orca binary.
 //!
 //! `ModelBackend` is the core trait all LLM clients implement.
 //! `build_backend()` is the factory — everything else in the codebase interacts
@@ -100,7 +100,7 @@ pub fn build_backend(config: &Config, model: &Model) -> Result<Box<dyn ModelBack
             let key = config
                 .anthropic_api_key
                 .clone()
-                .context("no API key — run `brain login` to store one")?;
+                .context("no API key — run `orca login` to store one")?;
             Ok(Box::new(ClaudeBackend::new(key, id)))
         }
         Model::LMStudio(id) => Ok(Box::new(LMStudioBackend::new(&config.lmstudio_url, id))),

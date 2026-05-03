@@ -42,7 +42,7 @@ enum Command {
         service: LoginService,
     },
 
-    /// List projects (memory dirs in brain vault)
+    /// List projects (memory dirs in orca vault)
     Projects,
 
     /// List available agents
@@ -78,10 +78,10 @@ enum Command {
         prompt: String,
     },
 
-    /// Start MCP stdio server — exposes brain tools to Claude Code
+    /// Start MCP stdio server — exposes orca tools to Claude Code
     McpServe,
 
-    /// Start the brain web server (docs + services UI)
+    /// Start the orca web server (docs + services UI)
     Serve {
         /// Dev mode: spawn Vite dev server for hot reload
         #[arg(long)]
@@ -114,7 +114,7 @@ enum Command {
         out: String,
     },
 
-    /// Manage the external API spec registry (~/brain/openapi/)
+    /// Manage the external API spec registry (~/orca/openapi/)
     Spec {
         #[command(subcommand)]
         action: SpecAction,
@@ -138,7 +138,7 @@ enum Command {
         action: SchemaAction,
     },
 
-    /// Manage Docker runtimes registered with brain
+    /// Manage Docker runtimes registered with orca
     Docker {
         #[command(subcommand)]
         action: DockerAction,
@@ -156,7 +156,7 @@ enum Command {
         action: CredsAction,
     },
 
-    /// Manage the brain.db schema (migrate, status)
+    /// Manage the orca.db schema (migrate, status)
     Db {
         #[command(subcommand)]
         action: DbAction,
@@ -169,10 +169,10 @@ enum Command {
         channel: String,
     },
 
-    /// Install brain: wire symlinks, register MCP server, install binary
+    /// Install orca: wire symlinks, register MCP server, install binary
     Install,
 
-    /// Uninstall brain: remove binary, MCP registration, and CLAUDE.md symlinks
+    /// Uninstall orca: remove binary, MCP registration, and CLAUDE.md symlinks
     Uninstall,
 }
 
@@ -293,7 +293,7 @@ async fn escalate(config: &Config, question: &str, project: Option<&str>) -> Res
     let api_key = config
         .anthropic_api_key
         .clone()
-        .ok_or_else(|| anyhow::anyhow!("no API key — run `brain login`"))?;
+        .ok_or_else(|| anyhow::anyhow!("no API key — run `orca login`"))?;
 
     let system = match project {
         Some(p) => {
@@ -338,7 +338,7 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
                 let _ = Command::new("kill").args(["-USR2", &pid.to_string()]).status();
                 return Err(e.context("daemon did not park in time; reclaim sent"));
             }
-            println!("[brain] daemon parked — dev server taking port {port}");
+            println!("[orca] daemon parked — dev server taking port {port}");
             (Some(pid), Some(binary))
         }
         _ => (None, None),
@@ -374,7 +374,7 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
             .is_some();
 
         if reclaimed {
-            println!("[brain] daemon reclaimed port {port}");
+            println!("[orca] daemon reclaimed port {port}");
         } else {
             // Daemon is not alive and was not restarted by launchd — spawn fresh
             let binary = state::read()
@@ -383,7 +383,7 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
                 .map(|s| s.binary)
                 .or(daemon_binary);
             if let Some(bin) = binary {
-                println!("[brain] daemon gone — respawning {bin}");
+                println!("[orca] daemon gone — respawning {bin}");
                 let _ = Command::new(&bin)
                     .args(["daemon", "start", "--port", &port.to_string()])
                     .spawn();

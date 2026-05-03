@@ -16,9 +16,9 @@ use super::mcp_client::McpPool;
 #[derive(OpenApi)]
 #[openapi(
     info(
-        title = "brain API",
+        title = "orca API",
         version = "0.1.0",
-        description = "brain local dev tool — docs, services, schema, MCP proxy"
+        description = "orca local dev tool — docs, services, schema, MCP proxy"
     ),
     components(schemas(
         super::api::TreeNode,
@@ -80,9 +80,9 @@ use super::mcp_client::McpPool;
     )),
     tags(
         // Public domains — served at /api/openapi/public.json
-        (name = "docs",       description = "Brain vault document tree and search [public]"),
+        (name = "docs",       description = "Orca vault document tree and search [public]"),
         (name = "library",    description = "Library documentation via context7 [public]"),
-        // Internal domains — brain local use only
+        // Internal domains — orca local use only
         (name = "mcp",        description = "MCP tool proxy — run any connected MCP server tool"),
         (name = "docker",     description = "Docker Compose service management"),
         (name = "schema",     description = "MySQL schema visualizer"),
@@ -93,7 +93,7 @@ use super::mcp_client::McpPool;
         (name = "jira",       description = "Jira issue management via Atlassian REST API"),
         (name = "confluence", description = "Confluence search via Atlassian REST API"),
         (name = "bitbucket",  description = "Bitbucket repo and PR listing"),
-        (name = "system",     description = "Brain installation status and install/uninstall actions"),
+        (name = "system",     description = "Orca installation status and install/uninstall actions"),
         (name = "learning",   description = "Learning progress tracking"),
     )
 )]
@@ -166,28 +166,28 @@ pub(super) fn install_spec(mut spec: utoipa::openapi::OpenApi) {
 }
 
 /// Build the OpenAPI spec on demand without starting the server.
-/// Used by the `brain spec dump` CLI command.
+/// Used by the `orca spec dump` CLI command.
 fn build_spec() -> utoipa::openapi::OpenApi {
     let (_, mut spec) = openapi_router().split_for_parts();
     spec.info.version = env!("CARGO_PKG_VERSION").to_string();
     spec
 }
 
-pub fn brain_spec_json() -> serde_json::Value {
+pub fn orca_spec_json() -> serde_json::Value {
     let spec = SPEC.get().cloned().unwrap_or_else(build_spec);
     let mut value = serde_json::to_value(&spec).unwrap_or_default();
-    value["x-brain"] = serde_json::json!({
-        "repo": "brain",
-        "project": "brain",
+    value["x-orca"] = serde_json::json!({
+        "repo": "orca",
+        "project": "orca",
         "source": "live"
     });
     value
 }
 
 pub async fn openapi_handler() -> impl axum::response::IntoResponse {
-    axum::Json(brain_spec_json())
+    axum::Json(orca_spec_json())
 }
 
 pub async fn openapi_public_handler() -> impl axum::response::IntoResponse {
-    axum::Json(brain_scanner::filter_brain_public(brain_spec_json()))
+    axum::Json(brain_scanner::filter_brain_public(orca_spec_json()))
 }

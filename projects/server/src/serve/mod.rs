@@ -5,7 +5,7 @@ mod openapi;
 pub mod pdf_gen;
 pub mod tree;
 
-pub use openapi::brain_spec_json as openapi_spec_json;
+pub use openapi::orca_spec_json as openapi_spec_json;
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -25,18 +25,18 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
         format!("0.0.0.0:{port}").parse()?
     };
 
-    println!("[brain] binding {}...", addr);
+    println!("[orca] binding {}...", addr);
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
         anyhow::anyhow!("failed to bind {addr}: {e} — is port {port} already in use?")
     })?;
-    println!("[brain] listening on http://localhost:{port}");
+    println!("[orca] listening on http://localhost:{port}");
 
     // Register as the active dev process so the parked daemon won't auto-reclaim.
-    // Use BRAIN_DEV_PARENT_PID (the shell script PID) so the registration stays
+    // Use ORCA_DEV_PARENT_PID (the shell script PID) so the registration stays
     // valid across cargo-watch rebuilds — the shell script outlives each server instance.
     if dev {
         if let Ok(Some(s)) = state::read() {
-            let active_pid = std::env::var("BRAIN_DEV_PARENT_PID")
+            let active_pid = std::env::var("ORCA_DEV_PARENT_PID")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or_else(std::process::id);
@@ -87,7 +87,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     // wait for the dev server to finish rather than immediately fighting it for the port.
     if let Ok(Some(mut s)) = state::read() {
         if s.mode == DaemonMode::Dev {
-            println!("[brain] restarted while dev session active — waiting for dev to exit");
+            println!("[orca] restarted while dev session active — waiting for dev to exit");
             s.daemon_pid = std::process::id();
             let _ = state::write(&s);
 
@@ -109,7 +109,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                     }
                 }
             }
-            println!("[brain] dev session ended — binding port {port}");
+            println!("[orca] dev session ended — binding port {port}");
         }
     }
 
@@ -117,7 +117,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
             anyhow::anyhow!("failed to bind {addr}: {e} — is port {port} already in use?")
         })?;
-        println!("[brain] daemon listening on http://localhost:{port}");
+        println!("[orca] daemon listening on http://localhost:{port}");
         let _ = state::set_mode(DaemonMode::Daemon);
         let _ = state::set_active_pid(std::process::id());
 
@@ -127,12 +127,12 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             result = axum::serve(listener, app.clone()) => { result?; false }
             _ = sigusr1.recv() => true,
             _ = sigterm.recv() => {
-                println!("[brain] daemon shutting down");
+                println!("[orca] daemon shutting down");
                 let _ = state::clear();
                 return Ok(());
             }
             _ = tokio::signal::ctrl_c() => {
-                println!("[brain] daemon shutting down");
+                println!("[orca] daemon shutting down");
                 let _ = state::clear();
                 return Ok(());
             }
@@ -149,16 +149,16 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
 
         // Port released (listener dropped by select! cancellation)
         let _ = state::set_mode(DaemonMode::Parked);
-        println!("[brain] daemon parked — port {port} released");
+        println!("[orca] daemon parked — port {port} released");
 
         loop {
             tokio::select! {
                 _ = sigusr2.recv() => {
-                    println!("[brain] daemon reclaiming port {port}");
+                    println!("[orca] daemon reclaiming port {port}");
                     break;
                 }
                 _ = sigterm.recv() => {
-                    println!("[brain] daemon shutting down (while parked)");
+                    println!("[orca] daemon shutting down (while parked)");
                     let _ = state::clear();
                     return Ok(());
                 }
@@ -172,7 +172,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                             DaemonMode::Daemon => false,
                         };
                         if abandoned {
-                            println!("[brain] auto-reclaiming port {port} (dev abandoned)");
+                            println!("[orca] auto-reclaiming port {port} (dev abandoned)");
                             break;
                         }
                     }
@@ -194,12 +194,12 @@ fn pid_alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-/// Returns the path to the brain binary suitable for respawning after a redeploy.
-/// Prefers `which brain` (the symlink on PATH) over `current_exe()` (the canonical
+/// Returns the path to the orca binary suitable for respawning after a redeploy.
+/// Prefers `which orca` (the symlink on PATH) over `current_exe()` (the canonical
 /// resolved path). After a redeploy, the symlink is updated to the new binary;
 /// the canonical path from current_exe() points to the old binary on disk.
 fn resolve_daemon_binary() -> String {
-    if let Ok(out) = std::process::Command::new("which").arg("brain").output() {
+    if let Ok(out) = std::process::Command::new("which").arg("orca").output() {
         if out.status.success() {
             let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !path.is_empty() {
@@ -340,7 +340,7 @@ async fn proxy_http_to_vite(req: axum::extract::Request) -> axum::response::Resp
         Err(_) => Response::builder()
             .status(502)
             .body(Body::from(
-                "brain: vite dev server unreachable — is it running on :12001?",
+                "orca: vite dev server unreachable — is it running on :12001?",
             ))
             .unwrap(),
     }

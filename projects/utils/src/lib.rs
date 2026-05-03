@@ -2,7 +2,7 @@
 //!
 //! Modules:
 //! - `auth`   — secure API key storage via OS keychain (keyring crate)
-//! - `config` — `Config` loaded from `~/.brain/brain.toml`; model/backend selection
+//! - `config` — `Config` loaded from `~/.orca/orca.toml`; model/backend selection
 //! - `ledger` — `TokenLedger` for tracking input/output token usage across a session
 //! - `log`    — `SessionLog` JSONL writer; `search_logs`, `list_sessions`, `recall_session`
 //! - `tools`  — filesystem and search helpers used by `ToolRegistry` (read/write/edit/glob/grep)

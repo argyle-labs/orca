@@ -4,12 +4,12 @@ pub fn tool_defs() -> Value {
     json!([
         {
             "name": "list_agents",
-            "description": "List all available brain agents with their names and descriptions.",
+            "description": "List all available orca agents with their names and descriptions.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
             "name": "get_agent",
-            "description": "Return the full system prompt for a named brain agent. Use this to invoke an agent programmatically via Agent(general-purpose, prompt=<result>+task).",
+            "description": "Return the full system prompt for a named orca agent. Use this to invoke an agent programmatically via Agent(general-purpose, prompt=<result>+task).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -23,7 +23,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "run_agent",
-            "description": "Delegate a task to a brain agent running on the local LLM (LM Studio). ONLY use this when the task genuinely requires language model reasoning — summarization, explanation, drafting, inference. Do NOT use for: file reads (use read_doc), searches (use search_docs), log lookup (use orca_search_logs), service state (use orca_list_services), schema queries (use get_graphql_info / get_rebuy_spec), or any operation with a deterministic tool that already handles it. Deterministic tools are always preferred over LLM calls. Falls back to Claude Haiku if LM Studio is unreachable.",
+            "description": "Delegate a task to a orca agent running on the local LLM (LM Studio). ONLY use this when the task genuinely requires language model reasoning — summarization, explanation, drafting, inference. Do NOT use for: file reads (use read_doc), searches (use search_docs), log lookup (use orca_search_logs), service state (use orca_list_services), schema queries (use get_graphql_info / get_rebuy_spec), or any operation with a deterministic tool that already handles it. Deterministic tools are always preferred over LLM calls. Falls back to Claude Haiku if LM Studio is unreachable.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -41,7 +41,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "search_logs",
-            "description": "Search brain session history for a keyword. Returns matching log entries with session ID, role, and content preview.",
+            "description": "Search orca session history for a keyword. Returns matching log entries with session ID, role, and content preview.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -68,7 +68,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "get_context",
-            "description": "Load the memory context for a brain project. Returns MEMORY.md index and all memory files for the project.",
+            "description": "Load the memory context for a orca project. Returns MEMORY.md index and all memory files for the project.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -82,7 +82,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "list_roots",
-            "description": "List available documentation roots (rebuy, brain) with file counts and paths.",
+            "description": "List available documentation roots (rebuy, orca) with file counts and paths.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -91,7 +91,7 @@ pub fn tool_defs() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "root": { "type": "string", "description": "Root name: rebuy | brain" },
+                    "root": { "type": "string", "description": "Root name: rebuy | orca" },
                     "path": { "type": "string", "description": "Optional subpath within root (e.g. \"admin-api\" or \"ai/claude/agents\")" }
                 },
                 "required": ["root"]
@@ -103,7 +103,7 @@ pub fn tool_defs() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "root": { "type": "string", "description": "Root name: rebuy | brain | docs" },
+                    "root": { "type": "string", "description": "Root name: rebuy | orca | docs" },
                     "path": { "type": "string", "description": "Path relative to root, without extension" },
                     "format": { "type": "string", "description": "Pass \"llm\" when this content will be consumed by a language model — strips decorative markdown (bold, italic, images, horizontal rules) and collapses whitespace to reduce token usage while preserving semantic structure" }
                 },
@@ -117,7 +117,7 @@ pub fn tool_defs() -> Value {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Search term (case-insensitive)" },
-                    "root": { "type": "string", "description": "Limit to root: rebuy | brain | docs | all (default: all)" },
+                    "root": { "type": "string", "description": "Limit to root: rebuy | orca | docs | all (default: all)" },
                     "format": { "type": "string", "description": "Pass \"llm\" when results will be consumed by a language model — strips decorative markdown from matched lines to reduce token usage" }
                 },
                 "required": ["query"]
@@ -125,7 +125,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "list_commands",
-            "description": "List all Claude slash commands and skills from the brain vault.",
+            "description": "List all Claude slash commands and skills from the orca vault.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -157,7 +157,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "run_tests",
-            "description": "Run the brain project test suite. Returns test output with pass/fail counts. Suites: rust (cargo test), frontend (vitest), e2e (playwright), all.",
+            "description": "Run the orca project test suite. Returns test output with pass/fail counts. Suites: rust (cargo test), frontend (vitest), e2e (playwright), all.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -219,12 +219,12 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "list_mcp_servers",
-            "description": "List all MCP servers registered in brain.db (brain's own managed registry). Does not include ~/.claude.json servers managed by Claude Code directly.",
+            "description": "List all MCP servers registered in orca.db (orca's own managed registry). Does not include ~/.claude.json servers managed by Claude Code directly.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
             "name": "add_mcp_server",
-            "description": "Add or update an MCP server in brain.db. Use this when the user wants to register a new MCP server for brain to federate.",
+            "description": "Add or update an MCP server in orca.db. Use this when the user wants to register a new MCP server for orca to federate.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -238,7 +238,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "remove_mcp_server",
-            "description": "Remove an MCP server from brain.db by name.",
+            "description": "Remove an MCP server from orca.db by name.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -249,12 +249,12 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "list_schemas",
-            "description": "List all MySQL/MariaDB schema databases registered in brain.db.",
+            "description": "List all MySQL/MariaDB schema databases registered in orca.db.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
             "name": "add_schema",
-            "description": "Add or update a schema database in brain.db. Use container OR host/port, not both.",
+            "description": "Add or update a schema database in orca.db. Use container OR host/port, not both.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -272,7 +272,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "remove_schema",
-            "description": "Remove a schema database from brain.db by name.",
+            "description": "Remove a schema database from orca.db by name.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -283,12 +283,12 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "list_docker_runtimes",
-            "description": "List all Docker runtimes registered in brain.db. The first enabled runtime is used as the active DOCKER_HOST for MCP subprocesses.",
+            "description": "List all Docker runtimes registered in orca.db. The first enabled runtime is used as the active DOCKER_HOST for MCP subprocesses.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
             "name": "add_docker_runtime",
-            "description": "Add or update a Docker runtime in brain.db. Use socketPath for local unix socket (Colima, Docker Desktop), host for remote TCP daemon, or url for web-based orchestrators (Dockge, Portainer). Multiple runtimes can be registered; the first enabled socket/host runtime is injected as DOCKER_HOST for MCP subprocesses.",
+            "description": "Add or update a Docker runtime in orca.db. Use socketPath for local unix socket (Colima, Docker Desktop), host for remote TCP daemon, or url for web-based orchestrators (Dockge, Portainer). Multiple runtimes can be registered; the first enabled socket/host runtime is injected as DOCKER_HOST for MCP subprocesses.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -302,7 +302,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "remove_docker_runtime",
-            "description": "Remove a Docker runtime from brain.db by name.",
+            "description": "Remove a Docker runtime from orca.db by name.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -313,7 +313,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "register_spec",
-            "description": "Fetch an OpenAPI JSON spec from a URL and store it in brain.db. Use this to register an external API spec for use with get_rebuy_spec.",
+            "description": "Fetch an OpenAPI JSON spec from a URL and store it in orca.db. Use this to register an external API spec for use with get_rebuy_spec.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -325,7 +325,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "refresh_spec",
-            "description": "Re-fetch one or all URL-registered specs from their source URLs and update brain.db.",
+            "description": "Re-fetch one or all URL-registered specs from their source URLs and update orca.db.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -336,7 +336,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "unregister_spec",
-            "description": "Remove a URL-registered spec from brain.db by name.",
+            "description": "Remove a URL-registered spec from orca.db by name.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

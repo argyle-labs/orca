@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use brain_utils::db;
 use clap::Subcommand;
+use rusqlite::Connection;
 
 #[derive(Subcommand)]
 pub enum CredsAction {
@@ -30,6 +31,11 @@ pub enum CredsAction {
     Sync {
         /// Plugin id
         plugin: String,
+    },
+    /// Verify each registered plugin has a token and can authenticate
+    Validate {
+        /// Plugin id — omit to validate all registered plugins
+        plugin: Option<String>,
     },
 }
 
@@ -78,6 +84,61 @@ pub fn cmd_creds(action: CredsAction) -> Result<()> {
 
         CredsAction::Sync { plugin } => {
             sync_plugin_creds(&plugin)?;
+        }
+
+        CredsAction::Validate { plugin } => {
+            let conn = db::open_default()?;
+            let plugins = match plugin {
+                Some(id) => {
+                    let p = db::get_plugin(&conn, &id)?
+                        .with_context(|| format!("plugin '{id}' not registered"))?;
+                    vec![p]
+                }
+                None => db::list_plugins(&conn)?,
+            };
+
+            if plugins.is_empty() {
+                println!("no plugins registered");
+                return Ok(());
+            }
+
+            println!("{:<20} {:<8} {:<10} {}", "PLUGIN", "TOKEN", "HTTP", "DETAILS");
+            println!("{}", "-".repeat(72));
+
+            let mut any_fail = false;
+            for p in &plugins {
+                let url = resolve_plugin_url(p);
+                // Only HTTP plugins require tokens — skip stdio/subprocess plugins.
+                if url.is_none() {
+                    println!("{:<20} {:<8} {:<10} stdio/subprocess — no token required", p.id, "—", "—");
+                    continue;
+                }
+                let url = url.unwrap();
+
+                let (token_ok, token_note) = validate_token(&conn, &p.id);
+                let (http_ok, http_note) = {
+                    let tok = db::list_plugin_credentials(&conn, &p.id)
+                        .ok()
+                        .and_then(|rows| rows.into_iter().find(|r| r.key == "MEERKAT_TOKEN"))
+                        .map(|r| r.value);
+                    match tok {
+                        Some(t) => ping_plugin(&url, &t),
+                        None => (false, "no token — run `orca creds set`".into()),
+                    }
+                };
+
+                let tok_sym = if token_ok { "✓" } else { "✗" };
+                let http_sym = if http_ok { "✓" } else { "✗" };
+                println!("{:<20} {:<8} {:<10} token:{} http:{}", p.id, tok_sym, http_sym, token_note, http_note);
+
+                if !token_ok || !http_ok {
+                    any_fail = true;
+                }
+            }
+
+            if any_fail {
+                std::process::exit(1);
+            }
         }
     }
     Ok(())
@@ -154,18 +215,44 @@ pub fn sync_plugin_creds(plugin_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn resolve_plugin_url(plugin: &db::PluginRow) -> Option<String> {
-    // Check mcp_command — for HTTP plugins it's the base URL.
+pub fn resolve_plugin_url(plugin: &db::PluginRow) -> Option<String> {
     if let Some(cmd) = &plugin.mcp_command {
         if cmd.starts_with("http://") || cmd.starts_with("https://") {
             return Some(cmd.trim_end_matches('/').to_string());
         }
     }
-    // Check mcp_args for a URL.
     for arg in &plugin.mcp_args {
         if arg.starts_with("http://") || arg.starts_with("https://") {
             return Some(arg.trim_end_matches('/').to_string());
         }
     }
     None
+}
+
+/// Returns (ok, note) — whether a MEERKAT_TOKEN credential exists for this plugin.
+fn validate_token(conn: &Connection, plugin_id: &str) -> (bool, String) {
+    match db::list_plugin_credentials(conn, plugin_id) {
+        Ok(rows) => {
+            if rows.iter().any(|r| r.key == "MEERKAT_TOKEN") {
+                (true, "stored".into())
+            } else {
+                (false, "missing".into())
+            }
+        }
+        Err(e) => (false, format!("db error: {e}")),
+    }
+}
+
+/// Returns (ok, note) — whether the plugin's /health endpoint responds with the token.
+fn ping_plugin(base_url: &str, token: &str) -> (bool, String) {
+    let url = format!("{base_url}/health");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap();
+    match client.get(&url).bearer_auth(token).send() {
+        Ok(resp) if resp.status().is_success() => (true, format!("ok ({})", resp.status())),
+        Ok(resp) => (false, format!("HTTP {}", resp.status())),
+        Err(e) => (false, format!("unreachable: {e}")),
+    }
 }

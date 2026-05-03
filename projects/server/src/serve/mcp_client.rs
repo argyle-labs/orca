@@ -124,7 +124,7 @@ impl McpClient {
                 json!({
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": { "name": "brain", "version": "1.0" }
+                    "clientInfo": { "name": "orca", "version": "1.0" }
                 }),
             )
             .await?;

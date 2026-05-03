@@ -1,4 +1,4 @@
-//! Token accounting for a single brain session.
+//! Token accounting for a single orca session.
 //!
 //! `TokenLedger` accumulates input/output token counts across all model calls so
 //! the TUI status bar and session summaries can show live usage.

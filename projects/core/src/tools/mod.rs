@@ -112,7 +112,7 @@ impl ToolRegistry {
             },
             ToolDef {
                 name: "delegate".into(),
-                description: "Delegate a task to a specialist agent. The agent runs a sub-conversation with full tool access and returns its result. Available agents: owl (explain code), fox (debug), crow (write code), spider (simplify), bear (review + audit), ferret (code standards), badger (homelab), hawk (containers), mole (processes/ports), elephant (external docs), boar (carl/rebuy only), lynx (plan), raven (notes), pinky (session logs).".into(),
+                description: "Delegate a task to a specialist agent. The agent runs a sub-conversation with full tool access and returns its result. Available agents: owl (explain code), fox (debug), crow (write code), spider (simplify), bear (review + audit), ferret (code standards), badger (homelab), hawk (containers), mole (processes/ports), elephant (external docs), boar (carl/rebuy only), lynx (plan), raven (notes), otter (session logs).".into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {

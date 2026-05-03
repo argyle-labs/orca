@@ -12,14 +12,14 @@ use super::prelude::*;
 
 // ── Credential helper ─────────────────────────────────────────────────────────
 
-/// Returns (domain, email, token) from the "atlassian" MCP server config in brain.db.
+/// Returns (domain, email, token) from the "atlassian" MCP server config in orca.db.
 pub(super) fn atlassian_creds(config: &Config) -> anyhow::Result<(String, String, String)> {
     let conn = brain_utils::db::open(&config.db_path)?;
     let servers = brain_utils::db::list_mcp_servers(&conn)?;
     let server = servers
         .into_iter()
         .find(|s| s.name == "atlassian")
-        .ok_or_else(|| anyhow::anyhow!("atlassian not configured — add via `brain mcp add`"))?;
+        .ok_or_else(|| anyhow::anyhow!("atlassian not configured — add via `orca mcp add`"))?;
 
     let args = &server.args;
 

@@ -1,6 +1,6 @@
-//! Encrypted SQLite database (`brain.db`) — the runtime registry for all dynamic orca config.
+//! Encrypted SQLite database (`orca.db`) — the runtime registry for all dynamic orca config.
 //!
-//! `open_default()` is the standard entry point. It opens (or creates) `~/.brain/brain.db` (orca's state dir),
+//! `open_default()` is the standard entry point. It opens (or creates) `~/.orca/orca.db`,
 //! applies the SQLCipher encryption key, runs `apply_schema` to ensure all tables exist,
 //! then applies any pending schema migrations via `run_pending_migrations`.
 //!
@@ -18,7 +18,7 @@ use crate::consts::{APP_DB_FILE, APP_STATE_DIR};
 /// Open (or create) the encrypted orca database.
 ///
 /// Key is loaded from the OS keychain on first call; generated and stored if not found.
-/// The database file lives at `~/.brain/brain.db` (orca's state dir) by default.
+/// The database file lives at `~/.orca/orca.db` by default.
 pub fn open(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -45,7 +45,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Open orca database using the default path (`~/.brain/brain.db`).
+/// Open orca database using the default path (`~/.orca/orca.db`).
 pub fn open_default() -> Result<Connection> {
     let home = dirs::home_dir().context("no home dir")?;
     let path = home.join(APP_STATE_DIR).join(APP_DB_FILE);
@@ -309,9 +309,9 @@ fn apply_schema(conn: &Connection) -> Result<()> {
 
 // ── Key management ───────────────────────────────────────────────────────────
 
-/// Load the DB encryption key from `~/.brain/.db_key`, generating it on first run.
+/// Load the DB encryption key from `~/.orca/.db_key`, generating it on first run.
 ///
-/// The key file is the backup unit alongside brain.db — copy both to restore.
+/// The key file is the backup unit alongside orca.db — copy both to restore.
 /// Never regenerate silently: if the file exists but is unreadable/corrupt, bail
 /// so the user knows they need to restore the key rather than destroying their data.
 fn load_or_create_key() -> Result<String> {
