@@ -27,15 +27,16 @@ use specs::{
     list_rebuy_specs, spec_refresh, spec_register, spec_unregister,
 };
 
-/// Servers whose tools brain already exposes natively or that must not be proxied back.
+/// Servers whose tools orca already exposes natively or that must not be proxied back.
 /// - orca-local: orca itself — proxying would spawn a recursive child
-/// - context7: brain exposes resolve-library-id / get-library-docs natively
-const FEDERATION_SKIP: &[&str] = &["orca-local", "context7"];
+const FEDERATION_SKIP: &[&str] = &["orca-local"];
 
 pub async fn serve(config: &Config) -> Result<()> {
     let pool = crate::serve::mcp_client::McpPool::new_with_db(config.db_path.clone());
-    // Maps federated tool name → owning server name; populated on tools/list
-    let mut tool_registry: HashMap<String, String> = HashMap::new();
+    // Maps exposed tool name → (server_name, internal_tool_name).
+    // For universal-mapped tools: exposed name differs from internal name.
+    // For pass-through tools: both names are the same.
+    let mut tool_registry: HashMap<String, (String, String)> = HashMap::new();
 
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
@@ -81,17 +82,19 @@ pub async fn serve(config: &Config) -> Result<()> {
                 // Discover tools from federated servers, skipping orca-local and context7
                 let external = pool.all_tools_filtered(FEDERATION_SKIP).await;
 
-                // Rebuild registry: federated tools that don't conflict with orca's own
+                // Rebuild registry: federated tools that don't conflict with orca's own.
+                // alias = internal tool name on the remote server (may differ for mapped tools).
                 tool_registry.clear();
                 for tool in &external {
                     let name = tool["name"].as_str().unwrap_or("");
                     let server = tool["server"].as_str().unwrap_or("");
+                    let alias = tool["alias"].as_str().unwrap_or(name);
                     if !name.is_empty() && !server.is_empty() && !orca_names.contains(name) {
-                        tool_registry.insert(name.to_string(), server.to_string());
+                        tool_registry.insert(name.to_string(), (server.to_string(), alias.to_string()));
                     }
                 }
 
-                // Merge orca tools + federated tools (strip internal "server" field)
+                // Merge orca tools + federated tools (strip internal fields)
                 let mut all_tools: Vec<Value> =
                     orca_tools.as_array().cloned().unwrap_or_default();
                 for mut tool in external {
@@ -99,6 +102,7 @@ pub async fn serve(config: &Config) -> Result<()> {
                     if tool_registry.contains_key(&name) {
                         if let Some(obj) = tool.as_object_mut() {
                             obj.remove("server");
+                            obj.remove("alias");
                         }
                         all_tools.push(tool);
                     }
@@ -110,8 +114,8 @@ pub async fn serve(config: &Config) -> Result<()> {
                 let name = params["name"].as_str().unwrap_or("");
                 let args = &params["arguments"];
 
-                if let Some(server_name) = tool_registry.get(name).cloned() {
-                    // Route to the owning federated server
+                if let Some((server_name, internal_name)) = tool_registry.get(name).cloned() {
+                    // Route to the owning federated server using the internal tool name
                     match pool.get_or_connect(&server_name).await {
                         Err(e) => reply(
                             id,
@@ -122,7 +126,7 @@ pub async fn serve(config: &Config) -> Result<()> {
                         ),
                         Ok(client) => {
                             let cid = id.to_string();
-                            match client.call_tool(name, args.clone(), &cid).await {
+                            match client.call_tool(&internal_name, args.clone(), &cid).await {
                                 Ok(result) => reply(id, result),
                                 Err(e) => {
                                     let msg = e.to_string();
@@ -175,42 +179,42 @@ pub async fn serve(config: &Config) -> Result<()> {
 
 async fn dispatch(name: &str, args: &Value, config: &Config) -> Result<String> {
     match name {
-        "orca_agents" => agents(),
-        "orca_get_agent" => get_agent(args, config),
-        "orca_run" => run(args, config).await,
-        "orca_search_logs" => search_logs(args, config),
-        "orca_get_config" => get_config(args, config),
-        "orca_get_context" => get_context(args, config),
-        "list_roots" => list_roots(config),
-        "get_tree" => get_tree(args, config),
-        "read_doc" => read_doc(args, config),
-        "search_docs" => search_docs(args, config),
-        "list_commands" => list_commands(config),
-        "orca_list_services" => list_services().await,
-        "orca_service_logs" => service_logs(args).await,
-        "orca_run_tests" => run_tests(args).await,
-        "list_rebuy_specs" => list_rebuy_specs(),
-        "get_rebuy_spec" => get_rebuy_spec(args),
+        "list_agents"         => agents(),
+        "get_agent"           => get_agent(args, config),
+        "run_agent"           => run(args, config).await,
+        "search_logs"         => search_logs(args, config),
+        "get_config"          => get_config(args, config),
+        "get_context"         => get_context(args, config),
+        "list_roots"          => list_roots(config),
+        "get_tree"            => get_tree(args, config),
+        "read_doc"            => read_doc(args, config),
+        "search_docs"         => search_docs(args, config),
+        "list_commands"       => list_commands(config),
+        "list_services"       => list_services().await,
+        "get_service_logs"    => service_logs(args).await,
+        "run_tests"           => run_tests(args).await,
+        "list_rebuy_specs"    => list_rebuy_specs(),
+        "get_rebuy_spec"      => get_rebuy_spec(args),
         "get_rebuy_spec_public" => get_rebuy_spec_public(args),
         "get_rebuy_graphql_schema" => get_rebuy_graphql_schema(args),
-        "get_graphql_info" => get_graphql_info(args),
-        "orca_mcp_list" => mcp_list_servers(),
-        "orca_mcp_add" => mcp_add_server(args),
-        "orca_mcp_remove" => mcp_remove_server(args),
-        "orca_mcp_map" => mcp_map_tool(args),
-        "orca_mcp_unmap" => mcp_unmap_tool(args),
-        "orca_mcp_sync" => mcp_sync_tools(args),
-        "orca_mcp_mappings" => mcp_list_mappings(args),
-        "orca_schema_list" => schema_list_databases(),
-        "orca_schema_add" => schema_add_database(args),
-        "orca_schema_remove" => schema_remove_database(args),
-        "orca_docker_list" => docker_list_runtimes(),
-        "orca_docker_add" => docker_add_runtime(args),
-        "orca_docker_remove" => docker_remove_runtime(args),
-        "orca_spec_register" => spec_register(args).await,
-        "orca_spec_refresh"  => spec_refresh(args).await,
-        "orca_spec_unregister" => spec_unregister(args),
-        "resolve-library-id" | "get-library-docs" => {
+        "get_graphql_info"    => get_graphql_info(args),
+        "list_mcp_servers"    => mcp_list_servers(),
+        "add_mcp_server"      => mcp_add_server(args),
+        "remove_mcp_server"   => mcp_remove_server(args),
+        "map_tool"            => mcp_map_tool(args),
+        "unmap_tool"          => mcp_unmap_tool(args),
+        "sync_tools"          => mcp_sync_tools(args),
+        "list_tool_mappings"  => mcp_list_mappings(args),
+        "list_schemas"        => schema_list_databases(),
+        "add_schema"          => schema_add_database(args),
+        "remove_schema"       => schema_remove_database(args),
+        "list_docker_runtimes" => docker_list_runtimes(),
+        "add_docker_runtime"  => docker_add_runtime(args),
+        "remove_docker_runtime" => docker_remove_runtime(args),
+        "register_spec"       => spec_register(args).await,
+        "refresh_spec"        => spec_refresh(args).await,
+        "unregister_spec"     => spec_unregister(args),
+        "resolve_library" | "get_library_docs" => {
             context7::proxy_context7(name, args, config).await
         }
         _ => anyhow::bail!("unknown tool: {name}"),

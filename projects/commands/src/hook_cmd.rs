@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use clap::Subcommand;
 use serde_json::{Value, json};
 use std::io::Read;

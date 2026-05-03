@@ -7,18 +7,18 @@ pub fn cmd_doctor(config: &Config) -> Result<()> {
     let mut issues: Vec<String> = Vec::new();
     let mut ok_count = 0;
 
-    // 1. Brain vault exists
-    if config.brain_vault.exists() {
+    // 1. Orca vault exists
+    if config.orca_vault.exists() {
         println!(
             "  {} {APP_NAME} vault: {}",
             "✓".green(),
-            config.brain_vault.display()
+            config.orca_vault.display()
         );
         ok_count += 1;
     } else {
         issues.push(format!(
             "{APP_NAME} vault not found at {}",
-            config.brain_vault.display()
+            config.orca_vault.display()
         ));
     }
 

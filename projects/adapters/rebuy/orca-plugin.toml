@@ -1,9 +1,44 @@
 [plugin]
-id = "rebuy"
-version = "0.1.0"
-tier = "work"
+id                = "rebuy"
+version           = "0.1.0"
+tier              = "external"
 context_injection = "full"
 
 [plugin.mcp]
 command = "node"
-args = ["/Users/scottkey/code/rebuy/rebuy-cli-mcp-server/build/index.js"]
+args    = ["/Users/scottkey/code/rebuy/rebuy-cli-mcp-server/build/index.js"]
+
+# Auto-strip: all rebuy_* tools are exposed with rebuy_ stripped.
+# e.g. rebuy_env_start → env_start, rebuy_docs_search → docs_search
+#
+# Overrides below are only for tools where the stripped name is semantically wrong
+# or where the desired universal verb-form differs from the auto-stripped noun-form.
+[plugin.commands]
+get_status         = "rebuy_status"
+check_health       = "rebuy_doctor"
+get_version        = "rebuy_version"
+pull_updates       = "rebuy_pull"
+send_feedback      = "rebuy_feedback"
+search_docs        = "rebuy_docs_search"
+list_docs          = "rebuy_docs_list"
+read_doc           = "rebuy_docs_read"
+search_spec        = "rebuy_spec_search"
+list_specs         = "rebuy_spec_list"
+search_graphql     = "rebuy_graphql_search"
+list_graphql       = "rebuy_graphql_list"
+get_graphql_op     = "rebuy_graphql_operation"
+list_repos         = "rebuy_repos_list"
+list_repo_teams    = "rebuy_repos_teams"
+list_repo_presets  = "rebuy_repos_presets"
+clone_repo         = "rebuy_repos_clone"
+clone_team_repos   = "rebuy_repos_clone_team"
+clone_missing_repos = "rebuy_repos_clone_missing"
+update_repos       = "rebuy_repos_update"
+list_projects      = "rebuy_project_list"
+list_releases      = "rebuy_release_list"
+list_ephemeral     = "rebuy_ephemeral_list"
+list_ephemeral_approvals = "rebuy_ephemeral_list_approvals"
+list_ephemeral_builds = "rebuy_ephemeral_config_builds"
+list_engines       = "rebuy_engines_list"
+list_modes         = "rebuy_mode_list"
+list_dbs           = "rebuy_db_list"

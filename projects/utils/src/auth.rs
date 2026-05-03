@@ -1,12 +1,12 @@
 use anyhow::Result;
 
-/// Load API key from macOS Keychain (service: "brain", account: "anthropic_api_key").
+/// Load API key from macOS Keychain (service: "orca", account: "anthropic_api_key").
 pub fn load_api_key_from_keychain() -> Option<String> {
     let output = std::process::Command::new("security")
         .args([
             "find-generic-password",
             "-s",
-            "brain",
+            "orca",
             "-a",
             "anthropic_api_key",
             "-w",
@@ -26,7 +26,7 @@ pub fn store_api_key(key: &str) -> Result<()> {
         .args([
             "delete-generic-password",
             "-s",
-            "brain",
+            "orca",
             "-a",
             "anthropic_api_key",
         ])
@@ -36,7 +36,7 @@ pub fn store_api_key(key: &str) -> Result<()> {
         .args([
             "add-generic-password",
             "-s",
-            "brain",
+            "orca",
             "-a",
             "anthropic_api_key",
             "-w",
@@ -55,7 +55,7 @@ pub fn remove_api_key() {
         .args([
             "delete-generic-password",
             "-s",
-            "brain",
+            "orca",
             "-a",
             "anthropic_api_key",
         ])
