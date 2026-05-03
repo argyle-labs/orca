@@ -7,15 +7,6 @@ use std::collections::HashMap;
 
 // ── Manifest parsing ──────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
-struct ManifestPlugin {
-    id: String,
-    version: String,
-    tier: String,
-    #[serde(default)]
-    context_injection: Option<String>,
-}
-
 #[derive(Deserialize, Default)]
 struct ManifestMcp {
     command: String,
@@ -26,10 +17,23 @@ struct ManifestMcp {
 }
 
 #[derive(Deserialize)]
+struct ManifestPlugin {
+    id: String,
+    version: String,
+    tier: String,
+    #[serde(default)]
+    context_injection: Option<String>,
+    #[serde(default)]
+    mcp: Option<ManifestMcp>,
+    /// Maps universal command name → plugin's internal MCP tool name.
+    /// e.g. search_docs = "rebuy_docs_search"
+    #[serde(default)]
+    commands: HashMap<String, String>,
+}
+
+#[derive(Deserialize)]
 struct Manifest {
     plugin: ManifestPlugin,
-    #[serde(rename = "plugin.mcp")]
-    plugin_mcp: Option<ManifestMcp>,
 }
 
 fn parse_manifest(path: &str) -> Result<(Manifest, String)> {
@@ -87,15 +91,16 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
                 id: m.plugin.id.clone(),
                 manifest_path: abs_path.clone(),
                 tier: m.plugin.tier.clone(),
-                mcp_command: m.plugin_mcp.as_ref().map(|mcp| mcp.command.clone()),
-                mcp_args: m.plugin_mcp.as_ref().map(|mcp| mcp.args.clone()).unwrap_or_default(),
-                mcp_env: m.plugin_mcp.as_ref().map(|mcp| mcp.env.clone()).unwrap_or_default(),
+                mcp_command: m.plugin.mcp.as_ref().map(|mcp| mcp.command.clone()),
+                mcp_args: m.plugin.mcp.as_ref().map(|mcp| mcp.args.clone()).unwrap_or_default(),
+                mcp_env: m.plugin.mcp.as_ref().map(|mcp| mcp.env.clone()).unwrap_or_default(),
                 context_injection: m
                     .plugin
                     .context_injection
                     .clone()
                     .unwrap_or_else(|| "minimal".into()),
                 enabled: true,
+                command_map: m.plugin.commands.clone(),
             };
             db::upsert_plugin(&conn, &row)?;
             println!(
@@ -110,14 +115,19 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
                 println!("no plugins registered — use `{APP_NAME} plugin add <path/to/{APP_NAME}-plugin.toml>`");
                 return Ok(());
             }
-            println!("{:<20} {:<10} {:<10} {}", "ID", "TIER", "CONTEXT", "MCP COMMAND");
-            println!("{}", "-".repeat(70));
+            println!("{:<20} {:<10} {:<10} {:<8} {}", "ID", "TIER", "CONTEXT", "COMMANDS", "MCP COMMAND");
+            println!("{}", "-".repeat(78));
             for p in &plugins {
                 let status = if p.enabled { "" } else { " [disabled]" };
                 let mcp = p.mcp_command.as_deref().unwrap_or("—");
+                let ncmds = if p.command_map.is_empty() {
+                    "—".to_string()
+                } else {
+                    p.command_map.len().to_string()
+                };
                 println!(
-                    "{:<20} {:<10} {:<10} {}{}",
-                    p.id, p.tier, p.context_injection, mcp, status
+                    "{:<20} {:<10} {:<10} {:<8} {}{}",
+                    p.id, p.tier, p.context_injection, ncmds, mcp, status
                 );
             }
         }

@@ -297,3 +297,124 @@ fn sha2_digest(data: &[u8]) -> [u8; 32] {
     hasher.update(data);
     hasher.finalize().into()
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Channel::from_str ─────────────────────────────────────────────────────
+
+    #[test]
+    fn channel_from_str_known() {
+        assert_eq!(Channel::from_str("stable"), Channel::Stable);
+        assert_eq!(Channel::from_str("rc"),     Channel::Rc);
+        assert_eq!(Channel::from_str("beta"),   Channel::Beta);
+        assert_eq!(Channel::from_str("alpha"),  Channel::Alpha);
+    }
+
+    #[test]
+    fn channel_from_str_unknown_defaults_to_stable() {
+        assert_eq!(Channel::from_str(""),        Channel::Stable);
+        assert_eq!(Channel::from_str("nightly"), Channel::Stable);
+        assert_eq!(Channel::from_str("STABLE"),  Channel::Stable); // case-sensitive
+    }
+
+    // ── Channel::accepts ──────────────────────────────────────────────────────
+
+    #[test]
+    fn stable_accepts_only_clean_tags() {
+        assert!( Channel::Stable.accepts("v1.0.0"));
+        assert!(!Channel::Stable.accepts("v1.0.0-rc.1"));
+        assert!(!Channel::Stable.accepts("v1.0.0-beta.1"));
+        assert!(!Channel::Stable.accepts("v1.0.0-alpha.1"));
+    }
+
+    #[test]
+    fn rc_accepts_stable_and_rc() {
+        assert!( Channel::Rc.accepts("v1.0.0"));
+        assert!( Channel::Rc.accepts("v1.0.0-rc.1"));
+        assert!( Channel::Rc.accepts("v1.0.0-rc.99"));
+        assert!(!Channel::Rc.accepts("v1.0.0-beta.1"));
+        assert!(!Channel::Rc.accepts("v1.0.0-alpha.1"));
+    }
+
+    #[test]
+    fn beta_accepts_stable_rc_beta() {
+        assert!( Channel::Beta.accepts("v1.0.0"));
+        assert!( Channel::Beta.accepts("v1.0.0-rc.1"));
+        assert!( Channel::Beta.accepts("v1.0.0-beta.1"));
+        assert!(!Channel::Beta.accepts("v1.0.0-alpha.1"));
+    }
+
+    #[test]
+    fn alpha_accepts_everything() {
+        assert!(Channel::Alpha.accepts("v1.0.0"));
+        assert!(Channel::Alpha.accepts("v1.0.0-rc.1"));
+        assert!(Channel::Alpha.accepts("v1.0.0-beta.1"));
+        assert!(Channel::Alpha.accepts("v1.0.0-alpha.1"));
+        assert!(Channel::Alpha.accepts("v0.0.1-alpha.99"));
+    }
+
+    // ── semver_cmp ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn semver_cmp_ordering() {
+        use std::cmp::Ordering::*;
+        assert_eq!(semver_cmp("1.0.1", "1.0.0"), Greater);
+        assert_eq!(semver_cmp("1.1.0", "1.0.9"), Greater);
+        assert_eq!(semver_cmp("2.0.0", "1.9.9"), Greater);
+        assert_eq!(semver_cmp("1.0.0", "1.0.0"), Equal);
+        assert_eq!(semver_cmp("1.0.0", "1.0.1"), Less);
+        assert_eq!(semver_cmp("0.0.0", "0.0.0"), Equal);
+    }
+
+    #[test]
+    fn semver_cmp_missing_parts_default_zero() {
+        use std::cmp::Ordering::*;
+        // "1.0" treated as "1.0.0"
+        assert_eq!(semver_cmp("1.0", "1.0.0"), Equal);
+        assert_eq!(semver_cmp("1",   "1.0.0"), Equal);
+    }
+
+    // ── is_newer ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_newer_returns_true_when_candidate_greater() {
+        assert!( is_newer("1.0.1", "1.0.0"));
+        assert!( is_newer("2.0.0", "1.9.9"));
+        assert!(!is_newer("1.0.0", "1.0.0"));
+        assert!(!is_newer("1.0.0", "1.0.1"));
+    }
+
+    #[test]
+    fn is_newer_strips_v_prefix() {
+        // The function doesn't strip 'v' itself — callers already strip it via
+        // trim_start_matches('v'). Verify it handles plain version strings.
+        assert!(is_newer("1.2.0", "1.1.9"));
+    }
+
+    // ── sha2_digest ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn sha256_known_hash() {
+        // SHA-256 of empty string is well-known.
+        let digest = sha2_digest(b"");
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn sha256_nonempty() {
+        let digest = sha2_digest(b"hello");
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+    }
+}

@@ -1,6 +1,6 @@
 //! Daemon state file: cooperative port handoff between stable daemon and dev server.
 //!
-//! `DaemonState` is written to `~/.brain/state.json`. The dev server reads it to find
+//! `DaemonState` is written to `~/.brain/state.json` (orca's state dir). The dev server reads it to find
 //! the daemon's PID, sends SIGUSR1 to park it, then reclaims with SIGUSR2 on exit.
 //! All writes go through a tmp-then-rename so readers never see a torn file.
 
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// Current operating mode of the `brain` process that owns the port.
+/// Current operating mode of the `orca` process that owns the port.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DaemonMode {
@@ -22,7 +22,7 @@ pub enum DaemonMode {
     Dev,
 }
 
-/// Persisted runtime state for the brain daemon/dev handoff protocol.
+/// Persisted runtime state for the orca daemon/dev handoff protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonState {
     /// PID of the stable daemon process — persists across park/dev cycles
@@ -37,7 +37,7 @@ pub struct DaemonState {
     pub started_at: DateTime<Utc>,
 }
 
-/// Canonical path for the daemon state file: `~/.brain/state.json`.
+/// Canonical path for the daemon state file: `~/.brain/state.json` (orca's state dir).
 pub fn state_path() -> PathBuf {
     dirs::home_dir()
         .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
@@ -89,7 +89,7 @@ pub fn read() -> Result<Option<DaemonState>> {
     read_from(&state_path())
 }
 
-/// Persist daemon state to `~/.brain/state.json` (atomic write).
+/// Persist daemon state to `~/.brain/state.json` — orca's state dir (atomic write).
 pub fn write(state: &DaemonState) -> Result<()> {
     write_to(&state_path(), state)
 }
@@ -143,7 +143,7 @@ mod tests {
             active_pid: 1234,
             port: 12000,
             mode: DaemonMode::Daemon,
-            binary: "/usr/local/bin/brain".to_string(),
+            binary: "/usr/local/bin/orca".to_string(),
             version: "0.1.0".to_string(),
             started_at: chrono::Utc::now(),
         }

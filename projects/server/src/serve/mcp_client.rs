@@ -375,23 +375,76 @@ impl McpPool {
     }
 
     /// Like `all_tools` but skips named servers entirely — avoids connecting to them.
-    /// Use this when federating to exclude the brain server itself and any servers
-    /// whose tools brain already exposes natively (e.g. context7).
+    ///
+    /// Naming logic per tool (in priority order):
+    /// 1. Explicit override in plugin's `command_map` (universal → internal).
+    /// 2. Auto-strip: if tool name starts with `{plugin_id}_`, strip that prefix.
+    /// 3. Pass-through: expose tool under its original name.
+    ///
+    /// The `alias` field carries the internal tool name when a rename occurred,
+    /// used by the federation router to call the right name on the remote server.
     pub async fn all_tools_filtered(&self, skip: &[&str]) -> Vec<Value> {
+        // Per plugin: inverse command_map (internal_name → universal_name) + id prefix
+        struct PluginMeta {
+            prefix: String,          // "{id}_" — stripped from tool names automatically
+            inverse: HashMap<String, String>, // internal_name → explicit universal_name
+        }
+
+        let plugin_meta: HashMap<String, PluginMeta> = self
+            .db_path
+            .as_ref()
+            .and_then(|p| brain_utils::db::open(p).ok())
+            .and_then(|conn| brain_utils::db::list_plugins(&conn).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| p.enabled)
+            .map(|p| {
+                let prefix = format!("{}_", p.id);
+                let inverse = p.command_map.into_iter().map(|(u, t)| (t, u)).collect();
+                (p.id, PluginMeta { prefix, inverse })
+            })
+            .collect();
+
         let configs = self.read_configs();
         let mut result = Vec::new();
         for server_name in configs.keys() {
             if skip.contains(&server_name.as_str()) {
                 continue;
             }
+            let meta = plugin_meta.get(server_name.as_str());
             if let Ok(client) = self.get_or_connect(server_name).await {
                 for tool in &client.tools {
-                    result.push(json!({
-                        "server": server_name,
-                        "name": tool.name,
-                        "description": tool.description,
-                        "inputSchema": tool.input_schema,
-                    }));
+                    let universal = if let Some(m) = meta {
+                        if let Some(explicit) = m.inverse.get(&tool.name) {
+                            // Explicit override wins
+                            explicit.clone()
+                        } else if let Some(stripped) = tool.name.strip_prefix(&m.prefix) {
+                            // Auto-strip plugin id prefix
+                            stripped.to_string()
+                        } else {
+                            // No prefix match — pass through as-is
+                            tool.name.clone()
+                        }
+                    } else {
+                        tool.name.clone()
+                    };
+
+                    if universal == tool.name {
+                        result.push(json!({
+                            "server": server_name,
+                            "name": universal,
+                            "description": tool.description,
+                            "inputSchema": tool.input_schema,
+                        }));
+                    } else {
+                        result.push(json!({
+                            "server": server_name,
+                            "name": universal,
+                            "alias": tool.name,
+                            "description": tool.description,
+                            "inputSchema": tool.input_schema,
+                        }));
+                    }
                 }
             }
         }

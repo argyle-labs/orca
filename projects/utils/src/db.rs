@@ -1,6 +1,6 @@
-//! Encrypted SQLite database (`brain.db`) — the runtime registry for all dynamic config.
+//! Encrypted SQLite database (`brain.db`) — the runtime registry for all dynamic orca config.
 //!
-//! `open_default()` is the standard entry point. It opens (or creates) `~/.brain/brain.db`,
+//! `open_default()` is the standard entry point. It opens (or creates) `~/.brain/brain.db` (orca's state dir),
 //! applies the SQLCipher encryption key, runs `apply_schema` to ensure all tables exist,
 //! then applies any pending schema migrations via `run_pending_migrations`.
 //!
@@ -15,10 +15,10 @@ use std::path::Path;
 
 use crate::consts::{APP_DB_FILE, APP_STATE_DIR};
 
-/// Open (or create) the encrypted brain database.
+/// Open (or create) the encrypted orca database.
 ///
 /// Key is loaded from the OS keychain on first call; generated and stored if not found.
-/// The database file lives at `~/brain/brain.db` by default.
+/// The database file lives at `~/.brain/brain.db` (orca's state dir) by default.
 pub fn open(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -45,7 +45,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Open brain database using the default path (`~/brain/brain.db`).
+/// Open orca database using the default path (`~/.brain/brain.db`).
 pub fn open_default() -> Result<Connection> {
     let home = dirs::home_dir().context("no home dir")?;
     let path = home.join(APP_STATE_DIR).join(APP_DB_FILE);
@@ -87,6 +87,25 @@ static MIGRATIONS: &[Migration] = &[
         description: "rename orca_tool column to orca_tool in mcp_tool_mappings",
         up: "ALTER TABLE mcp_tool_mappings RENAME COLUMN orca_tool TO orca_tool;",
         down: None,
+    },
+    Migration {
+        version: 3,
+        description: "add command_map to plugins for universal command routing",
+        up: "ALTER TABLE plugins ADD COLUMN command_map TEXT NOT NULL DEFAULT '{}';",
+        down: None,
+    },
+    Migration {
+        version: 4,
+        description: "add plugin_credentials table — Orca-managed secrets per plugin",
+        up: "CREATE TABLE IF NOT EXISTS plugin_credentials (
+            plugin_id  TEXT NOT NULL,
+            key        TEXT NOT NULL,
+            value      TEXT NOT NULL,
+            synced_at  TEXT,
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            PRIMARY KEY (plugin_id, key)
+        );",
+        down: Some("DROP TABLE IF EXISTS plugin_credentials;"),
     },
 ];
 
@@ -896,11 +915,14 @@ pub struct PluginRow {
     pub mcp_env: std::collections::HashMap<String, String>,
     pub context_injection: String,
     pub enabled: bool,
+    /// Maps universal command name → plugin's internal MCP tool name.
+    /// Empty map means no universal command routing for this plugin.
+    pub command_map: std::collections::HashMap<String, String>,
 }
 
 pub fn list_plugins(conn: &Connection) -> Result<Vec<PluginRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, manifest_path, tier, mcp_command, mcp_args, mcp_env, context_injection, enabled
+        "SELECT id, manifest_path, tier, mcp_command, mcp_args, mcp_env, context_injection, enabled, command_map
          FROM plugins ORDER BY id",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -913,14 +935,17 @@ pub fn list_plugins(conn: &Connection) -> Result<Vec<PluginRow>> {
             row.get::<_, String>(5)?,
             row.get::<_, String>(6)?,
             row.get::<_, i32>(7)?,
+            row.get::<_, String>(8)?,
         ))
     })?;
     let mut result = Vec::new();
     for r in rows {
-        let (id, manifest_path, tier, mcp_command, args_json, env_json, context_injection, enabled) = r?;
+        let (id, manifest_path, tier, mcp_command, args_json, env_json, context_injection, enabled, map_json) = r?;
         let mcp_args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
         let mcp_env: std::collections::HashMap<String, String> =
             serde_json::from_str(&env_json).unwrap_or_default();
+        let command_map: std::collections::HashMap<String, String> =
+            serde_json::from_str(&map_json).unwrap_or_default();
         result.push(PluginRow {
             id,
             manifest_path,
@@ -930,6 +955,7 @@ pub fn list_plugins(conn: &Connection) -> Result<Vec<PluginRow>> {
             mcp_env,
             context_injection,
             enabled: enabled != 0,
+            command_map,
         });
     }
     Ok(result)
@@ -937,7 +963,7 @@ pub fn list_plugins(conn: &Connection) -> Result<Vec<PluginRow>> {
 
 pub fn get_plugin(conn: &Connection, id: &str) -> Result<Option<PluginRow>> {
     let result = conn.query_row(
-        "SELECT id, manifest_path, tier, mcp_command, mcp_args, mcp_env, context_injection, enabled
+        "SELECT id, manifest_path, tier, mcp_command, mcp_args, mcp_env, context_injection, enabled, command_map
          FROM plugins WHERE id = ?1",
         rusqlite::params![id],
         |row| {
@@ -950,14 +976,17 @@ pub fn get_plugin(conn: &Connection, id: &str) -> Result<Option<PluginRow>> {
                 row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
                 row.get::<_, i32>(7)?,
+                row.get::<_, String>(8)?,
             ))
         },
     );
     match result {
-        Ok((id, manifest_path, tier, mcp_command, args_json, env_json, context_injection, enabled)) => {
+        Ok((id, manifest_path, tier, mcp_command, args_json, env_json, context_injection, enabled, map_json)) => {
             let mcp_args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
             let mcp_env: std::collections::HashMap<String, String> =
                 serde_json::from_str(&env_json).unwrap_or_default();
+            let command_map: std::collections::HashMap<String, String> =
+                serde_json::from_str(&map_json).unwrap_or_default();
             Ok(Some(PluginRow {
                 id,
                 manifest_path,
@@ -967,6 +996,7 @@ pub fn get_plugin(conn: &Connection, id: &str) -> Result<Option<PluginRow>> {
                 mcp_env,
                 context_injection,
                 enabled: enabled != 0,
+                command_map,
             }))
         }
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -977,9 +1007,10 @@ pub fn get_plugin(conn: &Connection, id: &str) -> Result<Option<PluginRow>> {
 pub fn upsert_plugin(conn: &Connection, plugin: &PluginRow) -> Result<()> {
     let args_json = serde_json::to_string(&plugin.mcp_args).unwrap_or_else(|_| "[]".into());
     let env_json = serde_json::to_string(&plugin.mcp_env).unwrap_or_else(|_| "{}".into());
+    let map_json = serde_json::to_string(&plugin.command_map).unwrap_or_else(|_| "{}".into());
     conn.execute(
-        "INSERT INTO plugins (id, manifest_path, tier, mcp_command, mcp_args, mcp_env, context_injection, enabled)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        "INSERT INTO plugins (id, manifest_path, tier, mcp_command, mcp_args, mcp_env, context_injection, enabled, command_map)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(id) DO UPDATE SET
              manifest_path     = excluded.manifest_path,
              tier              = excluded.tier,
@@ -987,7 +1018,8 @@ pub fn upsert_plugin(conn: &Connection, plugin: &PluginRow) -> Result<()> {
              mcp_args          = excluded.mcp_args,
              mcp_env           = excluded.mcp_env,
              context_injection = excluded.context_injection,
-             enabled           = excluded.enabled",
+             enabled           = excluded.enabled,
+             command_map       = excluded.command_map",
         rusqlite::params![
             plugin.id,
             plugin.manifest_path,
@@ -997,6 +1029,7 @@ pub fn upsert_plugin(conn: &Connection, plugin: &PluginRow) -> Result<()> {
             env_json,
             plugin.context_injection,
             plugin.enabled as i32,
+            map_json,
         ],
     )?;
     Ok(())
@@ -1016,4 +1049,70 @@ pub fn set_plugin_enabled(conn: &Connection, id: &str, enabled: bool) -> Result<
         rusqlite::params![enabled as i32, id],
     )?;
     Ok(n > 0)
+}
+
+// ── Plugin credentials ────────────────────────────────────────────────────────
+// Orca is the single source of truth for plugin credentials.
+// Values are stored encrypted at rest by SQLCipher.
+// Synced to each plugin's local encrypted store via the HTTP /creds API.
+
+#[derive(Debug, Clone)]
+pub struct PluginCredentialRow {
+    pub plugin_id: String,
+    pub key: String,
+    pub value: String,
+    pub synced_at: Option<String>,
+    pub updated_at: String,
+}
+
+/// Store or update a credential for a plugin.
+pub fn set_plugin_credential(conn: &Connection, plugin_id: &str, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO plugin_credentials (plugin_id, key, value, synced_at, updated_at)
+         VALUES (?1, ?2, ?3, NULL, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+         ON CONFLICT(plugin_id, key) DO UPDATE SET
+             value      = excluded.value,
+             synced_at  = NULL,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+        rusqlite::params![plugin_id, key, value],
+    )?;
+    Ok(())
+}
+
+/// List all credentials for a plugin. Returns key names and metadata; value is included
+/// for sync purposes — never surface values in CLI output.
+pub fn list_plugin_credentials(conn: &Connection, plugin_id: &str) -> Result<Vec<PluginCredentialRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT plugin_id, key, value, synced_at, updated_at
+         FROM plugin_credentials WHERE plugin_id = ?1 ORDER BY key",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![plugin_id], |row| {
+        Ok(PluginCredentialRow {
+            plugin_id: row.get(0)?,
+            key: row.get(1)?,
+            value: row.get(2)?,
+            synced_at: row.get(3)?,
+            updated_at: row.get(4)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+/// Delete a single credential for a plugin.
+pub fn delete_plugin_credential(conn: &Connection, plugin_id: &str, key: &str) -> Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM plugin_credentials WHERE plugin_id = ?1 AND key = ?2",
+        rusqlite::params![plugin_id, key],
+    )?;
+    Ok(n > 0)
+}
+
+/// Mark all credentials for a plugin as synced (called after a successful push).
+pub fn mark_plugin_credentials_synced(conn: &Connection, plugin_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE plugin_credentials SET synced_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+         WHERE plugin_id = ?1",
+        rusqlite::params![plugin_id],
+    )?;
+    Ok(())
 }

@@ -1,21 +1,22 @@
-//! Runtime configuration for the brain binary.
+//! Runtime configuration for the orca binary.
 //!
-//! `Config::load()` is called once at startup. It reads `brain.toml` from the vault,
+//! `Config::load()` is called once at startup. It reads `orca.toml` from the vault,
 //! API keys from env/keychain, and runs one-time TOML → DB migrations.
 
 use anyhow::{Context, Result};
+use crate::consts::{APP_DB_FILE, APP_STATE_DIR};
 use std::path::PathBuf;
 
-/// All runtime configuration for the brain binary.
+/// All runtime configuration for the orca binary.
 ///
 /// Static config (API keys, LLM endpoints) lives here.
-/// Dynamic registries (MCP servers, Docker runtimes, etc.) live in `brain.db` — see `db.rs`.
+/// Dynamic registries (MCP servers, Docker runtimes, etc.) live in `orca.db` — see `db.rs`.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub anthropic_api_key: Option<String>,
     pub lmstudio_url: String,
     pub default_model: Model,
-    pub brain_vault: PathBuf,
+    pub orca_vault: PathBuf,
     pub memory_root: PathBuf,
     pub db_path: PathBuf,
 }
@@ -51,9 +52,9 @@ impl Model {
 impl Config {
     pub fn load() -> Result<Self> {
         let home = dirs::home_dir().context("no home dir")?;
-        let brain_vault = home.join(".brain");
-        let memory_root = brain_vault.join("memory");
-        let db_path = brain_vault.join("brain.db");
+        let orca_vault = home.join(APP_STATE_DIR);
+        let memory_root = orca_vault.join("memory");
+        let db_path = orca_vault.join(APP_DB_FILE);
 
         // API key: env var takes priority, then macOS Keychain
         let api_key = std::env::var("ANTHROPIC_API_KEY")
@@ -67,9 +68,9 @@ impl Config {
         // Model ID resolved at session start from /v1/models.
         let default_model = Model::LMStudio(String::new());
 
-        let toml_path = brain_vault.join("brain.toml");
+        let toml_path = orca_vault.join("orca.toml");
         if toml_path.exists() {
-            // One-time migration: [[mcp.servers]] and [[schema.databases]] → brain.db
+            // One-time migration: [[mcp.servers]] and [[schema.databases]] → orca.db
             migrate_toml_servers_to_db(&toml_path, &db_path);
             migrate_toml_schema_databases_to_db(&toml_path, &db_path);
         }
@@ -80,14 +81,14 @@ impl Config {
             anthropic_api_key: api_key,
             lmstudio_url,
             default_model,
-            brain_vault,
+            orca_vault,
             memory_root,
             db_path,
         })
     }
 
-    pub fn brain_toml_path(&self) -> PathBuf {
-        self.brain_vault.join("brain.toml")
+    pub fn orca_toml_path(&self) -> PathBuf {
+        self.orca_vault.join("orca.toml")
     }
 
     pub fn agents_dir(&self) -> PathBuf {
@@ -95,11 +96,11 @@ impl Config {
     }
 
     pub fn logs_dir(&self) -> PathBuf {
-        dirs::home_dir().unwrap_or_default().join(".brain/logs/sessions")
+        self.orca_vault.join("logs/sessions")
     }
 
     pub fn config_dir(&self) -> PathBuf {
-        dirs::home_dir().unwrap_or_default().join("code/brain/config")
+        dirs::home_dir().unwrap_or_default().join("code/orca/config")
     }
 }
 
@@ -139,7 +140,7 @@ fn migrate_toml_servers_to_db(toml_path: &std::path::Path, db_path: &std::path::
         );
     }
     tracing::info!(
-        "migrated {} mcp server(s) from brain.toml to brain.db",
+        "migrated {} mcp server(s) from orca.toml to orca.db",
         parsed.mcp.servers.len()
     );
 }
@@ -217,7 +218,7 @@ fn migrate_toml_schema_databases_to_db(toml_path: &std::path::Path, db_path: &st
         );
     }
     tracing::info!(
-        "migrated {} schema database(s) from brain.toml to brain.db",
+        "migrated {} schema database(s) from orca.toml to orca.db",
         dbs.len()
     );
 }

@@ -4,7 +4,7 @@ use orca::mcp;
 use orca::serve;
 use orca::serve::openapi_spec_json;
 use orca::session::Session;
-use brain_commands::{self as cmd, DaemonAction, DbAction, DockerAction, HookAction, LogAction, McpAction, PluginAction, SchemaAction, SpecAction, cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian, cmd_install, cmd_uninstall};
+use brain_commands::{self as cmd, CredsAction, DaemonAction, DbAction, DockerAction, HookAction, LogAction, McpAction, PluginAction, SchemaAction, SpecAction, cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian, cmd_install, cmd_uninstall};
 use brain_core::backend::{ClaudeBackend, ModelBackend, stdout_sink};
 use brain_utils::config::Config;
 use brain_utils::types::Message;
@@ -150,6 +150,12 @@ enum Command {
         action: PluginAction,
     },
 
+    /// Manage plugin credentials — store in Orca, sync to plugins
+    Creds {
+        #[command(subcommand)]
+        action: CredsAction,
+    },
+
     /// Manage the brain.db schema (migrate, status)
     Db {
         #[command(subcommand)]
@@ -243,6 +249,7 @@ async fn main() -> Result<()> {
         Some(Command::Schema { action }) => cmd::cmd_schema(action),
         Some(Command::Docker { action }) => cmd::cmd_docker(action),
         Some(Command::Plugin { action }) => cmd::cmd_plugin(action),
+        Some(Command::Creds { action }) => cmd::cmd_creds(action),
         Some(Command::Db { action }) => cmd::cmd_db(action),
         Some(Command::Update { channel }) => {
             let ch = brain_commands::update::Channel::from_str(&channel);
