@@ -24,6 +24,8 @@ use handlers::{
     plugin_creds_list, plugin_creds_remove, plugin_creds_set, plugin_creds_sync, plugin_list,
     run, run_tests, schema_add_database, schema_list_databases, schema_remove_database,
     search_logs, service_logs,
+    doc_list_roots, doc_add_root, doc_remove_root,
+    doc_list_ignore_patterns, doc_add_ignore_pattern, doc_remove_ignore_pattern,
 };
 use specs::{
     get_graphql_info, get_rebuy_graphql_schema, get_rebuy_spec, get_rebuy_spec_public,
@@ -244,6 +246,12 @@ async fn dispatch(name: &str, args: &Value, config: &Config) -> Result<String> {
         "register_spec"       => spec_register(args).await,
         "refresh_spec"        => spec_refresh(args).await,
         "unregister_spec"     => spec_unregister(args),
+        "list_doc_roots"           => doc_list_roots(),
+        "add_doc_root"             => doc_add_root(args),
+        "remove_doc_root"          => doc_remove_root(args),
+        "list_doc_ignore_patterns" => doc_list_ignore_patterns(),
+        "add_doc_ignore_pattern"   => doc_add_ignore_pattern(args),
+        "remove_doc_ignore_pattern" => doc_remove_ignore_pattern(args),
         "resolve_library" | "get_library_docs" => {
             context7::proxy_context7(name, args, config).await
         }

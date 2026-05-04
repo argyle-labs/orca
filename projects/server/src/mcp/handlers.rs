@@ -569,3 +569,79 @@ pub fn plugin_disable(args: &Value) -> Result<String> {
         Ok(format!("Plugin '{id}' not found."))
     }
 }
+
+// ── Doc root registry ─────────────────────────────────────────────────────────
+
+pub fn doc_list_roots() -> Result<String> {
+    let conn = orca_utils::db::open_default()?;
+    let roots = orca_utils::db::list_doc_roots(&conn)?;
+    if roots.is_empty() {
+        return Ok("No doc roots registered. Use add_doc_root to add one.".to_string());
+    }
+    let mut lines = vec!["Registered doc roots:".to_string(), String::new()];
+    for r in &roots {
+        let desc = r.description.as_deref().unwrap_or("");
+        lines.push(format!("  {} → {}  {}", r.name, r.path, desc));
+    }
+    Ok(lines.join("\n"))
+}
+
+pub fn doc_add_root(args: &Value) -> Result<String> {
+    let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name required"))?;
+    let path = args["path"].as_str().ok_or_else(|| anyhow::anyhow!("path required"))?;
+    let description = args["description"].as_str().map(|s| s.to_string());
+    let row = orca_utils::db::DocRootRow {
+        name: name.to_string(),
+        path: path.to_string(),
+        description,
+        enabled: true,
+    };
+    let conn = orca_utils::db::open_default()?;
+    orca_utils::db::upsert_doc_root(&conn, &row)?;
+    Ok(format!("Registered doc root '{name}' → {path}"))
+}
+
+pub fn doc_remove_root(args: &Value) -> Result<String> {
+    let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name required"))?;
+    let conn = orca_utils::db::open_default()?;
+    if orca_utils::db::remove_doc_root(&conn, name)? {
+        Ok(format!("Removed doc root '{name}'."))
+    } else {
+        Ok(format!("Doc root '{name}' not found."))
+    }
+}
+
+// ── Doc ignore patterns ───────────────────────────────────────────────────────
+
+pub fn doc_list_ignore_patterns() -> Result<String> {
+    let conn = orca_utils::db::open_default()?;
+    let patterns = orca_utils::db::list_doc_ignore_patterns(&conn)?;
+    if patterns.is_empty() {
+        return Ok("No ignore patterns registered.".to_string());
+    }
+    let mut lines = vec!["Doc ignore patterns (applied to all roots):".to_string(), String::new()];
+    for p in &patterns {
+        lines.push(format!("  {p}"));
+    }
+    Ok(lines.join("\n"))
+}
+
+pub fn doc_add_ignore_pattern(args: &Value) -> Result<String> {
+    let pattern = args["pattern"].as_str().ok_or_else(|| anyhow::anyhow!("pattern required"))?;
+    let conn = orca_utils::db::open_default()?;
+    if orca_utils::db::add_doc_ignore_pattern(&conn, pattern)? {
+        Ok(format!("Added ignore pattern '{pattern}'."))
+    } else {
+        Ok(format!("Pattern '{pattern}' already exists."))
+    }
+}
+
+pub fn doc_remove_ignore_pattern(args: &Value) -> Result<String> {
+    let pattern = args["pattern"].as_str().ok_or_else(|| anyhow::anyhow!("pattern required"))?;
+    let conn = orca_utils::db::open_default()?;
+    if orca_utils::db::remove_doc_ignore_pattern(&conn, pattern)? {
+        Ok(format!("Removed ignore pattern '{pattern}'."))
+    } else {
+        Ok(format!("Pattern '{pattern}' not found."))
+    }
+}

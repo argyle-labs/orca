@@ -184,6 +184,7 @@ pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
         .routes(routes!(api::plugin_data_get_handler, api::plugin_data_set_handler, api::plugin_data_delete_handler))
         .routes(routes!(api::system_status_handler))
         .routes(routes!(api::system_action_handler))
+        .routes(routes!(api::fs_browse_handler))
         .routes(routes!(api::pdf_handler))
 }
 

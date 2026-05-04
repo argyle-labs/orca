@@ -203,6 +203,14 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // Dispatch hook commands before Config::load() — hooks run in a subprocess context
+    // where Keychain access (called inside Config::load) can hang and trigger a SIGKILL timeout.
+    // Hook implementations are lightweight (regex, stdin, filesystem) and don't need Config.
+    if let Some(Command::Hook { action }) = cli.command {
+        return cmd::cmd_hook(action);
+    }
+
     let config = Config::load()?;
 
     match cli.command {
