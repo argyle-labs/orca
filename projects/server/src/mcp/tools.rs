@@ -519,6 +519,62 @@ pub fn tool_defs() -> Value {
                 },
                 "required": ["context7CompatibleLibraryID"]
             }
+        },
+        {
+            "name": "list_doc_roots",
+            "description": "List all documentation roots registered in orca.db. These are the directories indexed for docs/search.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "add_doc_root",
+            "description": "Register a new documentation root in orca.db. Supports ~/ paths.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name":        { "type": "string", "description": "Short name for the root (e.g. meerkat)" },
+                    "path":        { "type": "string", "description": "Absolute or ~/ path to the directory" },
+                    "description": { "type": "string", "description": "Optional description" }
+                },
+                "required": ["name", "path"]
+            }
+        },
+        {
+            "name": "remove_doc_root",
+            "description": "Remove a documentation root from orca.db by name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Root name to remove" }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "list_doc_ignore_patterns",
+            "description": "List the global directory-name patterns excluded from all doc roots (e.g. node_modules, .git).",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "add_doc_ignore_pattern",
+            "description": "Add a directory name to the global doc ignore list. Applied to every doc root at runtime.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "Directory name to ignore (e.g. __pycache__)" }
+                },
+                "required": ["pattern"]
+            }
+        },
+        {
+            "name": "remove_doc_ignore_pattern",
+            "description": "Remove a directory name from the global doc ignore list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "Pattern to remove" }
+                },
+                "required": ["pattern"]
+            }
         }
     ])
 }

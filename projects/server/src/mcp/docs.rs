@@ -1,6 +1,7 @@
 use anyhow::Result;
 use orca_commands::list_embedded_commands;
 use orca_utils::config::Config;
+use orca_utils::tools::fs::expand_tilde;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -9,52 +10,32 @@ use crate::markdown::to_llm_text;
 use crate::serve::tree::{TreeNode, build_tree_raw};
 
 pub struct DocRoot {
-    pub name: &'static str,
+    pub name: String,
     pub path: PathBuf,
-    pub ignored: HashSet<&'static str>,
+    pub ignored: HashSet<String>,
 }
 
-pub fn doc_roots(config: &Config) -> Vec<DocRoot> {
-    let home = dirs::home_dir().unwrap_or_default();
-    vec![
-        DocRoot {
-            name: "rebuy",
-            path: std::env::var("REBUY_ROOT")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| home.join("code/rebuy")),
-            ignored: [
-                "node_modules",
-                ".git",
-                ".next",
-                "dist",
-                "build",
-                "vendor",
-                "www",
-                "docs",
-            ]
-            .into_iter()
-            .collect(),
-        },
-        DocRoot {
-            name: "orca",
-            path: config.vault_root.clone(),
-            ignored: [
-                ".git",
-                "logs",
-                "memory",
-                "plugins",
-                ".trash",
-                "node_modules",
-            ]
-            .into_iter()
-            .collect(),
-        },
-    ]
+pub fn doc_roots(_config: &Config) -> Vec<DocRoot> {
+    let conn = match orca_utils::db::open_default() {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    let patterns: HashSet<String> = orca_utils::db::list_doc_ignore_patterns(&conn)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let rows = orca_utils::db::list_doc_roots(&conn).unwrap_or_default();
+    rows.into_iter()
+        .map(|r| DocRoot {
+            name: r.name,
+            path: PathBuf::from(expand_tilde(&r.path)),
+            ignored: patterns.clone(),
+        })
+        .collect()
 }
 
-pub fn build_doc_tree(dir: &Path, root_dir: &Path, ignored: &HashSet<&str>) -> Vec<Value> {
-    let ignored_owned: HashSet<String> = ignored.iter().map(|s| s.to_string()).collect();
-    tree_nodes_to_values(build_tree_raw(dir, root_dir, &ignored_owned))
+pub fn build_doc_tree(dir: &Path, root_dir: &Path, ignored: &HashSet<String>) -> Vec<Value> {
+    tree_nodes_to_values(build_tree_raw(dir, root_dir, ignored))
 }
 
 fn tree_nodes_to_values(nodes: Vec<TreeNode>) -> Vec<Value> {

@@ -209,6 +209,48 @@ static MIGRATIONS: &[Migration] = &[
         up: "ALTER TABLE plugins ADD COLUMN mcp_url TEXT;",
         down: None,
     },
+    Migration {
+        version: 15,
+        description: "add doc_roots table — user-configurable documentation path registry",
+        up: "CREATE TABLE IF NOT EXISTS doc_roots (
+            name        TEXT PRIMARY KEY,
+            path        TEXT NOT NULL,
+            description TEXT,
+            enabled     INTEGER NOT NULL DEFAULT 1,
+            created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        INSERT OR IGNORE INTO doc_roots (name, path, description) VALUES
+            ('rebuy',    '~/code/rebuy',    'Rebuy monorepo'),
+            ('orca',     '~/code/orca',     'Orca codebase'),
+            ('bardbase', '~/code/bardbase', 'Bardbase'),
+            ('homepage', '~/code/homepage', 'Homepage'),
+            ('meerkat',  '~/code/meerkat',  'Meerkat');",
+        down: Some("DROP TABLE IF EXISTS doc_roots;"),
+    },
+    Migration {
+        version: 16,
+        description: "add doc_ignore_patterns table — global list of directory names excluded from all doc roots",
+        up: "CREATE TABLE IF NOT EXISTS doc_ignore_patterns (
+            pattern    TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        INSERT OR IGNORE INTO doc_ignore_patterns (pattern) VALUES
+            ('.git'), ('node_modules'), ('target'), ('.next'), ('dist'),
+            ('build'), ('vendor'), ('.trash'), ('logs'), ('memory'),
+            ('plugins'), ('.turbo'), ('coverage'), ('out'), ('.cache');",
+        down: Some("DROP TABLE IF EXISTS doc_ignore_patterns;"),
+    },
+    Migration {
+        version: 17,
+        description: "add settings table — generic key/value store for user-configurable flags",
+        up: "CREATE TABLE IF NOT EXISTS settings (
+            key        TEXT PRIMARY KEY,
+            value      TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        INSERT OR IGNORE INTO settings (key, value) VALUES ('fs.allow_unrestricted', 'false');",
+        down: Some("DROP TABLE IF EXISTS settings;"),
+    },
 ];
 
 /// Return the currently applied migration version (0 = baseline, no migrations run).
@@ -1469,4 +1511,111 @@ pub fn remove_llm_provider(conn: &Connection, name: &str) -> Result<bool> {
         rusqlite::params![name],
     )?;
     Ok(n > 0)
+}
+
+// ── Doc root registry ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct DocRootRow {
+    pub name: String,
+    pub path: String,
+    pub description: Option<String>,
+    pub enabled: bool,
+}
+
+pub fn list_doc_roots(conn: &Connection) -> Result<Vec<DocRootRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT name, path, description, enabled FROM doc_roots WHERE enabled = 1 ORDER BY name",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(DocRootRow {
+            name: row.get(0)?,
+            path: row.get(1)?,
+            description: row.get(2)?,
+            enabled: row.get::<_, i32>(3)? != 0,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+pub fn upsert_doc_root(conn: &Connection, root: &DocRootRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO doc_roots (name, path, description, enabled)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(name) DO UPDATE SET
+             path        = excluded.path,
+             description = excluded.description,
+             enabled     = excluded.enabled",
+        rusqlite::params![root.name, root.path, root.description, root.enabled as i32],
+    )?;
+    Ok(())
+}
+
+pub fn remove_doc_root(conn: &Connection, name: &str) -> Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM doc_roots WHERE name = ?1",
+        rusqlite::params![name],
+    )?;
+    Ok(n > 0)
+}
+
+// ── Doc ignore patterns ───────────────────────────────────────────────────────
+
+pub fn list_doc_ignore_patterns(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT pattern FROM doc_ignore_patterns ORDER BY pattern")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+pub fn add_doc_ignore_pattern(conn: &Connection, pattern: &str) -> Result<bool> {
+    let n = conn.execute(
+        "INSERT OR IGNORE INTO doc_ignore_patterns (pattern) VALUES (?1)",
+        rusqlite::params![pattern],
+    )?;
+    Ok(n > 0)
+}
+
+pub fn remove_doc_ignore_pattern(conn: &Connection, pattern: &str) -> Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM doc_ignore_patterns WHERE pattern = ?1",
+        rusqlite::params![pattern],
+    )?;
+    Ok(n > 0)
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+
+pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
+    let val = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            rusqlite::params![key],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(val)
+}
+
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+        rusqlite::params![key, value],
+    )?;
+    Ok(())
+}
+
+pub fn list_settings(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare("SELECT key, value FROM settings ORDER BY key")?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+pub fn fs_allow_unrestricted(conn: &Connection) -> bool {
+    get_setting(conn, "fs.allow_unrestricted")
+        .ok()
+        .flatten()
+        .map(|v| v == "true")
+        .unwrap_or(false)
 }
