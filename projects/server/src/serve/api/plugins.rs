@@ -8,6 +8,16 @@ use utoipa::ToSchema;
 
 use super::prelude::*;
 
+#[derive(Deserialize, ToSchema)]
+pub struct PluginInstallRequest {
+    /// Absolute or ~/ path to the orca-plugin.toml on the server's filesystem.
+    pub manifest: String,
+    /// Optional instance id override — allows multiple instances of the same
+    /// plugin template with separate credentials (e.g. "atlassian@infra").
+    #[serde(rename = "instanceId")]
+    pub instance_id: Option<String>,
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 #[derive(Serialize, ToSchema)]
@@ -308,6 +318,88 @@ pub async fn plugin_data_delete_handler(Path((id, key)): Path<(String, String)>)
     db_remove("data key", &key, || {
         let conn = orca_utils::db::open_default()?;
         orca_utils::db::delete_plugin_data(&conn, &id, &key)
+    })
+}
+
+// ── POST /api/plugins ─────────────────────────────────────────────────────────
+
+#[utoipa::path(
+    post,
+    path = "/api/plugins",
+    operation_id = "installPlugin",
+    request_body = PluginInstallRequest,
+    responses(
+        (status = 200, description = "Plugin id that was installed", body = OkResponse),
+        (status = 400, body = ErrorResponse),
+        (status = 500, body = ErrorResponse),
+    ),
+    tag = "plugins"
+)]
+pub async fn plugin_install_handler(Json(body): Json<PluginInstallRequest>) -> Response {
+    db_ok(|| {
+        let instance_id = body.instance_id.as_deref();
+        orca_commands::install_plugin(&body.manifest, instance_id)?;
+        Ok(())
+    })
+}
+
+// ── DELETE /api/plugins/:id ───────────────────────────────────────────────────
+
+#[utoipa::path(
+    delete,
+    path = "/api/plugins/{id}",
+    operation_id = "removePlugin",
+    params(("id" = String, Path, description = "Plugin ID")),
+    responses(
+        (status = 200, body = OkResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 500, body = ErrorResponse),
+    ),
+    tag = "plugins"
+)]
+pub async fn plugin_remove_handler(Path(id): Path<String>) -> Response {
+    db_remove("plugin", &id, || orca_commands::remove_plugin(&id))
+}
+
+// ── PATCH /api/plugins/:id/enable ────────────────────────────────────────────
+
+#[utoipa::path(
+    patch,
+    path = "/api/plugins/{id}/enable",
+    operation_id = "enablePlugin",
+    params(("id" = String, Path, description = "Plugin ID")),
+    responses(
+        (status = 200, body = OkResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 500, body = ErrorResponse),
+    ),
+    tag = "plugins"
+)]
+pub async fn plugin_enable_handler(Path(id): Path<String>) -> Response {
+    db_remove("plugin", &id, || {
+        let conn = orca_utils::db::open_default()?;
+        orca_utils::db::set_plugin_enabled(&conn, &id, true)
+    })
+}
+
+// ── PATCH /api/plugins/:id/disable ───────────────────────────────────────────
+
+#[utoipa::path(
+    patch,
+    path = "/api/plugins/{id}/disable",
+    operation_id = "disablePlugin",
+    params(("id" = String, Path, description = "Plugin ID")),
+    responses(
+        (status = 200, body = OkResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 500, body = ErrorResponse),
+    ),
+    tag = "plugins"
+)]
+pub async fn plugin_disable_handler(Path(id): Path<String>) -> Response {
+    db_remove("plugin", &id, || {
+        let conn = orca_utils::db::open_default()?;
+        orca_utils::db::set_plugin_enabled(&conn, &id, false)
     })
 }
 

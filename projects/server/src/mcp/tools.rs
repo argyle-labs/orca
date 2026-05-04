@@ -405,6 +405,51 @@ pub fn tool_defs() -> Value {
             }
         },
         {
+            "name": "add_plugin",
+            "description": "Install a plugin from its orca-plugin.toml manifest. Automatically installs any declared dependencies (plugin.uses) with the parent's mode. Use instance_id to install the same plugin template multiple times with separate credentials.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "manifest":    { "type": "string", "description": "Absolute or ~/ path to orca-plugin.toml" },
+                    "instance_id": { "type": "string", "description": "Optional id override for multi-instance use (e.g. 'atlassian-infra')" }
+                },
+                "required": ["manifest"]
+            }
+        },
+        {
+            "name": "remove_plugin",
+            "description": "Remove a plugin. Dependencies that were auto-installed by this plugin and have no other parent are also removed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Plugin ID to remove" }
+                },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "enable_plugin",
+            "description": "Enable a disabled plugin.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Plugin ID" }
+                },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "disable_plugin",
+            "description": "Disable a plugin without removing it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Plugin ID" }
+                },
+                "required": ["id"]
+            }
+        },
+        {
             "name": "list_plugin_creds",
             "description": "List credential keys stored for a plugin. Values are never returned — only key names and sync status.",
             "inputSchema": {

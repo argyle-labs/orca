@@ -14,6 +14,25 @@ use utoipa::ToSchema;
 use super::prelude::*;
 use super::{DockerActionRequest, DockerActionResponse};
 
+/// Resolve the `docker` CLI to an absolute path for daemon environments where
+/// /opt/homebrew/bin is not in PATH.
+fn resolve_docker_bin() -> &'static str {
+    static DOCKER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DOCKER.get_or_init(|| {
+        for candidate in &[
+            "/opt/homebrew/bin/docker",  // macOS Homebrew (Apple Silicon)
+            "/usr/local/bin/docker",     // macOS Homebrew (Intel) / manual install
+            "/usr/bin/docker",           // Linux system package (apt/dnf/rpm)
+            "/snap/bin/docker",          // Ubuntu snap
+        ] {
+            if std::path::Path::new(candidate).exists() {
+                return candidate.to_string();
+            }
+        }
+        "docker".to_string()
+    })
+}
+
 // ── GET /api/docker/engine ────────────────────────────────────────────────────
 
 #[utoipa::path(
@@ -43,13 +62,15 @@ pub async fn docker_engine_handler() -> Response {
     tag = "docker"
 )]
 pub async fn docker_engine_start_handler() -> Response {
-    // Only know how to start Colima — Docker Desktop requires a UI interaction.
-    let colima = Command::new("which").arg("colima").output().await;
-    let has_colima = colima.map(|o| o.status.success()).unwrap_or(false);
-    if !has_colima {
+    // Probe well-known colima install locations (avoid `which` — fails in daemon PATH).
+    let home = std::env::var("HOME").unwrap_or_default();
+    let local_bin = format!("{home}/.local/bin/colima");
+    let candidates: &[&str] = &["/opt/homebrew/bin/colima", "/usr/local/bin/colima", &local_bin];
+    let colima_bin = candidates.iter().find(|p| std::path::Path::new(p).exists()).map(|s| *s);
+    let Some(colima) = colima_bin else {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "colima not found — start Docker Desktop manually");
-    }
-    match Command::new("colima").arg("start").output().await {
+    };
+    match Command::new(colima).arg("start").output().await {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout).to_string();
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -273,21 +294,28 @@ pub(crate) fn find_compose_file(project_path: &str) -> Option<PathBuf> {
 
 /// Returns `("colima" | "desktop" | "none", is_running)`.
 async fn detect_docker_engine() -> (&'static str, bool) {
-    // Check Colima first — if installed and running it takes priority.
-    let colima_ok = Command::new("which").arg("colima").output().await
-        .map(|o| o.status.success()).unwrap_or(false);
-    if colima_ok {
-        // `colima status` exits 0 when running, non-zero when not. The output
-        // text contains "running" in BOTH states ("colima is running" vs
-        // "colima is not running"), so a substring match is unreliable —
-        // the exit code is the source of truth.
-        let status = Command::new("colima").arg("status").output().await;
-        let running = status.map(|o| o.status.success()).unwrap_or(false);
-        return ("colima", running);
+    // Probe the colima socket directly — exists only when colima is running.
+    // This avoids `which colima` which fails in daemon environments with stripped PATH.
+    let home = std::env::var("HOME").unwrap_or_default();
+    let colima_sock = format!("{home}/.colima/default/docker.sock");
+    if std::path::Path::new(&colima_sock).exists() {
+        return ("colima", true);
+    }
+
+    // Check if colima is installed but not running by probing known install locations.
+    let colima_installed = [
+        "/opt/homebrew/bin/colima",
+        "/usr/local/bin/colima",
+        &format!("{home}/.local/bin/colima"),
+    ]
+    .iter()
+    .any(|p| std::path::Path::new(p).exists());
+    if colima_installed {
+        return ("colima", false);
     }
 
     // Fall back: probe Docker Desktop by pinging the daemon.
-    let ping = Command::new("docker").args(["info", "--format", "{{.ServerVersion}}"]).output().await;
+    let ping = Command::new(resolve_docker_bin()).args(["info", "--format", "{{.ServerVersion}}"]).output().await;
     let running = ping.map(|o| o.status.success()).unwrap_or(false);
     ("desktop", running)
 }
@@ -304,7 +332,7 @@ async fn docker_host() -> Option<String> {
 }
 
 pub(crate) async fn run_docker(args: &[&str], cwd: Option<&str>) -> anyhow::Result<String> {
-    let mut cmd = Command::new("docker");
+    let mut cmd = Command::new(resolve_docker_bin());
     cmd.args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -344,6 +372,7 @@ pub(crate) fn parse_compose_ps(raw: &str) -> HashMap<String, ServiceStatus> {
         if name.is_empty() {
             continue;
         }
+        let mut seen = std::collections::HashSet::new();
         let ports = obj["Publishers"]
             .as_array()
             .unwrap_or(&vec![])
@@ -354,7 +383,8 @@ pub(crate) fn parse_compose_ps(raw: &str) -> HashMap<String, ServiceStatus> {
                 if pub_port == 0 {
                     return None;
                 }
-                Some(format!("{pub_port}:{target}"))
+                let label = format!("{pub_port}:{target}");
+                if seen.insert(label.clone()) { Some(label) } else { None }
             })
             .collect();
         out.insert(

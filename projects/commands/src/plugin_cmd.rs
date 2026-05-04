@@ -11,6 +11,7 @@ use std::path::Path;
 
 #[derive(Deserialize, Default)]
 struct ManifestMcp {
+    #[serde(default)]
     command: String,
     #[serde(default)]
     args: Vec<String>,
@@ -18,12 +19,27 @@ struct ManifestMcp {
     env: HashMap<String, String>,
     /// Env var name whose value is the Bearer token for HTTP/SSE transport.
     token_env: Option<String>,
+    /// HTTP/SSE endpoints tried in priority order (public domain → LAN → tailscale).
+    /// Single string `url` is a shorthand for a one-element list.
+    url: Option<String>,
+    #[serde(default)]
+    urls: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
 struct ManifestSpecs {
     /// Filesystem path (supports ~/) where this plugin's spec files live.
     dir: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct ManifestUses {
+    /// Path to the dependency's orca-plugin.toml (relative to this manifest or absolute/~/…).
+    path: String,
+    /// Override the instance id for this dependency. Allows the same plugin template
+    /// to be used multiple times with different credentials (e.g. atlassian@rebuy vs atlassian@infra).
+    /// Defaults to "{dep_plugin_id}@{parent_id}" when not specified.
+    id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -50,6 +66,11 @@ struct ManifestPlugin {
     /// Optional directory containing spec files served with this plugin's namespace.
     #[serde(default)]
     specs: Option<ManifestSpecs>,
+    /// Other plugins this plugin extends. Dependencies are installed automatically
+    /// and inherit this plugin's mode so their nav links and MCPs appear in the
+    /// same workspace.
+    #[serde(default, rename = "uses")]
+    uses: Vec<ManifestUses>,
 }
 
 fn default_mode() -> String { "orca".to_string() }
@@ -72,6 +93,105 @@ fn parse_manifest(path: &str) -> Result<(Manifest, String)> {
         .with_context(|| format!("invalid orca-plugin.toml at {}", abs.display()))?;
 
     Ok((manifest, abs.to_string_lossy().into_owned()))
+}
+
+/// Public entry point: install a plugin from a manifest path.
+/// `instance_id` overrides the plugin's own id (for multi-instance scenarios).
+pub fn install_plugin(manifest_path: &str, instance_id: Option<&str>) -> Result<String> {
+    let conn = db::open_default()?;
+    install_manifest(&conn, manifest_path, instance_id, None)
+}
+
+/// Public entry point: remove a plugin and cascade-remove exclusive deps.
+pub fn remove_plugin(id: &str) -> Result<bool> {
+    let conn = db::open_default()?;
+    let deps = db::list_plugin_deps(&conn, id)?;
+    db::remove_plugin_deps(&conn, id)?;
+    for dep_id in &deps {
+        if !db::plugin_has_parent(&conn, dep_id)? {
+            db::remove_plugin(&conn, dep_id)?;
+        }
+    }
+    db::remove_plugin(&conn, id)
+}
+
+/// Install a single plugin manifest into the DB.
+///
+/// - `instance_id_override`: use this id instead of the one declared in the toml.
+///   Enables multiple instances of the same plugin template (e.g. `atlassian@rebuy`
+///   and `atlassian@infra`) each with their own credentials and MCP connection.
+/// - `mode_override`: force this mode (parent passes its own mode to deps).
+///
+/// Returns the instance id that was registered.
+fn install_manifest(
+    conn: &rusqlite::Connection,
+    manifest_path: &str,
+    instance_id_override: Option<&str>,
+    mode_override: Option<&str>,
+) -> Result<String> {
+    let (m, abs_path) = parse_manifest(manifest_path)?;
+    let instance_id = instance_id_override.unwrap_or(&m.plugin.id).to_string();
+    let mode = mode_override.unwrap_or(&m.plugin.mode).to_string();
+    let specs_dir = m.plugin.specs.as_ref()
+        .and_then(|s| s.dir.as_deref())
+        .map(expand_tilde);
+    let row = PluginRow {
+        id: instance_id.clone(),
+        manifest_path: abs_path.clone(),
+        tier: m.plugin.tier.clone(),
+        mcp_command: m.plugin.mcp.as_ref().map(|mcp| mcp.command.clone()).filter(|c| !c.is_empty()),
+        mcp_args: m.plugin.mcp.as_ref().map(|mcp| mcp.args.clone()).unwrap_or_default(),
+        mcp_env: m.plugin.mcp.as_ref().map(|mcp| mcp.env.clone()).unwrap_or_default(),
+        mcp_token_env: m.plugin.mcp.as_ref().and_then(|mcp| mcp.token_env.clone()),
+        mcp_urls: m.plugin.mcp.as_ref().map(|mcp| {
+            // `urls` list takes precedence; `url` is a single-entry shorthand.
+            if !mcp.urls.is_empty() { mcp.urls.clone() }
+            else if let Some(u) = &mcp.url { vec![u.clone()] }
+            else { vec![] }
+        }).unwrap_or_default(),
+        context_injection: m.plugin.context_injection.clone().unwrap_or_else(|| "minimal".into()),
+        enabled: true,
+        command_map: m.plugin.commands.clone(),
+        mode: mode.clone(),
+        nav_links: m.plugin.nav_links.clone(),
+        search_tools: m.plugin.search_tools,
+        specs_dir,
+    };
+    db::upsert_plugin(conn, &row)?;
+
+    let display_id = if instance_id != m.plugin.id {
+        format!("{} (as '{instance_id}')", m.plugin.id)
+    } else {
+        instance_id.clone()
+    };
+    println!(
+        "registered plugin {} v{} ({}) [mode: {}] from {}",
+        display_id, m.plugin.version, m.plugin.tier, mode, abs_path
+    );
+
+    // Recursively install uses, resolving paths relative to this manifest's directory.
+    let manifest_dir = Path::new(&abs_path).parent().unwrap_or(Path::new("."));
+    for dep in &m.plugin.uses {
+        let dep_path = if dep.path.starts_with('/') || dep.path.starts_with('~') {
+            dep.path.clone()
+        } else {
+            manifest_dir.join(&dep.path).to_string_lossy().into_owned()
+        };
+        // Resolve the dep's base id from its manifest to build the default scoped id.
+        let dep_base_id = peek_plugin_id(&dep_path).unwrap_or_else(|_| "plugin".to_string());
+        let dep_instance_id = dep.id.clone()
+            .unwrap_or_else(|| format!("{dep_base_id}@{instance_id}"));
+        let dep_id = install_manifest(conn, &dep_path, Some(&dep_instance_id), Some(&mode))?;
+        db::add_plugin_dep(conn, &instance_id, &dep_id)?;
+    }
+
+    Ok(instance_id)
+}
+
+/// Parse a manifest just to read the plugin id, without full validation.
+fn peek_plugin_id(path: &str) -> Result<String> {
+    let (m, _) = parse_manifest(path)?;
+    Ok(m.plugin.id)
 }
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
@@ -132,35 +252,7 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
     let conn = db::open_default()?;
     match action {
         PluginAction::Add { manifest } => {
-            let (m, abs_path) = parse_manifest(&manifest)?;
-            let specs_dir = m.plugin.specs.as_ref()
-                .and_then(|s| s.dir.as_deref())
-                .map(expand_tilde);
-            let row = PluginRow {
-                id: m.plugin.id.clone(),
-                manifest_path: abs_path.clone(),
-                tier: m.plugin.tier.clone(),
-                mcp_command: m.plugin.mcp.as_ref().map(|mcp| mcp.command.clone()),
-                mcp_args: m.plugin.mcp.as_ref().map(|mcp| mcp.args.clone()).unwrap_or_default(),
-                mcp_env: m.plugin.mcp.as_ref().map(|mcp| mcp.env.clone()).unwrap_or_default(),
-                mcp_token_env: m.plugin.mcp.as_ref().and_then(|mcp| mcp.token_env.clone()),
-                context_injection: m
-                    .plugin
-                    .context_injection
-                    .clone()
-                    .unwrap_or_else(|| "minimal".into()),
-                enabled: true,
-                command_map: m.plugin.commands.clone(),
-                mode: m.plugin.mode.clone(),
-                nav_links: m.plugin.nav_links.clone(),
-                search_tools: m.plugin.search_tools,
-                specs_dir,
-            };
-            db::upsert_plugin(&conn, &row)?;
-            println!(
-                "registered plugin '{}' v{} ({}) from {}",
-                m.plugin.id, m.plugin.version, m.plugin.tier, abs_path
-            );
+            install_manifest(&conn, &manifest, None, None)?;
         }
 
         PluginAction::List => {
@@ -187,6 +279,16 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
         }
 
         PluginAction::Remove { id } => {
+            // Remove deps that were exclusively pulled in by this parent.
+            let deps = db::list_plugin_deps(&conn, &id)?;
+            db::remove_plugin_deps(&conn, &id)?;
+            for dep_id in &deps {
+                if !db::plugin_has_parent(&conn, dep_id)? {
+                    if db::remove_plugin(&conn, dep_id)? {
+                        println!("removed dependency '{dep_id}'");
+                    }
+                }
+            }
             if db::remove_plugin(&conn, &id)? {
                 println!("removed plugin '{id}'");
             } else {

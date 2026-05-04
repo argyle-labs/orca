@@ -48,6 +48,7 @@ pub mod spec;
 pub mod oauth;
 pub mod update;
 
+pub use plugin_cmd::{install_plugin, remove_plugin};
 pub use spec::{SpecAction, cmd_spec};
 pub use log_cmd::{LogAction, cmd_log};
 pub use auth::{cmd_login, cmd_logout, cmd_auth};

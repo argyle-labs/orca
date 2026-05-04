@@ -203,6 +203,12 @@ static MIGRATIONS: &[Migration] = &[
         );",
         down: Some("DROP TABLE IF EXISTS plugin_deps;"),
     },
+    Migration {
+        version: 14,
+        description: "add mcp_url to plugins — HTTP/SSE endpoint used instead of stdio when present (deploy mode)",
+        up: "ALTER TABLE plugins ADD COLUMN mcp_url TEXT;",
+        down: None,
+    },
 ];
 
 /// Return the currently applied migration version (0 = baseline, no migrations run).
@@ -1016,6 +1022,10 @@ pub struct PluginRow {
     pub mcp_env: std::collections::HashMap<String, String>,
     /// Env var name whose value is the Bearer token for HTTP/SSE transport.
     pub mcp_token_env: Option<String>,
+    /// HTTP/SSE endpoints for this plugin's MCP server, tried in priority order.
+    /// Allows fallback across public domain → LAN → tailscale addresses.
+    /// When non-empty, used instead of spawning a stdio subprocess (deploy mode).
+    pub mcp_urls: Vec<String>,
     pub context_injection: String,
     pub enabled: bool,
     /// Maps universal command name → plugin's internal MCP tool name.
@@ -1033,7 +1043,7 @@ pub struct PluginRow {
 const PLUGIN_COLS: &str =
     "id, manifest_path, tier, COALESCE(mode,'orca'), mcp_command, mcp_args, mcp_env,
      context_injection, enabled, command_map, mcp_token_env, COALESCE(nav_links,'[]'),
-     COALESCE(search_tools,'[]'), specs_dir";
+     COALESCE(search_tools,'[]'), specs_dir, mcp_url";
 
 fn parse_plugin_row(
     id: String, manifest_path: String, tier: String, mode: String,
@@ -1041,7 +1051,14 @@ fn parse_plugin_row(
     context_injection: String, enabled: i32, map_json: String,
     mcp_token_env: Option<String>, nav_links_json: String,
     search_tools_json: String, specs_dir: Option<String>,
+    mcp_url_raw: Option<String>,
 ) -> PluginRow {
+    // mcp_url column stores either a JSON array ["url1","url2"] or a plain URL string.
+    let mcp_urls = match mcp_url_raw.as_deref() {
+        None | Some("") => vec![],
+        Some(s) => serde_json::from_str::<Vec<String>>(s)
+            .unwrap_or_else(|_| vec![s.to_string()]),
+    };
     PluginRow {
         id,
         manifest_path,
@@ -1051,6 +1068,7 @@ fn parse_plugin_row(
         mcp_args: serde_json::from_str(&args_json).unwrap_or_default(),
         mcp_env: serde_json::from_str(&env_json).unwrap_or_default(),
         mcp_token_env,
+        mcp_urls,
         context_injection,
         enabled: enabled != 0,
         command_map: serde_json::from_str(&map_json).unwrap_or_default(),
@@ -1080,16 +1098,17 @@ pub fn list_plugins(conn: &Connection) -> Result<Vec<PluginRow>> {
             row.get::<_, String>(11)?,
             row.get::<_, String>(12)?,
             row.get::<_, Option<String>>(13)?,
+            row.get::<_, Option<String>>(14)?,
         ))
     })?;
     let mut result = Vec::new();
     for r in rows {
         let (id, manifest_path, tier, mode, mcp_command, args_json, env_json,
              context_injection, enabled, map_json, mcp_token_env, nav_links_json,
-             search_tools_json, specs_dir) = r?;
+             search_tools_json, specs_dir, mcp_url) = r?;
         result.push(parse_plugin_row(id, manifest_path, tier, mode, mcp_command,
             args_json, env_json, context_injection, enabled, map_json, mcp_token_env,
-            nav_links_json, search_tools_json, specs_dir));
+            nav_links_json, search_tools_json, specs_dir, mcp_url));
     }
     Ok(result)
 }
@@ -1113,15 +1132,16 @@ pub fn get_plugin(conn: &Connection, id: &str) -> Result<Option<PluginRow>> {
             row.get::<_, String>(11)?,
             row.get::<_, String>(12)?,
             row.get::<_, Option<String>>(13)?,
+            row.get::<_, Option<String>>(14)?,
         )),
     );
     match result {
         Ok((id, manifest_path, tier, mode, mcp_command, args_json, env_json,
             context_injection, enabled, map_json, mcp_token_env, nav_links_json,
-            search_tools_json, specs_dir)) => {
+            search_tools_json, specs_dir, mcp_url)) => {
             Ok(Some(parse_plugin_row(id, manifest_path, tier, mode, mcp_command,
                 args_json, env_json, context_injection, enabled, map_json, mcp_token_env,
-                nav_links_json, search_tools_json, specs_dir)))
+                nav_links_json, search_tools_json, specs_dir, mcp_url)))
         }
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
@@ -1134,9 +1154,14 @@ pub fn upsert_plugin(conn: &Connection, plugin: &PluginRow) -> Result<()> {
     let map_json = to_json_obj(&plugin.command_map);
     let nav_json = to_json_arr(&plugin.nav_links);
     let search_tools_json = to_json_arr(&plugin.search_tools);
+    let mcp_url_json: Option<String> = if plugin.mcp_urls.is_empty() {
+        None
+    } else {
+        Some(to_json_arr(&plugin.mcp_urls))
+    };
     conn.execute(
-        "INSERT INTO plugins (id, manifest_path, tier, mode, mcp_command, mcp_args, mcp_env, context_injection, enabled, command_map, mcp_token_env, nav_links, search_tools, specs_dir)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        "INSERT INTO plugins (id, manifest_path, tier, mode, mcp_command, mcp_args, mcp_env, context_injection, enabled, command_map, mcp_token_env, nav_links, search_tools, specs_dir, mcp_url)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(id) DO UPDATE SET
              manifest_path     = excluded.manifest_path,
              tier              = excluded.tier,
@@ -1150,12 +1175,13 @@ pub fn upsert_plugin(conn: &Connection, plugin: &PluginRow) -> Result<()> {
              mcp_token_env     = excluded.mcp_token_env,
              nav_links         = excluded.nav_links,
              search_tools      = excluded.search_tools,
-             specs_dir         = excluded.specs_dir",
+             specs_dir         = excluded.specs_dir,
+             mcp_url           = excluded.mcp_url",
         rusqlite::params![
             plugin.id, plugin.manifest_path, plugin.tier, plugin.mode,
             plugin.mcp_command, args_json, env_json, plugin.context_injection,
             plugin.enabled as i32, map_json, plugin.mcp_token_env, nav_json, search_tools_json,
-            plugin.specs_dir,
+            plugin.specs_dir, mcp_url_json,
         ],
     )?;
     Ok(())
