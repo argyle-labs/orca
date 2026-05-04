@@ -533,3 +533,39 @@ pub fn plugin_creds_sync(args: &Value) -> Result<String> {
     orca_commands::creds_cmd::sync_plugin_creds(plugin)?;
     Ok(format!("Synced credentials for plugin '{plugin}'."))
 }
+
+pub fn plugin_add(args: &Value) -> Result<String> {
+    let manifest = args["manifest"].as_str().ok_or_else(|| anyhow::anyhow!("manifest required"))?;
+    let instance_id = args["instance_id"].as_str();
+    let id = orca_commands::install_plugin(manifest, instance_id)?;
+    Ok(format!("Plugin '{id}' installed successfully."))
+}
+
+pub fn plugin_remove(args: &Value) -> Result<String> {
+    let id = args["id"].as_str().ok_or_else(|| anyhow::anyhow!("id required"))?;
+    if orca_commands::remove_plugin(id)? {
+        Ok(format!("Plugin '{id}' removed."))
+    } else {
+        Ok(format!("Plugin '{id}' not found."))
+    }
+}
+
+pub fn plugin_enable(args: &Value) -> Result<String> {
+    let id = args["id"].as_str().ok_or_else(|| anyhow::anyhow!("id required"))?;
+    let conn = orca_utils::db::open_default()?;
+    if orca_utils::db::set_plugin_enabled(&conn, id, true)? {
+        Ok(format!("Plugin '{id}' enabled."))
+    } else {
+        Ok(format!("Plugin '{id}' not found."))
+    }
+}
+
+pub fn plugin_disable(args: &Value) -> Result<String> {
+    let id = args["id"].as_str().ok_or_else(|| anyhow::anyhow!("id required"))?;
+    let conn = orca_utils::db::open_default()?;
+    if orca_utils::db::set_plugin_enabled(&conn, id, false)? {
+        Ok(format!("Plugin '{id}' disabled."))
+    } else {
+        Ok(format!("Plugin '{id}' not found."))
+    }
+}

@@ -11,6 +11,43 @@ fn active_docker_host() -> Option<String> {
 /// Launchd and other minimal environments strip PATH down to system directories,
 /// so `node`, `npx`, etc. won't be found even when they're installed. Try `which`
 /// first (works in interactive shells), then probe well-known install locations.
+/// Build a PATH that includes all well-known tool install directories so that
+/// processes spawned by orca (MCP servers and their children) can find CLIs
+/// like `node`, `rebuy`, `npx`, etc. even in minimal daemon environments.
+fn augmented_path() -> String {
+    let current = std::env::var("PATH").unwrap_or_default();
+    let home = std::env::var("HOME").unwrap_or_default();
+
+    let mut extra: Vec<String> = vec![
+        format!("{home}/.local/bin"),
+        format!("{home}/.volta/bin"),
+        format!("{home}/.fnm/current/bin"),
+        "/opt/homebrew/bin".to_string(),
+        "/opt/homebrew/sbin".to_string(),
+        "/usr/local/bin".to_string(),
+    ];
+
+    // Add bin dirs for ALL installed nvm node versions. This avoids having to
+    // resolve the alias chain (e.g. "24" → "v24.15.0") which nvm handles lazily.
+    let nvm_versions = format!("{home}/.nvm/versions/node");
+    if let Ok(entries) = std::fs::read_dir(&nvm_versions) {
+        for entry in entries.flatten() {
+            let bin = entry.path().join("bin");
+            if bin.is_dir() {
+                extra.push(bin.to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    let mut parts: Vec<&str> = current.split(':').filter(|s| !s.is_empty()).collect();
+    for dir in extra.iter().rev() {
+        if !parts.contains(&dir.as_str()) {
+            parts.insert(0, dir);
+        }
+    }
+    parts.join(":")
+}
+
 fn resolve_command(command: &str) -> String {
     if command.starts_with('/') {
         return command.to_string();
@@ -69,6 +106,10 @@ pub struct McpServerConfig {
     pub env: std::collections::HashMap<String, String>,
     /// Bearer token for HTTP/SSE transport (resolved from token_env at config load time).
     pub token: Option<String>,
+    /// Additional SSE URLs tried in order if `command` is an http URL that fails.
+    /// Priority: command (index 0) → fallback_urls[0] → fallback_urls[1] → ...
+    #[serde(default)]
+    pub fallback_urls: Vec<String>,
 }
 
 // ── Transport backends ────────────────────────────────────────────────────────
@@ -107,7 +148,23 @@ pub struct McpTool {
 impl McpClient {
     pub async fn connect(cfg: &McpServerConfig) -> Result<Self> {
         if cfg.command.starts_with("http://") || cfg.command.starts_with("https://") {
-            Self::connect_sse(cfg).await
+            // Try each URL in priority order, returning the first that succeeds.
+            let all_urls = std::iter::once(cfg.command.as_str())
+                .chain(cfg.fallback_urls.iter().map(|s| s.as_str()));
+            let mut last_err = anyhow::anyhow!("no URLs configured");
+            for url in all_urls {
+                let mut candidate = cfg.clone();
+                candidate.command = url.to_string();
+                candidate.fallback_urls = vec![];
+                match Self::connect_sse(&candidate).await {
+                    Ok(client) => return Ok(client),
+                    Err(e) => {
+                        tracing::debug!("MCP SSE failed for {url}: {e}");
+                        last_err = e;
+                    }
+                }
+            }
+            Err(last_err)
         } else {
             Self::connect_stdio(cfg).await
         }
@@ -120,6 +177,10 @@ impl McpClient {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
+
+        // Augment PATH so MCP server subprocesses can find tools (node, rebuy CLI, etc.)
+        // that live in nvm/volta/fnm/homebrew paths stripped by launchd/systemd daemons.
+        cmd.env("PATH", augmented_path());
 
         if let Some(host) = active_docker_host() {
             cmd.env("DOCKER_HOST", host);
@@ -447,6 +508,7 @@ impl McpPool {
                             args: row.args,
                             env: row.env,
                             token: None,
+                            fallback_urls: vec![],
                         });
                     }
                 }
@@ -455,8 +517,17 @@ impl McpPool {
                 if let Ok(plugins) = orca_utils::db::list_plugins(&conn) {
                     for p in plugins {
                         if !p.enabled { continue; }
-                        let Some(cmd) = p.mcp_command else { continue; };
-                        if cmd.is_empty() { continue; }
+                        // mcp_urls (priority-ordered list) override stdio command.
+                        // All URLs are passed; connect() tries them in order.
+                        let (cmd, fallback_urls) = if !p.mcp_urls.is_empty() {
+                            let mut urls = p.mcp_urls.into_iter();
+                            let primary = urls.next().unwrap();
+                            (primary, urls.collect::<Vec<_>>())
+                        } else if let Some(cmd) = p.mcp_command.filter(|c| !c.is_empty()) {
+                            (cmd, vec![])
+                        } else {
+                            continue;
+                        };
                         // Merge stored credentials (orca creds set) into env so the subprocess
                         // receives them without requiring the caller to export them manually.
                         let mut env = p.mcp_env;
@@ -475,6 +546,7 @@ impl McpPool {
                             args: p.mcp_args,
                             env,
                             token,
+                            fallback_urls,
                         });
                     }
                 }
@@ -514,7 +586,7 @@ impl McpPool {
                             .collect()
                     })
                     .unwrap_or_default();
-                Some((k.clone(), McpServerConfig { command, args, env, token: None }))
+                Some((k.clone(), McpServerConfig { command, args, env, token: None, fallback_urls: vec![] }))
             })
             .collect()
     }

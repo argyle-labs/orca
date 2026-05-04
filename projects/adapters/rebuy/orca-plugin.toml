@@ -8,22 +8,15 @@ context_injection = "full"
 [plugin.mcp]
 command = "node"
 args    = ["/Users/scottkey/code/rebuy/rebuy-cli-mcp-server/build/index.js"]
+# url — HTTP/SSE endpoint used instead of stdio in deploy mode (orca plugin add will store this)
+# url = "https://mcp.your-domain.com/rebuy"
 
 [plugin.specs]
 dir = "~/code/rebuy/rebuy-docs/docs/gen"
 
-# Nav links rendered in the rebuy sidebar section
-[[plugin.nav_links]]
-href  = "/jira"
-label = "Jira"
-
-[[plugin.nav_links]]
-href  = "/confluence"
-label = "Confluence"
-
-[[plugin.nav_links]]
-href  = "/bitbucket"
-label = "Bitbucket"
+# Plugins that extend the rebuy workspace — installed automatically and inherit rebuy's mode
+[[plugin.uses]]
+path = "../atlassian/orca-plugin.toml"
 
 # Sidebar panels declared by this plugin
 [[plugin.nav_links]]
