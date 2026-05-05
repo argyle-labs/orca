@@ -142,8 +142,8 @@ async fn try_or_refresh_atlassian(access_token: String) -> anyhow::Result<String
 fn api_key_creds() -> anyhow::Result<(String, String, String)> {
     // Try MCP server config
     if let Ok(config) = Config::load() {
-        if let Ok(conn) = orca_utils::db::open(&config.db_path) {
-            if let Ok(servers) = orca_utils::db::list_mcp_servers(&conn) {
+        if let Ok(conn) = db::open(&config.db_path) {
+            if let Ok(servers) = db::list_mcp_servers(&conn) {
                 if let Some(server) = servers.into_iter().find(|s| s.name == "atlassian") {
                     let args = &server.args;
                     let domain = args

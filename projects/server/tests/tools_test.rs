@@ -3,7 +3,7 @@ use tempfile::tempdir;
 
 use orca_agents::{list_embedded_agents, load_agent_prompt};
 use orca_core::tools::bash::BashPermissions;
-use orca_utils::tools::{fs as fstool, search};
+use orca_fs::{fs as fstool, search};
 
 // These tests verify the tool implementations work correctly.
 // They use real filesystem operations via the tempfile crate (no race conditions).

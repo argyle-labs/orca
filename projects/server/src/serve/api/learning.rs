@@ -2,7 +2,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Json, Response},
 };
-use orca_utils::db;
+use db;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use utoipa::ToSchema;

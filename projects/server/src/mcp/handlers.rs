@@ -1,8 +1,9 @@
 use anyhow::Result;
 use orca_core::backend::buffer_sink;
 use orca_utils::config::Config;
-use serde_json::Value;
+use serde_json::{Value, json};
 
+use crate::agent_backend::{self, Resolution};
 use crate::context::ProjectContext;
 use crate::session::Session;
 
@@ -37,9 +38,33 @@ pub async fn run(args: &Value, config: &Config) -> Result<String> {
         prompt.to_string()
     };
 
+    let resolution = agent_backend::resolve(agent, config)?;
+
+    let forced_model = match resolution {
+        // Local: let Session run the LM Studio probe in resolve_model so we get
+        // an actual loaded model id rather than the empty placeholder.
+        Resolution::Local(_) => None,
+        Resolution::ServerClaude(m) => Some(m),
+        Resolution::DelegateToClaudeCode => {
+            // Server does not call Anthropic. Hand the work back to the caller
+            // (a Claude Code session) as a structured envelope. The caller is
+            // expected to invoke get_agent + Agent(general-purpose) itself.
+            let agent_prompt = orca_agents::load_agent_prompt(agent, &config.agents_dir())
+                .ok_or_else(|| anyhow::anyhow!("agent not found: {agent}"))?;
+            let envelope = json!({
+                "action": "delegate_to_claude_code",
+                "agent": agent,
+                "agent_prompt": agent_prompt,
+                "task": prompt,
+            });
+            return Ok(serde_json::to_string_pretty(&envelope)?);
+        }
+    };
+
     let (sink, buf) = buffer_sink();
     let ctx = ProjectContext::default();
-    let mut session = Session::new_with_output(config.clone(), ctx, sink).await?;
+    let mut session =
+        Session::new_with_output_and_model(config.clone(), ctx, sink, forced_model).await?;
     session.one_shot(full_prompt).await?;
 
     let bytes = buf.lock().unwrap_or_else(|e| e.into_inner());
@@ -51,7 +76,7 @@ pub fn search_logs(args: &Value, config: &Config) -> Result<String> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("query is required"))?;
 
-    let matches = orca_utils::log::search_logs(&config.logs_dir(), query, 20)?;
+    let matches = log::search_logs(&config.logs_dir(), query, 20)?;
     if matches.is_empty() {
         return Ok(format!("No matches for '{query}'"));
     }
@@ -250,8 +275,8 @@ pub async fn run_tests(args: &Value) -> Result<String> {
 }
 
 pub fn mcp_list_servers() -> Result<String> {
-    let conn = orca_utils::db::open_default()?;
-    let servers = orca_utils::db::list_mcp_servers(&conn)?;
+    let conn = db::open_default()?;
+    let servers = db::list_mcp_servers(&conn)?;
     if servers.is_empty() {
         return Ok("No MCP servers registered in orca.db.".to_string());
     }
@@ -277,22 +302,22 @@ pub fn mcp_add_server(args: &Value) -> Result<String> {
                 .collect()
         })
         .unwrap_or_default();
-    let row = orca_utils::db::McpServerRow {
+    let row = db::McpServerRow {
         name: name.to_string(),
         command: command.to_string(),
         args: mcp_args,
         env,
         enabled: true,
     };
-    let conn = orca_utils::db::open_default()?;
-    orca_utils::db::upsert_mcp_server(&conn, &row)?;
+    let conn = db::open_default()?;
+    db::upsert_mcp_server(&conn, &row)?;
     Ok(format!("Registered MCP server '{name}' in orca.db."))
 }
 
 pub fn mcp_remove_server(args: &Value) -> Result<String> {
     let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name required"))?;
-    let conn = orca_utils::db::open_default()?;
-    if orca_utils::db::remove_mcp_server(&conn, name)? {
+    let conn = db::open_default()?;
+    if db::remove_mcp_server(&conn, name)? {
         Ok(format!("Removed MCP server '{name}' from orca.db."))
     } else {
         Ok(format!("Server '{name}' not found in orca.db."))
@@ -303,12 +328,12 @@ pub fn mcp_map_tool(args: &Value) -> Result<String> {
     let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name required"))?;
     let orca_tool = args["orca_tool"].as_str().ok_or_else(|| anyhow::anyhow!("orca_tool required"))?;
     let external_tool = args["external_tool"].as_str().ok_or_else(|| anyhow::anyhow!("external_tool required"))?;
-    let conn = orca_utils::db::open_default()?;
-    let servers = orca_utils::db::list_mcp_servers(&conn)?;
+    let conn = db::open_default()?;
+    let servers = db::list_mcp_servers(&conn)?;
     if !servers.iter().any(|s| s.name == name) {
         anyhow::bail!("MCP server '{name}' not found in orca.db — register it first with orca_mcp_add");
     }
-    let row = orca_utils::db::McpToolMappingRow {
+    let row = db::McpToolMappingRow {
         orca_tool: orca_tool.to_string(),
         mcp_name: name.to_string(),
         external_tool: external_tool.to_string(),
@@ -316,14 +341,14 @@ pub fn mcp_map_tool(args: &Value) -> Result<String> {
         confidence: None,
         enabled: true,
     };
-    orca_utils::db::upsert_mcp_tool_mapping(&conn, &row)?;
+    db::upsert_mcp_tool_mapping(&conn, &row)?;
     Ok(format!("Mapped {orca_tool} → {name}::{external_tool}"))
 }
 
 pub fn mcp_unmap_tool(args: &Value) -> Result<String> {
     let orca_tool = args["orca_tool"].as_str().ok_or_else(|| anyhow::anyhow!("orca_tool required"))?;
-    let conn = orca_utils::db::open_default()?;
-    if orca_utils::db::remove_mcp_tool_mapping(&conn, orca_tool)? {
+    let conn = db::open_default()?;
+    if db::remove_mcp_tool_mapping(&conn, orca_tool)? {
         Ok(format!("Unmapped {orca_tool}"))
     } else {
         Ok(format!("{orca_tool} not found in mcp_tool_mappings"))
@@ -337,9 +362,9 @@ pub fn mcp_sync_tools(args: &Value) -> Result<String> {
     if !all && name.is_none() {
         anyhow::bail!("provide name or set all=true");
     }
-    let conn = orca_utils::db::open_default()?;
-    let servers = orca_utils::db::list_mcp_servers(&conn)?;
-    let targets: Vec<&orca_utils::db::McpServerRow> = if all {
+    let conn = db::open_default()?;
+    let servers = db::list_mcp_servers(&conn)?;
+    let targets: Vec<&db::McpServerRow> = if all {
         servers.iter().collect()
     } else {
         let n = name.expect("name checked above via !all && name.is_none() guard");
@@ -359,11 +384,11 @@ pub fn mcp_sync_tools(args: &Value) -> Result<String> {
 
 pub fn mcp_list_mappings(args: &Value) -> Result<String> {
     let name = args["name"].as_str();
-    let conn = orca_utils::db::open_default()?;
-    let rows: Vec<orca_utils::db::McpToolMappingRow> = if let Some(n) = name {
-        orca_utils::db::list_mcp_tool_mappings(&conn, n)?
+    let conn = db::open_default()?;
+    let rows: Vec<db::McpToolMappingRow> = if let Some(n) = name {
+        db::list_mcp_tool_mappings(&conn, n)?
     } else {
-        orca_utils::db::all_mcp_tool_mappings(&conn)?
+        db::all_mcp_tool_mappings(&conn)?
     };
     if rows.is_empty() {
         return Ok("(no mappings)".to_string());
@@ -378,8 +403,8 @@ pub fn mcp_list_mappings(args: &Value) -> Result<String> {
 }
 
 pub fn schema_list_databases() -> Result<String> {
-    let conn = orca_utils::db::open_default()?;
-    let dbs = orca_utils::db::list_schema_databases(&conn)?;
+    let conn = db::open_default()?;
+    let dbs = db::list_schema_databases(&conn)?;
     if dbs.is_empty() {
         return Ok("No schema databases registered. Use `orca schema add` or orca_schema_add to register one.".to_string());
     }
@@ -400,7 +425,7 @@ pub fn schema_add_database(args: &Value) -> Result<String> {
     let database = args["database"].as_str().ok_or_else(|| anyhow::anyhow!("database required"))?;
     let user = args["user"].as_str().ok_or_else(|| anyhow::anyhow!("user required"))?;
     let password = args["password"].as_str().ok_or_else(|| anyhow::anyhow!("password required"))?;
-    let row = orca_utils::db::SchemaDbRow {
+    let row = db::SchemaDbRow {
         name: name.to_string(),
         driver: args["driver"].as_str().unwrap_or("mysql").to_string(),
         host: args["host"].as_str().map(|s| s.to_string()),
@@ -412,15 +437,15 @@ pub fn schema_add_database(args: &Value) -> Result<String> {
         domains_file: args["domainsFile"].as_str().map(|s| s.to_string()),
         enabled: true,
     };
-    let conn = orca_utils::db::open_default()?;
-    orca_utils::db::upsert_schema_database(&conn, &row)?;
+    let conn = db::open_default()?;
+    db::upsert_schema_database(&conn, &row)?;
     Ok(format!("Registered schema database '{name}' in orca.db."))
 }
 
 pub fn schema_remove_database(args: &Value) -> Result<String> {
     let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name required"))?;
-    let conn = orca_utils::db::open_default()?;
-    if orca_utils::db::remove_schema_database(&conn, name)? {
+    let conn = db::open_default()?;
+    if db::remove_schema_database(&conn, name)? {
         Ok(format!("Removed schema database '{name}' from orca.db."))
     } else {
         Ok(format!("Database '{name}' not found in orca.db."))
@@ -428,8 +453,8 @@ pub fn schema_remove_database(args: &Value) -> Result<String> {
 }
 
 pub fn docker_list_runtimes() -> Result<String> {
-    let conn = orca_utils::db::open_default()?;
-    let rts = orca_utils::db::list_docker_runtimes(&conn)?;
+    let conn = db::open_default()?;
+    let rts = db::list_docker_runtimes(&conn)?;
     if rts.is_empty() {
         return Ok("No Docker runtimes registered. Use `orca docker add` or orca_docker_add to register one.".to_string());
     }
@@ -452,22 +477,22 @@ pub fn docker_add_runtime(args: &Value) -> Result<String> {
     if socket_path.is_none() && host.is_none() && url.is_none() {
         anyhow::bail!("provide socketPath, host, or url");
     }
-    let row = orca_utils::db::DockerRuntimeRow {
+    let row = db::DockerRuntimeRow {
         name: name.to_string(),
         socket_path,
         host,
         url,
         enabled: true,
     };
-    let conn = orca_utils::db::open_default()?;
-    orca_utils::db::upsert_docker_runtime(&conn, &row)?;
+    let conn = db::open_default()?;
+    db::upsert_docker_runtime(&conn, &row)?;
     Ok(format!("Registered Docker runtime '{name}' in orca.db."))
 }
 
 pub fn docker_remove_runtime(args: &Value) -> Result<String> {
     let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name required"))?;
-    let conn = orca_utils::db::open_default()?;
-    if orca_utils::db::remove_docker_runtime(&conn, name)? {
+    let conn = db::open_default()?;
+    if db::remove_docker_runtime(&conn, name)? {
         Ok(format!("Removed Docker runtime '{name}' from orca.db."))
     } else {
         Ok(format!("Runtime '{name}' not found in orca.db."))
@@ -476,8 +501,8 @@ pub fn docker_remove_runtime(args: &Value) -> Result<String> {
 
 pub fn plugin_list(args: &Value) -> Result<String> {
     let workspace = args["workspace"].as_str();
-    let conn = orca_utils::db::open_default()?;
-    let plugins = orca_utils::db::list_plugins(&conn)?;
+    let conn = db::open_default()?;
+    let plugins = db::list_plugins(&conn)?;
     let filtered: Vec<_> = plugins.iter()
         .filter(|p| workspace.map_or(true, |w| p.tier == w))
         .collect();
@@ -495,8 +520,8 @@ pub fn plugin_list(args: &Value) -> Result<String> {
 
 pub fn plugin_creds_list(args: &Value) -> Result<String> {
     let plugin = args["plugin"].as_str().ok_or_else(|| anyhow::anyhow!("plugin required"))?;
-    let conn = orca_utils::db::open_default()?;
-    let creds = orca_utils::db::list_plugin_credentials(&conn, plugin)?;
+    let conn = db::open_default()?;
+    let creds = db::list_plugin_credentials(&conn, plugin)?;
     if creds.is_empty() {
         return Ok(format!("No credentials stored for plugin '{plugin}'."));
     }
@@ -512,16 +537,16 @@ pub fn plugin_creds_set(args: &Value) -> Result<String> {
     let plugin = args["plugin"].as_str().ok_or_else(|| anyhow::anyhow!("plugin required"))?;
     let key = args["key"].as_str().ok_or_else(|| anyhow::anyhow!("key required"))?;
     let value = args["value"].as_str().ok_or_else(|| anyhow::anyhow!("value required"))?;
-    let conn = orca_utils::db::open_default()?;
-    orca_utils::db::set_plugin_credential(&conn, plugin, key, value)?;
+    let conn = db::open_default()?;
+    db::set_plugin_credential(&conn, plugin, key, value)?;
     Ok(format!("Stored credential '{key}' for plugin '{plugin}'."))
 }
 
 pub fn plugin_creds_remove(args: &Value) -> Result<String> {
     let plugin = args["plugin"].as_str().ok_or_else(|| anyhow::anyhow!("plugin required"))?;
     let key = args["key"].as_str().ok_or_else(|| anyhow::anyhow!("key required"))?;
-    let conn = orca_utils::db::open_default()?;
-    if orca_utils::db::delete_plugin_credential(&conn, plugin, key)? {
+    let conn = db::open_default()?;
+    if db::delete_plugin_credential(&conn, plugin, key)? {
         Ok(format!("Removed credential '{key}' from plugin '{plugin}'."))
     } else {
         Ok(format!("Credential '{key}' not found for plugin '{plugin}'."))
@@ -552,8 +577,8 @@ pub fn plugin_remove(args: &Value) -> Result<String> {
 
 pub fn plugin_enable(args: &Value) -> Result<String> {
     let id = args["id"].as_str().ok_or_else(|| anyhow::anyhow!("id required"))?;
-    let conn = orca_utils::db::open_default()?;
-    if orca_utils::db::set_plugin_enabled(&conn, id, true)? {
+    let conn = db::open_default()?;
+    if db::set_plugin_enabled(&conn, id, true)? {
         Ok(format!("Plugin '{id}' enabled."))
     } else {
         Ok(format!("Plugin '{id}' not found."))
@@ -562,8 +587,8 @@ pub fn plugin_enable(args: &Value) -> Result<String> {
 
 pub fn plugin_disable(args: &Value) -> Result<String> {
     let id = args["id"].as_str().ok_or_else(|| anyhow::anyhow!("id required"))?;
-    let conn = orca_utils::db::open_default()?;
-    if orca_utils::db::set_plugin_enabled(&conn, id, false)? {
+    let conn = db::open_default()?;
+    if db::set_plugin_enabled(&conn, id, false)? {
         Ok(format!("Plugin '{id}' disabled."))
     } else {
         Ok(format!("Plugin '{id}' not found."))
@@ -573,8 +598,8 @@ pub fn plugin_disable(args: &Value) -> Result<String> {
 // ── Doc root registry ─────────────────────────────────────────────────────────
 
 pub fn doc_list_roots() -> Result<String> {
-    let conn = orca_utils::db::open_default()?;
-    let roots = orca_utils::db::list_doc_roots(&conn)?;
+    let conn = db::open_default()?;
+    let roots = db::list_doc_roots(&conn)?;
     if roots.is_empty() {
         return Ok("No doc roots registered. Use add_doc_root to add one.".to_string());
     }
@@ -590,21 +615,21 @@ pub fn doc_add_root(args: &Value) -> Result<String> {
     let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name required"))?;
     let path = args["path"].as_str().ok_or_else(|| anyhow::anyhow!("path required"))?;
     let description = args["description"].as_str().map(|s| s.to_string());
-    let row = orca_utils::db::DocRootRow {
+    let row = db::DocRootRow {
         name: name.to_string(),
         path: path.to_string(),
         description,
         enabled: true,
     };
-    let conn = orca_utils::db::open_default()?;
-    orca_utils::db::upsert_doc_root(&conn, &row)?;
+    let conn = db::open_default()?;
+    db::upsert_doc_root(&conn, &row)?;
     Ok(format!("Registered doc root '{name}' → {path}"))
 }
 
 pub fn doc_remove_root(args: &Value) -> Result<String> {
     let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name required"))?;
-    let conn = orca_utils::db::open_default()?;
-    if orca_utils::db::remove_doc_root(&conn, name)? {
+    let conn = db::open_default()?;
+    if db::remove_doc_root(&conn, name)? {
         Ok(format!("Removed doc root '{name}'."))
     } else {
         Ok(format!("Doc root '{name}' not found."))
@@ -614,8 +639,8 @@ pub fn doc_remove_root(args: &Value) -> Result<String> {
 // ── Doc ignore patterns ───────────────────────────────────────────────────────
 
 pub fn doc_list_ignore_patterns() -> Result<String> {
-    let conn = orca_utils::db::open_default()?;
-    let patterns = orca_utils::db::list_doc_ignore_patterns(&conn)?;
+    let conn = db::open_default()?;
+    let patterns = db::list_doc_ignore_patterns(&conn)?;
     if patterns.is_empty() {
         return Ok("No ignore patterns registered.".to_string());
     }
@@ -628,8 +653,8 @@ pub fn doc_list_ignore_patterns() -> Result<String> {
 
 pub fn doc_add_ignore_pattern(args: &Value) -> Result<String> {
     let pattern = args["pattern"].as_str().ok_or_else(|| anyhow::anyhow!("pattern required"))?;
-    let conn = orca_utils::db::open_default()?;
-    if orca_utils::db::add_doc_ignore_pattern(&conn, pattern)? {
+    let conn = db::open_default()?;
+    if db::add_doc_ignore_pattern(&conn, pattern)? {
         Ok(format!("Added ignore pattern '{pattern}'."))
     } else {
         Ok(format!("Pattern '{pattern}' already exists."))
@@ -638,10 +663,113 @@ pub fn doc_add_ignore_pattern(args: &Value) -> Result<String> {
 
 pub fn doc_remove_ignore_pattern(args: &Value) -> Result<String> {
     let pattern = args["pattern"].as_str().ok_or_else(|| anyhow::anyhow!("pattern required"))?;
-    let conn = orca_utils::db::open_default()?;
-    if orca_utils::db::remove_doc_ignore_pattern(&conn, pattern)? {
+    let conn = db::open_default()?;
+    if db::remove_doc_ignore_pattern(&conn, pattern)? {
         Ok(format!("Removed ignore pattern '{pattern}'."))
     } else {
         Ok(format!("Pattern '{pattern}' not found."))
+    }
+}
+
+// ── Agent backend configuration ───────────────────────────────────────────────
+
+pub fn agent_backend_status() -> Result<String> {
+    let mode = agent_backend::current_mode()?;
+    let use_server = agent_backend::use_server_anthropic()?;
+    let overrides = agent_backend::list_overrides()?;
+    let conn = db::open_default()?;
+    let key_present = db::secret_get(&conn, "anthropic_api_key")?.is_some();
+
+    let mut out = String::new();
+    out.push_str(&format!("mode: {}\n", mode.as_str()));
+    out.push_str(&format!("use_server_anthropic: {use_server}\n"));
+    out.push_str(&format!("api_key_in_db: {key_present}\n"));
+    if overrides.is_empty() {
+        out.push_str("overrides: (none)\n");
+    } else {
+        out.push_str("overrides:\n");
+        for (agent, backend) in overrides {
+            out.push_str(&format!("  @{agent} -> {backend}\n"));
+        }
+    }
+    Ok(out)
+}
+
+pub fn agent_backend_set_mode(args: &Value) -> Result<String> {
+    let mode_str = args["mode"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("mode required"))?;
+    let mode = agent_backend::Mode::parse(mode_str)?;
+    agent_backend::set_mode(mode)?;
+    Ok(format!("agent_backend.mode = {}", mode.as_str()))
+}
+
+pub fn agent_backend_override(args: &Value) -> Result<String> {
+    let agent = args["agent"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("agent required"))?;
+    let backend = args["backend"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("backend required"))?;
+
+    if backend == "clear" {
+        let removed = agent_backend::clear_override(agent)?;
+        return Ok(if removed {
+            format!("cleared override for @{agent}")
+        } else {
+            format!("no override set for @{agent}")
+        });
+    }
+
+    // Validate the agent exists before writing.
+    if !orca_agents::list_embedded_agents()
+        .iter()
+        .any(|(name, _)| name == agent)
+    {
+        anyhow::bail!("unknown agent: {agent}");
+    }
+
+    agent_backend::set_override(agent, backend)?;
+    Ok(format!("@{agent} -> {backend}"))
+}
+
+pub fn agent_backend_use_server_anthropic(args: &Value) -> Result<String> {
+    let enabled = args["enabled"]
+        .as_bool()
+        .ok_or_else(|| anyhow::anyhow!("enabled (bool) required"))?;
+    agent_backend::set_use_server_anthropic(enabled)?;
+    Ok(format!("agent_backend.use_server_anthropic = {enabled}"))
+}
+
+pub fn agent_backend_set_api_key(args: &Value) -> Result<String> {
+    let key = args["key"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("key required"))?;
+    if key.trim().is_empty() {
+        anyhow::bail!("key must not be empty");
+    }
+    let conn = db::open_default()?;
+    db::secret_set(&conn, "anthropic_api_key", key)?;
+    Ok(format!(
+        "stored Anthropic API key in encrypted orca DB ({})",
+        auth::mask_key(key)
+    ))
+}
+
+pub fn agent_backend_clear_api_key() -> Result<String> {
+    let conn = db::open_default()?;
+    let removed = db::secret_delete(&conn, "anthropic_api_key")?;
+    Ok(if removed {
+        "removed Anthropic API key from orca DB".to_string()
+    } else {
+        "no Anthropic API key was stored".to_string()
+    })
+}
+
+pub fn agent_backend_api_key_status() -> Result<String> {
+    let conn = db::open_default()?;
+    match db::secret_get(&conn, "anthropic_api_key")? {
+        Some(k) => Ok(format!("present: {}", auth::mask_key(&k))),
+        None => Ok("absent".to_string()),
     }
 }

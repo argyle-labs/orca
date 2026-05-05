@@ -1,6 +1,6 @@
 use anyhow::Result;
 use orca_utils::config::Config;
-use orca_utils::log;
+use log;
 use clap::Subcommand;
 use colored::Colorize;
 

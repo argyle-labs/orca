@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use orca_utils::db::{self, McpServerRow};
+use db::{self, McpServerRow};
 use clap::Subcommand;
 use std::collections::HashMap;
 

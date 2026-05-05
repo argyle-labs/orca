@@ -1,8 +1,10 @@
 use anyhow::Result;
-use orca_utils::auth;
+use colored::Colorize;
 use orca_utils::config::Config;
 use orca_utils::consts::APP_NAME;
-use colored::Colorize;
+use db;
+
+const KEY_NAME: &str = "anthropic_api_key";
 
 pub fn cmd_login(config: &Config) -> Result<()> {
     if let Some(key) = &config.anthropic_api_key {
@@ -33,15 +35,16 @@ pub fn cmd_login(config: &Config) -> Result<()> {
     let key = rpassword_or_stdin()?;
     let key = key.trim().to_string();
 
-    if !key.starts_with("sk-ant-") {
+    if !auth::looks_like_anthropic_key(&key) {
         eprintln!(
             "{}",
             "key doesn't look right (expected sk-ant-…) — saving anyway".yellow()
         );
     }
 
-    auth::store_api_key(&key)?;
-    println!("{}", "API key stored in macOS Keychain.".green());
+    let conn = db::open_default()?;
+    db::secret_set(&conn, KEY_NAME, &key)?;
+    println!("{}", "API key stored in encrypted orca DB.".green());
     println!(
         "{}",
         "Use /escalate or /model claude-* in sessions.".dimmed()
@@ -50,8 +53,13 @@ pub fn cmd_login(config: &Config) -> Result<()> {
 }
 
 pub fn cmd_logout() -> Result<()> {
-    auth::remove_api_key();
-    println!("{}", "API key removed from keychain.".green());
+    let conn = db::open_default()?;
+    let removed = db::secret_delete(&conn, KEY_NAME)?;
+    if removed {
+        println!("{}", "API key removed from orca DB.".green());
+    } else {
+        println!("{}", "No API key was stored.".dimmed());
+    }
     Ok(())
 }
 
@@ -73,7 +81,6 @@ pub fn cmd_auth(config: &Config) -> Result<()> {
         }
     }
 
-    // LM Studio connectivity
     let lms_url = &config.lmstudio_url;
     let lms_status = std::process::Command::new("curl")
         .args(["-sf", &format!("{lms_url}/v1/models"), "-o", "/dev/null"])
@@ -94,11 +101,10 @@ pub fn cmd_auth(config: &Config) -> Result<()> {
 }
 
 pub fn rpassword_or_stdin() -> Result<String> {
-    // Try to read without echo using stty
     let _ = std::process::Command::new("stty").arg("-echo").status();
     let mut input = String::new();
     std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut input)?;
     let _ = std::process::Command::new("stty").arg("echo").status();
-    println!(); // newline after hidden input
+    println!();
     Ok(input)
 }

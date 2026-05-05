@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use orca_utils::tools::fs::expand_tilde;
+use orca_fs::fs::expand_tilde;
 
 use axum::{
     http::StatusCode,
@@ -28,8 +28,8 @@ struct DbConfig {
     domains_file: Option<String>,
 }
 
-impl From<orca_utils::db::SchemaDbRow> for DbConfig {
-    fn from(r: orca_utils::db::SchemaDbRow) -> Self {
+impl From<db::SchemaDbRow> for DbConfig {
+    fn from(r: db::SchemaDbRow) -> Self {
         let default_port = if r.driver == "postgres" { 5432 } else { 3306 };
         DbConfig {
             name: r.name,
@@ -75,12 +75,12 @@ struct TomlOrcaConfig {
 /// Load schema DB configs from orca.db. If the table is empty, attempt a
 /// one-shot migration from orca.toml (idempotent: INSERT OR IGNORE).
 fn load_db_configs() -> Vec<DbConfig> {
-    let Ok(conn) = orca_utils::db::open_default() else {
+    let Ok(conn) = db::open_default() else {
         return vec![];
     };
 
     // Try DB first
-    if let Ok(rows) = orca_utils::db::list_schema_databases(&conn) {
+    if let Ok(rows) = db::list_schema_databases(&conn) {
         if !rows.is_empty() {
             return rows.into_iter().map(DbConfig::from).collect();
         }
@@ -96,7 +96,7 @@ fn load_db_configs() -> Vec<DbConfig> {
     {
         let dbs = cfg.schema.map(|s| s.databases).unwrap_or_default();
         for d in &dbs {
-            let row = orca_utils::db::SchemaDbRow {
+            let row = db::SchemaDbRow {
                 name: d.name.clone(),
                 driver: "mysql".to_string(),
                 host: if d.host.is_empty() { None } else { Some(d.host.clone()) },
@@ -108,7 +108,7 @@ fn load_db_configs() -> Vec<DbConfig> {
                 domains_file: d.domains_file.clone(),
                 enabled: true,
             };
-            let _ = orca_utils::db::upsert_schema_database(&conn, &row);
+            let _ = db::upsert_schema_database(&conn, &row);
         }
         if !dbs.is_empty() {
             return dbs

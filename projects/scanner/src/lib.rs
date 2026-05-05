@@ -9,13 +9,14 @@ pub mod ci4_generator;
 pub mod ci2_generator;
 pub mod nextjs_generator;
 
-pub fn openapi_dir() -> PathBuf {
-    // Override with ORCA_OPENAPI_DIR for non-standard installs.
-    if let Ok(custom) = std::env::var("ORCA_OPENAPI_DIR") {
+/// Directory holding all tracked external API specs — both OpenAPI (.json)
+/// and GraphQL (.graphql) files live here.
+pub fn specs_dir() -> PathBuf {
+    if let Ok(custom) = std::env::var("ORCA_SPECS_DIR") {
         return PathBuf::from(custom);
     }
     let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".orca/openapi/specs")
+    PathBuf::from(home).join(".orca/specs")
 }
 
 /// Registry entry for a tracked external API spec.
@@ -39,7 +40,7 @@ pub struct SpecRegistry {
 
 impl SpecRegistry {
     pub fn load() -> Result<Self> {
-        let path = openapi_dir().join("registry.json");
+        let path = specs_dir().join("registry.json");
         let entries = if path.exists() {
             let raw = std::fs::read_to_string(&path)?;
             serde_json::from_str(&raw).unwrap_or_default()
@@ -50,7 +51,7 @@ impl SpecRegistry {
     }
 
     pub fn save(&self) -> Result<()> {
-        let dir = openapi_dir();
+        let dir = specs_dir();
         std::fs::create_dir_all(&dir)?;
         let raw = serde_json::to_string_pretty(&self.entries)?;
         std::fs::write(dir.join("registry.json"), raw)?;
@@ -67,7 +68,7 @@ impl SpecRegistry {
         }
         self.save()?;
 
-        let dir = openapi_dir();
+        let dir = specs_dir();
         let full_path = dir.join(format!("{}.json", entry.repo));
         let public_path = dir.join(format!("{}.public.json", entry.repo));
 

@@ -4,20 +4,18 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+db = { package = "orca-db", path = "../db" }
+
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["rt"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
-colored = "2"
-tracing = "0.1"
-glob = "0.3"
 dirs = "5"
 toml = "0.8"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
 rusqlite = { version = "0.32", features = ["bundled-sqlcipher"] }
-rand = "0.8"
 
 [dev-dependencies]
 tempfile = "3"

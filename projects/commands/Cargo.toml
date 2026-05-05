@@ -8,6 +8,10 @@ orca-utils   = { path = "../utils" }
 orca-agents  = { path = "../agents" }
 orca-scanner = { path = "../scanner", features = ["php-ast"] }
 orca-core    = { path = "../core" }
+auth         = { package = "orca-auth", path = "../auth" }
+db           = { package = "orca-db", path = "../db" }
+log          = { package = "orca-log", path = "../log" }
+orca_fs      = { package = "orca-fs", path = "../fs" }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

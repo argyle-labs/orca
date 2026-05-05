@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 fn active_docker_host() -> Option<String> {
-    let conn = orca_utils::db::open_default().ok()?;
-    orca_utils::db::active_docker_host(&conn)
+    let conn = db::open_default().ok()?;
+    db::active_docker_host(&conn)
 }
 
 /// Resolve a bare command name to an absolute path.
@@ -500,8 +500,8 @@ impl McpPool {
 
         // DB servers take precedence over ~/.claude.json
         if let Some(db_path) = &self.db_path {
-            if let Ok(conn) = orca_utils::db::open(db_path) {
-                if let Ok(rows) = orca_utils::db::list_mcp_servers(&conn) {
+            if let Ok(conn) = db::open(db_path) {
+                if let Ok(rows) = db::list_mcp_servers(&conn) {
                     for row in rows {
                         configs.insert(row.name.clone(), McpServerConfig {
                             command: row.command,
@@ -514,7 +514,7 @@ impl McpPool {
                 }
                 // Enabled plugins that declare an MCP server are auto-federated.
                 // Plugin entries take precedence over ~/.claude.json but not over explicit mcp_servers rows.
-                if let Ok(plugins) = orca_utils::db::list_plugins(&conn) {
+                if let Ok(plugins) = db::list_plugins(&conn) {
                     for p in plugins {
                         if !p.enabled { continue; }
                         // mcp_urls (priority-ordered list) override stdio command.
@@ -532,7 +532,7 @@ impl McpPool {
                         // receives them without requiring the caller to export them manually.
                         let mut env = p.mcp_env;
                         let mut token: Option<String> = None;
-                        if let Ok(creds) = orca_utils::db::list_plugin_credentials(&conn, &p.id) {
+                        if let Ok(creds) = db::list_plugin_credentials(&conn, &p.id) {
                             for c in creds {
                                 // If this credential matches token_env, use it as Bearer token.
                                 if p.mcp_token_env.as_deref() == Some(c.key.as_str()) {
@@ -646,8 +646,8 @@ impl McpPool {
         let plugin_meta: HashMap<String, PluginMeta> = self
             .db_path
             .as_ref()
-            .and_then(|p| orca_utils::db::open(p).ok())
-            .and_then(|conn| orca_utils::db::list_plugins(&conn).ok())
+            .and_then(|p| db::open(p).ok())
+            .and_then(|conn| db::list_plugins(&conn).ok())
             .unwrap_or_default()
             .into_iter()
             .filter(|p| p.enabled)

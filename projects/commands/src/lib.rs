@@ -6,7 +6,7 @@
 //!
 //! Modules:
 //! - `agents`   — list available agents
-//! - `auth`     — login/logout/auth (keychain read/write via orca_utils::auth)
+//! - `auth`     — login/logout/auth (DB-backed secret store via db)
 //! - `codegen`  — `orca gen`: fetch OpenAPI spec, run openapi-typescript codegen
 //! - `daemon`   — daemon lifecycle: status/stop/park/reclaim/install/uninstall
 //! - `doctor`   — validate agent files, symlinks, config, and tool availability

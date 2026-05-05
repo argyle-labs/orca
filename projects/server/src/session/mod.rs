@@ -10,8 +10,8 @@ use orca_core::backend::{
 use orca_core::tools::ToolRegistry;
 use orca_jobs::JobManager;
 use orca_utils::config::{Config, Model};
-use orca_utils::ledger::TokenLedger;
-use orca_utils::log::SessionLog;
+use ledger::TokenLedger;
+use log::SessionLog;
 use orca_utils::types::Message;
 use crate::context::ProjectContext;
 use crate::tui::{self, TuiAction, TuiApp};
@@ -49,10 +49,25 @@ impl Session {
         ctx: ProjectContext,
         output: OutputSink,
     ) -> Result<Self> {
+        Self::new_with_output_and_model(config, ctx, output, None).await
+    }
+
+    /// Like `new_with_output` but bypasses model auto-discovery when `forced_model`
+    /// is `Some` — the caller has already decided which backend serves this session
+    /// and any failure to honor it must surface, not fall back.
+    pub async fn new_with_output_and_model(
+        config: Config,
+        ctx: ProjectContext,
+        output: OutputSink,
+        forced_model: Option<Model>,
+    ) -> Result<Self> {
         let system_prompt = ctx.build_system_prompt(&config);
         let project = ctx.project.clone();
 
-        let model = util::resolve_model(&config).await?;
+        let model = match forced_model {
+            Some(m) => m,
+            None => util::resolve_model(&config).await?,
+        };
         let context_window = util::estimate_context_window(&model);
         let backend = build_backend(&config, &model)?;
 

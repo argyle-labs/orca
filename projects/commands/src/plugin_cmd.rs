@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use orca_utils::consts::APP_NAME;
-use orca_utils::db::{self, PluginRow};
-use orca_utils::tools::fs::expand_tilde;
+use db::{self, PluginRow};
+use orca_fs::fs::expand_tilde;
 use clap::Subcommand;
 use serde::Deserialize;
 use std::collections::HashMap;

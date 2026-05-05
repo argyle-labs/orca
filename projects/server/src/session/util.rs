@@ -1,11 +1,14 @@
 use orca_core::backend::LMStudioBackend;
 use orca_utils::config::Model;
 use orca_utils::types::truncate_preview;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use colored::Colorize;
 
-/// Resolve which model to use. Priority: explicit config > LM Studio auto-discover > Claude fallback.
-/// LM Studio is always attempted first — Claude is escalation only.
+/// Resolve which model to use. Priority: explicit config > LM Studio auto-discover.
+///
+/// Hard-fail: if no explicit model is configured and LM Studio is unreachable or has
+/// no chat models loaded, this returns an error. There is no Claude fallback —
+/// configuration that can't be honored must surface, not be papered over.
 pub async fn resolve_model(config: &orca_utils::config::Config) -> Result<Model> {
     match &config.default_model {
         Model::Claude(id) if !id.is_empty() => return Ok(Model::Claude(id.clone())),
@@ -16,18 +19,26 @@ pub async fn resolve_model(config: &orca_utils::config::Config) -> Result<Model>
     let lms = LMStudioBackend::new(&config.lmstudio_url, "");
     match lms.list_models().await {
         Ok(models) => {
-            let chat_models: Vec<&str> = models
+            let mut chat_models: Vec<&str> = models
                 .iter()
                 .map(|s| s.as_str())
                 .filter(|m| !m.contains("embed"))
                 .collect();
 
             if chat_models.is_empty() {
-                eprintln!(
-                    "warning: LM Studio is running but no chat models are loaded — falling back to Claude"
+                anyhow::bail!(
+                    "LM Studio is running at {} but no chat models are loaded. Load a model and retry.",
+                    config.lmstudio_url
                 );
-                return claude_fallback(config);
             }
+
+            // Auto-pick priority. Lower rank wins. Qwen ranks first per
+            // explicit user preference. Other families follow alphabetically.
+            // Reasoning models (deepseek-r1) are still viable — the LMStudio
+            // backend folds `reasoning_content` into the response when
+            // `content` is empty.
+            chat_models.sort_by_key(|m| auto_pick_rank(m));
+
             if chat_models.len() == 1 {
                 return Ok(Model::LMStudio(chat_models[0].to_string()));
             }
@@ -38,7 +49,7 @@ pub async fn resolve_model(config: &orca_utils::config::Config) -> Result<Model>
             if !std::io::stdin().is_terminal() {
                 let first = chat_models[0].to_string();
                 eprintln!(
-                    "warning: multiple LM Studio models available, auto-selecting first: {first}"
+                    "warning: multiple LM Studio models available, auto-selecting: {first}"
                 );
                 return Ok(Model::LMStudio(first));
             }
@@ -58,22 +69,36 @@ pub async fn resolve_model(config: &orca_utils::config::Config) -> Result<Model>
             Ok(Model::LMStudio(selected.to_string()))
         }
         Err(e) => {
-            eprintln!(
-                "warning: LM Studio not reachable at {} ({e}) — falling back to Claude",
+            anyhow::bail!(
+                "LM Studio not reachable at {} ({e}). Start it (with a chat model loaded) or set an explicit model in config.",
                 config.lmstudio_url
             );
-            claude_fallback(config)
         }
     }
 }
 
-/// Cheapest Claude model as fallback when LM Studio is unavailable.
-fn claude_fallback(config: &orca_utils::config::Config) -> Result<Model> {
-    config
-        .anthropic_api_key
-        .as_ref()
-        .context("LM Studio unreachable and no Anthropic API key — run `orca login` or start LM Studio")?;
-    Ok(Model::Claude("claude-haiku-4-5-20251001".to_string()))
+/// Auto-pick rank for LM Studio chat models when more than one is loaded and
+/// orca is running non-interactively. Lower wins.
+///
+/// Qwen first (the user's default tier — strong tool-calling, low thinking
+/// overhead). Reasoning-distill models (deepseek-r1-distill-qwen, etc.) sink
+/// to the bottom because they share "qwen" in their id but behave like
+/// reasoning models, not chat-tuned qwen.
+fn auto_pick_rank(id: &str) -> u8 {
+    let id_lower = id.to_ascii_lowercase();
+    let is_reasoning = id_lower.contains("deepseek-r1")
+        || id_lower.contains("/r1-")
+        || id_lower.contains("o1-")
+        || id_lower.contains("-thinking")
+        || id_lower.contains("reasoning");
+    let is_qwen = id_lower.starts_with("qwen/") || id_lower.contains("/qwen");
+
+    match (is_qwen, is_reasoning) {
+        (true,  false) => 0,    // chat-tuned qwen — preferred
+        (false, false) => 10,   // other chat models
+        (true,  true)  => 50,   // qwen-distilled reasoning model
+        (false, true)  => 60,   // pure reasoning model
+    }
 }
 
 pub fn estimate_context_window(model: &Model) -> usize {

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use orca_utils::db;
+use db;
 use clap::Subcommand;
 use rusqlite::Connection;
 

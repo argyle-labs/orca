@@ -1,7 +1,7 @@
 pub mod bash;
 
 use crate::backend::{OutputSink, stdout_sink};
-use orca_utils::tools::{fs, search};
+use orca_fs::{fs, search};
 use orca_utils::types::{ToolDef, ToolResult};
 use anyhow::Result;
 use bash::BashPermissions;

@@ -119,6 +119,11 @@ async fn parse_lmstudio_stream(
     let mut buffer = String::new();
     let mut result = BackendResponse::default();
 
+    // Reasoning models (deepseek-r1, qwen3-thinking, etc.) emit to
+    // `reasoning_content`. We accumulate it separately so it can serve as the
+    // response body when the model never produces non-empty `content`.
+    let mut reasoning_accum = String::new();
+
     // Accumulate tool call deltas: index → (id, name, arguments)
     let mut tool_accum: HashMap<usize, (String, String, String)> = HashMap::new();
 
@@ -178,11 +183,13 @@ async fn parse_lmstudio_stream(
             let finish_reason = choice["finish_reason"].as_str();
 
             // Thinking/reasoning content (Qwen3, o1-style models) — stream dimmed
+            // and accumulate so we can fall back to it if `content` is empty.
             if let Some(thinking) = delta["reasoning_content"]
                 .as_str()
                 .filter(|s| !s.is_empty())
             {
                 sink_write(output, &format!("{}", thinking.dimmed()));
+                reasoning_accum.push_str(thinking);
             }
 
             // Text content (the actual response)
@@ -224,6 +231,14 @@ async fn parse_lmstudio_stream(
                 _ => {}
             }
         }
+    }
+
+    // Reasoning-only models (deepseek-r1 and similar) emit everything to
+    // `reasoning_content` and leave `content` empty when the token budget is
+    // consumed by thinking. Fall back to the reasoning text so the caller
+    // gets a usable response instead of an "empty" error.
+    if result.text.is_empty() && !reasoning_accum.is_empty() {
+        result.text = reasoning_accum;
     }
 
     // If the stream ended without producing anything (and wasn't cancelled), surface a clear error

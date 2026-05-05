@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use utoipa::ToSchema;
 
-use orca_utils::tools::fs::expand_tilde;
+use orca_fs::fs::expand_tilde;
 
 #[derive(Deserialize, ToSchema)]
 pub struct FsBrowseQuery {
@@ -114,11 +114,11 @@ pub async fn fs_browse_handler(
         None => return err(StatusCode::INTERNAL_SERVER_ERROR, "cannot resolve home directory"),
     };
 
-    let conn = match orca_utils::db::open_default() {
+    let conn = match db::open_default() {
         Ok(c) => c,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
-    let unrestricted_enabled = orca_utils::db::fs_allow_unrestricted(&conn);
+    let unrestricted_enabled = db::fs_allow_unrestricted(&conn);
 
     let raw = params.path.as_deref().unwrap_or("~/");
     let expanded = expand_tilde(raw);

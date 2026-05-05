@@ -8,6 +8,7 @@
 //! - `session`  — interactive REPL + TUI, chat loop, tool execution, job management
 //! - `tui`      — split-pane terminal UI (crossterm/ratatui), keybindings, layout
 
+pub mod agent_backend;
 pub mod context;
 pub mod markdown;
 pub mod mcp;

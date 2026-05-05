@@ -1,5 +1,5 @@
 use anyhow::Result;
-use orca_utils::db::{self, SchemaDbRow};
+use db::{self, SchemaDbRow};
 use clap::Subcommand;
 
 #[derive(Subcommand, Debug)]
