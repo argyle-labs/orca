@@ -47,6 +47,11 @@ toml = "0.8"
 # Async traits
 async-trait = "0.1"
 
+# Schema derivation for OrcaTool impls
+schemars = { version = "0.8", features = ["derive"] }
+tool    = { package = "orca-tool",    path = "../tool" }
+session = { package = "orca-session", path = "../session" }
+
 # Error handling
 anyhow = "1"
 

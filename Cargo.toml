@@ -13,7 +13,9 @@ members = [
     "projects/jobs",
     "projects/scanner",
     "projects/server",
+    "projects/session",
     "projects/state",
+    "projects/tool",
     "projects/types",
     "projects/utils",
 ]
