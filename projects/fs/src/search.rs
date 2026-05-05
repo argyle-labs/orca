@@ -114,3 +114,108 @@ fn search_dir(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn write(dir: &std::path::Path, name: &str, content: &str) -> std::path::PathBuf {
+        let p = dir.join(name);
+        fs::write(&p, content).unwrap();
+        p
+    }
+
+    // ── glob_files ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn glob_files_finds_matching_files() {
+        let dir = tempdir().unwrap();
+        write(dir.path(), "foo.txt", "hello");
+        write(dir.path(), "bar.txt", "world");
+        write(dir.path(), "baz.rs", "rust");
+
+        let result = glob_files("*.txt", Some(dir.path().to_str().unwrap())).unwrap();
+        assert!(result.contains("foo.txt"), "got: {result}");
+        assert!(result.contains("bar.txt"), "got: {result}");
+        assert!(!result.contains("baz.rs"), "should not match .rs: {result}");
+    }
+
+    #[test]
+    fn glob_files_no_match_returns_message() {
+        let dir = tempdir().unwrap();
+        let result = glob_files("*.nonexistent", Some(dir.path().to_str().unwrap())).unwrap();
+        assert!(result.contains("no files matched"), "got: {result}");
+    }
+
+    #[test]
+    fn glob_files_invalid_pattern_returns_err() {
+        let result = glob_files("[invalid", None);
+        assert!(result.is_err(), "invalid glob should error");
+    }
+
+    #[test]
+    fn glob_files_without_base_uses_absolute_pattern() {
+        let dir = tempdir().unwrap();
+        let path = write(dir.path(), "myfile.txt", "hi");
+        let pattern = format!("{}/*.txt", dir.path().to_str().unwrap());
+        let result = glob_files(&pattern, None).unwrap();
+        assert!(result.contains(path.file_name().unwrap().to_str().unwrap()), "got: {result}");
+    }
+
+    // ── grep_content ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn grep_content_finds_match_in_file() {
+        let dir = tempdir().unwrap();
+        let p = write(dir.path(), "a.txt", "hello world\nanother line\n");
+        let result = grep_content("hello", p.to_str().unwrap(), false).unwrap();
+        assert!(result.contains("hello world"), "got: {result}");
+    }
+
+    #[test]
+    fn grep_content_no_match_returns_message() {
+        let dir = tempdir().unwrap();
+        let p = write(dir.path(), "a.txt", "nothing interesting");
+        let result = grep_content("ZZZMISSING", p.to_str().unwrap(), false).unwrap();
+        assert!(result.contains("no matches"), "got: {result}");
+    }
+
+    #[test]
+    fn grep_content_case_insensitive() {
+        let dir = tempdir().unwrap();
+        let p = write(dir.path(), "a.txt", "Hello World");
+        let result = grep_content("hello", p.to_str().unwrap(), true).unwrap();
+        assert!(result.contains("Hello World"), "got: {result}");
+        // Case-sensitive should NOT match
+        let result2 = grep_content("hello", p.to_str().unwrap(), false).unwrap();
+        assert!(result2.contains("no matches"), "case-sensitive should miss: {result2}");
+    }
+
+    #[test]
+    fn grep_content_missing_path_returns_err() {
+        let result = grep_content("pattern", "/tmp/__no_such_file_xyz__.txt", false);
+        assert!(result.is_err(), "missing path should error");
+    }
+
+    #[test]
+    fn grep_content_searches_dir_recursively() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("deep.txt"), "needle in haystack").unwrap();
+        write(dir.path(), "top.txt", "nothing here");
+
+        let result = grep_content("needle", dir.path().to_str().unwrap(), false).unwrap();
+        assert!(result.contains("needle"), "should find match in subdir: {result}");
+    }
+
+    #[test]
+    fn grep_content_includes_line_numbers() {
+        let dir = tempdir().unwrap();
+        let p = write(dir.path(), "a.txt", "line one\nfind me\nline three\n");
+        let result = grep_content("find me", p.to_str().unwrap(), false).unwrap();
+        assert!(result.contains(":2:"), "should include line number: {result}");
+    }
+}

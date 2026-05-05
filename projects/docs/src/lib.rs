@@ -106,3 +106,107 @@ pub fn tree() -> Value {
 pub fn file_count() -> usize {
     list().len()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── list ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn list_returns_nonempty_sorted_md_files() {
+        let files = list();
+        assert!(!files.is_empty(), "embedded docs should not be empty");
+        // All entries should end in .md
+        for f in &files {
+            assert!(f.ends_with(".md"), "unexpected non-.md entry: {f}");
+        }
+        // Should be sorted
+        let mut sorted = files.clone();
+        sorted.sort();
+        assert_eq!(files, sorted, "list() should return files in sorted order");
+    }
+
+    // ── file_count ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn file_count_matches_list_len() {
+        assert_eq!(file_count(), list().len());
+    }
+
+    // ── read ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn read_known_doc_returns_some() {
+        // Pick the first file from list() — guaranteed to exist.
+        let first = list().into_iter().next().expect("list should be nonempty");
+        let content = read(&first);
+        assert!(content.is_some(), "read({first}) should return Some");
+        assert!(!content.unwrap().is_empty());
+    }
+
+    #[test]
+    fn read_without_md_extension_also_works() {
+        let first = list().into_iter().next().expect("list should be nonempty");
+        let without_ext = first.trim_end_matches(".md");
+        let with_ext = read(&first);
+        let without = read(without_ext);
+        assert_eq!(with_ext, without, "read with and without .md should return same content");
+    }
+
+    #[test]
+    fn read_nonexistent_returns_none() {
+        let result = read("does-not-exist-xyz");
+        assert!(result.is_none());
+    }
+
+    // ── search ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn search_finds_matches_in_docs() {
+        // "orca" appears in virtually every doc — should always match something.
+        let results = search("orca");
+        assert!(!results.is_empty(), "search for 'orca' should find results");
+        // Each result has a filename and at least one matching line snippet.
+        for (name, lines) in &results {
+            assert!(name.ends_with(".md"), "result name should be .md: {name}");
+            assert!(!lines.is_empty(), "result should have matching lines: {name}");
+        }
+    }
+
+    #[test]
+    fn search_is_case_insensitive() {
+        let lower = search("orca");
+        let upper = search("ORCA");
+        // Both should find at least one result
+        assert!(!lower.is_empty());
+        assert!(!upper.is_empty());
+    }
+
+    #[test]
+    fn search_no_match_returns_empty() {
+        let results = search("zzz_no_such_term_in_any_doc_xyz_999");
+        assert!(results.is_empty(), "search for nonexistent term should return empty");
+    }
+
+    // ── tree ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn tree_returns_array() {
+        let t = tree();
+        assert!(t.is_array(), "tree() should return a JSON array");
+        let arr = t.as_array().unwrap();
+        assert!(!arr.is_empty(), "tree array should not be empty");
+    }
+
+    #[test]
+    fn tree_nodes_have_required_fields() {
+        let t = tree();
+        for node in t.as_array().unwrap() {
+            assert!(node["name"].is_string(), "node missing name: {node}");
+            assert!(node["type"].is_string(), "node missing type: {node}");
+            let ty = node["type"].as_str().unwrap();
+            assert!(ty == "file" || ty == "dir", "unknown type: {ty}");
+        }
+    }
+}
