@@ -2,9 +2,16 @@
 ///
 /// Usage: orca mcp-serve
 /// Register: claude mcp add orca-local -- orca mcp-serve
+mod agent_backend_tools;
+mod agent_tools;
 mod context7;
 mod docs;
+mod docs_tools;
 mod handlers;
+mod infra_tools;
+mod mgmt_tools;
+mod plugin_tools;
+mod spec_tools;
 mod specs;
 mod tools;
 
@@ -12,28 +19,24 @@ use anyhow::Result;
 use config::Config;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tool::{ToolCtx, ToolRegistry};
 
-use crate::serve::api::llm as local_llm;
-use docs::{get_tree, list_commands, list_roots, read_doc, search_docs};
-use handlers::{
-    agent_backend_api_key_status, agent_backend_clear_api_key, agent_backend_override,
-    agent_backend_set_api_key, agent_backend_set_mode, agent_backend_status,
-    agent_backend_use_server_anthropic,
-    agents, docker_add_runtime, docker_list_runtimes, docker_remove_runtime, get_agent, get_config,
-    get_context, list_services, mcp_add_server, mcp_list_servers, mcp_list_mappings,
-    mcp_map_tool, mcp_remove_server, mcp_sync_tools, mcp_unmap_tool,
-    plugin_add, plugin_disable, plugin_enable, plugin_remove,
-    plugin_creds_list, plugin_creds_remove, plugin_creds_set, plugin_creds_sync, plugin_list,
-    run, run_tests, schema_add_database, schema_list_databases, schema_remove_database,
-    search_logs, service_logs,
-    doc_list_roots, doc_add_root, doc_remove_root,
-    doc_list_ignore_patterns, doc_add_ignore_pattern, doc_remove_ignore_pattern,
-};
-use specs::{
-    get_graphql_info, get_rebuy_graphql_schema, get_rebuy_spec, get_rebuy_spec_public,
-    list_rebuy_specs, spec_refresh, spec_register, spec_unregister,
-};
+use handlers::run;
+
+fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
+    let ctx = ToolCtx::new(config);
+    let mut reg = ToolRegistry::new();
+    agent_backend_tools::register(&mut reg);
+    agent_tools::register(&mut reg);
+    docs_tools::register(&mut reg);
+    infra_tools::register(&mut reg);
+    mgmt_tools::register(&mut reg);
+    plugin_tools::register(&mut reg);
+    spec_tools::register(&mut reg);
+    (reg, ctx)
+}
 
 /// Servers whose tools orca already exposes natively or that must not be proxied back.
 /// - orca-local: orca itself — proxying would spawn a recursive child
@@ -41,6 +44,10 @@ const FEDERATION_SKIP: &[&str] = &["orca-local"];
 
 pub async fn serve(config: &Config) -> Result<()> {
     let pool = crate::serve::mcp_client::McpPool::new_with_db(config.db_path.clone());
+
+    let config_arc = Arc::new(config.clone());
+    let (orca_registry, tool_ctx) = build_tool_registry(config_arc);
+
     // Maps exposed tool name → (server_name, internal_tool_name).
     // For universal-mapped tools: exposed name differs from internal name.
     // For pass-through tools: both names are the same.
@@ -81,17 +88,33 @@ pub async fn serve(config: &Config) -> Result<()> {
             ),
             "ping" => reply(id, json!({})),
             "tools/list" => {
-                let orca_tools = tools::tool_defs();
-                let orca_names: std::collections::HashSet<&str> = orca_tools
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|t| t["name"].as_str()).collect())
-                    .unwrap_or_default();
+                // Registry-derived tools replace the corresponding static entries in tools.rs.
+                // During migration: registry names shadow the static list.
+                let registry_defs = orca_registry.mcp_definitions();
+                let registry_names: std::collections::HashSet<String> = registry_defs
+                    .iter()
+                    .filter_map(|t| t["name"].as_str().map(str::to_string))
+                    .collect();
 
-                // Discover tools from federated servers, skipping orca-local and context7
+                let static_tools = tools::tool_defs();
+                let mut all_orca: Vec<Value> = registry_defs;
+                // Include static tools not yet migrated to the registry
+                if let Some(arr) = static_tools.as_array() {
+                    for t in arr {
+                        if t["name"].as_str().map_or(true, |n| !registry_names.contains(n as &str)) {
+                            all_orca.push(t.clone());
+                        }
+                    }
+                }
+
+                let orca_names: std::collections::HashSet<&str> = all_orca
+                    .iter()
+                    .filter_map(|t| t["name"].as_str())
+                    .collect();
+
+                // Discover tools from federated servers, skipping orca-local
                 let external = pool.all_tools_filtered(FEDERATION_SKIP).await;
 
-                // Rebuild registry: federated tools that don't conflict with orca's own.
-                // alias = internal tool name on the remote server (may differ for mapped tools).
                 tool_registry.clear();
                 for tool in &external {
                     let name = tool["name"].as_str().unwrap_or("");
@@ -102,9 +125,7 @@ pub async fn serve(config: &Config) -> Result<()> {
                     }
                 }
 
-                // Merge orca tools + federated tools (strip internal fields)
-                let mut all_tools: Vec<Value> =
-                    orca_tools.as_array().cloned().unwrap_or_default();
+                let mut all_tools = all_orca;
                 for mut tool in external {
                     let name = tool["name"].as_str().unwrap_or("").to_string();
                     if tool_registry.contains_key(&name) {
@@ -152,23 +173,30 @@ pub async fn serve(config: &Config) -> Result<()> {
                             }
                         }
                     }
+                } else if orca_registry.names().contains(&name) {
+                    // Route through OrcaTool registry
+                    let result = orca_registry.dispatch(name, args.clone(), &tool_ctx).await;
+                    match result {
+                        Ok(text) => reply(
+                            id,
+                            json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
+                        ),
+                        Err(e) => reply(
+                            id,
+                            json!({ "content": [{ "type": "text", "text": format!("Error: {e}") }], "isError": true }),
+                        ),
+                    }
                 } else {
-                    // Orca's own tools
+                    // Legacy dispatch for tools not yet migrated to OrcaTool
                     let result = dispatch(name, args, config).await;
                     match result {
                         Ok(text) => reply(
                             id,
-                            json!({
-                                "content": [{ "type": "text", "text": text }],
-                                "isError": false
-                            }),
+                            json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
                         ),
                         Err(e) => reply(
                             id,
-                            json!({
-                                "content": [{ "type": "text", "text": format!("Error: {e}") }],
-                                "isError": true
-                            }),
+                            json!({ "content": [{ "type": "text", "text": format!("Error: {e}") }], "isError": true }),
                         ),
                     }
                 }
@@ -185,86 +213,14 @@ pub async fn serve(config: &Config) -> Result<()> {
     Ok(())
 }
 
+// Legacy dispatch — only tools not yet converted to OrcaTool remain here.
+// TODO: convert run_agent, then delete this function entirely.
 async fn dispatch(name: &str, args: &Value, config: &Config) -> Result<String> {
     match name {
-        "list_agents"         => agents(),
-        "get_agent"           => get_agent(args, config),
-        "run_agent"           => run(args, config).await,
-        "search_logs"         => {
-            let raw = search_logs(args, config)?;
-            let query = args["query"].as_str().unwrap_or_default();
-            if let Some(llm) = local_llm::discover_local_llm().await {
-                if let Some(enhanced) = local_llm::present_text_results(&llm, query, &raw, 8000).await {
-                    return Ok(enhanced);
-                }
-            }
-            Ok(raw)
-        }
-        "get_config"          => get_config(args, config),
-        "get_context"         => get_context(args, config),
-        "list_roots"          => list_roots(config),
-        "get_tree"            => get_tree(args, config),
-        "read_doc"            => read_doc(args, config),
-        "search_docs"         => {
-            let raw = search_docs(args, config)?;
-            let query = args["query"].as_str().unwrap_or_default();
-            if let Some(llm) = local_llm::discover_local_llm().await {
-                if let Some(enhanced) = local_llm::present_text_results(&llm, query, &raw, 8000).await {
-                    return Ok(enhanced);
-                }
-            }
-            Ok(raw)
-        }
-        "list_commands"       => list_commands(config),
-        "list_services"       => list_services().await,
-        "get_service_logs"    => service_logs(args).await,
-        "run_tests"           => run_tests(args).await,
-        "list_rebuy_specs"    => list_rebuy_specs(),
-        "get_rebuy_spec"      => get_rebuy_spec(args),
-        "get_rebuy_spec_public" => get_rebuy_spec_public(args),
-        "get_rebuy_graphql_schema" => get_rebuy_graphql_schema(args),
-        "get_graphql_info"    => get_graphql_info(args),
-        "list_mcp_servers"    => mcp_list_servers(),
-        "add_mcp_server"      => mcp_add_server(args),
-        "remove_mcp_server"   => mcp_remove_server(args),
-        "map_tool"            => mcp_map_tool(args),
-        "unmap_tool"          => mcp_unmap_tool(args),
-        "sync_tools"          => mcp_sync_tools(args),
-        "list_tool_mappings"  => mcp_list_mappings(args),
-        "list_schemas"        => schema_list_databases(),
-        "add_schema"          => schema_add_database(args),
-        "remove_schema"       => schema_remove_database(args),
-        "list_docker_runtimes" => docker_list_runtimes(),
-        "add_docker_runtime"  => docker_add_runtime(args),
-        "remove_docker_runtime" => docker_remove_runtime(args),
-        "list_plugins"        => plugin_list(args),
-        "add_plugin"          => plugin_add(args),
-        "remove_plugin"       => plugin_remove(args),
-        "enable_plugin"       => plugin_enable(args),
-        "disable_plugin"      => plugin_disable(args),
-        "list_plugin_creds"   => plugin_creds_list(args),
-        "set_plugin_cred"     => plugin_creds_set(args),
-        "remove_plugin_cred"  => plugin_creds_remove(args),
-        "sync_plugin_creds"   => plugin_creds_sync(args),
-        "register_spec"       => spec_register(args).await,
-        "refresh_spec"        => spec_refresh(args).await,
-        "unregister_spec"     => spec_unregister(args),
-        "list_doc_roots"           => doc_list_roots(),
-        "add_doc_root"             => doc_add_root(args),
-        "remove_doc_root"          => doc_remove_root(args),
-        "list_doc_ignore_patterns" => doc_list_ignore_patterns(),
-        "add_doc_ignore_pattern"   => doc_add_ignore_pattern(args),
-        "remove_doc_ignore_pattern" => doc_remove_ignore_pattern(args),
+        "run_agent" => run(args, config).await,
         "resolve_library" | "get_library_docs" => {
             context7::proxy_context7(name, args, config).await
         }
-        "agent_backend_status"               => agent_backend_status(),
-        "agent_backend_set_mode"             => agent_backend_set_mode(args),
-        "agent_backend_override"             => agent_backend_override(args),
-        "agent_backend_use_server_anthropic" => agent_backend_use_server_anthropic(args),
-        "agent_backend_set_api_key"          => agent_backend_set_api_key(args),
-        "agent_backend_clear_api_key"        => agent_backend_clear_api_key(),
-        "agent_backend_api_key_status"       => agent_backend_api_key_status(),
         _ => anyhow::bail!("unknown tool: {name}"),
     }
 }
