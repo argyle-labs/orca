@@ -8,8 +8,9 @@
 ///
 /// Requirements: LM Studio running on localhost:1234, `lms` CLI on PATH,
 /// and the models referenced below available on disk.
-use orca_core::backend::{LMStudioBackend, ModelBackend, buffer_sink};
-use orca_core::{Message, StopReason, ToolDef};
+use llm::backend::{LMStudioBackend, ModelBackend, buffer_sink};
+use llm::{Message, StopReason};
+use tool::ToolDef;
 use serde_json::json;
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -214,7 +215,7 @@ async fn lmstudio_tool_call_then_answer() {
     let tc = &r1.tool_calls[0];
 
     // Round 2: provide tool result, expect final text answer
-    use orca_core::ToolResult;
+    use tool::ToolResult;
     let round2_messages = vec![
         Message::user("What is the capital of France? Use the lookup_capital tool."),
         Message::Assistant {
@@ -337,8 +338,9 @@ async fn lmstudio_cancellation() {
 /// not an empty string. This validates the fix for Ollama / llama.cpp compat.
 #[test]
 fn serialize_tool_call_content_is_null() {
-    use orca_core::backend::serialize::openai_messages;
-    use orca_core::{Message, ToolCall};
+    use llm::backend::serialize::openai_messages;
+    use llm::Message;
+    use tool::ToolCall;
     use serde_json::Value;
 
     let messages = vec![Message::Assistant {
@@ -366,8 +368,9 @@ fn serialize_tool_call_content_is_null() {
 /// Serialize: assistant message with text AND tool_calls emits the text as content.
 #[test]
 fn serialize_tool_call_with_text_keeps_content() {
-    use orca_core::backend::serialize::openai_messages;
-    use orca_core::{Message, ToolCall};
+    use llm::backend::serialize::openai_messages;
+    use llm::Message;
+    use tool::ToolCall;
 
     let messages = vec![Message::Assistant {
         text: Some("Thinking…".into()),
@@ -386,7 +389,7 @@ fn serialize_tool_call_with_text_keeps_content() {
 /// Serialize: system prompt appears as first message when non-empty.
 #[test]
 fn serialize_system_prompt_prepended() {
-    use orca_core::backend::serialize::openai_messages;
+    use llm::backend::serialize::openai_messages;
 
     let messages = vec![Message::User { content: "hello".into() }];
     let serialized = openai_messages(&messages, "You are a robot.");
@@ -400,7 +403,7 @@ fn serialize_system_prompt_prepended() {
 /// Serialize: empty system prompt is NOT prepended.
 #[test]
 fn serialize_empty_system_prompt_omitted() {
-    use orca_core::backend::serialize::openai_messages;
+    use llm::backend::serialize::openai_messages;
 
     let messages = vec![Message::User { content: "hello".into() }];
     let serialized = openai_messages(&messages, "");
@@ -412,8 +415,8 @@ fn serialize_empty_system_prompt_omitted() {
 /// Serialize: tool results become role=tool with correct tool_call_id.
 #[test]
 fn serialize_tool_results_role_and_id() {
-    use orca_core::backend::serialize::openai_messages;
-    use orca_core::ToolResult;
+    use llm::backend::serialize::openai_messages;
+    use tool::ToolResult;
 
     let messages = vec![Message::ToolResults(vec![
         ToolResult {
@@ -441,7 +444,7 @@ fn serialize_tool_results_role_and_id() {
 /// Serialize: assistant with no text and no tool_calls emits empty string content.
 #[test]
 fn serialize_assistant_empty_is_empty_string() {
-    use orca_core::backend::serialize::openai_messages;
+    use llm::backend::serialize::openai_messages;
 
     let messages = vec![Message::Assistant {
         text: None,
@@ -457,8 +460,8 @@ fn serialize_assistant_empty_is_empty_string() {
 /// Serialize: full conversation round-trip order is preserved.
 #[test]
 fn serialize_conversation_order() {
-    use orca_core::backend::serialize::openai_messages;
-    use orca_core::{ToolCall, ToolResult};
+    use llm::backend::serialize::openai_messages;
+    use tool::{ToolCall, ToolResult};
 
     let messages = vec![
         Message::User { content: "question".into() },
@@ -555,7 +558,7 @@ async fn lmstudio_tool_error_handled() {
     }
 
     let tc = &r1.tool_calls[0];
-    use orca_core::ToolResult;
+    use tool::ToolResult;
 
     // Round 2: return an error result
     let (sink2, _buf2) = buffer_sink();

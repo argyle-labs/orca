@@ -1,8 +1,7 @@
 use super::{Session, util};
-use orca_core::backend::{ClaudeBackend, LMStudioBackend, ModelBackend, build_backend};
+use llm::{ClaudeBackend, LMStudioBackend, ModelBackend, build_backend, Message};
 use config::Model;
 use ledger::fmt_tokens;
-use orca_core::Message;
 use anyhow::{Context, Result};
 use colored::Colorize;
 use tokio_util::sync::CancellationToken;

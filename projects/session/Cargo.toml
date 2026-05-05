@@ -11,6 +11,7 @@ name = "session"
 orca-agents = { path = "../agents" }
 orca-core   = { path = "../core" }
 orca-jobs   = { path = "../jobs" }
+llm         = { package = "orca-llm",     path = "../llm" }
 config      = { package = "orca-config",  path = "../config" }
 db          = { package = "orca-db",      path = "../db" }
 ledger      = { package = "orca-ledger",  path = "../ledger" }

@@ -8,6 +8,7 @@ members = [
     "projects/core",
     "projects/fs",
     "projects/ledger",
+    "projects/llm",
     "projects/log",
     "projects/docs",
     "projects/jobs",

@@ -6,10 +6,12 @@
 pub mod ctx;
 pub mod erased;
 pub mod registry;
+pub mod types;
 
 pub use ctx::ToolCtx;
 pub use erased::ErasedTool;
 pub use registry::ToolRegistry;
+pub use types::{ToolCall, ToolDef, ToolResult};
 
 use anyhow::Result;
 use async_trait::async_trait;

@@ -4,15 +4,14 @@ mod delegate;
 mod ui;
 pub mod util;
 
-use orca_core::backend::{
-    ModelBackend, OutputSink, build_backend, sink_write, sink_writeln, stdout_sink,
+use llm::{
+    ModelBackend, OutputSink, build_backend, sink_write, sink_writeln, stdout_sink, Message,
 };
 use orca_core::tools::ToolRegistry;
 use orca_jobs::JobManager;
 use config::{Config, Model};
 use ledger::TokenLedger;
 use log::SessionLog;
-use orca_core::Message;
 use crate::context::ProjectContext;
 use crate::tui::{self, TuiAction, TuiApp};
 use anyhow::{Context, Result};

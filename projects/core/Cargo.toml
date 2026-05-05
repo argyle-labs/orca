@@ -4,15 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-orca_fs    = { package = "orca-fs", path = "../fs" }
+orca_fs    = { package = "orca-fs",  path = "../fs" }
 config     = { package = "orca-config", path = "../config" }
+tool       = { package = "orca-tool",   path = "../tool" }
+llm        = { package = "orca-llm",    path = "../llm" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-async-trait = "0.1"
-reqwest = { version = "0.12", features = ["json", "stream"] }
-futures-util = "0.3"
 colored = "2"
-tokio-util = "0.7"
-uuid = { version = "1", features = ["v4"] }

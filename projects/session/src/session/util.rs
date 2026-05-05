@@ -1,8 +1,13 @@
-use orca_core::backend::LMStudioBackend;
+use llm::LMStudioBackend;
 use config::Model;
-use orca_core::truncate_preview;
 use anyhow::Result;
 use colored::Colorize;
+
+fn truncate_preview(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() { format!("{truncated}…") } else { truncated }
+}
 
 /// Resolve which model to use. Priority: explicit config > LM Studio auto-discover.
 ///
