@@ -3,6 +3,7 @@ members = [
     "projects/agents",
     "projects/auth",
     "projects/commands",
+    "projects/config",
     "projects/db",
     "projects/core",
     "projects/fs",
@@ -12,6 +13,8 @@ members = [
     "projects/jobs",
     "projects/scanner",
     "projects/server",
+    "projects/state",
+    "projects/types",
     "projects/utils",
 ]
 resolver = "2"

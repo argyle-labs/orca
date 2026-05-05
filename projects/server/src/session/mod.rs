@@ -9,10 +9,10 @@ use orca_core::backend::{
 };
 use orca_core::tools::ToolRegistry;
 use orca_jobs::JobManager;
-use orca_utils::config::{Config, Model};
+use config::{Config, Model};
 use ledger::TokenLedger;
 use log::SessionLog;
-use orca_utils::types::Message;
+use types::Message;
 use crate::context::ProjectContext;
 use crate::tui::{self, TuiAction, TuiApp};
 use anyhow::{Context, Result};

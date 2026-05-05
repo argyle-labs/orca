@@ -1,6 +1,6 @@
 use anyhow::Result;
 use orca_core::backend::buffer_sink;
-use orca_utils::config::Config;
+use config::Config;
 use serde_json::{Value, json};
 
 use crate::agent_backend::{self, Resolution};

@@ -9,7 +9,7 @@ mod specs;
 mod tools;
 
 use anyhow::Result;
-use orca_utils::config::Config;
+use config::Config;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
