@@ -1,6 +1,6 @@
 use orca_core::backend::LMStudioBackend;
-use orca_utils::config::Model;
-use orca_utils::types::truncate_preview;
+use config::Model;
+use types::truncate_preview;
 use anyhow::Result;
 use colored::Colorize;
 
@@ -9,7 +9,7 @@ use colored::Colorize;
 /// Hard-fail: if no explicit model is configured and LM Studio is unreachable or has
 /// no chat models loaded, this returns an error. There is no Claude fallback —
 /// configuration that can't be honored must surface, not be papered over.
-pub async fn resolve_model(config: &orca_utils::config::Config) -> Result<Model> {
+pub async fn resolve_model(config: &config::Config) -> Result<Model> {
     match &config.default_model {
         Model::Claude(id) if !id.is_empty() => return Ok(Model::Claude(id.clone())),
         Model::LMStudio(id) if !id.is_empty() => return Ok(Model::LMStudio(id.clone())),

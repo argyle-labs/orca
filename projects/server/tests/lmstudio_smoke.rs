@@ -9,7 +9,7 @@
 /// Requirements: LM Studio running on localhost:1234, `lms` CLI on PATH,
 /// and the models referenced below available on disk.
 use orca_core::backend::{LMStudioBackend, ModelBackend, buffer_sink};
-use orca_utils::types::{Message, StopReason, ToolDef};
+use types::{Message, StopReason, ToolDef};
 use serde_json::json;
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -214,7 +214,7 @@ async fn lmstudio_tool_call_then_answer() {
     let tc = &r1.tool_calls[0];
 
     // Round 2: provide tool result, expect final text answer
-    use orca_utils::types::ToolResult;
+    use types::ToolResult;
     let round2_messages = vec![
         Message::user("What is the capital of France? Use the lookup_capital tool."),
         Message::Assistant {
@@ -338,7 +338,7 @@ async fn lmstudio_cancellation() {
 #[test]
 fn serialize_tool_call_content_is_null() {
     use orca_core::backend::serialize::openai_messages;
-    use orca_utils::types::{Message, ToolCall};
+    use types::{Message, ToolCall};
     use serde_json::Value;
 
     let messages = vec![Message::Assistant {
@@ -367,7 +367,7 @@ fn serialize_tool_call_content_is_null() {
 #[test]
 fn serialize_tool_call_with_text_keeps_content() {
     use orca_core::backend::serialize::openai_messages;
-    use orca_utils::types::{Message, ToolCall};
+    use types::{Message, ToolCall};
 
     let messages = vec![Message::Assistant {
         text: Some("Thinking…".into()),
@@ -413,7 +413,7 @@ fn serialize_empty_system_prompt_omitted() {
 #[test]
 fn serialize_tool_results_role_and_id() {
     use orca_core::backend::serialize::openai_messages;
-    use orca_utils::types::ToolResult;
+    use types::ToolResult;
 
     let messages = vec![Message::ToolResults(vec![
         ToolResult {
@@ -458,7 +458,7 @@ fn serialize_assistant_empty_is_empty_string() {
 #[test]
 fn serialize_conversation_order() {
     use orca_core::backend::serialize::openai_messages;
-    use orca_utils::types::{ToolCall, ToolResult};
+    use types::{ToolCall, ToolResult};
 
     let messages = vec![
         Message::User { content: "question".into() },
@@ -555,7 +555,7 @@ async fn lmstudio_tool_error_handled() {
     }
 
     let tc = &r1.tool_calls[0];
-    use orca_utils::types::ToolResult;
+    use types::ToolResult;
 
     // Round 2: return an error result
     let (sink2, _buf2) = buffer_sink();
@@ -600,10 +600,10 @@ async fn lmstudio_mcp_run_agent_offload() {
     // Build a Config that points at LM Studio and has no Anthropic key — ensures
     // build_backend can only produce an LMStudioBackend.
     let home = std::env::var("HOME").expect("HOME not set");
-    let config = orca_utils::config::Config {
+    let config = config::Config {
         anthropic_api_key: None,
         lmstudio_url: LMS_URL.to_string(),
-        default_model: orca_utils::config::Model::LMStudio(FAST_MODEL.to_string()),
+        default_model: config::Model::LMStudio(FAST_MODEL.to_string()),
         orca_vault: std::path::PathBuf::from(format!("{home}/.orca")),
         vault_root: std::path::PathBuf::from(format!("{home}/orca")),
         memory_root: std::path::PathBuf::from(format!("{home}/.orca/memory")),

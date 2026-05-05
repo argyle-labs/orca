@@ -1,4 +1,4 @@
-use orca_utils::config::Config;
+use config::Config;
 use anyhow::Result;
 
 /// Resolved project context: system prompt + memory content.

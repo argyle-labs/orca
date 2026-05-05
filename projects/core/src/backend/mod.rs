@@ -7,8 +7,8 @@
 //! `OutputSink` is the streaming output target: stdout for interactive sessions,
 //! a memory buffer (`buffer_sink`) for background jobs.
 
-use orca_utils::config::{Config, Model};
-use orca_utils::types::{BackendResponse, Message, ToolDef};
+use config::{Config, Model};
+use types::{BackendResponse, Message, ToolDef};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::io::Write;

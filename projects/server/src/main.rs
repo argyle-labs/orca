@@ -6,8 +6,8 @@ use orca::serve::openapi_spec_json;
 use orca::session::Session;
 use orca_commands::{self as cmd, CredsAction, DaemonAction, DbAction, DockerAction, HookAction, LogAction, McpAction, PluginAction, SchemaAction, SpecAction, cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian, cmd_install, cmd_uninstall};
 use orca_core::backend::{ClaudeBackend, ModelBackend, stdout_sink};
-use orca_utils::config::Config;
-use orca_utils::types::Message;
+use config::Config;
+use types::Message;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -338,7 +338,7 @@ fn port_in_use(port: u16) -> bool {
 
 /// Park the stable daemon (if running), start dev server, reclaim on exit.
 async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
-    use orca_utils::state::{self, DaemonMode};
+    use state::{self, DaemonMode};
     use std::process::Command;
 
     // Spawn Vite dev server if not already running on 12001

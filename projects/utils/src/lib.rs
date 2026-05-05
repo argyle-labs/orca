@@ -1,19 +1,13 @@
-//! Orca utilities — shared cross-cutting types and config plumbing.
+//! Orca shared constants — paths, app names. Anything heavier lives in its own crate.
 //!
-//! Modules:
-//! - `consts` — string constants (paths, app names)
-//! - `config` — `Config` loaded from env + DB; model/backend selection
-//! - `state`  — daemon mode state file
-//! - `types`  — `Message`, `ToolCall`, `ToolResult`, `ToolDef`, `truncate_preview`
-//!
-//! These siblings live in their own crates:
+//! Sibling crates extracted out of utils:
 //! - `orca-auth`   — API-key formatting helpers
+//! - `orca-config` — runtime `Config` loaded from env + DB
 //! - `orca-db`     — encrypted SQLite (SQLCipher)
-//! - `orca-log`    — `SessionLog` JSONL writer + log search
+//! - `orca-fs`     — filesystem and search helpers
 //! - `orca-ledger` — `TokenLedger` token-usage accounting
-//! - `orca-fs`     — filesystem and search helpers (read/write/edit/glob/grep)
+//! - `orca-log`    — `SessionLog` JSONL writer + log search
+//! - `orca-state`  — daemon mode state file
+//! - `orca-types`  — cross-cutting `Message`, `ToolCall`, `ToolResult`, etc.
 
 pub mod consts;
-pub mod config;
-pub mod state;
-pub mod types;

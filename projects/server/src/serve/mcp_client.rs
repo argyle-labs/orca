@@ -222,6 +222,7 @@ impl McpClient {
 
         let http = reqwest::Client::builder()
             .default_headers(headers)
+            .connect_timeout(std::time::Duration::from_secs(2))
             .timeout(std::time::Duration::from_secs(60))
             .build()?;
 
@@ -659,13 +660,36 @@ impl McpPool {
             .collect();
 
         let configs = self.read_configs();
+
+        // Federate in parallel with a per-server hard deadline so that a single
+        // unreachable server (e.g. an off-LAN homelab plugin) cannot block the
+        // entire tools/list call. Servers that error or time out are silently
+        // dropped — they simply don't appear in the federation set this call.
+        let attempts = configs
+            .keys()
+            .filter(|n| !skip.contains(&n.as_str()))
+            .cloned()
+            .map(|name| async move {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    self.get_or_connect(&name),
+                )
+                .await
+                {
+                    Ok(Ok(client)) => Some((name, client)),
+                    _ => None,
+                }
+            });
+        let connected: Vec<(String, Arc<McpClient>)> = futures_util::future::join_all(attempts)
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+
         let mut result = Vec::new();
-        for server_name in configs.keys() {
-            if skip.contains(&server_name.as_str()) {
-                continue;
-            }
+        for (server_name, client) in &connected {
             let meta = plugin_meta.get(server_name.as_str());
-            if let Ok(client) = self.get_or_connect(server_name).await {
+            {
                 for tool in &client.tools {
                     let universal = if let Some(m) = meta {
                         if let Some(explicit) = m.inverse.get(&tool.name) {

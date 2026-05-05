@@ -1,6 +1,6 @@
 use anyhow::Result;
 use colored::Colorize;
-use orca_utils::config::Config;
+use config::Config;
 use orca_utils::consts::APP_NAME;
 use db;
 

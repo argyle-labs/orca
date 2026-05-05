@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::Result;
 use axum::Router;
 use axum::routing::get;
-use orca_utils::state::{self, DaemonMode, DaemonState};
+use state::{self, DaemonMode, DaemonState};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 

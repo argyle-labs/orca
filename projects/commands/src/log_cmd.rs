@@ -1,5 +1,5 @@
 use anyhow::Result;
-use orca_utils::config::Config;
+use config::Config;
 use log;
 use clap::Subcommand;
 use colored::Colorize;

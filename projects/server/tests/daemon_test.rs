@@ -11,7 +11,7 @@ mod daemon_signal_tests {
     use std::path::Path;
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
-    use orca_utils::state::{self, DaemonMode};
+    use state::{self, DaemonMode};
 
     const TEST_PORT: u16 = 19998;
     const TIMEOUT: Duration = Duration::from_secs(15);

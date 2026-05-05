@@ -4,7 +4,7 @@
 //! API keys from env/keychain, and runs one-time TOML → DB migrations.
 
 use anyhow::{Context, Result};
-use crate::consts::{APP_DB_FILE, APP_STATE_DIR};
+use orca_utils::consts::{APP_DB_FILE, APP_STATE_DIR};
 use std::path::PathBuf;
 
 /// All runtime configuration for the orca binary.

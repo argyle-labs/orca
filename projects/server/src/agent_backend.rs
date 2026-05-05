@@ -9,7 +9,7 @@
 //! there is no silent fallback between modes.
 
 use anyhow::{Context, Result};
-use orca_utils::config::{Config, Model};
+use config::{Config, Model};
 use db;
 
 const KEY_MODE: &str = "agent_backend.mode";

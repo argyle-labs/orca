@@ -1,6 +1,6 @@
 use anyhow::Result;
 use orca_commands::list_embedded_commands;
-use orca_utils::config::Config;
+use config::Config;
 use orca_fs::fs::expand_tilde;
 use serde_json::{Value, json};
 use std::collections::HashSet;

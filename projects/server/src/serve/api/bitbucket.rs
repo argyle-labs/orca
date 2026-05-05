@@ -2,7 +2,7 @@ use axum::{
     extract::Query,
     response::{IntoResponse, Json},
 };
-use orca_utils::config::Config;
+use config::Config;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use utoipa::ToSchema;
