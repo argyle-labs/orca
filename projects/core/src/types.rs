@@ -1,7 +1,4 @@
-//! Shared data types used across all orca crates.
-//!
-//! These are the canonical wire types — every backend and tool converts to/from these.
-//! Keeping them in `orca-utils` (the leaf crate) prevents circular dependencies.
+//! Canonical wire types for LLM backends and tool execution.
 
 use serde::{Deserialize, Serialize};
 

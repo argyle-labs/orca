@@ -1,7 +1,7 @@
 use anyhow::Result;
 use colored::Colorize;
 use config::Config;
-use orca_utils::consts::APP_NAME;
+use config::APP_NAME;
 use db;
 
 const KEY_NAME: &str = "anthropic_api_key";

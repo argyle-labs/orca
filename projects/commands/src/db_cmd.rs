@@ -1,5 +1,5 @@
 use anyhow::Result;
-use orca_utils::consts::APP_NAME;
+use config::APP_NAME;
 use db::{self, MigrateDirection};
 use clap::Subcommand;
 

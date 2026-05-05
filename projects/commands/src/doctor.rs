@@ -1,6 +1,6 @@
 use anyhow::Result;
 use config::Config;
-use orca_utils::consts::APP_NAME;
+use config::APP_NAME;
 use colored::Colorize;
 
 pub fn cmd_doctor(config: &Config) -> Result<()> {

@@ -7,7 +7,7 @@
 use orca_core::backend::{ModelBackend, OutputSink, buffer_sink, sink_write};
 use orca_core::tools::ToolRegistry;
 use config::{Config, Model};
-use types::{Message, ToolResult, truncate_preview};
+use orca_core::{Message, ToolResult, truncate_preview};
 use anyhow::Result;
 use colored::Colorize;
 use std::sync::{Arc, Mutex};

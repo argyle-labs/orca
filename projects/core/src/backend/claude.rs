@@ -1,5 +1,5 @@
 use super::{ModelBackend, OutputSink, serialize, sink_write, sink_writeln};
-use types::{BackendResponse, Message, StopReason, ToolCall, ToolDef};
+use crate::types::{BackendResponse, Message, StopReason, ToolCall, ToolDef};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use colored::Colorize;

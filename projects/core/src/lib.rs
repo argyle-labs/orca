@@ -7,3 +7,5 @@
 
 pub mod backend;
 pub mod tools;
+pub mod types;
+pub use crate::types::{BackendResponse, Message, StopReason, ToolCall, ToolDef, ToolResult, truncate_preview};

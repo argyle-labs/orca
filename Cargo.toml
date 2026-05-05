@@ -16,8 +16,6 @@ members = [
     "projects/session",
     "projects/state",
     "projects/tool",
-    "projects/types",
-    "projects/utils",
 ]
 resolver = "2"
 

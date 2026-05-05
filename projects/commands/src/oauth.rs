@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use orca_utils::consts::APP_NAME;
+use config::APP_NAME;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngCore;
 use serde::Deserialize;

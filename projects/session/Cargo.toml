@@ -15,7 +15,6 @@ config      = { package = "orca-config",  path = "../config" }
 db          = { package = "orca-db",      path = "../db" }
 ledger      = { package = "orca-ledger",  path = "../ledger" }
 log         = { package = "orca-log",     path = "../log" }
-types       = { package = "orca-types",   path = "../types" }
 
 # Async
 anyhow      = "1"
