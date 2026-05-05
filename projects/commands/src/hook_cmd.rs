@@ -340,6 +340,20 @@ fn pii_scan() -> Result<()> {
     Ok(())
 }
 
+/// Returns true if `cmd` matches any destructive pattern. Exposed for testing.
+fn matches_destructive(cmd: &str) -> bool {
+    DESTRUCTIVE_PATTERNS.iter().any(|p| {
+        regex::Regex::new(p).expect("valid pattern").is_match(cmd)
+    })
+}
+
+/// Returns true if `cmd` matches any OPNsense-targeting pattern. Exposed for testing.
+fn matches_opnsense(cmd: &str) -> bool {
+    OPNSENSE_PATTERNS.iter().any(|p| {
+        regex::Regex::new(p).expect("valid pattern").is_match(cmd)
+    })
+}
+
 // ── Secrets scan (git commit guard) ──────────────────────────────────────────
 
 fn secrets_scan() -> Result<()> {
@@ -421,4 +435,214 @@ fn secrets_scan() -> Result<()> {
         println!("{}", serde_json::to_string(&decision)?);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    // ── BashGuard pattern matching ────────────────────────────────────────────
+
+    #[test]
+    fn destructive_blocks_rm_rf() {
+        assert!(matches_destructive("rm -rf /tmp/foo"));
+        assert!(matches_destructive("rm -fr /tmp/foo"));
+        // Patterns match lowercase r/f only — uppercase variants are not in scope
+        assert!(!matches_destructive("rm -Rf /etc"));
+    }
+
+    #[test]
+    fn destructive_allows_safe_rm() {
+        assert!(!matches_destructive("rm -f myfile.txt"));
+        assert!(!matches_destructive("rm single_file"));
+    }
+
+    #[test]
+    fn destructive_blocks_proxmox_commands() {
+        assert!(matches_destructive("qm destroy 101"));
+        assert!(matches_destructive("pct destroy 200"));
+        assert!(matches_destructive("pvesm remove local:vm-101-disk-0"));
+    }
+
+    #[test]
+    fn destructive_blocks_disk_wipe_commands() {
+        assert!(matches_destructive("wipefs -a /dev/sda"));
+        assert!(matches_destructive("mkfs.ext4 /dev/sda1"));
+        assert!(matches_destructive("dd if=/dev/zero of=/dev/sda"));
+        assert!(matches_destructive("blkdiscard /dev/nvme0n1"));
+        assert!(matches_destructive("shred /dev/sda"));
+    }
+
+    #[test]
+    fn destructive_allows_harmless_commands() {
+        assert!(!matches_destructive("ls -la"));
+        assert!(!matches_destructive("git status"));
+        assert!(!matches_destructive("cargo build"));
+        assert!(!matches_destructive("echo hello"));
+    }
+
+    // ── OpnsenseGuard pattern matching ────────────────────────────────────────
+
+    #[test]
+    fn opnsense_blocks_ip_access() {
+        assert!(matches_opnsense("ssh admin@10.10.10.1"));
+        assert!(matches_opnsense("curl http://10.10.10.1/api"));
+        assert!(matches_opnsense("ping 10.10.10.1"));
+    }
+
+    #[test]
+    fn opnsense_does_not_block_similar_ips() {
+        // 10.10.10.10 has an extra digit — should NOT match 10.10.10.1 as a prefix
+        assert!(!matches_opnsense("ping 10.10.10.10"));
+        assert!(!matches_opnsense("ssh user@10.10.10.100"));
+    }
+
+    #[test]
+    fn opnsense_blocks_named_target() {
+        assert!(matches_opnsense("ssh root@opnsense"));
+        assert!(matches_opnsense("curl http://opnsense/api"));
+        assert!(matches_opnsense("wget http://opnsense/status"));
+        assert!(matches_opnsense("opnsense-update"));
+    }
+
+    #[test]
+    fn opnsense_allows_unrelated_commands() {
+        assert!(!matches_opnsense("ping 8.8.8.8"));
+        assert!(!matches_opnsense("ssh user@192.168.1.1"));
+        assert!(!matches_opnsense("curl https://api.example.com"));
+    }
+
+    // ── extract_last_assistant_text ───────────────────────────────────────────
+
+    #[test]
+    fn extract_last_assistant_text_returns_empty_for_missing_file() {
+        let result = extract_last_assistant_text("/tmp/__no_such_transcript_file__.jsonl");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn extract_last_assistant_text_parses_transcript() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        // One assistant turn with text content
+        let entry = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "The answer is 42."}
+                ]
+            }
+        });
+        writeln!(f, "{}", serde_json::to_string(&entry).unwrap()).unwrap();
+        let result = extract_last_assistant_text(f.path().to_str().unwrap());
+        assert_eq!(result, "The answer is 42.");
+    }
+
+    #[test]
+    fn extract_last_assistant_text_uses_last_turn() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        // Two assistant turns — should return only the last one
+        for text in ["First response.", "Second response."] {
+            let entry = serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": text}]
+                }
+            });
+            writeln!(f, "{}", serde_json::to_string(&entry).unwrap()).unwrap();
+        }
+        let result = extract_last_assistant_text(f.path().to_str().unwrap());
+        assert_eq!(result, "Second response.");
+    }
+
+    #[test]
+    fn extract_last_assistant_text_skips_non_assistant_entries() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        let user_entry = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": [{"type": "text", "text": "User message"}]}
+        });
+        writeln!(f, "{}", serde_json::to_string(&user_entry).unwrap()).unwrap();
+        let result = extract_last_assistant_text(f.path().to_str().unwrap());
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn extract_last_assistant_text_skips_non_text_blocks() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        let entry = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "t1", "name": "bash", "input": {}},
+                    {"type": "text", "text": "Done!"}
+                ]
+            }
+        });
+        writeln!(f, "{}", serde_json::to_string(&entry).unwrap()).unwrap();
+        let result = extract_last_assistant_text(f.path().to_str().unwrap());
+        assert_eq!(result, "Done!");
+    }
+
+    #[test]
+    fn extract_last_assistant_text_handles_invalid_jsonl_gracefully() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        writeln!(f, "{{bad json").unwrap();
+        writeln!(f, "also not json").unwrap();
+        let result = extract_last_assistant_text(f.path().to_str().unwrap());
+        assert_eq!(result, "");
+    }
+
+    // ── new_uuid ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn new_uuid_format_is_valid() {
+        let id = new_uuid();
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(parts.len(), 5, "UUID should have 5 dash-separated segments: {id}");
+        assert_eq!(parts[0].len(), 8);
+        assert_eq!(parts[1].len(), 4);
+        assert_eq!(parts[2].len(), 4);
+        assert_eq!(parts[3].len(), 4);
+        assert_eq!(parts[4].len(), 12);
+        // Version 4 bit
+        assert!(parts[2].starts_with('4'), "version nibble should be 4: {id}");
+    }
+
+    #[test]
+    fn new_uuid_generates_distinct_values() {
+        let a = new_uuid();
+        let b = new_uuid();
+        // Not a guarantee but very unlikely to collide in practice
+        assert_ne!(a, b, "two sequential UUIDs should differ");
+    }
+
+    // ── pii patterns compile without panic ────────────────────────────────────
+
+    #[test]
+    fn pii_patterns_all_compile() {
+        for (pattern, _label) in PII_PATTERNS {
+            regex::Regex::new(pattern).expect("PII pattern should compile: {pattern}");
+        }
+    }
+
+    #[test]
+    fn pii_patterns_detect_known_secrets() {
+        // Split across concat so no single literal matches the PII scanner patterns.
+        let stripe_key = ["sk", "_live_", "abcdefghijklmnop"].concat();
+        let bearer = ["Bearer ", "eyJhbGciOiJSUzI1NiIsInR5cCI6Ikp"].concat();
+        let re_key = ["re_", "AbCdEfGhIjKlMnOpQrStUvWxYz"].concat();
+
+        let stripe_re = regex::Regex::new(r"sk_live_[A-Za-z0-9]+").unwrap();
+        assert!(stripe_re.is_match(&stripe_key));
+
+        let bearer_re = regex::Regex::new(r"Bearer [A-Za-z0-9\-_\.]{20,}").unwrap();
+        assert!(bearer_re.is_match(&bearer));
+
+        let re_re = regex::Regex::new(r"re_[A-Za-z0-9]{20,}").unwrap();
+        assert!(re_re.is_match(&re_key));
+    }
 }

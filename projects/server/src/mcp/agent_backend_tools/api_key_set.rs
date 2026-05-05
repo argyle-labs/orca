@@ -29,7 +29,7 @@ impl OrcaTool for AgentBackendSetApiKey {
         db::secret_set(&conn, "anthropic_api_key", &args.key)?;
         Ok(format!(
             "stored Anthropic API key in encrypted orca DB ({})",
-            auth::mask_key(&args.key)
+            db::mask_key(&args.key)
         ))
     }
 }

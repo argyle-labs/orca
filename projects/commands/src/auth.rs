@@ -11,7 +11,7 @@ pub fn cmd_login(config: &Config) -> Result<()> {
         println!(
             "{} API key already set: {}",
             "✓".green(),
-            auth::mask_key(key).dimmed()
+            db::mask_key(key).dimmed()
         );
         println!("  {}  no", "[1]".dimmed());
         println!("  {}  yes, replace", "[2]".dimmed());
@@ -35,7 +35,7 @@ pub fn cmd_login(config: &Config) -> Result<()> {
     let key = rpassword_or_stdin()?;
     let key = key.trim().to_string();
 
-    if !auth::looks_like_anthropic_key(&key) {
+    if !db::looks_like_anthropic_key(&key) {
         eprintln!(
             "{}",
             "key doesn't look right (expected sk-ant-…) — saving anyway".yellow()
@@ -69,7 +69,7 @@ pub fn cmd_auth(config: &Config) -> Result<()> {
             println!(
                 "{} Anthropic API key: {}",
                 "✓".green(),
-                auth::mask_key(key).dimmed()
+                db::mask_key(key).dimmed()
             );
         }
         None => {

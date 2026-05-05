@@ -1,6 +1,6 @@
 use anyhow::Result;
 use config::Config;
-use log;
+use session::log;
 use clap::Subcommand;
 use colored::Colorize;
 
@@ -10,7 +10,6 @@ pub enum LogAction {
     Search { query: String },
     /// List recent sessions
     Sessions {
-        /// Max sessions to show
         #[arg(short, long, default_value = "15")]
         limit: usize,
     },
@@ -88,7 +87,7 @@ pub fn cmd_log(config: &Config, action: LogAction) -> Result<()> {
                         format!("[{role}/@{agent}]")
                     };
                     let preview: String = content.chars().take(200).collect();
-                    let ellipsis = if content.len() > 200 { "…" } else { "" };
+                    let ellipsis = if content.chars().count() > 200 { "…" } else { "" };
                     println!(
                         "  {} {}{}{}",
                         prefix.cyan(),

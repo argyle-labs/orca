@@ -7,11 +7,11 @@ pub mod util;
 use llm::{
     ModelBackend, OutputSink, build_backend, sink_write, sink_writeln, stdout_sink, Message,
 };
-use orca_core::tools::ToolRegistry;
+use llm::tools::ToolRegistry;
 use orca_jobs::JobManager;
 use config::{Config, Model};
-use ledger::TokenLedger;
-use log::SessionLog;
+use crate::ledger::TokenLedger;
+use crate::log::SessionLog;
 use crate::context::ProjectContext;
 use crate::tui::{self, TuiAction, TuiApp};
 use anyhow::{Context, Result};
@@ -65,7 +65,7 @@ impl Session {
 
         let model = match forced_model {
             Some(m) => m,
-            None => util::resolve_model(&config).await?,
+            None => util::resolve_model(&config, None).await?,
         };
         let context_window = util::estimate_context_window(&model);
         let backend = build_backend(&config, &model)?;

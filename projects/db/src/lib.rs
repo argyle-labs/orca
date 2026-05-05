@@ -1526,6 +1526,67 @@ pub fn secret_delete(conn: &Connection, name: &str) -> Result<bool> {
     settings_delete(conn, &format!("{SECRET_PREFIX}{name}"))
 }
 
+/// Mask an API key for display: first 8 chars + ellipsis + last 4. Short keys (≤12) are fully masked.
+pub fn mask_key(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() > 12 {
+        let prefix: String = chars[..8].iter().collect();
+        let suffix: String = chars[chars.len() - 4..].iter().collect();
+        format!("{prefix}…{suffix}")
+    } else {
+        "****".to_string()
+    }
+}
+
+/// Returns true if the key looks like an Anthropic key (starts with `sk-ant-`).
+pub fn looks_like_anthropic_key(key: &str) -> bool {
+    key.starts_with("sk-ant-")
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    #[test]
+    fn mask_key_long_key_shows_first_and_last() {
+        let key = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz";
+        let masked = mask_key(key);
+        assert!(masked.starts_with("sk-ant-a"), "prefix wrong: {masked}");
+        assert!(masked.ends_with("wxyz"), "suffix wrong: {masked}");
+        assert!(masked.contains('…'), "no ellipsis: {masked}");
+    }
+
+    #[test]
+    fn mask_key_short_returns_stars() {
+        assert_eq!(mask_key("short"), "****");
+    }
+
+    #[test]
+    fn mask_key_exactly_12_returns_stars() {
+        assert_eq!(mask_key("abcdefghijkl"), "****");
+    }
+
+    #[test]
+    fn mask_key_13_chars_masks() {
+        let key = "abcdefghijklm";
+        let masked = mask_key(key);
+        assert!(masked.starts_with("abcdefgh"), "got: {masked}");
+        assert!(masked.ends_with("jklm"), "got: {masked}");
+    }
+
+    #[test]
+    fn mask_key_empty_returns_stars() {
+        assert_eq!(mask_key(""), "****");
+    }
+
+    #[test]
+    fn looks_like_anthropic_accepts_real_format() {
+        assert!(looks_like_anthropic_key("sk-ant-api03-xyz"));
+        assert!(!looks_like_anthropic_key("sk-1234"));
+        assert!(!looks_like_anthropic_key(""));
+    }
+}
+
 pub fn settings_list_prefix(conn: &Connection, prefix: &str) -> Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare(
         "SELECT key, value FROM settings WHERE key LIKE ?1 ORDER BY key",
@@ -1694,4 +1755,620 @@ pub fn fs_allow_unrestricted(conn: &Connection) -> bool {
         .flatten()
         .map(|v| v == "true")
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    /// Open an unencrypted in-memory database with full schema + migrations applied.
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open_in_memory");
+        conn.execute_batch("PRAGMA journal_mode = WAL;").ok();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").ok();
+        apply_schema(&conn).expect("apply_schema");
+        run_pending_migrations(&conn).expect("migrations");
+        conn
+    }
+
+    // ── Migrations ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn migrations_run_to_latest() {
+        let conn = test_conn();
+        let v = schema_version(&conn).unwrap();
+        assert_eq!(v as usize, MIGRATIONS.len(), "schema version should match migration count");
+    }
+
+    #[test]
+    fn migration_count_is_nonzero() {
+        assert!(migration_count() > 0);
+    }
+
+    #[test]
+    fn migrate_up_idempotent_already_at_latest() {
+        let conn = test_conn();
+        let v_before = schema_version(&conn).unwrap();
+        migrate(&conn, MigrateDirection::Up, usize::MAX).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), v_before);
+    }
+
+    // ── Learning progress ─────────────────────────────────────────────────────
+
+    #[test]
+    fn learning_progress_round_trip() {
+        let conn = test_conn();
+        assert!(get_learning_progress(&conn).unwrap().is_none());
+        save_learning_progress(&conn, "page-42").unwrap();
+        assert_eq!(get_learning_progress(&conn).unwrap().as_deref(), Some("page-42"));
+        // Upsert overwrites
+        save_learning_progress(&conn, "page-99").unwrap();
+        assert_eq!(get_learning_progress(&conn).unwrap().as_deref(), Some("page-99"));
+    }
+
+    // ── Session events ────────────────────────────────────────────────────────
+
+    #[test]
+    fn insert_and_search_event() {
+        let conn = test_conn();
+        insert_event(
+            &conn, "ev-1", "sess-1", Some("orca"), "2026-01-01T00:00:00Z",
+            Some("user"), Some("orca"), Some("hello world unique phrase"), false, None,
+        ).unwrap();
+        let results = search_events(&conn, "unique", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "ev-1");
+        assert_eq!(results[0].session, "sess-1");
+        assert_eq!(results[0].project.as_deref(), Some("orca"));
+    }
+
+    #[test]
+    fn insert_event_ignore_duplicate_id() {
+        let conn = test_conn();
+        insert_event(&conn, "dup", "s", None, "2026-01-01T00:00:00Z", None, None, Some("a"), false, None).unwrap();
+        insert_event(&conn, "dup", "s", None, "2026-01-01T00:00:00Z", None, None, Some("b"), false, None).unwrap();
+        let results = search_events(&conn, "a", 10).unwrap();
+        assert_eq!(results.len(), 1, "duplicate id should be ignored");
+    }
+
+    #[test]
+    fn important_events_filters_by_project() {
+        let conn = test_conn();
+        insert_event(&conn, "imp-1", "s", Some("proj-a"), "2026-01-01T00:00:00Z", None, None, Some("important thing"), true, None).unwrap();
+        insert_event(&conn, "imp-2", "s", Some("proj-b"), "2026-01-01T00:00:00Z", None, None, Some("other thing"), true, None).unwrap();
+        insert_event(&conn, "not-imp", "s", Some("proj-a"), "2026-01-01T00:00:00Z", None, None, Some("boring"), false, None).unwrap();
+
+        let results = important_events(&conn, "proj-a", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "imp-1");
+        assert!(results[0].important);
+    }
+
+    // ── MCP servers ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn mcp_server_crud() {
+        let conn = test_conn();
+        assert!(list_mcp_servers(&conn).unwrap().is_empty());
+
+        let server = McpServerRow {
+            name: "test-mcp".into(),
+            command: "/usr/bin/node".into(),
+            args: vec!["server.js".into()],
+            env: [("PORT".into(), "3000".into())].into(),
+            enabled: true,
+        };
+        upsert_mcp_server(&conn, &server).unwrap();
+
+        let list = list_mcp_servers(&conn).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "test-mcp");
+        assert_eq!(list[0].args, vec!["server.js"]);
+        assert_eq!(list[0].env.get("PORT").map(|s| s.as_str()), Some("3000"));
+
+        assert!(remove_mcp_server(&conn, "test-mcp").unwrap());
+        assert!(list_mcp_servers(&conn).unwrap().is_empty());
+        assert!(!remove_mcp_server(&conn, "test-mcp").unwrap());
+    }
+
+    #[test]
+    fn mcp_server_upsert_updates_existing() {
+        let conn = test_conn();
+        let s = McpServerRow { name: "s".into(), command: "cmd1".into(), args: vec![], env: Default::default(), enabled: true };
+        upsert_mcp_server(&conn, &s).unwrap();
+        let s2 = McpServerRow { name: "s".into(), command: "cmd2".into(), args: vec![], env: Default::default(), enabled: true };
+        upsert_mcp_server(&conn, &s2).unwrap();
+        let list = list_mcp_servers(&conn).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].command, "cmd2");
+    }
+
+    // ── MCP tool mappings ─────────────────────────────────────────────────────
+
+    #[test]
+    fn mcp_tool_mapping_crud() {
+        let conn = test_conn();
+        // Need a parent MCP server (FK constraint)
+        let server = McpServerRow { name: "mcp".into(), command: "cmd".into(), args: vec![], env: Default::default(), enabled: true };
+        upsert_mcp_server(&conn, &server).unwrap();
+
+        let mapping = McpToolMappingRow {
+            orca_tool: "read_file".into(),
+            mcp_name: "mcp".into(),
+            external_tool: "fs_read".into(),
+            match_type: "explicit".into(),
+            confidence: Some(0.99),
+            enabled: true,
+        };
+        upsert_mcp_tool_mapping(&conn, &mapping).unwrap();
+
+        let found = lookup_mcp_mapping(&conn, "read_file").unwrap().unwrap();
+        assert_eq!(found.external_tool, "fs_read");
+        assert!((found.confidence.unwrap() - 0.99).abs() < 1e-9);
+
+        let all = all_mcp_tool_mappings(&conn).unwrap();
+        assert_eq!(all.len(), 1);
+
+        let by_server = list_mcp_tool_mappings(&conn, "mcp").unwrap();
+        assert_eq!(by_server.len(), 1);
+
+        assert!(set_mcp_tool_mapping_enabled(&conn, "read_file", false).unwrap());
+        assert!(lookup_mcp_mapping(&conn, "read_file").unwrap().is_none(), "disabled should not appear");
+
+        assert!(remove_mcp_tool_mapping(&conn, "read_file").unwrap());
+        assert!(!remove_mcp_tool_mapping(&conn, "read_file").unwrap());
+    }
+
+    // ── Schema databases ──────────────────────────────────────────────────────
+
+    #[test]
+    fn schema_database_crud() {
+        let conn = test_conn();
+        assert!(list_schema_databases(&conn).unwrap().is_empty());
+
+        let db = SchemaDbRow {
+            name: "mydb".into(),
+            driver: "postgres".into(),
+            host: Some("localhost".into()),
+            port: Some(5432),
+            user: "admin".into(),
+            password: "secret".into(),
+            database: "app".into(),
+            container: None,
+            domains_file: None,
+            enabled: true,
+        };
+        upsert_schema_database(&conn, &db).unwrap();
+
+        let list = list_schema_databases(&conn).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "mydb");
+        assert_eq!(list[0].port, Some(5432));
+        assert_eq!(list[0].driver, "postgres");
+
+        assert!(remove_schema_database(&conn, "mydb").unwrap());
+        assert!(list_schema_databases(&conn).unwrap().is_empty());
+    }
+
+    // ── Docker runtimes ───────────────────────────────────────────────────────
+
+    #[test]
+    fn docker_runtime_crud() {
+        let conn = test_conn();
+        let rt = DockerRuntimeRow {
+            name: "colima".into(),
+            socket_path: Some("~/.colima/default/docker.sock".into()),
+            host: None,
+            url: None,
+            enabled: true,
+        };
+        upsert_docker_runtime(&conn, &rt).unwrap();
+
+        let list = list_docker_runtimes(&conn).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "colima");
+
+        let docker_host = list[0].docker_host().unwrap();
+        assert!(docker_host.starts_with("unix://"), "got: {docker_host}");
+        assert!(!docker_host.contains('~'), "tilde should be expanded: {docker_host}");
+
+        assert!(remove_docker_runtime(&conn, "colima").unwrap());
+        assert!(list_docker_runtimes(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn docker_runtime_tcp_host() {
+        let conn = test_conn();
+        let rt = DockerRuntimeRow {
+            name: "remote".into(),
+            socket_path: None,
+            host: Some("tcp://remote:2376".into()),
+            url: None,
+            enabled: true,
+        };
+        upsert_docker_runtime(&conn, &rt).unwrap();
+        let list = list_docker_runtimes(&conn).unwrap();
+        assert_eq!(list[0].docker_host().as_deref(), Some("tcp://remote:2376"));
+    }
+
+    #[test]
+    fn docker_runtime_web_url_no_docker_host() {
+        let rt = DockerRuntimeRow {
+            name: "portainer".into(),
+            socket_path: None,
+            host: None,
+            url: Some("http://portainer:9000".into()),
+            enabled: true,
+        };
+        assert!(rt.docker_host().is_none(), "web-only runtime should return None for docker_host");
+    }
+
+    #[test]
+    fn active_docker_host_returns_first_socket() {
+        let conn = test_conn();
+        upsert_docker_runtime(&conn, &DockerRuntimeRow {
+            name: "a".into(), socket_path: Some("/var/run/docker.sock".into()),
+            host: None, url: None, enabled: true,
+        }).unwrap();
+        let host = active_docker_host(&conn).unwrap();
+        assert!(host.starts_with("unix://"));
+    }
+
+    #[test]
+    fn active_docker_host_none_when_empty() {
+        let conn = test_conn();
+        assert!(active_docker_host(&conn).is_none());
+    }
+
+    // ── OpenAPI specs ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn openapi_spec_crud() {
+        let conn = test_conn();
+        assert!(list_openapi_specs(&conn).unwrap().is_empty());
+
+        let spec = OpenApiSpecRow {
+            name: "myapi".into(),
+            url: Some("http://api.example.com/openapi.json".into()),
+            source_mcp: None,
+            spec_json: Some(r#"{"openapi":"3.0.0"}"#.into()),
+            cached_at: Some("2026-01-01T00:00:00Z".into()),
+            enabled: true,
+        };
+        upsert_openapi_spec(&conn, &spec).unwrap();
+
+        let found = get_openapi_spec(&conn, "myapi").unwrap().unwrap();
+        assert_eq!(found.url.as_deref(), Some("http://api.example.com/openapi.json"));
+        assert!(found.spec_json.is_some());
+
+        let list = list_openapi_specs(&conn).unwrap();
+        assert_eq!(list.len(), 1);
+
+        assert!(remove_openapi_spec(&conn, "myapi").unwrap());
+        assert!(get_openapi_spec(&conn, "myapi").unwrap().is_none());
+    }
+
+    #[test]
+    fn get_openapi_spec_returns_none_for_missing() {
+        let conn = test_conn();
+        assert!(get_openapi_spec(&conn, "ghost").unwrap().is_none());
+    }
+
+    // ── Plugins ───────────────────────────────────────────────────────────────
+
+    fn make_plugin(id: &str) -> PluginRow {
+        PluginRow {
+            id: id.into(),
+            manifest_path: format!("/plugins/{id}/manifest.toml"),
+            tier: "personal".into(),
+            mode: "orca".into(),
+            mcp_command: Some("node".into()),
+            mcp_args: vec!["server.js".into()],
+            mcp_env: Default::default(),
+            mcp_token_env: None,
+            mcp_urls: vec![],
+            context_injection: "minimal".into(),
+            enabled: true,
+            command_map: Default::default(),
+            nav_links: vec![],
+            search_tools: vec![],
+            specs_dir: None,
+        }
+    }
+
+    #[test]
+    fn plugin_crud() {
+        let conn = test_conn();
+        assert!(list_plugins(&conn).unwrap().is_empty());
+
+        upsert_plugin(&conn, &make_plugin("rebuy")).unwrap();
+
+        let list = list_plugins(&conn).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "rebuy");
+        assert_eq!(list[0].tier, "personal");
+
+        let found = get_plugin(&conn, "rebuy").unwrap().unwrap();
+        assert_eq!(found.mcp_args, vec!["server.js"]);
+
+        assert!(remove_plugin(&conn, "rebuy").unwrap());
+        assert!(list_plugins(&conn).unwrap().is_empty());
+        assert!(!remove_plugin(&conn, "rebuy").unwrap());
+    }
+
+    #[test]
+    fn get_plugin_returns_none_for_missing() {
+        let conn = test_conn();
+        assert!(get_plugin(&conn, "ghost").unwrap().is_none());
+    }
+
+    #[test]
+    fn plugin_enabled_toggle() {
+        let conn = test_conn();
+        upsert_plugin(&conn, &make_plugin("p1")).unwrap();
+
+        assert!(set_plugin_enabled(&conn, "p1", false).unwrap());
+        let p = get_plugin(&conn, "p1").unwrap().unwrap();
+        assert!(!p.enabled);
+
+        assert!(set_plugin_enabled(&conn, "p1", true).unwrap());
+        let p = get_plugin(&conn, "p1").unwrap().unwrap();
+        assert!(p.enabled);
+
+        assert!(!set_plugin_enabled(&conn, "nonexistent", true).unwrap());
+    }
+
+    #[test]
+    fn plugin_deps_tracking() {
+        let conn = test_conn();
+        upsert_plugin(&conn, &make_plugin("parent")).unwrap();
+        upsert_plugin(&conn, &make_plugin("dep-a")).unwrap();
+        upsert_plugin(&conn, &make_plugin("dep-b")).unwrap();
+
+        add_plugin_dep(&conn, "parent", "dep-a").unwrap();
+        add_plugin_dep(&conn, "parent", "dep-b").unwrap();
+
+        let deps = list_plugin_deps(&conn, "parent").unwrap();
+        assert_eq!(deps.len(), 2);
+        assert!(deps.contains(&"dep-a".to_string()));
+
+        assert!(plugin_has_parent(&conn, "dep-a").unwrap());
+        assert!(!plugin_has_parent(&conn, "parent").unwrap());
+
+        remove_plugin_deps(&conn, "parent").unwrap();
+        assert!(list_plugin_deps(&conn, "parent").unwrap().is_empty());
+    }
+
+    // ── Plugin credentials ────────────────────────────────────────────────────
+
+    #[test]
+    fn plugin_credential_set_list_delete() {
+        let conn = test_conn();
+        set_plugin_credential(&conn, "rebuy", "API_KEY", "secret-val").unwrap();
+        set_plugin_credential(&conn, "rebuy", "OTHER", "other-val").unwrap();
+
+        let creds = list_plugin_credentials(&conn, "rebuy").unwrap();
+        assert_eq!(creds.len(), 2);
+        assert!(creds.iter().any(|c| c.key == "API_KEY" && c.value == "secret-val"));
+
+        // Upsert resets synced_at
+        set_plugin_credential(&conn, "rebuy", "API_KEY", "new-val").unwrap();
+        let creds2 = list_plugin_credentials(&conn, "rebuy").unwrap();
+        let api = creds2.iter().find(|c| c.key == "API_KEY").unwrap();
+        assert_eq!(api.value, "new-val");
+        assert!(api.synced_at.is_none(), "synced_at should be reset on update");
+
+        assert!(delete_plugin_credential(&conn, "rebuy", "API_KEY").unwrap());
+        assert!(!delete_plugin_credential(&conn, "rebuy", "API_KEY").unwrap());
+        assert_eq!(list_plugin_credentials(&conn, "rebuy").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn plugin_credentials_synced_at_set_after_mark() {
+        let conn = test_conn();
+        set_plugin_credential(&conn, "p", "K", "V").unwrap();
+        let before = list_plugin_credentials(&conn, "p").unwrap();
+        assert!(before[0].synced_at.is_none());
+
+        super::mark_plugin_credentials_synced(&conn, "p").unwrap();
+        let after = list_plugin_credentials(&conn, "p").unwrap();
+        assert!(after[0].synced_at.is_some());
+    }
+
+    // ── OAuth tokens ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn oauth_token_round_trip() {
+        let conn = test_conn();
+        assert!(get_oauth_token(&conn, "github").unwrap().is_none());
+
+        let row = OAuthTokenRow {
+            service: "github".into(),
+            access_token: "gha_abc".into(),
+            refresh_token: Some("refresh_xyz".into()),
+            expires_at: Some("2027-01-01T00:00:00Z".into()),
+        };
+        upsert_oauth_token(&conn, &row).unwrap();
+
+        let found = get_oauth_token(&conn, "github").unwrap().unwrap();
+        assert_eq!(found.access_token, "gha_abc");
+        assert_eq!(found.refresh_token.as_deref(), Some("refresh_xyz"));
+
+        // Upsert updates
+        let row2 = OAuthTokenRow { service: "github".into(), access_token: "new_token".into(), refresh_token: None, expires_at: None };
+        upsert_oauth_token(&conn, &row2).unwrap();
+        let found2 = get_oauth_token(&conn, "github").unwrap().unwrap();
+        assert_eq!(found2.access_token, "new_token");
+        assert!(found2.refresh_token.is_none());
+
+        assert!(delete_oauth_token(&conn, "github").unwrap());
+        assert!(get_oauth_token(&conn, "github").unwrap().is_none());
+        assert!(!delete_oauth_token(&conn, "github").unwrap());
+    }
+
+    // ── Plugin data ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn plugin_data_set_get_list_delete() {
+        let conn = test_conn();
+        assert!(get_plugin_data(&conn, "p", "k").unwrap().is_none());
+
+        set_plugin_data(&conn, "p", "key1", "val1").unwrap();
+        set_plugin_data(&conn, "p", "key2", "val2").unwrap();
+
+        let found = get_plugin_data(&conn, "p", "key1").unwrap().unwrap();
+        assert_eq!(found.value, "val1");
+
+        // Upsert
+        set_plugin_data(&conn, "p", "key1", "updated").unwrap();
+        assert_eq!(get_plugin_data(&conn, "p", "key1").unwrap().unwrap().value, "updated");
+
+        let list = list_plugin_data(&conn, "p").unwrap();
+        assert_eq!(list.len(), 2);
+
+        assert!(delete_plugin_data(&conn, "p", "key1").unwrap());
+        assert!(!delete_plugin_data(&conn, "p", "key1").unwrap());
+        assert_eq!(list_plugin_data(&conn, "p").unwrap().len(), 1);
+    }
+
+    // ── Settings ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn settings_get_set_delete() {
+        let conn = test_conn();
+        assert!(settings_get(&conn, "my.flag").unwrap().is_none());
+
+        settings_set(&conn, "my.flag", "enabled").unwrap();
+        assert_eq!(settings_get(&conn, "my.flag").unwrap().as_deref(), Some("enabled"));
+
+        settings_set(&conn, "my.flag", "disabled").unwrap();
+        assert_eq!(settings_get(&conn, "my.flag").unwrap().as_deref(), Some("disabled"));
+
+        assert!(settings_delete(&conn, "my.flag").unwrap());
+        assert!(settings_get(&conn, "my.flag").unwrap().is_none());
+        assert!(!settings_delete(&conn, "my.flag").unwrap());
+    }
+
+    #[test]
+    fn settings_list_prefix_filters() {
+        let conn = test_conn();
+        settings_set(&conn, "foo.a", "1").unwrap();
+        settings_set(&conn, "foo.b", "2").unwrap();
+        settings_set(&conn, "bar.c", "3").unwrap();
+
+        let foo_settings = settings_list_prefix(&conn, "foo.").unwrap();
+        assert_eq!(foo_settings.len(), 2);
+        assert!(foo_settings.iter().all(|(k, _)| k.starts_with("foo.")));
+    }
+
+    #[test]
+    fn secret_uses_settings_prefix() {
+        let conn = test_conn();
+        secret_set(&conn, "ANTHROPIC_KEY", "sk-ant-test").unwrap();
+        // Should appear under settings with prefix
+        let all = settings_list_prefix(&conn, "secrets.").unwrap();
+        assert!(all.iter().any(|(k, _)| k == "secrets.ANTHROPIC_KEY"));
+        // secret_get retrieves it
+        assert_eq!(secret_get(&conn, "ANTHROPIC_KEY").unwrap().as_deref(), Some("sk-ant-test"));
+        assert!(secret_delete(&conn, "ANTHROPIC_KEY").unwrap());
+        assert!(secret_get(&conn, "ANTHROPIC_KEY").unwrap().is_none());
+    }
+
+    #[test]
+    fn fs_allow_unrestricted_seeded_false() {
+        let conn = test_conn();
+        // Migration 17 seeds this as 'false'
+        assert!(!fs_allow_unrestricted(&conn));
+        set_setting(&conn, "fs.allow_unrestricted", "true").unwrap();
+        assert!(fs_allow_unrestricted(&conn));
+    }
+
+    #[test]
+    fn get_setting_vs_settings_get_both_work() {
+        let conn = test_conn();
+        set_setting(&conn, "x", "42").unwrap();
+        assert_eq!(get_setting(&conn, "x").unwrap().as_deref(), Some("42"));
+        assert_eq!(settings_get(&conn, "x").unwrap().as_deref(), Some("42"));
+    }
+
+    // ── LLM providers ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn llm_provider_crud() {
+        let conn = test_conn();
+        assert!(list_llm_providers(&conn).unwrap().is_empty());
+
+        upsert_llm_provider(&conn, "local", "http://localhost:1234", "lmstudio").unwrap();
+        let list = list_llm_providers(&conn).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "local");
+        assert!(list[0].enabled);
+
+        // Upsert updates URL
+        upsert_llm_provider(&conn, "local", "http://localhost:5678", "lmstudio").unwrap();
+        let list2 = list_llm_providers(&conn).unwrap();
+        assert_eq!(list2[0].url, "http://localhost:5678");
+
+        assert!(set_llm_provider_enabled(&conn, "local", false).unwrap());
+        let list3 = list_llm_providers(&conn).unwrap();
+        assert!(!list3[0].enabled);
+
+        assert!(remove_llm_provider(&conn, "local").unwrap());
+        assert!(list_llm_providers(&conn).unwrap().is_empty());
+        assert!(!remove_llm_provider(&conn, "local").unwrap());
+    }
+
+    // ── Doc roots ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn doc_roots_seeded_by_migration() {
+        let conn = test_conn();
+        let roots = list_doc_roots(&conn).unwrap();
+        // Migration 15 seeds rebuy, orca, bardbase, homepage, meerkat
+        assert!(roots.len() >= 5, "expected seeded doc roots, got {}", roots.len());
+        assert!(roots.iter().any(|r| r.name == "orca"));
+    }
+
+    #[test]
+    fn doc_roots_crud() {
+        let conn = test_conn();
+        let root = DocRootRow {
+            name: "myproject".into(),
+            path: "/home/user/myproject".into(),
+            description: Some("My project".into()),
+            enabled: true,
+        };
+        upsert_doc_root(&conn, &root).unwrap();
+
+        let list = list_doc_roots(&conn).unwrap();
+        assert!(list.iter().any(|r| r.name == "myproject"));
+
+        assert!(remove_doc_root(&conn, "myproject").unwrap());
+        assert!(!list_doc_roots(&conn).unwrap().iter().any(|r| r.name == "myproject"));
+        assert!(!remove_doc_root(&conn, "myproject").unwrap());
+    }
+
+    // ── Doc ignore patterns ───────────────────────────────────────────────────
+
+    #[test]
+    fn doc_ignore_patterns_seeded_by_migration() {
+        let conn = test_conn();
+        let patterns = list_doc_ignore_patterns(&conn).unwrap();
+        assert!(patterns.contains(&"node_modules".to_string()));
+        assert!(patterns.contains(&".git".to_string()));
+        assert!(patterns.contains(&"target".to_string()));
+    }
+
+    #[test]
+    fn doc_ignore_pattern_add_remove() {
+        let conn = test_conn();
+        assert!(add_doc_ignore_pattern(&conn, "my_custom_dir").unwrap());
+        assert!(!add_doc_ignore_pattern(&conn, "my_custom_dir").unwrap(), "duplicate insert should return false");
+
+        let patterns = list_doc_ignore_patterns(&conn).unwrap();
+        assert!(patterns.contains(&"my_custom_dir".to_string()));
+
+        assert!(remove_doc_ignore_pattern(&conn, "my_custom_dir").unwrap());
+        assert!(!remove_doc_ignore_pattern(&conn, "my_custom_dir").unwrap());
+    }
 }

@@ -6,6 +6,9 @@ edition = "2024"
 [lib]
 name = "tool"
 
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+
 [dependencies]
 # Orca layer 0-1 only — never import orca-core, orca-agents, etc. here
 config = { package = "orca-config", path = "../config" }

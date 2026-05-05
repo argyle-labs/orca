@@ -1,6 +1,6 @@
 pub mod bash;
 
-use llm::{OutputSink, stdout_sink};
+use crate::backend::{OutputSink, stdout_sink};
 use orca_fs::{fs, search};
 use tool::{ToolDef, ToolResult};
 use anyhow::Result;

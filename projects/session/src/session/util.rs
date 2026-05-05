@@ -1,118 +1,12 @@
-use llm::LMStudioBackend;
-use config::Model;
-use anyhow::Result;
 use colored::Colorize;
+
+pub use llm::resolve_model;
+pub use llm::estimate_context_window;
 
 fn truncate_preview(s: &str, max_chars: usize) -> String {
     let mut chars = s.chars();
     let truncated: String = chars.by_ref().take(max_chars).collect();
     if chars.next().is_some() { format!("{truncated}…") } else { truncated }
-}
-
-/// Resolve which model to use. Priority: explicit config > LM Studio auto-discover.
-///
-/// Hard-fail: if no explicit model is configured and LM Studio is unreachable or has
-/// no chat models loaded, this returns an error. There is no Claude fallback —
-/// configuration that can't be honored must surface, not be papered over.
-pub async fn resolve_model(config: &config::Config) -> Result<Model> {
-    match &config.default_model {
-        Model::Claude(id) if !id.is_empty() => return Ok(Model::Claude(id.clone())),
-        Model::LMStudio(id) if !id.is_empty() => return Ok(Model::LMStudio(id.clone())),
-        _ => {}
-    }
-
-    let lms = LMStudioBackend::new(&config.lmstudio_url, "");
-    match lms.list_models().await {
-        Ok(models) => {
-            let mut chat_models: Vec<&str> = models
-                .iter()
-                .map(|s| s.as_str())
-                .filter(|m| !m.contains("embed"))
-                .collect();
-
-            if chat_models.is_empty() {
-                anyhow::bail!(
-                    "LM Studio is running at {} but no chat models are loaded. Load a model and retry.",
-                    config.lmstudio_url
-                );
-            }
-
-            // Auto-pick priority. Lower rank wins. Qwen ranks first per
-            // explicit user preference. Other families follow alphabetically.
-            // Reasoning models (deepseek-r1) are still viable — the LMStudio
-            // backend folds `reasoning_content` into the response when
-            // `content` is empty.
-            chat_models.sort_by_key(|m| auto_pick_rank(m));
-
-            if chat_models.len() == 1 {
-                return Ok(Model::LMStudio(chat_models[0].to_string()));
-            }
-
-            // In non-interactive contexts (MCP server, piped stdin) we cannot prompt —
-            // blocking on read_line would hang the caller indefinitely.
-            use std::io::IsTerminal;
-            if !std::io::stdin().is_terminal() {
-                let first = chat_models[0].to_string();
-                eprintln!(
-                    "warning: multiple LM Studio models available, auto-selecting: {first}"
-                );
-                return Ok(Model::LMStudio(first));
-            }
-
-            println!("{}", "Select a model:".green());
-            for (i, m) in chat_models.iter().enumerate() {
-                println!("  {}  {m}", format!("[{}]", i + 1).dimmed());
-            }
-            print!("{} ", "[1]:".cyan());
-            std::io::Write::flush(&mut std::io::stdout())?;
-            let mut input = String::new();
-            std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut input)?;
-            let choice: usize = input.trim().parse().unwrap_or(1);
-            let selected = chat_models
-                .get(choice.saturating_sub(1))
-                .unwrap_or(&chat_models[0]);
-            Ok(Model::LMStudio(selected.to_string()))
-        }
-        Err(e) => {
-            anyhow::bail!(
-                "LM Studio not reachable at {} ({e}). Start it (with a chat model loaded) or set an explicit model in config.",
-                config.lmstudio_url
-            );
-        }
-    }
-}
-
-/// Auto-pick rank for LM Studio chat models when more than one is loaded and
-/// orca is running non-interactively. Lower wins.
-///
-/// Qwen first (the user's default tier — strong tool-calling, low thinking
-/// overhead). Reasoning-distill models (deepseek-r1-distill-qwen, etc.) sink
-/// to the bottom because they share "qwen" in their id but behave like
-/// reasoning models, not chat-tuned qwen.
-fn auto_pick_rank(id: &str) -> u8 {
-    let id_lower = id.to_ascii_lowercase();
-    let is_reasoning = id_lower.contains("deepseek-r1")
-        || id_lower.contains("/r1-")
-        || id_lower.contains("o1-")
-        || id_lower.contains("-thinking")
-        || id_lower.contains("reasoning");
-    let is_qwen = id_lower.starts_with("qwen/") || id_lower.contains("/qwen");
-
-    match (is_qwen, is_reasoning) {
-        (true,  false) => 0,    // chat-tuned qwen — preferred
-        (false, false) => 10,   // other chat models
-        (true,  true)  => 50,   // qwen-distilled reasoning model
-        (false, true)  => 60,   // pure reasoning model
-    }
-}
-
-pub fn estimate_context_window(model: &Model) -> usize {
-    match model {
-        Model::Claude(id) if id.contains("opus") => 200_000,
-        Model::Claude(_) => 200_000,
-        Model::LMStudio(id) if id.contains("35b") => 32_768,
-        Model::LMStudio(_) => 32_768,
-    }
 }
 
 pub fn history_file() -> Option<std::path::PathBuf> {
@@ -173,6 +67,124 @@ pub fn find_other_orca_pids() -> Vec<u32> {
             .filter(|&pid| pid != my_pid)
             .collect(),
         _ => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── agent_emoji ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn agent_emoji_known_agents() {
+        assert_eq!(agent_emoji("wolf"), "🐺");
+        assert_eq!(agent_emoji("orca"), "🐋");
+        assert_eq!(agent_emoji("otter"), "🦦");
+        assert_eq!(agent_emoji("owl"), "🦉");
+        assert_eq!(agent_emoji("fox"), "🦊");
+        assert_eq!(agent_emoji("bear"), "🐻");
+        assert_eq!(agent_emoji("oracle"), "🔮");
+    }
+
+    #[test]
+    fn agent_emoji_unknown_returns_wrench() {
+        assert_eq!(agent_emoji("unknown-agent"), "🔧");
+        assert_eq!(agent_emoji(""), "🔧");
+    }
+
+    // ── truncate_preview ──────────────────────────────────────────────────────
+
+    #[test]
+    fn truncate_preview_short_unchanged() {
+        assert_eq!(truncate_preview("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_preview_long_gets_ellipsis() {
+        let result = truncate_preview("abcdefghij", 5);
+        assert_eq!(result, "abcde…");
+    }
+
+    #[test]
+    fn truncate_preview_exactly_at_limit_no_ellipsis() {
+        assert_eq!(truncate_preview("12345", 5), "12345");
+    }
+
+    // ── summarize_result ──────────────────────────────────────────────────────
+
+    #[test]
+    fn summarize_result_error_truncates_content() {
+        let content = "a".repeat(400);
+        let result = summarize_result("bash", &content, true);
+        assert!(result.ends_with('…'), "should be truncated: {result}");
+        assert!(result.chars().count() <= 302, "should not exceed truncation limit + ellipsis");
+    }
+
+    #[test]
+    fn summarize_result_glob_counts_files() {
+        let content = "src/main.rs\nsrc/lib.rs\nsrc/util.rs\n";
+        let result = summarize_result("glob", content, false);
+        assert_eq!(result, "3 file(s) matched");
+    }
+
+    #[test]
+    fn summarize_result_glob_empty_returns_no_matches() {
+        assert_eq!(summarize_result("glob", "", false), "(no matches)");
+        assert_eq!(summarize_result("glob", "\n\n", false), "(no matches)");
+    }
+
+    #[test]
+    fn summarize_result_grep_counts_matches_and_files() {
+        let content = "src/main.rs:10:fn main\nsrc/lib.rs:5:fn helper\nsrc/lib.rs:20:fn other\n";
+        let result = summarize_result("grep", content, false);
+        assert_eq!(result, "3 match(es) in 2 file(s)");
+    }
+
+    #[test]
+    fn summarize_result_grep_empty_returns_no_matches() {
+        assert_eq!(summarize_result("grep", "", false), "(no matches)");
+    }
+
+    #[test]
+    fn summarize_result_read_file_counts_lines() {
+        let content = "line1\nline2\nline3\n";
+        let result = summarize_result("read_file", content, false);
+        assert_eq!(result, "3 lines");
+    }
+
+    #[test]
+    fn summarize_result_bash_single_line() {
+        let result = summarize_result("bash", "hello world", false);
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn summarize_result_bash_multiline_shows_first_plus_count() {
+        let content = "first line\nsecond line\nthird line\n";
+        let result = summarize_result("bash", content, false);
+        assert!(result.contains("first line"), "should contain first line: {result}");
+        assert!(result.contains("+2"), "should show +2 more lines: {result}");
+    }
+
+    #[test]
+    fn summarize_result_bash_empty_returns_no_output() {
+        assert_eq!(summarize_result("bash", "", false), "(no output)");
+        assert_eq!(summarize_result("bash", "   \n  ", false), "(no output)");
+    }
+
+    #[test]
+    fn summarize_result_write_file_returns_content() {
+        let result = summarize_result("write_file", "written 42 bytes", false);
+        assert_eq!(result, "written 42 bytes");
+    }
+
+    #[test]
+    fn summarize_result_unknown_tool_truncates_at_200() {
+        let content = "x".repeat(300);
+        let result = summarize_result("unknown_tool", &content, false);
+        assert!(result.ends_with('…'));
+        assert!(result.chars().count() <= 202);
     }
 }
 

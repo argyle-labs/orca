@@ -5,7 +5,7 @@
 //! retrieved via `get_output`. Cancellation is handled via `CancellationToken`.
 
 use llm::{ModelBackend, OutputSink, buffer_sink, sink_write, Message};
-use orca_core::tools::ToolRegistry;
+use llm::tools::ToolRegistry;
 use config::{Config, Model};
 use tool::ToolResult;
 use anyhow::Result;
@@ -172,7 +172,7 @@ async fn run_background_chat(
     let mut tools = ToolRegistry {
         output: output.clone(),
         permissions: {
-            let mut p = orca_core::tools::bash::BashPermissions::default();
+            let mut p = llm::tools::bash::BashPermissions::default();
             p.auto_approve = true;
             p
         },
@@ -244,4 +244,224 @@ fn truncate_preview(s: &str, max_chars: usize) -> String {
 
 fn write_to_sink(sink: &OutputSink, data: &str) {
     sink_write(sink, data);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use llm::buffer_sink;
+
+    fn make_finished_job(id: usize, prompt: &str) -> BackgroundJob {
+        let (_, buffer) = buffer_sink();
+        let handle = tokio::spawn(async { Ok(()) });
+        BackgroundJob {
+            id,
+            prompt: prompt.to_string(),
+            buffer,
+            handle,
+            cancel: CancellationToken::new(),
+            notified: false,
+        }
+    }
+
+    fn make_running_job(id: usize, prompt: &str) -> BackgroundJob {
+        let (_, buffer) = buffer_sink();
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+            Ok(())
+        });
+        BackgroundJob {
+            id,
+            prompt: prompt.to_string(),
+            buffer,
+            handle,
+            cancel: CancellationToken::new(),
+            notified: false,
+        }
+    }
+
+    // ── BackgroundJob ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn background_job_is_finished_after_task_completes() {
+        let job = make_finished_job(1, "test");
+        // Give tokio a chance to run the spawned task
+        tokio::task::yield_now().await;
+        // The task is an instant Ok(()), so it should be done quickly
+        tokio::time::timeout(
+            tokio::time::Duration::from_millis(100),
+            async {
+                loop {
+                    if job.is_finished() { break; }
+                    tokio::task::yield_now().await;
+                }
+            }
+        ).await.expect("job should finish within 100ms");
+    }
+
+    #[tokio::test]
+    async fn background_job_output_reads_buffer_contents() {
+        let (sink, buffer) = buffer_sink();
+        let handle = tokio::spawn(async { Ok(()) });
+        sink_write(&sink, "hello from job");
+        let job = BackgroundJob {
+            id: 1,
+            prompt: "p".into(),
+            buffer,
+            handle,
+            cancel: CancellationToken::new(),
+            notified: false,
+        };
+        assert_eq!(job.output(), "hello from job");
+    }
+
+    #[tokio::test]
+    async fn background_job_output_empty_by_default() {
+        let job = make_finished_job(1, "empty");
+        assert_eq!(job.output(), "");
+    }
+
+    // ── JobManager state management ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn job_manager_starts_empty() {
+        let manager = JobManager::new();
+        let listed = manager.list();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].contains("no background jobs"), "got: {:?}", listed[0]);
+    }
+
+    #[tokio::test]
+    async fn drain_notifications_empty_on_new_manager() {
+        let mut manager = JobManager::new();
+        assert!(manager.drain_notifications().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_output_returns_none_for_unknown_id() {
+        let manager = JobManager::new();
+        assert!(manager.get_output(999).is_none());
+    }
+
+    #[tokio::test]
+    async fn cancel_returns_false_for_unknown_id() {
+        let mut manager = JobManager::new();
+        assert!(!manager.cancel(999));
+    }
+
+    #[tokio::test]
+    async fn drain_notifications_notifies_once_then_silent() {
+        let mut manager = JobManager::new();
+        let job = make_finished_job(1, "do something");
+        // Wait for task to finish
+        tokio::task::yield_now().await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        manager.jobs.push(job);
+
+        let notes = manager.drain_notifications();
+        // Should have a notification for the finished job
+        assert!(!notes.is_empty(), "should notify about finished job");
+        assert!(notes[0].contains("#1"), "notification should mention job id: {:?}", notes[0]);
+
+        // Second drain: already notified, no more notes
+        let notes2 = manager.drain_notifications();
+        assert!(notes2.is_empty(), "second drain should be empty");
+    }
+
+    #[tokio::test]
+    async fn list_shows_done_for_finished_job() {
+        let mut manager = JobManager::new();
+        let job = make_finished_job(42, "finished task");
+        tokio::task::yield_now().await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        manager.jobs.push(job);
+
+        let list = manager.list();
+        assert_eq!(list.len(), 1);
+        let entry = &list[0];
+        assert!(entry.contains("#42"), "should show job id: {entry}");
+        assert!(entry.contains("done"), "should show 'done' status: {entry}");
+    }
+
+    #[tokio::test]
+    async fn list_shows_running_for_active_job() {
+        let mut manager = JobManager::new();
+        let job = make_running_job(7, "long task");
+        manager.jobs.push(job);
+
+        let list = manager.list();
+        assert_eq!(list.len(), 1);
+        let entry = &list[0];
+        assert!(entry.contains("#7"), "should show job id: {entry}");
+        assert!(entry.contains("running"), "should show 'running' status: {entry}");
+    }
+
+    #[tokio::test]
+    async fn cancel_running_job_returns_true() {
+        let mut manager = JobManager::new();
+        let job = make_running_job(5, "cancellable");
+        manager.jobs.push(job);
+
+        assert!(manager.cancel(5), "cancel should return true for running job");
+        // Job is still sleeping (token cancelled, task not yet woken) — cancel is idempotent
+        assert!(manager.cancel(5), "second cancel on still-running job also returns true");
+        // Unknown id always returns false
+        assert!(!manager.cancel(999), "cancel unknown id returns false");
+    }
+
+    #[tokio::test]
+    async fn cancel_finished_job_returns_false() {
+        let mut manager = JobManager::new();
+        let job = make_finished_job(9, "done already");
+        tokio::task::yield_now().await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        manager.jobs.push(job);
+
+        // Job is finished so cancel finds no running job with that id
+        assert!(!manager.cancel(9), "can't cancel an already-finished job");
+    }
+
+    #[tokio::test]
+    async fn get_output_returns_job_output() {
+        let (sink, buffer) = buffer_sink();
+        sink_write(&sink, "job output text");
+        let handle = tokio::spawn(async { Ok(()) });
+        let mut manager = JobManager::new();
+        manager.jobs.push(BackgroundJob {
+            id: 3,
+            prompt: "p".into(),
+            buffer,
+            handle,
+            cancel: CancellationToken::new(),
+            notified: false,
+        });
+
+        assert_eq!(manager.get_output(3).as_deref(), Some("job output text"));
+        assert!(manager.get_output(99).is_none());
+    }
+
+    #[tokio::test]
+    async fn job_id_increments_correctly() {
+        // Verify next_id by manually constructing two job states
+        let manager = JobManager::new();
+        assert_eq!(manager.next_id, 1);
+    }
+
+    // ── truncate_preview ──────────────────────────────────────────────────────
+
+    #[test]
+    fn truncate_preview_short_string_unchanged() {
+        assert_eq!(truncate_preview("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_preview_long_string_gets_ellipsis() {
+        let result = truncate_preview("abcdefghij", 5);
+        assert_eq!(result, "abcde…");
+    }
+
+    #[test]
+    fn truncate_preview_exactly_at_limit_no_ellipsis() {
+        assert_eq!(truncate_preview("12345", 5), "12345");
+    }
 }

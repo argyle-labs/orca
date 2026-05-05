@@ -1,7 +1,7 @@
 use super::{Session, util};
 use llm::{ClaudeBackend, LMStudioBackend, ModelBackend, build_backend, Message};
 use config::Model;
-use ledger::fmt_tokens;
+use crate::ledger::fmt_tokens;
 use anyhow::{Context, Result};
 use colored::Colorize;
 use tokio_util::sync::CancellationToken;
@@ -342,7 +342,7 @@ impl Session {
 
     fn cmd_search_logs(&self, query: &str) {
         let logs_dir = self.config.logs_dir();
-        match log::search_logs(&logs_dir, query, 20) {
+        match crate::log::search_logs(&logs_dir, query, 20) {
             Ok(matches) if matches.is_empty() => {
                 self.out(&format!("no matches for '{query}'").dimmed().to_string());
             }
@@ -376,7 +376,7 @@ impl Session {
 
     fn cmd_list_sessions(&self) {
         let logs_dir = self.config.logs_dir();
-        match log::list_sessions(&logs_dir, 15) {
+        match crate::log::list_sessions(&logs_dir, 15) {
             Ok(sessions) if sessions.is_empty() => {
                 self.out(&"no sessions found".dimmed().to_string());
             }
@@ -402,7 +402,7 @@ impl Session {
 
     fn cmd_recall_session(&self, session_id: &str) {
         let logs_dir = self.config.logs_dir();
-        match log::recall_session(&logs_dir, session_id) {
+        match crate::log::recall_session(&logs_dir, session_id) {
             Ok(records) => {
                 self.out(
                     &format!("session: {} ({} records)", session_id, records.len())

@@ -11,6 +11,7 @@
 use anyhow::{Context, Result};
 use config::{Config, Model};
 use db;
+use crate::discovery::{TaskKind, discover_all, select_for_task, to_config_model};
 
 const KEY_MODE: &str = "agent_backend.mode";
 const KEY_USE_SERVER_ANTHROPIC: &str = "agent_backend.use_server_anthropic";
@@ -181,6 +182,43 @@ fn current_claude_model(config: &Config) -> Option<Model> {
         // No explicit Claude model configured — leave id empty so the backend
         // layer surfaces a clear "model required" error rather than guessing.
         _ => Some(Model::Claude(String::new())),
+    }
+}
+
+/// Resolve which model to use for an interactive session.
+///
+/// Priority order:
+///   1. Explicit model in config (user already decided).
+///   2. Best available model for the given task kind, discovered at call time.
+///
+/// Hard-fail: if nothing is available, returns an error. No silent fallback.
+pub async fn resolve_model(config: &Config, task: Option<TaskKind>) -> Result<Model> {
+    // Honour explicit config first.
+    match &config.default_model {
+        Model::Claude(id) if !id.is_empty() => return Ok(Model::Claude(id.clone())),
+        Model::LMStudio(id) if !id.is_empty() => return Ok(Model::LMStudio(id.clone())),
+        _ => {}
+    }
+
+    let available = discover_all(config).await;
+    let task = task.unwrap_or(TaskKind::ToolUse); // default: assume tools are needed
+
+    match select_for_task(&available, task) {
+        Some(m) => Ok(to_config_model(m)),
+        None => anyhow::bail!(
+            "no models available — start LM Studio with a chat model loaded, \
+             or run `orca login` to configure an Anthropic API key"
+        ),
+    }
+}
+
+/// Estimate the context window in tokens for a model. Used to warn the user
+/// when context is filling up.
+pub fn estimate_context_window(model: &Model) -> usize {
+    use crate::discovery::classify_model;
+    match model {
+        Model::Claude(id) => classify_model(id, "claude").context_window,
+        Model::LMStudio(id) => classify_model(id, "lmstudio").context_window,
     }
 }
 

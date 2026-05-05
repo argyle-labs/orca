@@ -345,3 +345,179 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_manifest(dir: &std::path::Path, content: &str) -> String {
+        let path = dir.join("orca-plugin.toml");
+        std::fs::write(&path, content).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    const MINIMAL_MANIFEST: &str = r#"
+[plugin]
+id = "test-plugin"
+version = "1.0.0"
+tier = "personal"
+"#;
+
+    const FULL_MANIFEST: &str = r#"
+[plugin]
+id = "my-plugin"
+version = "2.3.1"
+tier = "team"
+mode = "rebuy"
+context_injection = "full"
+
+[plugin.mcp]
+command = "node"
+args = ["server.js", "--port", "3000"]
+
+[plugin.mcp.env]
+LOG_LEVEL = "info"
+
+[[plugin.nav_links]]
+href = "/dashboard"
+label = "Dashboard"
+"#;
+
+    // ── parse_manifest ────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_manifest_minimal_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_manifest(dir.path(), MINIMAL_MANIFEST);
+        let (m, abs) = parse_manifest(&path).unwrap();
+        assert_eq!(m.plugin.id, "test-plugin");
+        assert_eq!(m.plugin.version, "1.0.0");
+        assert_eq!(m.plugin.tier, "personal");
+        assert_eq!(m.plugin.mode, "orca", "default mode should be orca");
+        assert!(abs.contains("orca-plugin.toml"));
+    }
+
+    #[test]
+    fn parse_manifest_full_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_manifest(dir.path(), FULL_MANIFEST);
+        let (m, _) = parse_manifest(&path).unwrap();
+        assert_eq!(m.plugin.id, "my-plugin");
+        assert_eq!(m.plugin.mode, "rebuy");
+        assert_eq!(m.plugin.context_injection, Some("full".into()));
+        let mcp = m.plugin.mcp.unwrap();
+        assert_eq!(mcp.command, "node");
+        assert_eq!(mcp.args, vec!["server.js", "--port", "3000"]);
+        assert_eq!(mcp.env.get("LOG_LEVEL").map(|s| s.as_str()), Some("info"));
+    }
+
+    #[test]
+    fn parse_manifest_errors_on_missing_file() {
+        match parse_manifest("/tmp/__no_such_manifest__.toml") {
+            Ok(_) => panic!("expected error for missing file"),
+            Err(e) => assert!(e.to_string().contains("manifest not found"), "got: {e}"),
+        }
+    }
+
+    #[test]
+    fn parse_manifest_errors_on_invalid_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_manifest(dir.path(), "this is not valid toml {{{{");
+        match parse_manifest(&path) {
+            Ok(_) => panic!("expected error for invalid TOML"),
+            Err(e) => assert!(e.to_string().contains("invalid orca-plugin.toml"), "got: {e}"),
+        }
+    }
+
+    #[test]
+    fn parse_manifest_errors_on_missing_required_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_manifest(dir.path(), "[plugin]\nid = \"x\"\n");
+        match parse_manifest(&path) {
+            Ok(_) => panic!("expected error for missing fields"),
+            Err(e) => assert!(e.to_string().contains("invalid orca-plugin.toml"), "got: {e}"),
+        }
+    }
+
+    // ── peek_plugin_id ────────────────────────────────────────────────────────
+
+    #[test]
+    fn peek_plugin_id_returns_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_manifest(dir.path(), MINIMAL_MANIFEST);
+        assert_eq!(peek_plugin_id(&path).unwrap(), "test-plugin");
+    }
+
+    #[test]
+    fn peek_plugin_id_errors_on_missing_file() {
+        assert!(peek_plugin_id("/tmp/__no_such_file__.toml").is_err());
+    }
+
+    // ── mcp url resolution in install_manifest ────────────────────────────────
+
+    #[test]
+    fn manifest_mcp_url_shorthand_becomes_vec() {
+        let content = r#"
+[plugin]
+id = "http-plugin"
+version = "1.0.0"
+tier = "personal"
+
+[plugin.mcp]
+url = "http://localhost:8080"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_manifest(dir.path(), content);
+        let (m, _) = parse_manifest(&path).unwrap();
+        let mcp = m.plugin.mcp.unwrap();
+        assert_eq!(mcp.url.as_deref(), Some("http://localhost:8080"));
+        assert!(mcp.urls.is_empty(), "urls list should be empty when only url shorthand is set");
+    }
+
+    #[test]
+    fn manifest_mcp_urls_list_takes_precedence() {
+        let content = r#"
+[plugin]
+id = "multi-url"
+version = "1.0.0"
+tier = "personal"
+
+[plugin.mcp]
+url = "http://public.example.com"
+urls = ["http://lan.local", "http://tailscale.local"]
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_manifest(dir.path(), content);
+        let (m, _) = parse_manifest(&path).unwrap();
+        let mcp = m.plugin.mcp.unwrap();
+        assert_eq!(mcp.urls, vec!["http://lan.local", "http://tailscale.local"]);
+    }
+
+    #[test]
+    fn manifest_default_mode_is_orca() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_manifest(dir.path(), MINIMAL_MANIFEST);
+        let (m, _) = parse_manifest(&path).unwrap();
+        assert_eq!(m.plugin.mode, "orca");
+    }
+
+    #[test]
+    fn manifest_commands_map_parsed() {
+        let content = r#"
+[plugin]
+id = "cmd-plugin"
+version = "1.0.0"
+tier = "personal"
+
+[plugin.commands]
+search = "mcp_search"
+deploy = "mcp_deploy"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_manifest(dir.path(), content);
+        let (m, _) = parse_manifest(&path).unwrap();
+        assert_eq!(m.plugin.commands.get("search").map(|s| s.as_str()), Some("mcp_search"));
+        assert_eq!(m.plugin.commands.get("deploy").map(|s| s.as_str()), Some("mcp_deploy"));
+    }
+}

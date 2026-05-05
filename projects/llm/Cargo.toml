@@ -7,9 +7,10 @@ edition = "2024"
 name = "llm"
 
 [dependencies]
-config  = { package = "orca-config", path = "../config" }
-db      = { package = "orca-db",     path = "../db" }
-tool    = { package = "orca-tool",   path = "../tool" }
+config   = { package = "orca-config", path = "../config" }
+db       = { package = "orca-db",     path = "../db" }
+tool     = { package = "orca-tool",   path = "../tool" }
+orca_fs  = { package = "orca-fs",     path = "../fs" }
 
 anyhow       = "1"
 async-trait  = "0.1"

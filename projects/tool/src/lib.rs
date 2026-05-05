@@ -23,7 +23,7 @@ use serde::de::DeserializeOwned;
 ///
 /// # Implementing
 ///
-/// ```rust
+/// ```rust,ignore
 /// #[derive(Deserialize, JsonSchema)]
 /// pub struct Args { pub mode: String }
 ///
