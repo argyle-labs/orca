@@ -1,5 +1,5 @@
 use anyhow::Result;
-use orca_core::backend::buffer_sink;
+use llm::buffer_sink;
 use config::Config;
 use serde_json::{Value, json};
 

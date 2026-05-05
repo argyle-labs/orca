@@ -1,11 +1,13 @@
-//! Orca core — model backends and tool execution.
+//! Orca core — tool execution.
 //!
 //! Modules:
-//! - `backend` — `ModelBackend` trait + Claude (Anthropic) and LM Studio (OpenAI-compat) impls,
-//!               streaming SSE parser, output sink abstraction, `build_backend` factory
 //! - `tools`   — `ToolRegistry`: tool definitions, dispatch, bash execution with permissions
+//!
+//! LLM backend types and implementations have moved to `orca-llm`.
 
-pub mod backend;
 pub mod tools;
-pub mod types;
-pub use crate::types::{BackendResponse, Message, StopReason, ToolCall, ToolDef, ToolResult, truncate_preview};
+
+// Re-export llm types for backward compatibility
+pub use llm::{BackendResponse, Message, StopReason};
+pub use llm::backend;
+pub use llm::types;

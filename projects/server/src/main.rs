@@ -5,9 +5,8 @@ use orca::serve;
 use orca::serve::openapi_spec_json;
 use orca::session::Session;
 use orca_commands::{self as cmd, CredsAction, DaemonAction, DbAction, DockerAction, HookAction, LogAction, McpAction, PluginAction, SchemaAction, SpecAction, cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian, cmd_install, cmd_uninstall};
-use orca_core::backend::{ClaudeBackend, ModelBackend, stdout_sink};
+use llm::{ClaudeBackend, ModelBackend, stdout_sink, Message};
 use config::Config;
-use orca_core::Message;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]

@@ -4,10 +4,10 @@
 //! without blocking the foreground session. Results are buffered in memory and
 //! retrieved via `get_output`. Cancellation is handled via `CancellationToken`.
 
-use orca_core::backend::{ModelBackend, OutputSink, buffer_sink, sink_write};
+use llm::{ModelBackend, OutputSink, buffer_sink, sink_write, Message};
 use orca_core::tools::ToolRegistry;
 use config::{Config, Model};
-use orca_core::{Message, ToolResult, truncate_preview};
+use tool::ToolResult;
 use anyhow::Result;
 use colored::Colorize;
 use std::sync::{Arc, Mutex};
@@ -71,7 +71,7 @@ impl JobManager {
         let id = self.next_id;
         self.next_id += 1;
 
-        let backend = orca_core::backend::build_backend(config, model)?;
+        let backend = llm::build_backend(config, model)?;
         let (sink, buffer) = buffer_sink();
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
@@ -176,6 +176,7 @@ async fn run_background_chat(
             p.auto_approve = true;
             p
         },
+
         working_dir: None,
     };
     let tool_defs = ToolRegistry::definitions()
@@ -233,6 +234,12 @@ async fn run_background_chat(
     }
 
     Ok(())
+}
+
+fn truncate_preview(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() { format!("{truncated}…") } else { truncated }
 }
 
 fn write_to_sink(sink: &OutputSink, data: &str) {

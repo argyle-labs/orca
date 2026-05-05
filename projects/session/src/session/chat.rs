@@ -1,6 +1,7 @@
 use super::{Session, util};
 use orca_core::tools::ToolRegistry;
-use orca_core::{Message, ToolResult};
+use llm::Message;
+use tool::ToolResult;
 use anyhow::Result;
 use colored::Colorize;
 use tokio_util::sync::CancellationToken;
