@@ -61,8 +61,8 @@ pub struct SetCredRequest {
 )]
 pub async fn plugins_list_handler() -> Response {
     db_json(|| {
-        let conn = orca_utils::db::open_default()?;
-        let plugins = orca_utils::db::list_plugins(&conn)?
+        let conn = db::open_default()?;
+        let plugins = db::list_plugins(&conn)?
             .into_iter()
             .map(|p| PluginInfo {
                 id: p.id,
@@ -94,11 +94,11 @@ pub async fn plugins_list_handler() -> Response {
 )]
 pub async fn plugin_creds_list_handler(Path(id): Path<String>) -> Response {
     db_json(|| {
-        let conn = orca_utils::db::open_default()?;
-        if orca_utils::db::get_plugin(&conn, &id)?.is_none() {
+        let conn = db::open_default()?;
+        if db::get_plugin(&conn, &id)?.is_none() {
             anyhow::bail!("plugin '{}' not found", id);
         }
-        let creds = orca_utils::db::list_plugin_credentials(&conn, &id)?
+        let creds = db::list_plugin_credentials(&conn, &id)?
             .into_iter()
             .map(|c| CredInfo {
                 key: c.key,
@@ -130,11 +130,11 @@ pub async fn plugin_creds_set_handler(
     Json(body): Json<SetCredRequest>,
 ) -> Response {
     db_ok(|| {
-        let conn = orca_utils::db::open_default()?;
-        if orca_utils::db::get_plugin(&conn, &id)?.is_none() {
+        let conn = db::open_default()?;
+        if db::get_plugin(&conn, &id)?.is_none() {
             anyhow::bail!("plugin '{}' not found", id);
         }
-        orca_utils::db::set_plugin_credential(&conn, &id, &body.key, &body.value)?;
+        db::set_plugin_credential(&conn, &id, &body.key, &body.value)?;
         Ok(())
     })
 }
@@ -158,8 +158,8 @@ pub async fn plugin_creds_set_handler(
 )]
 pub async fn plugin_creds_delete_handler(Path((id, key)): Path<(String, String)>) -> Response {
     db_remove("credential", &key, || {
-        let conn = orca_utils::db::open_default()?;
-        orca_utils::db::delete_plugin_credential(&conn, &id, &key)
+        let conn = db::open_default()?;
+        db::delete_plugin_credential(&conn, &id, &key)
     })
 }
 
@@ -179,10 +179,10 @@ pub async fn plugin_creds_delete_handler(Path((id, key)): Path<(String, String)>
 )]
 pub async fn plugin_health_handler(Path(id): Path<String>) -> Response {
     let mcp_command = {
-        let Ok(conn) = orca_utils::db::open_default() else {
+        let Ok(conn) = db::open_default() else {
             return err(StatusCode::INTERNAL_SERVER_ERROR, "db error");
         };
-        let Ok(Some(plugin)) = orca_utils::db::get_plugin(&conn, &id) else {
+        let Ok(Some(plugin)) = db::get_plugin(&conn, &id) else {
             return err(StatusCode::NOT_FOUND, "plugin not found");
         };
         plugin.mcp_command.filter(|u| u.starts_with("http"))
@@ -192,8 +192,8 @@ pub async fn plugin_health_handler(Path(id): Path<String>) -> Response {
         return err(StatusCode::BAD_REQUEST, "plugin has no HTTP transport URL");
     };
 
-    let token = orca_utils::db::open_default().ok().and_then(|conn|
-        orca_utils::db::list_plugin_credentials(&conn, &id).ok()
+    let token = db::open_default().ok().and_then(|conn|
+        db::list_plugin_credentials(&conn, &id).ok()
             .and_then(|creds| creds.into_iter().find(|c| c.key == "MEERKAT_TOKEN").map(|c| c.value))
     );
 
@@ -233,8 +233,8 @@ pub async fn plugin_health_handler(Path(id): Path<String>) -> Response {
 )]
 pub async fn plugin_data_list_handler(Path(id): Path<String>) -> Response {
     db_json(|| {
-        let conn = orca_utils::db::open_default()?;
-        let entries = orca_utils::db::list_plugin_data(&conn, &id)?
+        let conn = db::open_default()?;
+        let entries = db::list_plugin_data(&conn, &id)?
             .into_iter()
             .map(|r| PluginDataEntry { key: r.key, value: r.value, updated_at: r.updated_at })
             .collect::<Vec<_>>();
@@ -261,8 +261,8 @@ pub async fn plugin_data_list_handler(Path(id): Path<String>) -> Response {
 )]
 pub async fn plugin_data_get_handler(Path((id, key)): Path<(String, String)>) -> Response {
     db_json(|| {
-        let conn = orca_utils::db::open_default()?;
-        match orca_utils::db::get_plugin_data(&conn, &id, &key)? {
+        let conn = db::open_default()?;
+        match db::get_plugin_data(&conn, &id, &key)? {
             Some(r) => Ok(PluginDataEntry { key: r.key, value: r.value, updated_at: r.updated_at }),
             None => anyhow::bail!("key '{}' not found for plugin '{}'", key, id),
         }
@@ -291,8 +291,8 @@ pub async fn plugin_data_set_handler(
     Json(body): Json<SetPluginDataRequest>,
 ) -> Response {
     db_ok(|| {
-        let conn = orca_utils::db::open_default()?;
-        orca_utils::db::set_plugin_data(&conn, &id, &key, &body.value)?;
+        let conn = db::open_default()?;
+        db::set_plugin_data(&conn, &id, &key, &body.value)?;
         Ok(())
     })
 }
@@ -316,8 +316,8 @@ pub async fn plugin_data_set_handler(
 )]
 pub async fn plugin_data_delete_handler(Path((id, key)): Path<(String, String)>) -> Response {
     db_remove("data key", &key, || {
-        let conn = orca_utils::db::open_default()?;
-        orca_utils::db::delete_plugin_data(&conn, &id, &key)
+        let conn = db::open_default()?;
+        db::delete_plugin_data(&conn, &id, &key)
     })
 }
 
@@ -377,8 +377,8 @@ pub async fn plugin_remove_handler(Path(id): Path<String>) -> Response {
 )]
 pub async fn plugin_enable_handler(Path(id): Path<String>) -> Response {
     db_remove("plugin", &id, || {
-        let conn = orca_utils::db::open_default()?;
-        orca_utils::db::set_plugin_enabled(&conn, &id, true)
+        let conn = db::open_default()?;
+        db::set_plugin_enabled(&conn, &id, true)
     })
 }
 
@@ -398,8 +398,8 @@ pub async fn plugin_enable_handler(Path(id): Path<String>) -> Response {
 )]
 pub async fn plugin_disable_handler(Path(id): Path<String>) -> Response {
     db_remove("plugin", &id, || {
-        let conn = orca_utils::db::open_default()?;
-        orca_utils::db::set_plugin_enabled(&conn, &id, false)
+        let conn = db::open_default()?;
+        db::set_plugin_enabled(&conn, &id, false)
     })
 }
 

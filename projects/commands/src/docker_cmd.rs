@@ -1,5 +1,5 @@
 use anyhow::Result;
-use orca_utils::db::{self, DockerRuntimeRow};
+use db::{self, DockerRuntimeRow};
 use clap::Subcommand;
 
 #[derive(Subcommand, Debug)]

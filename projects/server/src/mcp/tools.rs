@@ -23,7 +23,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "run_agent",
-            "description": "Delegate a task to a orca agent running on the local LLM (LM Studio). ONLY use this when the task genuinely requires language model reasoning — summarization, explanation, drafting, inference. Do NOT use for: file reads (use read_doc), searches (use search_docs), log lookup (use orca_search_logs), service state (use orca_list_services), schema queries (use get_graphql_info / get_rebuy_spec), or any operation with a deterministic tool that already handles it. Deterministic tools are always preferred over LLM calls. Falls back to Claude Haiku if LM Studio is unreachable.",
+            "description": "Delegate a task to an orca agent. The backend (LM Studio, server-side Anthropic, or delegation back to Claude Code) is selected by agent_backend_status — see the agent_backend_* tools to configure. ONLY use this when the task genuinely requires language model reasoning — summarization, explanation, drafting, inference. Do NOT use for: file reads (use read_doc), searches (use search_docs), log lookup (use search_logs), service state (use list_services), schema queries (use get_graphql_info / get_rebuy_spec), or any operation with a deterministic tool that already handles it. Deterministic tools are always preferred over LLM calls. Hard-fail: no silent fallback between backends. When the resolver picks Claude and server-side Anthropic is disabled, run_agent returns a JSON envelope { action: 'delegate_to_claude_code', ... } and the caller must invoke get_agent + Agent(general-purpose) itself.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -575,6 +575,66 @@ pub fn tool_defs() -> Value {
                 },
                 "required": ["pattern"]
             }
+        },
+        {
+            "name": "agent_backend_status",
+            "description": "Show the current agent backend configuration: mode (local|claude|hybrid), per-agent overrides, and whether server-side Anthropic calls are enabled.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "agent_backend_set_mode",
+            "description": "[MUTATES STATE] Set the global agent backend mode. local = always LM Studio. claude = always route to Claude (server-side if enabled, else delegate to caller). hybrid = check per-agent override; default is Claude when no override is set.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "mode": { "type": "string", "enum": ["local", "claude", "hybrid"] }
+                },
+                "required": ["mode"]
+            }
+        },
+        {
+            "name": "agent_backend_override",
+            "description": "[MUTATES STATE] Set, change, or clear a per-agent backend override (only consulted in hybrid mode). backend=clear deletes the override.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent":   { "type": "string" },
+                    "backend": { "type": "string", "enum": ["local", "claude", "clear"] }
+                },
+                "required": ["agent", "backend"]
+            }
+        },
+        {
+            "name": "agent_backend_use_server_anthropic",
+            "description": "[MUTATES STATE] Toggle whether the orca server makes Anthropic API calls directly when the resolver picks Claude. When false (default), Claude-routed agents return a delegate-to-claude-code envelope instead. Requires a stored API key when true.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean" }
+                },
+                "required": ["enabled"]
+            }
+        },
+        {
+            "name": "agent_backend_set_api_key",
+            "description": "[MUTATES STATE] Store an Anthropic API key in the encrypted orca DB (settings table, key 'secrets.anthropic_api_key'). The DB is SQLCipher-encrypted at rest. Required for server-side Anthropic calls.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string", "description": "Anthropic API key (sk-ant-...)" }
+                },
+                "required": ["key"]
+            }
+        },
+        {
+            "name": "agent_backend_clear_api_key",
+            "description": "[MUTATES STATE] Remove the stored Anthropic API key from the encrypted orca DB.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "agent_backend_api_key_status",
+            "description": "Report whether an Anthropic API key is stored in the encrypted orca DB. Never echoes the raw key — only a masked preview.",
+            "inputSchema": { "type": "object", "properties": {} }
         }
     ])
 }

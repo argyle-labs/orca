@@ -42,3 +42,36 @@ Otter delegates to these agents — do not invoke them directly unless Otter is 
 # Narrating Delegation
 
 When delegating to Otter, write `Orca: "Otter, ..."` first, then call the Agent tool. When Otter returns, present its actual output as `Otter: "..."` — never fabricate the response.
+
+# Agent Backend Selection
+
+Each `run_agent` invocation routes to one of three backends based on a global setting plus optional per-agent overrides. All routing is **hard-fail** — there is no silent fallback between backends.
+
+## Modes
+
+| mode     | behavior |
+|----------|----------|
+| `local`  | Always LM Studio. Errors if LM Studio is unreachable or has no chat model loaded. |
+| `claude` | Always Claude. See "Claude path" below. |
+| `hybrid` | Per-agent override; agents with no override default to Claude. |
+
+## Claude path
+
+When the resolver picks Claude, two sub-paths:
+
+- **Default — delegate to caller.** `run_agent` returns a JSON envelope `{ action: "delegate_to_claude_code", agent, agent_prompt, task }`. The calling Claude Code session is expected to invoke `get_agent` + `Agent(general-purpose)` itself. The orca server makes no Anthropic API calls.
+- **Opt-in — server-side Anthropic.** When `agent_backend.use_server_anthropic = true` AND an API key is stored in the encrypted orca DB (SQLCipher), the server makes the Anthropic call directly. If the toggle is on but no key is present, that's an error — the user asked for it, configuration is broken.
+
+Whichever Claude model is currently configured is used; no model id is hardcoded in the resolver.
+
+## MCP tools
+
+| tool | purpose |
+|------|---------|
+| `agent_backend_status` | mode, overrides, server-anthropic toggle, key presence |
+| `agent_backend_set_mode` | set mode to local/claude/hybrid |
+| `agent_backend_override` | set/clear per-agent override (hybrid mode only) |
+| `agent_backend_use_server_anthropic` | toggle direct server-side Anthropic calls |
+| `agent_backend_set_api_key` | store key in encrypted orca DB |
+| `agent_backend_clear_api_key` | remove key from orca DB |
+| `agent_backend_api_key_status` | report key presence (masked, never raw) |

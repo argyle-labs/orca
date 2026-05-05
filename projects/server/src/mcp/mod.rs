@@ -17,6 +17,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use crate::serve::api::llm as local_llm;
 use docs::{get_tree, list_commands, list_roots, read_doc, search_docs};
 use handlers::{
+    agent_backend_api_key_status, agent_backend_clear_api_key, agent_backend_override,
+    agent_backend_set_api_key, agent_backend_set_mode, agent_backend_status,
+    agent_backend_use_server_anthropic,
     agents, docker_add_runtime, docker_list_runtimes, docker_remove_runtime, get_agent, get_config,
     get_context, list_services, mcp_add_server, mcp_list_servers, mcp_list_mappings,
     mcp_map_tool, mcp_remove_server, mcp_sync_tools, mcp_unmap_tool,
@@ -255,6 +258,13 @@ async fn dispatch(name: &str, args: &Value, config: &Config) -> Result<String> {
         "resolve_library" | "get_library_docs" => {
             context7::proxy_context7(name, args, config).await
         }
+        "agent_backend_status"               => agent_backend_status(),
+        "agent_backend_set_mode"             => agent_backend_set_mode(args),
+        "agent_backend_override"             => agent_backend_override(args),
+        "agent_backend_use_server_anthropic" => agent_backend_use_server_anthropic(args),
+        "agent_backend_set_api_key"          => agent_backend_set_api_key(args),
+        "agent_backend_clear_api_key"        => agent_backend_clear_api_key(),
+        "agent_backend_api_key_status"       => agent_backend_api_key_status(),
         _ => anyhow::bail!("unknown tool: {name}"),
     }
 }

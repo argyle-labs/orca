@@ -1,6 +1,6 @@
 use anyhow::Result;
 use orca_utils::consts::APP_NAME;
-use orca_utils::db::{self, MigrateDirection};
+use db::{self, MigrateDirection};
 use clap::Subcommand;
 
 /// Subcommands for `orca db`.
@@ -20,7 +20,7 @@ pub enum DbAction {
 pub fn cmd_db(action: DbAction) -> Result<()> {
     let conn = db::open_default()?;
     let current = db::schema_version(&conn)?;
-    let total = orca_utils::db::migration_count();
+    let total = db::migration_count();
 
     match action {
         DbAction::Up => {

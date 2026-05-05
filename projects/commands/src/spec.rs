@@ -1,6 +1,6 @@
 use anyhow::Result;
 use orca_scanner as scanner;
-use orca_utils::db;
+use db;
 use clap::Subcommand;
 use colored::Colorize;
 use serde::Deserialize;
@@ -303,8 +303,8 @@ fn rebuy_repo_path(name: &str) -> std::path::PathBuf {
 }
 
 fn write_spec(repo: &str, spec: &serde_json::Value) -> Result<std::path::PathBuf> {
-    let out_path = scanner::openapi_dir().join(format!("{repo}.json"));
-    std::fs::create_dir_all(out_path.parent().expect("openapi_dir().join(...) always has a parent"))?;
+    let out_path = scanner::specs_dir().join(format!("{repo}.json"));
+    std::fs::create_dir_all(out_path.parent().expect("specs_dir().join(...) always has a parent"))?;
     std::fs::write(&out_path, serde_json::to_string_pretty(spec)?)?;
     Ok(out_path)
 }
@@ -399,7 +399,7 @@ fn sync_rebuy_shopify_client() -> Result<()> {
         out.push('\n');
     }
 
-    let dir = scanner::openapi_dir();
+    let dir = scanner::specs_dir();
     std::fs::create_dir_all(&dir)?;
     let out_path = dir.join("rebuy-shopify-client.graphql");
     std::fs::write(&out_path, out)?;
@@ -468,7 +468,7 @@ fn sync_shopify_admin() -> Result<()> {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let dir = scanner::openapi_dir();
+    let dir = scanner::specs_dir();
     std::fs::create_dir_all(&dir)?;
     let out_path = dir.join("shopify-admin.graphql");
     std::fs::write(&out_path, &sdl)?;

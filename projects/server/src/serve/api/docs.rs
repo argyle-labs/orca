@@ -153,7 +153,7 @@ async fn call_plugin_search_tools(
     query: &str,
     cid: &str,
 ) -> Vec<serde_json::Value> {
-    use orca_utils::db;
+    use db;
     let plugins = db::open_default()
         .and_then(|conn| db::list_plugins(&conn))
         .unwrap_or_default();

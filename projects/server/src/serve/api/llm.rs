@@ -46,8 +46,8 @@ impl LocalLlm {
 /// Returns the first reachable provider with at least one chat model.
 pub async fn discover_local_llm() -> Option<LocalLlm> {
     // 1. DB-registered providers
-    if let Ok(conn) = orca_utils::db::open_default() {
-        if let Ok(providers) = orca_utils::db::list_llm_providers(&conn) {
+    if let Ok(conn) = db::open_default() {
+        if let Ok(providers) = db::list_llm_providers(&conn) {
             let enabled: Vec<_> = providers.into_iter().filter(|p| p.enabled).collect();
             if !enabled.is_empty() {
                 let probes: Vec<_> = enabled.iter().map(|p| {

@@ -37,13 +37,13 @@ pub struct MappingsQuery {
     tag = "mcp"
 )]
 pub async fn mcp_mappings_list_handler(Query(q): Query<MappingsQuery>) -> Response {
-    match orca_utils::db::open_default() {
+    match db::open_default() {
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
         Ok(conn) => {
             let result = if let Some(name) = &q.name {
-                orca_utils::db::list_mcp_tool_mappings(&conn, name)
+                db::list_mcp_tool_mappings(&conn, name)
             } else {
-                orca_utils::db::all_mcp_tool_mappings(&conn)
+                db::all_mcp_tool_mappings(&conn)
             };
             match result {
                 Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -87,7 +87,7 @@ pub struct MapRequest {
     tag = "mcp"
 )]
 pub async fn mcp_mappings_create_handler(Json(body): Json<MapRequest>) -> Response {
-    let row = orca_utils::db::McpToolMappingRow {
+    let row = db::McpToolMappingRow {
         orca_tool: body.orca_tool.clone(),
         mcp_name: body.name,
         external_tool: body.external_tool,
@@ -95,8 +95,8 @@ pub async fn mcp_mappings_create_handler(Json(body): Json<MapRequest>) -> Respon
         confidence: None,
         enabled: true,
     };
-    match orca_utils::db::open_default()
-        .and_then(|conn| orca_utils::db::upsert_mcp_tool_mapping(&conn, &row))
+    match db::open_default()
+        .and_then(|conn| db::upsert_mcp_tool_mapping(&conn, &row))
     {
         Ok(()) => Json(OkResponse { ok: true }).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -120,8 +120,8 @@ pub async fn mcp_mappings_create_handler(Json(body): Json<MapRequest>) -> Respon
 pub async fn mcp_mappings_delete_handler(
     axum::extract::Path(orca_tool): axum::extract::Path<String>,
 ) -> Response {
-    match orca_utils::db::open_default()
-        .and_then(|conn| orca_utils::db::remove_mcp_tool_mapping(&conn, &orca_tool))
+    match db::open_default()
+        .and_then(|conn| db::remove_mcp_tool_mapping(&conn, &orca_tool))
     {
         Ok(true) => Json(OkResponse { ok: true }).into_response(),
         Ok(false) => err(StatusCode::NOT_FOUND, &format!("mapping '{orca_tool}' not found")),

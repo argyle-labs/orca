@@ -1,0 +1,10 @@
+[package]
+name = "orca-ledger"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "ledger"
+path = "src/lib.rs"
+
+[dependencies]

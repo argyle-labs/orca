@@ -6,7 +6,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use utoipa::ToSchema;
-use orca_utils::db;
+use db;
 
 fn shopify_admin_version() -> String {
     #[derive(Deserialize, Default)]
@@ -280,7 +280,7 @@ pub async fn specs_get_handler(
     if !validate_repo(&repo) {
         return err(StatusCode::BAD_REQUEST, "invalid repo name");
     }
-    // 1. Orca's own spec dir (~/.orca/openapi/specs/)
+    // 1. Orca's own spec dir (~/.orca/specs/)
     let path = specs_dir().join(format!("{repo}.json"));
     if let Ok(raw) = std::fs::read_to_string(&path) {
         return serve_spec(&raw, &repo, &query);

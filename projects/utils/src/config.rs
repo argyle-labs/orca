@@ -62,10 +62,13 @@ impl Config {
         let memory_root = orca_vault.join("memory");
         let db_path = orca_vault.join(APP_DB_FILE);
 
-        // API key: env var takes priority, then macOS Keychain
-        let api_key = std::env::var("ANTHROPIC_API_KEY")
-            .ok()
-            .or_else(crate::auth::load_api_key_from_keychain);
+        // API key: env var > orca DB secrets. The DB is the canonical secure
+        // store (SQLCipher-encrypted at rest). No keychain, no plaintext config.
+        let api_key = std::env::var("ANTHROPIC_API_KEY").ok().or_else(|| {
+            db::open(&db_path)
+                .ok()
+                .and_then(|c| db::secret_get(&c, "anthropic_api_key").ok().flatten())
+        });
 
         let lmstudio_url =
             std::env::var("LMSTUDIO_URL").unwrap_or_else(|_| "http://localhost:1234".to_string());
@@ -136,7 +139,7 @@ fn migrate_toml_servers_to_db(toml_path: &std::path::Path, db_path: &std::path::
     let Ok(parsed) = toml::from_str::<LegacyToml>(&raw) else { return };
     if parsed.mcp.servers.is_empty() { return }
 
-    let Ok(conn) = crate::db::open(db_path) else { return };
+    let Ok(conn) = db::open(db_path) else { return };
     for s in &parsed.mcp.servers {
         let args_json = serde_json::to_string(&s.args).unwrap_or_else(|_| "[]".into());
         let env_json = serde_json::to_string(&s.env).unwrap_or_else(|_| "{}".into());
@@ -161,7 +164,7 @@ fn migrate_colima_runtime(db_path: &std::path::Path) {
     if !std::path::Path::new(&sock).exists() {
         return;
     }
-    let Ok(conn) = crate::db::open(db_path) else { return };
+    let Ok(conn) = db::open(db_path) else { return };
     // Only auto-register if no runtimes exist yet
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM docker_runtimes", [], |r| r.get(0))
@@ -210,7 +213,7 @@ fn migrate_toml_schema_databases_to_db(toml_path: &std::path::Path, db_path: &st
     let dbs = parsed.schema.map(|s| s.databases).unwrap_or_default();
     if dbs.is_empty() { return }
 
-    let Ok(conn) = crate::db::open(db_path) else { return };
+    let Ok(conn) = db::open(db_path) else { return };
     for d in &dbs {
         let host: Option<&str> = if d.host.is_empty() { None } else { Some(&d.host) };
         let port: Option<i64> = if d.port == 0 { None } else { Some(d.port as i64) };

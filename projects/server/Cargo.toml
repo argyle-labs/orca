@@ -20,6 +20,11 @@ orca-docs     = { path = "../docs" }
 orca-jobs     = { path = "../jobs" }
 orca-scanner  = { path = "../scanner", features = ["php-ast"] }
 orca-utils    = { path = "../utils" }
+auth          = { package = "orca-auth", path = "../auth" }
+db            = { package = "orca-db", path = "../db" }
+log           = { package = "orca-log", path = "../log" }
+ledger        = { package = "orca-ledger", path = "../ledger" }
+orca_fs       = { package = "orca-fs", path = "../fs" }
 
 # CLI
 clap = { version = "4", features = ["derive"] }

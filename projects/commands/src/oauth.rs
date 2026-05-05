@@ -11,12 +11,12 @@ use std::time::Duration;
 // ── DB token helpers ──────────────────────────────────────────────────────────
 
 fn open_db() -> anyhow::Result<rusqlite::Connection> {
-    orca_utils::db::open_default()
+    db::open_default()
 }
 
 fn store_oauth(service: &str, access_token: &str, refresh_token: Option<&str>) -> Result<()> {
     let conn = open_db()?;
-    orca_utils::db::upsert_oauth_token(&conn, &orca_utils::db::OAuthTokenRow {
+    db::upsert_oauth_token(&conn, &db::OAuthTokenRow {
         service: service.to_string(),
         access_token: access_token.to_string(),
         refresh_token: refresh_token.map(str::to_string),
@@ -25,13 +25,13 @@ fn store_oauth(service: &str, access_token: &str, refresh_token: Option<&str>) -
     Ok(())
 }
 
-fn load_oauth(service: &str) -> Option<orca_utils::db::OAuthTokenRow> {
-    open_db().ok().and_then(|conn| orca_utils::db::get_oauth_token(&conn, service).ok().flatten())
+fn load_oauth(service: &str) -> Option<db::OAuthTokenRow> {
+    open_db().ok().and_then(|conn| db::get_oauth_token(&conn, service).ok().flatten())
 }
 
 fn delete_oauth(service: &str) {
     if let Ok(conn) = open_db() {
-        let _ = orca_utils::db::delete_oauth_token(&conn, service);
+        let _ = db::delete_oauth_token(&conn, service);
     }
 }
 

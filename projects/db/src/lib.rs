@@ -13,8 +13,19 @@ use rand::RngCore;
 use rusqlite::Connection;
 use std::path::Path;
 
-use crate::consts::{APP_DB_FILE, APP_STATE_DIR};
-use crate::tools::fs::expand_tilde;
+// Inlined to keep `orca-db` free of circular deps with `orca-utils`. When
+// `orca-consts` becomes its own crate, both can depend on it instead.
+const APP_DB_FILE: &str = "orca.db";
+const APP_STATE_DIR: &str = ".orca";
+
+fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{home}/{rest}")
+    } else {
+        path.to_string()
+    }
+}
 
 fn to_json_arr<T: serde::Serialize>(v: &T) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "[]".into())
@@ -1459,6 +1470,73 @@ pub fn delete_plugin_data(conn: &Connection, plugin_id: &str, key: &str) -> Resu
         rusqlite::params![plugin_id, key],
     )?;
     Ok(n > 0)
+}
+
+// ── Settings (generic key/value) ──────────────────────────────────────────────
+
+pub fn settings_get(conn: &Connection, key: &str) -> Result<Option<String>> {
+    let result = conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        rusqlite::params![key],
+        |row| row.get::<_, String>(0),
+    );
+    match result {
+        Ok(v) => Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn settings_set(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO settings (key, value, updated_at)
+         VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+         ON CONFLICT(key) DO UPDATE SET
+             value      = excluded.value,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+        rusqlite::params![key, value],
+    )?;
+    Ok(())
+}
+
+pub fn settings_delete(conn: &Connection, key: &str) -> Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM settings WHERE key = ?1",
+        rusqlite::params![key],
+    )?;
+    Ok(n > 0)
+}
+
+// ── Secrets (settings rows under the `secrets.` prefix) ──────────────────────
+//
+// These live in the SQLCipher-encrypted `settings` table, so values are at-rest
+// encrypted by the same key the rest of the orca DB uses. Read/write through
+// these helpers so the prefix stays consistent and we can later add a separate
+// table or audit log without touching call sites.
+
+const SECRET_PREFIX: &str = "secrets.";
+
+pub fn secret_get(conn: &Connection, name: &str) -> Result<Option<String>> {
+    settings_get(conn, &format!("{SECRET_PREFIX}{name}"))
+}
+
+pub fn secret_set(conn: &Connection, name: &str, value: &str) -> Result<()> {
+    settings_set(conn, &format!("{SECRET_PREFIX}{name}"), value)
+}
+
+pub fn secret_delete(conn: &Connection, name: &str) -> Result<bool> {
+    settings_delete(conn, &format!("{SECRET_PREFIX}{name}"))
+}
+
+pub fn settings_list_prefix(conn: &Connection, prefix: &str) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT key, value FROM settings WHERE key LIKE ?1 ORDER BY key",
+    )?;
+    let pattern = format!("{prefix}%");
+    let rows = stmt.query_map(rusqlite::params![pattern], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
 
 // ── LLM providers ─────────────────────────────────────────────────────────────

@@ -1,20 +1,19 @@
-//! Orca utilities — shared types, config, auth, logging, and filesystem tools.
+//! Orca utilities — shared cross-cutting types and config plumbing.
 //!
 //! Modules:
-//! - `auth`   — secure API key storage via OS keychain (keyring crate)
-//! - `config` — `Config` loaded from `~/.orca/orca.toml`; model/backend selection
-//! - `ledger` — `TokenLedger` for tracking input/output token usage across a session
-//! - `log`    — `SessionLog` JSONL writer; `search_logs`, `list_sessions`, `recall_session`
-//! - `tools`  — filesystem and search helpers used by `ToolRegistry` (read/write/edit/glob/grep)
+//! - `consts` — string constants (paths, app names)
+//! - `config` — `Config` loaded from env + DB; model/backend selection
+//! - `state`  — daemon mode state file
 //! - `types`  — `Message`, `ToolCall`, `ToolResult`, `ToolDef`, `truncate_preview`
-//! - `db`     — encrypted SQLite via SQLCipher; session event indexing + FTS
+//!
+//! These siblings live in their own crates:
+//! - `orca-auth`   — API-key formatting helpers
+//! - `orca-db`     — encrypted SQLite (SQLCipher)
+//! - `orca-log`    — `SessionLog` JSONL writer + log search
+//! - `orca-ledger` — `TokenLedger` token-usage accounting
+//! - `orca-fs`     — filesystem and search helpers (read/write/edit/glob/grep)
 
-pub mod auth;
 pub mod consts;
 pub mod config;
-pub mod db;
-pub mod ledger;
-pub mod log;
 pub mod state;
-pub mod tools;
 pub mod types;

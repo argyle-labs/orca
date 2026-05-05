@@ -1,7 +1,7 @@
 use anyhow::Result;
 use orca_commands::list_embedded_commands;
 use orca_utils::config::Config;
-use orca_utils::tools::fs::expand_tilde;
+use orca_fs::fs::expand_tilde;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -16,15 +16,15 @@ pub struct DocRoot {
 }
 
 pub fn doc_roots(_config: &Config) -> Vec<DocRoot> {
-    let conn = match orca_utils::db::open_default() {
+    let conn = match db::open_default() {
         Ok(c) => c,
         Err(_) => return vec![],
     };
-    let patterns: HashSet<String> = orca_utils::db::list_doc_ignore_patterns(&conn)
+    let patterns: HashSet<String> = db::list_doc_ignore_patterns(&conn)
         .unwrap_or_default()
         .into_iter()
         .collect();
-    let rows = orca_utils::db::list_doc_roots(&conn).unwrap_or_default();
+    let rows = db::list_doc_roots(&conn).unwrap_or_default();
     rows.into_iter()
         .map(|r| DocRoot {
             name: r.name,
