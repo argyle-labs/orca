@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use orca_utils::consts::APP_NAME;
+use config::APP_NAME;
 use db::{self, PluginRow};
 use orca_fs::fs::expand_tilde;
 use clap::Subcommand;

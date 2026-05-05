@@ -8,15 +8,13 @@
 //! the bottom of this file, and a migration entry in `MIGRATIONS` if the table was added
 //! to an already-deployed database.
 
+pub mod startup;
+
 use anyhow::{Context, Result};
+use config::{APP_DB_FILE, APP_STATE_DIR};
 use rand::RngCore;
 use rusqlite::Connection;
 use std::path::Path;
-
-// Inlined to keep `orca-db` free of circular deps with `orca-utils`. When
-// `orca-consts` becomes its own crate, both can depend on it instead.
-const APP_DB_FILE: &str = "orca.db";
-const APP_STATE_DIR: &str = ".orca";
 
 fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {

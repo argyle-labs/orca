@@ -9,7 +9,6 @@ name = "tool"
 [dependencies]
 # Orca layer 0-1 only — never import orca-core, orca-agents, etc. here
 config = { package = "orca-config", path = "../config" }
-types  = { package = "orca-types",  path = "../types" }
 
 async-trait = "0.1"
 schemars    = { version = "0.8", features = ["derive"] }

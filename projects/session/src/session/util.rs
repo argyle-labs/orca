@@ -1,6 +1,6 @@
 use orca_core::backend::LMStudioBackend;
 use config::Model;
-use types::truncate_preview;
+use orca_core::truncate_preview;
 use anyhow::Result;
 use colored::Colorize;
 

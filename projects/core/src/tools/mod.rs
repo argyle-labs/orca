@@ -2,7 +2,7 @@ pub mod bash;
 
 use crate::backend::{OutputSink, stdout_sink};
 use orca_fs::{fs, search};
-use types::{ToolDef, ToolResult};
+use crate::types::{ToolDef, ToolResult};
 use anyhow::Result;
 use bash::BashPermissions;
 use serde_json::{Value, json};

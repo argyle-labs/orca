@@ -12,7 +12,7 @@ use orca_jobs::JobManager;
 use config::{Config, Model};
 use ledger::TokenLedger;
 use log::SessionLog;
-use types::Message;
+use orca_core::Message;
 use crate::context::ProjectContext;
 use crate::tui::{self, TuiAction, TuiApp};
 use anyhow::{Context, Result};

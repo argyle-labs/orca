@@ -7,7 +7,7 @@ use orca::session::Session;
 use orca_commands::{self as cmd, CredsAction, DaemonAction, DbAction, DockerAction, HookAction, LogAction, McpAction, PluginAction, SchemaAction, SpecAction, cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian, cmd_install, cmd_uninstall};
 use orca_core::backend::{ClaudeBackend, ModelBackend, stdout_sink};
 use config::Config;
-use types::Message;
+use orca_core::Message;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -211,7 +211,13 @@ async fn main() -> Result<()> {
         return cmd::cmd_hook(action);
     }
 
-    let config = Config::load()?;
+    let mut config = Config::load()?;
+    // Run TOML → DB migrations and auto-registration of detected runtimes.
+    db::startup::init(&config);
+    // Load API key from encrypted DB when not set via environment variable.
+    if config.anthropic_api_key.is_none() {
+        config.anthropic_api_key = db::startup::load_api_key(&config);
+    }
 
     match cli.command {
         Some(Command::Login { service }) => match service {

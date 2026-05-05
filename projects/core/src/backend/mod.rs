@@ -8,7 +8,7 @@
 //! a memory buffer (`buffer_sink`) for background jobs.
 
 use config::{Config, Model};
-use types::{BackendResponse, Message, ToolDef};
+use crate::types::{BackendResponse, Message, ToolDef};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::io::Write;

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use orca_utils::consts::{APP_MCP_SERVER, APP_NAME, APP_STATE_DIR};
+use config::{APP_MCP_SERVER, APP_NAME, APP_STATE_DIR};
 use colored::Colorize;
 use std::path::{Path, PathBuf};
 

@@ -8,15 +8,5 @@ name = "config"
 path = "src/lib.rs"
 
 [dependencies]
-orca-utils = { path = "../utils" }
-db = { package = "orca-db", path = "../db" }
-
 anyhow = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-chrono = { version = "0.4", features = ["serde"] }
-dirs = "5"
-toml = "0.8"
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-rusqlite = { version = "0.32", features = ["bundled-sqlcipher"] }
+dirs   = "5"
