@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-orca-core  = { path = "../core" }
 llm        = { package = "orca-llm",    path = "../llm" }
 config     = { package = "orca-config", path = "../config" }
 tool       = { package = "orca-tool",   path = "../tool" }

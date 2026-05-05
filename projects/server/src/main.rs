@@ -4,7 +4,8 @@ use orca::mcp;
 use orca::serve;
 use orca::serve::openapi_spec_json;
 use orca::session::Session;
-use orca_commands::{self as cmd, CredsAction, DaemonAction, DbAction, DockerAction, HookAction, LogAction, McpAction, PluginAction, SchemaAction, SpecAction, cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian, cmd_install, cmd_uninstall};
+use orca_commands::{self as cmd, CredsAction, DaemonAction, DbAction, DockerAction, HookAction, McpAction, PluginAction, SchemaAction, SpecAction, cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian, cmd_install, cmd_uninstall};
+use orca::log_cmd::{LogAction, cmd_log};
 use llm::{ClaudeBackend, ModelBackend, stdout_sink, Message};
 use config::Config;
 use clap::{Parser, Subcommand};
@@ -236,7 +237,7 @@ async fn main() -> Result<()> {
             escalate(&config, &question, project.as_deref()).await
         }
         Some(Command::Doctor) => cmd::cmd_doctor(&config),
-        Some(Command::Log { action }) => cmd::cmd_log(&config, action),
+        Some(Command::Log { action }) => cmd_log(&config, action),
         Some(Command::Audit { path }) => {
             let abs = std::fs::canonicalize(&path).unwrap_or_else(|_| path.into());
             let prompt = format!(

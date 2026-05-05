@@ -256,3 +256,67 @@ fn ping_plugin(base_url: &str, token: &str) -> (bool, String) {
         Err(e) => (false, format!("unreachable: {e}")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use db::PluginRow;
+    use std::collections::HashMap;
+
+    fn base_plugin(id: &str) -> PluginRow {
+        PluginRow {
+            id: id.into(),
+            manifest_path: "/tmp/manifest.toml".into(),
+            tier: "personal".into(),
+            mode: "orca".into(),
+            mcp_command: None,
+            mcp_args: vec![],
+            mcp_env: HashMap::new(),
+            mcp_token_env: None,
+            mcp_urls: vec![],
+            context_injection: "minimal".into(),
+            enabled: true,
+            command_map: HashMap::new(),
+            nav_links: vec![],
+            search_tools: vec![],
+            specs_dir: None,
+        }
+    }
+
+    #[test]
+    fn resolve_plugin_url_from_http_command() {
+        let p = PluginRow { mcp_command: Some("http://localhost:8080".into()), ..base_plugin("p") };
+        assert_eq!(resolve_plugin_url(&p).as_deref(), Some("http://localhost:8080"));
+    }
+
+    #[test]
+    fn resolve_plugin_url_from_https_command_strips_trailing_slash() {
+        let p = PluginRow { mcp_command: Some("https://plugin.example.com/".into()), ..base_plugin("p") };
+        assert_eq!(resolve_plugin_url(&p).as_deref(), Some("https://plugin.example.com"));
+    }
+
+    #[test]
+    fn resolve_plugin_url_from_http_arg_when_command_is_binary() {
+        let p = PluginRow {
+            mcp_command: Some("node".into()),
+            mcp_args: vec!["server.js".into(), "http://localhost:9000".into()],
+            ..base_plugin("p")
+        };
+        assert_eq!(resolve_plugin_url(&p).as_deref(), Some("http://localhost:9000"));
+    }
+
+    #[test]
+    fn resolve_plugin_url_returns_none_for_stdio_plugin() {
+        let p = PluginRow {
+            mcp_command: Some("node".into()),
+            mcp_args: vec!["server.js".into(), "--port".into(), "3000".into()],
+            ..base_plugin("p")
+        };
+        assert!(resolve_plugin_url(&p).is_none());
+    }
+
+    #[test]
+    fn resolve_plugin_url_returns_none_when_empty() {
+        assert!(resolve_plugin_url(&base_plugin("p")).is_none());
+    }
+}

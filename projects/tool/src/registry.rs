@@ -106,3 +106,210 @@ pub enum CliArgs {
     /// `mode=hybrid enabled=true`
     Pairs(Vec<String>),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{OrcaTool, ToolCtx};
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+    use std::sync::Arc;
+
+    // ── Test tool implementations ─────────────────────────────────────────────
+
+    #[derive(Deserialize, JsonSchema)]
+    struct EchoArgs {
+        message: String,
+    }
+
+    struct EchoTool;
+
+    #[async_trait]
+    impl OrcaTool for EchoTool {
+        const NAME: &'static str = "echo";
+        const DESCRIPTION: &'static str = "Echoes a message.";
+        type Args = EchoArgs;
+        async fn run(args: EchoArgs, _ctx: &ToolCtx) -> Result<String> {
+            Ok(args.message)
+        }
+    }
+
+    #[derive(Deserialize, JsonSchema)]
+    struct AddArgs {
+        a: i64,
+        b: i64,
+    }
+
+    struct AddTool;
+
+    #[async_trait]
+    impl OrcaTool for AddTool {
+        const NAME: &'static str = "add";
+        const DESCRIPTION: &'static str = "Adds two numbers.";
+        type Args = AddArgs;
+        async fn run(args: AddArgs, _ctx: &ToolCtx) -> Result<String> {
+            Ok((args.a + args.b).to_string())
+        }
+    }
+
+    fn make_ctx() -> ToolCtx {
+        use config::{Config, Model};
+        use std::path::PathBuf;
+        ToolCtx::new(Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: "http://localhost:1234".into(),
+            default_model: Model::LMStudio(String::new()),
+            orca_vault: PathBuf::from("/tmp"),
+            vault_root: PathBuf::from("/tmp"),
+            memory_root: PathBuf::from("/tmp"),
+            db_path: PathBuf::from("/tmp/test.db"),
+        }))
+    }
+
+    // ── Registration ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn registry_registers_tool_and_names_shows_it() {
+        let mut reg = ToolRegistry::new();
+        reg.register::<EchoTool>();
+        assert!(reg.names().contains(&"echo"));
+    }
+
+    #[test]
+    fn registry_names_empty_when_no_tools_registered() {
+        let reg = ToolRegistry::new();
+        assert!(reg.names().is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate tool name")]
+    fn registry_panics_on_duplicate_name() {
+        let mut reg = ToolRegistry::new();
+        reg.register::<EchoTool>();
+        reg.register::<EchoTool>(); // duplicate
+    }
+
+    #[test]
+    fn registry_multiple_tools_all_appear_in_names() {
+        let mut reg = ToolRegistry::new();
+        reg.register::<EchoTool>().register::<AddTool>();
+        let names = reg.names();
+        assert!(names.contains(&"echo"));
+        assert!(names.contains(&"add"));
+        assert_eq!(names.len(), 2);
+    }
+
+    // ── MCP definitions ───────────────────────────────────────────────────────
+
+    #[test]
+    fn mcp_definitions_includes_name_description_schema() {
+        let mut reg = ToolRegistry::new();
+        reg.register::<EchoTool>();
+        let defs = reg.mcp_definitions();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0]["name"], "echo");
+        assert_eq!(defs[0]["description"], "Echoes a message.");
+        assert!(defs[0]["inputSchema"].is_object(), "inputSchema must be an object");
+    }
+
+    #[test]
+    fn mcp_definitions_schema_has_no_dollar_schema_key() {
+        let mut reg = ToolRegistry::new();
+        reg.register::<EchoTool>();
+        let defs = reg.mcp_definitions();
+        assert!(defs[0]["inputSchema"]["$schema"].is_null(), "$schema should be stripped");
+    }
+
+    #[test]
+    fn mcp_definitions_empty_when_no_tools() {
+        let reg = ToolRegistry::new();
+        assert!(reg.mcp_definitions().is_empty());
+    }
+
+    // ── dispatch ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_known_tool_returns_result() {
+        let mut reg = ToolRegistry::new();
+        reg.register::<EchoTool>();
+        let ctx = make_ctx();
+        let result = reg.dispatch("echo", serde_json::json!({"message": "hello"}), &ctx).await.unwrap();
+        assert_eq!(result, "hello");
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_tool_returns_error() {
+        let reg = ToolRegistry::new();
+        let ctx = make_ctx();
+        let err = reg.dispatch("ghost", serde_json::json!({}), &ctx).await.unwrap_err();
+        assert!(err.to_string().contains("unknown tool"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_invalid_args_returns_error() {
+        let mut reg = ToolRegistry::new();
+        reg.register::<EchoTool>();
+        let ctx = make_ctx();
+        // Missing required "message" field
+        let err = reg.dispatch("echo", serde_json::json!({}), &ctx).await.unwrap_err();
+        assert!(err.to_string().contains("invalid args"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_add_tool_computes_correctly() {
+        let mut reg = ToolRegistry::new();
+        reg.register::<AddTool>();
+        let ctx = make_ctx();
+        let result = reg.dispatch("add", serde_json::json!({"a": 7, "b": 3}), &ctx).await.unwrap();
+        assert_eq!(result, "10");
+    }
+
+    // ── cli_dispatch ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn cli_dispatch_json_args_works() {
+        let mut reg = ToolRegistry::new();
+        reg.register::<EchoTool>();
+        let ctx = make_ctx();
+        let result = reg.cli_dispatch("echo", CliArgs::Json(r#"{"message":"via json"}"#.into()), &ctx).await.unwrap();
+        assert_eq!(result, "via json");
+    }
+
+    #[tokio::test]
+    async fn cli_dispatch_pair_args_works() {
+        let mut reg = ToolRegistry::new();
+        reg.register::<EchoTool>();
+        let ctx = make_ctx();
+        let result = reg.cli_dispatch("echo", CliArgs::Pairs(vec!["message=hello pairs".into()]), &ctx).await.unwrap();
+        assert_eq!(result, "hello pairs");
+    }
+
+    #[tokio::test]
+    async fn cli_dispatch_pair_numeric_coercion() {
+        let mut reg = ToolRegistry::new();
+        reg.register::<AddTool>();
+        let ctx = make_ctx();
+        let result = reg.cli_dispatch("add", CliArgs::Pairs(vec!["a=5".into(), "b=3".into()]), &ctx).await.unwrap();
+        assert_eq!(result, "8");
+    }
+
+    #[tokio::test]
+    async fn cli_dispatch_pair_missing_equals_errors() {
+        let mut reg = ToolRegistry::new();
+        reg.register::<EchoTool>();
+        let ctx = make_ctx();
+        let err = reg.cli_dispatch("echo", CliArgs::Pairs(vec!["no-equals-here".into()]), &ctx).await.unwrap_err();
+        assert!(err.to_string().contains("expected key=value"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn cli_dispatch_invalid_json_errors() {
+        let mut reg = ToolRegistry::new();
+        reg.register::<EchoTool>();
+        let ctx = make_ctx();
+        let err = reg.cli_dispatch("echo", CliArgs::Json("{bad json".into()), &ctx).await.unwrap_err();
+        assert!(err.to_string().contains("invalid JSON"), "got: {err}");
+    }
+}

@@ -15,16 +15,12 @@ path = "src/main.rs"
 # Workspace crates
 orca-agents   = { path = "../agents" }
 orca-commands = { path = "../commands" }
-orca-core     = { path = "../core" }
 orca-docs     = { path = "../docs" }
 orca-jobs     = { path = "../jobs" }
 orca-scanner  = { path = "../scanner", features = ["php-ast"] }
 llm           = { package = "orca-llm", path = "../llm" }
-auth          = { package = "orca-auth", path = "../auth" }
 config        = { package = "orca-config", path = "../config" }
 db            = { package = "orca-db", path = "../db" }
-log           = { package = "orca-log", path = "../log" }
-ledger        = { package = "orca-ledger", path = "../ledger" }
 orca_fs       = { package = "orca-fs", path = "../fs" }
 state         = { package = "orca-state", path = "../state" }
 

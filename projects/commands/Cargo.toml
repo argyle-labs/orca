@@ -6,11 +6,8 @@ edition = "2024"
 [dependencies]
 orca-agents  = { path = "../agents" }
 orca-scanner = { path = "../scanner", features = ["php-ast"] }
-orca-core    = { path = "../core" }
-auth         = { package = "orca-auth", path = "../auth" }
 config       = { package = "orca-config", path = "../config" }
 db           = { package = "orca-db", path = "../db" }
-log          = { package = "orca-log", path = "../log" }
 orca_fs      = { package = "orca-fs", path = "../fs" }
 state        = { package = "orca-state", path = "../state" }
 

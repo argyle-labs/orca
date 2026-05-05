@@ -24,6 +24,15 @@ impl ClaudeBackend {
             model: model.into(),
         }
     }
+
+    /// Anthropic models available for server-side use, newest-first.
+    pub fn known_models() -> &'static [&'static str] {
+        &[
+            "claude-sonnet-4-6",
+            "claude-opus-4-7",
+            "claude-haiku-4-5-20251001",
+        ]
+    }
 }
 
 #[async_trait]

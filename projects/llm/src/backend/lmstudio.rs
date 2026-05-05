@@ -104,6 +104,12 @@ impl ModelBackend for LMStudioBackend {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
+            // Detect "model can't load" — separate from generic errors so callers
+            // can distinguish "model not available" from "bad request".
+            if text.contains("Failed to load model") || text.contains("insufficient system resources") {
+                bail!("model not available: {} — it may require more memory than is currently free. \
+                       Try unloading other models first.", self.model);
+            }
             bail!("LM Studio error {status}: {text}");
         }
 

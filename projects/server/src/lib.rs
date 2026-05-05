@@ -13,6 +13,7 @@ pub use ::session::context;
 pub use ::session::session;
 pub use ::session::tui;
 
+pub mod log_cmd;
 pub mod markdown;
 pub mod mcp;
 pub mod serve;

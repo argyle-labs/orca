@@ -10,7 +10,6 @@
 //! - `codegen`  — `orca gen`: fetch OpenAPI spec, run openapi-typescript codegen
 //! - `daemon`   — daemon lifecycle: status/stop/park/reclaim/install/uninstall
 //! - `doctor`   — validate agent files, symlinks, config, and tool availability
-//! - `log_cmd`  — session log subcommands: list, search, recall, tail
 //! - `mcp_cmd`  — MCP registry subcommands: add/remove/list external MCP servers
 //! - `projects` — list projects from orca vault memory directory
 //! - `spec`     — manage external OpenAPI spec registry (add, remove, list, refresh)
@@ -37,7 +36,6 @@ pub mod db_cmd;
 pub mod docker_cmd;
 pub mod doctor;
 pub mod install;
-pub mod log_cmd;
 pub mod mcp_cmd;
 pub mod creds_cmd;
 pub mod plugin_cmd;
@@ -50,7 +48,6 @@ pub mod update;
 
 pub use plugin_cmd::{install_plugin, remove_plugin};
 pub use spec::{SpecAction, cmd_spec};
-pub use log_cmd::{LogAction, cmd_log};
 pub use auth::{cmd_login, cmd_logout, cmd_auth};
 pub use agents::cmd_agents;
 pub use daemon::{DaemonAction, cmd_daemon};

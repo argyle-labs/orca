@@ -69,3 +69,115 @@ impl ProjectContext {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use config::Model;
+    use std::path::PathBuf;
+
+    fn test_config(memory_root: PathBuf, agents_dir: PathBuf) -> Config {
+        Config {
+            anthropic_api_key: None,
+            lmstudio_url: "http://localhost:1234".into(),
+            default_model: Model::LMStudio(String::new()),
+            orca_vault: PathBuf::from("/tmp"),
+            vault_root: PathBuf::from("/tmp"),
+            memory_root,
+            db_path: PathBuf::from("/tmp/test.db"),
+        }
+    }
+
+    // ── ProjectContext::resolve ───────────────────────────────────────────────
+
+    #[test]
+    fn resolve_exact_match_loads_memory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let memory_root = tmp.path().to_path_buf();
+        let project_dir = memory_root.join("myproject");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("MEMORY.md"), "# My Project Memory").unwrap();
+
+        let config = test_config(memory_root, PathBuf::from("/tmp"));
+        let ctx = ProjectContext::resolve("myproject", &config).unwrap();
+
+        assert_eq!(ctx.project.as_deref(), Some("myproject"));
+        assert_eq!(ctx.memory_content.as_deref(), Some("# My Project Memory"));
+    }
+
+    #[test]
+    fn resolve_fuzzy_match_finds_partial_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let memory_root = tmp.path().to_path_buf();
+        let project_dir = memory_root.join("myproject-backend");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("MEMORY.md"), "backend memory").unwrap();
+
+        let config = test_config(memory_root, PathBuf::from("/tmp"));
+        let ctx = ProjectContext::resolve("backend", &config).unwrap();
+
+        assert!(ctx.memory_content.is_some(), "fuzzy match should load memory");
+    }
+
+    #[test]
+    fn resolve_no_match_returns_empty_memory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path().to_path_buf(), PathBuf::from("/tmp"));
+
+        let ctx = ProjectContext::resolve("nonexistent-project-xyz", &config).unwrap();
+
+        assert_eq!(ctx.project.as_deref(), Some("nonexistent-project-xyz"));
+        assert!(ctx.memory_content.is_none(), "no match should have no memory");
+    }
+
+    #[test]
+    fn resolve_empty_memory_root_returns_gracefully() {
+        let config = test_config(PathBuf::from("/tmp/__no_such_memory_root__"), PathBuf::from("/tmp"));
+        let ctx = ProjectContext::resolve("anything", &config).unwrap();
+        assert!(ctx.memory_content.is_none());
+    }
+
+    // ── build_system_prompt ───────────────────────────────────────────────────
+
+    #[test]
+    fn build_system_prompt_without_memory_returns_wolf_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path().to_path_buf(), tmp.path().to_path_buf());
+        let ctx = ProjectContext { project: None, memory_content: None };
+
+        let prompt = ctx.build_system_prompt(&config);
+        // No memory — just the wolf prompt (or fallback)
+        assert!(!prompt.is_empty());
+        assert!(!prompt.contains("Project Context"), "no memory means no project section");
+    }
+
+    #[test]
+    fn build_system_prompt_with_memory_includes_context_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path().to_path_buf(), tmp.path().to_path_buf());
+        let ctx = ProjectContext {
+            project: Some("myproject".into()),
+            memory_content: Some("Key facts here.".into()),
+        };
+
+        let prompt = ctx.build_system_prompt(&config);
+        assert!(prompt.contains("Project Context"), "memory should add project context section");
+        assert!(prompt.contains("myproject"), "project name should appear");
+        assert!(prompt.contains("Key facts here."), "memory content should be included");
+    }
+
+    #[test]
+    fn build_system_prompt_memory_appended_after_wolf() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = test_config(tmp.path().to_path_buf(), tmp.path().to_path_buf());
+        let ctx = ProjectContext {
+            project: Some("proj".into()),
+            memory_content: Some("mem content".into()),
+        };
+
+        let prompt = ctx.build_system_prompt(&config);
+        let wolf_end = prompt.find("---").unwrap_or(0);
+        let mem_start = prompt.find("mem content").unwrap_or(usize::MAX);
+        assert!(wolf_end < mem_start, "wolf prompt should come before memory injection");
+    }
+}

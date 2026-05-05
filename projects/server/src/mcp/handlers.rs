@@ -67,7 +67,7 @@ pub fn search_logs(args: &Value, config: &Config) -> Result<String> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("query is required"))?;
 
-    let matches = log::search_logs(&config.logs_dir(), query, 20)?;
+    let matches = session::log::search_logs(&config.logs_dir(), query, 20)?;
     if matches.is_empty() {
         return Ok(format!("No matches for '{query}'"));
     }
