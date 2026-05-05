@@ -30,6 +30,7 @@ fn rebuy_config() -> McpServerConfig {
         args: vec![REBUY_MCP_ARG.to_string()],
         env: Default::default(),
         token: None,
+        fallback_urls: vec![],
     }
 }
 
