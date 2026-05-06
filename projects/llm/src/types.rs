@@ -40,3 +40,37 @@ pub enum StopReason {
     ToolUse,
     MaxTokens,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_user_constructs_correctly() {
+        let m = Message::user("hello");
+        assert!(matches!(m, Message::User { content } if content == "hello"));
+    }
+
+    #[test]
+    fn message_user_accepts_string_and_str() {
+        let from_str = Message::user("str input");
+        let from_string = Message::user("str input".to_string());
+        assert!(matches!(from_str, Message::User { .. }));
+        assert!(matches!(from_string, Message::User { .. }));
+    }
+
+    #[test]
+    fn stop_reason_default_is_end_turn() {
+        assert_eq!(StopReason::default(), StopReason::EndTurn);
+    }
+
+    #[test]
+    fn backend_response_default_is_empty() {
+        let r = BackendResponse::default();
+        assert!(r.text.is_empty());
+        assert!(r.tool_calls.is_empty());
+        assert_eq!(r.input_tokens, 0);
+        assert_eq!(r.output_tokens, 0);
+        assert_eq!(r.stop_reason, StopReason::EndTurn);
+    }
+}

@@ -432,7 +432,8 @@ async fn proxy_ws_to_vite(mut browser: axum::extract::ws::WebSocket, path: Strin
     let _ = browser.close().await;
 }
 
-fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
+/// Build the axum `Router` — exposed so integration tests can call it directly.
+pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
     use std::sync::Arc;
 
     let cors = CorsLayer::new()

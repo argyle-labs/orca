@@ -143,3 +143,70 @@ fn format_body(bytes: &Bytes) -> String {
     }
     format!("[{} bytes binary]", bytes.len())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── skip_body ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn skip_body_matches_prefix() {
+        assert!(skip_body("/api/openapi/spec.json"));
+        assert!(skip_body("/api/specs/rebuy"));
+        assert!(!skip_body("/api/health"));
+        assert!(!skip_body("/api/agents"));
+    }
+
+    #[test]
+    fn skip_body_exact_prefix_not_matches_shorter() {
+        assert!(!skip_body("/api/open")); // shorter than the registered prefix
+        assert!(!skip_body("/api"));
+    }
+
+    // ── skip_log ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn skip_log_matches_known_prefixes() {
+        assert!(skip_log("/api/health"));
+        assert!(skip_log("/assets/main.js"));
+        assert!(skip_log("/favicon.ico"));
+    }
+
+    #[test]
+    fn skip_log_does_not_match_other_paths() {
+        assert!(!skip_log("/api/agents"));
+        assert!(!skip_log("/api/sessions"));
+    }
+
+    // ── format_body ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn format_body_empty_bytes_returns_empty_string() {
+        let bytes = Bytes::from("");
+        assert_eq!(format_body(&bytes), "");
+    }
+
+    #[test]
+    fn format_body_valid_json_compacts() {
+        let pretty = serde_json::json!({"key": "value", "n": 42});
+        let bytes = Bytes::from(serde_json::to_string_pretty(&pretty).unwrap());
+        let result = format_body(&bytes);
+        // compact JSON has no newlines
+        assert!(!result.contains('\n'), "should be compact: {result}");
+        assert!(result.contains("\"key\""), "should contain key: {result}");
+    }
+
+    #[test]
+    fn format_body_non_json_text_returns_as_is() {
+        let bytes = Bytes::from("plain text body");
+        assert_eq!(format_body(&bytes), "plain text body");
+    }
+
+    #[test]
+    fn format_body_binary_describes_size() {
+        let bytes = Bytes::from(vec![0u8, 1, 2, 255, 254]);
+        let result = format_body(&bytes);
+        assert!(result.contains("bytes binary"), "got: {result}");
+    }
+}

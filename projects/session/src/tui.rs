@@ -1,4 +1,5 @@
 use llm::OutputSink;
+use unicode_width::UnicodeWidthStr;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame, Terminal,
@@ -145,21 +146,36 @@ impl TuiApp {
                 return TuiAction::Submit(text);
             }
 
-            // Backspace / Delete
+            // Backspace / Delete — step back to char boundary
             (_, KeyCode::Backspace) if self.cursor > 0 => {
-                self.cursor -= 1;
+                let prev = self.input[..self.cursor]
+                    .char_indices()
+                    .next_back()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                self.cursor = prev;
                 self.input.remove(self.cursor);
             }
             (_, KeyCode::Delete) if self.cursor < self.input.len() => {
                 self.input.remove(self.cursor);
             }
 
-            // Cursor movement
+            // Cursor movement — step by char boundaries, not raw bytes
             (_, KeyCode::Left) => {
-                self.cursor = self.cursor.saturating_sub(1);
+                if self.cursor > 0 {
+                    // Walk back to the start of the previous UTF-8 char
+                    let prev = self.input[..self.cursor]
+                        .char_indices()
+                        .next_back()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    self.cursor = prev;
+                }
             }
             (_, KeyCode::Right) if self.cursor < self.input.len() => {
-                self.cursor += 1;
+                // Advance by the byte length of the current char
+                let c = self.input[self.cursor..].chars().next().unwrap_or('\0');
+                self.cursor += c.len_utf8();
             }
 
             // Scroll (Shift+Arrow — must come before wildcard Up/Down)
@@ -225,7 +241,7 @@ impl TuiApp {
             // Character input
             (_, KeyCode::Char(c)) => {
                 self.input.insert(self.cursor, c);
-                self.cursor += 1;
+                self.cursor += c.len_utf8();
             }
 
             _ => {}
@@ -244,16 +260,36 @@ pub enum TuiAction {
 // ─── Rendering ───────────────────────────────────────────────────────────────
 
 pub fn render(f: &mut Frame, app: &TuiApp) {
+    let total_width = f.area().width;
+    let input_height = input_box_height(app, total_width);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(3),    // output
-            Constraint::Length(3), // input
+            Constraint::Min(3),
+            Constraint::Length(input_height),
         ])
         .split(f.area());
 
     render_output(f, app, chunks[0]);
     render_input(f, app, chunks[1]);
+}
+
+/// How many rows the input box needs: borders (2) + wrapped content rows.
+/// Height is driven by the CURSOR position, not the text length, so the box
+/// always has room for the cursor row — even when text exactly fills the
+/// last content row (which would place cursor_row on the border otherwise).
+fn input_box_height(app: &TuiApp, total_width: u16) -> u16 {
+    let inner_width = total_width.saturating_sub(2) as usize; // subtract borders
+    if inner_width == 0 {
+        return 3;
+    }
+    let prefix_cols = app.prompt.width() + 1; // prompt + space
+    let col_offset = prefix_cols + app.input[..app.cursor].width();
+    let cursor_row = col_offset / inner_width;
+    // cursor_row is 0-indexed; we need at least cursor_row+1 content rows
+    let content_rows = (cursor_row + 1).max(1);
+    (content_rows as u16) + 2 // +2 for borders
 }
 
 fn render_output(f: &mut Frame, app: &TuiApp, area: Rect) {
@@ -320,14 +356,25 @@ fn render_input(f: &mut Frame, app: &TuiApp, area: Rect) {
             .borders(Borders::ALL)
             .title(" input ")
             .border_style(Style::default().fg(Color::Cyan)),
-    );
+    )
+    .wrap(Wrap { trim: false });
 
     f.render_widget(input_widget, area);
 
-    // Position cursor inside the input box
-    let cursor_x = area.x + 1 + app.prompt.len() as u16 + 1 + app.cursor as u16;
-    let cursor_y = area.y + 1;
-    if cursor_x < area.x + area.width - 1 {
+    // Cursor position accounting for line wrapping.
+    // Column offset within the inner area = prompt_cols + 1 (space) + input_cols_at_cursor.
+    let inner_width = area.width.saturating_sub(2) as usize;
+    if inner_width == 0 {
+        return;
+    }
+    let prefix_cols = app.prompt.width() + 1;
+    let input_cols_at_cursor = app.input[..app.cursor].width();
+    let col_offset = prefix_cols + input_cols_at_cursor;
+    let cursor_row = (col_offset / inner_width) as u16;
+    let cursor_col = (col_offset % inner_width) as u16;
+    let cursor_x = area.x + 1 + cursor_col;
+    let cursor_y = area.y + 1 + cursor_row;
+    if cursor_x < area.x + area.width - 1 && cursor_y < area.y + area.height - 1 {
         f.set_cursor_position((cursor_x, cursor_y));
     }
 }
