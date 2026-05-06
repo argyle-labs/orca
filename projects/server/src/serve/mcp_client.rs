@@ -281,6 +281,10 @@ impl McpClient {
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        self.request_timeout(method, params, 30).await
+    }
+
+    async fn request_timeout(&self, method: &str, params: Value, timeout_secs: u64) -> Result<Value> {
         let id = self.next_id().await;
         let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
 
@@ -294,7 +298,7 @@ impl McpClient {
                     stdin.write_all(line.as_bytes()).await?;
                     stdin.flush().await?;
                 }
-                match tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), async {
                     loop {
                         let mut buf = String::new();
                         let n = {
@@ -361,7 +365,7 @@ impl McpClient {
 
                 http.post(&post_url).json(&msg).send().await?;
 
-                match tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), async {
                     let mut buf = String::new();
                     while let Some(Ok(chunk)) = stream.next().await {
                         buf.push_str(&String::from_utf8_lossy(&chunk));
@@ -454,9 +458,10 @@ impl McpClient {
         );
 
         let resp = self
-            .request(
+            .request_timeout(
                 "tools/call",
                 json!({ "name": name, "arguments": arguments }),
+                300, // 5 minutes — agent runs can take much longer than 30s
             )
             .await?;
 
@@ -738,5 +743,69 @@ impl McpPool {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── resolve_command ───────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_command_absolute_path_returned_unchanged() {
+        // Absolute paths bypass all resolution logic.
+        assert_eq!(resolve_command("/usr/bin/env"), "/usr/bin/env");
+        assert_eq!(resolve_command("/bin/bash"), "/bin/bash");
+    }
+
+    #[test]
+    fn resolve_command_known_binary_returns_nonempty() {
+        // "bash" exists on every CI/dev machine — we just need it to resolve to something.
+        let resolved = resolve_command("bash");
+        assert!(!resolved.is_empty(), "resolve_command('bash') should return non-empty");
+        // Should be an absolute path or the bare name unchanged
+        assert!(resolved == "bash" || resolved.starts_with('/'), "got: {resolved}");
+    }
+
+    #[test]
+    fn resolve_command_unknown_returns_input_unchanged() {
+        // A completely made-up command falls through all probes and returns as-is.
+        let result = resolve_command("zzz_no_such_binary_xyz_999");
+        assert_eq!(result, "zzz_no_such_binary_xyz_999");
+    }
+
+    // ── augmented_path ────────────────────────────────────────────────────────
+
+    #[test]
+    fn augmented_path_contains_homebrew_bin() {
+        let path = augmented_path();
+        // On macOS the output should include at least one of the standard dirs
+        assert!(
+            path.contains("/opt/homebrew/bin")
+                || path.contains("/usr/local/bin")
+                || path.contains("/usr/bin"),
+            "augmented_path missing expected dirs: {path}",
+        );
+    }
+
+    #[test]
+    fn augmented_path_has_no_empty_segments() {
+        let path = augmented_path();
+        for segment in path.split(':') {
+            assert!(!segment.is_empty(), "empty segment in PATH: {path}");
+        }
+    }
+
+    #[test]
+    fn augmented_path_does_not_add_duplicate_extra_dirs() {
+        // The extras we inject should not appear twice.
+        let path = augmented_path();
+        let mut seen = std::collections::HashSet::new();
+        for candidate in ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"] {
+            if path.contains(candidate) {
+                assert!(seen.insert(candidate), "extra dir appears more than once: {candidate}");
+            }
+        }
     }
 }

@@ -135,3 +135,103 @@ pub async fn run_bash(
 
     Ok(combined)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buffer_sink;
+
+    // ── BashPermissions ───────────────────────────────────────────────────────
+
+    #[test]
+    fn is_allowed_default_denies_all() {
+        let perms = BashPermissions::default();
+        assert!(!perms.is_allowed("ls -la"));
+        assert!(!perms.is_allowed("echo hello"));
+    }
+
+    #[test]
+    fn is_allowed_auto_approve_allows_all() {
+        let mut perms = BashPermissions::default();
+        perms.auto_approve = true;
+        assert!(perms.is_allowed("rm -rf /"));
+        assert!(perms.is_allowed("any command at all"));
+    }
+
+    #[test]
+    fn allow_prefix_grants_prefix_match() {
+        let mut perms = BashPermissions::default();
+        perms.allow("git");
+        assert!(perms.is_allowed("git status"));
+        assert!(perms.is_allowed("git log --oneline"));
+        assert!(!perms.is_allowed("echo not git"));
+    }
+
+    #[test]
+    fn allow_multiple_prefixes() {
+        let mut perms = BashPermissions::default();
+        perms.allow("cargo");
+        perms.allow("echo");
+        assert!(perms.is_allowed("cargo test"));
+        assert!(perms.is_allowed("echo hello"));
+        assert!(!perms.is_allowed("rm file"));
+    }
+
+    #[test]
+    fn allow_exact_prefix_does_not_match_shorter() {
+        let mut perms = BashPermissions::default();
+        perms.allow("git status");
+        assert!(perms.is_allowed("git status --short"));
+        assert!(!perms.is_allowed("git"));  // prefix is longer than command
+    }
+
+    // ── run_bash (auto_approve mode) ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_bash_runs_simple_command() {
+        let (sink, _buf) = buffer_sink();
+        let mut perms = BashPermissions { auto_approve: true, ..Default::default() };
+        let result = run_bash("echo hello", &mut perms, None, &sink).await.unwrap();
+        assert_eq!(result.trim(), "hello");
+    }
+
+    #[tokio::test]
+    async fn run_bash_captures_stderr() {
+        let (sink, _buf) = buffer_sink();
+        let mut perms = BashPermissions { auto_approve: true, ..Default::default() };
+        let result = run_bash("echo err >&2", &mut perms, None, &sink).await.unwrap();
+        assert!(result.contains("err"), "stderr should be captured: {result}");
+    }
+
+    #[tokio::test]
+    async fn run_bash_nonzero_exit_includes_exit_code() {
+        let (sink, _buf) = buffer_sink();
+        let mut perms = BashPermissions { auto_approve: true, ..Default::default() };
+        // Produce output so we get the "[exit code N]" prefix rather than an Err
+        let result = run_bash("echo failing; exit 42", &mut perms, None, &sink).await.unwrap();
+        assert!(result.contains("42"), "exit code should appear in output: {result}");
+    }
+
+    #[tokio::test]
+    async fn run_bash_nonzero_exit_with_no_output_errors() {
+        let (sink, _buf) = buffer_sink();
+        let mut perms = BashPermissions { auto_approve: true, ..Default::default() };
+        let result = run_bash("exit 1", &mut perms, None, &sink);
+        // exit 1 with no output → returns Err
+        assert!(result.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn run_bash_respects_working_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sink, _buf) = buffer_sink();
+        let mut perms = BashPermissions { auto_approve: true, ..Default::default() };
+        let result = run_bash("pwd", &mut perms, Some(tmp.path().to_str().unwrap()), &sink)
+            .await
+            .unwrap();
+        assert!(
+            result.trim().contains(tmp.path().to_str().unwrap()),
+            "pwd should reflect working_dir: {result}"
+        );
+    }
+}

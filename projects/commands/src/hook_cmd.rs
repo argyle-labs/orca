@@ -340,14 +340,14 @@ fn pii_scan() -> Result<()> {
     Ok(())
 }
 
-/// Returns true if `cmd` matches any destructive pattern. Exposed for testing.
+#[cfg(test)]
 fn matches_destructive(cmd: &str) -> bool {
     DESTRUCTIVE_PATTERNS.iter().any(|p| {
         regex::Regex::new(p).expect("valid pattern").is_match(cmd)
     })
 }
 
-/// Returns true if `cmd` matches any OPNsense-targeting pattern. Exposed for testing.
+#[cfg(test)]
 fn matches_opnsense(cmd: &str) -> bool {
     OPNSENSE_PATTERNS.iter().any(|p| {
         regex::Regex::new(p).expect("valid pattern").is_match(cmd)

@@ -38,10 +38,11 @@ kill-dev:
 	@echo "→ dev processes cleared"
 
 # Build release binary and deploy to current system (~/.local/bin/orca)
-deploy: kill-dev build
+deploy: build
 	@if cmp -s target/release/orca $(INSTALL_PATH); then \
 	  echo "binary unchanged — skipping copy and codesign"; \
 	else \
+	  $(MAKE) kill-dev; \
 	  cp target/release/orca $(INSTALL_PATH); \
 	  codesign --force --sign - $(INSTALL_PATH); \
 	  echo "deployed → $(INSTALL_PATH)"; \

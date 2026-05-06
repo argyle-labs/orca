@@ -282,9 +282,11 @@ impl Session {
                                 terminal.draw(|f| tui::render(f, &app))?;
 
                                 if input.starts_with('/') {
-                                    let _ = self.handle_command(&input).await;
-                                } else {
-                                    let _ = self.chat(input).await;
+                                    if let Err(e) = self.handle_command(&input).await {
+                                        self.out(&format!("error: {e}"));
+                                    }
+                                } else if let Err(e) = self.chat(input).await {
+                                    self.out(&format!("error: {e}"));
                                 }
 
                                 app.busy = false;

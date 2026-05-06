@@ -74,10 +74,30 @@ pub fn open(path: &Path) -> Result<Connection> {
 }
 
 /// Open orca database using the default path (`~/.orca/orca.db`).
+///
+/// When `ORCA_DB_PATH` is set (e.g. in tests), that path is used instead.
+/// The env-var path skips SQLCipher encryption so an in-process unencrypted
+/// SQLite file can be used for integration tests.
 pub fn open_default() -> Result<Connection> {
+    if let Ok(path) = std::env::var("ORCA_DB_PATH") {
+        return open_unencrypted(std::path::Path::new(&path));
+    }
     let home = dirs::home_dir().context("no home dir")?;
     let path = home.join(APP_STATE_DIR).join(APP_DB_FILE);
     open(&path)
+}
+
+/// Open an unencrypted SQLite database (used for testing via `ORCA_DB_PATH`).
+pub fn open_unencrypted(path: &Path) -> Result<Connection> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let conn = Connection::open(path).context("failed to open unencrypted database")?;
+    conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    apply_schema(&conn)?;
+    run_pending_migrations(&conn)?;
+    Ok(conn)
 }
 
 // ── Migrations ───────────────────────────────────────────────────────────────

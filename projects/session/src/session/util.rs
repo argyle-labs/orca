@@ -1,5 +1,3 @@
-use colored::Colorize;
-
 pub use llm::resolve_model;
 pub use llm::estimate_context_window;
 
