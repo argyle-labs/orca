@@ -36,7 +36,7 @@ pub struct TuiApp {
     saved_input: String,
     /// Whether a chat is in progress.
     pub busy: bool,
-    /// Prompt prefix (e.g. "🐋 orca ›").
+    /// Prompt prefix (e.g. "☯ orca ›").
     prompt: String,
     /// Whether the app should quit.
     pub should_quit: bool,
@@ -294,24 +294,30 @@ fn input_box_height(app: &TuiApp, total_width: u16) -> u16 {
 
 fn render_output(f: &mut Frame, app: &TuiApp, area: Rect) {
     let inner_height = area.height.saturating_sub(2) as usize; // borders
+    let inner_width = area.width.saturating_sub(2) as usize;   // borders
 
-    // Build display lines (strip ANSI for now)
-    let mut display: Vec<Line> = app
-        .lines
-        .iter()
-        .map(|s| Line::from(strip_ansi(s)))
-        .collect();
-    if !app.partial.is_empty() {
-        display.push(Line::from(strip_ansi(&app.partial)));
-    }
+    // Strip ANSI first so we can measure visual widths accurately.
+    let stripped: Vec<String> = {
+        let mut v: Vec<String> = app.lines.iter().map(|s| strip_ansi(s)).collect();
+        if !app.partial.is_empty() {
+            v.push(strip_ansi(&app.partial));
+        }
+        v
+    };
 
-    let total = display.len();
+    // Total rendered rows, accounting for line wrapping.
+    let total_display_rows: usize = stripped.iter().map(|s| {
+        let w = s.width();
+        if inner_width == 0 || w == 0 { 1 } else { w.div_ceil(inner_width) }
+    }).sum();
 
-    // Compute scroll position
+    let display: Vec<Line> = stripped.iter().map(|s| Line::from(s.as_str())).collect();
+
+    // Compute scroll position in display rows (not raw line count).
     let scroll_from_top = if app.auto_scroll {
-        total.saturating_sub(inner_height)
+        total_display_rows.saturating_sub(inner_height)
     } else {
-        total
+        total_display_rows
             .saturating_sub(inner_height)
             .saturating_sub(app.scroll as usize)
     };

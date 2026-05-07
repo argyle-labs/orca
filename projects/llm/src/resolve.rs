@@ -160,7 +160,9 @@ pub fn decide(
     };
 
     if !want_claude {
-        return Ok(Resolution::Local(Model::LMStudio(String::new())));
+        // Empty model ID — session layer will discover the best available local model
+        // (LM Studio or Ollama) at runtime.
+        return Ok(Resolution::Local(Model::LMStudio { id: String::new(), url: String::new() }));
     }
 
     if use_server {
@@ -196,7 +198,8 @@ pub async fn resolve_model(config: &Config, task: Option<TaskKind>) -> Result<Mo
     // Honour explicit config first.
     match &config.default_model {
         Model::Claude(id) if !id.is_empty() => return Ok(Model::Claude(id.clone())),
-        Model::LMStudio(id) if !id.is_empty() => return Ok(Model::LMStudio(id.clone())),
+        Model::LMStudio { id, url } if !id.is_empty() => return Ok(Model::LMStudio { id: id.clone(), url: url.clone() }),
+        Model::Ollama { id, url } if !id.is_empty() => return Ok(Model::Ollama { id: id.clone(), url: url.clone() }),
         _ => {}
     }
 
@@ -218,7 +221,8 @@ pub fn estimate_context_window(model: &Model) -> usize {
     use crate::discovery::classify_model;
     match model {
         Model::Claude(id) => classify_model(id, "claude").context_window,
-        Model::LMStudio(id) => classify_model(id, "lmstudio").context_window,
+        Model::LMStudio { id, .. } => classify_model(id, "lmstudio").context_window,
+        Model::Ollama { id, .. } => classify_model(id, "ollama").context_window,
     }
 }
 
@@ -231,7 +235,8 @@ mod tests {
         Config {
             anthropic_api_key: key.map(String::from),
             lmstudio_url: "http://localhost:1234".into(),
-            default_model: Model::LMStudio(String::new()),
+            ollama_url: "http://localhost:11434".into(),
+            default_model: Model::LMStudio { id: String::new(), url: String::new() },
             orca_vault: PathBuf::from("/tmp"),
             vault_root: PathBuf::from("/tmp"),
             memory_root: PathBuf::from("/tmp"),

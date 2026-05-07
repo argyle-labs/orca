@@ -52,22 +52,50 @@ impl ProjectContext {
     /// Build the system prompt for this context.
     /// Loads Wolf's agent definition (filesystem first, embedded fallback) + injects memory.
     pub fn build_system_prompt(&self, config: &Config) -> String {
-        let wolf_prompt = orca_agents::load_agent_prompt("wolf", &config.agents_dir())
-            .unwrap_or_else(|| {
-                eprintln!("warning: wolf.md not found — using minimal fallback prompt");
-                "You are an AI assistant. Be precise, efficient, and honest.".to_string()
-            });
+        self.build_system_prompt_for_backend(config, true)
+    }
+
+    /// Build a system prompt appropriate for the backend capability level.
+    /// `full_persona` = true: full Wolf prompt with agent routing (Claude, capable local models).
+    /// `full_persona` = false: stripped-down prompt for local models that don't handle complex personas.
+    pub fn build_system_prompt_for_backend(&self, config: &Config, full_persona: bool) -> String {
+        let base = if full_persona {
+            orca_agents::load_agent_prompt("wolf", &config.agents_dir())
+                .unwrap_or_else(|| {
+                    eprintln!("warning: wolf.md not found — using minimal fallback prompt");
+                    "You are an AI assistant. Be precise, efficient, and honest.".to_string()
+                })
+        } else {
+            // Local models (LMStudio, Ollama) get a clean minimal prompt — not a stripped Wolf.
+            // The Wolf persona (Otter narration, agent routing) causes them to loop and narrate.
+            local_model_prompt()
+        };
 
         if let Some(memory) = &self.memory_content {
             format!(
                 "{}\n\n---\n\n## Project Context\n\nProject: {}\n\n{memory}",
-                wolf_prompt,
+                base,
                 self.project.as_deref().unwrap_or("unknown"),
             )
         } else {
-            wolf_prompt
+            base
         }
     }
+}
+
+/// Minimal system prompt for local models (LM Studio, Ollama).
+/// The full Wolf persona (Otter narration, agent routing) confuses local models — they narrate
+/// to themselves, loop, and repeat. This gives them a clean, direct instruction set instead.
+fn local_model_prompt() -> String {
+    "You are a helpful AI assistant. Be concise, accurate, and direct.\n\
+     \n\
+     Rules:\n\
+     - Answer the question. Do not explain what you are about to do — just do it.\n\
+     - No preamble. No narration. No reasoning out loud. State your answer directly.\n\
+     - Do not repeat yourself.\n\
+     - If you do not know something, say so in one sentence.\n\
+     - Use tools when they would help answer the question more accurately."
+        .to_string()
 }
 
 #[cfg(test)]
@@ -80,7 +108,7 @@ mod tests {
         Config {
             anthropic_api_key: None,
             lmstudio_url: "http://localhost:1234".into(),
-            default_model: Model::LMStudio(String::new()),
+            default_model: Model::LMStudio { id: String::new(), url: String::new() },
             orca_vault: PathBuf::from("/tmp"),
             vault_root: PathBuf::from("/tmp"),
             memory_root,

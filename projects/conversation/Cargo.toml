@@ -1,10 +1,10 @@
 [package]
-name = "orca-session"
+name = "orca-conversation"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "session"
+name = "conversation"
 
 [dependencies]
 # Workspace crates

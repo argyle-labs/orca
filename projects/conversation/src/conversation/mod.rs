@@ -60,7 +60,6 @@ impl Session {
         output: OutputSink,
         forced_model: Option<Model>,
     ) -> Result<Self> {
-        let system_prompt = ctx.build_system_prompt(&config);
         let project = ctx.project.clone();
 
         let model = match forced_model {
@@ -69,6 +68,11 @@ impl Session {
         };
         let context_window = util::estimate_context_window(&model);
         let backend = build_backend(&config, &model)?;
+
+        // Claude and tool-capable backends get the full Wolf persona.
+        // Local models that don't support tools get a stripped prompt without
+        // the Otter narration and agent routing table, which confuse them.
+        let system_prompt = ctx.build_system_prompt_for_backend(&config, !backend.is_local());
 
         let log = SessionLog::new(project.as_deref(), &config.logs_dir()).ok();
 

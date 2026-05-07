@@ -9,8 +9,9 @@
 //! No model is hardcoded as "the" model. Selection is always driven by what's
 //! literally available at call time.
 
-use crate::backend::{ClaudeBackend, LMStudioBackend};
+use crate::backend::{ClaudeBackend, LMStudioBackend, OllamaBackend};
 use config::Config;
+use futures_util::future::join_all;
 
 // ── Task classification ───────────────────────────────────────────────────────
 
@@ -156,6 +157,8 @@ pub struct DiscoveredModel {
     pub id: String,
     /// Which backend serves this model: "lmstudio", "claude", "ollama".
     pub backend: String,
+    /// The base URL of the backend that serves this model. Empty for Claude.
+    pub url: String,
     /// Inferred capabilities.
     pub capabilities: ModelCapabilities,
 }
@@ -168,23 +171,41 @@ pub struct DiscoveredModel {
 ///
 /// Embedding models are excluded (they can't handle chat completions).
 pub async fn discover_all(config: &Config) -> Vec<DiscoveredModel> {
-    let mut found = Vec::new();
+    // Collect all (kind, url) pairs to probe: env-var defaults + DB registrations.
+    let mut endpoints: Vec<(String, String)> = vec![
+        ("lmstudio".into(), config.lmstudio_url.clone()),
+        ("ollama".into(), config.ollama_url.clone()),
+    ];
 
-    // LM Studio — query /v1/models for currently loaded models.
-    let lms = LMStudioBackend::new(&config.lmstudio_url, "");
-    if let Ok(ids) = lms.list_models().await {
-        for id in ids {
-            let caps = classify_model(&id, "lmstudio");
-            if caps.preferred_tasks.is_empty() {
-                continue; // embedding model — skip
+    // DB-registered providers override or supplement the env defaults.
+    if let Ok(conn) = db::open(&config.db_path) {
+        if let Ok(providers) = db::list_llm_providers(&conn) {
+            for p in providers.into_iter().filter(|p| p.enabled) {
+                // If there's already an entry for this URL, skip (dedup).
+                if !endpoints.iter().any(|(_, u)| u == &p.url) {
+                    endpoints.push((p.kind.clone(), p.url.clone()));
+                }
             }
-            found.push(DiscoveredModel {
-                id,
-                backend: "lmstudio".into(),
-                capabilities: caps,
-            });
         }
     }
+
+    // Probe all endpoints concurrently.
+    let probes: Vec<_> = endpoints.into_iter().map(|(kind, url)| async move {
+        let ids = match kind.as_str() {
+            "ollama" => OllamaBackend::new(&url, "").list_models().await.ok(),
+            _ => LMStudioBackend::new(&url, "").list_models().await.ok(),
+        };
+        ids.unwrap_or_default()
+            .into_iter()
+            .filter_map(|id| {
+                let caps = classify_model(&id, &kind);
+                if caps.preferred_tasks.is_empty() { return None; }
+                Some(DiscoveredModel { id, backend: kind.clone(), url: url.clone(), capabilities: caps })
+            })
+            .collect::<Vec<_>>()
+    }).collect();
+
+    let mut found: Vec<DiscoveredModel> = join_all(probes).await.into_iter().flatten().collect();
 
     // Claude — available if a key is configured.
     if config.anthropic_api_key.is_some() {
@@ -192,6 +213,7 @@ pub async fn discover_all(config: &Config) -> Vec<DiscoveredModel> {
             found.push(DiscoveredModel {
                 id: claude_id.to_string(),
                 backend: "claude".into(),
+                url: String::new(),
                 capabilities: classify_model(claude_id, "claude"),
             });
         }
@@ -238,7 +260,8 @@ pub fn select_for_task<'a>(
 pub fn to_config_model(discovered: &DiscoveredModel) -> config::Model {
     match discovered.backend.as_str() {
         "claude" => config::Model::Claude(discovered.id.clone()),
-        _ => config::Model::LMStudio(discovered.id.clone()),
+        "ollama" => config::Model::Ollama { id: discovered.id.clone(), url: discovered.url.clone() },
+        _ => config::Model::LMStudio { id: discovered.id.clone(), url: discovered.url.clone() },
     }
 }
 
@@ -327,6 +350,7 @@ mod tests {
         DiscoveredModel {
             id: id.to_string(),
             backend: backend.to_string(),
+            url: String::new(),
             capabilities: classify_model(id, backend),
         }
     }
@@ -433,13 +457,13 @@ mod tests {
     fn lmstudio_backend_maps_to_lmstudio_model() {
         let d = make_model("qwen/qwen3-8b", "lmstudio");
         let m = to_config_model(&d);
-        assert!(matches!(m, config::Model::LMStudio(ref s) if s == "qwen/qwen3-8b"));
+        assert!(matches!(m, config::Model::LMStudio { ref id, .. } if id == "qwen/qwen3-8b"));
     }
 
     #[test]
-    fn unknown_backend_defaults_to_lmstudio() {
+    fn ollama_backend_maps_to_ollama_model() {
         let d = make_model("some-model", "ollama");
         let m = to_config_model(&d);
-        assert!(matches!(m, config::Model::LMStudio(_)));
+        assert!(matches!(m, config::Model::Ollama { ref id, .. } if id == "some-model"));
     }
 }

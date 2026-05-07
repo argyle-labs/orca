@@ -160,7 +160,7 @@ mod tests {
         ToolCtx::new(Arc::new(Config {
             anthropic_api_key: None,
             lmstudio_url: "http://localhost:1234".into(),
-            default_model: Model::LMStudio(String::new()),
+            default_model: Model::LMStudio { id: String::new(), url: String::new() },
             orca_vault: PathBuf::from("/tmp"),
             vault_root: PathBuf::from("/tmp"),
             memory_root: PathBuf::from("/tmp"),
