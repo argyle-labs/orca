@@ -18,10 +18,12 @@ use tokio_util::sync::CancellationToken;
 
 pub mod claude;
 pub mod lmstudio;
+pub mod ollama;
 pub mod serialize;
 
 pub use claude::ClaudeBackend;
 pub use lmstudio::LMStudioBackend;
+pub use ollama::OllamaBackend;
 
 /// A thread-safe write target for streaming output.
 /// Foreground sessions pass stdout; background jobs pass a `Vec<u8>` buffer.
@@ -92,6 +94,19 @@ pub trait ModelBackend: Send + Sync {
 
     /// Model identifier for API calls.
     fn model_id(&self) -> &str;
+
+    /// Whether this backend supports tool/function calling.
+    /// Local models that don't reliably handle tool schemas should return false.
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    /// Whether this is a local model backend (LM Studio, Ollama).
+    /// Cloud backends (Claude) return false, which enables the full Wolf persona prompt.
+    /// Local backends get a stripped-down prompt — no Otter narration, no agent routing.
+    fn is_local(&self) -> bool {
+        true
+    }
 }
 
 /// Construct the correct backend from config and model selection.
@@ -104,6 +119,13 @@ pub fn build_backend(config: &Config, model: &Model) -> Result<Box<dyn ModelBack
                 .context("no API key — run `orca login` to store one")?;
             Ok(Box::new(ClaudeBackend::new(key, id)))
         }
-        Model::LMStudio(id) => Ok(Box::new(LMStudioBackend::new(&config.lmstudio_url, id))),
+        Model::LMStudio { id, url } => {
+            let base = if url.is_empty() { &config.lmstudio_url } else { url };
+            Ok(Box::new(LMStudioBackend::new(base, id)))
+        }
+        Model::Ollama { id, url } => {
+            let base = if url.is_empty() { &config.ollama_url } else { url };
+            Ok(Box::new(OllamaBackend::new(base, id)))
+        }
     }
 }

@@ -606,7 +606,8 @@ async fn lmstudio_mcp_run_agent_offload() {
     let config = config::Config {
         anthropic_api_key: None,
         lmstudio_url: LMS_URL.to_string(),
-        default_model: config::Model::LMStudio(FAST_MODEL.to_string()),
+        ollama_url: String::new(),
+        default_model: config::Model::LMStudio { id: FAST_MODEL.to_string(), url: String::new() },
         orca_vault: std::path::PathBuf::from(format!("{home}/.orca")),
         vault_root: std::path::PathBuf::from(format!("{home}/orca")),
         memory_root: std::path::PathBuf::from(format!("{home}/.orca/memory")),
@@ -615,7 +616,7 @@ async fn lmstudio_mcp_run_agent_offload() {
 
     let (sink, buf) = buffer_sink();
     let ctx = orca::context::ProjectContext::default();
-    let mut session = orca::session::Session::new_with_output(config, ctx, sink)
+    let mut session = orca::conversation::Session::new_with_output(config, ctx, sink)
         .await
         .expect("failed to create session");
 

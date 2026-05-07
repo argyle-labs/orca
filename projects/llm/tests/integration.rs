@@ -26,11 +26,16 @@ fn lmstudio_url() -> String {
     std::env::var("LMSTUDIO_URL").unwrap_or_else(|_| "http://localhost:1234".into())
 }
 
+fn ollama_url() -> String {
+    std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".into())
+}
+
 fn test_config() -> Config {
     Config {
         anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
         lmstudio_url: lmstudio_url(),
-        default_model: Model::LMStudio(String::new()),
+        ollama_url: ollama_url(),
+        default_model: Model::LMStudio { id: String::new(), url: String::new() },
         orca_vault: PathBuf::from("/tmp/.orca-test"),
         vault_root: PathBuf::from("/tmp"),
         memory_root: PathBuf::from("/tmp"),
@@ -145,20 +150,21 @@ async fn resolve_model_returns_something_when_lmstudio_available() {
 async fn resolve_model_respects_explicit_config() {
     // When a model is explicitly configured, we must use it — no discovery.
     let config = Config {
-        default_model: Model::LMStudio("explicit-model-id".into()),
+        default_model: Model::LMStudio { id: "explicit-model-id".into(), url: String::new() },
         ..test_config()
     };
     let model = resolve_model(&config, None).await.unwrap();
-    assert!(matches!(model, Model::LMStudio(ref id) if id == "explicit-model-id"));
+    assert!(matches!(model, Model::LMStudio { ref id, .. } if id == "explicit-model-id"));
 }
 
 #[tokio::test]
 async fn resolve_model_errors_when_nothing_available() {
-    // No LM Studio, no API key.
+    // No LM Studio, no Ollama, no API key — all backends point at dead ports.
     let config = Config {
-        lmstudio_url: "http://localhost:19999".into(), // port nothing listens on
+        lmstudio_url: "http://localhost:19999".into(),
+        ollama_url: "http://localhost:19998".into(),
         anthropic_api_key: None,
-        default_model: Model::LMStudio(String::new()),
+        default_model: Model::LMStudio { id: String::new(), url: String::new() },
         ..test_config()
     };
     let result = resolve_model(&config, None).await;
@@ -177,11 +183,13 @@ async fn select_for_task_tool_use_avoids_reasoning_model() {
         DiscoveredModel {
             id: "deepseek-r1-14b".into(),
             backend: "lmstudio".into(),
+            url: String::new(),
             capabilities: classify_model("deepseek-r1-14b", "lmstudio"),
         },
         DiscoveredModel {
             id: "qwen/qwen3-14b".into(),
             backend: "lmstudio".into(),
+            url: String::new(),
             capabilities: classify_model("qwen/qwen3-14b", "lmstudio"),
         },
     ];
@@ -194,9 +202,9 @@ async fn select_for_task_tool_use_avoids_reasoning_model() {
 #[tokio::test]
 async fn context_window_estimate_is_sensible() {
     assert!(estimate_context_window(&Model::Claude("claude-sonnet-4-6".into())) >= 100_000);
-    assert!(estimate_context_window(&Model::LMStudio("qwen3-14b".into())) >= 4_096);
+    assert!(estimate_context_window(&Model::LMStudio { id: "qwen3-14b".into(), url: String::new() }) >= 4_096);
     // 128k model in the ID should get a larger window
-    let w = estimate_context_window(&Model::LMStudio("some-model-128k".into()));
+    let w = estimate_context_window(&Model::LMStudio { id: "some-model-128k".into(), url: String::new() });
     assert!(w >= 100_000, "128k model should have large context window, got {w}");
 }
 

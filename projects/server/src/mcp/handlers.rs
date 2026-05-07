@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use crate::agent_backend::{self, Resolution};
 use crate::context::ProjectContext;
-use crate::session::Session;
+use crate::conversation::Session;
 
 pub fn agents() -> Result<String> {
     let mut lines = vec!["Available orca agents:".to_string(), String::new()];
@@ -67,7 +67,7 @@ pub fn search_logs(args: &Value, config: &Config) -> Result<String> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("query is required"))?;
 
-    let matches = session::log::search_logs(&config.logs_dir(), query, 20)?;
+    let matches = conversation::log::search_logs(&config.logs_dir(), query, 20)?;
     if matches.is_empty() {
         return Ok(format!("No matches for '{query}'"));
     }

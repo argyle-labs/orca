@@ -3,8 +3,8 @@ use orca::context::ProjectContext;
 use orca::mcp;
 use orca::serve;
 use orca::serve::openapi_spec_json;
-use orca::session::Session;
-use orca_commands::{self as cmd, CredsAction, DaemonAction, DbAction, DockerAction, HookAction, McpAction, PluginAction, SchemaAction, SpecAction, cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian, cmd_install, cmd_uninstall};
+use orca::conversation::Session;
+use orca_commands::{self as cmd, CredsAction, DaemonAction, DbAction, DockerAction, EnginesAction, HookAction, McpAction, PluginAction, SchemaAction, SpecAction, cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian, cmd_install, cmd_uninstall};
 use orca::log_cmd::{LogAction, cmd_log};
 use llm::{ClaudeBackend, ModelBackend, stdout_sink, Message};
 use config::Config;
@@ -138,6 +138,12 @@ enum Command {
         action: SchemaAction,
     },
 
+    /// Manage LLM backends (LM Studio, Ollama) registered with orca
+    Engines {
+        #[command(subcommand)]
+        action: EnginesAction,
+    },
+
     /// Manage Docker runtimes registered with orca
     Docker {
         #[command(subcommand)]
@@ -261,6 +267,7 @@ async fn main() -> Result<()> {
         Some(Command::Hook { action }) => cmd::cmd_hook(action),
         Some(Command::Mcp { action }) => cmd::cmd_mcp(action),
         Some(Command::Schema { action }) => cmd::cmd_schema(action),
+        Some(Command::Engines { action }) => cmd::cmd_engines(action),
         Some(Command::Docker { action }) => cmd::cmd_docker(action),
         Some(Command::Plugin { action }) => cmd::cmd_plugin(action),
         Some(Command::Creds { action }) => cmd::cmd_creds(action),

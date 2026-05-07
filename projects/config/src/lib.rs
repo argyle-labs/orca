@@ -17,6 +17,7 @@ use std::path::PathBuf;
 pub struct Config {
     pub anthropic_api_key: Option<String>,
     pub lmstudio_url: String,
+    pub ollama_url: String,
     pub default_model: Model,
     /// State/config dir: ~/.orca (db, logs, memory, config)
     pub orca_vault: PathBuf,
@@ -29,26 +30,40 @@ pub struct Config {
 /// Which model backend and model ID to use for a session.
 ///
 /// Defaults to `LMStudio` (local-first). Claude is escalation-only.
+/// The `url` field on LMStudio/Ollama is empty when loaded from env/config —
+/// `build_backend` then falls back to the global config URL. When populated
+/// from discovery it carries the specific endpoint that answered.
 #[derive(Debug, Clone)]
 pub enum Model {
     /// Anthropic Claude API — requires `ANTHROPIC_API_KEY` or a DB secret entry.
     Claude(String),
     /// LM Studio (OpenAI-compatible local server) — no API key needed.
-    LMStudio(String),
+    LMStudio { id: String, url: String },
+    /// Ollama (OpenAI-compatible local/network server) — no API key needed.
+    Ollama { id: String, url: String },
 }
 
 impl Model {
     /// Parse a /model <spec> argument.
-    /// Accepts: "claude-sonnet-4-6", "claude:claude-sonnet-4-6", "lmstudio:model-id"
+    /// Accepts: "claude-sonnet-4-6", "claude:claude-sonnet-4-6", "lmstudio:model-id", "ollama:model-id"
     pub fn parse(s: &str) -> Self {
         if let Some(m) = s.strip_prefix("lmstudio:") {
-            Model::LMStudio(m.to_string())
+            Model::LMStudio { id: m.to_string(), url: String::new() }
+        } else if let Some(m) = s.strip_prefix("ollama:") {
+            Model::Ollama { id: m.to_string(), url: String::new() }
         } else if let Some(m) = s.strip_prefix("claude:") {
             Model::Claude(m.to_string())
         } else if s.starts_with("claude-") {
             Model::Claude(s.to_string())
         } else {
-            Model::LMStudio(s.to_string())
+            Model::LMStudio { id: s.to_string(), url: String::new() }
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        match self {
+            Model::Claude(id) => id,
+            Model::LMStudio { id, .. } | Model::Ollama { id, .. } => id,
         }
     }
 }
@@ -70,11 +85,14 @@ impl Config {
         let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
         let lmstudio_url =
             std::env::var("LMSTUDIO_URL").unwrap_or_else(|_| "http://localhost:1234".to_string());
+        let ollama_url =
+            std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
 
         Ok(Config {
             anthropic_api_key: api_key,
             lmstudio_url,
-            default_model: Model::LMStudio(String::new()),
+            ollama_url,
+            default_model: Model::LMStudio { id: String::new(), url: String::new() },
             orca_vault,
             vault_root,
             memory_root,
@@ -107,7 +125,7 @@ mod tests {
     fn parse_lmstudio_prefix() {
         let m = Model::parse("lmstudio:qwen3");
         assert!(
-            matches!(m, Model::LMStudio(ref s) if s == "qwen3"),
+            matches!(m, Model::LMStudio { ref id, .. } if id == "qwen3"),
             "got: {m:?}"
         );
     }
@@ -134,7 +152,7 @@ mod tests {
     fn parse_unknown_defaults_to_lmstudio() {
         let m = Model::parse("some-local-model");
         assert!(
-            matches!(m, Model::LMStudio(ref s) if s == "some-local-model"),
+            matches!(m, Model::LMStudio { ref id, .. } if id == "some-local-model"),
             "got: {m:?}"
         );
     }
@@ -143,7 +161,7 @@ mod tests {
     fn parse_empty_defaults_to_lmstudio() {
         let m = Model::parse("");
         assert!(
-            matches!(m, Model::LMStudio(ref s) if s.is_empty()),
+            matches!(m, Model::LMStudio { ref id, .. } if id.is_empty()),
             "got: {m:?}"
         );
     }

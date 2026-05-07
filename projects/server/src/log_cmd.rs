@@ -1,6 +1,6 @@
 use anyhow::Result;
 use config::Config;
-use session::log;
+use conversation::log;
 use clap::Subcommand;
 use colored::Colorize;
 

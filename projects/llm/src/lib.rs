@@ -8,7 +8,7 @@ pub use types::{BackendResponse, Message, StopReason};
 pub use backend::{
     ModelBackend, OutputSink,
     build_backend, buffer_sink, sink_write, sink_writeln, stdout_sink,
-    ClaudeBackend, LMStudioBackend,
+    ClaudeBackend, LMStudioBackend, OllamaBackend,
 };
 pub use discovery::{
     TaskKind, ModelCapabilities, DiscoveredModel,

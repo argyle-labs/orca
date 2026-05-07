@@ -45,6 +45,10 @@ impl ModelBackend for ClaudeBackend {
         &self.model
     }
 
+    fn is_local(&self) -> bool {
+        false
+    }
+
     async fn chat(
         &self,
         messages: &[Message],

@@ -8,10 +8,10 @@
 //! - `session`  — interactive REPL + TUI, chat loop, tool execution, job management
 //! - `tui`      — split-pane terminal UI (crossterm/ratatui), keybindings, layout
 
-pub use ::session::agent_backend;
-pub use ::session::context;
-pub use ::session::session;
-pub use ::session::tui;
+pub use ::conversation::agent_backend;
+pub use ::conversation::context;
+pub use ::conversation::conversation;
+pub use ::conversation::tui;
 
 pub mod log_cmd;
 pub mod markdown;

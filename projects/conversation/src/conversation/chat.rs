@@ -22,8 +22,12 @@ impl Session {
         });
 
         let max_rounds = 30;
+        let tools = if self.backend.supports_tools() {
+            ToolRegistry::definitions()
+        } else {
+            vec![]
+        };
         for round in 0..max_rounds {
-            let tools = ToolRegistry::definitions();
             let response = self
                 .backend
                 .chat(

@@ -31,7 +31,7 @@ pub fn check_git_changes(dir: &str) -> Option<usize> {
 
 pub fn agent_emoji(name: &str) -> &'static str {
     match name {
-        "orca" => "🐋",
+        "orca" => "☯",
         "wolf" => "🐺",
         "otter" => "🦦",
         "owl" => "🦉",
@@ -77,7 +77,7 @@ mod tests {
     #[test]
     fn agent_emoji_known_agents() {
         assert_eq!(agent_emoji("wolf"), "🐺");
-        assert_eq!(agent_emoji("orca"), "🐋");
+        assert_eq!(agent_emoji("orca"), "☯");
         assert_eq!(agent_emoji("otter"), "🦦");
         assert_eq!(agent_emoji("owl"), "🦉");
         assert_eq!(agent_emoji("fox"), "🦊");
