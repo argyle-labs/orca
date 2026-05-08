@@ -201,7 +201,7 @@
   onMount(() => {
     servicesOpen = localStorage.getItem('sidebar-services-open') === '1';
     pollAll();
-    listSpecs().then(s => { specs = s as SpecMeta[]; }).catch(() => {});
+    listSpecs().then(s => { specs = s as unknown as SpecMeta[]; }).catch(() => {});
     const t = setInterval(pollAll, POLL_MS);
     return () => { clearInterval(t); };
   });
