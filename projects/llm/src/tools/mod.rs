@@ -1,11 +1,11 @@
 pub mod bash;
 
 use crate::backend::{OutputSink, stdout_sink};
-use orca_fs::{fs, search};
-use tool::{ToolDef, ToolResult};
 use anyhow::Result;
 use bash::BashPermissions;
+use orca_fs::{fs, search};
 use serde_json::{Value, json};
+use tool::{ToolDef, ToolResult};
 
 pub struct ToolRegistry {
     pub permissions: BashPermissions,

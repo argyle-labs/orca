@@ -16,8 +16,7 @@ pub struct ListServices;
 #[async_trait]
 impl OrcaTool for ListServices {
     const NAME: &'static str = "list_services";
-    const DESCRIPTION: &'static str =
-        "List all running docker compose services across all rebuy projects. \
+    const DESCRIPTION: &'static str = "List all running docker compose services across all rebuy projects. \
          Returns project name, path, and per-service state/health/ports.";
     type Args = ListServicesArgs;
     async fn run(_: ListServicesArgs, _: &ToolCtx) -> Result<String> {
@@ -42,8 +41,7 @@ pub struct GetServiceLogs;
 #[async_trait]
 impl OrcaTool for GetServiceLogs {
     const NAME: &'static str = "get_service_logs";
-    const DESCRIPTION: &'static str =
-        "Fetch docker compose logs for a running rebuy service. \
+    const DESCRIPTION: &'static str = "Fetch docker compose logs for a running rebuy service. \
          Specify the project path and service name.";
     type Args = GetServiceLogsArgs;
     async fn run(args: GetServiceLogsArgs, _: &ToolCtx) -> Result<String> {
@@ -70,8 +68,7 @@ pub struct RunTests;
 #[async_trait]
 impl OrcaTool for RunTests {
     const NAME: &'static str = "run_tests";
-    const DESCRIPTION: &'static str =
-        "Run the orca project test suite. Returns test output with pass/fail counts. \
+    const DESCRIPTION: &'static str = "Run the orca project test suite. Returns test output with pass/fail counts. \
          Suites: rust (cargo test), frontend (vitest), e2e (playwright), all.";
     type Args = RunTestsArgs;
     async fn run(args: RunTestsArgs, _: &ToolCtx) -> Result<String> {

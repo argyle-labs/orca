@@ -4,15 +4,15 @@
 //! without blocking the foreground session. Results are buffered in memory and
 //! retrieved via `get_output`. Cancellation is handled via `CancellationToken`.
 
-use llm::{ModelBackend, OutputSink, buffer_sink, sink_write, Message};
-use llm::tools::ToolRegistry;
-use config::{Config, Model};
-use tool::ToolResult;
 use anyhow::Result;
 use colored::Colorize;
+use config::{Config, Model};
+use llm::tools::ToolRegistry;
+use llm::{Message, ModelBackend, OutputSink, buffer_sink, sink_write};
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tool::ToolResult;
 
 /// A background agent job that runs independently of the foreground session.
 pub struct BackgroundJob {
@@ -239,7 +239,11 @@ async fn run_background_chat(
 fn truncate_preview(s: &str, max_chars: usize) -> String {
     let mut chars = s.chars();
     let truncated: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() { format!("{truncated}…") } else { truncated }
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
 }
 
 fn write_to_sink(sink: &OutputSink, data: &str) {
@@ -288,15 +292,16 @@ mod tests {
         // Give tokio a chance to run the spawned task
         tokio::task::yield_now().await;
         // The task is an instant Ok(()), so it should be done quickly
-        tokio::time::timeout(
-            tokio::time::Duration::from_millis(100),
-            async {
-                loop {
-                    if job.is_finished() { break; }
-                    tokio::task::yield_now().await;
+        tokio::time::timeout(tokio::time::Duration::from_millis(100), async {
+            loop {
+                if job.is_finished() {
+                    break;
                 }
+                tokio::task::yield_now().await;
             }
-        ).await.expect("job should finish within 100ms");
+        })
+        .await
+        .expect("job should finish within 100ms");
     }
 
     #[tokio::test]
@@ -328,7 +333,11 @@ mod tests {
         let manager = JobManager::new();
         let listed = manager.list();
         assert_eq!(listed.len(), 1);
-        assert!(listed[0].contains("no background jobs"), "got: {:?}", listed[0]);
+        assert!(
+            listed[0].contains("no background jobs"),
+            "got: {:?}",
+            listed[0]
+        );
     }
 
     #[tokio::test]
@@ -361,7 +370,11 @@ mod tests {
         let notes = manager.drain_notifications();
         // Should have a notification for the finished job
         assert!(!notes.is_empty(), "should notify about finished job");
-        assert!(notes[0].contains("#1"), "notification should mention job id: {:?}", notes[0]);
+        assert!(
+            notes[0].contains("#1"),
+            "notification should mention job id: {:?}",
+            notes[0]
+        );
 
         // Second drain: already notified, no more notes
         let notes2 = manager.drain_notifications();
@@ -393,7 +406,10 @@ mod tests {
         assert_eq!(list.len(), 1);
         let entry = &list[0];
         assert!(entry.contains("#7"), "should show job id: {entry}");
-        assert!(entry.contains("running"), "should show 'running' status: {entry}");
+        assert!(
+            entry.contains("running"),
+            "should show 'running' status: {entry}"
+        );
     }
 
     #[tokio::test]
@@ -402,9 +418,15 @@ mod tests {
         let job = make_running_job(5, "cancellable");
         manager.jobs.push(job);
 
-        assert!(manager.cancel(5), "cancel should return true for running job");
+        assert!(
+            manager.cancel(5),
+            "cancel should return true for running job"
+        );
         // Job is still sleeping (token cancelled, task not yet woken) — cancel is idempotent
-        assert!(manager.cancel(5), "second cancel on still-running job also returns true");
+        assert!(
+            manager.cancel(5),
+            "second cancel on still-running job also returns true"
+        );
         // Unknown id always returns false
         assert!(!manager.cancel(999), "cancel unknown id returns false");
     }

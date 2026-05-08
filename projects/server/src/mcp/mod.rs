@@ -101,16 +101,17 @@ pub async fn serve(config: &Config) -> Result<()> {
                 // Include static tools not yet migrated to the registry
                 if let Some(arr) = static_tools.as_array() {
                     for t in arr {
-                        if t["name"].as_str().is_none_or(|n| !registry_names.contains(n as &str)) {
+                        if t["name"]
+                            .as_str()
+                            .is_none_or(|n| !registry_names.contains(n as &str))
+                        {
                             all_orca.push(t.clone());
                         }
                     }
                 }
 
-                let orca_names: std::collections::HashSet<&str> = all_orca
-                    .iter()
-                    .filter_map(|t| t["name"].as_str())
-                    .collect();
+                let orca_names: std::collections::HashSet<&str> =
+                    all_orca.iter().filter_map(|t| t["name"].as_str()).collect();
 
                 // Discover tools from federated servers, skipping orca-local
                 let external = pool.all_tools_filtered(FEDERATION_SKIP).await;
@@ -121,7 +122,8 @@ pub async fn serve(config: &Config) -> Result<()> {
                     let server = tool["server"].as_str().unwrap_or("");
                     let alias = tool["alias"].as_str().unwrap_or(name);
                     if !name.is_empty() && !server.is_empty() && !orca_names.contains(name) {
-                        tool_registry.insert(name.to_string(), (server.to_string(), alias.to_string()));
+                        tool_registry
+                            .insert(name.to_string(), (server.to_string(), alias.to_string()));
                     }
                 }
 

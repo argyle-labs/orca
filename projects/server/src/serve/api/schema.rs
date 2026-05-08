@@ -81,9 +81,10 @@ fn load_db_configs() -> Vec<DbConfig> {
 
     // Try DB first
     if let Ok(rows) = db::list_schema_databases(&conn)
-        && !rows.is_empty() {
-            return rows.into_iter().map(DbConfig::from).collect();
-        }
+        && !rows.is_empty()
+    {
+        return rows.into_iter().map(DbConfig::from).collect();
+    }
 
     // DB empty — attempt one-shot migration from orca.toml
     let home = std::env::var("HOME").unwrap_or_default();
@@ -98,7 +99,11 @@ fn load_db_configs() -> Vec<DbConfig> {
             let row = db::SchemaDbRow {
                 name: d.name.clone(),
                 driver: "mysql".to_string(),
-                host: if d.host.is_empty() { None } else { Some(d.host.clone()) },
+                host: if d.host.is_empty() {
+                    None
+                } else {
+                    Some(d.host.clone())
+                },
                 port: if d.port == 0 { None } else { Some(d.port) },
                 user: d.user.clone(),
                 password: d.password.clone(),
@@ -129,7 +134,6 @@ fn load_db_configs() -> Vec<DbConfig> {
 
     vec![]
 }
-
 
 pub(crate) fn load_domains(domains_file: &Option<String>) -> Value {
     let Some(path) = domains_file else {
@@ -249,16 +253,25 @@ async fn query_database_docker(cfg: &DbConfig, container: &str) -> anyhow::Resul
     let db = &cfg.database;
     let pass_arg = format!("-p{}", cfg.password);
     let base_args: Vec<String> = vec![
-        "exec".into(), container.into(), "mysql".into(),
-        "-u".into(), cfg.user.clone(), pass_arg, cfg.database.clone(),
-        "--batch".into(), "--silent".into(),
+        "exec".into(),
+        container.into(),
+        "mysql".into(),
+        "-u".into(),
+        cfg.user.clone(),
+        pass_arg,
+        cfg.database.clone(),
+        "--batch".into(),
+        "--silent".into(),
     ];
 
     let run = |sql: String| {
         let mut args = base_args.clone();
         args.extend(["-e".into(), sql]);
         async move {
-            let out = tokio::process::Command::new("docker").args(&args).output().await?;
+            let out = tokio::process::Command::new("docker")
+                .args(&args)
+                .output()
+                .await?;
             if !out.status.success() {
                 anyhow::bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
             }
@@ -313,8 +326,7 @@ async fn query_database_postgres(cfg: &DbConfig) -> anyhow::Result<Value> {
         "host={} port={} user={} password={} dbname={}",
         cfg.host, cfg.port, cfg.user, cfg.password, cfg.database
     );
-    let (client, connection) =
-        tokio_postgres::connect(&conn_str, tokio_postgres::NoTls).await?;
+    let (client, connection) = tokio_postgres::connect(&conn_str, tokio_postgres::NoTls).await?;
     tokio::spawn(connection);
 
     let tables_rows = client

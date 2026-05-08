@@ -1,9 +1,9 @@
 use super::{Session, util};
-use llm::{ClaudeBackend, LMStudioBackend, ModelBackend, build_backend, Message};
-use config::Model;
 use crate::ledger::fmt_tokens;
 use anyhow::{Context, Result};
 use colored::Colorize;
+use config::Model;
+use llm::{ClaudeBackend, LMStudioBackend, Message, ModelBackend, build_backend};
 use tokio_util::sync::CancellationToken;
 
 impl Session {

@@ -1,6 +1,5 @@
 use super::{ModelBackend, OutputSink, serialize, sink_write, sink_writeln};
 use crate::types::{BackendResponse, Message, StopReason};
-use tool::{ToolCall, ToolDef};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use colored::Colorize;
@@ -10,6 +9,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+use tool::{ToolCall, ToolDef};
 
 pub struct LMStudioBackend {
     client: Client,
@@ -111,9 +111,14 @@ impl ModelBackend for LMStudioBackend {
             let text = response.text().await.unwrap_or_default();
             // Detect "model can't load" — separate from generic errors so callers
             // can distinguish "model not available" from "bad request".
-            if text.contains("Failed to load model") || text.contains("insufficient system resources") {
-                bail!("model not available: {} — it may require more memory than is currently free. \
-                       Try unloading other models first.", self.model);
+            if text.contains("Failed to load model")
+                || text.contains("insufficient system resources")
+            {
+                bail!(
+                    "model not available: {} — it may require more memory than is currently free. \
+                       Try unloading other models first.",
+                    self.model
+                );
             }
             bail!("LM Studio error {status}: {text}");
         }

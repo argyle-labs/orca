@@ -1,8 +1,8 @@
 use anyhow::Result;
-use orca_scanner as scanner;
-use db;
 use clap::Subcommand;
 use colored::Colorize;
+use db;
+use orca_scanner as scanner;
 use serde::Deserialize;
 
 #[derive(Subcommand)]
@@ -40,9 +40,7 @@ pub enum SpecAction {
         all: bool,
     },
     /// Remove a URL-registered spec from orca.db
-    Unregister {
-        name: String,
-    },
+    Unregister { name: String },
     /// Generate an OpenAPI spec for a registered rebuy repo by scanning its
     /// source. Pass --all to sync every supported repo at once (used by
     /// `make build`). Repos that aren't checked out locally are skipped with
@@ -159,7 +157,9 @@ pub fn cmd_spec(action: SpecAction) -> Result<()> {
             let strict = !all;
             for r in repos {
                 if let Err(e) = sync_one(r, strict) {
-                    if strict { return Err(e); }
+                    if strict {
+                        return Err(e);
+                    }
                     println!("{} {}: {}", "⊘".yellow(), r, e);
                 }
             }
@@ -168,8 +168,8 @@ pub fn cmd_spec(action: SpecAction) -> Result<()> {
         SpecAction::Register { name, url } => {
             let conn = db::open_default()?;
             print!("  fetching {}", url.dimmed());
-            let resp = reqwest::blocking::get(&url)
-                .map_err(|e| anyhow::anyhow!("fetch failed: {e}"))?;
+            let resp =
+                reqwest::blocking::get(&url).map_err(|e| anyhow::anyhow!("fetch failed: {e}"))?;
             if !resp.status().is_success() {
                 anyhow::bail!("HTTP {}: {}", resp.status(), url);
             }
@@ -221,7 +221,10 @@ pub fn cmd_spec(action: SpecAction) -> Result<()> {
                 return Ok(());
             }
             for spec in to_refresh {
-                let url = spec.url.as_ref().expect("pre-filtered list guarantees URL is present");
+                let url = spec
+                    .url
+                    .as_ref()
+                    .expect("pre-filtered list guarantees URL is present");
                 print!("  refreshing {}", spec.name.cyan());
                 let resp = match reqwest::blocking::get(url) {
                     Ok(r) => r,
@@ -297,14 +300,17 @@ fn sync_known_repo(name: &str) -> Result<&str> {
 
 fn rebuy_repo_path(name: &str) -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
-    let rebuy_root = std::env::var("REBUY_ROOT")
-        .unwrap_or_else(|_| format!("{home}/code/rebuy"));
+    let rebuy_root = std::env::var("REBUY_ROOT").unwrap_or_else(|_| format!("{home}/code/rebuy"));
     std::path::PathBuf::from(&rebuy_root).join(name)
 }
 
 fn write_spec(repo: &str, spec: &serde_json::Value) -> Result<std::path::PathBuf> {
     let out_path = scanner::specs_dir().join(format!("{repo}.json"));
-    std::fs::create_dir_all(out_path.parent().expect("specs_dir().join(...) always has a parent"))?;
+    std::fs::create_dir_all(
+        out_path
+            .parent()
+            .expect("specs_dir().join(...) always has a parent"),
+    )?;
     std::fs::write(&out_path, serde_json::to_string_pretty(spec)?)?;
     Ok(out_path)
 }
@@ -388,7 +394,10 @@ fn sync_rebuy_shopify_client() -> Result<()> {
     let mut out = String::new();
     out.push_str("# Aggregated from rebuy-shopify-client/resources/http/**\n");
     out.push_str(&format!("# Files: {}\n", files.len()));
-    out.push_str(&format!("# Generated: {}\n\n", chrono::Utc::now().to_rfc3339()));
+    out.push_str(&format!(
+        "# Generated: {}\n\n",
+        chrono::Utc::now().to_rfc3339()
+    ));
     for f in &files {
         let rel = f.strip_prefix(&repo_path).unwrap_or(f);
         out.push_str(&format!("# ── {} ──\n", rel.display()));
@@ -438,8 +447,8 @@ fn load_shopify_admin_version() -> String {
     }
 
     let home = std::env::var("HOME").unwrap_or_default();
-    let toml_path = std::env::var("ORCA_CONFIG")
-        .unwrap_or_else(|_| format!("{home}/.orca/config/orca.toml"));
+    let toml_path =
+        std::env::var("ORCA_CONFIG").unwrap_or_else(|_| format!("{home}/.orca/config/orca.toml"));
 
     std::fs::read_to_string(&toml_path)
         .ok()

@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
+use clap::Subcommand;
 use config::APP_NAME;
 use db::{self, PluginRow};
 use orca_fs::fs::expand_tilde;
-use clap::Subcommand;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -73,7 +73,9 @@ struct ManifestPlugin {
     uses: Vec<ManifestUses>,
 }
 
-fn default_mode() -> String { "orca".to_string() }
+fn default_mode() -> String {
+    "orca".to_string()
+}
 
 #[derive(Deserialize)]
 struct Manifest {
@@ -132,24 +134,55 @@ fn install_manifest(
     let (m, abs_path) = parse_manifest(manifest_path)?;
     let instance_id = instance_id_override.unwrap_or(&m.plugin.id).to_string();
     let mode = mode_override.unwrap_or(&m.plugin.mode).to_string();
-    let specs_dir = m.plugin.specs.as_ref()
+    let specs_dir = m
+        .plugin
+        .specs
+        .as_ref()
         .and_then(|s| s.dir.as_deref())
         .map(expand_tilde);
     let row = PluginRow {
         id: instance_id.clone(),
         manifest_path: abs_path.clone(),
         tier: m.plugin.tier.clone(),
-        mcp_command: m.plugin.mcp.as_ref().map(|mcp| mcp.command.clone()).filter(|c| !c.is_empty()),
-        mcp_args: m.plugin.mcp.as_ref().map(|mcp| mcp.args.clone()).unwrap_or_default(),
-        mcp_env: m.plugin.mcp.as_ref().map(|mcp| mcp.env.clone()).unwrap_or_default(),
+        mcp_command: m
+            .plugin
+            .mcp
+            .as_ref()
+            .map(|mcp| mcp.command.clone())
+            .filter(|c| !c.is_empty()),
+        mcp_args: m
+            .plugin
+            .mcp
+            .as_ref()
+            .map(|mcp| mcp.args.clone())
+            .unwrap_or_default(),
+        mcp_env: m
+            .plugin
+            .mcp
+            .as_ref()
+            .map(|mcp| mcp.env.clone())
+            .unwrap_or_default(),
         mcp_token_env: m.plugin.mcp.as_ref().and_then(|mcp| mcp.token_env.clone()),
-        mcp_urls: m.plugin.mcp.as_ref().map(|mcp| {
-            // `urls` list takes precedence; `url` is a single-entry shorthand.
-            if !mcp.urls.is_empty() { mcp.urls.clone() }
-            else if let Some(u) = &mcp.url { vec![u.clone()] }
-            else { vec![] }
-        }).unwrap_or_default(),
-        context_injection: m.plugin.context_injection.clone().unwrap_or_else(|| "minimal".into()),
+        mcp_urls: m
+            .plugin
+            .mcp
+            .as_ref()
+            .map(|mcp| {
+                // `urls` list takes precedence; `url` is a single-entry shorthand.
+                if !mcp.urls.is_empty() {
+                    mcp.urls.clone()
+                } else if let Some(u) = &mcp.url {
+                    vec![u.clone()]
+                } else {
+                    vec![]
+                }
+            })
+            .unwrap_or_default(),
+        context_injection: m
+            .plugin
+            .context_injection
+            .clone()
+            .unwrap_or_else(|| "minimal".into()),
         enabled: true,
         command_map: m.plugin.commands.clone(),
         mode: mode.clone(),
@@ -179,7 +212,9 @@ fn install_manifest(
         };
         // Resolve the dep's base id from its manifest to build the default scoped id.
         let dep_base_id = peek_plugin_id(&dep_path).unwrap_or_else(|_| "plugin".to_string());
-        let dep_instance_id = dep.id.clone()
+        let dep_instance_id = dep
+            .id
+            .clone()
             .unwrap_or_else(|| format!("{dep_base_id}@{instance_id}"));
         let dep_id = install_manifest(conn, &dep_path, Some(&dep_instance_id), Some(&mode))?;
         db::add_plugin_dep(conn, &instance_id, &dep_id)?;
@@ -211,13 +246,9 @@ pub enum PluginAction {
         id: String,
     },
     /// Enable a disabled plugin
-    Enable {
-        id: String,
-    },
+    Enable { id: String },
     /// Disable a plugin without removing it
-    Disable {
-        id: String,
-    },
+    Disable { id: String },
     /// Get a plugin data value
     DataGet {
         /// Plugin id
@@ -258,10 +289,15 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
         PluginAction::List => {
             let plugins = db::list_plugins(&conn)?;
             if plugins.is_empty() {
-                println!("no plugins registered — use `{APP_NAME} plugin add <path/to/{APP_NAME}-plugin.toml>`");
+                println!(
+                    "no plugins registered — use `{APP_NAME} plugin add <path/to/{APP_NAME}-plugin.toml>`"
+                );
                 return Ok(());
             }
-            println!("{:<20} {:<10} {:<10} {:<8} MCP COMMAND", "ID", "TIER", "CONTEXT", "COMMANDS");
+            println!(
+                "{:<20} {:<10} {:<10} {:<8} MCP COMMAND",
+                "ID", "TIER", "CONTEXT", "COMMANDS"
+            );
             println!("{}", "-".repeat(78));
             for p in &plugins {
                 let status = if p.enabled { "" } else { " [disabled]" };
@@ -283,10 +319,9 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
             let deps = db::list_plugin_deps(&conn, &id)?;
             db::remove_plugin_deps(&conn, &id)?;
             for dep_id in &deps {
-                if !db::plugin_has_parent(&conn, dep_id)?
-                    && db::remove_plugin(&conn, dep_id)? {
-                        println!("removed dependency '{dep_id}'");
-                    }
+                if !db::plugin_has_parent(&conn, dep_id)? && db::remove_plugin(&conn, dep_id)? {
+                    println!("removed dependency '{dep_id}'");
+                }
             }
             if db::remove_plugin(&conn, &id)? {
                 println!("removed plugin '{id}'");
@@ -311,12 +346,10 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
             }
         }
 
-        PluginAction::DataGet { id, key } => {
-            match db::get_plugin_data(&conn, &id, &key)? {
-                Some(row) => println!("{}", row.value),
-                None => println!("(not set)"),
-            }
-        }
+        PluginAction::DataGet { id, key } => match db::get_plugin_data(&conn, &id, &key)? {
+            Some(row) => println!("{}", row.value),
+            None => println!("(not set)"),
+        },
 
         PluginAction::DataSet { id, key, value } => {
             db::set_plugin_data(&conn, &id, &key, &value)?;
@@ -331,7 +364,11 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
                 println!("{:<30} {:<24} VALUE", "KEY", "UPDATED");
                 println!("{}", "-".repeat(80));
                 for r in rows {
-                    let preview = if r.value.len() > 40 { format!("{}…", &r.value[..40]) } else { r.value.clone() };
+                    let preview = if r.value.len() > 40 {
+                        format!("{}…", &r.value[..40])
+                    } else {
+                        r.value.clone()
+                    };
                     println!("{:<30} {:<24} {}", r.key, r.updated_at, preview);
                 }
             }
@@ -424,7 +461,10 @@ label = "Dashboard"
         let path = write_manifest(dir.path(), "this is not valid toml {{{{");
         match parse_manifest(&path) {
             Ok(_) => panic!("expected error for invalid TOML"),
-            Err(e) => assert!(e.to_string().contains("invalid orca-plugin.toml"), "got: {e}"),
+            Err(e) => assert!(
+                e.to_string().contains("invalid orca-plugin.toml"),
+                "got: {e}"
+            ),
         }
     }
 
@@ -434,7 +474,10 @@ label = "Dashboard"
         let path = write_manifest(dir.path(), "[plugin]\nid = \"x\"\n");
         match parse_manifest(&path) {
             Ok(_) => panic!("expected error for missing fields"),
-            Err(e) => assert!(e.to_string().contains("invalid orca-plugin.toml"), "got: {e}"),
+            Err(e) => assert!(
+                e.to_string().contains("invalid orca-plugin.toml"),
+                "got: {e}"
+            ),
         }
     }
 
@@ -470,7 +513,10 @@ url = "http://localhost:8080"
         let (m, _) = parse_manifest(&path).unwrap();
         let mcp = m.plugin.mcp.unwrap();
         assert_eq!(mcp.url.as_deref(), Some("http://localhost:8080"));
-        assert!(mcp.urls.is_empty(), "urls list should be empty when only url shorthand is set");
+        assert!(
+            mcp.urls.is_empty(),
+            "urls list should be empty when only url shorthand is set"
+        );
     }
 
     #[test]
@@ -515,7 +561,13 @@ deploy = "mcp_deploy"
         let dir = tempfile::tempdir().unwrap();
         let path = write_manifest(dir.path(), content);
         let (m, _) = parse_manifest(&path).unwrap();
-        assert_eq!(m.plugin.commands.get("search").map(|s| s.as_str()), Some("mcp_search"));
-        assert_eq!(m.plugin.commands.get("deploy").map(|s| s.as_str()), Some("mcp_deploy"));
+        assert_eq!(
+            m.plugin.commands.get("search").map(|s| s.as_str()),
+            Some("mcp_search")
+        );
+        assert_eq!(
+            m.plugin.commands.get("deploy").map(|s| s.as_str()),
+            Some("mcp_deploy")
+        );
     }
 }

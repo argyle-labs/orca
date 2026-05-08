@@ -54,16 +54,17 @@ fn resolve_command(command: &str) -> String {
     }
     // which works when PATH is rich (interactive shell, dev mode)
     if let Ok(out) = std::process::Command::new("which").arg(command).output()
-        && out.status.success() {
-            let resolved = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !resolved.is_empty() && std::path::Path::new(&resolved).exists() {
-                return resolved;
-            }
+        && out.status.success()
+    {
+        let resolved = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !resolved.is_empty() && std::path::Path::new(&resolved).exists() {
+            return resolved;
         }
+    }
     // Probe known install paths — covers launchd/systemd daemon environments
     let mut candidates: Vec<String> = vec![
-        format!("/opt/homebrew/bin/{command}"),  // Apple Silicon Homebrew
-        format!("/usr/local/bin/{command}"),     // Intel Homebrew + manual installs
+        format!("/opt/homebrew/bin/{command}"), // Apple Silicon Homebrew
+        format!("/usr/local/bin/{command}"),    // Intel Homebrew + manual installs
         format!("/usr/bin/{command}"),
         format!("/bin/{command}"),
     ];
@@ -86,7 +87,9 @@ fn resolve_command(command: &str) -> String {
             return path.clone();
         }
     }
-    tracing::warn!("could not resolve '{command}' to an absolute path; using as-is (may fail in daemon mode)");
+    tracing::warn!(
+        "could not resolve '{command}' to an absolute path; using as-is (may fail in daemon mode)"
+    );
     command.to_string()
 }
 
@@ -189,8 +192,16 @@ impl McpClient {
         }
 
         let mut child = cmd.spawn()?;
-        let stdin = child.stdin.take().context("MCP child process missing stdin pipe")?;
-        let stdout = BufReader::new(child.stdout.take().context("MCP child process missing stdout pipe")?);
+        let stdin = child
+            .stdin
+            .take()
+            .context("MCP child process missing stdin pipe")?;
+        let stdout = BufReader::new(
+            child
+                .stdout
+                .take()
+                .context("MCP child process missing stdout pipe")?,
+        );
 
         let mut client = McpClient {
             transport: Transport::Stdio {
@@ -212,11 +223,12 @@ impl McpClient {
 
         let mut headers = reqwest::header::HeaderMap::new();
         if let Some(token) = &cfg.token
-            && !token.is_empty() {
-                let val = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
-                    .map_err(|e| anyhow::anyhow!("invalid token: {e}"))?;
-                headers.insert(reqwest::header::AUTHORIZATION, val);
-            }
+            && !token.is_empty()
+        {
+            let val = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+                .map_err(|e| anyhow::anyhow!("invalid token: {e}"))?;
+            headers.insert(reqwest::header::AUTHORIZATION, val);
+        }
 
         let http = reqwest::Client::builder()
             .default_headers(headers)
@@ -282,7 +294,12 @@ impl McpClient {
         self.request_timeout(method, params, 30).await
     }
 
-    async fn request_timeout(&self, method: &str, params: Value, timeout_secs: u64) -> Result<Value> {
+    async fn request_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout_secs: u64,
+    ) -> Result<Value> {
         let id = self.next_id().await;
         let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
 
@@ -303,15 +320,23 @@ impl McpClient {
                             let mut stdout = stdout.lock().await;
                             stdout.read_line(&mut buf).await?
                         };
-                        if n == 0 { anyhow::bail!("MCP server closed"); }
+                        if n == 0 {
+                            anyhow::bail!("MCP server closed");
+                        }
                         let buf = buf.trim();
-                        if buf.is_empty() { continue; }
+                        if buf.is_empty() {
+                            continue;
+                        }
                         let resp: Value = serde_json::from_str(buf)?;
-                        if resp["id"] == id { return Ok(resp); }
+                        if resp["id"] == id {
+                            return Ok(resp);
+                        }
                     }
                     #[allow(unreachable_code)]
                     Ok(Value::Null)
-                }).await {
+                })
+                .await
+                {
                     Ok(r) => r,
                     Err(_) => anyhow::bail!("MCP server timed out"),
                 }
@@ -334,9 +359,8 @@ impl McpClient {
                 let mut buf = String::new();
 
                 // Read until we get the `data: /message?sessionId=…` endpoint line.
-                let session_post = match tokio::time::timeout(
-                    std::time::Duration::from_secs(10),
-                    async {
+                let session_post =
+                    match tokio::time::timeout(std::time::Duration::from_secs(10), async {
                         while let Some(Ok(chunk)) = stream.next().await {
                             buf.push_str(&String::from_utf8_lossy(&chunk));
                             for line in buf.lines() {
@@ -346,14 +370,13 @@ impl McpClient {
                             }
                         }
                         anyhow::bail!("SSE closed before endpoint event")
-                    },
-                )
-                .await
-                {
-                    Ok(Ok(path)) => path,
-                    Ok(Err(e)) => return Err(e),
-                    Err(_) => anyhow::bail!("SSE endpoint event timed out"),
-                };
+                    })
+                    .await
+                    {
+                        Ok(Ok(path)) => path,
+                        Ok(Err(e)) => return Err(e),
+                        Err(_) => anyhow::bail!("SSE endpoint event timed out"),
+                    };
 
                 let post_url = if session_post.starts_with("http") {
                     session_post
@@ -370,9 +393,13 @@ impl McpClient {
                         for line in buf.lines() {
                             if let Some(data) = line.strip_prefix("data: ") {
                                 let data = data.trim();
-                                if data.is_empty() { continue; }
+                                if data.is_empty() {
+                                    continue;
+                                }
                                 let resp: Value = serde_json::from_str(data)?;
-                                if resp["id"] == id { return Ok(resp); }
+                                if resp["id"] == id {
+                                    return Ok(resp);
+                                }
                             }
                         }
                     }
@@ -406,35 +433,33 @@ impl McpClient {
                     .header("Accept", "text/event-stream")
                     .send()
                     .await
-                    && sse_resp.status().is_success() {
-                        let mut stream = sse_resp.bytes_stream();
-                        let mut buf = String::new();
-                        // Read endpoint event.
-                        let mut session_post = String::new();
-                        let _ = tokio::time::timeout(
-                            std::time::Duration::from_secs(5),
-                            async {
-                                while let Some(Ok(chunk)) = stream.next().await {
-                                    buf.push_str(&String::from_utf8_lossy(&chunk));
-                                    for line in buf.lines() {
-                                        if let Some(data) = line.strip_prefix("data: ") {
-                                            session_post = data.trim().to_string();
-                                            return;
-                                        }
-                                    }
+                    && sse_resp.status().is_success()
+                {
+                    let mut stream = sse_resp.bytes_stream();
+                    let mut buf = String::new();
+                    // Read endpoint event.
+                    let mut session_post = String::new();
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        while let Some(Ok(chunk)) = stream.next().await {
+                            buf.push_str(&String::from_utf8_lossy(&chunk));
+                            for line in buf.lines() {
+                                if let Some(data) = line.strip_prefix("data: ") {
+                                    session_post = data.trim().to_string();
+                                    return;
                                 }
-                            },
-                        )
-                        .await;
-                        if !session_post.is_empty() {
-                            let post_url = if session_post.starts_with("http") {
-                                session_post
-                            } else {
-                                format!("{base_url}{session_post}")
-                            };
-                            let _ = http.post(&post_url).json(&msg).send().await;
+                            }
                         }
+                    })
+                    .await;
+                    if !session_post.is_empty() {
+                        let post_url = if session_post.starts_with("http") {
+                            session_post
+                        } else {
+                            format!("{base_url}{session_post}")
+                        };
+                        let _ = http.post(&post_url).json(&msg).send().await;
                     }
+                }
             }
         }
         Ok(())
@@ -496,11 +521,17 @@ impl Default for McpPool {
 
 impl McpPool {
     pub fn new() -> Self {
-        McpPool { clients: Mutex::new(HashMap::new()), db_path: None }
+        McpPool {
+            clients: Mutex::new(HashMap::new()),
+            db_path: None,
+        }
     }
 
     pub fn new_with_db(db_path: std::path::PathBuf) -> Self {
-        McpPool { clients: Mutex::new(HashMap::new()), db_path: Some(db_path) }
+        McpPool {
+            clients: Mutex::new(HashMap::new()),
+            db_path: Some(db_path),
+        }
     }
 
     pub fn read_configs(&self) -> HashMap<String, McpServerConfig> {
@@ -508,57 +539,63 @@ impl McpPool {
 
         // DB servers take precedence over ~/.claude.json
         if let Some(db_path) = &self.db_path
-            && let Ok(conn) = db::open(db_path) {
-                if let Ok(rows) = db::list_mcp_servers(&conn) {
-                    for row in rows {
-                        configs.insert(row.name.clone(), McpServerConfig {
+            && let Ok(conn) = db::open(db_path)
+        {
+            if let Ok(rows) = db::list_mcp_servers(&conn) {
+                for row in rows {
+                    configs.insert(
+                        row.name.clone(),
+                        McpServerConfig {
                             command: row.command,
                             args: row.args,
                             env: row.env,
                             token: None,
                             fallback_urls: vec![],
-                        });
-                    }
-                }
-                // Enabled plugins that declare an MCP server are auto-federated.
-                // Plugin entries take precedence over ~/.claude.json but not over explicit mcp_servers rows.
-                if let Ok(plugins) = db::list_plugins(&conn) {
-                    for p in plugins {
-                        if !p.enabled { continue; }
-                        // mcp_urls (priority-ordered list) override stdio command.
-                        // All URLs are passed; connect() tries them in order.
-                        let (cmd, fallback_urls) = if !p.mcp_urls.is_empty() {
-                            let mut urls = p.mcp_urls.into_iter();
-                            let primary = urls.next().unwrap();
-                            (primary, urls.collect::<Vec<_>>())
-                        } else if let Some(cmd) = p.mcp_command.filter(|c| !c.is_empty()) {
-                            (cmd, vec![])
-                        } else {
-                            continue;
-                        };
-                        // Merge stored credentials (orca creds set) into env so the subprocess
-                        // receives them without requiring the caller to export them manually.
-                        let mut env = p.mcp_env;
-                        let mut token: Option<String> = None;
-                        if let Ok(creds) = db::list_plugin_credentials(&conn, &p.id) {
-                            for c in creds {
-                                // If this credential matches token_env, use it as Bearer token.
-                                if p.mcp_token_env.as_deref() == Some(c.key.as_str()) {
-                                    token = Some(c.value.clone());
-                                }
-                                env.insert(c.key, c.value);
-                            }
-                        }
-                        configs.entry(p.id).or_insert(McpServerConfig {
-                            command: cmd,
-                            args: p.mcp_args,
-                            env,
-                            token,
-                            fallback_urls,
-                        });
-                    }
+                        },
+                    );
                 }
             }
+            // Enabled plugins that declare an MCP server are auto-federated.
+            // Plugin entries take precedence over ~/.claude.json but not over explicit mcp_servers rows.
+            if let Ok(plugins) = db::list_plugins(&conn) {
+                for p in plugins {
+                    if !p.enabled {
+                        continue;
+                    }
+                    // mcp_urls (priority-ordered list) override stdio command.
+                    // All URLs are passed; connect() tries them in order.
+                    let (cmd, fallback_urls) = if !p.mcp_urls.is_empty() {
+                        let mut urls = p.mcp_urls.into_iter();
+                        let primary = urls.next().unwrap();
+                        (primary, urls.collect::<Vec<_>>())
+                    } else if let Some(cmd) = p.mcp_command.filter(|c| !c.is_empty()) {
+                        (cmd, vec![])
+                    } else {
+                        continue;
+                    };
+                    // Merge stored credentials (orca creds set) into env so the subprocess
+                    // receives them without requiring the caller to export them manually.
+                    let mut env = p.mcp_env;
+                    let mut token: Option<String> = None;
+                    if let Ok(creds) = db::list_plugin_credentials(&conn, &p.id) {
+                        for c in creds {
+                            // If this credential matches token_env, use it as Bearer token.
+                            if p.mcp_token_env.as_deref() == Some(c.key.as_str()) {
+                                token = Some(c.value.clone());
+                            }
+                            env.insert(c.key, c.value);
+                        }
+                    }
+                    configs.entry(p.id).or_insert(McpServerConfig {
+                        command: cmd,
+                        args: p.mcp_args,
+                        env,
+                        token,
+                        fallback_urls,
+                    });
+                }
+            }
+        }
 
         configs
     }
@@ -593,7 +630,16 @@ impl McpPool {
                             .collect()
                     })
                     .unwrap_or_default();
-                Some((k.clone(), McpServerConfig { command, args, env, token: None, fallback_urls: vec![] }))
+                Some((
+                    k.clone(),
+                    McpServerConfig {
+                        command,
+                        args,
+                        env,
+                        token: None,
+                        fallback_urls: vec![],
+                    },
+                ))
             })
             .collect()
     }
@@ -646,7 +692,7 @@ impl McpPool {
     pub async fn all_tools_filtered(&self, skip: &[&str]) -> Vec<Value> {
         // Per plugin: inverse command_map (internal_name → universal_name) + id prefix
         struct PluginMeta {
-            prefix: String,          // "{id}_" — stripped from tool names automatically
+            prefix: String,                   // "{id}_" — stripped from tool names automatically
             inverse: HashMap<String, String>, // internal_name → explicit universal_name
         }
 
@@ -764,9 +810,15 @@ mod tests {
     fn resolve_command_known_binary_returns_nonempty() {
         // "bash" exists on every CI/dev machine — we just need it to resolve to something.
         let resolved = resolve_command("bash");
-        assert!(!resolved.is_empty(), "resolve_command('bash') should return non-empty");
+        assert!(
+            !resolved.is_empty(),
+            "resolve_command('bash') should return non-empty"
+        );
         // Should be an absolute path or the bare name unchanged
-        assert!(resolved == "bash" || resolved.starts_with('/'), "got: {resolved}");
+        assert!(
+            resolved == "bash" || resolved.starts_with('/'),
+            "got: {resolved}"
+        );
     }
 
     #[test]
@@ -805,7 +857,10 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for candidate in ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"] {
             if path.contains(candidate) {
-                assert!(seen.insert(candidate), "extra dir appears more than once: {candidate}");
+                assert!(
+                    seen.insert(candidate),
+                    "extra dir appears more than once: {candidate}"
+                );
             }
         }
     }

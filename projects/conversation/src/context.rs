@@ -1,5 +1,5 @@
-use config::Config;
 use anyhow::Result;
+use config::Config;
 
 /// Resolved project context: system prompt + memory content.
 #[derive(Debug, Default)]
@@ -60,11 +60,10 @@ impl ProjectContext {
     /// `full_persona` = false: stripped-down prompt for local models that don't handle complex personas.
     pub fn build_system_prompt_for_backend(&self, config: &Config, full_persona: bool) -> String {
         let base = if full_persona {
-            orca_agents::load_agent_prompt("wolf", &config.agents_dir())
-                .unwrap_or_else(|| {
-                    eprintln!("warning: wolf.md not found — using minimal fallback prompt");
-                    "You are an AI assistant. Be precise, efficient, and honest.".to_string()
-                })
+            orca_agents::load_agent_prompt("wolf", &config.agents_dir()).unwrap_or_else(|| {
+                eprintln!("warning: wolf.md not found — using minimal fallback prompt");
+                "You are an AI assistant. Be precise, efficient, and honest.".to_string()
+            })
         } else {
             // Local models (LMStudio, Ollama) get a clean minimal prompt — not a stripped Wolf.
             // The Wolf persona (Otter narration, agent routing) causes them to loop and narrate.
@@ -108,7 +107,10 @@ mod tests {
         Config {
             anthropic_api_key: None,
             lmstudio_url: "http://localhost:1234".into(),
-            default_model: Model::LMStudio { id: String::new(), url: String::new() },
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
             orca_vault: PathBuf::from("/tmp"),
             vault_root: PathBuf::from("/tmp"),
             memory_root,
@@ -144,7 +146,10 @@ mod tests {
         let config = test_config(memory_root, PathBuf::from("/tmp"));
         let ctx = ProjectContext::resolve("backend", &config).unwrap();
 
-        assert!(ctx.memory_content.is_some(), "fuzzy match should load memory");
+        assert!(
+            ctx.memory_content.is_some(),
+            "fuzzy match should load memory"
+        );
     }
 
     #[test]
@@ -155,12 +160,18 @@ mod tests {
         let ctx = ProjectContext::resolve("nonexistent-project-xyz", &config).unwrap();
 
         assert_eq!(ctx.project.as_deref(), Some("nonexistent-project-xyz"));
-        assert!(ctx.memory_content.is_none(), "no match should have no memory");
+        assert!(
+            ctx.memory_content.is_none(),
+            "no match should have no memory"
+        );
     }
 
     #[test]
     fn resolve_empty_memory_root_returns_gracefully() {
-        let config = test_config(PathBuf::from("/tmp/__no_such_memory_root__"), PathBuf::from("/tmp"));
+        let config = test_config(
+            PathBuf::from("/tmp/__no_such_memory_root__"),
+            PathBuf::from("/tmp"),
+        );
         let ctx = ProjectContext::resolve("anything", &config).unwrap();
         assert!(ctx.memory_content.is_none());
     }
@@ -171,12 +182,18 @@ mod tests {
     fn build_system_prompt_without_memory_returns_wolf_prompt() {
         let tmp = tempfile::tempdir().unwrap();
         let config = test_config(tmp.path().to_path_buf(), tmp.path().to_path_buf());
-        let ctx = ProjectContext { project: None, memory_content: None };
+        let ctx = ProjectContext {
+            project: None,
+            memory_content: None,
+        };
 
         let prompt = ctx.build_system_prompt(&config);
         // No memory — just the wolf prompt (or fallback)
         assert!(!prompt.is_empty());
-        assert!(!prompt.contains("Project Context"), "no memory means no project section");
+        assert!(
+            !prompt.contains("Project Context"),
+            "no memory means no project section"
+        );
     }
 
     #[test]
@@ -189,9 +206,15 @@ mod tests {
         };
 
         let prompt = ctx.build_system_prompt(&config);
-        assert!(prompt.contains("Project Context"), "memory should add project context section");
+        assert!(
+            prompt.contains("Project Context"),
+            "memory should add project context section"
+        );
         assert!(prompt.contains("myproject"), "project name should appear");
-        assert!(prompt.contains("Key facts here."), "memory content should be included");
+        assert!(
+            prompt.contains("Key facts here."),
+            "memory content should be included"
+        );
     }
 
     #[test]
@@ -206,6 +229,9 @@ mod tests {
         let prompt = ctx.build_system_prompt(&config);
         let wolf_end = prompt.find("---").unwrap_or(0);
         let mem_start = prompt.find("mem content").unwrap_or(usize::MAX);
-        assert!(wolf_end < mem_start, "wolf prompt should come before memory injection");
+        assert!(
+            wolf_end < mem_start,
+            "wolf prompt should come before memory injection"
+        );
     }
 }

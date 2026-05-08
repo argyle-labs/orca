@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
-use config::APP_NAME;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use config::APP_NAME;
 use rand::RngCore;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -16,17 +16,22 @@ fn open_db() -> anyhow::Result<rusqlite::Connection> {
 
 fn store_oauth(service: &str, access_token: &str, refresh_token: Option<&str>) -> Result<()> {
     let conn = open_db()?;
-    db::upsert_oauth_token(&conn, &db::OAuthTokenRow {
-        service: service.to_string(),
-        access_token: access_token.to_string(),
-        refresh_token: refresh_token.map(str::to_string),
-        expires_at: None,
-    })?;
+    db::upsert_oauth_token(
+        &conn,
+        &db::OAuthTokenRow {
+            service: service.to_string(),
+            access_token: access_token.to_string(),
+            refresh_token: refresh_token.map(str::to_string),
+            expires_at: None,
+        },
+    )?;
     Ok(())
 }
 
 fn load_oauth(service: &str) -> Option<db::OAuthTokenRow> {
-    open_db().ok().and_then(|conn| db::get_oauth_token(&conn, service).ok().flatten())
+    open_db()
+        .ok()
+        .and_then(|conn| db::get_oauth_token(&conn, service).ok().flatten())
 }
 
 fn delete_oauth(service: &str) {
@@ -113,7 +118,10 @@ pub async fn cmd_oauth_github() -> Result<()> {
             .form(&[
                 ("client_id", &client_id),
                 ("device_code", &resp.device_code),
-                ("grant_type", &"urn:ietf:params:oauth:grant-type:device_code".to_string()),
+                (
+                    "grant_type",
+                    &"urn:ietf:params:oauth:grant-type:device_code".to_string(),
+                ),
             ])
             .send()
             .await
@@ -145,8 +153,7 @@ pub fn cmd_logout_github() -> Result<()> {
 
 const ATLASSIAN_AUTH_URL: &str = "https://auth.atlassian.com/authorize";
 const ATLASSIAN_TOKEN_URL: &str = "https://auth.atlassian.com/oauth/token";
-const ATLASSIAN_SCOPES: &str =
-    "read:jira-work write:jira-work read:confluence-space.summary read:confluence-content.all offline_access";
+const ATLASSIAN_SCOPES: &str = "read:jira-work write:jira-work read:confluence-space.summary read:confluence-content.all offline_access";
 
 #[derive(Deserialize)]
 struct AtlassianTokenResponse {
@@ -178,8 +185,10 @@ pub async fn cmd_oauth_atlassian() -> Result<()> {
          &prompt=consent\
          &code_challenge_method=S256\
          &code_challenge={challenge}",
-        scopes = url::form_urlencoded::byte_serialize(ATLASSIAN_SCOPES.as_bytes()).collect::<String>(),
-        redirect_uri = url::form_urlencoded::byte_serialize(redirect_uri.as_bytes()).collect::<String>(),
+        scopes =
+            url::form_urlencoded::byte_serialize(ATLASSIAN_SCOPES.as_bytes()).collect::<String>(),
+        redirect_uri =
+            url::form_urlencoded::byte_serialize(redirect_uri.as_bytes()).collect::<String>(),
     );
 
     println!("\nOpening browser for Atlassian authorization...");
@@ -207,7 +216,11 @@ pub async fn cmd_oauth_atlassian() -> Result<()> {
         .await
         .context("failed to parse token response")?;
 
-    store_oauth("atlassian", &token_resp.access_token, token_resp.refresh_token.as_deref())?;
+    store_oauth(
+        "atlassian",
+        &token_resp.access_token,
+        token_resp.refresh_token.as_deref(),
+    )?;
     println!("Atlassian tokens stored in orca.db.");
     Ok(())
 }

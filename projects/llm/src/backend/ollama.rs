@@ -1,6 +1,5 @@
 use super::{ModelBackend, OutputSink, serialize, sink_write, sink_writeln};
 use crate::types::{BackendResponse, Message, StopReason};
-use tool::{ToolCall, ToolDef};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use colored::Colorize;
@@ -10,6 +9,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+use tool::{ToolCall, ToolDef};
 
 pub struct OllamaBackend {
     client: Client,
@@ -32,7 +32,11 @@ impl OllamaBackend {
     pub async fn list_models(&self) -> Result<Vec<String>> {
         // Prefer native /api/tags endpoint; fall back to OpenAI-compat /v1/models.
         let url = format!("{}/api/tags", self.base_url);
-        let resp = self.client.get(&url).send().await
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
             .context("failed to connect to Ollama")?;
 
         if resp.status().is_success() {
@@ -47,7 +51,11 @@ impl OllamaBackend {
 
         // OpenAI-compat fallback
         let url = format!("{}/v1/models", self.base_url);
-        let resp = self.client.get(&url).send().await
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
             .context("failed to connect to Ollama")?;
         if !resp.status().is_success() {
             bail!("Ollama /v1/models returned {}", resp.status());
@@ -178,11 +186,13 @@ async fn parse_ollama_stream(
                 result.input_tokens = usage
                     .get("prompt_tokens")
                     .and_then(|v| v.as_u64())
-                    .unwrap_or(result.input_tokens as u64) as u32;
+                    .unwrap_or(result.input_tokens as u64)
+                    as u32;
                 result.output_tokens = usage
                     .get("completion_tokens")
                     .and_then(|v| v.as_u64())
-                    .unwrap_or(result.output_tokens as u64) as u32;
+                    .unwrap_or(result.output_tokens as u64)
+                    as u32;
             }
 
             let delta = &choice["delta"];
@@ -200,7 +210,8 @@ async fn parse_ollama_stream(
 
             if let Some(text) = delta["content"].as_str().filter(|s| !s.is_empty()) {
                 // Filter <think>...</think> blocks that leak into content.
-                let visible = filter_think_tokens(text, &mut in_think_block, &mut think_buf, output);
+                let visible =
+                    filter_think_tokens(text, &mut in_think_block, &mut think_buf, output);
                 if !visible.is_empty() {
                     sink_write(output, &visible);
                     result.text.push_str(&visible);
@@ -278,7 +289,12 @@ async fn parse_ollama_stream(
 
 /// Pass content tokens through, stripping `<think>…</think>` blocks.
 /// Returns the visible (non-thinking) portion of `chunk`.
-fn filter_think_tokens(chunk: &str, in_think: &mut bool, buf: &mut String, output: &OutputSink) -> String {
+fn filter_think_tokens(
+    chunk: &str,
+    in_think: &mut bool,
+    buf: &mut String,
+    output: &OutputSink,
+) -> String {
     let mut visible = String::new();
     let mut rest = chunk;
     loop {

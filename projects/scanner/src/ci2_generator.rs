@@ -114,7 +114,9 @@ fn extract_v1_private_functions(src: &str, out: &mut Vec<Endpoint>) {
     }
 
     // v1_custom_metafield_namespaces: /api/v1/custom_metafield_namespaces
-    if let Some(body) = extract_function_body(src, "private function v1_custom_metafield_namespaces(") {
+    if let Some(body) =
+        extract_function_body(src, "private function v1_custom_metafield_namespaces(")
+    {
         let methods = detect_http_methods(&body);
         let params = scan_params(&body);
         let resp = scan_response_keys(&body);
@@ -145,15 +147,31 @@ fn extract_v1_private_functions(src: &str, out: &mut Vec<Endpoint>) {
 fn public_dispatch_functions() -> Vec<(&'static str, &'static str, Auth)> {
     vec![
         ("public function widgets(", "/api/widgets", Auth::Public),
-        ("public function smart_cart(", "/api/smart_cart", Auth::Public),
-        ("public function post_purchase(", "/api/post_purchase", Auth::ShopifyJwt),
-        ("public function draft_order(", "/api/draft_order", Auth::ShopifyJwt),
+        (
+            "public function smart_cart(",
+            "/api/smart_cart",
+            Auth::Public,
+        ),
+        (
+            "public function post_purchase(",
+            "/api/post_purchase",
+            Auth::ShopifyJwt,
+        ),
+        (
+            "public function draft_order(",
+            "/api/draft_order",
+            Auth::ShopifyJwt,
+        ),
         ("public function promo(", "/api/promo", Auth::Public),
         ("public function reorder(", "/api/reorder", Auth::Public),
         ("public function products(", "/api/products", Auth::ApiKey),
         ("public function analytics(", "/api/analytics", Auth::ApiKey),
         ("public function recharge(", "/api/recharge", Auth::ApiKey),
-        ("public function data_sources(", "/api/data_sources", Auth::ApiKey),
+        (
+            "public function data_sources(",
+            "/api/data_sources",
+            Auth::ApiKey,
+        ),
         ("public function user(", "/api/user", Auth::Public),
     ]
 }
@@ -169,14 +187,62 @@ fn extract_v1_no_auth_routes(body: &str, out: &mut Vec<Endpoint>) {
 
     // Routes explicitly dispatched before the key check
     let static_routes: &[(&str, &str, Vec<&str>, Auth, &str)] = &[
-        ("widgets/settings",    "/api/v1/widgets/settings",  vec!["GET"], Auth::Public, "Widget settings by ID"),
-        ("widgets/styles",      "/api/v1/widgets/styles",    vec!["GET"], Auth::Public, "Widget styles (CSS/JSON)"),
-        ("widgets/templates",   "/api/v1/widgets/templates", vec!["GET"], Auth::Public, "Widget Liquid templates"),
-        ("promo/settings",      "/api/v1/promo/settings",    vec!["GET"], Auth::Public, "Promo bar settings"),
-        ("reorder/settings",    "/api/v1/reorder/settings",  vec!["GET"], Auth::Public, "Reorder landing page settings"),
-        ("smart_cart/apps",     "/api/v1/smart_cart/apps",   vec!["GET"], Auth::Public, "Smart Cart app list"),
-        ("shopify/post_purchase", "/api/v1/shopify/post_purchase/{method}", vec!["GET","POST"], Auth::ShopifyJwt, "Shopify post-purchase flow"),
-        ("shopify/draft_order",   "/api/v1/shopify/draft_order/{method}",  vec!["GET","POST"], Auth::ShopifyJwt, "Draft order operations"),
+        (
+            "widgets/settings",
+            "/api/v1/widgets/settings",
+            vec!["GET"],
+            Auth::Public,
+            "Widget settings by ID",
+        ),
+        (
+            "widgets/styles",
+            "/api/v1/widgets/styles",
+            vec!["GET"],
+            Auth::Public,
+            "Widget styles (CSS/JSON)",
+        ),
+        (
+            "widgets/templates",
+            "/api/v1/widgets/templates",
+            vec!["GET"],
+            Auth::Public,
+            "Widget Liquid templates",
+        ),
+        (
+            "promo/settings",
+            "/api/v1/promo/settings",
+            vec!["GET"],
+            Auth::Public,
+            "Promo bar settings",
+        ),
+        (
+            "reorder/settings",
+            "/api/v1/reorder/settings",
+            vec!["GET"],
+            Auth::Public,
+            "Reorder landing page settings",
+        ),
+        (
+            "smart_cart/apps",
+            "/api/v1/smart_cart/apps",
+            vec!["GET"],
+            Auth::Public,
+            "Smart Cart app list",
+        ),
+        (
+            "shopify/post_purchase",
+            "/api/v1/shopify/post_purchase/{method}",
+            vec!["GET", "POST"],
+            Auth::ShopifyJwt,
+            "Shopify post-purchase flow",
+        ),
+        (
+            "shopify/draft_order",
+            "/api/v1/shopify/draft_order/{method}",
+            vec!["GET", "POST"],
+            Auth::ShopifyJwt,
+            "Draft order operations",
+        ),
     ];
 
     for (marker, path, methods, auth, summary) in static_routes {
@@ -193,7 +259,15 @@ fn extract_v1_no_auth_routes(body: &str, out: &mut Vec<Endpoint>) {
     }
 
     // user/* routes listed in $valid_user_endpoints
-    let user_sub = ["all", "shop", "stylesheet", "smart_cart", "smart_carts", "templates", "config"];
+    let user_sub = [
+        "all",
+        "shop",
+        "stylesheet",
+        "smart_cart",
+        "smart_carts",
+        "templates",
+        "config",
+    ];
     for sub in &user_sub {
         if no_auth_section.contains(&format!("'{sub}'")) {
             out.push(Endpoint {
@@ -224,7 +298,10 @@ fn extract_v1_key_routes(body: &str, out: &mut Vec<Endpoint>) {
         .collect();
 
     for (i, (pos, arg1)) in arg1_positions.iter().enumerate() {
-        let end = arg1_positions.get(i + 1).map(|(p, _)| *p).unwrap_or(body.len());
+        let end = arg1_positions
+            .get(i + 1)
+            .map(|(p, _)| *p)
+            .unwrap_or(body.len());
         let block = &body[*pos..end];
 
         // Find arg2 values within this block
@@ -242,10 +319,16 @@ fn extract_v1_key_routes(body: &str, out: &mut Vec<Endpoint>) {
         let mut all_params = params;
         for rp in &required_params {
             if !all_params.iter().any(|p| &p.name == rp) {
-                all_params.push(Param { name: rp.clone(), required: true, in_query: true });
+                all_params.push(Param {
+                    name: rp.clone(),
+                    required: true,
+                    in_query: true,
+                });
             } else {
                 for p in all_params.iter_mut() {
-                    if &p.name == rp { p.required = true; }
+                    if &p.name == rp {
+                        p.required = true;
+                    }
                 }
             }
         }
@@ -308,7 +391,10 @@ fn extract_method_dispatch_routes(body: &str, base: &str, auth: Auth, out: &mut 
     }
 
     for (i, (pos, method_val)) in method_positions.iter().enumerate() {
-        let end = method_positions.get(i + 1).map(|(p, _)| *p).unwrap_or(body.len());
+        let end = method_positions
+            .get(i + 1)
+            .map(|(p, _)| *p)
+            .unwrap_or(body.len());
         let block = &body[*pos..end];
         let params = scan_params(block);
         let methods = detect_http_methods(block);
@@ -317,10 +403,16 @@ fn extract_method_dispatch_routes(body: &str, base: &str, auth: Auth, out: &mut 
         let mut all_params = params;
         for rp in &req_params {
             if !all_params.iter().any(|p| &p.name == rp) {
-                all_params.push(Param { name: rp.clone(), required: true, in_query: true });
+                all_params.push(Param {
+                    name: rp.clone(),
+                    required: true,
+                    in_query: true,
+                });
             } else {
                 for p in all_params.iter_mut() {
-                    if &p.name == rp { p.required = true; }
+                    if &p.name == rp {
+                        p.required = true;
+                    }
                 }
             }
         }
@@ -338,23 +430,31 @@ fn extract_method_dispatch_routes(body: &str, base: &str, auth: Auth, out: &mut 
 // ── Scanning helpers ──────────────────────────────────────────────────────────
 
 fn scan_params(block: &str) -> Vec<Param> {
-    let re = regex::Regex::new(
-        r#"(?:\$_GET|\$_REQUEST|\$_POST)\s*\[\s*'([^']+)'"#
-    ).expect("scan_params re regex");
+    let re = regex::Regex::new(r#"(?:\$_GET|\$_REQUEST|\$_POST)\s*\[\s*'([^']+)'"#)
+        .expect("scan_params re regex");
     let mut seen = BTreeSet::new();
     let mut params = Vec::new();
     for cap in re.captures_iter(block) {
         let name = cap[1].to_string();
         if seen.insert(name.clone()) {
-            params.push(Param { name, required: false, in_query: true });
+            params.push(Param {
+                name,
+                required: false,
+                in_query: true,
+            });
         }
     }
     // Also catch: ->input->get('X') style without the parens variation
-    let re2 = regex::Regex::new(r#"\$this->input->\w+\('([^']+)'\)"#).expect("scan_params re2 regex");
+    let re2 =
+        regex::Regex::new(r#"\$this->input->\w+\('([^']+)'\)"#).expect("scan_params re2 regex");
     for cap in re2.captures_iter(block) {
         let name = cap[1].to_string();
         if seen.insert(name.clone()) {
-            params.push(Param { name, required: false, in_query: true });
+            params.push(Param {
+                name,
+                required: false,
+                in_query: true,
+            });
         }
     }
     params
@@ -364,22 +464,25 @@ fn scan_required_params(block: &str) -> Vec<String> {
     // Pattern: if (!isset($_REQUEST['X'])) { ... $missing_args[] = 'X' }
     // or: if (empty($this->input->get('X')))
     let re = regex::Regex::new(
-        r#"!isset\(\$_(?:REQUEST|GET|POST)\['([^']+)'\]\)|empty\(\$this->input->\w+\('([^']+)'\)"#
-    ).expect("scan_required_params re regex");
+        r#"!isset\(\$_(?:REQUEST|GET|POST)\['([^']+)'\]\)|empty\(\$this->input->\w+\('([^']+)'\)"#,
+    )
+    .expect("scan_required_params re regex");
     let mut required = Vec::new();
     for cap in re.captures_iter(block) {
         let name = cap.get(1).or(cap.get(2)).map(|m| m.as_str().to_string());
         if let Some(n) = name
-            && !required.contains(&n) {
-                required.push(n);
-            }
+            && !required.contains(&n)
+        {
+            required.push(n);
+        }
     }
     required
 }
 
 fn scan_response_keys(block: &str) -> Vec<String> {
     // Look for json_encode(array('key' => ...)) — top-level array keys
-    let re = regex::Regex::new(r#"json_encode\s*\(\s*(?:array\s*\(|\[)\s*'([^']+)'\s*=>"#).expect("scan_response_keys re regex");
+    let re = regex::Regex::new(r#"json_encode\s*\(\s*(?:array\s*\(|\[)\s*'([^']+)'\s*=>"#)
+        .expect("scan_response_keys re regex");
     let mut keys = BTreeSet::new();
     for cap in re.captures_iter(block) {
         keys.insert(cap[1].to_string());
@@ -387,7 +490,8 @@ fn scan_response_keys(block: &str) -> Vec<String> {
     // Also catch: json_encode(['key' => ...]) multi-key
     let re2 = regex::Regex::new(r#"'([^']+)'\s*=>"#).expect("scan_response_keys re2 regex");
     // Only look inside json_encode blocks
-    let json_re = regex::Regex::new(r#"json_encode\s*\(([^;]{0,500})\)"#).expect("scan_response_keys json_re regex");
+    let json_re = regex::Regex::new(r#"json_encode\s*\(([^;]{0,500})\)"#)
+        .expect("scan_response_keys json_re regex");
     for jcap in json_re.captures_iter(block) {
         for cap in re2.captures_iter(&jcap[1]) {
             let k = cap[1].to_string();
@@ -408,11 +512,21 @@ fn detect_http_methods(block: &str) -> Vec<String> {
     let has_patch = block.contains("'PATCH'") || block.contains("\"PATCH\"");
 
     let mut methods = Vec::new();
-    if has_get   { methods.push("GET".to_string()); }
-    if has_post  { methods.push("POST".to_string()); }
-    if has_put   { methods.push("PUT".to_string()); }
-    if has_delete { methods.push("DELETE".to_string()); }
-    if has_patch { methods.push("PATCH".to_string()); }
+    if has_get {
+        methods.push("GET".to_string());
+    }
+    if has_post {
+        methods.push("POST".to_string());
+    }
+    if has_put {
+        methods.push("PUT".to_string());
+    }
+    if has_delete {
+        methods.push("DELETE".to_string());
+    }
+    if has_patch {
+        methods.push("PATCH".to_string());
+    }
 
     if methods.is_empty() {
         // No explicit method check — infer from context
@@ -443,13 +557,18 @@ fn extract_function_body(src: &str, sig: &str) -> Option<String> {
 fn extract_balanced(src: &str, open: char, close: char) -> Option<&str> {
     let mut chars = src.char_indices();
     let (_, first) = chars.next()?;
-    if first != open { return None; }
+    if first != open {
+        return None;
+    }
     let mut depth = 1usize;
     for (i, ch) in chars {
-        if ch == open  { depth += 1; }
-        else if ch == close {
+        if ch == open {
+            depth += 1;
+        } else if ch == close {
             depth -= 1;
-            if depth == 0 { return Some(&src[1..i]); }
+            if depth == 0 {
+                return Some(&src[1..i]);
+            }
         }
     }
     None
@@ -527,7 +646,10 @@ fn build_spec(endpoints: Vec<Endpoint>, existing: Option<Value>) -> Value {
     // Merge info/servers/security schemes from existing if present
     let (title, desc, servers, schemes) = if let Some(ref ex) = existing {
         (
-            ex["info"]["title"].as_str().unwrap_or("Rebuy Engine API").to_string(),
+            ex["info"]["title"]
+                .as_str()
+                .unwrap_or("Rebuy Engine API")
+                .to_string(),
             ex["info"]["description"].as_str().unwrap_or("").to_string(),
             ex["servers"].clone(),
             ex["components"]["securitySchemes"].clone(),
@@ -575,7 +697,9 @@ fn build_spec(endpoints: Vec<Endpoint>, existing: Option<Value>) -> Value {
             for op in obj.values() {
                 if let Some(arr) = op["tags"].as_array() {
                     for t in arr {
-                        if let Some(s) = t.as_str() { tag_set.insert(s.to_string()); }
+                        if let Some(s) = t.as_str() {
+                            tag_set.insert(s.to_string());
+                        }
                     }
                 }
             }
@@ -600,9 +724,10 @@ fn build_spec(endpoints: Vec<Endpoint>, existing: Option<Value>) -> Value {
 
     // Carry over components/schemas from existing
     if let Some(ref ex) = existing
-        && let Some(schemas) = ex["components"]["schemas"].as_object() {
-            spec["components"]["schemas"] = Value::Object(schemas.clone());
-        }
+        && let Some(schemas) = ex["components"]["schemas"].as_object()
+    {
+        spec["components"]["schemas"] = Value::Object(schemas.clone());
+    }
 
     spec
 }
@@ -624,9 +749,13 @@ fn build_parameters(path: &str, params: &[Param]) -> Value {
     // Query params
     for p in params {
         // Skip params already covered as path params
-        if re.captures_iter(path).any(|c| c[1] == p.name) { continue; }
+        if re.captures_iter(path).any(|c| c[1] == p.name) {
+            continue;
+        }
         // Skip internal non-query-looking names
-        if p.name == "bust_cache" || p.name == "rebuild_cache" { continue; }
+        if p.name == "bust_cache" || p.name == "rebuild_cache" {
+            continue;
+        }
         out.push(json!({
             "name": p.name,
             "in": "query",
@@ -641,30 +770,90 @@ fn build_parameters(path: &str, params: &[Param]) -> Value {
 /// Infer a JSON Schema type from a response key name using naming conventions.
 fn infer_key_schema(key: &str) -> Value {
     let lower = key.to_lowercase();
-    if matches!(lower.as_str(),
+    if matches!(
+        lower.as_str(),
         "successful" | "success" | "ok" | "enabled" | "active" | "deleted" | "found" | "valid"
-    ) || lower.starts_with("is_") || lower.starts_with("has_") {
+    ) || lower.starts_with("is_")
+        || lower.starts_with("has_")
+    {
         json!({ "type": "boolean" })
-    } else if matches!(lower.as_str(),
-        "count" | "total" | "id" | "status" | "code" | "page" | "limit" | "offset" |
-        "per_page" | "current_page" | "last_page" | "total_pages" | "size"
-    ) || lower.ends_with("_id") || lower.ends_with("_count") || lower.ends_with("_total")
-      || lower.ends_with("_status") || lower.ends_with("_code")
+    } else if matches!(
+        lower.as_str(),
+        "count"
+            | "total"
+            | "id"
+            | "status"
+            | "code"
+            | "page"
+            | "limit"
+            | "offset"
+            | "per_page"
+            | "current_page"
+            | "last_page"
+            | "total_pages"
+            | "size"
+    ) || lower.ends_with("_id")
+        || lower.ends_with("_count")
+        || lower.ends_with("_total")
+        || lower.ends_with("_status")
+        || lower.ends_with("_code")
     {
         json!({ "type": "integer" })
-    } else if matches!(lower.as_str(),
-        "error" | "message" | "msg" | "name" | "title" | "description" | "url" | "handle" |
-        "type" | "key" | "token" | "value" | "label" | "slug" | "email" | "format" | "mode" |
-        "state" | "reason" | "note" | "text" | "currency" | "locale"
-    ) || lower.ends_with("_name") || lower.ends_with("_title") || lower.ends_with("_url")
-      || lower.ends_with("_key") || lower.ends_with("_token") || lower.ends_with("_type")
+    } else if matches!(
+        lower.as_str(),
+        "error"
+            | "message"
+            | "msg"
+            | "name"
+            | "title"
+            | "description"
+            | "url"
+            | "handle"
+            | "type"
+            | "key"
+            | "token"
+            | "value"
+            | "label"
+            | "slug"
+            | "email"
+            | "format"
+            | "mode"
+            | "state"
+            | "reason"
+            | "note"
+            | "text"
+            | "currency"
+            | "locale"
+    ) || lower.ends_with("_name")
+        || lower.ends_with("_title")
+        || lower.ends_with("_url")
+        || lower.ends_with("_key")
+        || lower.ends_with("_token")
+        || lower.ends_with("_type")
     {
         json!({ "type": "string" })
-    } else if matches!(lower.as_str(),
-        "data" | "items" | "results" | "list" | "records" | "rows" | "entries" |
-        "ids" | "tags" | "errors" | "warnings" | "attributes" | "options" | "fields"
-    ) || (lower.ends_with('s') && lower.len() > 3
-          && !matches!(lower.as_str(), "status" | "class" | "process" | "address" | "access"))
+    } else if matches!(
+        lower.as_str(),
+        "data"
+            | "items"
+            | "results"
+            | "list"
+            | "records"
+            | "rows"
+            | "entries"
+            | "ids"
+            | "tags"
+            | "errors"
+            | "warnings"
+            | "attributes"
+            | "options"
+            | "fields"
+    ) || (lower.ends_with('s')
+        && lower.len() > 3
+        && !matches!(
+            lower.as_str(),
+            "status" | "class" | "process" | "address" | "access"
+        ))
     {
         json!({ "type": "array", "items": {} })
     } else {
@@ -726,8 +915,9 @@ fn operation_id(method: &str, path: &str) -> String {
         .filter(|s| !s.is_empty() && *s != "api")
         .enumerate()
         .map(|(i, s)| {
-            if i == 0 { s.to_string() }
-            else {
+            if i == 0 {
+                s.to_string()
+            } else {
                 let mut chars = s.chars();
                 match chars.next() {
                     None => String::new(),

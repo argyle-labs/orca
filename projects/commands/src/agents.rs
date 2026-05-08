@@ -1,7 +1,7 @@
 use anyhow::Result;
-use orca_agents as agents;
-use config::Config;
 use colored::Colorize;
+use config::Config;
+use orca_agents as agents;
 
 pub fn cmd_agents(_config: &Config) -> Result<()> {
     println!("{}", "Agents:".green());

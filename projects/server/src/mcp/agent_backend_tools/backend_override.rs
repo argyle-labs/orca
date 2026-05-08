@@ -18,8 +18,7 @@ pub struct AgentBackendOverride;
 #[async_trait]
 impl OrcaTool for AgentBackendOverride {
     const NAME: &'static str = "agent_backend_override";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Set, change, or clear a per-agent backend override \
+    const DESCRIPTION: &'static str = "[MUTATES STATE] Set, change, or clear a per-agent backend override \
          (only consulted in hybrid mode). backend=clear deletes the override.";
     type Args = Args;
 

@@ -15,17 +15,10 @@ pub struct CorrelationId(pub String);
 
 /// Paths where we skip body logging — response is too large to be useful in logs.
 /// Prefix-matched: any path that starts with one of these is skipped.
-const SKIP_BODY_PREFIXES: &[&str] = &[
-    "/api/openapi",
-    "/api/specs",
-];
+const SKIP_BODY_PREFIXES: &[&str] = &["/api/openapi", "/api/specs"];
 
 /// Paths to skip logging entirely (no request/response log lines).
-const SKIP_LOG_PREFIXES: &[&str] = &[
-    "/api/health",
-    "/assets/",
-    "/favicon",
-];
+const SKIP_LOG_PREFIXES: &[&str] = &["/api/health", "/assets/", "/favicon"];
 
 fn skip_body(path: &str) -> bool {
     SKIP_BODY_PREFIXES.iter().any(|p| path.starts_with(p))

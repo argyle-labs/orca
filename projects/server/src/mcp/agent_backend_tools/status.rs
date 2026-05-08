@@ -14,8 +14,7 @@ pub struct AgentBackendStatus;
 #[async_trait]
 impl OrcaTool for AgentBackendStatus {
     const NAME: &'static str = "agent_backend_status";
-    const DESCRIPTION: &'static str =
-        "Show the current agent backend configuration: mode (local|claude|hybrid), \
+    const DESCRIPTION: &'static str = "Show the current agent backend configuration: mode (local|claude|hybrid), \
          per-agent overrides, and whether server-side Anthropic calls are enabled.";
     type Args = Args;
 

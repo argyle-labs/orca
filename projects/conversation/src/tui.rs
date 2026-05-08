@@ -1,6 +1,5 @@
-use llm::OutputSink;
-use unicode_width::UnicodeWidthStr;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use llm::OutputSink;
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -12,6 +11,7 @@ use ratatui::{
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+use unicode_width::UnicodeWidthStr;
 
 // ─── TUI App State ──────────────────────────────────────────────────────────
 
@@ -161,16 +161,15 @@ impl TuiApp {
             }
 
             // Cursor movement — step by char boundaries, not raw bytes
-            (_, KeyCode::Left)
-                if self.cursor > 0 => {
-                    // Walk back to the start of the previous UTF-8 char
-                    let prev = self.input[..self.cursor]
-                        .char_indices()
-                        .next_back()
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    self.cursor = prev;
-                }
+            (_, KeyCode::Left) if self.cursor > 0 => {
+                // Walk back to the start of the previous UTF-8 char
+                let prev = self.input[..self.cursor]
+                    .char_indices()
+                    .next_back()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                self.cursor = prev;
+            }
             (_, KeyCode::Right) if self.cursor < self.input.len() => {
                 // Advance by the byte length of the current char
                 let c = self.input[self.cursor..].chars().next().unwrap_or('\0');
@@ -264,10 +263,7 @@ pub fn render(f: &mut Frame, app: &TuiApp) {
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(3),
-            Constraint::Length(input_height),
-        ])
+        .constraints([Constraint::Min(3), Constraint::Length(input_height)])
         .split(f.area());
 
     render_output(f, app, chunks[0]);
@@ -293,7 +289,7 @@ fn input_box_height(app: &TuiApp, total_width: u16) -> u16 {
 
 fn render_output(f: &mut Frame, app: &TuiApp, area: Rect) {
     let inner_height = area.height.saturating_sub(2) as usize; // borders
-    let inner_width = area.width.saturating_sub(2) as usize;   // borders
+    let inner_width = area.width.saturating_sub(2) as usize; // borders
 
     // Strip ANSI first so we can measure visual widths accurately.
     let stripped: Vec<String> = {
@@ -305,10 +301,17 @@ fn render_output(f: &mut Frame, app: &TuiApp, area: Rect) {
     };
 
     // Total rendered rows, accounting for line wrapping.
-    let total_display_rows: usize = stripped.iter().map(|s| {
-        let w = s.width();
-        if inner_width == 0 || w == 0 { 1 } else { w.div_ceil(inner_width) }
-    }).sum();
+    let total_display_rows: usize = stripped
+        .iter()
+        .map(|s| {
+            let w = s.width();
+            if inner_width == 0 || w == 0 {
+                1
+            } else {
+                w.div_ceil(inner_width)
+            }
+        })
+        .sum();
 
     let display: Vec<Line> = stripped.iter().map(|s| Line::from(s.as_str())).collect();
 

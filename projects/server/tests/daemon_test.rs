@@ -8,10 +8,10 @@
 #[cfg(unix)]
 #[cfg(test)]
 mod daemon_signal_tests {
+    use state::{self, DaemonMode};
     use std::path::Path;
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
-    use state::{self, DaemonMode};
 
     const TEST_PORT: u16 = 19998;
     const TIMEOUT: Duration = Duration::from_secs(15);
@@ -46,7 +46,10 @@ mod daemon_signal_tests {
             if !path.exists() {
                 return;
             }
-            assert!(Instant::now() < deadline, "timed out waiting for state file removal");
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for state file removal"
+            );
             std::thread::sleep(POLL);
         }
     }

@@ -17,8 +17,7 @@ use serde_json::json;
 
 const REBUY_PLUGIN_ID: &str = "rebuy";
 const REBUY_MCP_CMD: &str = "node";
-const REBUY_MCP_ARG: &str =
-    "/Users/scottkey/code/rebuy/rebuy-cli-mcp-server/build/index.js";
+const REBUY_MCP_ARG: &str = "/Users/scottkey/code/rebuy/rebuy-cli-mcp-server/build/index.js";
 const REBUY_TOOL_PREFIX: &str = "rebuy_";
 const MIN_TOOL_COUNT: usize = 100;
 
@@ -72,7 +71,10 @@ fn rebuy_plugin_registered_in_db() {
     let plugins = db::list_plugins(&conn).expect("failed to list plugins");
 
     let rebuy = plugins.iter().find(|p| p.id == REBUY_PLUGIN_ID);
-    assert!(rebuy.is_some(), "rebuy plugin not found in orca.db — run `orca plugin sync`");
+    assert!(
+        rebuy.is_some(),
+        "rebuy plugin not found in orca.db — run `orca plugin sync`"
+    );
 
     let rebuy = rebuy.unwrap();
     assert!(rebuy.enabled, "rebuy plugin is disabled in orca.db");
@@ -191,7 +193,10 @@ async fn rebuy_tool_call_status() {
         .await
         .expect("rebuy_status call failed");
 
-    eprintln!("rebuy_status result (truncated): {:.500}", result.to_string());
+    eprintln!(
+        "rebuy_status result (truncated): {:.500}",
+        result.to_string()
+    );
     assert!(!result.is_null(), "rebuy_status returned null");
 }
 
@@ -208,7 +213,10 @@ async fn rebuy_tool_call_doctor() {
         .await
         .expect("rebuy_doctor call failed");
 
-    eprintln!("rebuy_doctor result (truncated): {:.500}", result.to_string());
+    eprintln!(
+        "rebuy_doctor result (truncated): {:.500}",
+        result.to_string()
+    );
     assert!(!result.is_null(), "rebuy_doctor returned null");
 }
 
@@ -268,7 +276,10 @@ async fn rebuy_prefix_stripped_in_all_tools_filtered() {
     assert!(
         still_prefixed.is_empty(),
         "tools still have rebuy_ prefix after stripping: {:?}",
-        still_prefixed.iter().map(|t| &t["name"]).collect::<Vec<_>>()
+        still_prefixed
+            .iter()
+            .map(|t| &t["name"])
+            .collect::<Vec<_>>()
     );
 
     // Tools that WERE renamed (had rebuy_ stripped) must have an alias pointing
@@ -288,14 +299,20 @@ async fn rebuy_prefix_stripped_in_all_tools_filtered() {
     assert!(
         missing_alias.is_empty(),
         "stripped tools have wrong alias: {:?}",
-        missing_alias.iter().map(|t| (&t["name"], &t["alias"])).collect::<Vec<_>>()
+        missing_alias
+            .iter()
+            .map(|t| (&t["name"], &t["alias"]))
+            .collect::<Vec<_>>()
     );
 
     // Spot-check: stripped "version" should alias to "rebuy_version"
     let version_entry = rebuy_tools
         .iter()
         .find(|t| t["name"].as_str() == Some("version"));
-    assert!(version_entry.is_some(), "'version' not found in filtered tools");
+    assert!(
+        version_entry.is_some(),
+        "'version' not found in filtered tools"
+    );
     assert_eq!(
         version_entry.unwrap()["alias"].as_str(),
         Some("rebuy_version"),
@@ -335,7 +352,10 @@ async fn rebuy_no_name_conflicts_with_orca_native() {
         dupes.is_empty(),
         "duplicate exposed names in rebuy tool set: {dupes:?}"
     );
-    eprintln!("no duplicate names in rebuy's {} exposed tools", rebuy_tools.len());
+    eprintln!(
+        "no duplicate names in rebuy's {} exposed tools",
+        rebuy_tools.len()
+    );
 }
 
 /// Federation dispatch via pool: call stripped name "version", pool routes to
@@ -354,8 +374,7 @@ async fn rebuy_federation_dispatch_via_alias() {
     let version_tool = tools
         .iter()
         .find(|t| {
-            t["server"].as_str() == Some(REBUY_PLUGIN_ID)
-                && t["name"].as_str() == Some("version")
+            t["server"].as_str() == Some(REBUY_PLUGIN_ID) && t["name"].as_str() == Some("version")
         })
         .expect("'version' not found in filtered tools for rebuy");
 
@@ -405,10 +424,7 @@ async fn rebuy_spec_list_finds_specs() {
         !text.contains("Specs directory not found"),
         "rebuy spec tool could not find its specs dir — expected at ~/code/rebuy/rebuy-docs/docs/gen/: {text}"
     );
-    assert!(
-        !text.is_empty(),
-        "spec_list returned empty output"
-    );
+    assert!(!text.is_empty(), "spec_list returned empty output");
 }
 
 /// `rebuy_spec_search` can search endpoints from rebuy's own spec directory.
@@ -428,7 +444,10 @@ async fn rebuy_spec_search_returns_results() {
         .await
         .expect("rebuy_spec_search call failed");
 
-    eprintln!("spec_search result (truncated): {:.500}", result.to_string());
+    eprintln!(
+        "spec_search result (truncated): {:.500}",
+        result.to_string()
+    );
 
     let text = result["content"]
         .get(0)
@@ -494,4 +513,3 @@ async fn rebuy_graphql_list_finds_schemas() {
         "graphql_list could not find schemas: {text}"
     );
 }
-

@@ -1,4 +1,7 @@
-use axum::{Json, response::{IntoResponse, Response}};
+use axum::{
+    Json,
+    response::{IntoResponse, Response},
+};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -65,9 +68,7 @@ pub async fn system_status_handler() -> Response {
     ),
     tag = "system"
 )]
-pub async fn system_action_handler(
-    Json(req): Json<SystemActionRequest>,
-) -> Response {
+pub async fn system_action_handler(Json(req): Json<SystemActionRequest>) -> Response {
     use orca_commands::install::{InstallReport, cmd_install_report, cmd_uninstall_report};
 
     let report: InstallReport = match req.action.as_str() {
@@ -77,7 +78,7 @@ pub async fn system_action_handler(
             return err(
                 axum::http::StatusCode::BAD_REQUEST,
                 &format!("unknown action '{other}' — use 'install' or 'uninstall'"),
-            )
+            );
         }
     };
 

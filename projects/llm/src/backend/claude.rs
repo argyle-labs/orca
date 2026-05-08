@@ -1,6 +1,5 @@
 use super::{ModelBackend, OutputSink, serialize, sink_write, sink_writeln};
 use crate::types::{BackendResponse, Message, StopReason};
-use tool::{ToolCall, ToolDef};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use colored::Colorize;
@@ -9,6 +8,7 @@ use reqwest::Client;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
+use tool::{ToolCall, ToolDef};
 
 pub struct ClaudeBackend {
     client: Client,

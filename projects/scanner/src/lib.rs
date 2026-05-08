@@ -4,10 +4,10 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use utoipa::ToSchema;
 
-pub mod php_parse;
-pub mod ci4_generator;
 pub mod ci2_generator;
+pub mod ci4_generator;
 pub mod nextjs_generator;
+pub mod php_parse;
 
 /// Directory holding all tracked external API specs — both OpenAPI (.json)
 /// and GraphQL (.graphql) files live here.
@@ -322,15 +322,17 @@ pub fn parse_graphql_operations(repo: &str, src: &str) -> Result<GraphQlInfo> {
         }
     }
 
-    let doc = parse_query::<String>(src)
-        .map_err(|e| anyhow::anyhow!("GraphQL parse error: {e}"))?;
+    let doc =
+        parse_query::<String>(src).map_err(|e| anyhow::anyhow!("GraphQL parse error: {e}"))?;
 
     let mut queries = Vec::new();
     let mut mutations = Vec::new();
     let mut subscriptions = Vec::new();
 
     for def in &doc.definitions {
-        let Definition::Operation(op) = def else { continue };
+        let Definition::Operation(op) = def else {
+            continue;
+        };
         let (name, vars, bucket) = match op {
             OperationDefinition::Query(q) => (
                 q.name.clone().unwrap_or_else(|| "anonymous".into()),
@@ -353,7 +355,12 @@ pub fn parse_graphql_operations(repo: &str, src: &str) -> Result<GraphQlInfo> {
             .iter()
             .map(|v| {
                 let (type_name, required) = op_type_str(&v.var_type);
-                GraphQlField { name: v.name.clone(), type_name, description: None, required }
+                GraphQlField {
+                    name: v.name.clone(),
+                    type_name,
+                    description: None,
+                    required,
+                }
             })
             .collect();
         bucket.push(GraphQlOperation {
@@ -393,7 +400,10 @@ pub fn parse_graphql_sdl(repo: &str, sdl: &str) -> Result<GraphQlInfo> {
     // SDL parsed — but it may be an operations file that happened to parse (unlikely).
     // Check if it has any type definitions; if not, treat as operations.
     let has_type_defs = doc.definitions.iter().any(|d| {
-        matches!(d, Definition::TypeDefinition(_) | Definition::SchemaDefinition(_))
+        matches!(
+            d,
+            Definition::TypeDefinition(_) | Definition::SchemaDefinition(_)
+        )
     });
     if !has_type_defs {
         return parse_graphql_operations(repo, sdl);
@@ -407,30 +417,42 @@ pub fn parse_graphql_sdl(repo: &str, sdl: &str) -> Result<GraphQlInfo> {
     let mut enums = Vec::new();
 
     for def in &doc.definitions {
-        if let Definition::TypeDefinition(td) = def { match td {
-            TypeDefinition::Object(obj) => match obj.name.as_str() {
-                "Query" => queries = obj.fields.iter().map(map_operation).collect(),
-                "Mutation" => mutations = obj.fields.iter().map(map_operation).collect(),
-                "Subscription" => subscriptions = obj.fields.iter().map(map_operation).collect(),
-                _ => types.push(GraphQlType {
-                    name: obj.name.clone(),
-                    description: obj.description.clone(),
-                    fields: obj.fields.iter().map(map_field).collect(),
+        if let Definition::TypeDefinition(td) = def {
+            match td {
+                TypeDefinition::Object(obj) => match obj.name.as_str() {
+                    "Query" => queries = obj.fields.iter().map(map_operation).collect(),
+                    "Mutation" => mutations = obj.fields.iter().map(map_operation).collect(),
+                    "Subscription" => {
+                        subscriptions = obj.fields.iter().map(map_operation).collect()
+                    }
+                    _ => types.push(GraphQlType {
+                        name: obj.name.clone(),
+                        description: obj.description.clone(),
+                        fields: obj.fields.iter().map(map_field).collect(),
+                    }),
+                },
+                TypeDefinition::InputObject(inp) => inputs.push(GraphQlType {
+                    name: inp.name.clone(),
+                    description: inp.description.clone(),
+                    fields: inp.fields.iter().map(map_input_field).collect(),
                 }),
-            },
-            TypeDefinition::InputObject(inp) => inputs.push(GraphQlType {
-                name: inp.name.clone(),
-                description: inp.description.clone(),
-                fields: inp.fields.iter().map(map_input_field).collect(),
-            }),
-            TypeDefinition::Enum(e) => enums.push(GraphQlEnum {
-                name: e.name.clone(),
-                description: e.description.clone(),
-                values: e.values.iter().map(|v| v.name.clone()).collect(),
-            }),
-            _ => {}
-        } }
+                TypeDefinition::Enum(e) => enums.push(GraphQlEnum {
+                    name: e.name.clone(),
+                    description: e.description.clone(),
+                    values: e.values.iter().map(|v| v.name.clone()).collect(),
+                }),
+                _ => {}
+            }
+        }
     }
 
-    Ok(GraphQlInfo { repo: repo.to_string(), queries, mutations, subscriptions, types, inputs, enums })
+    Ok(GraphQlInfo {
+        repo: repo.to_string(),
+        queries,
+        mutations,
+        subscriptions,
+        types,
+        inputs,
+        enums,
+    })
 }

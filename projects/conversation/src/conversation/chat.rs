@@ -1,8 +1,8 @@
 use super::{Session, util};
-use llm::tools::ToolRegistry;
-use llm::{Message, types::ToolResult};
 use anyhow::Result;
 use colored::Colorize;
+use llm::tools::ToolRegistry;
+use llm::{Message, types::ToolResult};
 use tokio_util::sync::CancellationToken;
 
 impl Session {

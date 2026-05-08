@@ -75,35 +75,34 @@ pub async fn run_bash(
     let command = command.to_string();
     let working_dir = working_dir.map(str::to_string);
 
-    let output_result =
-        tokio::task::spawn_blocking(move || -> Result<std::process::Output> {
-            let mut cmd = Command::new("bash");
-            cmd.arg("-c").arg(&command);
-            if let Some(dir) = &working_dir {
-                cmd.current_dir(dir);
-            }
-            let mut child = cmd
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()?;
+    let output_result = tokio::task::spawn_blocking(move || -> Result<std::process::Output> {
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c").arg(&command);
+        if let Some(dir) = &working_dir {
+            cmd.current_dir(dir);
+        }
+        let mut child = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
 
-            let timeout = Duration::from_secs(120);
-            let start = std::time::Instant::now();
-            loop {
-                match child.try_wait()? {
-                    Some(_) => break,
-                    None => {
-                        if start.elapsed() > timeout {
-                            let _ = child.kill();
-                            bail!("command timed out after {}s", timeout.as_secs());
-                        }
-                        std::thread::sleep(Duration::from_millis(100));
+        let timeout = Duration::from_secs(120);
+        let start = std::time::Instant::now();
+        loop {
+            match child.try_wait()? {
+                Some(_) => break,
+                None => {
+                    if start.elapsed() > timeout {
+                        let _ = child.kill();
+                        bail!("command timed out after {}s", timeout.as_secs());
                     }
+                    std::thread::sleep(Duration::from_millis(100));
                 }
             }
-            Ok(child.wait_with_output()?)
-        })
-        .await??;
+        }
+        Ok(child.wait_with_output()?)
+    })
+    .await??;
 
     let stdout = String::from_utf8_lossy(&output_result.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output_result.stderr).to_string();
@@ -182,7 +181,7 @@ mod tests {
         let mut perms = BashPermissions::default();
         perms.allow("git status");
         assert!(perms.is_allowed("git status --short"));
-        assert!(!perms.is_allowed("git"));  // prefix is longer than command
+        assert!(!perms.is_allowed("git")); // prefix is longer than command
     }
 
     // ── run_bash (auto_approve mode) ──────────────────────────────────────────
@@ -190,32 +189,56 @@ mod tests {
     #[tokio::test]
     async fn run_bash_runs_simple_command() {
         let (sink, _buf) = buffer_sink();
-        let mut perms = BashPermissions { auto_approve: true, ..Default::default() };
-        let result = run_bash("echo hello", &mut perms, None, &sink).await.unwrap();
+        let mut perms = BashPermissions {
+            auto_approve: true,
+            ..Default::default()
+        };
+        let result = run_bash("echo hello", &mut perms, None, &sink)
+            .await
+            .unwrap();
         assert_eq!(result.trim(), "hello");
     }
 
     #[tokio::test]
     async fn run_bash_captures_stderr() {
         let (sink, _buf) = buffer_sink();
-        let mut perms = BashPermissions { auto_approve: true, ..Default::default() };
-        let result = run_bash("echo err >&2", &mut perms, None, &sink).await.unwrap();
-        assert!(result.contains("err"), "stderr should be captured: {result}");
+        let mut perms = BashPermissions {
+            auto_approve: true,
+            ..Default::default()
+        };
+        let result = run_bash("echo err >&2", &mut perms, None, &sink)
+            .await
+            .unwrap();
+        assert!(
+            result.contains("err"),
+            "stderr should be captured: {result}"
+        );
     }
 
     #[tokio::test]
     async fn run_bash_nonzero_exit_includes_exit_code() {
         let (sink, _buf) = buffer_sink();
-        let mut perms = BashPermissions { auto_approve: true, ..Default::default() };
+        let mut perms = BashPermissions {
+            auto_approve: true,
+            ..Default::default()
+        };
         // Produce output so we get the "[exit code N]" prefix rather than an Err
-        let result = run_bash("echo failing; exit 42", &mut perms, None, &sink).await.unwrap();
-        assert!(result.contains("42"), "exit code should appear in output: {result}");
+        let result = run_bash("echo failing; exit 42", &mut perms, None, &sink)
+            .await
+            .unwrap();
+        assert!(
+            result.contains("42"),
+            "exit code should appear in output: {result}"
+        );
     }
 
     #[tokio::test]
     async fn run_bash_nonzero_exit_with_no_output_errors() {
         let (sink, _buf) = buffer_sink();
-        let mut perms = BashPermissions { auto_approve: true, ..Default::default() };
+        let mut perms = BashPermissions {
+            auto_approve: true,
+            ..Default::default()
+        };
         let result = run_bash("exit 1", &mut perms, None, &sink);
         // exit 1 with no output → returns Err
         assert!(result.await.is_err());
@@ -225,7 +248,10 @@ mod tests {
     async fn run_bash_respects_working_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let (sink, _buf) = buffer_sink();
-        let mut perms = BashPermissions { auto_approve: true, ..Default::default() };
+        let mut perms = BashPermissions {
+            auto_approve: true,
+            ..Default::default()
+        };
         let result = run_bash("pwd", &mut perms, Some(tmp.path().to_str().unwrap()), &sink)
             .await
             .unwrap();

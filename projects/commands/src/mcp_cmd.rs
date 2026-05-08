@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use db::{self, McpServerRow};
 use clap::Subcommand;
+use db::{self, McpServerRow};
 use std::collections::HashMap;
 
 #[derive(Subcommand, Debug)]
@@ -22,9 +22,7 @@ pub enum McpAction {
         env: Vec<String>,
     },
     /// Remove an MCP server from orca.db
-    Remove {
-        name: String,
-    },
+    Remove { name: String },
     /// Map an orca tool name to an equivalent tool on a registered MCP server
     Map {
         /// Registered MCP server name (e.g. rebuy)
@@ -73,15 +71,21 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
             let claude_path = format!("{home}/.claude.json");
             if let Ok(raw) = std::fs::read_to_string(&claude_path)
                 && let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw)
-                    && let Some(servers) = json["mcpServers"].as_object() {
-                        println!("~/.claude.json servers:");
-                        for name in servers.keys() {
-                            println!("  {name}");
-                        }
-                    }
+                && let Some(servers) = json["mcpServers"].as_object()
+            {
+                println!("~/.claude.json servers:");
+                for name in servers.keys() {
+                    println!("  {name}");
+                }
+            }
             Ok(())
         }
-        McpAction::Add { name, command, args, env } => {
+        McpAction::Add {
+            name,
+            command,
+            args,
+            env,
+        } => {
             let env_map: HashMap<String, String> = env
                 .iter()
                 .filter_map(|e| {
@@ -90,7 +94,13 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
                 })
                 .collect();
 
-            let row = McpServerRow { name: name.clone(), command, args, env: env_map, enabled: true };
+            let row = McpServerRow {
+                name: name.clone(),
+                command,
+                args,
+                env: env_map,
+                enabled: true,
+            };
             let conn = db::open_default()?;
             db::upsert_mcp_server(&conn, &row)?;
             println!("added {name} to orca.db");
@@ -107,11 +117,17 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
             Ok(())
         }
 
-        McpAction::Map { name, orca_tool, external_tool } => {
+        McpAction::Map {
+            name,
+            orca_tool,
+            external_tool,
+        } => {
             let conn = db::open_default()?;
             let servers = db::list_mcp_servers(&conn)?;
             if !servers.iter().any(|s| s.name == name) {
-                anyhow::bail!("MCP server '{name}' not found in orca.db — add it first with `orca mcp add`");
+                anyhow::bail!(
+                    "MCP server '{name}' not found in orca.db — add it first with `orca mcp add`"
+                );
             }
             let row = db::McpToolMappingRow {
                 orca_tool: orca_tool.clone(),
@@ -137,7 +153,11 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
             Ok(())
         }
 
-        McpAction::Sync { name, all, threshold } => {
+        McpAction::Sync {
+            name,
+            all,
+            threshold,
+        } => {
             if !all && name.is_none() {
                 anyhow::bail!("usage: orca mcp sync <name> | --all");
             }
@@ -147,14 +167,18 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
                 servers.iter().collect()
             } else {
                 let n = name.as_deref().expect("name.is_none() rejected above");
-                let s = servers.iter().find(|s| s.name == n)
+                let s = servers
+                    .iter()
+                    .find(|s| s.name == n)
                     .ok_or_else(|| anyhow::anyhow!("server '{n}' not found"))?;
                 vec![s]
             };
             for server in targets {
                 println!("syncing {}...", server.name);
                 match mcp_sync_server(server, threshold) {
-                    Ok((added, skipped)) => println!("  {} mappings added, {} skipped", added, skipped),
+                    Ok((added, skipped)) => {
+                        println!("  {} mappings added, {} skipped", added, skipped)
+                    }
                     Err(e) => println!("  error: {e}"),
                 }
             }
@@ -173,9 +197,15 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
                 return Ok(());
             }
             for r in &rows {
-                let conf = r.confidence.map(|c| format!(" [{:.0}%]", c * 100.0)).unwrap_or_default();
+                let conf = r
+                    .confidence
+                    .map(|c| format!(" [{:.0}%]", c * 100.0))
+                    .unwrap_or_default();
                 let status = if r.enabled { "" } else { " [disabled]" };
-                println!("  {} → {}::{}{}{}", r.orca_tool, r.mcp_name, r.external_tool, conf, status);
+                println!(
+                    "  {} → {}::{}{}{}",
+                    r.orca_tool, r.mcp_name, r.external_tool, conf, status
+                );
             }
             Ok(())
         }
@@ -198,8 +228,14 @@ pub fn mcp_sync_server(
         .spawn()
         .with_context(|| format!("failed to spawn {}", server.command))?;
 
-    let mut stdin = child.stdin.take().context("MCP child process missing stdin pipe")?;
-    let stdout = child.stdout.take().context("MCP child process missing stdout pipe")?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("MCP child process missing stdin pipe")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("MCP child process missing stdout pipe")?;
     let mut reader = BufReader::new(stdout);
 
     let init = serde_json::json!({
@@ -208,9 +244,14 @@ pub fn mcp_sync_server(
                     "clientInfo": { "name": "orca-sync", "version": "0.1.0" } }
     });
     writeln!(stdin, "{}", init)?;
-    writeln!(stdin, "{}", serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))?;
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })
+    )?;
 
-    let tools_req = serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} });
+    let tools_req =
+        serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} });
     writeln!(stdin, "{}", tools_req)?;
     stdin.flush()?;
 
@@ -219,12 +260,13 @@ pub fn mcp_sync_server(
     while reader.read_line(&mut line)? > 0 {
         let trimmed = line.trim();
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed)
-            && v["id"] == 2 {
-                if let Some(arr) = v["result"]["tools"].as_array() {
-                    external_tools = arr.clone();
-                }
-                break;
+            && v["id"] == 2
+        {
+            if let Some(arr) = v["result"]["tools"].as_array() {
+                external_tools = arr.clone();
             }
+            break;
+        }
         line.clear();
     }
     let _ = child.kill();
@@ -234,7 +276,8 @@ pub fn mcp_sync_server(
     }
 
     let existing = db::list_mcp_tool_mappings(&conn, &server.name)?;
-    let already_mapped: std::collections::HashSet<String> = existing.iter()
+    let already_mapped: std::collections::HashSet<String> = existing
+        .iter()
         .filter(|r| r.match_type == "explicit")
         .map(|r| r.orca_tool.clone())
         .collect();
@@ -242,9 +285,18 @@ pub fn mcp_sync_server(
     let mut added = 0usize;
     let mut skipped = 0usize;
     for tool in &external_tools {
-        let ext_name = match tool["name"].as_str() { Some(n) => n, None => continue };
-        if already_mapped.contains(ext_name) { skipped += 1; continue; }
-        if let Ok(Some(_)) = db::lookup_mcp_mapping(&conn, ext_name) { skipped += 1; continue; }
+        let ext_name = match tool["name"].as_str() {
+            Some(n) => n,
+            None => continue,
+        };
+        if already_mapped.contains(ext_name) {
+            skipped += 1;
+            continue;
+        }
+        if let Ok(Some(_)) = db::lookup_mcp_mapping(&conn, ext_name) {
+            skipped += 1;
+            continue;
+        }
         let row = db::McpToolMappingRow {
             orca_tool: ext_name.to_string(),
             mcp_name: server.name.clone(),

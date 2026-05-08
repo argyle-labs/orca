@@ -69,7 +69,11 @@ pub async fn rebuy_health_handler(
             async move {
                 let result = client.call_tool(&tool, json!({}), &cid).await;
                 let output = match &result {
-                    Ok(v) => v["content"].get(0).and_then(|c| c["text"].as_str()).unwrap_or("").to_string(),
+                    Ok(v) => v["content"]
+                        .get(0)
+                        .and_then(|c| c["text"].as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     Err(e) => format!("error: {e}"),
                 };
                 let ok = result.is_ok() && !output.to_lowercase().contains("error");

@@ -12,8 +12,7 @@ pub struct AgentBackendApiKeyStatus;
 #[async_trait]
 impl OrcaTool for AgentBackendApiKeyStatus {
     const NAME: &'static str = "agent_backend_api_key_status";
-    const DESCRIPTION: &'static str =
-        "Report whether an Anthropic API key is stored in the encrypted orca DB. \
+    const DESCRIPTION: &'static str = "Report whether an Anthropic API key is stored in the encrypted orca DB. \
          Never echoes the raw key — only a masked preview.";
     type Args = Args;
 

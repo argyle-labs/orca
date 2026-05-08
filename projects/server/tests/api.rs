@@ -36,25 +36,28 @@ impl TestApp {
         let tmp = TempDir::new().expect("tempdir");
         let db_path = tmp.path().join("test.db");
         let router = orca::serve::build_router(false, db_path.clone());
-        TestApp { router, _tmp: tmp, db_path }
+        TestApp {
+            router,
+            _tmp: tmp,
+            db_path,
+        }
     }
 
     /// Execute a single request against the router.
     async fn call(&self, req: Request<Body>) -> (StatusCode, Value) {
-        let response = self
-            .router
-            .clone()
-            .oneshot(req)
-            .await
-            .expect("oneshot");
+        let response = self.router.clone().oneshot(req).await.expect("oneshot");
         let status = response.status();
-        let bytes = response.into_body().collect().await.expect("body").to_bytes();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
         let body: Value = if bytes.is_empty() {
             json!(null)
         } else {
-            serde_json::from_slice(&bytes).unwrap_or_else(|_| {
-                json!({ "raw": String::from_utf8_lossy(&bytes).to_string() })
-            })
+            serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| json!({ "raw": String::from_utf8_lossy(&bytes).to_string() }))
         };
         (status, body)
     }
@@ -145,7 +148,10 @@ async fn openapi_spec_contains_expected_routes() {
     let (_, body) = app.get("/api/openapi.json").await;
     let paths = body["paths"].as_object().expect("paths object");
     assert!(paths.contains_key("/api/health"), "missing /api/health");
-    assert!(paths.contains_key("/api/mcp/servers"), "missing /api/mcp/servers");
+    assert!(
+        paths.contains_key("/api/mcp/servers"),
+        "missing /api/mcp/servers"
+    );
     assert!(paths.contains_key("/api/plugins"), "missing /api/plugins");
     assert!(paths.contains_key("/api/tree"), "missing /api/tree");
 }
@@ -200,7 +206,9 @@ async fn search_docs_root_returns_array() {
 #[tokio::test]
 async fn doc_unknown_root_returns_400() {
     let app = TestApp::new();
-    let (status, body) = app.get("/api/doc?root=unknown-root-xyz&path=anything").await;
+    let (status, body) = app
+        .get("/api/doc?root=unknown-root-xyz&path=anything")
+        .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].is_string());
 }
@@ -519,7 +527,10 @@ async fn specs_list_returns_array() {
     TestApp::with_db(&db, || async {
         let (status, body) = app.get("/api/specs").await;
         assert_eq!(status, StatusCode::OK, "specs list failed: {body}");
-        assert!(body.is_array() || body.is_object(), "unexpected body: {body}");
+        assert!(
+            body.is_array() || body.is_object(),
+            "unexpected body: {body}"
+        );
     })
     .await;
 }
@@ -540,7 +551,9 @@ async fn spec_get_unknown_returns_404() {
 #[tokio::test]
 async fn fs_browse_missing_path_returns_error() {
     let app = TestApp::new();
-    let (status, _) = app.get("/api/fs/browse?path=/tmp/__orca_test_no_exist_xyz__").await;
+    let (status, _) = app
+        .get("/api/fs/browse?path=/tmp/__orca_test_no_exist_xyz__")
+        .await;
     // Expect 400 or 404 for a path that doesn't exist
     assert!(status.is_client_error() || status.is_server_error());
 }
@@ -556,7 +569,11 @@ async fn search_with_docs_root_returns_results_for_known_term() {
     // "memory" should appear in the embedded docs
     assert!(!arr.is_empty(), "expected results for 'memory' in docs");
     for r in arr {
-        assert_eq!(r["root"], json!("docs"), "all results should be from docs root");
+        assert_eq!(
+            r["root"],
+            json!("docs"),
+            "all results should be from docs root"
+        );
     }
 }
 

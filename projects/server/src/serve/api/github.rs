@@ -12,10 +12,10 @@ use super::prelude::*;
 fn github_client() -> anyhow::Result<(reqwest::Client, String)> {
     let token = orca_commands::oauth::load_github_token()
         .or_else(|| std::env::var("GITHUB_TOKEN").ok())
-        .ok_or_else(|| anyhow::anyhow!("no GitHub token — run `orca login github` or set GITHUB_TOKEN"))?;
-    let client = reqwest::Client::builder()
-        .user_agent("orca/1.0")
-        .build()?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("no GitHub token — run `orca login github` or set GITHUB_TOKEN")
+        })?;
+    let client = reqwest::Client::builder().user_agent("orca/1.0").build()?;
     Ok((client, token))
 }
 
@@ -41,8 +41,12 @@ async fn github_get(path: &str, query: &[(&str, &str)]) -> axum::response::Respo
                     if status.is_success() {
                         Json(body).into_response()
                     } else {
-                        (StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-                         Json(body)).into_response()
+                        (
+                            StatusCode::from_u16(status.as_u16())
+                                .unwrap_or(StatusCode::BAD_GATEWAY),
+                            Json(body),
+                        )
+                            .into_response()
                     }
                 }
                 Err(e) => err(StatusCode::BAD_GATEWAY, &e.to_string()),
@@ -98,7 +102,11 @@ pub async fn github_repos_handler(Query(q): Query<GithubReposQuery>) -> impl Int
     let repo_type = q.repo_type.as_deref().unwrap_or("all");
     let sort = q.sort.as_deref().unwrap_or("updated");
     let per_page = q.per_page.unwrap_or(30).to_string();
-    github_get("/user/repos", &[("type", repo_type), ("sort", sort), ("per_page", &per_page)]).await
+    github_get(
+        "/user/repos",
+        &[("type", repo_type), ("sort", sort), ("per_page", &per_page)],
+    )
+    .await
 }
 
 // ── GET /api/github/repos/:owner/:repo/pulls ──────────────────────────────────

@@ -48,15 +48,24 @@ impl Model {
     /// Accepts: "claude-sonnet-4-6", "claude:claude-sonnet-4-6", "lmstudio:model-id", "ollama:model-id"
     pub fn parse(s: &str) -> Self {
         if let Some(m) = s.strip_prefix("lmstudio:") {
-            Model::LMStudio { id: m.to_string(), url: String::new() }
+            Model::LMStudio {
+                id: m.to_string(),
+                url: String::new(),
+            }
         } else if let Some(m) = s.strip_prefix("ollama:") {
-            Model::Ollama { id: m.to_string(), url: String::new() }
+            Model::Ollama {
+                id: m.to_string(),
+                url: String::new(),
+            }
         } else if let Some(m) = s.strip_prefix("claude:") {
             Model::Claude(m.to_string())
         } else if s.starts_with("claude-") {
             Model::Claude(s.to_string())
         } else {
-            Model::LMStudio { id: s.to_string(), url: String::new() }
+            Model::LMStudio {
+                id: s.to_string(),
+                url: String::new(),
+            }
         }
     }
 
@@ -92,7 +101,10 @@ impl Config {
             anthropic_api_key: api_key,
             lmstudio_url,
             ollama_url,
-            default_model: Model::LMStudio { id: String::new(), url: String::new() },
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
             orca_vault,
             vault_root,
             memory_root,
@@ -113,7 +125,9 @@ impl Config {
     }
 
     pub fn config_dir(&self) -> PathBuf {
-        dirs::home_dir().unwrap_or_default().join("code/orca/config")
+        dirs::home_dir()
+            .unwrap_or_default()
+            .join("code/orca/config")
     }
 }
 

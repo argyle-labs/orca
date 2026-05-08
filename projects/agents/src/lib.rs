@@ -33,7 +33,6 @@ pub fn list_embedded_agents() -> Vec<(String, String)> {
         .collect()
 }
 
-
 fn frontmatter_field_from_str(content: &str, field: &str) -> Option<String> {
     let prefix = format!("{field}:");
     content
@@ -62,7 +61,10 @@ mod tests {
     #[test]
     fn list_embedded_agents_is_non_empty() {
         let agents = list_embedded_agents();
-        assert!(!agents.is_empty(), "at least one agent must be embedded at build time");
+        assert!(
+            !agents.is_empty(),
+            "at least one agent must be embedded at build time"
+        );
     }
 
     #[test]
@@ -76,15 +78,27 @@ mod tests {
     #[test]
     fn load_agent_prompt_known_embedded_agent() {
         // Use the first embedded agent name — guaranteed to exist at build time.
-        let first_name = list_embedded_agents().into_iter().next()
-            .expect("at least one embedded agent").0;
+        let first_name = list_embedded_agents()
+            .into_iter()
+            .next()
+            .expect("at least one embedded agent")
+            .0;
         let nonexistent = PathBuf::from("/tmp/__orca_no_such_dir__");
         let prompt = load_agent_prompt(&first_name, &nonexistent);
-        assert!(prompt.is_some(), "embedded agent '{first_name}' should always load");
+        assert!(
+            prompt.is_some(),
+            "embedded agent '{first_name}' should always load"
+        );
         let text = prompt.unwrap();
-        assert!(!text.is_empty(), "prompt should not be empty after stripping frontmatter");
+        assert!(
+            !text.is_empty(),
+            "prompt should not be empty after stripping frontmatter"
+        );
         // Verify the opening frontmatter delimiter is gone (body may contain --- as markdown)
-        assert!(!text.trim_start().starts_with("---"), "opening frontmatter delimiter should be stripped");
+        assert!(
+            !text.trim_start().starts_with("---"),
+            "opening frontmatter delimiter should be stripped"
+        );
     }
 
     #[test]
@@ -108,13 +122,19 @@ mod tests {
 
     #[test]
     fn load_agent_prompt_falls_back_to_embedded_when_file_missing() {
-        let first_name = list_embedded_agents().into_iter().next()
-            .expect("at least one embedded agent").0;
+        let first_name = list_embedded_agents()
+            .into_iter()
+            .next()
+            .expect("at least one embedded agent")
+            .0;
         let dir = std::env::temp_dir().join(format!("orca_agent_fallback_{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         // Dir exists but the agent .md file is not present — should fall back to embedded.
         let prompt = load_agent_prompt(&first_name, &dir);
-        assert!(prompt.is_some(), "should fall back to embedded agent '{first_name}'");
+        assert!(
+            prompt.is_some(),
+            "should fall back to embedded agent '{first_name}'"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

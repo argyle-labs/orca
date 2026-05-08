@@ -9,9 +9,9 @@ use serde::Deserialize;
 use serde_json::json;
 use utoipa::ToSchema;
 
-use super::prelude::*;
 use super::LogsResponse;
 use super::docker::{find_compose_file, parse_compose_ps, run_docker};
+use super::prelude::*;
 
 // ── GET /api/logs/services ────────────────────────────────────────────────────
 
@@ -60,14 +60,7 @@ pub async fn log_services_handler() -> Response {
                 };
                 let compose_str = compose_file.to_string_lossy().into_owned();
                 let ps_raw = run_docker(
-                    &[
-                        "compose",
-                        "-f",
-                        &compose_str,
-                        "ps",
-                        "--format",
-                        "json",
-                    ],
+                    &["compose", "-f", &compose_str, "ps", "--format", "json"],
                     None,
                 )
                 .await

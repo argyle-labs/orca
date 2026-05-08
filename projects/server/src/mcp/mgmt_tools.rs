@@ -18,8 +18,7 @@ pub struct ListMcpServers;
 #[async_trait]
 impl OrcaTool for ListMcpServers {
     const NAME: &'static str = "list_mcp_servers";
-    const DESCRIPTION: &'static str =
-        "List all MCP servers registered in orca.db (orca's own managed registry). \
+    const DESCRIPTION: &'static str = "List all MCP servers registered in orca.db (orca's own managed registry). \
          Does not include ~/.claude.json servers managed by Claude Code directly.";
     type Args = ListMcpServersArgs;
     async fn run(_: ListMcpServersArgs, _: &ToolCtx) -> Result<String> {
@@ -42,8 +41,7 @@ pub struct AddMcpServer;
 #[async_trait]
 impl OrcaTool for AddMcpServer {
     const NAME: &'static str = "add_mcp_server";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Add or update an MCP server in orca.db. Use this when the user \
+    const DESCRIPTION: &'static str = "[MUTATES STATE] Add or update an MCP server in orca.db. Use this when the user \
          wants to register a new MCP server for orca to federate.";
     type Args = AddMcpServerArgs;
     async fn run(args: AddMcpServerArgs, _: &ToolCtx) -> Result<String> {
@@ -69,8 +67,7 @@ pub struct RemoveMcpServer;
 #[async_trait]
 impl OrcaTool for RemoveMcpServer {
     const NAME: &'static str = "remove_mcp_server";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Remove an MCP server from orca.db by name.";
+    const DESCRIPTION: &'static str = "[MUTATES STATE] Remove an MCP server from orca.db by name.";
     type Args = RemoveMcpServerArgs;
     async fn run(args: RemoveMcpServerArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
@@ -114,8 +111,7 @@ pub struct UnmapTool;
 #[async_trait]
 impl OrcaTool for UnmapTool {
     const NAME: &'static str = "unmap_tool";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Remove a tool mapping from orca.db.";
+    const DESCRIPTION: &'static str = "[MUTATES STATE] Remove a tool mapping from orca.db.";
     type Args = UnmapToolArgs;
     async fn run(args: UnmapToolArgs, _: &ToolCtx) -> Result<String> {
         use serde_json::json;
@@ -136,8 +132,7 @@ pub struct SyncTools;
 #[async_trait]
 impl OrcaTool for SyncTools {
     const NAME: &'static str = "sync_tools";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Auto-discover and map tools from registered MCP servers. \
+    const DESCRIPTION: &'static str = "[MUTATES STATE] Auto-discover and map tools from registered MCP servers. \
          Provide name or set all=true.";
     type Args = SyncToolsArgs;
     async fn run(args: SyncToolsArgs, _: &ToolCtx) -> Result<String> {
@@ -205,8 +200,7 @@ pub struct AddSchema;
 #[async_trait]
 impl OrcaTool for AddSchema {
     const NAME: &'static str = "add_schema";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Add or update a schema database in orca.db. \
+    const DESCRIPTION: &'static str = "[MUTATES STATE] Add or update a schema database in orca.db. \
          Use container OR host/port, not both.";
     type Args = AddSchemaArgs;
     async fn run(args: AddSchemaArgs, _: &ToolCtx) -> Result<String> {
@@ -224,7 +218,10 @@ impl OrcaTool for AddSchema {
         };
         let conn = db::open_default()?;
         db::upsert_schema_database(&conn, &row)?;
-        Ok(format!("Registered schema database '{}' in orca.db.", args.name))
+        Ok(format!(
+            "Registered schema database '{}' in orca.db.",
+            args.name
+        ))
     }
 }
 
@@ -242,7 +239,10 @@ impl OrcaTool for RemoveSchema {
     async fn run(args: RemoveSchemaArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
         if db::remove_schema_database(&conn, &args.name)? {
-            Ok(format!("Removed schema database '{}' from orca.db.", args.name))
+            Ok(format!(
+                "Removed schema database '{}' from orca.db.",
+                args.name
+            ))
         } else {
             Ok(format!("Database '{}' not found in orca.db.", args.name))
         }
@@ -259,8 +259,7 @@ pub struct ListDockerRuntimes;
 #[async_trait]
 impl OrcaTool for ListDockerRuntimes {
     const NAME: &'static str = "list_docker_runtimes";
-    const DESCRIPTION: &'static str =
-        "List all Docker runtimes registered in orca.db.";
+    const DESCRIPTION: &'static str = "List all Docker runtimes registered in orca.db.";
     type Args = ListDockerRuntimesArgs;
     async fn run(_: ListDockerRuntimesArgs, _: &ToolCtx) -> Result<String> {
         handlers::docker_list_runtimes()
@@ -281,8 +280,7 @@ pub struct AddDockerRuntime;
 #[async_trait]
 impl OrcaTool for AddDockerRuntime {
     const NAME: &'static str = "add_docker_runtime";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Register a Docker runtime in orca.db. \
+    const DESCRIPTION: &'static str = "[MUTATES STATE] Register a Docker runtime in orca.db. \
          Provide socketPath, host, or url.";
     type Args = AddDockerRuntimeArgs;
     async fn run(args: AddDockerRuntimeArgs, _: &ToolCtx) -> Result<String> {
@@ -298,7 +296,10 @@ impl OrcaTool for AddDockerRuntime {
         };
         let conn = db::open_default()?;
         db::upsert_docker_runtime(&conn, &row)?;
-        Ok(format!("Registered Docker runtime '{}' in orca.db.", args.name))
+        Ok(format!(
+            "Registered Docker runtime '{}' in orca.db.",
+            args.name
+        ))
     }
 }
 
@@ -316,7 +317,10 @@ impl OrcaTool for RemoveDockerRuntime {
     async fn run(args: RemoveDockerRuntimeArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
         if db::remove_docker_runtime(&conn, &args.name)? {
-            Ok(format!("Removed Docker runtime '{}' from orca.db.", args.name))
+            Ok(format!(
+                "Removed Docker runtime '{}' from orca.db.",
+                args.name
+            ))
         } else {
             Ok(format!("Runtime '{}' not found in orca.db.", args.name))
         }
@@ -333,8 +337,7 @@ pub struct ListDocRoots;
 #[async_trait]
 impl OrcaTool for ListDocRoots {
     const NAME: &'static str = "list_doc_roots";
-    const DESCRIPTION: &'static str =
-        "List all documentation roots registered in orca.db.";
+    const DESCRIPTION: &'static str = "List all documentation roots registered in orca.db.";
     type Args = ListDocRootsArgs;
     async fn run(_: ListDocRootsArgs, _: &ToolCtx) -> Result<String> {
         handlers::doc_list_roots()
@@ -363,7 +366,10 @@ impl OrcaTool for AddDocRoot {
         };
         let conn = db::open_default()?;
         db::upsert_doc_root(&conn, &row)?;
-        Ok(format!("Registered doc root '{}' → {}", args.name, args.path))
+        Ok(format!(
+            "Registered doc root '{}' → {}",
+            args.name, args.path
+        ))
     }
 }
 

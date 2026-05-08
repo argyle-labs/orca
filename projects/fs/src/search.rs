@@ -161,7 +161,10 @@ mod tests {
         let path = write(dir.path(), "myfile.txt", "hi");
         let pattern = format!("{}/*.txt", dir.path().to_str().unwrap());
         let result = glob_files(&pattern, None).unwrap();
-        assert!(result.contains(path.file_name().unwrap().to_str().unwrap()), "got: {result}");
+        assert!(
+            result.contains(path.file_name().unwrap().to_str().unwrap()),
+            "got: {result}"
+        );
     }
 
     // ── grep_content ──────────────────────────────────────────────────────────
@@ -190,7 +193,10 @@ mod tests {
         assert!(result.contains("Hello World"), "got: {result}");
         // Case-sensitive should NOT match
         let result2 = grep_content("hello", p.to_str().unwrap(), false).unwrap();
-        assert!(result2.contains("no matches"), "case-sensitive should miss: {result2}");
+        assert!(
+            result2.contains("no matches"),
+            "case-sensitive should miss: {result2}"
+        );
     }
 
     #[test]
@@ -208,7 +214,10 @@ mod tests {
         write(dir.path(), "top.txt", "nothing here");
 
         let result = grep_content("needle", dir.path().to_str().unwrap(), false).unwrap();
-        assert!(result.contains("needle"), "should find match in subdir: {result}");
+        assert!(
+            result.contains("needle"),
+            "should find match in subdir: {result}"
+        );
     }
 
     #[test]
@@ -216,6 +225,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let p = write(dir.path(), "a.txt", "line one\nfind me\nline three\n");
         let result = grep_content("find me", p.to_str().unwrap(), false).unwrap();
-        assert!(result.contains(":2:"), "should include line number: {result}");
+        assert!(
+            result.contains(":2:"),
+            "should include line number: {result}"
+        );
     }
 }

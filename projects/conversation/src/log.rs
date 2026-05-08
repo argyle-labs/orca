@@ -105,19 +105,21 @@ fn read_records(path: &Path) -> Vec<serde_json::Value> {
     let mut flags: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for r in &raw {
         if r["type"].as_str() == Some("flag")
-            && let (Some(ref_id), Some(note)) = (r["ref"].as_str(), r["note"].as_str()) {
-                flags.insert(ref_id.to_string(), note.to_string());
-            }
+            && let (Some(ref_id), Some(note)) = (r["ref"].as_str(), r["note"].as_str())
+        {
+            flags.insert(ref_id.to_string(), note.to_string());
+        }
     }
 
     raw.into_iter()
         .filter(|r| r["type"].as_str() != Some("flag"))
         .map(|mut r| {
             if let Some(id) = r["id"].as_str().map(str::to_string)
-                && let Some(note) = flags.get(&id) {
-                    r["important"] = json!(true);
-                    r["note"] = json!(note);
-                }
+                && let Some(note) = flags.get(&id)
+            {
+                r["important"] = json!(true);
+                r["note"] = json!(note);
+            }
             r
         })
         .collect()
@@ -228,7 +230,8 @@ mod tests {
     fn append_writes_readable_jsonl() {
         let tmp = tempfile::tempdir().unwrap();
         let mut log = make_log(tmp.path(), Some("proj"));
-        log.append("user", "wolf", "hello world", &["tag1"]).unwrap();
+        log.append("user", "wolf", "hello world", &["tag1"])
+            .unwrap();
 
         let records = read_records(log.path());
         // First record is session_start, second is the appended message
@@ -254,11 +257,14 @@ mod tests {
     fn flag_last_marks_record_as_important() {
         let tmp = tempfile::tempdir().unwrap();
         let mut log = make_log(tmp.path(), Some("proj"));
-        log.append("assistant", "wolf", "important answer", &[]).unwrap();
+        log.append("assistant", "wolf", "important answer", &[])
+            .unwrap();
         log.flag_last("key insight").unwrap();
 
         let records = read_records(log.path());
-        let flagged = records.iter().find(|r| r["important"].as_bool() == Some(true));
+        let flagged = records
+            .iter()
+            .find(|r| r["important"].as_bool() == Some(true));
         assert!(flagged.is_some(), "should have a flagged record");
         assert_eq!(flagged.unwrap()["note"].as_str(), Some("key insight"));
     }
@@ -315,8 +321,10 @@ mod tests {
     fn search_logs_finds_matching_content() {
         let tmp = tempfile::tempdir().unwrap();
         let mut log = make_log(tmp.path(), Some("proj"));
-        log.append("user", "wolf", "the quick brown fox", &[]).unwrap();
-        log.append("user", "wolf", "something unrelated", &[]).unwrap();
+        log.append("user", "wolf", "the quick brown fox", &[])
+            .unwrap();
+        log.append("user", "wolf", "something unrelated", &[])
+            .unwrap();
         drop(log);
 
         let results = search_logs(tmp.path(), "quick brown", 10).unwrap();
@@ -340,7 +348,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut log = make_log(tmp.path(), Some("proj"));
         for i in 0..5 {
-            log.append("user", "wolf", &format!("match {i}"), &[]).unwrap();
+            log.append("user", "wolf", &format!("match {i}"), &[])
+                .unwrap();
         }
         drop(log);
 
@@ -359,7 +368,9 @@ mod tests {
         drop(log);
 
         let records = recall_session(tmp.path(), &sid).unwrap();
-        let msg = records.iter().find(|r| r["content"].as_str() == Some("recalled content"));
+        let msg = records
+            .iter()
+            .find(|r| r["content"].as_str() == Some("recalled content"));
         assert!(msg.is_some(), "should find appended message");
     }
 

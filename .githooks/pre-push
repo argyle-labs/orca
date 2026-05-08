@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+echo "==> rustfmt"
+cargo fmt --all -- --check
+
+echo "==> clippy"
+cargo clippy -- -D warnings
+
+echo "==> cargo test"
+cargo test
+
+echo "==> frontend check"
+cd "$ROOT/projects/frontend"
+npm run check
+
+echo "==> frontend test"
+npm run test:run
+
+echo "==> frontend build"
+npm run build
+
+echo "All checks passed."

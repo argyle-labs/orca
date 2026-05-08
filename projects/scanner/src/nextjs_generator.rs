@@ -72,10 +72,10 @@ fn walk(root: &Path, dir: &Path, paths: &mut serde_json::Map<String, Value>) -> 
         } else if matches!(
             p.file_name().and_then(|s| s.to_str()),
             Some("route.ts" | "route.tsx" | "route.js")
-        )
-            && let Some((api_path, ops)) = scan_route_file(root, &p)? {
-                paths.insert(api_path, ops);
-            }
+        ) && let Some((api_path, ops)) = scan_route_file(root, &p)?
+        {
+            paths.insert(api_path, ops);
+        }
     }
     Ok(())
 }
@@ -96,10 +96,7 @@ fn scan_route_file(root: &Path, file: &Path) -> Result<Option<(String, Value)>> 
             // Strip Next.js route groups: "(group)" segments don't appear in URL.
             if s.starts_with('(') && s.ends_with(')') {
                 String::new()
-            } else if let Some(name) = s
-                .strip_prefix("[...")
-                .and_then(|s| s.strip_suffix(']'))
-            {
+            } else if let Some(name) = s.strip_prefix("[...").and_then(|s| s.strip_suffix(']')) {
                 format!("{{{name}}}")
             } else if let Some(name) = s.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
                 format!("{{{name}}}")

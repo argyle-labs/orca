@@ -192,10 +192,16 @@ pub async fn plugin_health_handler(Path(id): Path<String>) -> Response {
         return err(StatusCode::BAD_REQUEST, "plugin has no HTTP transport URL");
     };
 
-    let token = db::open_default().ok().and_then(|conn|
-        db::list_plugin_credentials(&conn, &id).ok()
-            .and_then(|creds| creds.into_iter().find(|c| c.key == "MEERKAT_TOKEN").map(|c| c.value))
-    );
+    let token = db::open_default().ok().and_then(|conn| {
+        db::list_plugin_credentials(&conn, &id)
+            .ok()
+            .and_then(|creds| {
+                creds
+                    .into_iter()
+                    .find(|c| c.key == "MEERKAT_TOKEN")
+                    .map(|c| c.value)
+            })
+    });
 
     let health_url = format!("{}/health", base_url.trim_end_matches('/'));
     let client = reqwest::Client::new();
@@ -204,12 +210,10 @@ pub async fn plugin_health_handler(Path(id): Path<String>) -> Response {
         req = req.bearer_auth(t);
     }
     match req.send().await {
-        Ok(resp) if resp.status().is_success() => {
-            match resp.json::<serde_json::Value>().await {
-                Ok(body) => Json(body).into_response(),
-                Err(_) => Json(serde_json::json!({ "status": "ok" })).into_response(),
-            }
-        }
+        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+            Ok(body) => Json(body).into_response(),
+            Err(_) => Json(serde_json::json!({ "status": "ok" })).into_response(),
+        },
         Ok(resp) => err(
             StatusCode::BAD_GATEWAY,
             &format!("plugin returned HTTP {}", resp.status()),
@@ -236,7 +240,11 @@ pub async fn plugin_data_list_handler(Path(id): Path<String>) -> Response {
         let conn = db::open_default()?;
         let entries = db::list_plugin_data(&conn, &id)?
             .into_iter()
-            .map(|r| PluginDataEntry { key: r.key, value: r.value, updated_at: r.updated_at })
+            .map(|r| PluginDataEntry {
+                key: r.key,
+                value: r.value,
+                updated_at: r.updated_at,
+            })
             .collect::<Vec<_>>();
         Ok(entries)
     })
@@ -263,7 +271,11 @@ pub async fn plugin_data_get_handler(Path((id, key)): Path<(String, String)>) ->
     db_json(|| {
         let conn = db::open_default()?;
         match db::get_plugin_data(&conn, &id, &key)? {
-            Some(r) => Ok(PluginDataEntry { key: r.key, value: r.value, updated_at: r.updated_at }),
+            Some(r) => Ok(PluginDataEntry {
+                key: r.key,
+                value: r.value,
+                updated_at: r.updated_at,
+            }),
             None => anyhow::bail!("key '{}' not found for plugin '{}'", key, id),
         }
     })

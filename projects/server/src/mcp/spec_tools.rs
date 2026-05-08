@@ -16,8 +16,7 @@ pub struct ListRebuySpecs;
 #[async_trait]
 impl OrcaTool for ListRebuySpecs {
     const NAME: &'static str = "list_rebuy_specs";
-    const DESCRIPTION: &'static str =
-        "List all registered OpenAPI specs for rebuy repos. Returns repo name, description, \
+    const DESCRIPTION: &'static str = "List all registered OpenAPI specs for rebuy repos. Returns repo name, description, \
          path count, and whether a public or GraphQL schema is available.";
     type Args = ListRebuySpecsArgs;
     async fn run(_args: ListRebuySpecsArgs, _ctx: &ToolCtx) -> Result<String> {
@@ -38,8 +37,7 @@ pub struct GetRebuySpec;
 #[async_trait]
 impl OrcaTool for GetRebuySpec {
     const NAME: &'static str = "get_rebuy_spec";
-    const DESCRIPTION: &'static str =
-        "Read the full OpenAPI spec for a rebuy repo (e.g. admin-api, apiv2). \
+    const DESCRIPTION: &'static str = "Read the full OpenAPI spec for a rebuy repo (e.g. admin-api, apiv2). \
          Returns the complete JSON spec.";
     type Args = GetRebuySpecArgs;
     async fn run(args: GetRebuySpecArgs, _ctx: &ToolCtx) -> Result<String> {
@@ -61,8 +59,7 @@ pub struct GetRebuySpecPublic;
 #[async_trait]
 impl OrcaTool for GetRebuySpecPublic {
     const NAME: &'static str = "get_rebuy_spec_public";
-    const DESCRIPTION: &'static str =
-        "Read the public-only OpenAPI spec for a rebuy repo. Contains only publicly \
+    const DESCRIPTION: &'static str = "Read the public-only OpenAPI spec for a rebuy repo. Contains only publicly \
          documented endpoints.";
     type Args = GetRebuySpecPublicArgs;
     async fn run(args: GetRebuySpecPublicArgs, _ctx: &ToolCtx) -> Result<String> {
@@ -106,8 +103,7 @@ pub struct GetGraphqlInfo;
 #[async_trait]
 impl OrcaTool for GetGraphqlInfo {
     const NAME: &'static str = "get_graphql_info";
-    const DESCRIPTION: &'static str =
-        "Parse and return structured GraphQL schema info for a rebuy repo: queries, mutations, \
+    const DESCRIPTION: &'static str = "Parse and return structured GraphQL schema info for a rebuy repo: queries, mutations, \
          subscriptions, types, inputs, and enums — each with field names, types, and descriptions. \
          Use this instead of get_rebuy_graphql_schema when you need to reason about the schema \
          rather than read the raw SDL.";
@@ -131,8 +127,7 @@ pub struct RegisterSpec;
 #[async_trait]
 impl OrcaTool for RegisterSpec {
     const NAME: &'static str = "register_spec";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Fetch an OpenAPI spec from a URL and register it in the orca DB. \
+    const DESCRIPTION: &'static str = "[MUTATES STATE] Fetch an OpenAPI spec from a URL and register it in the orca DB. \
          Use refresh_spec to re-fetch after updates.";
     type Args = RegisterSpecArgs;
     async fn run(args: RegisterSpecArgs, _ctx: &ToolCtx) -> Result<String> {
@@ -156,8 +151,7 @@ pub struct RefreshSpec;
 #[async_trait]
 impl OrcaTool for RefreshSpec {
     const NAME: &'static str = "refresh_spec";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Re-fetch and update one or all URL-registered OpenAPI specs. \
+    const DESCRIPTION: &'static str = "[MUTATES STATE] Re-fetch and update one or all URL-registered OpenAPI specs. \
          Provide name or set all=true.";
     type Args = RefreshSpecArgs;
     async fn run(args: RefreshSpecArgs, _ctx: &ToolCtx) -> Result<String> {

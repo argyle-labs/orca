@@ -17,10 +17,10 @@ pub enum Channel {
 impl Channel {
     pub fn parse(s: &str) -> Self {
         match s {
-            "rc"    => Self::Rc,
-            "beta"  => Self::Beta,
+            "rc" => Self::Rc,
+            "beta" => Self::Beta,
             "alpha" => Self::Alpha,
-            _       => Self::Stable,
+            _ => Self::Stable,
         }
     }
 
@@ -29,11 +29,11 @@ impl Channel {
             // stable: only tags with no pre-release suffix
             Self::Stable => !tag.contains('-'),
             // rc: stable + rc tags
-            Self::Rc     => !tag.contains('-') || tag.contains("-rc."),
+            Self::Rc => !tag.contains('-') || tag.contains("-rc."),
             // beta: stable + rc + beta
-            Self::Beta   => !tag.contains('-') || tag.contains("-rc.") || tag.contains("-beta."),
+            Self::Beta => !tag.contains('-') || tag.contains("-rc.") || tag.contains("-beta."),
             // alpha: everything
-            Self::Alpha  => true,
+            Self::Alpha => true,
         }
     }
 }
@@ -204,11 +204,13 @@ pub async fn apply_update(info: &UpdateInfo) -> Result<()> {
 pub async fn cmd_update(channel: Channel) -> Result<()> {
     let channel_label = match &channel {
         Channel::Stable => "stable".to_string(),
-        Channel::Rc     => "rc".to_string(),
-        Channel::Beta   => "beta".to_string(),
-        Channel::Alpha  => "alpha".to_string(),
+        Channel::Rc => "rc".to_string(),
+        Channel::Beta => "beta".to_string(),
+        Channel::Alpha => "alpha".to_string(),
     };
-    println!("[orca] current version: v{CURRENT_VERSION} ({BUILD_TARGET}, channel={channel_label})");
+    println!(
+        "[orca] current version: v{CURRENT_VERSION} ({BUILD_TARGET}, channel={channel_label})"
+    );
     println!("[orca] checking for updates...");
 
     match check_for_update(&channel).await? {
@@ -244,7 +246,11 @@ pub async fn startup_update_check() {
 fn semver_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     let parse = |s: &str| -> (u64, u64, u64) {
         let mut parts = s.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
-        (parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0))
+        (
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+        )
     };
     parse(a).cmp(&parse(b))
 }
@@ -309,23 +315,23 @@ mod tests {
     #[test]
     fn channel_from_str_known() {
         assert_eq!(Channel::parse("stable"), Channel::Stable);
-        assert_eq!(Channel::parse("rc"),     Channel::Rc);
-        assert_eq!(Channel::parse("beta"),   Channel::Beta);
-        assert_eq!(Channel::parse("alpha"),  Channel::Alpha);
+        assert_eq!(Channel::parse("rc"), Channel::Rc);
+        assert_eq!(Channel::parse("beta"), Channel::Beta);
+        assert_eq!(Channel::parse("alpha"), Channel::Alpha);
     }
 
     #[test]
     fn channel_from_str_unknown_defaults_to_stable() {
-        assert_eq!(Channel::parse(""),        Channel::Stable);
+        assert_eq!(Channel::parse(""), Channel::Stable);
         assert_eq!(Channel::parse("nightly"), Channel::Stable);
-        assert_eq!(Channel::parse("STABLE"),  Channel::Stable); // case-sensitive
+        assert_eq!(Channel::parse("STABLE"), Channel::Stable); // case-sensitive
     }
 
     // ── Channel::accepts ──────────────────────────────────────────────────────
 
     #[test]
     fn stable_accepts_only_clean_tags() {
-        assert!( Channel::Stable.accepts("v1.0.0"));
+        assert!(Channel::Stable.accepts("v1.0.0"));
         assert!(!Channel::Stable.accepts("v1.0.0-rc.1"));
         assert!(!Channel::Stable.accepts("v1.0.0-beta.1"));
         assert!(!Channel::Stable.accepts("v1.0.0-alpha.1"));
@@ -333,18 +339,18 @@ mod tests {
 
     #[test]
     fn rc_accepts_stable_and_rc() {
-        assert!( Channel::Rc.accepts("v1.0.0"));
-        assert!( Channel::Rc.accepts("v1.0.0-rc.1"));
-        assert!( Channel::Rc.accepts("v1.0.0-rc.99"));
+        assert!(Channel::Rc.accepts("v1.0.0"));
+        assert!(Channel::Rc.accepts("v1.0.0-rc.1"));
+        assert!(Channel::Rc.accepts("v1.0.0-rc.99"));
         assert!(!Channel::Rc.accepts("v1.0.0-beta.1"));
         assert!(!Channel::Rc.accepts("v1.0.0-alpha.1"));
     }
 
     #[test]
     fn beta_accepts_stable_rc_beta() {
-        assert!( Channel::Beta.accepts("v1.0.0"));
-        assert!( Channel::Beta.accepts("v1.0.0-rc.1"));
-        assert!( Channel::Beta.accepts("v1.0.0-beta.1"));
+        assert!(Channel::Beta.accepts("v1.0.0"));
+        assert!(Channel::Beta.accepts("v1.0.0-rc.1"));
+        assert!(Channel::Beta.accepts("v1.0.0-beta.1"));
         assert!(!Channel::Beta.accepts("v1.0.0-alpha.1"));
     }
 
@@ -375,15 +381,15 @@ mod tests {
         use std::cmp::Ordering::*;
         // "1.0" treated as "1.0.0"
         assert_eq!(semver_cmp("1.0", "1.0.0"), Equal);
-        assert_eq!(semver_cmp("1",   "1.0.0"), Equal);
+        assert_eq!(semver_cmp("1", "1.0.0"), Equal);
     }
 
     // ── is_newer ──────────────────────────────────────────────────────────────
 
     #[test]
     fn is_newer_returns_true_when_candidate_greater() {
-        assert!( is_newer("1.0.1", "1.0.0"));
-        assert!( is_newer("2.0.0", "1.9.9"));
+        assert!(is_newer("1.0.1", "1.0.0"));
+        assert!(is_newer("2.0.0", "1.9.9"));
         assert!(!is_newer("1.0.0", "1.0.0"));
         assert!(!is_newer("1.0.0", "1.0.1"));
     }

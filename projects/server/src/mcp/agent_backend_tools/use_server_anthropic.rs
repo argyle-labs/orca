@@ -16,8 +16,7 @@ pub struct AgentBackendUseServerAnthropic;
 #[async_trait]
 impl OrcaTool for AgentBackendUseServerAnthropic {
     const NAME: &'static str = "agent_backend_use_server_anthropic";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Toggle whether the orca server makes Anthropic API calls directly \
+    const DESCRIPTION: &'static str = "[MUTATES STATE] Toggle whether the orca server makes Anthropic API calls directly \
          when the resolver picks Claude. When false (default), Claude-routed agents return \
          a delegate-to-claude-code envelope instead. Requires a stored API key when true.";
     type Args = Args;

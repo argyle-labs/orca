@@ -40,10 +40,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fmt_tokens_zero() { assert_eq!(fmt_tokens(0), "0"); }
+    fn fmt_tokens_zero() {
+        assert_eq!(fmt_tokens(0), "0");
+    }
 
     #[test]
-    fn fmt_tokens_small() { assert_eq!(fmt_tokens(999), "999"); }
+    fn fmt_tokens_small() {
+        assert_eq!(fmt_tokens(999), "999");
+    }
 
     #[test]
     fn fmt_tokens_thousands() {

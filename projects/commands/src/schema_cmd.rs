@@ -1,6 +1,6 @@
 use anyhow::Result;
-use db::{self, SchemaDbRow};
 use clap::Subcommand;
+use db::{self, SchemaDbRow};
 
 #[derive(Subcommand, Debug)]
 pub enum SchemaAction {
@@ -33,9 +33,7 @@ pub enum SchemaAction {
         domains_file: Option<String>,
     },
     /// Remove a schema database from orca.db
-    Remove {
-        name: String,
-    },
+    Remove { name: String },
 }
 
 pub fn cmd_schema(action: SchemaAction) -> Result<()> {
@@ -57,13 +55,24 @@ pub fn cmd_schema(action: SchemaAction) -> Result<()> {
                         }
                         _ => "unknown".to_string(),
                     };
-                    println!("  {} [{}] → {} @ {}", d.name, d.driver, d.database, conn_info);
+                    println!(
+                        "  {} [{}] → {} @ {}",
+                        d.name, d.driver, d.database, conn_info
+                    );
                 }
             }
             Ok(())
         }
         SchemaAction::Add {
-            name, database, driver, user, password, container, host, port, domains_file,
+            name,
+            database,
+            driver,
+            user,
+            password,
+            container,
+            host,
+            port,
+            domains_file,
         } => {
             let row = SchemaDbRow {
                 name: name.clone(),

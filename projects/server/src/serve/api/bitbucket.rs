@@ -134,4 +134,3 @@ async fn fetch_prs(workspace: &str, slug: &str) -> anyhow::Result<serde_json::Va
 
     Ok(resp.json().await?)
 }
-

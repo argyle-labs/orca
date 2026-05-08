@@ -10,12 +10,12 @@
 //!
 //! Set LMSTUDIO_URL to override the default (http://localhost:1234).
 
-use llm::{
-    ClaudeBackend, DiscoveredModel, LMStudioBackend, Message, ModelBackend,
-    StopReason, TaskKind, classify_model, discover_all, select_for_task,
-    buffer_sink, stdout_sink, resolve_model, estimate_context_window,
-};
 use config::{Config, Model};
+use llm::{
+    ClaudeBackend, DiscoveredModel, LMStudioBackend, Message, ModelBackend, StopReason, TaskKind,
+    buffer_sink, classify_model, discover_all, estimate_context_window, resolve_model,
+    select_for_task, stdout_sink,
+};
 use serde_json::json;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
@@ -35,7 +35,10 @@ fn test_config() -> Config {
         anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
         lmstudio_url: lmstudio_url(),
         ollama_url: ollama_url(),
-        default_model: Model::LMStudio { id: String::new(), url: String::new() },
+        default_model: Model::LMStudio {
+            id: String::new(),
+            url: String::new(),
+        },
         orca_vault: PathBuf::from("/tmp/.orca-test"),
         vault_root: PathBuf::from("/tmp"),
         memory_root: PathBuf::from("/tmp"),
@@ -52,7 +55,9 @@ fn is_server_busy(e: &anyhow::Error) -> bool {
 /// True when the error indicates a model failed to load (memory constraint / 400).
 fn is_model_unavailable(e: &anyhow::Error) -> bool {
     let s = e.to_string();
-    s.contains("model not available") || s.contains("Failed to load model") || s.contains("insufficient system resources")
+    s.contains("model not available")
+        || s.contains("Failed to load model")
+        || s.contains("insufficient system resources")
 }
 
 /// Returns Some(backend) if LM Studio is reachable with at least one chat model,
@@ -70,7 +75,10 @@ async fn lmstudio_if_available() -> Option<(LMStudioBackend, String)> {
                 eprintln!("SKIP: LM Studio at {url} has no chat models loaded");
                 None
             } else {
-                Some((LMStudioBackend::new(&url, &chat_models[0]), chat_models[0].clone()))
+                Some((
+                    LMStudioBackend::new(&url, &chat_models[0]),
+                    chat_models[0].clone(),
+                ))
             }
         }
         Err(e) => {
@@ -95,7 +103,10 @@ async fn list_models_returns_strings_when_available() {
             // IDs must be non-empty strings
             for id in &models {
                 assert!(!id.is_empty(), "model id must not be empty");
-                assert!(id.is_ascii() || id.contains('/'), "unexpected model id: {id}");
+                assert!(
+                    id.is_ascii() || id.contains('/'),
+                    "unexpected model id: {id}"
+                );
             }
         }
     }
@@ -105,7 +116,11 @@ async fn list_models_returns_strings_when_available() {
 async fn discover_all_deduplicates_backends() {
     let config = test_config();
     let found = discover_all(&config).await;
-    eprintln!("Discovered {} model(s): {:?}", found.len(), found.iter().map(|m| &m.id).collect::<Vec<_>>());
+    eprintln!(
+        "Discovered {} model(s): {:?}",
+        found.len(),
+        found.iter().map(|m| &m.id).collect::<Vec<_>>()
+    );
 
     // No embedding models should appear
     for m in &found {
@@ -129,15 +144,23 @@ async fn discover_all_excludes_embed_models() {
     // We can't force LM Studio to return them, so we test the filter indirectly
     // by checking classify_model for an embed ID returns empty preferred_tasks.
     let caps = classify_model("nomic-embed-text-v1", "lmstudio");
-    assert!(caps.preferred_tasks.is_empty(), "embed model should have no preferred tasks");
-    assert_eq!(caps.rank, 255, "embed model should have maximum rank (never selected)");
+    assert!(
+        caps.preferred_tasks.is_empty(),
+        "embed model should have no preferred tasks"
+    );
+    assert_eq!(
+        caps.rank, 255,
+        "embed model should have maximum rank (never selected)"
+    );
 }
 
 // ── Model selection tests ─────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn resolve_model_returns_something_when_lmstudio_available() {
-    let Some((_, _)) = lmstudio_if_available().await else { return; };
+    let Some((_, _)) = lmstudio_if_available().await else {
+        return;
+    };
 
     let config = test_config();
     match resolve_model(&config, Some(TaskKind::Chat)).await {
@@ -150,7 +173,10 @@ async fn resolve_model_returns_something_when_lmstudio_available() {
 async fn resolve_model_respects_explicit_config() {
     // When a model is explicitly configured, we must use it — no discovery.
     let config = Config {
-        default_model: Model::LMStudio { id: "explicit-model-id".into(), url: String::new() },
+        default_model: Model::LMStudio {
+            id: "explicit-model-id".into(),
+            url: String::new(),
+        },
         ..test_config()
     };
     let model = resolve_model(&config, None).await.unwrap();
@@ -164,7 +190,10 @@ async fn resolve_model_errors_when_nothing_available() {
         lmstudio_url: "http://localhost:19999".into(),
         ollama_url: "http://localhost:19998".into(),
         anthropic_api_key: None,
-        default_model: Model::LMStudio { id: String::new(), url: String::new() },
+        default_model: Model::LMStudio {
+            id: String::new(),
+            url: String::new(),
+        },
         ..test_config()
     };
     let result = resolve_model(&config, None).await;
@@ -195,24 +224,39 @@ async fn select_for_task_tool_use_avoids_reasoning_model() {
     ];
 
     let selected = select_for_task(&models, TaskKind::ToolUse).unwrap();
-    assert_eq!(selected.id, "qwen/qwen3-14b",
-        "should pick qwen over reasoning model for tool use");
+    assert_eq!(
+        selected.id, "qwen/qwen3-14b",
+        "should pick qwen over reasoning model for tool use"
+    );
 }
 
 #[tokio::test]
 async fn context_window_estimate_is_sensible() {
     assert!(estimate_context_window(&Model::Claude("claude-sonnet-4-6".into())) >= 100_000);
-    assert!(estimate_context_window(&Model::LMStudio { id: "qwen3-14b".into(), url: String::new() }) >= 4_096);
+    assert!(
+        estimate_context_window(&Model::LMStudio {
+            id: "qwen3-14b".into(),
+            url: String::new()
+        }) >= 4_096
+    );
     // 128k model in the ID should get a larger window
-    let w = estimate_context_window(&Model::LMStudio { id: "some-model-128k".into(), url: String::new() });
-    assert!(w >= 100_000, "128k model should have large context window, got {w}");
+    let w = estimate_context_window(&Model::LMStudio {
+        id: "some-model-128k".into(),
+        url: String::new(),
+    });
+    assert!(
+        w >= 100_000,
+        "128k model should have large context window, got {w}"
+    );
 }
 
 // ── Basic chat tests ──────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn lmstudio_chat_returns_non_empty_response() {
-    let Some((backend, model_id)) = lmstudio_if_available().await else { return; };
+    let Some((backend, model_id)) = lmstudio_if_available().await else {
+        return;
+    };
 
     eprintln!("Testing chat with model: {model_id}");
     let messages = vec![Message::user("Say exactly: pong")];
@@ -220,7 +264,13 @@ async fn lmstudio_chat_returns_non_empty_response() {
     let (sink, buf) = buffer_sink();
 
     let resp = backend
-        .chat(&messages, &[], "You are a test assistant. Be very brief.", cancel, &sink)
+        .chat(
+            &messages,
+            &[],
+            "You are a test assistant. Be very brief.",
+            cancel,
+            &sink,
+        )
         .await
         .expect("chat should succeed");
 
@@ -233,12 +283,17 @@ async fn lmstudio_chat_returns_non_empty_response() {
     if resp.input_tokens == 0 {
         eprintln!("Note: model did not report input_tokens (acceptable for local models)");
     }
-    assert!(matches!(resp.stop_reason, StopReason::EndTurn | StopReason::MaxTokens));
+    assert!(matches!(
+        resp.stop_reason,
+        StopReason::EndTurn | StopReason::MaxTokens
+    ));
 }
 
 #[tokio::test]
 async fn lmstudio_chat_streams_to_sink() {
-    let Some((backend, model_id)) = lmstudio_if_available().await else { return; };
+    let Some((backend, model_id)) = lmstudio_if_available().await else {
+        return;
+    };
 
     let messages = vec![Message::user("Count to 3, one number per line.")];
     let cancel = CancellationToken::new();
@@ -256,7 +311,10 @@ async fn lmstudio_chat_streams_to_sink() {
     let output = String::from_utf8_lossy(&buf.lock().unwrap()).to_string();
     eprintln!("Streamed: {output:?}");
     // Streaming should have written something to the sink
-    assert!(!output.is_empty(), "sink must receive streamed tokens, model: {model_id}");
+    assert!(
+        !output.is_empty(),
+        "sink must receive streamed tokens, model: {model_id}"
+    );
 }
 
 #[tokio::test]
@@ -276,7 +334,9 @@ async fn lmstudio_empty_response_errors() {
 
 #[tokio::test]
 async fn lmstudio_cancellation_returns_partial_response() {
-    let Some((backend, model_id)) = lmstudio_if_available().await else { return; };
+    let Some((backend, model_id)) = lmstudio_if_available().await else {
+        return;
+    };
 
     let messages = vec![Message::user(
         "Write a very long detailed essay about the history of computing. Be thorough.",
@@ -291,13 +351,14 @@ async fn lmstudio_cancellation_returns_partial_response() {
         cancel_clone.cancel();
     });
 
-    let result = backend
-        .chat(&messages, &[], "", cancel, &sink)
-        .await;
+    let result = backend.chat(&messages, &[], "", cancel, &sink).await;
 
     // Cancellation should not produce an error — it's a graceful stop.
     match result {
-        Ok(resp) => eprintln!("Cancelled after {} chars, model: {model_id}", resp.text.len()),
+        Ok(resp) => eprintln!(
+            "Cancelled after {} chars, model: {model_id}",
+            resp.text.len()
+        ),
         Err(e) => eprintln!("Got error on cancel (acceptable): {e}"),
     }
     // We just check it doesn't panic. Partial response or clean error both acceptable.
@@ -307,7 +368,9 @@ async fn lmstudio_cancellation_returns_partial_response() {
 
 #[tokio::test]
 async fn lmstudio_tool_call_round_trip() {
-    let Some((backend, model_id)) = lmstudio_if_available().await else { return; };
+    let Some((backend, model_id)) = lmstudio_if_available().await else {
+        return;
+    };
 
     // Only run this test on models that support tools.
     let caps = classify_model(&model_id, "lmstudio");
@@ -334,7 +397,13 @@ async fn lmstudio_tool_call_round_trip() {
     let (sink, _) = buffer_sink();
 
     let resp = match backend
-        .chat(&messages, &tools, "Use the get_weather tool when asked about weather.", cancel, &sink)
+        .chat(
+            &messages,
+            &tools,
+            "Use the get_weather tool when asked about weather.",
+            cancel,
+            &sink,
+        )
         .await
     {
         Err(e) if is_server_busy(&e) => {
@@ -350,7 +419,10 @@ async fn lmstudio_tool_call_round_trip() {
 
     // Model should have called the tool
     if resp.stop_reason == StopReason::ToolUse {
-        assert!(!resp.tool_calls.is_empty(), "ToolUse stop reason but no tool calls");
+        assert!(
+            !resp.tool_calls.is_empty(),
+            "ToolUse stop reason but no tool calls"
+        );
         let tc = &resp.tool_calls[0];
         assert_eq!(tc.name, "get_weather");
         assert!(!tc.id.is_empty(), "tool call id must not be empty");
@@ -372,18 +444,29 @@ async fn lmstudio_tool_call_round_trip() {
 
 #[tokio::test]
 async fn lmstudio_multi_turn_conversation() {
-    let Some((backend, model_id)) = lmstudio_if_available().await else { return; };
+    let Some((backend, model_id)) = lmstudio_if_available().await else {
+        return;
+    };
 
     let messages = vec![
         Message::user("My name is Alice. Remember that."),
-        Message::Assistant { text: Some("Got it, Alice.".into()), tool_calls: vec![] },
+        Message::Assistant {
+            text: Some("Got it, Alice.".into()),
+            tool_calls: vec![],
+        },
         Message::user("What's my name?"),
     ];
     let cancel = CancellationToken::new();
     let (sink, _) = buffer_sink();
 
     let resp = match backend
-        .chat(&messages, &[], "You are a helpful assistant with perfect memory.", cancel, &sink)
+        .chat(
+            &messages,
+            &[],
+            "You are a helpful assistant with perfect memory.",
+            cancel,
+            &sink,
+        )
         .await
     {
         Err(e) if is_server_busy(&e) => {
@@ -395,7 +478,10 @@ async fn lmstudio_multi_turn_conversation() {
     };
 
     eprintln!("Multi-turn response: {:?}", resp.text);
-    assert!(!resp.text.is_empty(), "response should not be empty, model: {model_id}");
+    assert!(
+        !resp.text.is_empty(),
+        "response should not be empty, model: {model_id}"
+    );
     // The model should mention Alice — but we can't guarantee it, so just verify we got a response.
 }
 
@@ -411,11 +497,16 @@ async fn switching_models_mid_session() {
             eprintln!("SKIP: LM Studio not available at {url}");
             return;
         }
-        Ok(m) => m.into_iter().filter(|m| !m.contains("embed")).collect::<Vec<_>>(),
+        Ok(m) => m
+            .into_iter()
+            .filter(|m| !m.contains("embed"))
+            .collect::<Vec<_>>(),
     };
 
     if models.len() < 2 {
-        eprintln!("SKIP: need at least 2 chat models loaded for model-switch test, found: {models:?}");
+        eprintln!(
+            "SKIP: need at least 2 chat models loaded for model-switch test, found: {models:?}"
+        );
         return;
     }
 
@@ -425,9 +516,15 @@ async fn switching_models_mid_session() {
     let cancel = CancellationToken::new();
     let (sink1, _) = buffer_sink();
     let backend_a = LMStudioBackend::new(&url, &models[0]);
-    let resp_a = match backend_a.chat(&messages, &[], "", cancel.clone(), &sink1).await {
+    let resp_a = match backend_a
+        .chat(&messages, &[], "", cancel.clone(), &sink1)
+        .await
+    {
         Err(e) if is_model_unavailable(&e) || is_server_busy(&e) => {
-            eprintln!("SKIP: model {} unavailable or LM Studio busy: {e}", models[0]);
+            eprintln!(
+                "SKIP: model {} unavailable or LM Studio busy: {e}",
+                models[0]
+            );
             return;
         }
         Err(e) => panic!("model A chat failed: {e}"),
@@ -439,7 +536,10 @@ async fn switching_models_mid_session() {
     let backend_b = LMStudioBackend::new(&url, &models[1]);
     let resp_b = match backend_b.chat(&messages2, &[], "", cancel, &sink2).await {
         Err(e) if is_model_unavailable(&e) || is_server_busy(&e) => {
-            eprintln!("SKIP: model {} unavailable or LM Studio busy: {e}", models[1]);
+            eprintln!(
+                "SKIP: model {} unavailable or LM Studio busy: {e}",
+                models[1]
+            );
             return;
         }
         Err(e) => panic!("model B chat failed: {e}"),
@@ -448,8 +548,16 @@ async fn switching_models_mid_session() {
 
     assert!(!resp_a.text.is_empty(), "model A should respond");
     assert!(!resp_b.text.is_empty(), "model B should respond");
-    eprintln!("Model A ({}) response: {:?}", models[0], &resp_a.text[..resp_a.text.len().min(80)]);
-    eprintln!("Model B ({}) response: {:?}", models[1], &resp_b.text[..resp_b.text.len().min(80)]);
+    eprintln!(
+        "Model A ({}) response: {:?}",
+        models[0],
+        &resp_a.text[..resp_a.text.len().min(80)]
+    );
+    eprintln!(
+        "Model B ({}) response: {:?}",
+        models[1],
+        &resp_b.text[..resp_b.text.len().min(80)]
+    );
 }
 
 // ── Reasoning model handling ──────────────────────────────────────────────────
@@ -490,10 +598,14 @@ async fn reasoning_model_fallback_to_reasoning_content() {
         .await
         .expect("reasoning model should return a response (via reasoning_content fallback)");
 
-    assert!(!resp.text.is_empty(),
-        "reasoning model should produce text even if only via reasoning_content");
-    eprintln!("Reasoning model response (first 200 chars): {:?}",
-        &resp.text[..resp.text.len().min(200)]);
+    assert!(
+        !resp.text.is_empty(),
+        "reasoning model should produce text even if only via reasoning_content"
+    );
+    eprintln!(
+        "Reasoning model response (first 200 chars): {:?}",
+        &resp.text[..resp.text.len().min(200)]
+    );
 }
 
 // ── Backend properties ────────────────────────────────────────────────────────

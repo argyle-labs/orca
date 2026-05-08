@@ -60,7 +60,11 @@ fn doc_title(path: &str) -> String {
                 .map(|l| l[2..].trim().to_string())
         })
         .unwrap_or_else(|| {
-            let stem = path.rsplit('/').next().unwrap_or(path).trim_end_matches(".md");
+            let stem = path
+                .rsplit('/')
+                .next()
+                .unwrap_or(path)
+                .trim_end_matches(".md");
             stem.replace('-', " ")
         })
 }
@@ -151,7 +155,10 @@ mod tests {
         let without_ext = first.trim_end_matches(".md");
         let with_ext = read(&first);
         let without = read(without_ext);
-        assert_eq!(with_ext, without, "read with and without .md should return same content");
+        assert_eq!(
+            with_ext, without,
+            "read with and without .md should return same content"
+        );
     }
 
     #[test]
@@ -170,7 +177,10 @@ mod tests {
         // Each result has a filename and at least one matching line snippet.
         for (name, lines) in &results {
             assert!(name.ends_with(".md"), "result name should be .md: {name}");
-            assert!(!lines.is_empty(), "result should have matching lines: {name}");
+            assert!(
+                !lines.is_empty(),
+                "result should have matching lines: {name}"
+            );
         }
     }
 
@@ -186,7 +196,10 @@ mod tests {
     #[test]
     fn search_no_match_returns_empty() {
         let results = search("zzz_no_such_term_in_any_doc_xyz_999");
-        assert!(results.is_empty(), "search for nonexistent term should return empty");
+        assert!(
+            results.is_empty(),
+            "search for nonexistent term should return empty"
+        );
     }
 
     // ── tree ──────────────────────────────────────────────────────────────────
