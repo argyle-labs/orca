@@ -162,6 +162,7 @@ mod tests {
         ToolCtx::new(Arc::new(Config {
             anthropic_api_key: None,
             lmstudio_url: "http://localhost:1234".into(),
+            ollama_url: "http://localhost:11434".into(),
             default_model: Model::LMStudio {
                 id: String::new(),
                 url: String::new(),
