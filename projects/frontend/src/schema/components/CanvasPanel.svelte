@@ -26,7 +26,7 @@
   let { data, searchMatchSet, activeDomains, selected, onselect, ongoto, drift }: Props = $props();
 
   // Layout is computed once per CanvasPanel mount (data is keyed in parent).
-  // eslint-disable-next-line svelte/state-referenced-locally — intentional one-shot snapshot
+  // svelte-ignore state_referenced_locally
   const initialData = data;
   const layout = computeLayout(initialData.tables, initialData.fks, initialData.domains);
 

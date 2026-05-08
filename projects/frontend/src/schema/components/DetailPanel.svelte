@@ -34,6 +34,7 @@
     <div id="detail-columns">
       {#each selectedNode.table.columns as col (col.name)}
         {@const isClickable = !!(col.fk && col.fkTarget && nodeMap[col.fkTarget])}
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
         <div
           class={cx('detail-col', col.fk && 'fk-row')}
           onclick={isClickable ? () => ongoto(col.fkTarget!) : undefined}

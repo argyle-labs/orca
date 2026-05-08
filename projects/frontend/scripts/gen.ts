@@ -380,84 +380,16 @@ function staleTimeForTags(tags: string[]): number | null {
   return null; // use global default
 }
 
-// ── Generate hooks.ts ─────────────────────────────────────────────────────────
-
-function generateHooks(ops: ParsedOp[]): string {
-  const lines: string[] = [
-    '// ⚠️  AUTO-GENERATED — do not edit. Run `orca gen` to regenerate.',
-    '',
-    "import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';",
-    "import type { UseQueryOptions, UseMutationOptions } from '@tanstack/react-query';",
-    "import type * as T from './types';",
-    "import * as client from './client';",
-    "import { staleMs } from './stale';",
-    '',
-  ];
-
-  for (const op of ops) {
-    const hasPath = op.pathParams.length > 0;
-    const hasQuery = op.queryParams.length > 0;
-    const hasBody = op.requestBodyType !== null;
-    const hasParams = hasPath || hasQuery || hasBody;
-    const returnType = op.responseType === 'void' ? 'void' : op.responseType;
-
-    const paramsType = hasParams
-      ? `Parameters<typeof client.${op.operationId}>[0]`
-      : 'void';
-
-    if (op.isGet) {
-      // useQuery hook
-      const hookName = `use${op.operationId.charAt(0).toUpperCase()}${op.operationId.slice(1)}`;
-      const keyExpr = hasParams
-        ? `['${op.operationId}', params]`
-        : `['${op.operationId}']`;
-      const paramsArg = hasParams ? `params: ${paramsType}, ` : '';
-      const callArg = hasParams ? 'params' : '';
-      const enabledLine = hasParams && op.queryParams.some((p) => p.required)
-        ? `\n    enabled: !!params,`
-        : '';
-      const staleTime = staleTimeForTags(op.tags);
-      const staleTimeLine = staleTime !== null ? `\n    staleTime: staleMs(${staleTime}),` : '';
-
-      lines.push(
-        `export function ${hookName}(${paramsArg}options?: Omit<UseQueryOptions<${returnType}>, 'queryKey' | 'queryFn'>) {`,
-        `  return useQuery({`,
-        `    queryKey: ${keyExpr},`,
-        `    queryFn: () => client.${op.operationId}(${callArg}),${staleTimeLine}`,
-        `    ...options,${enabledLine}`,
-        `  });`,
-        `}`,
-        '',
-      );
-    } else {
-      // useMutation hook
-      const hookName = `use${op.operationId.charAt(0).toUpperCase()}${op.operationId.slice(1)}`;
-      const mutationType = hasParams ? paramsType : 'void';
-
-      lines.push(
-        `export function ${hookName}(options?: UseMutationOptions<${returnType}, Error, ${mutationType}>) {`,
-        `  return useMutation({`,
-        `    mutationFn: (${hasParams ? 'params' : '_'}: ${mutationType}) => client.${op.operationId}(${hasParams ? 'params' : ''}),`,
-        `    ...options,`,
-        `  });`,
-        `}`,
-        '',
-      );
-    }
-  }
-
-  return lines.join('\n');
-}
-
 // ── Generate index.ts ─────────────────────────────────────────────────────────
 
 function generateIndex(): string {
+  // Frontend is React-free; the legacy hooks.ts depends on @tanstack/react-query
+  // which is no longer installed. Only types + client are exported.
   return [
     '// ⚠️  AUTO-GENERATED — do not edit. Run `orca gen` to regenerate.',
     '',
     "export * from './types';",
     "export * from './client';",
-    "export * from './hooks';",
     '',
   ].join('\n');
 }
@@ -469,7 +401,6 @@ const ops = collectOps(spec);
 const files: [string, string][] = [
   ['types.ts', generateTypes(spec)],
   ['client.ts', generateClient(spec, ops)],
-  ['hooks.ts', generateHooks(ops)],
   ['index.ts', generateIndex()],
 ];
 
