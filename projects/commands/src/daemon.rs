@@ -1,5 +1,7 @@
 use anyhow::Result;
-use config::{APP_DAEMON_LOG, APP_NAME, APP_PLIST_LABEL, APP_STATE_DIR};
+use config::{APP_NAME, APP_STATE_DIR};
+#[cfg(target_os = "macos")]
+use config::{APP_DAEMON_LOG, APP_PLIST_LABEL};
 #[cfg(target_os = "linux")]
 use config::APP_SYSTEMD_SERVICE;
 use state::{self, DaemonMode};
