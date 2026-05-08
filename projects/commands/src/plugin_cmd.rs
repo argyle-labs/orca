@@ -348,7 +348,6 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     fn write_manifest(dir: &std::path::Path, content: &str) -> String {
         let path = dir.join("orca-plugin.toml");
