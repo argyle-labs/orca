@@ -61,7 +61,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: headless
+          shared-key: rust-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Check
         run: cargo check
@@ -84,7 +84,8 @@ jobs:
   # ── 3. Server (ui) ───────────────────────────────────────────────────────────
   # Builds the full CLI artifact with the frontend embedded via --features ui.
   # Depends on both the frontend dist artifact and a clean headless build.
-  # Only builds — no redundant check/clippy (headless covers those).
+  # Restores the same cache saved by server-headless — only the server crate
+  # itself needs recompiling for the ui feature; all deps are cache hits.
   server-ui:
     name: Server (ui) — Build with embedded frontend
     runs-on: ubuntu-latest
@@ -96,7 +97,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ui
+          shared-key: rust-${{ hashFiles('**/Cargo.lock') }}
 
       - uses: actions/download-artifact@v4
         with:
