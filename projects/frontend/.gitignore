@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+.svelte-kit/
+
+# Generated files
+*.tsbuildinfo
+coverage/
+playwright-report/
+
+# Env
+.env.local
+.env.*.local
+
+# Legacy (Next.js remnant)
+.next/
