@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Request {
     pub jsonrpc: String,
     pub id: Value,
@@ -25,6 +26,7 @@ impl Request {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Notification {
     pub jsonrpc: String,
     pub method: String,
@@ -77,6 +79,7 @@ impl ErrorObject {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Response {
     pub jsonrpc: String,
     pub id: Value,

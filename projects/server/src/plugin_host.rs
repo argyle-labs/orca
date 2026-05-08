@@ -4,16 +4,22 @@
 //! certificates signed by the orca CA. Dispatches JSON-RPC 2.0 frames.
 //!
 //! Phase A methods:
-//!   orca/hello  — version handshake; always responds ok for compatible SDKs
+//!   orca/hello  — version + capability handshake. Returns `full` when all
+//!                 required and optional methods are supported, `degraded`
+//!                 when only optional methods are missing, and `rejected`
+//!                 when the server version is below `core_min_required` or
+//!                 a required method is unavailable.
 
 use anyhow::{Context, Result};
 use orca_sdk::framing::{read_frame, write_frame};
 use orca_sdk::jsonrpc::{ErrorObject, Message, Response};
 use orca_sdk::pki;
-use orca_sdk::transport::HelloParams;
+use orca_sdk::transport::{HelloParams, HelloResult};
 use rustls::ServerConfig;
 use rustls::server::WebPkiClientVerifier;
 use serde_json::json;
+use std::cmp::Ordering;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -32,6 +38,15 @@ pub fn start(pki_dir: &Path, port: u16) -> tokio::task::JoinHandle<()> {
 }
 
 async fn run(pki_dir: &Path, port: u16) -> Result<()> {
+    let (listener, acceptor, addr) = bind(pki_dir, port).await?;
+    info!("[plugin-host] listening on {addr} (mTLS)");
+    serve(listener, acceptor).await
+}
+
+/// Bind a TCP listener and build the mTLS acceptor for the plugin host.
+/// Returns the listener, acceptor, and the actual bound address (useful when
+/// `port == 0` lets the OS pick an ephemeral port).
+pub async fn bind(pki_dir: &Path, port: u16) -> Result<(TcpListener, TlsAcceptor, SocketAddr)> {
     let server_bundle = pki::load_server(pki_dir).context("load server TLS bundle")?;
     let acceptor = build_acceptor(&server_bundle)?;
 
@@ -39,9 +54,13 @@ async fn run(pki_dir: &Path, port: u16) -> Result<()> {
     let listener = TcpListener::bind(&addr)
         .await
         .with_context(|| format!("plugin host bind {addr}"))?;
+    let local = listener.local_addr().context("listener.local_addr")?;
+    Ok((listener, acceptor, local))
+}
 
-    info!("[plugin-host] listening on {addr} (mTLS)");
-
+/// Run the accept loop until the listener errors. Each connection is handled
+/// in its own task.
+pub async fn serve(listener: TcpListener, acceptor: TlsAcceptor) -> Result<()> {
     loop {
         match listener.accept().await {
             Ok((tcp, peer)) => {
@@ -97,6 +116,10 @@ async fn handle_connection(
         };
 
         let response = dispatch(&frame);
+        if response.is_null() {
+            // Notification — no response on the wire.
+            continue;
+        }
         let response_bytes = serde_json::to_vec(&response)?;
         write_frame(&mut writer, &response_bytes).await?;
     }
@@ -132,6 +155,13 @@ fn dispatch(frame: &[u8]) -> serde_json::Value {
     }
 }
 
+/// Methods the plugin host implements. Plugins announce their required and
+/// optional method dependencies in `orca/hello`; we use this set to decide
+/// whether the connection is `full`, `degraded`, or `rejected`.
+pub const SUPPORTED_METHODS: &[&str] = &["orca/hello"];
+
+const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 fn handle_hello(id: serde_json::Value, params: Option<serde_json::Value>) -> serde_json::Value {
     let params: HelloParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
         Some(p) => p,
@@ -149,12 +179,113 @@ fn handle_hello(id: serde_json::Value, params: Option<serde_json::Value>) -> ser
         params.plugin_id, params.sdk_version, params.flavor
     );
 
-    let result = json!({
-        "server_version": env!("CARGO_PKG_VERSION"),
-        "ok": true,
-        "status": "full",
-        "methods": ["orca/hello"]
-    });
+    let supported: Vec<String> = SUPPORTED_METHODS.iter().map(|s| s.to_string()).collect();
+    let reject = |reason: String| HelloResult {
+        server_version: SERVER_VERSION.to_string(),
+        ok: false,
+        status: "rejected".into(),
+        methods: supported.clone(),
+        reason: Some(reason),
+    };
 
-    serde_json::to_value(Response::ok(id, result)).expect("Response serializes")
+    // 1. Version gate.
+    let result = match compare_semver(SERVER_VERSION, &params.core_min_required) {
+        Err(e) => reject(format!(
+            "invalid core_min_required '{}': {e}",
+            params.core_min_required
+        )),
+        Ok(Ordering::Less) => reject(format!(
+            "server {SERVER_VERSION} < core_min_required {}",
+            params.core_min_required
+        )),
+        Ok(_) => {
+            // 2. Required methods must all be supported.
+            let missing_required: Vec<String> = params
+                .methods_required
+                .iter()
+                .filter(|m| !SUPPORTED_METHODS.contains(&m.as_str()))
+                .cloned()
+                .collect();
+            if !missing_required.is_empty() {
+                reject(format!("missing required methods: {missing_required:?}"))
+            } else {
+                // 3. Optional methods missing → degraded.
+                let missing_optional: Vec<String> = params
+                    .methods_optional
+                    .iter()
+                    .filter(|m| !SUPPORTED_METHODS.contains(&m.as_str()))
+                    .cloned()
+                    .collect();
+                if missing_optional.is_empty() {
+                    HelloResult {
+                        server_version: SERVER_VERSION.to_string(),
+                        ok: true,
+                        status: "full".into(),
+                        methods: supported,
+                        reason: None,
+                    }
+                } else {
+                    HelloResult {
+                        server_version: SERVER_VERSION.to_string(),
+                        ok: true,
+                        status: "degraded".into(),
+                        methods: supported,
+                        reason: Some(format!(
+                            "optional methods unavailable: {missing_optional:?}"
+                        )),
+                    }
+                }
+            }
+        }
+    };
+
+    let value = serde_json::to_value(&result).expect("HelloResult serializes");
+    serde_json::to_value(Response::ok(id, value)).expect("Response serializes")
+}
+
+/// Compare two dotted-numeric versions (e.g. "0.1.0" vs "0.2.0").
+/// Pre-release / build metadata segments are not supported — returns Err.
+fn compare_semver(a: &str, b: &str) -> Result<Ordering> {
+    fn parse(v: &str) -> Result<Vec<u64>> {
+        if v.contains('-') || v.contains('+') {
+            anyhow::bail!("pre-release/build metadata not supported");
+        }
+        v.split('.')
+            .map(|p| {
+                p.parse::<u64>()
+                    .map_err(|e| anyhow::anyhow!("bad component '{p}': {e}"))
+            })
+            .collect()
+    }
+    let av = parse(a)?;
+    let bv = parse(b)?;
+    let len = av.len().max(bv.len());
+    for i in 0..len {
+        let l = av.get(i).copied().unwrap_or(0);
+        let r = bv.get(i).copied().unwrap_or(0);
+        match l.cmp(&r) {
+            Ordering::Equal => continue,
+            other => return Ok(other),
+        }
+    }
+    Ok(Ordering::Equal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn semver_compare() {
+        assert_eq!(compare_semver("0.1.0", "0.1.0").unwrap(), Ordering::Equal);
+        assert_eq!(compare_semver("0.2.0", "0.1.9").unwrap(), Ordering::Greater);
+        assert_eq!(compare_semver("0.1.0", "0.1.1").unwrap(), Ordering::Less);
+        assert_eq!(compare_semver("1.0", "1.0.0").unwrap(), Ordering::Equal);
+        assert_eq!(
+            compare_semver("2.0.0", "1.99.99").unwrap(),
+            Ordering::Greater
+        );
+        assert!(compare_semver("0.1.0-rc1", "0.1.0").is_err());
+        assert!(compare_semver("not-a-version", "0.1.0").is_err());
+    }
 }
