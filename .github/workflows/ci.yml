@@ -1,5 +1,9 @@
 name: CI
 
+# Fast feedback on every push: formatting, linting, and unit tests only.
+# No release builds, no integration tests, no cargo-chef.
+# Run the "Pipeline" workflow manually for full validation before a release.
+
 on:
   push:
     branches: [main]
@@ -9,13 +13,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # cargo-chef version pinned so the cook cache stays valid across runs
-  CARGO_CHEF_VERSION: "0.1.71"
 
 jobs:
-  # ── 1. Frontend ──────────────────────────────────────────────────────────────
+  # ── Frontend: type-check + unit tests (no build) ─────────────────────────
   frontend:
-    name: Frontend — Check, Test & Build
+    name: Frontend — Check & Test
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -38,208 +40,24 @@ jobs:
       - name: Test
         run: npm run test:run
 
-      - name: Build
-        run: npm run build
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: frontend-dist-${{ github.sha }}
-          path: projects/frontend/dist/
-          retention-days: 7
-
-  # ── 2. Rust dep cook (debug) ─────────────────────────────────────────────────
-  # Compiles every external crate in debug profile keyed on Cargo.lock.
-  # This is a cache hit on every run where deps didn't change.
-  # Workspace crates are NOT compiled here — just the recipe skeleton.
-  cook-dev:
-    name: Cook deps (debug)
+  # ── Rust: fmt + clippy + unit tests (no integration tests) ───────────────
+  rust:
+    name: Rust — Fmt, Clippy & Unit Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-chef
-        run: cargo install cargo-chef --version $CARGO_CHEF_VERSION --locked
+        with:
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: chef-dev-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Prepare recipe
-        run: cargo chef prepare --recipe-path recipe.json
-
-      - name: Cook deps (debug)
-        run: cargo chef cook --recipe-path recipe.json
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: recipe-${{ github.sha }}
-          path: recipe.json
-          retention-days: 1
-
-  # ── 3. Rust dep cook (release) ───────────────────────────────────────────────
-  # Same but release profile — needed by the two build jobs downstream.
-  cook-release:
-    name: Cook deps (release)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-chef
-        run: cargo install cargo-chef --version $CARGO_CHEF_VERSION --locked
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: chef-release-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Prepare recipe
-        run: cargo chef prepare --recipe-path recipe.json
-
-      - name: Cook deps (release)
-        run: cargo chef cook --release --recipe-path recipe.json
-
-  # ── 4. SDK isolation check ───────────────────────────────────────────────────
-  # Builds orca-sdk in isolation to verify it has no server/ui bleed.
-  # Any dep that should not be in the SDK surface will fail here before it
-  # reaches rust-ci or the release builds.
-  build-sdk:
-    name: SDK — Build & Test (isolation check)
-    runs-on: ubuntu-latest
-    needs: cook-dev
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-chef
-        run: cargo install cargo-chef --version $CARGO_CHEF_VERSION --locked
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: chef-dev-${{ hashFiles('**/Cargo.lock') }}
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: recipe-${{ github.sha }}
-
-      - name: Cook deps (ensure present)
-        run: cargo chef cook --recipe-path recipe.json
-
-      - name: Build SDK
-        run: cargo build -p orca-sdk
-
-      - name: Test SDK
-        run: cargo test -p orca-sdk
-
-      - name: Verify no server deps leaked in
-        run: |
-          # Fail if the SDK's dep tree pulls in orca-server or any server-only crate.
-          if cargo tree -p orca-sdk 2>&1 | grep -E "orca-server|orca-commands|orca-conversation|orca-agents|orca-llm|orca-scanner|rust-embed"; then
-            echo "ERROR: server-only crate found in orca-sdk dependency tree"
-            exit 1
-          fi
-
-  # ── 5. Rust CI — clippy + test ───────────────────────────────────────────────
-  # Deps are already compiled in cook-dev. Only workspace crates build here.
-  rust-ci:
-    name: Rust — Clippy & Test
-    runs-on: ubuntu-latest
-    needs: cook-dev
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-chef
-        run: cargo install cargo-chef --version $CARGO_CHEF_VERSION --locked
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: chef-dev-${{ hashFiles('**/Cargo.lock') }}
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: recipe-${{ github.sha }}
-
-      - name: Cook workspace (ensure deps present)
-        run: cargo chef cook --recipe-path recipe.json
+      - name: Format check
+        run: cargo fmt --all -- --check
 
       - name: Clippy
         run: RUSTFLAGS="-D warnings" cargo clippy --tests -- -D warnings
 
-      - name: Test
-        run: cargo test
-
-  # ── 5. Build headless (release) ──────────────────────────────────────────────
-  # Deps already compiled in cook-release. Only the server workspace crate builds.
-  build-headless:
-    name: Build headless (release)
-    runs-on: ubuntu-latest
-    needs: [rust-ci, cook-release]
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-chef
-        run: cargo install cargo-chef --version $CARGO_CHEF_VERSION --locked
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: chef-release-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Prepare recipe
-        run: cargo chef prepare --recipe-path recipe.json
-
-      - name: Cook deps (ensure present)
-        run: cargo chef cook --release --recipe-path recipe.json
-
-      - name: Build (linux/x86_64-gnu, headless)
-        run: cargo build --release --target x86_64-unknown-linux-gnu --manifest-path projects/server/Cargo.toml
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: orca-headless-x86_64-unknown-linux-gnu-${{ github.sha }}
-          path: target/x86_64-unknown-linux-gnu/release/orca
-          retention-days: 7
-
-  # ── 6. Build UI (release) ────────────────────────────────────────────────────
-  # Deps already compiled. Only server crate + rust-embed asset bundling.
-  build-ui:
-    name: Build UI (release)
-    runs-on: ubuntu-latest
-    needs: [frontend, rust-ci, cook-release]
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-chef
-        run: cargo install cargo-chef --version $CARGO_CHEF_VERSION --locked
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: chef-release-${{ hashFiles('**/Cargo.lock') }}
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: frontend-dist-${{ github.sha }}
-          path: projects/frontend/dist/
-
-      - name: Prepare recipe
-        run: cargo chef prepare --recipe-path recipe.json
-
-      - name: Cook deps (ensure present)
-        run: cargo chef cook --release --recipe-path recipe.json
-
-      - name: Build (linux/x86_64-gnu, ui)
-        run: cargo build --release --target x86_64-unknown-linux-gnu --features ui --manifest-path projects/server/Cargo.toml
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: orca-x86_64-unknown-linux-gnu-${{ github.sha }}
-          path: target/x86_64-unknown-linux-gnu/release/orca
-          retention-days: 7
+      - name: Unit tests
+        run: cargo test --lib --workspace
