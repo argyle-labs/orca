@@ -72,6 +72,52 @@ pub fn find_other_orca_pids() -> Vec<u32> {
     }
 }
 
+/// Produce a terminal-friendly summary of a tool result.
+pub fn summarize_result(tool: &str, content: &str, is_error: bool) -> String {
+    if is_error {
+        return truncate_preview(content, 300);
+    }
+    match tool {
+        "glob" => {
+            let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+            if lines.is_empty() {
+                return "(no matches)".to_string();
+            }
+            format!("{} file(s) matched", lines.len())
+        }
+        "grep" => {
+            let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+            if lines.is_empty() {
+                return "(no matches)".to_string();
+            }
+            let files: std::collections::HashSet<&str> =
+                lines.iter().filter_map(|l| l.split(':').next()).collect();
+            format!("{} match(es) in {} file(s)", lines.len(), files.len())
+        }
+        "read_file" => {
+            let lines = content.lines().count();
+            format!("{lines} lines")
+        }
+        "write_file" => content.to_string(),
+        "edit_file" => content.to_string(),
+        "bash" => {
+            let mut non_empty = content.lines().filter(|l| !l.trim().is_empty());
+            match non_empty.next() {
+                None => "(no output)".to_string(),
+                Some(first) => {
+                    let rest = non_empty.count();
+                    if rest == 0 {
+                        truncate_preview(first, 120)
+                    } else {
+                        format!("{} (+{rest} more lines)", truncate_preview(first, 80))
+                    }
+                }
+            }
+        }
+        _ => truncate_preview(content, 200),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,51 +239,5 @@ mod tests {
         let result = summarize_result("unknown_tool", &content, false);
         assert!(result.ends_with('…'));
         assert!(result.chars().count() <= 202);
-    }
-}
-
-/// Produce a terminal-friendly summary of a tool result.
-pub fn summarize_result(tool: &str, content: &str, is_error: bool) -> String {
-    if is_error {
-        return truncate_preview(content, 300);
-    }
-    match tool {
-        "glob" => {
-            let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
-            if lines.is_empty() {
-                return "(no matches)".to_string();
-            }
-            format!("{} file(s) matched", lines.len())
-        }
-        "grep" => {
-            let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
-            if lines.is_empty() {
-                return "(no matches)".to_string();
-            }
-            let files: std::collections::HashSet<&str> =
-                lines.iter().filter_map(|l| l.split(':').next()).collect();
-            format!("{} match(es) in {} file(s)", lines.len(), files.len())
-        }
-        "read_file" => {
-            let lines = content.lines().count();
-            format!("{lines} lines")
-        }
-        "write_file" => content.to_string(),
-        "edit_file" => content.to_string(),
-        "bash" => {
-            let mut non_empty = content.lines().filter(|l| !l.trim().is_empty());
-            match non_empty.next() {
-                None => "(no output)".to_string(),
-                Some(first) => {
-                    let rest = non_empty.count();
-                    if rest == 0 {
-                        truncate_preview(first, 120)
-                    } else {
-                        format!("{} (+{rest} more lines)", truncate_preview(first, 80))
-                    }
-                }
-            }
-        }
-        _ => truncate_preview(content, 200),
     }
 }
