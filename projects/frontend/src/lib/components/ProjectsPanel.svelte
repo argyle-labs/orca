@@ -97,7 +97,7 @@
   onMount(() => {
     projectsOpen = localStorage.getItem('sidebar-projects-open') === '1';
     pollProjects();
-    listSpecs().then(s => { specs = s as SpecMeta[]; }).catch(() => {});
+    listSpecs().then(s => { specs = s as unknown as SpecMeta[]; }).catch(() => {});
     listSchemaDatabases().then(s => { schemas = s as DbInfo[]; }).catch(() => {});
     const t = setInterval(pollProjects, POLL_MS);
     return () => { clearInterval(t); };
@@ -186,8 +186,9 @@
   <Modal open={!!openProject} onclose={() => { openProject = null; projActionsOpen = false; }} size="full"
          title="{openProject.name} — {openProject.path.replace(HOME + '/', '~/')}">
     {#snippet children()}
-      {@const modalSpec   = findSpec(openProject.name)}
-      {@const modalSchema = findSchema(openProject.name)}
+      {@const proj        = openProject!}
+      {@const modalSpec   = findSpec(proj.name)}
+      {@const modalSchema = findSchema(proj.name)}
 
       {#if projActionsOpen}
         <div class="dd-overlay" role="presentation" onclick={() => projActionsOpen = false} onkeydown={() => projActionsOpen = false}></div>
@@ -195,7 +196,7 @@
 
       <!-- Compact header: status + label + ⋯ menu (all actions) + links -->
       <div class="proj-head">
-        <StatusDot ok={openProject.running} />
+        <StatusDot ok={proj.running} />
         <span class="proj-title">Project</span>
         <span class="proj-src">rebuy CLI</span>
 
@@ -235,13 +236,13 @@
 
       <!-- Compose + containers -->
       <div class="compose-wrap">
-        <DockerComposePanel projectPath={openProject.path} busy={projBusy}
+        <DockerComposePanel projectPath={proj.path} busy={projBusy}
                             onservicesloaded={(svcs) => { projDockerSvcs = svcs; }}
                             onoutput={(out, lbl) => { projOutput = out; projOutputLabel = lbl; }} />
       </div>
 
       <!-- Terminal — hero, fills remaining space -->
-      <LogViewer projectPath={openProject.path}
+      <LogViewer projectPath={proj.path}
                  services={projDockerSvcs}
                  actionOutput={projOutput}
                  actionLabel={projOutputLabel}
