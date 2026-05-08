@@ -331,10 +331,19 @@ async fn mcp_mappings_create_and_delete() {
     let app = TestApp::new();
     let db = app.db_path.clone();
     TestApp::with_db(&db, || async {
+        // Register the MCP server first (mappings have a FK constraint on mcp_name).
+        let (status, body) = app
+            .post(
+                "/api/mcp/servers",
+                json!({ "name": "test-server", "command": "echo", "args": [], "env": {}, "enabled": true }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "add server failed: {body}");
+
         let (status, body) = app
             .post(
                 "/api/mcp/mappings",
-                json!({ "orca_tool": "test_map_tool", "mcp_server": "test-server", "mcp_tool": "real_tool" }),
+                json!({ "name": "test-server", "orca_tool": "test_map_tool", "external_tool": "real_tool" }),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "create mapping failed: {body}");
@@ -536,12 +545,14 @@ async fn specs_list_returns_array() {
 }
 
 #[tokio::test]
-async fn spec_get_unknown_returns_404() {
+async fn spec_get_unknown_triggers_background_sync() {
     let app = TestApp::new();
     let db = app.db_path.clone();
     TestApp::with_db(&db, || async {
-        let (status, _) = app.get("/api/specs/no-such-spec-xyz").await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, body) = app.get("/api/specs/no-such-spec-xyz").await;
+        // Unknown specs return 202 and kick off a background sync attempt.
+        assert_eq!(status, StatusCode::ACCEPTED, "body: {body}");
+        assert_eq!(body["generating"], json!(true));
     })
     .await;
 }
