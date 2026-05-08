@@ -55,7 +55,6 @@ fn rebuy_only_skip(pool: &McpPool) -> Vec<String> {
 fn rebuy_mcp_binary_exists() {
     if !std::path::Path::new(REBUY_MCP_ARG).exists() {
         eprintln!("skipping: rebuy MCP server binary not found at {REBUY_MCP_ARG}");
-        return;
     }
 }
 
@@ -104,7 +103,6 @@ fn rebuy_db_pool_read_configs_contains_rebuy() {
         eprintln!(
             "skipping: rebuy not found in McpPool configs — check plugin is enabled and has mcp_command"
         );
-        return;
     }
 }
 

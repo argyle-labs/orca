@@ -1,3 +1,6 @@
+// Serializes concurrent test execution with a std::Mutex held across await — intentional.
+#![allow(clippy::await_holding_lock)]
+
 /// LM Studio smoke tests — validate end-to-end communication with local models.
 ///
 /// Each test owns the model lifecycle: unload everything, load its model, run,
