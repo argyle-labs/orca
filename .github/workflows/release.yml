@@ -91,7 +91,7 @@ jobs:
           TOML=projects/server/Cargo.toml
           CURRENT=$(grep '^version' "$TOML" | head -1 | sed 's/version = "\(.*\)"/\1/')
           sed -i "0,/^version = \"${CURRENT}\"/s//version = \"${NEW}\"/" "$TOML"
-          cargo update -p brain --precise "$NEW" 2>/dev/null || cargo update -p brain || true
+          cargo update -p orca --precise "$NEW" 2>/dev/null || cargo update -p orca || true
 
       - name: Commit and tag
         run: |
