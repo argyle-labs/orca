@@ -1,4 +1,0 @@
-[submodule "projects/frontend"]
-	path = projects/frontend
-	url = https://github.com/scottdkey/rebuy-docs.git
-	branch = main
