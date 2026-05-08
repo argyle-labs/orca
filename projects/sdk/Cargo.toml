@@ -18,8 +18,9 @@ anyhow     = "1"
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Async runtime (net + io-util for TCP streams; sync for Mutex)
-tokio = { version = "1", features = ["net", "io-util", "sync"] }
+# Async runtime: net + io-util for TCP streams; sync for Mutex/oneshot/broadcast/mpsc;
+# rt for the background reader task and notification pumps spawned by TcpTransport.
+tokio = { version = "1", features = ["net", "io-util", "sync", "rt"] }
 
 # TLS
 rustls          = { version = "0.23", default-features = false, features = ["ring"] }

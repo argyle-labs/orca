@@ -14,17 +14,54 @@ use anyhow::{Context, Result};
 use orca_sdk::framing::{read_frame, write_frame};
 use orca_sdk::jsonrpc::{ErrorObject, Message, Response};
 use orca_sdk::pki;
-use orca_sdk::transport::{HelloParams, HelloResult, TypesDeclareParams, TypesDeclareResult};
+use orca_sdk::transport::{
+    CONTEXT_EVENT_METHOD, ContextEvent, ContextPublishParams, ContextSubscribeParams,
+    ContextSubscribeResult, ContextUnsubscribeParams, HelloParams, HelloResult, TypedValue,
+    TypesDeclareParams, TypesDeclareResult,
+};
 use rustls::ServerConfig;
 use rustls::server::WebPkiClientVerifier;
 use serde_json::json;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::net::TcpListener;
+use tokio::sync::{broadcast, mpsc};
 use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
+
+/// Tuple sent across a context's broadcast channel: `(context_id, value)`.
+type ContextEnvelope = (String, TypedValue);
+type ContextChannels = HashMap<String, broadcast::Sender<ContextEnvelope>>;
+
+/// In-memory registry of named contexts. Each context has an associated
+/// broadcast channel that fans `TypedValue` events out to all current
+/// subscribers. Contexts are created lazily on first publish or subscribe.
+#[derive(Clone, Default)]
+pub struct ContextRegistry {
+    inner: Arc<StdMutex<ContextChannels>>,
+}
+
+impl ContextRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Get the broadcast sender for `context_id`, creating it if needed.
+    /// The tuple sent is `(context_id, value)` so subscriber tasks can label
+    /// outgoing events without round-tripping through the registry.
+    fn channel(&self, context_id: &str) -> broadcast::Sender<ContextEnvelope> {
+        let mut map = self.inner.lock().unwrap();
+        if let Some(tx) = map.get(context_id) {
+            return tx.clone();
+        }
+        let (tx, _) = broadcast::channel(256);
+        map.insert(context_id.to_string(), tx.clone());
+        tx
+    }
+}
 
 /// Start the plugin host in a background task. Returns immediately.
 /// If the PKI directory doesn't contain a CA, logs a warning and skips the host.
@@ -40,7 +77,7 @@ pub fn start(pki_dir: &Path, port: u16) -> tokio::task::JoinHandle<()> {
 async fn run(pki_dir: &Path, port: u16) -> Result<()> {
     let (listener, acceptor, addr) = bind(pki_dir, port).await?;
     info!("[plugin-host] listening on {addr} (mTLS)");
-    serve(listener, acceptor).await
+    serve(listener, acceptor, ContextRegistry::new()).await
 }
 
 /// Bind a TCP listener and build the mTLS acceptor for the plugin host.
@@ -59,16 +96,22 @@ pub async fn bind(pki_dir: &Path, port: u16) -> Result<(TcpListener, TlsAcceptor
 }
 
 /// Run the accept loop until the listener errors. Each connection is handled
-/// in its own task.
-pub async fn serve(listener: TcpListener, acceptor: TlsAcceptor) -> Result<()> {
+/// in its own task. The supplied `registry` is shared across all connections
+/// so a publish on one connection fans out to subscribers on others.
+pub async fn serve(
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+    registry: ContextRegistry,
+) -> Result<()> {
     loop {
         match listener.accept().await {
             Ok((tcp, peer)) => {
                 let acceptor = acceptor.clone();
+                let registry = registry.clone();
                 tokio::spawn(async move {
                     match acceptor.accept(tcp).await {
                         Ok(tls) => {
-                            if let Err(e) = handle_connection(tls).await {
+                            if let Err(e) = handle_connection(tls, registry).await {
                                 warn!("[plugin-host] {peer} connection error: {e:#}");
                             }
                         }
@@ -99,37 +142,68 @@ fn build_acceptor(bundle: &pki::NodeBundle) -> Result<TlsAcceptor> {
 
 /// Per-connection state carried across frames. Set by `orca/hello`; read by
 /// every subsequent method that needs the plugin's identity.
-#[derive(Default)]
 struct ConnState {
     plugin_id: Option<String>,
+    registry: ContextRegistry,
+    /// Notifications produced by handlers (and by subscription pumps) that
+    /// the writer half of the connection should serialize and send.
+    notify_tx: mpsc::UnboundedSender<serde_json::Value>,
+    /// Active subscriptions; aborting the JoinHandle stops forwarding events.
+    subscriptions: HashMap<String, tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for ConnState {
+    fn drop(&mut self) {
+        for (_, handle) in self.subscriptions.drain() {
+            handle.abort();
+        }
+    }
 }
 
 async fn handle_connection(
     tls: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    registry: ContextRegistry,
 ) -> Result<()> {
     let (mut reader, mut writer) = tokio::io::split(tls);
-    let mut state = ConnState::default();
+    let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<serde_json::Value>();
+    let mut state = ConnState {
+        plugin_id: None,
+        registry,
+        notify_tx,
+        subscriptions: HashMap::new(),
+    };
 
     loop {
-        let frame = match read_frame(&mut reader).await {
-            Ok(f) => f,
-            Err(e) => {
-                // EOF or clean disconnect — not an error worth logging.
-                let msg = e.to_string();
-                if msg.contains("unexpected end of file") || msg.contains("early eof") {
-                    break;
-                }
-                return Err(e);
-            }
-        };
+        tokio::select! {
+            biased;
 
-        let response = dispatch(&mut state, &frame);
-        if response.is_null() {
-            // Notification — no response on the wire.
-            continue;
+            // Outgoing notifications (from subscription pumps) — flush first
+            // so events don't queue up indefinitely behind a slow client.
+            Some(notif) = notify_rx.recv() => {
+                let bytes = serde_json::to_vec(&notif)?;
+                write_frame(&mut writer, &bytes).await?;
+            }
+
+            // Incoming frames.
+            frame = read_frame(&mut reader) => {
+                let frame = match frame {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if msg.contains("unexpected end of file") || msg.contains("early eof") {
+                            break;
+                        }
+                        return Err(e);
+                    }
+                };
+                let response = dispatch(&mut state, &frame);
+                if response.is_null() {
+                    continue;
+                }
+                let response_bytes = serde_json::to_vec(&response)?;
+                write_frame(&mut writer, &response_bytes).await?;
+            }
         }
-        let response_bytes = serde_json::to_vec(&response)?;
-        write_frame(&mut writer, &response_bytes).await?;
     }
 
     Ok(())
@@ -153,6 +227,9 @@ fn dispatch(state: &mut ConnState, frame: &[u8]) -> serde_json::Value {
             match req.method.as_str() {
                 "orca/hello" => handle_hello(state, id, req.params),
                 "orca/types.declare" => handle_types_declare(state, id, req.params),
+                "orca/context.publish" => handle_context_publish(state, id, req.params),
+                "orca/context.subscribe" => handle_context_subscribe(state, id, req.params),
+                "orca/context.unsubscribe" => handle_context_unsubscribe(state, id, req.params),
                 other => {
                     serde_json::to_value(Response::err(id, ErrorObject::method_not_found(other)))
                         .expect("Response serializes")
@@ -167,7 +244,13 @@ fn dispatch(state: &mut ConnState, frame: &[u8]) -> serde_json::Value {
 /// Methods the plugin host implements. Plugins announce their required and
 /// optional method dependencies in `orca/hello`; we use this set to decide
 /// whether the connection is `full`, `degraded`, or `rejected`.
-pub const SUPPORTED_METHODS: &[&str] = &["orca/hello", "orca/types.declare"];
+pub const SUPPORTED_METHODS: &[&str] = &[
+    "orca/hello",
+    "orca/types.declare",
+    "orca/context.publish",
+    "orca/context.subscribe",
+    "orca/context.unsubscribe",
+];
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -345,6 +428,148 @@ fn handle_types_declare(
     let result = TypesDeclareResult { accepted };
     let value = serde_json::to_value(&result).expect("TypesDeclareResult serializes");
     serde_json::to_value(Response::ok(id, value)).expect("Response serializes")
+}
+
+// ── context.* handlers ────────────────────────────────────────────────────────
+
+fn require_hello(
+    state: &ConnState,
+    id: &serde_json::Value,
+    method: &str,
+) -> Option<serde_json::Value> {
+    if state.plugin_id.is_some() {
+        None
+    } else {
+        Some(
+            serde_json::to_value(Response::err(
+                id.clone(),
+                ErrorObject::invalid_params(&format!("{method} requires prior orca/hello")),
+            ))
+            .expect("Response serializes"),
+        )
+    }
+}
+
+fn handle_context_publish(
+    state: &ConnState,
+    id: serde_json::Value,
+    params: Option<serde_json::Value>,
+) -> serde_json::Value {
+    if let Some(reject) = require_hello(state, &id, "orca/context.publish") {
+        return reject;
+    }
+    let params: ContextPublishParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
+        Some(p) => p,
+        None => {
+            return serde_json::to_value(Response::err(
+                id,
+                ErrorObject::invalid_params("orca/context.publish requires { context_id, value }"),
+            ))
+            .expect("Response serializes");
+        }
+    };
+    let tx = state.registry.channel(&params.context_id);
+    // Ignore SendError when no current subscribers — message is just dropped.
+    let _ = tx.send((params.context_id, params.value));
+    serde_json::to_value(Response::ok(id, json!({ "ok": true }))).expect("Response serializes")
+}
+
+fn handle_context_subscribe(
+    state: &mut ConnState,
+    id: serde_json::Value,
+    params: Option<serde_json::Value>,
+) -> serde_json::Value {
+    if let Some(reject) = require_hello(state, &id, "orca/context.subscribe") {
+        return reject;
+    }
+    let params: ContextSubscribeParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
+        Some(p) => p,
+        None => {
+            return serde_json::to_value(Response::err(
+                id,
+                ErrorObject::invalid_params(
+                    "orca/context.subscribe requires { context_id, type_filter? }",
+                ),
+            ))
+            .expect("Response serializes");
+        }
+    };
+
+    let subscription_id = uuid::Uuid::new_v4().to_string();
+    let mut rx = state.registry.channel(&params.context_id).subscribe();
+    let notify_tx = state.notify_tx.clone();
+    let filter = params.type_filter;
+    let sub_id_for_task = subscription_id.clone();
+
+    let handle = tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok((ctx_id, value)) => {
+                    if !filter.is_empty() && !filter.iter().any(|t| t == &value.type_id) {
+                        continue;
+                    }
+                    let event = ContextEvent {
+                        subscription_id: sub_id_for_task.clone(),
+                        context_id: ctx_id,
+                        value,
+                    };
+                    let notif = json!({
+                        "jsonrpc": "2.0",
+                        "method": CONTEXT_EVENT_METHOD,
+                        "params": event,
+                    });
+                    if notify_tx.send(notif).is_err() {
+                        break; // connection closed
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    state.subscriptions.insert(subscription_id.clone(), handle);
+    let result = ContextSubscribeResult { subscription_id };
+    let value = serde_json::to_value(&result).expect("ContextSubscribeResult serializes");
+    serde_json::to_value(Response::ok(id, value)).expect("Response serializes")
+}
+
+fn handle_context_unsubscribe(
+    state: &mut ConnState,
+    id: serde_json::Value,
+    params: Option<serde_json::Value>,
+) -> serde_json::Value {
+    if let Some(reject) = require_hello(state, &id, "orca/context.unsubscribe") {
+        return reject;
+    }
+    let params: ContextUnsubscribeParams = match params.and_then(|p| serde_json::from_value(p).ok())
+    {
+        Some(p) => p,
+        None => {
+            return serde_json::to_value(Response::err(
+                id,
+                ErrorObject::invalid_params(
+                    "orca/context.unsubscribe requires { subscription_id }",
+                ),
+            ))
+            .expect("Response serializes");
+        }
+    };
+    match state.subscriptions.remove(&params.subscription_id) {
+        Some(handle) => {
+            handle.abort();
+            serde_json::to_value(Response::ok(id, json!({ "ok": true })))
+                .expect("Response serializes")
+        }
+        None => serde_json::to_value(Response::err(
+            id,
+            ErrorObject::invalid_params(&format!(
+                "unknown subscription_id '{}'",
+                params.subscription_id
+            )),
+        ))
+        .expect("Response serializes"),
+    }
 }
 
 /// Compare two dotted-numeric versions (e.g. "0.1.0" vs "0.2.0").
