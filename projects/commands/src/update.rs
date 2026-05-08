@@ -308,17 +308,17 @@ mod tests {
 
     #[test]
     fn channel_from_str_known() {
-        assert_eq!(Channel::from_str("stable"), Channel::Stable);
-        assert_eq!(Channel::from_str("rc"),     Channel::Rc);
-        assert_eq!(Channel::from_str("beta"),   Channel::Beta);
-        assert_eq!(Channel::from_str("alpha"),  Channel::Alpha);
+        assert_eq!(Channel::parse("stable"), Channel::Stable);
+        assert_eq!(Channel::parse("rc"),     Channel::Rc);
+        assert_eq!(Channel::parse("beta"),   Channel::Beta);
+        assert_eq!(Channel::parse("alpha"),  Channel::Alpha);
     }
 
     #[test]
     fn channel_from_str_unknown_defaults_to_stable() {
-        assert_eq!(Channel::from_str(""),        Channel::Stable);
-        assert_eq!(Channel::from_str("nightly"), Channel::Stable);
-        assert_eq!(Channel::from_str("STABLE"),  Channel::Stable); // case-sensitive
+        assert_eq!(Channel::parse(""),        Channel::Stable);
+        assert_eq!(Channel::parse("nightly"), Channel::Stable);
+        assert_eq!(Channel::parse("STABLE"),  Channel::Stable); // case-sensitive
     }
 
     // ── Channel::accepts ──────────────────────────────────────────────────────
