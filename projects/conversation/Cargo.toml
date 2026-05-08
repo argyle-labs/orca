@@ -1,7 +1,7 @@
 [package]
 name = "orca-conversation"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
 
 [lib]
 name = "conversation"
@@ -27,10 +27,10 @@ uuid       = { version = "1", features = ["v4"] }
 
 # Terminal
 colored         = "2"
-rustyline       = "14"
-crossterm       = { version = "0.28", features = ["event-stream"] }
-ratatui         = "0.29"
-dirs            = "5"
+rustyline       = "18"
+crossterm       = { version = "0.29", features = ["event-stream"] }
+ratatui         = "0.30"
+dirs            = "6"
 unicode-width   = "0.2"
 
 [dev-dependencies]

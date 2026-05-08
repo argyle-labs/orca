@@ -514,7 +514,7 @@ fn load_or_create_key() -> Result<String> {
 
     // First run: generate key, write with restricted permissions
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
     let hex: String = bytes.iter().fold(String::new(), |mut s, b| {
         use std::fmt::Write;
         let _ = write!(s, "{b:02x}");
