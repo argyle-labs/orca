@@ -7,12 +7,12 @@
 //! Run with:
 //!   cargo test -p orca --test api
 //!
-//! DB mutation tests share a global mutex so they never race on the env var.
+//! DB mutation tests use a thread-local DB path override so parallel tests don't race.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use axum::body::Body;
+extern crate db;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -20,9 +20,6 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 // ── Test harness ──────────────────────────────────────────────────────────────
-
-/// Serialises all DB-mutating tests so `ORCA_DB_PATH` doesn't race.
-static DB_LOCK: Mutex<()> = Mutex::new(());
 
 struct TestApp {
     router: axum::Router,
@@ -93,9 +90,9 @@ impl TestApp {
         self.call(req).await
     }
 
-    /// Set ORCA_DB_PATH to this app's isolated DB for the duration of the closure.
-    /// Holds the global mutex so concurrent tests don't stomp each other.
-    #[allow(clippy::ptr_arg, clippy::await_holding_lock)]
+    /// Point `open_default()` at this test's isolated DB for the duration of the closure.
+    /// Uses a thread-local override so parallel tests on different threads don't race.
+    #[allow(clippy::ptr_arg)]
     fn with_db<F, Fut>(db_path: &PathBuf, f: F) -> impl std::future::Future<Output = ()>
     where
         F: FnOnce() -> Fut,
@@ -103,13 +100,9 @@ impl TestApp {
     {
         let db_path = db_path.to_string_lossy().to_string();
         async move {
-            // Recover from a poisoned mutex — a panic in a prior test shouldn't block all others.
-            let _guard = DB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            // SAFETY: guarded by DB_LOCK — no other thread touches ORCA_DB_PATH concurrently.
-            unsafe { std::env::set_var("ORCA_DB_PATH", &db_path) };
+            db::set_thread_db_path(Some(&db_path));
             f().await;
-            // SAFETY: same guard holds.
-            unsafe { std::env::remove_var("ORCA_DB_PATH") };
+            db::set_thread_db_path(None);
         }
     }
 }
