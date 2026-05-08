@@ -1,0 +1,124 @@
+name: Pipeline
+
+# Full validation: integration tests, SDK isolation, frontend build.
+# Run this manually before cutting a release.
+# Uses cargo-chef to cache dependency compilation across jobs.
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_CHEF_VERSION: "0.1.71"
+
+jobs:
+  # ── Frontend: check + test + build ───────────────────────────────────────
+  frontend:
+    name: Frontend — Check, Test & Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: projects/frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: projects/frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run check
+
+      - name: Test
+        run: npm run test:run
+
+      - name: Build
+        run: npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: projects/frontend/dist/
+          retention-days: 3
+
+  # ── Rust dep cook (debug) ─────────────────────────────────────────────────
+  cook-dev:
+    name: Cook deps (debug)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-chef
+        run: cargo install cargo-chef --version $CARGO_CHEF_VERSION --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: chef-dev-${{ hashFiles('**/Cargo.lock') }}
+      - name: Prepare recipe
+        run: cargo chef prepare --recipe-path recipe.json
+      - name: Cook deps (debug)
+        run: cargo chef cook --recipe-path recipe.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recipe-${{ github.sha }}
+          path: recipe.json
+          retention-days: 1
+
+  # ── SDK isolation check ───────────────────────────────────────────────────
+  build-sdk:
+    name: SDK — Build & Test (isolation check)
+    runs-on: ubuntu-latest
+    needs: cook-dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-chef
+        run: cargo install cargo-chef --version $CARGO_CHEF_VERSION --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: chef-dev-${{ hashFiles('**/Cargo.lock') }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: recipe-${{ github.sha }}
+      - name: Cook deps (ensure present)
+        run: cargo chef cook --recipe-path recipe.json
+      - name: Build SDK
+        run: cargo build -p orca-sdk
+      - name: Test SDK
+        run: cargo test -p orca-sdk
+      - name: Verify no server deps leaked in
+        run: |
+          if cargo tree -p orca-sdk 2>&1 | grep -E "orca-server|orca-commands|orca-conversation|orca-agents|orca-llm|orca-scanner|rust-embed"; then
+            echo "ERROR: server-only crate found in orca-sdk dependency tree"
+            exit 1
+          fi
+
+  # ── Full Rust test suite (unit + integration) ─────────────────────────────
+  rust-ci:
+    name: Rust — Full Test Suite
+    runs-on: ubuntu-latest
+    needs: cook-dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install cargo-chef
+        run: cargo install cargo-chef --version $CARGO_CHEF_VERSION --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: chef-dev-${{ hashFiles('**/Cargo.lock') }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: recipe-${{ github.sha }}
+      - name: Cook deps (ensure present)
+        run: cargo chef cook --recipe-path recipe.json
+      - name: Clippy
+        run: RUSTFLAGS="-D warnings" cargo clippy --tests -- -D warnings
+      - name: Full test suite
+        run: cargo test

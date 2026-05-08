@@ -1,33 +1,26 @@
 name: Release — orca
 
-# Automatic: fires after CI passes on main and auto-detects the bump level
-# from conventional commits since the last release tag.
+# Manual release: you choose the bump type and channel.
+# Version number is auto-computed from the latest release tag — no manual
+# editing of Cargo.toml or version strings required.
 #
-# Bump rules (highest wins):
-#   feat!: / BREAKING CHANGE  → major
-#   feat:                      → minor
-#   fix: / perf: / refactor:   → patch
-#   chore: / docs: / ci: etc.  → skip (no release)
-#
-# Manual override: workflow_dispatch lets you force a bump level or channel.
+# Typical flow:
+#   1. Run Pipeline workflow to validate everything.
+#   2. Run this workflow (patch/minor/major + alpha/rc/stable).
+#   3. If pre-release: run Promote workflow when ready to go stable.
 
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
-    branches: [main]
-
   workflow_dispatch:
     inputs:
       bump:
-        description: "Version bump (blank = auto-detect from commits)"
-        required: false
+        description: "Version bump"
+        required: true
         type: choice
-        options: ['', patch, minor, major]
-        default: ''
+        options: [patch, minor, major]
+        default: patch
       channel:
         description: "Release channel"
-        required: false
+        required: true
         type: choice
         options: [stable, alpha, beta, rc]
         default: stable
@@ -44,88 +37,35 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # ── 1. Decide whether to release and compute the version ─────────────────
+  # ── 1. Compute version, commit to Cargo.toml, tag ────────────────────────
   version:
     runs-on: ubuntu-latest
     outputs:
-      skip:          ${{ steps.bump.outputs.skip }}
       version:       ${{ steps.bump.outputs.version }}
       tag:           ${{ steps.bump.outputs.tag }}
       is_prerelease: ${{ steps.bump.outputs.is_prerelease }}
       previous:      ${{ steps.bump.outputs.previous }}
-      bump:          ${{ steps.bump.outputs.bump }}
       channel:       ${{ steps.bump.outputs.channel }}
     steps:
       - uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
-          # For workflow_run, check out the exact commit CI validated.
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Compute version
         id: bump
         run: |
           set -euo pipefail
-
-          # ── Guard: only proceed when triggered automatically if CI passed ──
-          if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            CONCLUSION="${{ github.event.workflow_run.conclusion }}"
-            if [ "$CONCLUSION" != "success" ]; then
-              echo "CI conclusion=$CONCLUSION — skipping release"
-              echo "skip=true" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-          fi
-
           git fetch --tags --quiet
 
-          # ── Guard: skip if HEAD is itself a release commit (prevents loop) ──
-          HEAD_MSG=$(git log -1 --pretty=format:"%s")
-          if echo "$HEAD_MSG" | grep -qE '^chore: release v'; then
-            echo "HEAD is a release commit — skipping"
-            echo "skip=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          # ── Resolve channel ──────────────────────────────────────────────────
           CHANNEL="${{ inputs.channel }}"
-          [ -z "$CHANNEL" ] && CHANNEL="stable"
+          BUMP="${{ inputs.bump }}"
 
-          # ── Latest stable tag as the version base ──────────────────────────
+          # Latest stable tag as the version base
           LATEST_STABLE=$(git tag -l 'v[0-9]*' \
             | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
           LATEST_STABLE=${LATEST_STABLE:-v0.0.0}
 
-          # ── Commits since last stable tag (excluding release chore commits) ─
-          if [ "$LATEST_STABLE" = "v0.0.0" ]; then
-            COMMITS=$(git log --pretty=format:"%s" \
-              | grep -v '^chore: release v' | head -200 || true)
-          else
-            COMMITS=$(git log "${LATEST_STABLE}..HEAD" --pretty=format:"%s" \
-              | grep -v '^chore: release v' | head -200 || true)
-          fi
-
-          # ── Auto-detect or use override ─────────────────────────────────────
-          BUMP_OVERRIDE="${{ inputs.bump }}"
-
-          if [ -n "$BUMP_OVERRIDE" ]; then
-            BUMP="$BUMP_OVERRIDE"
-          else
-            if echo "$COMMITS" | grep -qiE '^[a-z]+(\([^)]*\))?!:|BREAKING[[:space:]]CHANGE'; then
-              BUMP="major"
-            elif echo "$COMMITS" | grep -qiE '^feat(\([^)]*\))?[:(]|^feat:'; then
-              BUMP="minor"
-            elif echo "$COMMITS" | grep -qiE '^(fix|perf|refactor)(\([^)]*\))?[:(]'; then
-              BUMP="patch"
-            else
-              echo "No releasable commits since $LATEST_STABLE — skipping"
-              echo "skip=true" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-          fi
-
-          # ── Compute next version ─────────────────────────────────────────────
           VERSION="${LATEST_STABLE#v}"
           IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
 
@@ -154,16 +94,13 @@ jobs:
           fi
 
           echo "Releasing: $LATEST_STABLE → v$NEW  (bump=$BUMP, channel=$CHANNEL)"
-          echo "skip=false"                  >> $GITHUB_OUTPUT
           echo "version=$NEW"               >> $GITHUB_OUTPUT
           echo "tag=v${NEW}"               >> $GITHUB_OUTPUT
           echo "is_prerelease=$IS_PRERELEASE" >> $GITHUB_OUTPUT
           echo "previous=v${PREV#v}"       >> $GITHUB_OUTPUT
-          echo "bump=$BUMP"                 >> $GITHUB_OUTPUT
           echo "channel=$CHANNEL"           >> $GITHUB_OUTPUT
 
       - name: Write version to Cargo.toml
-        if: steps.bump.outputs.skip != 'true'
         run: |
           NEW="${{ steps.bump.outputs.version }}"
           TOML=projects/server/Cargo.toml
@@ -172,7 +109,6 @@ jobs:
           cargo update -p orca --precise "$NEW" 2>/dev/null || cargo update -p orca || true
 
       - name: Commit and tag
-        if: steps.bump.outputs.skip != 'true'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -184,7 +120,6 @@ jobs:
   # ── 2. Build across all targets ──────────────────────────────────────────
   build:
     needs: version
-    if: needs.version.outputs.skip != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -246,7 +181,6 @@ jobs:
   # ── 3. Changelog + release ───────────────────────────────────────────────
   release:
     needs: [version, build]
-    if: needs.version.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
