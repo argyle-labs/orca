@@ -95,6 +95,7 @@ impl TestApp {
 
     /// Set ORCA_DB_PATH to this app's isolated DB for the duration of the closure.
     /// Holds the global mutex so concurrent tests don't stomp each other.
+    #[allow(clippy::ptr_arg, clippy::await_holding_lock)]
     fn with_db<F, Fut>(db_path: &PathBuf, f: F) -> impl std::future::Future<Output = ()>
     where
         F: FnOnce() -> Fut,

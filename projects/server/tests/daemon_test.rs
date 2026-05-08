@@ -32,10 +32,10 @@ mod daemon_signal_tests {
                 panic!("timed out waiting for mode={target:?}");
             }
             std::thread::sleep(POLL);
-            if let Ok(Some(s)) = state::read_from(state_path) {
-                if s.mode == target {
-                    return s.daemon_pid;
-                }
+            if let Ok(Some(s)) = state::read_from(state_path)
+                && s.mode == target
+            {
+                return s.daemon_pid;
             }
         }
     }
