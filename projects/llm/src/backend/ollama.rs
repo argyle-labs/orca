@@ -19,6 +19,7 @@ pub struct OllamaBackend {
 
 impl OllamaBackend {
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
+        crate::ensure_crypto_provider();
         OllamaBackend {
             client: Client::builder()
                 .connect_timeout(Duration::from_secs(10))

@@ -471,6 +471,9 @@ async fn proxy_ws_to_vite(mut browser: axum::extract::ws::WebSocket, path: Strin
 pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
     use std::sync::Arc;
 
+    // Ensures reqwest (rustls-no-provider) has a crypto provider; idempotent.
+    llm::ensure_crypto_provider();
+
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)

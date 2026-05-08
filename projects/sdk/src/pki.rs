@@ -10,8 +10,8 @@
 
 use anyhow::{Context, Result};
 use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose,
-    IsCa, KeyPair, KeyUsagePurpose,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
+    KeyPair, KeyUsagePurpose,
 };
 use std::path::{Path, PathBuf};
 
@@ -134,10 +134,10 @@ pub fn init(pki_dir: &Path) -> Result<()> {
 /// Issue a cert for `plugin_id` signed by the CA. Errors if the CA does not
 /// exist — caller must run `init` first.
 pub fn issue(pki_dir: &Path, plugin_id: &str, capability: Capability) -> Result<NodeBundle> {
-    let ca_cert_pem =
-        std::fs::read_to_string(ca_cert_path(pki_dir)).context("CA cert not found — run `orca pki init` first")?;
-    let ca_key_pem =
-        std::fs::read_to_string(ca_key_path(pki_dir)).context("CA key not found — run `orca pki init` first")?;
+    let ca_cert_pem = std::fs::read_to_string(ca_cert_path(pki_dir))
+        .context("CA cert not found — run `orca pki init` first")?;
+    let ca_key_pem = std::fs::read_to_string(ca_key_path(pki_dir))
+        .context("CA key not found — run `orca pki init` first")?;
 
     let ca_key = KeyPair::from_pem(&ca_key_pem)?;
     let ca_cert = CertificateParams::from_ca_cert_pem(&ca_cert_pem)?.self_signed(&ca_key)?;
@@ -160,7 +160,10 @@ pub fn issue(pki_dir: &Path, plugin_id: &str, capability: Capability) -> Result<
     let plugin_dir = pki_dir.join(format!("plugins/{plugin_id}"));
     std::fs::create_dir_all(&plugin_dir)?;
     write_pem(plugin_cert_path(pki_dir, plugin_id), &plugin_cert.pem())?;
-    write_pem(plugin_key_path(pki_dir, plugin_id), &plugin_key.serialize_pem())?;
+    write_pem(
+        plugin_key_path(pki_dir, plugin_id),
+        &plugin_key.serialize_pem(),
+    )?;
 
     Ok(NodeBundle {
         cert_pem: plugin_cert.pem(),
@@ -186,8 +189,13 @@ pub fn load_server(pki_dir: &Path) -> Result<NodeBundle> {
 /// Load a plugin's TLS material from disk.
 pub fn load_plugin(pki_dir: &Path, plugin_id: &str) -> Result<NodeBundle> {
     Ok(NodeBundle {
-        cert_pem: std::fs::read_to_string(plugin_cert_path(pki_dir, plugin_id))
-            .with_context(|| format!("plugin cert not found for '{plugin_id}' — run `orca pki issue {plugin_id}`"))?,
+        cert_pem: std::fs::read_to_string(plugin_cert_path(pki_dir, plugin_id)).with_context(
+            || {
+                format!(
+                    "plugin cert not found for '{plugin_id}' — run `orca pki issue {plugin_id}`"
+                )
+            },
+        )?,
         key_pem: std::fs::read_to_string(plugin_key_path(pki_dir, plugin_id))
             .with_context(|| format!("plugin key not found for '{plugin_id}'"))?,
         ca_cert_pem: std::fs::read_to_string(ca_cert_path(pki_dir))
@@ -250,8 +258,7 @@ fn write_pem(path: PathBuf, pem: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, pem.as_bytes())
-        .with_context(|| format!("write {}", path.display()))?;
+    std::fs::write(&path, pem.as_bytes()).with_context(|| format!("write {}", path.display()))?;
     // Restrict key files to owner-only read/write.
     #[cfg(unix)]
     if path.to_string_lossy().contains(".key.") {

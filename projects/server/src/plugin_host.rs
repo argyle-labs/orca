@@ -63,8 +63,7 @@ async fn run(pki_dir: &Path, port: u16) -> Result<()> {
 }
 
 fn build_acceptor(bundle: &pki::NodeBundle) -> Result<TlsAcceptor> {
-    let (cert_chain, private_key) =
-        pki::parse_cert_and_key(&bundle.cert_pem, &bundle.key_pem)?;
+    let (cert_chain, private_key) = pki::parse_cert_and_key(&bundle.cert_pem, &bundle.key_pem)?;
     let ca_root_store = Arc::new(pki::ca_root_store(&bundle.ca_cert_pem)?);
 
     let client_cert_verifier = WebPkiClientVerifier::builder(ca_root_store)
@@ -122,15 +121,14 @@ fn dispatch(frame: &[u8]) -> serde_json::Value {
             let id = req.id.clone();
             match req.method.as_str() {
                 "orca/hello" => handle_hello(id, req.params),
-                other => serde_json::to_value(Response::err(
-                    id,
-                    ErrorObject::method_not_found(other),
-                ))
-                .expect("Response serializes"),
+                other => {
+                    serde_json::to_value(Response::err(id, ErrorObject::method_not_found(other)))
+                        .expect("Response serializes")
+                }
             }
         }
         // Notifications have no id — don't respond.
-        Message::Notification(_) | Message::Response(_) => return json!(null),
+        Message::Notification(_) | Message::Response(_) => json!(null),
     }
 }
 

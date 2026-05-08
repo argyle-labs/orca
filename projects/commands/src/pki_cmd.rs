@@ -38,7 +38,10 @@ pub fn cmd_pki(action: PkiAction) -> Result<()> {
             pki::init(&pki_dir)?;
             println!("PKI initialized at {}", pki_dir.display());
             println!("  CA cert:     {}", pki::ca_cert_path(&pki_dir).display());
-            println!("  Server cert: {}", pki::server_cert_path(&pki_dir).display());
+            println!(
+                "  Server cert: {}",
+                pki::server_cert_path(&pki_dir).display()
+            );
         }
 
         PkiAction::Issue {
@@ -48,8 +51,14 @@ pub fn cmd_pki(action: PkiAction) -> Result<()> {
             let cap: Capability = capability.parse()?;
             let bundle = pki::issue(&pki_dir, &plugin_id, cap)?;
             println!("issued cert for '{plugin_id}' (capability: {cap})");
-            println!("  cert: {}", pki::plugin_cert_path(&pki_dir, &plugin_id).display());
-            println!("  key:  {}", pki::plugin_key_path(&pki_dir, &plugin_id).display());
+            println!(
+                "  cert: {}",
+                pki::plugin_cert_path(&pki_dir, &plugin_id).display()
+            );
+            println!(
+                "  key:  {}",
+                pki::plugin_key_path(&pki_dir, &plugin_id).display()
+            );
             // Print the bundle so it can be piped to the plugin's own PKI dir.
             println!("\n# CA cert (add to plugin's trust store)");
             println!("{}", bundle.ca_cert_pem);

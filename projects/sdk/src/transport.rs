@@ -10,7 +10,10 @@ use anyhow::{Context, Result, bail};
 use rustls::pki_types::ServerName;
 use serde_json::Value;
 use std::net::SocketAddr;
-use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -104,7 +107,10 @@ impl TcpTransport {
 
         let (r, w) = tokio::io::split(tls);
         Ok(Arc::new(Self {
-            inner: Mutex::new(Inner { reader: r, writer: w }),
+            inner: Mutex::new(Inner {
+                reader: r,
+                writer: w,
+            }),
             next_id: AtomicU64::new(1),
         }))
     }
@@ -162,7 +168,9 @@ impl TcpTransport {
             methods_optional,
         };
 
-        let resp = self.call("orca/hello", Some(serde_json::to_value(params)?)).await?;
+        let resp = self
+            .call("orca/hello", Some(serde_json::to_value(params)?))
+            .await?;
 
         if resp.is_error() {
             let msg = resp
@@ -173,12 +181,14 @@ impl TcpTransport {
             bail!("orca/hello rejected: {msg}");
         }
 
-        let result: HelloResult = serde_json::from_value(
-            resp.result.context("orca/hello returned null result")?,
-        )?;
+        let result: HelloResult =
+            serde_json::from_value(resp.result.context("orca/hello returned null result")?)?;
 
         if !result.ok {
-            bail!("orca/hello: server returned ok=false (status: {})", result.status);
+            bail!(
+                "orca/hello: server returned ok=false (status: {})",
+                result.status
+            );
         }
 
         Ok(result)
