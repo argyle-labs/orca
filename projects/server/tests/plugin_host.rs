@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 
 use orca::plugin_host;
 use orca_sdk::pki::{self, Capability};
-use orca_sdk::transport::{Sensitivity, TcpTransport, TypeDeclaration};
+use orca_sdk::transport::{Sensitivity, TcpTransport, TypeDeclaration, TypedValue};
 
 /// Point the db crate at an isolated SQLite file for the lifetime of the test.
 /// Must be called before any code path that opens the DB.
@@ -22,11 +22,18 @@ fn install_ring() {
 }
 
 async fn boot_host(pki_dir: &std::path::Path) -> SocketAddr {
+    boot_host_with_registry(pki_dir, plugin_host::ContextRegistry::new()).await
+}
+
+async fn boot_host_with_registry(
+    pki_dir: &std::path::Path,
+    registry: plugin_host::ContextRegistry,
+) -> SocketAddr {
     let (listener, acceptor, bound) = plugin_host::bind(pki_dir, 0)
         .await
         .expect("plugin_host::bind");
     tokio::spawn(async move {
-        let _ = plugin_host::serve(listener, acceptor).await;
+        let _ = plugin_host::serve(listener, acceptor, registry).await;
     });
     // Connect via loopback regardless of the 0.0.0.0 bind.
     SocketAddr::from(([127, 0, 0, 1], bound.port()))
@@ -77,14 +84,14 @@ async fn hello_degraded_when_optional_method_missing() {
             "p-deg",
             orca_sdk::Flavor::Headless,
             vec!["orca/hello".to_string()],
-            vec!["orca/context.subscribe".to_string()], // not yet implemented
+            vec!["orca/fs.read".to_string()], // not yet implemented
         )
         .await
         .unwrap();
 
     assert!(result.ok);
     assert_eq!(result.status, "degraded");
-    assert!(result.reason.unwrap().contains("orca/context.subscribe"));
+    assert!(result.reason.unwrap().contains("orca/fs.read"));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -103,7 +110,7 @@ async fn hello_rejects_when_required_method_missing() {
         .hello(
             "p-rej",
             orca_sdk::Flavor::Headless,
-            vec!["orca/context.subscribe".to_string()], // required but unavailable
+            vec!["orca/fs.read".to_string()], // required but unavailable
             vec![],
         )
         .await
@@ -112,7 +119,7 @@ async fn hello_rejects_when_required_method_missing() {
     let msg = format!("{err:#}");
     assert!(msg.contains("rejected"), "expected rejection, got: {msg}");
     assert!(
-        msg.contains("orca/context.subscribe"),
+        msg.contains("orca/fs.read"),
         "expected method name in reason: {msg}"
     );
 }
@@ -287,6 +294,182 @@ async fn types_declare_upserts_on_resubmit() {
     assert_eq!(row.sensitivity, "sensitive");
 
     db::set_thread_db_path(None);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn context_subscribe_receives_published_events_across_clients() {
+    install_ring();
+
+    let dir = tempfile::tempdir().unwrap();
+    let pki_dir = dir.path();
+    pki::init(pki_dir).unwrap();
+    let pub_bundle = pki::issue(pki_dir, "publisher", Capability::General).unwrap();
+    let sub_bundle = pki::issue(pki_dir, "subscriber", Capability::General).unwrap();
+
+    let registry = plugin_host::ContextRegistry::new();
+    let addr = boot_host_with_registry(pki_dir, registry).await;
+
+    let publisher = TcpTransport::connect(addr, &pub_bundle).await.unwrap();
+    publisher
+        .hello("publisher", orca_sdk::Flavor::Headless, vec![], vec![])
+        .await
+        .unwrap();
+
+    let subscriber = TcpTransport::connect(addr, &sub_bundle).await.unwrap();
+    subscriber
+        .hello("subscriber", orca_sdk::Flavor::Headless, vec![], vec![])
+        .await
+        .unwrap();
+
+    let (sub_id, mut events) = subscriber
+        .subscribe_context("room:kitchen", vec![])
+        .await
+        .unwrap();
+    assert!(!sub_id.is_empty());
+
+    // Give the subscription pump task a moment to register the broadcast rx
+    // before we publish; without this the publish may race ahead of subscribe.
+    tokio::task::yield_now().await;
+
+    let value = TypedValue {
+        type_id: "orca.host.LoadSample".into(),
+        schema_version: "0.1.0".into(),
+        sensitivity: Sensitivity::General,
+        payload: serde_json::json!({"cpu": 0.42}),
+    };
+    publisher
+        .publish_context("room:kitchen", value.clone())
+        .await
+        .unwrap();
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+        .await
+        .expect("event arrived in time")
+        .expect("event present");
+
+    assert_eq!(event.subscription_id, sub_id);
+    assert_eq!(event.context_id, "room:kitchen");
+    assert_eq!(event.value.type_id, value.type_id);
+    assert_eq!(event.value.payload, value.payload);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn context_subscribe_type_filter_drops_other_types() {
+    install_ring();
+
+    let dir = tempfile::tempdir().unwrap();
+    let pki_dir = dir.path();
+    pki::init(pki_dir).unwrap();
+    let bundle = pki::issue(pki_dir, "selffilter", Capability::General).unwrap();
+
+    let addr = boot_host(pki_dir).await;
+    let transport = TcpTransport::connect(addr, &bundle).await.unwrap();
+    transport
+        .hello("selffilter", orca_sdk::Flavor::Headless, vec![], vec![])
+        .await
+        .unwrap();
+
+    let (_sub_id, mut events) = transport
+        .subscribe_context("room:office", vec!["orca.host.LoadSample".into()])
+        .await
+        .unwrap();
+    tokio::task::yield_now().await;
+
+    // Publish a non-matching type — should be filtered out.
+    transport
+        .publish_context(
+            "room:office",
+            TypedValue {
+                type_id: "arr.sonarr.Series".into(),
+                schema_version: "0.1.0".into(),
+                sensitivity: Sensitivity::General,
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .unwrap();
+
+    // Publish a matching type — should arrive.
+    transport
+        .publish_context(
+            "room:office",
+            TypedValue {
+                type_id: "orca.host.LoadSample".into(),
+                schema_version: "0.1.0".into(),
+                sensitivity: Sensitivity::General,
+                payload: serde_json::json!({"cpu": 0.1}),
+            },
+        )
+        .await
+        .unwrap();
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+        .await
+        .expect("matching event arrives")
+        .expect("event present");
+    assert_eq!(event.value.type_id, "orca.host.LoadSample");
+
+    // Channel should now be empty (within a brief window).
+    let extra = tokio::time::timeout(std::time::Duration::from_millis(100), events.recv()).await;
+    assert!(extra.is_err(), "no more events expected, got {extra:?}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn context_unsubscribe_stops_events() {
+    install_ring();
+
+    let dir = tempfile::tempdir().unwrap();
+    let pki_dir = dir.path();
+    pki::init(pki_dir).unwrap();
+    let bundle = pki::issue(pki_dir, "unsub-plug", Capability::General).unwrap();
+
+    let addr = boot_host(pki_dir).await;
+    let transport = TcpTransport::connect(addr, &bundle).await.unwrap();
+    transport
+        .hello("unsub-plug", orca_sdk::Flavor::Headless, vec![], vec![])
+        .await
+        .unwrap();
+
+    let (sub_id, mut events) = transport.subscribe_context("c1", vec![]).await.unwrap();
+    tokio::task::yield_now().await;
+
+    transport
+        .publish_context(
+            "c1",
+            TypedValue {
+                type_id: "t.A".into(),
+                schema_version: "0.1.0".into(),
+                sensitivity: Sensitivity::General,
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .unwrap();
+    let _first = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+        .await
+        .expect("first event arrives")
+        .expect("event present");
+
+    transport.unsubscribe_context(sub_id).await.unwrap();
+
+    transport
+        .publish_context(
+            "c1",
+            TypedValue {
+                type_id: "t.A".into(),
+                schema_version: "0.1.0".into(),
+                sensitivity: Sensitivity::General,
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .unwrap();
+
+    let after = tokio::time::timeout(std::time::Duration::from_millis(150), events.recv()).await;
+    assert!(
+        after.is_err(),
+        "should not receive events after unsubscribe, got {after:?}"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
