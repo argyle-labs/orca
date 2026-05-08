@@ -11,6 +11,12 @@ path = "src/lib.rs"
 name = "orca"
 path = "src/main.rs"
 
+[features]
+# Embed the compiled frontend (projects/frontend/dist/) into the binary.
+# Off by default — headless builds (Meerkat, workers, native app backends) never set this.
+# Only the CLI release artifact enables it via `--features ui`.
+ui = ["dep:rust-embed", "dep:mime_guess"]
+
 [dependencies]
 # Workspace crates
 orca-agents   = { path = "../agents" }
@@ -38,6 +44,7 @@ futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+serde_yaml = "0.9"
 
 # Async traits
 async-trait = "0.1"
@@ -57,23 +64,23 @@ colored = "2"
 # Cancellation
 tokio-util = "0.7"
 
-
 # Utilities
 dirs = "5"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 glob = "0.3"
 regex = "1"
+pulldown-cmark = "0.12"
 
 # Web server
 axum = { version = "0.8", features = ["macros", "ws"] }
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 tower-http = { version = "0.6", features = ["cors"] }
 http-body-util = "0.1"
-mime_guess = "2"
-rust-embed = "8"
-serde_yaml = "0.9"
-pulldown-cmark = "0.12"
+
+# Optional — only compiled when `--features ui` embeds the frontend dist/
+mime_guess = { version = "2", optional = true }
+rust-embed = { version = "8", optional = true }
 
 # PDF generation (pure Rust, no external binary required)
 typst        = "0.14"

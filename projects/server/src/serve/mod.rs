@@ -263,12 +263,14 @@ fn resolve_daemon_binary() -> String {
         .to_string()
 }
 
-// frontend/dist is compiled into the binary at build time so the binary ships alone —
-// no separate frontend/ directory needed at the install destination.
+// Embedded web UI — only present when built with `--features ui`.
+// Headless builds (Meerkat, workers, native app backends) omit this entirely.
+#[cfg(feature = "ui")]
 #[derive(rust_embed::RustEmbed)]
 #[folder = "../frontend/dist/"]
 struct Assets;
 
+#[cfg(feature = "ui")]
 async fn static_handler(uri: axum::http::Uri) -> axum::response::Response {
     use axum::body::Body;
     use axum::http::{Response, header};
@@ -293,6 +295,16 @@ async fn static_handler(uri: axum::http::Uri) -> axum::response::Response {
             None => Response::builder().status(404).body(Body::empty()).expect("404 response is valid"),
         },
     }
+}
+
+#[cfg(not(feature = "ui"))]
+async fn static_handler(_uri: axum::http::Uri) -> axum::response::Response {
+    use axum::body::Body;
+    axum::http::Response::builder()
+        .status(404)
+        .header("content-type", "text/plain")
+        .body(Body::from("no web UI — build orca with --features ui"))
+        .expect("hardcoded response is valid")
 }
 
 // ── Dev proxy ─────────────────────────────────────────────────────────────────
