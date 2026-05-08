@@ -17,21 +17,16 @@
 pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Flavors control which transports and capabilities are compiled in.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Flavor {
     /// Full SDK: all transports, all capability classes.
     Full,
     /// Headless only: Unix + TCP+mTLS. No UDP, no dashboard push.
+    #[default]
     Headless,
     /// Minimal: Unix socket only. For same-host plugins with no network surface.
     Local,
-}
-
-impl Default for Flavor {
-    fn default() -> Self {
-        Self::Headless
-    }
 }
 
 #[cfg(test)]
