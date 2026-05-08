@@ -69,7 +69,9 @@
   const theme = createTheme();
 
   // One-shot snapshot — initial selection only.
+  // svelte-ignore state_referenced_locally
   const initialTabNameSnap = initialTabName;
+  // svelte-ignore state_referenced_locally
   const initialDataSnap = data;
   const initialIndex = initialTabNameSnap
     ? Math.max(0, initialDataSnap.tabs.findIndex((t) => t.title.toLowerCase() === initialTabNameSnap.toLowerCase()))
