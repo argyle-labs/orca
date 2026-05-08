@@ -1,8 +1,8 @@
 use anyhow::Result;
-use config::Config;
-use conversation::log;
 use clap::Subcommand;
 use colored::Colorize;
+use config::Config;
+use conversation::log;
 
 #[derive(Subcommand)]
 pub enum LogAction {
@@ -87,7 +87,11 @@ pub fn cmd_log(config: &Config, action: LogAction) -> Result<()> {
                         format!("[{role}/@{agent}]")
                     };
                     let preview: String = content.chars().take(200).collect();
-                    let ellipsis = if content.chars().count() > 200 { "…" } else { "" };
+                    let ellipsis = if content.chars().count() > 200 {
+                        "…"
+                    } else {
+                        ""
+                    };
                     println!(
                         "  {} {}{}{}",
                         prefix.cyan(),

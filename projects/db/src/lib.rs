@@ -41,7 +41,9 @@ pub struct PluginSearchTool {
     pub root: String,
 }
 
-fn default_search_arg() -> String { "query".to_string() }
+fn default_search_arg() -> String {
+    "query".to_string()
+}
 
 /// Open (or create) the encrypted orca database.
 ///
@@ -531,7 +533,9 @@ fn load_or_create_key() -> Result<String> {
         std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
     }
 
-    tracing::info!("generated new DB encryption key at ~/.orca/.db_key — back this up alongside orca.db");
+    tracing::info!(
+        "generated new DB encryption key at ~/.orca/.db_key — back this up alongside orca.db"
+    );
     Ok(hex)
 }
 
@@ -633,7 +637,8 @@ pub fn search_events(conn: &Connection, query: &str, limit: usize) -> Result<Vec
         })
     })?;
 
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 /// Retrieve all important events for a project.
@@ -660,7 +665,8 @@ pub fn important_events(conn: &Connection, project: &str, limit: usize) -> Resul
         })
     })?;
 
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 // ── MCP server registry ───────────────────────────────────────────────────────
@@ -770,7 +776,8 @@ pub fn list_schema_databases(conn: &Connection) -> Result<Vec<SchemaDbRow>> {
             driver: row.get(9)?,
         })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn upsert_schema_database(conn: &Connection, db: &SchemaDbRow) -> Result<()> {
@@ -851,7 +858,8 @@ pub fn list_docker_runtimes(conn: &Connection) -> Result<Vec<DockerRuntimeRow>> 
             enabled: row.get::<_, i32>(4)? != 0,
         })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 /// Returns the first enabled socket/tcp runtime's DOCKER_HOST value for subprocess injection.
@@ -866,7 +874,10 @@ pub fn active_docker_host(conn: &Connection) -> Option<String> {
         .ok()?;
     let (socket_path, host) = stmt
         .query_row([], |row| {
-            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?))
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
         })
         .ok()?;
     if let Some(sock) = socket_path {
@@ -925,7 +936,8 @@ pub fn list_openapi_specs(conn: &Connection) -> Result<Vec<OpenApiSpecRow>> {
             enabled: row.get::<_, i32>(5)? != 0,
         })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn get_openapi_spec(conn: &Connection, name: &str) -> Result<Option<OpenApiSpecRow>> {
@@ -1003,7 +1015,8 @@ pub fn list_mcp_tool_mappings(conn: &Connection, mcp_name: &str) -> Result<Vec<M
             enabled: row.get::<_, i32>(5)? != 0,
         })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn all_mcp_tool_mappings(conn: &Connection) -> Result<Vec<McpToolMappingRow>> {
@@ -1021,7 +1034,8 @@ pub fn all_mcp_tool_mappings(conn: &Connection) -> Result<Vec<McpToolMappingRow>
             enabled: row.get::<_, i32>(5)? != 0,
         })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn lookup_mcp_mapping(conn: &Connection, orca_tool: &str) -> Result<Option<McpToolMappingRow>> {
@@ -1029,14 +1043,16 @@ pub fn lookup_mcp_mapping(conn: &Connection, orca_tool: &str) -> Result<Option<M
         "SELECT orca_tool, mcp_name, external_tool, match_type, confidence, enabled
          FROM mcp_tool_mappings WHERE orca_tool = ?1 AND enabled = 1",
         rusqlite::params![orca_tool],
-        |row| Ok(McpToolMappingRow {
-            orca_tool: row.get(0)?,
-            mcp_name: row.get(1)?,
-            external_tool: row.get(2)?,
-            match_type: row.get(3)?,
-            confidence: row.get(4)?,
-            enabled: row.get::<_, i32>(5)? != 0,
-        }),
+        |row| {
+            Ok(McpToolMappingRow {
+                orca_tool: row.get(0)?,
+                mcp_name: row.get(1)?,
+                external_tool: row.get(2)?,
+                match_type: row.get(3)?,
+                confidence: row.get(4)?,
+                enabled: row.get::<_, i32>(5)? != 0,
+            })
+        },
     );
     match result {
         Ok(row) => Ok(Some(row)),
@@ -1071,7 +1087,11 @@ pub fn remove_mcp_tool_mapping(conn: &Connection, orca_tool: &str) -> Result<boo
     Ok(n > 0)
 }
 
-pub fn set_mcp_tool_mapping_enabled(conn: &Connection, orca_tool: &str, enabled: bool) -> Result<bool> {
+pub fn set_mcp_tool_mapping_enabled(
+    conn: &Connection,
+    orca_tool: &str,
+    enabled: bool,
+) -> Result<bool> {
     let n = conn.execute(
         "UPDATE mcp_tool_mappings SET enabled = ?1 WHERE orca_tool = ?2",
         rusqlite::params![enabled as i32, orca_tool],
@@ -1119,18 +1139,26 @@ const PLUGIN_COLS: &str =
 
 #[allow(clippy::too_many_arguments)]
 fn parse_plugin_row(
-    id: String, manifest_path: String, tier: String, mode: String,
-    mcp_command: Option<String>, args_json: String, env_json: String,
-    context_injection: String, enabled: i32, map_json: String,
-    mcp_token_env: Option<String>, nav_links_json: String,
-    search_tools_json: String, specs_dir: Option<String>,
+    id: String,
+    manifest_path: String,
+    tier: String,
+    mode: String,
+    mcp_command: Option<String>,
+    args_json: String,
+    env_json: String,
+    context_injection: String,
+    enabled: i32,
+    map_json: String,
+    mcp_token_env: Option<String>,
+    nav_links_json: String,
+    search_tools_json: String,
+    specs_dir: Option<String>,
     mcp_url_raw: Option<String>,
 ) -> PluginRow {
     // mcp_url column stores either a JSON array ["url1","url2"] or a plain URL string.
     let mcp_urls = match mcp_url_raw.as_deref() {
         None | Some("") => vec![],
-        Some(s) => serde_json::from_str::<Vec<String>>(s)
-            .unwrap_or_else(|_| vec![s.to_string()]),
+        Some(s) => serde_json::from_str::<Vec<String>>(s).unwrap_or_else(|_| vec![s.to_string()]),
     };
     PluginRow {
         id,
@@ -1152,9 +1180,7 @@ fn parse_plugin_row(
 }
 
 pub fn list_plugins(conn: &Connection) -> Result<Vec<PluginRow>> {
-    let mut stmt = conn.prepare(
-        &format!("SELECT {PLUGIN_COLS} FROM plugins ORDER BY id"),
-    )?;
+    let mut stmt = conn.prepare(&format!("SELECT {PLUGIN_COLS} FROM plugins ORDER BY id"))?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -1176,12 +1202,40 @@ pub fn list_plugins(conn: &Connection) -> Result<Vec<PluginRow>> {
     })?;
     let mut result = Vec::new();
     for r in rows {
-        let (id, manifest_path, tier, mode, mcp_command, args_json, env_json,
-             context_injection, enabled, map_json, mcp_token_env, nav_links_json,
-             search_tools_json, specs_dir, mcp_url) = r?;
-        result.push(parse_plugin_row(id, manifest_path, tier, mode, mcp_command,
-            args_json, env_json, context_injection, enabled, map_json, mcp_token_env,
-            nav_links_json, search_tools_json, specs_dir, mcp_url));
+        let (
+            id,
+            manifest_path,
+            tier,
+            mode,
+            mcp_command,
+            args_json,
+            env_json,
+            context_injection,
+            enabled,
+            map_json,
+            mcp_token_env,
+            nav_links_json,
+            search_tools_json,
+            specs_dir,
+            mcp_url,
+        ) = r?;
+        result.push(parse_plugin_row(
+            id,
+            manifest_path,
+            tier,
+            mode,
+            mcp_command,
+            args_json,
+            env_json,
+            context_injection,
+            enabled,
+            map_json,
+            mcp_token_env,
+            nav_links_json,
+            search_tools_json,
+            specs_dir,
+            mcp_url,
+        ));
     }
     Ok(result)
 }
@@ -1190,32 +1244,60 @@ pub fn get_plugin(conn: &Connection, id: &str) -> Result<Option<PluginRow>> {
     let result = conn.query_row(
         &format!("SELECT {PLUGIN_COLS} FROM plugins WHERE id = ?1"),
         rusqlite::params![id],
-        |row| Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, Option<String>>(4)?,
-            row.get::<_, String>(5)?,
-            row.get::<_, String>(6)?,
-            row.get::<_, String>(7)?,
-            row.get::<_, i32>(8)?,
-            row.get::<_, String>(9)?,
-            row.get::<_, Option<String>>(10)?,
-            row.get::<_, String>(11)?,
-            row.get::<_, String>(12)?,
-            row.get::<_, Option<String>>(13)?,
-            row.get::<_, Option<String>>(14)?,
-        )),
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, i32>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, String>(11)?,
+                row.get::<_, String>(12)?,
+                row.get::<_, Option<String>>(13)?,
+                row.get::<_, Option<String>>(14)?,
+            ))
+        },
     );
     match result {
-        Ok((id, manifest_path, tier, mode, mcp_command, args_json, env_json,
-            context_injection, enabled, map_json, mcp_token_env, nav_links_json,
-            search_tools_json, specs_dir, mcp_url)) => {
-            Ok(Some(parse_plugin_row(id, manifest_path, tier, mode, mcp_command,
-                args_json, env_json, context_injection, enabled, map_json, mcp_token_env,
-                nav_links_json, search_tools_json, specs_dir, mcp_url)))
-        }
+        Ok((
+            id,
+            manifest_path,
+            tier,
+            mode,
+            mcp_command,
+            args_json,
+            env_json,
+            context_injection,
+            enabled,
+            map_json,
+            mcp_token_env,
+            nav_links_json,
+            search_tools_json,
+            specs_dir,
+            mcp_url,
+        )) => Ok(Some(parse_plugin_row(
+            id,
+            manifest_path,
+            tier,
+            mode,
+            mcp_command,
+            args_json,
+            env_json,
+            context_injection,
+            enabled,
+            map_json,
+            mcp_token_env,
+            nav_links_json,
+            search_tools_json,
+            specs_dir,
+            mcp_url,
+        ))),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
     }
@@ -1261,10 +1343,7 @@ pub fn upsert_plugin(conn: &Connection, plugin: &PluginRow) -> Result<()> {
 }
 
 pub fn remove_plugin(conn: &Connection, id: &str) -> Result<bool> {
-    let n = conn.execute(
-        "DELETE FROM plugins WHERE id = ?1",
-        rusqlite::params![id],
-    )?;
+    let n = conn.execute("DELETE FROM plugins WHERE id = ?1", rusqlite::params![id])?;
     Ok(n > 0)
 }
 
@@ -1279,9 +1358,7 @@ pub fn add_plugin_dep(conn: &Connection, parent_id: &str, dep_id: &str) -> Resul
 
 /// Return all dep_ids that were pulled in by `parent_id`.
 pub fn list_plugin_deps(conn: &Connection, parent_id: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT dep_id FROM plugin_deps WHERE parent_id = ?1",
-    )?;
+    let mut stmt = conn.prepare("SELECT dep_id FROM plugin_deps WHERE parent_id = ?1")?;
     let rows = stmt.query_map(rusqlite::params![parent_id], |r| r.get(0))?;
     rows.map(|r| r.map_err(Into::into)).collect()
 }
@@ -1328,7 +1405,12 @@ pub struct PluginCredentialRow {
 }
 
 /// Store or update a credential for a plugin.
-pub fn set_plugin_credential(conn: &Connection, plugin_id: &str, key: &str, value: &str) -> Result<()> {
+pub fn set_plugin_credential(
+    conn: &Connection,
+    plugin_id: &str,
+    key: &str,
+    value: &str,
+) -> Result<()> {
     conn.execute(
         "INSERT INTO plugin_credentials (plugin_id, key, value, synced_at, updated_at)
          VALUES (?1, ?2, ?3, NULL, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
@@ -1343,7 +1425,10 @@ pub fn set_plugin_credential(conn: &Connection, plugin_id: &str, key: &str, valu
 
 /// List all credentials for a plugin. Returns key names and metadata; value is included
 /// for sync purposes — never surface values in CLI output.
-pub fn list_plugin_credentials(conn: &Connection, plugin_id: &str) -> Result<Vec<PluginCredentialRow>> {
+pub fn list_plugin_credentials(
+    conn: &Connection,
+    plugin_id: &str,
+) -> Result<Vec<PluginCredentialRow>> {
     let mut stmt = conn.prepare(
         "SELECT plugin_id, key, value, synced_at, updated_at
          FROM plugin_credentials WHERE plugin_id = ?1 ORDER BY key",
@@ -1357,7 +1442,8 @@ pub fn list_plugin_credentials(conn: &Connection, plugin_id: &str) -> Result<Vec
             updated_at: row.get(4)?,
         })
     })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 /// Delete a single credential for a plugin.
@@ -1398,7 +1484,12 @@ pub fn upsert_oauth_token(conn: &Connection, row: &OAuthTokenRow) -> Result<()> 
              refresh_token = excluded.refresh_token,
              expires_at    = excluded.expires_at,
              updated_at    = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
-        rusqlite::params![row.service, row.access_token, row.refresh_token, row.expires_at],
+        rusqlite::params![
+            row.service,
+            row.access_token,
+            row.refresh_token,
+            row.expires_at
+        ],
     )?;
     Ok(())
 }
@@ -1410,10 +1501,10 @@ pub fn get_oauth_token(conn: &Connection, service: &str) -> Result<Option<OAuthT
     )?;
     let mut rows = stmt.query_map(rusqlite::params![service], |row| {
         Ok(OAuthTokenRow {
-            service:       row.get(0)?,
-            access_token:  row.get(1)?,
+            service: row.get(0)?,
+            access_token: row.get(1)?,
             refresh_token: row.get(2)?,
-            expires_at:    row.get(3)?,
+            expires_at: row.get(3)?,
         })
     })?;
     Ok(rows.next().transpose()?)
@@ -1439,7 +1530,11 @@ pub struct PluginDataRow {
     pub updated_at: String,
 }
 
-pub fn get_plugin_data(conn: &Connection, plugin_id: &str, key: &str) -> Result<Option<PluginDataRow>> {
+pub fn get_plugin_data(
+    conn: &Connection,
+    plugin_id: &str,
+    key: &str,
+) -> Result<Option<PluginDataRow>> {
     let result = conn.query_row(
         "SELECT plugin_id, key, value, updated_at FROM plugin_data WHERE plugin_id = ?1 AND key = ?2",
         rusqlite::params![plugin_id, key],
@@ -1475,13 +1570,14 @@ pub fn list_plugin_data(conn: &Connection, plugin_id: &str) -> Result<Vec<Plugin
     )?;
     let rows = stmt.query_map(rusqlite::params![plugin_id], |row| {
         Ok(PluginDataRow {
-            plugin_id:  row.get(0)?,
-            key:        row.get(1)?,
-            value:      row.get(2)?,
+            plugin_id: row.get(0)?,
+            key: row.get(1)?,
+            value: row.get(2)?,
             updated_at: row.get(3)?,
         })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn delete_plugin_data(conn: &Connection, plugin_id: &str, key: &str) -> Result<bool> {
@@ -1610,24 +1706,24 @@ mod key_tests {
 }
 
 pub fn settings_list_prefix(conn: &Connection, prefix: &str) -> Result<Vec<(String, String)>> {
-    let mut stmt = conn.prepare(
-        "SELECT key, value FROM settings WHERE key LIKE ?1 ORDER BY key",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT key, value FROM settings WHERE key LIKE ?1 ORDER BY key")?;
     let pattern = format!("{prefix}%");
     let rows = stmt.query_map(rusqlite::params![pattern], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 // ── LLM providers ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct LlmProvider {
-    pub name:       String,
-    pub url:        String,
-    pub kind:       String,
-    pub enabled:    bool,
+    pub name: String,
+    pub url: String,
+    pub kind: String,
+    pub enabled: bool,
     pub created_at: String,
 }
 
@@ -1637,14 +1733,15 @@ pub fn list_llm_providers(conn: &Connection) -> Result<Vec<LlmProvider>> {
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(LlmProvider {
-            name:       row.get(0)?,
-            url:        row.get(1)?,
-            kind:       row.get(2)?,
-            enabled:    row.get::<_, i64>(3)? != 0,
+            name: row.get(0)?,
+            url: row.get(1)?,
+            kind: row.get(2)?,
+            enabled: row.get::<_, i64>(3)? != 0,
             created_at: row.get(4)?,
         })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn upsert_llm_provider(conn: &Connection, name: &str, url: &str, kind: &str) -> Result<()> {
@@ -1694,7 +1791,8 @@ pub fn list_doc_roots(conn: &Connection) -> Result<Vec<DocRootRow>> {
             enabled: row.get::<_, i32>(3)? != 0,
         })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn upsert_doc_root(conn: &Connection, root: &DocRootRow) -> Result<()> {
@@ -1723,7 +1821,8 @@ pub fn remove_doc_root(conn: &Connection, name: &str) -> Result<bool> {
 pub fn list_doc_ignore_patterns(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare("SELECT pattern FROM doc_ignore_patterns ORDER BY pattern")?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn add_doc_ignore_pattern(conn: &Connection, pattern: &str) -> Result<bool> {
@@ -1768,7 +1867,8 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
 pub fn list_settings(conn: &Connection) -> Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare("SELECT key, value FROM settings ORDER BY key")?;
     let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn fs_allow_unrestricted(conn: &Connection) -> bool {
@@ -1799,7 +1899,11 @@ mod registry_tests {
     fn migrations_run_to_latest() {
         let conn = test_conn();
         let v = schema_version(&conn).unwrap();
-        assert_eq!(v as usize, MIGRATIONS.len(), "schema version should match migration count");
+        assert_eq!(
+            v as usize,
+            MIGRATIONS.len(),
+            "schema version should match migration count"
+        );
     }
 
     #[test]
@@ -1822,10 +1926,16 @@ mod registry_tests {
         let conn = test_conn();
         assert!(get_learning_progress(&conn).unwrap().is_none());
         save_learning_progress(&conn, "page-42").unwrap();
-        assert_eq!(get_learning_progress(&conn).unwrap().as_deref(), Some("page-42"));
+        assert_eq!(
+            get_learning_progress(&conn).unwrap().as_deref(),
+            Some("page-42")
+        );
         // Upsert overwrites
         save_learning_progress(&conn, "page-99").unwrap();
-        assert_eq!(get_learning_progress(&conn).unwrap().as_deref(), Some("page-99"));
+        assert_eq!(
+            get_learning_progress(&conn).unwrap().as_deref(),
+            Some("page-99")
+        );
     }
 
     // ── Session events ────────────────────────────────────────────────────────
@@ -1834,9 +1944,18 @@ mod registry_tests {
     fn insert_and_search_event() {
         let conn = test_conn();
         insert_event(
-            &conn, "ev-1", "sess-1", Some("orca"), "2026-01-01T00:00:00Z",
-            Some("user"), Some("orca"), Some("hello world unique phrase"), false, None,
-        ).unwrap();
+            &conn,
+            "ev-1",
+            "sess-1",
+            Some("orca"),
+            "2026-01-01T00:00:00Z",
+            Some("user"),
+            Some("orca"),
+            Some("hello world unique phrase"),
+            false,
+            None,
+        )
+        .unwrap();
         let results = search_events(&conn, "unique", 10).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "ev-1");
@@ -1847,8 +1966,32 @@ mod registry_tests {
     #[test]
     fn insert_event_ignore_duplicate_id() {
         let conn = test_conn();
-        insert_event(&conn, "dup", "s", None, "2026-01-01T00:00:00Z", None, None, Some("a"), false, None).unwrap();
-        insert_event(&conn, "dup", "s", None, "2026-01-01T00:00:00Z", None, None, Some("b"), false, None).unwrap();
+        insert_event(
+            &conn,
+            "dup",
+            "s",
+            None,
+            "2026-01-01T00:00:00Z",
+            None,
+            None,
+            Some("a"),
+            false,
+            None,
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            "dup",
+            "s",
+            None,
+            "2026-01-01T00:00:00Z",
+            None,
+            None,
+            Some("b"),
+            false,
+            None,
+        )
+        .unwrap();
         let results = search_events(&conn, "a", 10).unwrap();
         assert_eq!(results.len(), 1, "duplicate id should be ignored");
     }
@@ -1856,9 +1999,45 @@ mod registry_tests {
     #[test]
     fn important_events_filters_by_project() {
         let conn = test_conn();
-        insert_event(&conn, "imp-1", "s", Some("proj-a"), "2026-01-01T00:00:00Z", None, None, Some("important thing"), true, None).unwrap();
-        insert_event(&conn, "imp-2", "s", Some("proj-b"), "2026-01-01T00:00:00Z", None, None, Some("other thing"), true, None).unwrap();
-        insert_event(&conn, "not-imp", "s", Some("proj-a"), "2026-01-01T00:00:00Z", None, None, Some("boring"), false, None).unwrap();
+        insert_event(
+            &conn,
+            "imp-1",
+            "s",
+            Some("proj-a"),
+            "2026-01-01T00:00:00Z",
+            None,
+            None,
+            Some("important thing"),
+            true,
+            None,
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            "imp-2",
+            "s",
+            Some("proj-b"),
+            "2026-01-01T00:00:00Z",
+            None,
+            None,
+            Some("other thing"),
+            true,
+            None,
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            "not-imp",
+            "s",
+            Some("proj-a"),
+            "2026-01-01T00:00:00Z",
+            None,
+            None,
+            Some("boring"),
+            false,
+            None,
+        )
+        .unwrap();
 
         let results = important_events(&conn, "proj-a", 10).unwrap();
         assert_eq!(results.len(), 1);
@@ -1896,9 +2075,21 @@ mod registry_tests {
     #[test]
     fn mcp_server_upsert_updates_existing() {
         let conn = test_conn();
-        let s = McpServerRow { name: "s".into(), command: "cmd1".into(), args: vec![], env: Default::default(), enabled: true };
+        let s = McpServerRow {
+            name: "s".into(),
+            command: "cmd1".into(),
+            args: vec![],
+            env: Default::default(),
+            enabled: true,
+        };
         upsert_mcp_server(&conn, &s).unwrap();
-        let s2 = McpServerRow { name: "s".into(), command: "cmd2".into(), args: vec![], env: Default::default(), enabled: true };
+        let s2 = McpServerRow {
+            name: "s".into(),
+            command: "cmd2".into(),
+            args: vec![],
+            env: Default::default(),
+            enabled: true,
+        };
         upsert_mcp_server(&conn, &s2).unwrap();
         let list = list_mcp_servers(&conn).unwrap();
         assert_eq!(list.len(), 1);
@@ -1911,7 +2102,13 @@ mod registry_tests {
     fn mcp_tool_mapping_crud() {
         let conn = test_conn();
         // Need a parent MCP server (FK constraint)
-        let server = McpServerRow { name: "mcp".into(), command: "cmd".into(), args: vec![], env: Default::default(), enabled: true };
+        let server = McpServerRow {
+            name: "mcp".into(),
+            command: "cmd".into(),
+            args: vec![],
+            env: Default::default(),
+            enabled: true,
+        };
         upsert_mcp_server(&conn, &server).unwrap();
 
         let mapping = McpToolMappingRow {
@@ -1935,7 +2132,10 @@ mod registry_tests {
         assert_eq!(by_server.len(), 1);
 
         assert!(set_mcp_tool_mapping_enabled(&conn, "read_file", false).unwrap());
-        assert!(lookup_mcp_mapping(&conn, "read_file").unwrap().is_none(), "disabled should not appear");
+        assert!(
+            lookup_mcp_mapping(&conn, "read_file").unwrap().is_none(),
+            "disabled should not appear"
+        );
 
         assert!(remove_mcp_tool_mapping(&conn, "read_file").unwrap());
         assert!(!remove_mcp_tool_mapping(&conn, "read_file").unwrap());
@@ -1992,7 +2192,10 @@ mod registry_tests {
 
         let docker_host = list[0].docker_host().unwrap();
         assert!(docker_host.starts_with("unix://"), "got: {docker_host}");
-        assert!(!docker_host.contains('~'), "tilde should be expanded: {docker_host}");
+        assert!(
+            !docker_host.contains('~'),
+            "tilde should be expanded: {docker_host}"
+        );
 
         assert!(remove_docker_runtime(&conn, "colima").unwrap());
         assert!(list_docker_runtimes(&conn).unwrap().is_empty());
@@ -2022,16 +2225,26 @@ mod registry_tests {
             url: Some("http://portainer:9000".into()),
             enabled: true,
         };
-        assert!(rt.docker_host().is_none(), "web-only runtime should return None for docker_host");
+        assert!(
+            rt.docker_host().is_none(),
+            "web-only runtime should return None for docker_host"
+        );
     }
 
     #[test]
     fn active_docker_host_returns_first_socket() {
         let conn = test_conn();
-        upsert_docker_runtime(&conn, &DockerRuntimeRow {
-            name: "a".into(), socket_path: Some("/var/run/docker.sock".into()),
-            host: None, url: None, enabled: true,
-        }).unwrap();
+        upsert_docker_runtime(
+            &conn,
+            &DockerRuntimeRow {
+                name: "a".into(),
+                socket_path: Some("/var/run/docker.sock".into()),
+                host: None,
+                url: None,
+                enabled: true,
+            },
+        )
+        .unwrap();
         let host = active_docker_host(&conn).unwrap();
         assert!(host.starts_with("unix://"));
     }
@@ -2060,7 +2273,10 @@ mod registry_tests {
         upsert_openapi_spec(&conn, &spec).unwrap();
 
         let found = get_openapi_spec(&conn, "myapi").unwrap().unwrap();
-        assert_eq!(found.url.as_deref(), Some("http://api.example.com/openapi.json"));
+        assert_eq!(
+            found.url.as_deref(),
+            Some("http://api.example.com/openapi.json")
+        );
         assert!(found.spec_json.is_some());
 
         let list = list_openapi_specs(&conn).unwrap();
@@ -2171,14 +2387,21 @@ mod registry_tests {
 
         let creds = list_plugin_credentials(&conn, "rebuy").unwrap();
         assert_eq!(creds.len(), 2);
-        assert!(creds.iter().any(|c| c.key == "API_KEY" && c.value == "secret-val"));
+        assert!(
+            creds
+                .iter()
+                .any(|c| c.key == "API_KEY" && c.value == "secret-val")
+        );
 
         // Upsert resets synced_at
         set_plugin_credential(&conn, "rebuy", "API_KEY", "new-val").unwrap();
         let creds2 = list_plugin_credentials(&conn, "rebuy").unwrap();
         let api = creds2.iter().find(|c| c.key == "API_KEY").unwrap();
         assert_eq!(api.value, "new-val");
-        assert!(api.synced_at.is_none(), "synced_at should be reset on update");
+        assert!(
+            api.synced_at.is_none(),
+            "synced_at should be reset on update"
+        );
 
         assert!(delete_plugin_credential(&conn, "rebuy", "API_KEY").unwrap());
         assert!(!delete_plugin_credential(&conn, "rebuy", "API_KEY").unwrap());
@@ -2217,7 +2440,12 @@ mod registry_tests {
         assert_eq!(found.refresh_token.as_deref(), Some("refresh_xyz"));
 
         // Upsert updates
-        let row2 = OAuthTokenRow { service: "github".into(), access_token: "new_token".into(), refresh_token: None, expires_at: None };
+        let row2 = OAuthTokenRow {
+            service: "github".into(),
+            access_token: "new_token".into(),
+            refresh_token: None,
+            expires_at: None,
+        };
         upsert_oauth_token(&conn, &row2).unwrap();
         let found2 = get_oauth_token(&conn, "github").unwrap().unwrap();
         assert_eq!(found2.access_token, "new_token");
@@ -2243,7 +2471,10 @@ mod registry_tests {
 
         // Upsert
         set_plugin_data(&conn, "p", "key1", "updated").unwrap();
-        assert_eq!(get_plugin_data(&conn, "p", "key1").unwrap().unwrap().value, "updated");
+        assert_eq!(
+            get_plugin_data(&conn, "p", "key1").unwrap().unwrap().value,
+            "updated"
+        );
 
         let list = list_plugin_data(&conn, "p").unwrap();
         assert_eq!(list.len(), 2);
@@ -2261,10 +2492,16 @@ mod registry_tests {
         assert!(settings_get(&conn, "my.flag").unwrap().is_none());
 
         settings_set(&conn, "my.flag", "enabled").unwrap();
-        assert_eq!(settings_get(&conn, "my.flag").unwrap().as_deref(), Some("enabled"));
+        assert_eq!(
+            settings_get(&conn, "my.flag").unwrap().as_deref(),
+            Some("enabled")
+        );
 
         settings_set(&conn, "my.flag", "disabled").unwrap();
-        assert_eq!(settings_get(&conn, "my.flag").unwrap().as_deref(), Some("disabled"));
+        assert_eq!(
+            settings_get(&conn, "my.flag").unwrap().as_deref(),
+            Some("disabled")
+        );
 
         assert!(settings_delete(&conn, "my.flag").unwrap());
         assert!(settings_get(&conn, "my.flag").unwrap().is_none());
@@ -2291,7 +2528,10 @@ mod registry_tests {
         let all = settings_list_prefix(&conn, "secrets.").unwrap();
         assert!(all.iter().any(|(k, _)| k == "secrets.ANTHROPIC_KEY"));
         // secret_get retrieves it
-        assert_eq!(secret_get(&conn, "ANTHROPIC_KEY").unwrap().as_deref(), Some("sk-ant-test"));
+        assert_eq!(
+            secret_get(&conn, "ANTHROPIC_KEY").unwrap().as_deref(),
+            Some("sk-ant-test")
+        );
         assert!(secret_delete(&conn, "ANTHROPIC_KEY").unwrap());
         assert!(secret_get(&conn, "ANTHROPIC_KEY").unwrap().is_none());
     }
@@ -2347,7 +2587,11 @@ mod registry_tests {
         let conn = test_conn();
         let roots = list_doc_roots(&conn).unwrap();
         // Migration 15 seeds rebuy, orca, bardbase, homepage, meerkat
-        assert!(roots.len() >= 5, "expected seeded doc roots, got {}", roots.len());
+        assert!(
+            roots.len() >= 5,
+            "expected seeded doc roots, got {}",
+            roots.len()
+        );
         assert!(roots.iter().any(|r| r.name == "orca"));
     }
 
@@ -2366,7 +2610,12 @@ mod registry_tests {
         assert!(list.iter().any(|r| r.name == "myproject"));
 
         assert!(remove_doc_root(&conn, "myproject").unwrap());
-        assert!(!list_doc_roots(&conn).unwrap().iter().any(|r| r.name == "myproject"));
+        assert!(
+            !list_doc_roots(&conn)
+                .unwrap()
+                .iter()
+                .any(|r| r.name == "myproject")
+        );
         assert!(!remove_doc_root(&conn, "myproject").unwrap());
     }
 
@@ -2385,7 +2634,10 @@ mod registry_tests {
     fn doc_ignore_pattern_add_remove() {
         let conn = test_conn();
         assert!(add_doc_ignore_pattern(&conn, "my_custom_dir").unwrap());
-        assert!(!add_doc_ignore_pattern(&conn, "my_custom_dir").unwrap(), "duplicate insert should return false");
+        assert!(
+            !add_doc_ignore_pattern(&conn, "my_custom_dir").unwrap(),
+            "duplicate insert should return false"
+        );
 
         let patterns = list_doc_ignore_patterns(&conn).unwrap();
         assert!(patterns.contains(&"my_custom_dir".to_string()));

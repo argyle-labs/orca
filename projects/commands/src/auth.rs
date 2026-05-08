@@ -1,7 +1,7 @@
 use anyhow::Result;
 use colored::Colorize;
-use config::Config;
 use config::APP_NAME;
+use config::Config;
 use db;
 
 const KEY_NAME: &str = "anthropic_api_key";

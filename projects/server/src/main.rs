@@ -1,14 +1,18 @@
 use anyhow::Result;
+use clap::{Parser, Subcommand};
+use config::Config;
+use llm::{ClaudeBackend, Message, ModelBackend, stdout_sink};
 use orca::context::ProjectContext;
+use orca::conversation::Session;
+use orca::log_cmd::{LogAction, cmd_log};
 use orca::mcp;
 use orca::serve;
 use orca::serve::openapi_spec_json;
-use orca::conversation::Session;
-use orca_commands::{self as cmd, CredsAction, DaemonAction, DbAction, DockerAction, EnginesAction, HookAction, McpAction, PluginAction, SchemaAction, SpecAction, cmd_oauth_github, cmd_oauth_atlassian, cmd_logout_github, cmd_logout_atlassian, cmd_install, cmd_uninstall};
-use orca::log_cmd::{LogAction, cmd_log};
-use llm::{ClaudeBackend, ModelBackend, stdout_sink, Message};
-use config::Config;
-use clap::{Parser, Subcommand};
+use orca_commands::{
+    self as cmd, CredsAction, DaemonAction, DbAction, DockerAction, EnginesAction, HookAction,
+    McpAction, PluginAction, SchemaAction, SpecAction, cmd_install, cmd_logout_atlassian,
+    cmd_logout_github, cmd_oauth_atlassian, cmd_oauth_github, cmd_uninstall,
+};
 
 #[derive(Parser)]
 #[command(name = "orca", about = "Context-first AI agent orchestrator", version)]
@@ -196,12 +200,9 @@ enum LoginService {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("ORCA_LOG")
-                .unwrap_or_else(|_| {
-                    tracing_subscriber::EnvFilter::new(
-                        "warn,orca=info,tower_http=warn,axum=warn",
-                    )
-                }),
+            tracing_subscriber::EnvFilter::try_from_env("ORCA_LOG").unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("warn,orca=info,tower_http=warn,axum=warn")
+            }),
         )
         .with_target(false)
         .compact()
@@ -232,7 +233,10 @@ async fn main() -> Result<()> {
             LoginService::Atlassian => cmd_oauth_atlassian().await,
         },
         Some(Command::Logout { service }) => match service {
-            LoginService::Anthropic => { let _ = cmd::cmd_logout(); Ok(()) },
+            LoginService::Anthropic => {
+                let _ = cmd::cmd_logout();
+                Ok(())
+            }
             LoginService::Github => cmd_logout_github(),
             LoginService::Atlassian => cmd_logout_atlassian(),
         },
@@ -328,7 +332,9 @@ async fn escalate(config: &Config, question: &str, project: Option<&str>) -> Res
     let messages = vec![Message::user(question)];
     let cancel = tokio_util::sync::CancellationToken::new();
     let output = stdout_sink();
-    claude.chat(&messages, &[], &system, cancel, &output).await?;
+    claude
+        .chat(&messages, &[], &system, cancel, &output)
+        .await?;
     Ok(())
 }
 
@@ -367,7 +373,9 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
             let mut cmd = {
                 use std::os::unix::process::CommandExt;
                 let mut c = Command::new("npm");
-                c.args(["run", "dev"]).current_dir(&frontend_dir).process_group(0);
+                c.args(["run", "dev"])
+                    .current_dir(&frontend_dir)
+                    .process_group(0);
                 c
             };
             #[cfg(not(unix))]
@@ -376,8 +384,7 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
                 c.args(["run", "dev"]).current_dir(&frontend_dir);
                 c
             };
-            match cmd.spawn()
-            {
+            match cmd.spawn() {
                 Ok(child) => {
                     println!("[orca] vite started (pid {})", child.id());
                     Some(child)
@@ -407,7 +414,9 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
                 .status()?;
             if let Err(e) = state::wait_for_mode(DaemonMode::Parked, 5).await {
                 // Parking timed out — reclaim immediately so daemon isn't stuck parked
-                let _ = Command::new("kill").args(["-USR2", &pid.to_string()]).status();
+                let _ = Command::new("kill")
+                    .args(["-USR2", &pid.to_string()])
+                    .status();
                 return Err(e.context("daemon did not park in time; reclaim sent"));
             }
             println!("[orca] daemon parked — dev server taking port {port}");

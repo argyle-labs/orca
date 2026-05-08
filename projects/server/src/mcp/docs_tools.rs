@@ -40,8 +40,7 @@ pub struct GetTree;
 #[async_trait]
 impl OrcaTool for GetTree {
     const NAME: &'static str = "get_tree";
-    const DESCRIPTION: &'static str =
-        "Get the compacted documentation tree for a root, optionally scoped to a subpath. \
+    const DESCRIPTION: &'static str = "Get the compacted documentation tree for a root, optionally scoped to a subpath. \
          Returns a JSON tree of .md files.";
     type Args = GetTreeArgs;
     async fn run(args: GetTreeArgs, ctx: &ToolCtx) -> Result<String> {
@@ -68,8 +67,7 @@ pub struct ReadDoc;
 #[async_trait]
 impl OrcaTool for ReadDoc {
     const NAME: &'static str = "read_doc";
-    const DESCRIPTION: &'static str =
-        "Read a documentation file by root and relative path \
+    const DESCRIPTION: &'static str = "Read a documentation file by root and relative path \
          (e.g. root=rebuy, path=admin-api/README).";
     type Args = ReadDocArgs;
     async fn run(args: ReadDocArgs, ctx: &ToolCtx) -> Result<String> {
@@ -106,9 +104,9 @@ impl OrcaTool for SearchDocs {
         if let Some(llm) = local_llm::discover_local_llm().await
             && let Some(enhanced) =
                 local_llm::present_text_results(&llm, &args.query, &raw, 8000).await
-            {
-                return Ok(enhanced);
-            }
+        {
+            return Ok(enhanced);
+        }
         Ok(raw)
     }
 }

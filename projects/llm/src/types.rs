@@ -18,7 +18,9 @@ pub enum Message {
 
 impl Message {
     pub fn user(content: impl Into<String>) -> Self {
-        Message::User { content: content.into() }
+        Message::User {
+            content: content.into(),
+        }
     }
 }
 

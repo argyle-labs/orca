@@ -1,12 +1,12 @@
 use anyhow::Result;
-use config::{APP_NAME, APP_STATE_DIR};
-#[cfg(target_os = "macos")]
-use config::{APP_DAEMON_LOG, APP_PLIST_LABEL};
-#[cfg(target_os = "linux")]
-use config::APP_SYSTEMD_SERVICE;
-use state::{self, DaemonMode};
 use clap::Subcommand;
 use colored::Colorize;
+#[cfg(target_os = "linux")]
+use config::APP_SYSTEMD_SERVICE;
+#[cfg(target_os = "macos")]
+use config::{APP_DAEMON_LOG, APP_PLIST_LABEL};
+use config::{APP_NAME, APP_STATE_DIR};
+use state::{self, DaemonMode};
 use std::process::Command;
 
 #[derive(Subcommand)]
@@ -84,8 +84,14 @@ fn status() -> Result<()> {
     println!("  uptime:  {}", uptime);
 
     if !alive {
-        println!("  {}", "warning: PID not found — daemon may have crashed".yellow());
-        println!("  {}", format!("hint: remove ~/{APP_STATE_DIR}/state.json and restart").dimmed());
+        println!(
+            "  {}",
+            "warning: PID not found — daemon may have crashed".yellow()
+        );
+        println!(
+            "  {}",
+            format!("hint: remove ~/{APP_STATE_DIR}/state.json and restart").dimmed()
+        );
     }
     Ok(())
 }
@@ -93,7 +99,11 @@ fn status() -> Result<()> {
 fn stop() -> Result<()> {
     let s = state::read()?.ok_or_else(|| anyhow::anyhow!("daemon not running (no state file)"))?;
     send_signal(s.daemon_pid, "TERM")?;
-    println!("{} sent SIGTERM to daemon (pid {})", "✓".green(), s.daemon_pid);
+    println!(
+        "{} sent SIGTERM to daemon (pid {})",
+        "✓".green(),
+        s.daemon_pid
+    );
     Ok(())
 }
 
@@ -103,18 +113,32 @@ fn park() -> Result<()> {
         anyhow::bail!("daemon is not in running mode (current: {:?})", s.mode);
     }
     send_signal(s.daemon_pid, "USR1")?;
-    println!("{} parked daemon (pid {}) — port {} released", "✓".green(), s.daemon_pid, s.port);
+    println!(
+        "{} parked daemon (pid {}) — port {} released",
+        "✓".green(),
+        s.daemon_pid,
+        s.port
+    );
     Ok(())
 }
 
 fn reclaim() -> Result<()> {
     let s = state::read()?.ok_or_else(|| anyhow::anyhow!("daemon not running (no state file)"))?;
     if s.mode == DaemonMode::Daemon {
-        println!("{} daemon is already running on port {}", "✓".green(), s.port);
+        println!(
+            "{} daemon is already running on port {}",
+            "✓".green(),
+            s.port
+        );
         return Ok(());
     }
     send_signal(s.daemon_pid, "USR2")?;
-    println!("{} sent SIGUSR2 to daemon (pid {}) — reclaiming port {}", "✓".green(), s.daemon_pid, s.port);
+    println!(
+        "{} sent SIGUSR2 to daemon (pid {}) — reclaiming port {}",
+        "✓".green(),
+        s.daemon_pid,
+        s.port
+    );
     Ok(())
 }
 
@@ -149,9 +173,10 @@ fn uninstall() -> Result<()> {
 
 fn resolve_binary() -> Result<String> {
     if let Some(s) = state::read()?
-        && !s.binary.is_empty() {
-            return Ok(s.binary);
-        }
+        && !s.binary.is_empty()
+    {
+        return Ok(s.binary);
+    }
     let out = Command::new("which").arg(APP_NAME).output()?;
     if out.status.success() {
         let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -223,7 +248,10 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     if !status.success() {
         anyhow::bail!("launchctl bootstrap {domain} failed");
     }
-    println!("{} {APP_NAME} daemon installed — starts now and on login", "✓".green());
+    println!(
+        "{} {APP_NAME} daemon installed — starts now and on login",
+        "✓".green()
+    );
     println!("  logs: tail -f {APP_DAEMON_LOG}");
     Ok(())
 }
@@ -354,7 +382,11 @@ mod tests {
         // We cannot guarantee `orca` is on PATH in CI, so we only assert the
         // result is non-empty and is either a real path or the fallback path.
         let result = resolve_binary();
-        assert!(result.is_ok(), "resolve_binary should never error: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "resolve_binary should never error: {:?}",
+            result
+        );
         let path = result.unwrap();
         assert!(!path.is_empty(), "resolve_binary returned an empty string");
     }

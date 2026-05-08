@@ -1,7 +1,7 @@
 use anyhow::Result;
+use clap::Subcommand;
 use config::APP_NAME;
 use db::{self, MigrateDirection};
-use clap::Subcommand;
 
 /// Subcommands for `orca db`.
 #[derive(Subcommand)]
@@ -46,7 +46,9 @@ pub fn cmd_db(action: DbAction) -> Result<()> {
             if pending == 0 {
                 println!("Status         : up to date");
             } else {
-                println!("Status         : {pending} migration(s) pending — run `{APP_NAME} db migrate`");
+                println!(
+                    "Status         : {pending} migration(s) pending — run `{APP_NAME} db migrate`"
+                );
             }
         }
     }

@@ -54,7 +54,12 @@ pub async fn spec_download_handler(
     let path = specs_dir().join(format!("{repo}.json"));
     let raw = match std::fs::read_to_string(&path) {
         Ok(s) => s,
-        Err(_) => return err(StatusCode::NOT_FOUND, &format!("no spec registered for '{repo}'")),
+        Err(_) => {
+            return err(
+                StatusCode::NOT_FOUND,
+                &format!("no spec registered for '{repo}'"),
+            );
+        }
     };
 
     let want_yaml = params.format.as_deref() == Some("yaml");
@@ -115,7 +120,7 @@ pub async fn graphql_download_handler(
             return err(
                 StatusCode::NOT_FOUND,
                 &format!("no GraphQL schema for '{repo}'"),
-            )
+            );
         }
     };
 

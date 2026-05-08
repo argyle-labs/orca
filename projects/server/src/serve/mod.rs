@@ -35,20 +35,19 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     // Register as the active dev process so the parked daemon won't auto-reclaim.
     // Use ORCA_DEV_PARENT_PID (the shell script PID) so the registration stays
     // valid across cargo-watch rebuilds — the shell script outlives each server instance.
-    if dev
-        && let Ok(Some(s)) = state::read() {
-            let active_pid = std::env::var("ORCA_DEV_PARENT_PID")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or_else(std::process::id);
-            if let Err(e) = state::write(&DaemonState {
-                mode: DaemonMode::Dev,
-                active_pid,
-                ..s
-            }) {
-                tracing::warn!("failed to write dev state: {e}");
-            }
+    if dev && let Ok(Some(s)) = state::read() {
+        let active_pid = std::env::var("ORCA_DEV_PARENT_PID")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(std::process::id);
+        if let Err(e) = state::write(&DaemonState {
+            mode: DaemonMode::Dev,
+            active_pid,
+            ..s
+        }) {
+            tracing::warn!("failed to write dev state: {e}");
         }
+    }
 
     // Non-blocking update check — prints a notice if a newer version is available.
     tokio::spawn(orca_commands::startup_update_check());
@@ -90,33 +89,34 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     // Crash-restart recovery: if launchd restarted us while a dev session was active,
     // wait for the dev server to finish rather than immediately fighting it for the port.
     if let Ok(Some(mut s)) = state::read()
-        && s.mode == DaemonMode::Dev {
-            info!("[orca] restarted while dev session active — waiting for dev to exit");
-            s.daemon_pid = std::process::id();
-            if let Err(e) = state::write(&s) {
-                tracing::warn!("failed to update daemon_pid in state: {e}");
-            }
+        && s.mode == DaemonMode::Dev
+    {
+        info!("[orca] restarted while dev session active — waiting for dev to exit");
+        s.daemon_pid = std::process::id();
+        if let Err(e) = state::write(&s) {
+            tracing::warn!("failed to update daemon_pid in state: {e}");
+        }
 
-            // Register SIGUSR2 now so dev can signal us at the new PID
-            let mut sigusr2 = signal(SignalKind::user_defined2())?;
-            loop {
-                tokio::select! {
-                    _ = sigusr2.recv() => break,
-                    _ = sigterm.recv() => {
-                        let _ = state::clear();
-                        return Ok(());
-                    }
-                    _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                        if let Ok(Some(s)) = state::read() {
-                            if s.mode != DaemonMode::Dev || !pid_alive(s.active_pid) { break; }
-                        } else {
-                            break;
-                        }
+        // Register SIGUSR2 now so dev can signal us at the new PID
+        let mut sigusr2 = signal(SignalKind::user_defined2())?;
+        loop {
+            tokio::select! {
+                _ = sigusr2.recv() => break,
+                _ = sigterm.recv() => {
+                    let _ = state::clear();
+                    return Ok(());
+                }
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                    if let Ok(Some(s)) = state::read() {
+                        if s.mode != DaemonMode::Dev || !pid_alive(s.active_pid) { break; }
+                    } else {
+                        break;
                     }
                 }
             }
-            info!("[orca] dev session ended — binding port {port}");
         }
+        info!("[orca] dev session ended — binding port {port}");
+    }
 
     loop {
         let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
@@ -248,12 +248,13 @@ fn pid_alive(pid: u32) -> bool {
 /// the canonical path from current_exe() points to the old binary on disk.
 fn resolve_daemon_binary() -> String {
     if let Ok(out) = std::process::Command::new("which").arg("orca").output()
-        && out.status.success() {
-            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !path.is_empty() {
-                return path;
-            }
+        && out.status.success()
+    {
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !path.is_empty() {
+            return path;
         }
+    }
     std::env::current_exe()
         .unwrap_or_default()
         .to_string_lossy()
@@ -289,7 +290,10 @@ async fn static_handler(uri: axum::http::Uri) -> axum::response::Response {
                 .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
                 .body(Body::from(content.data))
                 .expect("hardcoded headers are valid"),
-            None => Response::builder().status(404).body(Body::empty()).expect("404 response is valid"),
+            None => Response::builder()
+                .status(404)
+                .body(Body::empty())
+                .expect("404 response is valid"),
         },
     }
 }
@@ -316,8 +320,13 @@ const VITE_WS_ORIGIN: &str = "ws://127.0.0.1:12001";
 fn is_hop_by_hop(name: &str) -> bool {
     matches!(
         name,
-        "connection" | "keep-alive" | "transfer-encoding" | "te"
-            | "trailer" | "upgrade" | "proxy-authorization"
+        "connection"
+            | "keep-alive"
+            | "transfer-encoding"
+            | "te"
+            | "trailer"
+            | "upgrade"
+            | "proxy-authorization"
             | "proxy-authenticate"
     )
 }
@@ -392,9 +401,12 @@ async fn proxy_http_to_vite(req: axum::extract::Request) -> axum::response::Resp
                 builder = builder.header(k.as_str(), v);
             }
             let bytes = resp.bytes().await.unwrap_or_default();
-            builder
-                .body(Body::from(bytes))
-                .unwrap_or_else(|_| Response::builder().status(502).body(Body::empty()).expect("502 response is valid"))
+            builder.body(Body::from(bytes)).unwrap_or_else(|_| {
+                Response::builder()
+                    .status(502)
+                    .body(Body::empty())
+                    .expect("502 response is valid")
+            })
         }
         Err(_) => Response::builder()
             .status(502)
@@ -462,7 +474,10 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         // Spec endpoints — registered after split so they are not themselves
         // documented in the spec (would be circular and noisy).
         .route("/api/openapi.json", get(openapi::openapi_handler))
-        .route("/api/openapi/public.json", get(openapi::openapi_public_handler))
+        .route(
+            "/api/openapi/public.json",
+            get(openapi::openapi_public_handler),
+        )
         // Scalar API reference viewer — served by Rust so it works in the
         // prerendered static build (SvelteKit SSR routes don't survive embedding).
         .route("/scalar", get(scalar_handler))

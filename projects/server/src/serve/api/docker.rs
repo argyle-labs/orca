@@ -20,10 +20,10 @@ fn resolve_docker_bin() -> &'static str {
     static DOCKER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     DOCKER.get_or_init(|| {
         for candidate in &[
-            "/opt/homebrew/bin/docker",  // macOS Homebrew (Apple Silicon)
-            "/usr/local/bin/docker",     // macOS Homebrew (Intel) / manual install
-            "/usr/bin/docker",           // Linux system package (apt/dnf/rpm)
-            "/snap/bin/docker",          // Ubuntu snap
+            "/opt/homebrew/bin/docker", // macOS Homebrew (Apple Silicon)
+            "/usr/local/bin/docker",    // macOS Homebrew (Intel) / manual install
+            "/usr/bin/docker",          // Linux system package (apt/dnf/rpm)
+            "/snap/bin/docker",         // Ubuntu snap
         ] {
             if std::path::Path::new(candidate).exists() {
                 return candidate.to_string();
@@ -65,10 +65,20 @@ pub async fn docker_engine_start_handler() -> Response {
     // Probe well-known colima install locations (avoid `which` — fails in daemon PATH).
     let home = std::env::var("HOME").unwrap_or_default();
     let local_bin = format!("{home}/.local/bin/colima");
-    let candidates: &[&str] = &["/opt/homebrew/bin/colima", "/usr/local/bin/colima", &local_bin];
-    let colima_bin = candidates.iter().find(|p| std::path::Path::new(p).exists()).copied();
+    let candidates: &[&str] = &[
+        "/opt/homebrew/bin/colima",
+        "/usr/local/bin/colima",
+        &local_bin,
+    ];
+    let colima_bin = candidates
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .copied();
     let Some(colima) = colima_bin else {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, "colima not found — start Docker Desktop manually");
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "colima not found — start Docker Desktop manually",
+        );
     };
     match Command::new(colima).arg("start").output().await {
         Ok(out) => {
@@ -315,7 +325,10 @@ async fn detect_docker_engine() -> (&'static str, bool) {
     }
 
     // Fall back: probe Docker Desktop by pinging the daemon.
-    let ping = Command::new(resolve_docker_bin()).args(["info", "--format", "{{.ServerVersion}}"]).output().await;
+    let ping = Command::new(resolve_docker_bin())
+        .args(["info", "--format", "{{.ServerVersion}}"])
+        .output()
+        .await;
     let running = ping.map(|o| o.status.success()).unwrap_or(false);
     ("desktop", running)
 }
@@ -384,7 +397,11 @@ pub(crate) fn parse_compose_ps(raw: &str) -> HashMap<String, ServiceStatus> {
                     return None;
                 }
                 let label = format!("{pub_port}:{target}");
-                if seen.insert(label.clone()) { Some(label) } else { None }
+                if seen.insert(label.clone()) {
+                    Some(label)
+                } else {
+                    None
+                }
             })
             .collect();
         out.insert(

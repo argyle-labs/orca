@@ -28,11 +28,11 @@
 //! parse error), the string-scanning fallback functions below take over.
 //! This means the scanner compiles and works in all configurations; the AST
 //! path simply produces higher-fidelity results.
+use crate::php_parse::PhpFile;
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use crate::php_parse::PhpFile;
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
@@ -57,20 +57,21 @@ pub fn generate(repo_path: &Path) -> Result<Value> {
                 let trimmed = schema_path.trim_start_matches('/');
                 let file_path = schemas_root.join(trimmed);
                 if let Ok(raw) = std::fs::read_to_string(&file_path)
-                    && let Ok(schema) = serde_json::from_str::<Value>(&raw) {
-                        let schema = clean_json_schema(schema);
-                        let cname = schema_component_name(trimmed);
-                        components_schemas.insert(cname.clone(), schema);
-                        schema_name_map.insert(trimmed.to_string(), cname.clone());
-                        request_body = Some(json!({
-                            "required": true,
-                            "content": {
-                                "application/json": {
-                                    "schema": { "$ref": format!("#/components/schemas/{cname}") }
-                                }
+                    && let Ok(schema) = serde_json::from_str::<Value>(&raw)
+                {
+                    let schema = clean_json_schema(schema);
+                    let cname = schema_component_name(trimmed);
+                    components_schemas.insert(cname.clone(), schema);
+                    schema_name_map.insert(trimmed.to_string(), cname.clone());
+                    request_body = Some(json!({
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": { "$ref": format!("#/components/schemas/{cname}") }
                             }
-                        }));
-                    }
+                        }
+                    }));
+                }
                 break;
             }
         }
@@ -118,42 +119,47 @@ pub fn generate(repo_path: &Path) -> Result<Value> {
         }
 
         // Derive method name from controller ref (e.g. Api\V1\Foo::postCreate → postCreate)
-        let method_name = route.controller
+        let method_name = route
+            .controller
             .rsplit("::")
             .next()
             .unwrap_or("")
             .to_string();
 
-        let schema = if let Some(ctrl_path) = resolve_controller_file(repo_path, &route.controller) {
+        let schema = if let Some(ctrl_path) = resolve_controller_file(repo_path, &route.controller)
+        {
             if let Ok(ctrl_src) = std::fs::read_to_string(&ctrl_path) {
                 let mut found_schema: Option<Value> = None;
 
                 // Try Payload class first
                 if let Some(payload_class) = find_payload_class(&ctrl_src, &method_name)
-                    && let Some(payload_path) = resolve_payload_file(repo_path, &payload_class, &ctrl_src)
-                        && let Ok(payload_src) = std::fs::read_to_string(&payload_path) {
-                            let s = extract_payload_schema(&payload_src);
-                            if s.get("properties")
-                                .and_then(|p| p.as_object())
-                                .map(|p| !p.is_empty())
-                                .unwrap_or(false)
-                            {
-                                found_schema = Some(s);
-                            }
-                        }
+                    && let Some(payload_path) =
+                        resolve_payload_file(repo_path, &payload_class, &ctrl_src)
+                    && let Ok(payload_src) = std::fs::read_to_string(&payload_path)
+                {
+                    let s = extract_payload_schema(&payload_src);
+                    if s.get("properties")
+                        .and_then(|p| p.as_object())
+                        .map(|p| !p.is_empty())
+                        .unwrap_or(false)
+                    {
+                        found_schema = Some(s);
+                    }
+                }
 
                 // Fallback: getJSON field extraction
                 if found_schema.is_none()
-                    && let Some(body) = extract_method_body(&ctrl_src, &method_name) {
-                        let s = extract_getjson_fields(body);
-                        if s.get("properties")
-                            .and_then(|p| p.as_object())
-                            .map(|p| !p.is_empty())
-                            .unwrap_or(false)
-                        {
-                            found_schema = Some(s);
-                        }
+                    && let Some(body) = extract_method_body(&ctrl_src, &method_name)
+                {
+                    let s = extract_getjson_fields(body);
+                    if s.get("properties")
+                        .and_then(|p| p.as_object())
+                        .map(|p| !p.is_empty())
+                        .unwrap_or(false)
+                    {
+                        found_schema = Some(s);
                     }
+                }
 
                 found_schema
             } else {
@@ -164,16 +170,17 @@ pub fn generate(repo_path: &Path) -> Result<Value> {
         };
 
         if let Some(schema) = schema
-            && let Some(path_item) = paths.get_mut(&oas_path) {
-                path_item[method]["requestBody"] = json!({
-                    "required": true,
-                    "content": {
-                        "application/json": {
-                            "schema": schema
-                        }
+            && let Some(path_item) = paths.get_mut(&oas_path)
+        {
+            path_item[method]["requestBody"] = json!({
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": schema
                     }
-                });
-            }
+                }
+            });
+        }
     }
 
     // Third pass: override the 200 response for endpoints with #[ApiResponse(Class::class)].
@@ -182,7 +189,8 @@ pub fn generate(repo_path: &Path) -> Result<Value> {
         if route.controller.is_empty() {
             continue;
         }
-        let method_name = route.controller
+        let method_name = route
+            .controller
             .rsplit("::")
             .next()
             .unwrap_or("")
@@ -193,12 +201,17 @@ pub fn generate(repo_path: &Path) -> Result<Value> {
             .and_then(|ctrl_src| {
                 let response_class = find_response_class(&ctrl_src, &method_name)?;
                 // Simple name for the component key (last segment of any FQN).
-                let simple = response_class.split('\\').next_back().unwrap_or(&response_class).to_string();
+                let simple = response_class
+                    .split('\\')
+                    .next_back()
+                    .unwrap_or(&response_class)
+                    .to_string();
                 let response_path = resolve_response_file(repo_path, &response_class, &ctrl_src)?;
                 let response_src = std::fs::read_to_string(&response_path).ok()?;
                 let schema = extract_payload_schema(&response_src);
                 // Only use the schema if it has at least one property.
-                let has_props = schema.get("properties")
+                let has_props = schema
+                    .get("properties")
                     .and_then(|p| p.as_object())
                     .map(|p| !p.is_empty())
                     .unwrap_or(false);
@@ -209,15 +222,18 @@ pub fn generate(repo_path: &Path) -> Result<Value> {
             components_schemas.insert(cname.clone(), schema);
             // Wrap the data class inside an ApiResponse envelope schema.
             let wrapped_cname = format!("ApiResponse{cname}");
-            components_schemas.insert(wrapped_cname.clone(), json!({
-                "type": "object",
-                "properties": {
-                    "successful": { "type": "boolean" },
-                    "data": { "$ref": format!("#/components/schemas/{cname}") },
-                    "status": { "type": "integer" },
-                    "errorMessage": { "type": ["string", "null"] }
-                }
-            }));
+            components_schemas.insert(
+                wrapped_cname.clone(),
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "successful": { "type": "boolean" },
+                        "data": { "$ref": format!("#/components/schemas/{cname}") },
+                        "status": { "type": "integer" },
+                        "errorMessage": { "type": ["string", "null"] }
+                    }
+                }),
+            );
             if let Some(path_item) = paths.get_mut(&oas_path) {
                 let method = route.method.as_str();
                 path_item[method]["responses"]["200"] = json!({
@@ -235,18 +251,34 @@ pub fn generate(repo_path: &Path) -> Result<Value> {
     // ── Pass 4: setJSON literal array schema + engine proxy ──────────────────
     for route in &routes {
         let oas_path = ci4_path_to_oas(&route.path);
-        let is_generic = paths.get(&oas_path)
+        let is_generic = paths
+            .get(&oas_path)
             .and_then(|p| p[route.method.as_str()].get("responses"))
             .and_then(|r| r["200"]["content"]["application/json"]["schema"]["$ref"].as_str())
             .map(|r| r == "#/components/schemas/ApiResponse")
             .unwrap_or(false);
-        if !is_generic { continue; }
-        if route.controller.is_empty() { continue; }
+        if !is_generic {
+            continue;
+        }
+        if route.controller.is_empty() {
+            continue;
+        }
 
-        let method_name = route.controller.rsplit("::").next().unwrap_or("").to_string();
-        let Some(ctrl_path) = resolve_controller_file(repo_path, &route.controller) else { continue };
-        let Ok(ctrl_src) = std::fs::read_to_string(&ctrl_path) else { continue };
-        let Some(body) = extract_method_body(&ctrl_src, &method_name) else { continue };
+        let method_name = route
+            .controller
+            .rsplit("::")
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let Some(ctrl_path) = resolve_controller_file(repo_path, &route.controller) else {
+            continue;
+        };
+        let Ok(ctrl_src) = std::fs::read_to_string(&ctrl_path) else {
+            continue;
+        };
+        let Some(body) = extract_method_body(&ctrl_src, &method_name) else {
+            continue;
+        };
 
         if body.contains("setEngineResponseData(") {
             if let Some(path_item) = paths.get_mut(&oas_path) {
@@ -260,38 +292,57 @@ pub fn generate(repo_path: &Path) -> Result<Value> {
 
         // Try AST extraction first; fall back to context-aware string scan.
         let schema = if let Some(php) = PhpFile::parse(&ctrl_src) {
-            php.set_json_schema(&method_name).map(|props| json!({
-                "type": "object",
-                "properties": Value::Object(props)
-            }))
+            php.set_json_schema(&method_name).map(|props| {
+                json!({
+                    "type": "object",
+                    "properties": Value::Object(props)
+                })
+            })
         } else {
             infer_set_json_schema_ctx(body, &ctrl_src, repo_path)
                 .or_else(|| infer_set_json_schema(body))
         };
         if let Some(schema) = schema
-            && let Some(path_item) = paths.get_mut(&oas_path) {
-                path_item[route.method.as_str()]["responses"]["200"] = json!({
-                    "description": "Success",
-                    "content": { "application/json": { "schema": schema } }
-                });
-            }
+            && let Some(path_item) = paths.get_mut(&oas_path)
+        {
+            path_item[route.method.as_str()]["responses"]["200"] = json!({
+                "description": "Success",
+                "content": { "application/json": { "schema": schema } }
+            });
+        }
     }
 
     // ── Pass 5: sendResponse(data: $var->toArray()) → entity $casts ──────────
     for route in &routes {
         let oas_path = ci4_path_to_oas(&route.path);
-        let is_generic = paths.get(&oas_path)
+        let is_generic = paths
+            .get(&oas_path)
             .and_then(|p| p[route.method.as_str()].get("responses"))
             .and_then(|r| r["200"]["content"]["application/json"]["schema"]["$ref"].as_str())
             .map(|r| r == "#/components/schemas/ApiResponse")
             .unwrap_or(false);
-        if !is_generic { continue; }
-        if route.controller.is_empty() { continue; }
+        if !is_generic {
+            continue;
+        }
+        if route.controller.is_empty() {
+            continue;
+        }
 
-        let method_name = route.controller.rsplit("::").next().unwrap_or("").to_string();
-        let Some(ctrl_path) = resolve_controller_file(repo_path, &route.controller) else { continue };
-        let Ok(ctrl_src) = std::fs::read_to_string(&ctrl_path) else { continue };
-        let Some(body) = extract_method_body(&ctrl_src, &method_name) else { continue };
+        let method_name = route
+            .controller
+            .rsplit("::")
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let Some(ctrl_path) = resolve_controller_file(repo_path, &route.controller) else {
+            continue;
+        };
+        let Ok(ctrl_src) = std::fs::read_to_string(&ctrl_path) else {
+            continue;
+        };
+        let Some(body) = extract_method_body(&ctrl_src, &method_name) else {
+            continue;
+        };
 
         // Try AST var extraction first; fall back to string scan.
         let var_name = if let Some(php) = PhpFile::parse(&ctrl_src) {
@@ -303,8 +354,13 @@ pub fn generate(repo_path: &Path) -> Result<Value> {
 
         // Entity file tracing is a multi-file hop — still string-based.
         let Some((entity_class, entity_file)) =
-            trace_var_to_entity_file(body, &ctrl_src, &var_name, repo_path) else { continue };
-        let Ok(entity_src) = std::fs::read_to_string(&entity_file) else { continue };
+            trace_var_to_entity_file(body, &ctrl_src, &var_name, repo_path)
+        else {
+            continue;
+        };
+        let Ok(entity_src) = std::fs::read_to_string(&entity_file) else {
+            continue;
+        };
 
         // Try AST $casts extraction first; fall back to string scan.
         let entity_schema = if let Some(php) = PhpFile::parse(&entity_src) {
@@ -321,22 +377,35 @@ pub fn generate(repo_path: &Path) -> Result<Value> {
         } else {
             extract_casts_schema(&entity_src)
         };
-        let Some(entity_schema) = entity_schema else { continue };
+        let Some(entity_schema) = entity_schema else {
+            continue;
+        };
 
-        let has_props = entity_schema["properties"].as_object().map(|p| !p.is_empty()).unwrap_or(false);
-        if !has_props { continue; }
+        let has_props = entity_schema["properties"]
+            .as_object()
+            .map(|p| !p.is_empty())
+            .unwrap_or(false);
+        if !has_props {
+            continue;
+        }
 
         let wrapped_name = format!("ApiResponse{entity_class}");
-        components_schemas.entry(entity_class.clone()).or_insert(entity_schema);
-        components_schemas.entry(wrapped_name.clone()).or_insert_with(|| json!({
-            "type": "object",
-            "properties": {
-                "successful": { "type": "boolean" },
-                "data": { "$ref": format!("#/components/schemas/{entity_class}") },
-                "status": { "type": "integer" },
-                "errorMessage": { "type": ["string", "null"] }
-            }
-        }));
+        components_schemas
+            .entry(entity_class.clone())
+            .or_insert(entity_schema);
+        components_schemas
+            .entry(wrapped_name.clone())
+            .or_insert_with(|| {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "successful": { "type": "boolean" },
+                        "data": { "$ref": format!("#/components/schemas/{entity_class}") },
+                        "status": { "type": "integer" },
+                        "errorMessage": { "type": ["string", "null"] }
+                    }
+                })
+            });
 
         if let Some(path_item) = paths.get_mut(&oas_path) {
             path_item[route.method.as_str()]["responses"]["200"] = json!({
@@ -353,43 +422,80 @@ pub fn generate(repo_path: &Path) -> Result<Value> {
     // where the data comes from a service/model method with a @return annotation.
     for route in &routes {
         let oas_path = ci4_path_to_oas(&route.path);
-        let is_generic = paths.get(&oas_path)
+        let is_generic = paths
+            .get(&oas_path)
             .and_then(|p| p[route.method.as_str()].get("responses"))
             .and_then(|r| r["200"]["content"]["application/json"]["schema"]["$ref"].as_str())
             .map(|r| r == "#/components/schemas/ApiResponse")
             .unwrap_or(false);
-        if !is_generic { continue; }
-        if route.controller.is_empty() { continue; }
+        if !is_generic {
+            continue;
+        }
+        if route.controller.is_empty() {
+            continue;
+        }
 
-        let method_name = route.controller.rsplit("::").next().unwrap_or("").to_string();
-        let Some(ctrl_path) = resolve_controller_file(repo_path, &route.controller) else { continue };
-        let Ok(ctrl_src) = std::fs::read_to_string(&ctrl_path) else { continue };
-        let Some(body) = extract_method_body(&ctrl_src, &method_name) else { continue };
+        let method_name = route
+            .controller
+            .rsplit("::")
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let Some(ctrl_path) = resolve_controller_file(repo_path, &route.controller) else {
+            continue;
+        };
+        let Ok(ctrl_src) = std::fs::read_to_string(&ctrl_path) else {
+            continue;
+        };
+        let Some(body) = extract_method_body(&ctrl_src, &method_name) else {
+            continue;
+        };
 
         let Some((data_schema, schema_name)) =
-            resolve_send_response_schema(body, &ctrl_src, repo_path) else { continue };
+            resolve_send_response_schema(body, &ctrl_src, repo_path)
+        else {
+            continue;
+        };
 
         // Only use schemas that have meaningful content
-        let has_props = data_schema.get("properties")
+        let has_props = data_schema
+            .get("properties")
             .and_then(|p| p.as_object())
             .map(|p| !p.is_empty())
-            .unwrap_or_else(|| data_schema.get("type")
-                .and_then(|t| t.as_str())
-                .map(|t| t == "array" || t == "string" || t == "integer" || t == "boolean" || t == "number")
-                .unwrap_or(false));
-        if !has_props { continue; }
+            .unwrap_or_else(|| {
+                data_schema
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .map(|t| {
+                        t == "array"
+                            || t == "string"
+                            || t == "integer"
+                            || t == "boolean"
+                            || t == "number"
+                    })
+                    .unwrap_or(false)
+            });
+        if !has_props {
+            continue;
+        }
 
         let wrapped_name = format!("ApiResponse{schema_name}");
-        components_schemas.entry(schema_name.clone()).or_insert(data_schema);
-        components_schemas.entry(wrapped_name.clone()).or_insert_with(|| json!({
-            "type": "object",
-            "properties": {
-                "successful": { "type": "boolean" },
-                "data": { "$ref": format!("#/components/schemas/{schema_name}") },
-                "status": { "type": "integer" },
-                "errorMessage": { "type": ["string", "null"] }
-            }
-        }));
+        components_schemas
+            .entry(schema_name.clone())
+            .or_insert(data_schema);
+        components_schemas
+            .entry(wrapped_name.clone())
+            .or_insert_with(|| {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "successful": { "type": "boolean" },
+                        "data": { "$ref": format!("#/components/schemas/{schema_name}") },
+                        "status": { "type": "integer" },
+                        "errorMessage": { "type": ["string", "null"] }
+                    }
+                })
+            });
         if let Some(path_item) = paths.get_mut(&oas_path) {
             path_item[route.method.as_str()]["responses"]["200"] = json!({
                 "description": "Success",
@@ -726,7 +832,7 @@ fn extract_filters(src: &str) -> Vec<String> {
 fn ci4_path_to_oas(path: &str) -> String {
     let oas = format!("/{path}");
     // Replace (:num), (:segment), (:any), (:alpha) with named params
-    
+
     replace_path_params(&oas)
 }
 
@@ -878,11 +984,7 @@ fn build_tags(paths: &BTreeMap<String, Value>) -> Value {
             }
         }
     }
-    Value::Array(
-        tags.into_iter()
-            .map(|t| json!({ "name": t }))
-            .collect(),
-    )
+    Value::Array(tags.into_iter().map(|t| json!({ "name": t })).collect())
 }
 
 // ── operationId ───────────────────────────────────────────────────────────────
@@ -985,12 +1087,11 @@ fn resolve_controller_file(repo_path: &Path, ctrl_ref: &str) -> Option<PathBuf> 
     };
     // `Api\V1\RebuyAssistant` → `apps/ci4/app/Controllers/Api/V1/RebuyAssistant.php`
     let rel = class_part.replace('\\', "/");
-    let path = repo_path.join("apps/ci4/app/Controllers").join(&rel).with_extension("php");
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
+    let path = repo_path
+        .join("apps/ci4/app/Controllers")
+        .join(&rel)
+        .with_extension("php");
+    if path.exists() { Some(path) } else { None }
 }
 
 /// Extract the body of a named method from PHP source.
@@ -1001,13 +1102,12 @@ fn extract_method_body<'a>(src: &'a str, method_name: &str) -> Option<&'a str> {
     let after_sig = &src[func_pos + needle.len()..];
     let brace_pos = after_sig.find('{')?;
     let body_start = func_pos + needle.len() + brace_pos;
-    extract_balanced(&src[body_start..], '{', '}')
-        .map(|s| {
-            // Return a slice of the original src rather than a derived slice
-            let offset = body_start + 1; // skip the opening brace
-            let end = offset + s.len();
-            &src[offset..end]
-        })
+    extract_balanced(&src[body_start..], '{', '}').map(|s| {
+        // Return a slice of the original src rather than a derived slice
+        let offset = body_start + 1; // skip the opening brace
+        let end = offset + s.len();
+        &src[offset..end]
+    })
 }
 
 /// Find the Payload class name used in a method body.
@@ -1081,13 +1181,18 @@ fn find_response_class(ctrl_src: &str, method_name: &str) -> Option<String> {
 
 /// Resolve a Response class to its file path.
 /// Accepts either a simple name (resolved via `use` statements) or a FQN.
-fn resolve_response_file(repo_path: &Path, response_class: &str, ctrl_src: &str) -> Option<PathBuf> {
+fn resolve_response_file(
+    repo_path: &Path,
+    response_class: &str,
+    ctrl_src: &str,
+) -> Option<PathBuf> {
     // FQN path: App\Responses\... → resolve directly without needing a use stmt.
     if response_class.contains('\\') {
         if let Some(p) = namespace_to_path(repo_path, response_class)
-            && p.exists() {
-                return Some(p);
-            }
+            && p.exists()
+        {
+            return Some(p);
+        }
         return None;
     }
 
@@ -1106,9 +1211,10 @@ fn resolve_response_file(repo_path: &Path, response_class: &str, ctrl_src: &str)
             continue;
         }
         if let Some(p) = namespace_to_path(repo_path, ns)
-            && p.exists() {
-                return Some(p);
-            }
+            && p.exists()
+        {
+            return Some(p);
+        }
     }
     None
 }
@@ -1134,9 +1240,10 @@ fn resolve_payload_file(repo_path: &Path, payload_class: &str, ctrl_src: &str) -
 
         let path = namespace_to_path(repo_path, ns);
         if let Some(p) = path
-            && p.exists() {
-                return Some(p);
-            }
+            && p.exists()
+        {
+            return Some(p);
+        }
     }
     None
 }
@@ -1146,7 +1253,12 @@ fn namespace_to_path(repo_path: &Path, ns: &str) -> Option<PathBuf> {
     if let Some(rest) = ns.strip_prefix("App\\") {
         // App\Payloads\... → apps/ci4/app/Payloads/...
         let rel = rest.replace('\\', "/");
-        return Some(repo_path.join("apps/ci4/app").join(&rel).with_extension("php"));
+        return Some(
+            repo_path
+                .join("apps/ci4/app")
+                .join(&rel)
+                .with_extension("php"),
+        );
     }
     if let Some(rest) = ns.strip_prefix("RebuyCore\\") {
         // RebuyCore\... → apps/ci4/vendor/rebuy/core-ci4/src/...
@@ -1201,28 +1313,35 @@ fn infer_set_json_schema(body: &str) -> Option<Value> {
                 }
             // Pattern B: ->setJSON((new ApiResponse($ok, $data, $status, $msg))->toJson())
             // Wrap data in the standard ApiResponse envelope using the variable name for $data.
-            } else if (trimmed.starts_with("(new ApiResponse(") || trimmed.starts_with("(new \\ApiResponse("))
-                && let Some(args_inner) = extract_balanced(trimmed, '(', ')') {
-                    // ApiResponse(bool $successful, mixed $data, int $status, ?string $errorMessage)
-                    let args: Vec<&str> = args_inner.splitn(4, ',').collect();
-                    if args.len() >= 2 {
-                        let data_arg = args[1].trim();
-                        let data_schema = infer_php_literal_schema(data_arg);
-                        // Build envelope properties with typed data field
-                        let mut props = serde_json::Map::new();
-                        props.insert("successful".to_string(), json!({ "type": "boolean" }));
-                        props.insert("data".to_string(), data_schema);
-                        props.insert("status".to_string(), json!({ "type": "integer" }));
-                        props.insert("errorMessage".to_string(), json!({ "type": ["string", "null"] }));
-                        if props.len() > best.len() {
-                            best = props;
-                        }
+            } else if (trimmed.starts_with("(new ApiResponse(")
+                || trimmed.starts_with("(new \\ApiResponse("))
+                && let Some(args_inner) = extract_balanced(trimmed, '(', ')')
+            {
+                // ApiResponse(bool $successful, mixed $data, int $status, ?string $errorMessage)
+                let args: Vec<&str> = args_inner.splitn(4, ',').collect();
+                if args.len() >= 2 {
+                    let data_arg = args[1].trim();
+                    let data_schema = infer_php_literal_schema(data_arg);
+                    // Build envelope properties with typed data field
+                    let mut props = serde_json::Map::new();
+                    props.insert("successful".to_string(), json!({ "type": "boolean" }));
+                    props.insert("data".to_string(), data_schema);
+                    props.insert("status".to_string(), json!({ "type": "integer" }));
+                    props.insert(
+                        "errorMessage".to_string(),
+                        json!({ "type": ["string", "null"] }),
+                    );
+                    if props.len() > best.len() {
+                        best = props;
                     }
                 }
+            }
             pos += rel + 1;
         }
     }
-    if best.is_empty() { return None; }
+    if best.is_empty() {
+        return None;
+    }
     Some(json!({ "type": "object", "properties": best }))
 }
 
@@ -1235,12 +1354,20 @@ fn parse_php_array_schema(inner: &str) -> serde_json::Map<String, Value> {
     while let Some(qp) = remaining.find(['\'', '"']) {
         let quote = remaining.as_bytes()[qp] as char;
         let after = &remaining[qp + 1..];
-        let Some(key_end) = find_closing_quote(after, quote) else { break };
+        let Some(key_end) = find_closing_quote(after, quote) else {
+            break;
+        };
         let key = &after[..key_end];
-        if key.is_empty() { remaining = &after[key_end + 1..]; continue; }
+        if key.is_empty() {
+            remaining = &after[key_end + 1..];
+            continue;
+        }
 
         let after_key = after[key_end + 1..].trim_start();
-        if !after_key.starts_with("=>") { remaining = after_key; continue; }
+        if !after_key.starts_with("=>") {
+            remaining = after_key;
+            continue;
+        }
         let val_src = after_key[2..].trim_start();
 
         // Value-based inference first; fall back to key-name hint when value is opaque.
@@ -1249,7 +1376,11 @@ fn parse_php_array_schema(inner: &str) -> serde_json::Map<String, Value> {
             if by_val.as_object().map(|o| o.is_empty()).unwrap_or(false) {
                 // Value gave no info — try key name
                 let hint = infer_schema_from_name(key);
-                if !hint.as_object().map(|o| o.is_empty()).unwrap_or(true) { hint } else { by_val }
+                if !hint.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+                    hint
+                } else {
+                    by_val
+                }
             } else {
                 by_val
             }
@@ -1266,8 +1397,13 @@ fn find_closing_quote(src: &str, quote: char) -> Option<usize> {
     let bytes = src.as_bytes();
     while i < bytes.len() {
         let c = bytes[i] as char;
-        if c == '\\' { i += 2; continue; }
-        if c == quote { return Some(i); }
+        if c == '\\' {
+            i += 2;
+            continue;
+        }
+        if c == quote {
+            return Some(i);
+        }
         i += 1;
     }
     None
@@ -1278,47 +1414,132 @@ fn find_closing_quote(src: &str, quote: char) -> Option<usize> {
 fn infer_schema_from_name(name: &str) -> Value {
     let lower = name.to_lowercase();
     // Boolean indicators
-    if matches!(lower.as_str(),
-        "successful" | "success" | "ok" | "enabled" | "active" | "deleted" |
-        "found" | "exists" | "is_valid" | "valid" | "published" | "visible"
-    ) || lower.starts_with("is_") || lower.starts_with("has_") || lower.starts_with("can_")
+    if matches!(
+        lower.as_str(),
+        "successful"
+            | "success"
+            | "ok"
+            | "enabled"
+            | "active"
+            | "deleted"
+            | "found"
+            | "exists"
+            | "is_valid"
+            | "valid"
+            | "published"
+            | "visible"
+    ) || lower.starts_with("is_")
+        || lower.starts_with("has_")
+        || lower.starts_with("can_")
     {
         return json!({ "type": "boolean" });
     }
     // Integer indicators
-    if matches!(lower.as_str(),
-        "count" | "total" | "id" | "status" | "code" | "page" | "limit" | "offset" |
-        "per_page" | "current_page" | "last_page" | "total_pages" | "size" | "length"
-    ) || lower.ends_with("_id") || lower.ends_with("_count") || lower.ends_with("_total")
-      || lower.ends_with("_status") || lower.ends_with("_code")
+    if matches!(
+        lower.as_str(),
+        "count"
+            | "total"
+            | "id"
+            | "status"
+            | "code"
+            | "page"
+            | "limit"
+            | "offset"
+            | "per_page"
+            | "current_page"
+            | "last_page"
+            | "total_pages"
+            | "size"
+            | "length"
+    ) || lower.ends_with("_id")
+        || lower.ends_with("_count")
+        || lower.ends_with("_total")
+        || lower.ends_with("_status")
+        || lower.ends_with("_code")
     {
         return json!({ "type": "integer" });
     }
     // String indicators
-    if matches!(lower.as_str(),
-        "error" | "errormessage" | "error_message" | "message" | "msg" | "name" | "title" |
-        "description" | "url" | "handle" | "type" | "key" | "token" | "value" | "label" |
-        "slug" | "email" | "phone" | "address" | "currency" | "locale" | "timezone" |
-        "format" | "mode" | "state" | "reason" | "note" | "comment" | "text"
-    ) || lower.ends_with("_name") || lower.ends_with("_title") || lower.ends_with("_url")
-      || lower.ends_with("_key") || lower.ends_with("_token") || lower.ends_with("_type")
-      || lower.ends_with("_id") && lower.len() > 3 && lower.ends_with("_id")
+    if matches!(
+        lower.as_str(),
+        "error"
+            | "errormessage"
+            | "error_message"
+            | "message"
+            | "msg"
+            | "name"
+            | "title"
+            | "description"
+            | "url"
+            | "handle"
+            | "type"
+            | "key"
+            | "token"
+            | "value"
+            | "label"
+            | "slug"
+            | "email"
+            | "phone"
+            | "address"
+            | "currency"
+            | "locale"
+            | "timezone"
+            | "format"
+            | "mode"
+            | "state"
+            | "reason"
+            | "note"
+            | "comment"
+            | "text"
+    ) || lower.ends_with("_name")
+        || lower.ends_with("_title")
+        || lower.ends_with("_url")
+        || lower.ends_with("_key")
+        || lower.ends_with("_token")
+        || lower.ends_with("_type")
+        || lower.ends_with("_id") && lower.len() > 3 && lower.ends_with("_id")
     {
         // Don't override integer for _id if already caught above
-        if lower.ends_with("_name") || lower.ends_with("_title") || lower.ends_with("_url")
-            || lower.ends_with("_key") || lower.ends_with("_token") || lower.ends_with("_type")
+        if lower.ends_with("_name")
+            || lower.ends_with("_title")
+            || lower.ends_with("_url")
+            || lower.ends_with("_key")
+            || lower.ends_with("_token")
+            || lower.ends_with("_type")
         {
             return json!({ "type": "string" });
         }
         return json!({ "type": "string" });
     }
     // Array indicators — plural nouns or common collection names
-    if matches!(lower.as_str(),
-        "data" | "items" | "results" | "list" | "records" | "rows" | "entries" |
-        "collection" | "set" | "batch" | "ids" | "tags" | "errors" | "warnings" |
-        "attributes" | "options" | "filters" | "params" | "headers" | "fields"
-    ) || (lower.ends_with('s') && lower.len() > 3
-          && !matches!(lower.as_str(), "status" | "class" | "process" | "address" | "access"))
+    if matches!(
+        lower.as_str(),
+        "data"
+            | "items"
+            | "results"
+            | "list"
+            | "records"
+            | "rows"
+            | "entries"
+            | "collection"
+            | "set"
+            | "batch"
+            | "ids"
+            | "tags"
+            | "errors"
+            | "warnings"
+            | "attributes"
+            | "options"
+            | "filters"
+            | "params"
+            | "headers"
+            | "fields"
+    ) || (lower.ends_with('s')
+        && lower.len() > 3
+        && !matches!(
+            lower.as_str(),
+            "status" | "class" | "process" | "address" | "access"
+        ))
     {
         return json!({ "type": "array", "items": {} });
     }
@@ -1333,11 +1554,19 @@ fn infer_php_literal_schema(val: &str) -> Value {
     } else if val.starts_with(['\'', '"']) {
         json!({ "type": "string" })
     } else if val.starts_with(|c: char| c.is_ascii_digit()) {
-        if val.contains('.') { json!({ "type": "number" }) } else { json!({ "type": "integer" }) }
+        if val.contains('.') {
+            json!({ "type": "number" })
+        } else {
+            json!({ "type": "integer" })
+        }
     } else if val.starts_with("null") {
         json!({ "type": "null" })
     } else if val.starts_with('[') || val.starts_with("array(") {
-        let (open, close) = if val.starts_with('[') { ('[', ']') } else { ('(', ')') };
+        let (open, close) = if val.starts_with('[') {
+            ('[', ']')
+        } else {
+            ('(', ')')
+        };
         if let Some(inner) = extract_balanced(val, open, close) {
             // Associative array → object
             let props = parse_php_array_schema(inner);
@@ -1353,25 +1582,44 @@ fn infer_php_literal_schema(val: &str) -> Value {
         }
         json!({ "type": "array", "items": {} })
     // Expression-based inference: cast operators and well-known functions
-    } else if val.starts_with("(int)") || val.starts_with("(integer)") || val.starts_with("intval(")
-           || val.starts_with("count(") || val.starts_with("sizeof(") || val.starts_with("strlen(")
+    } else if val.starts_with("(int)")
+        || val.starts_with("(integer)")
+        || val.starts_with("intval(")
+        || val.starts_with("count(")
+        || val.starts_with("sizeof(")
+        || val.starts_with("strlen(")
     {
         json!({ "type": "integer" })
-    } else if val.starts_with("(float)") || val.starts_with("(double)") || val.starts_with("floatval(") {
+    } else if val.starts_with("(float)")
+        || val.starts_with("(double)")
+        || val.starts_with("floatval(")
+    {
         json!({ "type": "number" })
-    } else if val.starts_with("(bool)") || val.starts_with("(boolean)") || val.starts_with("boolval(") {
+    } else if val.starts_with("(bool)")
+        || val.starts_with("(boolean)")
+        || val.starts_with("boolval(")
+    {
         json!({ "type": "boolean" })
-    } else if val.starts_with("(string)") || val.starts_with("strval(") || val.starts_with("sprintf(")
-           || val.starts_with("implode(") || val.starts_with("json_encode(")
+    } else if val.starts_with("(string)")
+        || val.starts_with("strval(")
+        || val.starts_with("sprintf(")
+        || val.starts_with("implode(")
+        || val.starts_with("json_encode(")
     {
         json!({ "type": "string" })
-    } else if val.starts_with("array_") || val.starts_with("array_merge(") || val.starts_with("array_map(")
-           || val.starts_with("array_filter(") || val.starts_with("array_values(")
+    } else if val.starts_with("array_")
+        || val.starts_with("array_merge(")
+        || val.starts_with("array_map(")
+        || val.starts_with("array_filter(")
+        || val.starts_with("array_values(")
     {
         json!({ "type": "array", "items": {} })
     // Variable: use name-based heuristic
     } else if let Some(rest) = val.strip_prefix('$') {
-        let name = rest.split(|c: char| !c.is_alphanumeric() && c != '_').next().unwrap_or("");
+        let name = rest
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .next()
+            .unwrap_or("");
         infer_schema_from_name(name)
     } else {
         json!({})
@@ -1389,13 +1637,26 @@ fn skip_php_value_to_comma(src: &str) -> &str {
     while i < bytes.len() {
         let c = bytes[i] as char;
         if in_str {
-            if c == '\\' { i += 2; continue; }
-            if c == str_char { in_str = false; }
+            if c == '\\' {
+                i += 2;
+                continue;
+            }
+            if c == str_char {
+                in_str = false;
+            }
         } else {
             match c {
-                '\'' | '"' => { in_str = true; str_char = c; }
+                '\'' | '"' => {
+                    in_str = true;
+                    str_char = c;
+                }
                 '[' | '(' | '{' => depth += 1,
-                ']' | ')' | '}' => { depth -= 1; if depth < 0 { return &src[i..]; } }
+                ']' | ')' | '}' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return &src[i..];
+                    }
+                }
                 ',' if depth == 0 => return &src[i + 1..],
                 _ => {}
             }
@@ -1415,7 +1676,11 @@ fn find_send_response_var_to_array(body: &str) -> Option<String> {
             // Guard: ensure no unmatched `)` between sendResponse( and data:
             let depth: i32 = after_sr[..data_rel]
                 .chars()
-                .map(|c| match c { '(' => 1, ')' => -1, _ => 0 })
+                .map(|c| match c {
+                    '(' => 1,
+                    ')' => -1,
+                    _ => 0,
+                })
                 .sum();
             if depth >= 0 {
                 let after_data = after_sr[data_rel + "data:".len()..].trim_start();
@@ -1431,11 +1696,17 @@ fn find_send_response_var_to_array(body: &str) -> Option<String> {
 
 /// If `src` starts with `$varName->toArray(`, return `varName`.
 fn extract_var_to_array(src: &str) -> Option<String> {
-    if !src.starts_with('$') { return None; }
+    if !src.starts_with('$') {
+        return None;
+    }
     let rest = &src[1..];
-    let var_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(rest.len());
+    let var_end = rest
+        .find(|c: char| !c.is_alphanumeric() && c != '_')
+        .unwrap_or(rest.len());
     let var_name = &rest[..var_end];
-    if var_name.is_empty() { return None; }
+    if var_name.is_empty() {
+        return None;
+    }
     let after_var = rest[var_end..].trim_start();
     if after_var.starts_with("->") && after_var[2..].trim_start().starts_with("toArray(") {
         return Some(var_name.to_string());
@@ -1455,23 +1726,33 @@ fn trace_var_to_entity_file(
     let assign_pat = format!("${var_name} = $");
     if let Some(pos) = body.find(&assign_pat) {
         let after = &body[pos + assign_pat.len()..];
-        let model_end = after.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after.len());
+        let model_end = after
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(after.len());
         let model_var = &after[..model_end];
         if !model_var.is_empty()
-            && let Some(r) = resolve_via_model(body, ctrl_src, model_var, repo_path) {
-                return Some(r);
-            }
+            && let Some(r) = resolve_via_model(body, ctrl_src, model_var, repo_path)
+        {
+            return Some(r);
+        }
     }
     let new_pat = format!("${var_name} = new ");
     if let Some(pos) = body.find(&new_pat) {
         let after = &body[pos + new_pat.len()..];
-        let class_end = after.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '\\').unwrap_or(after.len());
+        let class_end = after
+            .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '\\')
+            .unwrap_or(after.len());
         let class_name = &after[..class_end];
         if !class_name.is_empty()
-            && let Some(f) = resolve_class_file(repo_path, class_name, ctrl_src) {
-                let ec = class_name.split('\\').next_back().unwrap_or(class_name).to_string();
-                return Some((ec, f));
-            }
+            && let Some(f) = resolve_class_file(repo_path, class_name, ctrl_src)
+        {
+            let ec = class_name
+                .split('\\')
+                .next_back()
+                .unwrap_or(class_name)
+                .to_string();
+            return Some((ec, f));
+        }
     }
     None
 }
@@ -1486,15 +1767,23 @@ fn resolve_via_model(
     let new_pat = format!("${model_var} = new ");
     let pos = body.find(&new_pat)?;
     let after = &body[pos + new_pat.len()..];
-    let class_end = after.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '\\').unwrap_or(after.len());
+    let class_end = after
+        .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '\\')
+        .unwrap_or(after.len());
     let model_class = &after[..class_end];
-    if model_class.is_empty() { return None; }
+    if model_class.is_empty() {
+        return None;
+    }
 
     let model_file = resolve_class_file(repo_path, model_class, ctrl_src)?;
     let model_src = std::fs::read_to_string(&model_file).ok()?;
 
     let full_entity = extract_return_type(&model_src)?;
-    let entity_class = full_entity.split('\\').next_back().unwrap_or(&full_entity).to_string();
+    let entity_class = full_entity
+        .split('\\')
+        .next_back()
+        .unwrap_or(&full_entity)
+        .to_string();
     let entity_file = resolve_class_file(repo_path, &full_entity, &model_src)?;
     Some((entity_class, entity_file))
 }
@@ -1507,7 +1796,9 @@ fn extract_return_type(src: &str) -> Option<String> {
     let after = src[pos + needle.len()..].trim_start();
     if let Some(cc) = after.find("::class") {
         let class = after[..cc].trim().trim_start_matches('\\');
-        if !class.is_empty() { return Some(class.to_string()); }
+        if !class.is_empty() {
+            return Some(class.to_string());
+        }
     }
     if after.starts_with(['\'', '"']) {
         let q = after.as_bytes()[0] as char;
@@ -1527,17 +1818,30 @@ fn resolve_class_file(repo_path: &Path, class_name: &str, src_with_uses: &str) -
     }
     for line in src_with_uses.lines() {
         let trimmed = line.trim();
-        if !trimmed.starts_with("use ") { continue; }
-        let ns_raw = trimmed.trim_start_matches("use ").trim_end_matches(';').trim();
+        if !trimmed.starts_with("use ") {
+            continue;
+        }
+        let ns_raw = trimmed
+            .trim_start_matches("use ")
+            .trim_end_matches(';')
+            .trim();
         let (actual_ns, resolved_name) = if let Some(as_pos) = ns_raw.find(" as ") {
-            (ns_raw[..as_pos].trim(), ns_raw[as_pos + " as ".len()..].trim())
+            (
+                ns_raw[..as_pos].trim(),
+                ns_raw[as_pos + " as ".len()..].trim(),
+            )
         } else {
             let last = ns_raw.split('\\').next_back().unwrap_or("");
             (ns_raw, last)
         };
-        if resolved_name != class_name { continue; }
+        if resolved_name != class_name {
+            continue;
+        }
         if let Some(p) = namespace_to_path(repo_path, actual_ns)
-            && p.exists() { return Some(p); }
+            && p.exists()
+        {
+            return Some(p);
+        }
     }
     None
 }
@@ -1556,12 +1860,20 @@ fn extract_casts_schema(entity_src: &str) -> Option<Value> {
     while let Some(qp) = remaining.find(['\'', '"']) {
         let quote = remaining.as_bytes()[qp] as char;
         let after = &remaining[qp + 1..];
-        let Some(key_end) = find_closing_quote(after, quote) else { break };
+        let Some(key_end) = find_closing_quote(after, quote) else {
+            break;
+        };
         let key = &after[..key_end];
-        if key.is_empty() { remaining = &after[key_end + 1..]; continue; }
+        if key.is_empty() {
+            remaining = &after[key_end + 1..];
+            continue;
+        }
 
         let after_key = after[key_end + 1..].trim_start();
-        if !after_key.starts_with("=>") { remaining = after_key; continue; }
+        if !after_key.starts_with("=>") {
+            remaining = after_key;
+            continue;
+        }
         let val_src = after_key[2..].trim_start();
 
         if val_src.starts_with(['\'', '"']) {
@@ -1579,7 +1891,9 @@ fn extract_casts_schema(entity_src: &str) -> Option<Value> {
         remaining = skip_php_value_to_comma(val_src);
     }
 
-    if properties.is_empty() { return None; }
+    if properties.is_empty() {
+        return None;
+    }
     Some(json!({ "type": "object", "properties": properties }))
 }
 
@@ -1625,8 +1939,16 @@ fn extract_payload_schema(payload_src: &str) -> Value {
             let l = lines[i].trim();
             if l.contains("@var ") {
                 let after = &l[l.find("@var ").unwrap() + 5..];
-                let token = after.split_whitespace().next().unwrap_or("").trim_end_matches('*');
-                if !token.is_empty() { Some(token.to_string()) } else { None }
+                let token = after
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches('*');
+                if !token.is_empty() {
+                    Some(token.to_string())
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -1704,7 +2026,8 @@ fn extract_getjson_fields(method_body: &str) -> Value {
                 // Only include if preceded by a typical body variable or getJSON call
                 let before = &search[..pos];
                 let last_token = before
-                    .split(|c: char| c.is_whitespace() || c == '(' || c == ',').rfind(|s| !s.is_empty())
+                    .split(|c: char| c.is_whitespace() || c == '(' || c == ',')
+                    .rfind(|s| !s.is_empty())
                     .unwrap_or("");
                 if last_token.starts_with('$')
                     || last_token.ends_with("getJSON(true)")
@@ -1737,20 +2060,37 @@ fn infer_set_json_schema_ctx(body: &str, ctrl_src: &str, repo_path: &Path) -> Op
         while let Some(rel) = body[pos..].find(call_pat) {
             let after_paren = pos + rel + call_pat.len();
             let rest = body[after_paren..].trim_start();
-            let open = if rest.starts_with('[') { '[' } else if rest.starts_with('(') { '(' } else { pos += rel + 1; continue };
+            let open = if rest.starts_with('[') {
+                '['
+            } else if rest.starts_with('(') {
+                '('
+            } else {
+                pos += rel + 1;
+                continue;
+            };
             let close = if open == '[' { ']' } else { ')' };
             let inner = match extract_balanced(rest, open, close) {
                 Some(i) => i,
-                None => { pos += rel + 1; continue }
+                None => {
+                    pos += rel + 1;
+                    continue;
+                }
             };
             // Only process associative arrays
-            if !inner.contains("=>") { pos += rel + 1; continue }
+            if !inner.contains("=>") {
+                pos += rel + 1;
+                continue;
+            }
             let props = parse_array_schema_ctx(inner, body, ctrl_src, repo_path);
-            if props.len() > best.len() { best = props; }
+            if props.len() > best.len() {
+                best = props;
+            }
             pos += rel + 1;
         }
     }
-    if best.is_empty() { return None; }
+    if best.is_empty() {
+        return None;
+    }
     Some(json!({ "type": "object", "properties": Value::Object(best) }))
 }
 
@@ -1767,12 +2107,20 @@ fn parse_array_schema_ctx(
     while let Some(qp) = remaining.find(['\'', '"']) {
         let quote = remaining.as_bytes()[qp] as char;
         let after = &remaining[qp + 1..];
-        let Some(key_end) = find_closing_quote(after, quote) else { break };
+        let Some(key_end) = find_closing_quote(after, quote) else {
+            break;
+        };
         let key = &after[..key_end];
-        if key.is_empty() { remaining = &after[key_end + 1..]; continue; }
+        if key.is_empty() {
+            remaining = &after[key_end + 1..];
+            continue;
+        }
 
         let after_key = after[key_end + 1..].trim_start();
-        if !after_key.starts_with("=>") { remaining = after_key; continue; }
+        if !after_key.starts_with("=>") {
+            remaining = after_key;
+            continue;
+        }
         let val_src = after_key[2..].trim_start();
 
         let schema = infer_expr_ctx(val_src, body, ctrl_src, repo_path);
@@ -1791,17 +2139,24 @@ fn infer_expr_ctx(val: &str, body: &str, ctrl_src: &str, repo_path: &Path) -> Va
 
     // $this->prop->method(...) — property access chain
     if let Some(rest) = trimmed.strip_prefix("$this->") {
-        let prop_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(rest.len());
+        let prop_end = rest
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(rest.len());
         let prop = &rest[..prop_end];
         let after_prop = rest[prop_end..].trim_start();
 
         if let Some(method_chain) = after_prop.strip_prefix("->") {
-            let method_end = method_chain.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(method_chain.len());
+            let method_end = method_chain
+                .find(|c: char| !c.is_alphanumeric() && c != '_')
+                .unwrap_or(method_chain.len());
             let method = &method_chain[..method_end];
-            if !prop.is_empty() && !method.is_empty()
-                && let Some(schema) = resolve_this_prop_method_schema(ctrl_src, prop, method, repo_path) {
-                    return schema;
-                }
+            if !prop.is_empty()
+                && !method.is_empty()
+                && let Some(schema) =
+                    resolve_this_prop_method_schema(ctrl_src, prop, method, repo_path)
+            {
+                return schema;
+            }
         }
         // $this->prop alone or unresolved — name hint on prop
         if !prop.is_empty() {
@@ -1815,25 +2170,32 @@ fn infer_expr_ctx(val: &str, body: &str, ctrl_src: &str, repo_path: &Path) -> Va
     // $var->method(...) — variable access chain
     if trimmed.starts_with('$') && !trimmed.starts_with("$this") {
         let rest = &trimmed[1..];
-        let var_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(rest.len());
+        let var_end = rest
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(rest.len());
         let var_name = &rest[..var_end];
         let after_var = rest[var_end..].trim_start();
         if let Some(method_chain) = after_var.strip_prefix("->") {
-            let method_end = method_chain.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(method_chain.len());
+            let method_end = method_chain
+                .find(|c: char| !c.is_alphanumeric() && c != '_')
+                .unwrap_or(method_chain.len());
             let method = &method_chain[..method_end];
-            if !var_name.is_empty() && !method.is_empty()
+            if !var_name.is_empty()
+                && !method.is_empty()
                 && let Some(class) = resolve_var_class(body, var_name, ctrl_src, repo_path)
-                    && let Some(result) = resolve_method_schema(repo_path, &class, method, ctrl_src) {
-                        return result.0;
-                    }
+                && let Some(result) = resolve_method_schema(repo_path, &class, method, ctrl_src)
+            {
+                return result.0;
+            }
         }
     }
 
     // ClassName::staticMethod(...)
     if let Some((class, method)) = parse_static_call(trimmed)
-        && let Some(result) = resolve_method_schema(repo_path, &class, &method, ctrl_src) {
-            return result.0;
-        }
+        && let Some(result) = resolve_method_schema(repo_path, &class, &method, ctrl_src)
+    {
+        return result.0;
+    }
 
     // Fall through to literal + key-name logic (no key here so literal only)
     infer_php_literal_schema(trimmed)
@@ -1859,9 +2221,12 @@ fn resolve_this_prop_method_schema(
 
     // If we have a specific typed return, use it
     if let Some(ref rt) = return_type
-        && rt != "array" && rt != "mixed" && !rt.is_empty() {
-            return schema_from_return_type(rt, repo_path, &class_src);
-        }
+        && rt != "array"
+        && rt != "mixed"
+        && !rt.is_empty()
+    {
+        return schema_from_return_type(rt, repo_path, &class_src);
+    }
 
     // Plain `@return array` or missing — trace the method body for entity type
     let method_body = extract_method_body(&class_src, method_name)?;
@@ -1881,8 +2246,14 @@ fn resolve_this_property_class(ctrl_src: &str, prop_name: &str) -> Option<String
     while let Some(pos) = ctrl_src[search_start..].find(&search) {
         let abs_pos = search_start + pos;
         // Must be followed by a word boundary (space, ;, =, )
-        let after = ctrl_src[abs_pos + search.len()..].chars().next().unwrap_or(' ');
-        if after.is_alphanumeric() || after == '_' { search_start = abs_pos + 1; continue; }
+        let after = ctrl_src[abs_pos + search.len()..]
+            .chars()
+            .next()
+            .unwrap_or(' ');
+        if after.is_alphanumeric() || after == '_' {
+            search_start = abs_pos + 1;
+            continue;
+        }
 
         let before = &ctrl_src[..abs_pos];
         let last_line = before.lines().last().unwrap_or("").trim();
@@ -1890,8 +2261,14 @@ fn resolve_this_property_class(ctrl_src: &str, prop_name: &str) -> Option<String
         let words: Vec<&str> = last_line.split_whitespace().collect();
         if words.len() >= 2 {
             let type_word = words[words.len() - 2].trim_start_matches('?');
-            if type_word.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
-                && type_word.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '\\')
+            if type_word
+                .chars()
+                .next()
+                .map(|c| c.is_uppercase())
+                .unwrap_or(false)
+                && type_word
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '\\')
             {
                 let simple = type_word.split('\\').next_back().unwrap_or(type_word);
                 return Some(simple.to_string());
@@ -1905,16 +2282,20 @@ fn resolve_this_property_class(ctrl_src: &str, prop_name: &str) -> Option<String
 /// Scan a method body for array-returning model call patterns and trace to entity schema.
 /// Returns `{ type: array, items: <entity schema> }` when found.
 /// `depth` limits recursive `$this->method()` following to avoid loops.
-fn find_entity_array_in_body(
-    body: &str,
-    src: &str,
-    repo_path: &Path,
-    depth: u8,
-) -> Option<Value> {
-    if depth == 0 { return None; }
+fn find_entity_array_in_body(body: &str, src: &str, repo_path: &Path, depth: u8) -> Option<Value> {
+    if depth == 0 {
+        return None;
+    }
 
     // Pattern A: ModelClass::findAll/findBy/paginate/all/getAll(
-    let list_methods = ["::findAll(", "::findBy(", "::paginate(", "::getAll(", "::all(", "::get("];
+    let list_methods = [
+        "::findAll(",
+        "::findBy(",
+        "::paginate(",
+        "::getAll(",
+        "::all(",
+        "::get(",
+    ];
     for pat in &list_methods {
         if let Some(pos) = body.find(pat) {
             let before = &body[..pos];
@@ -1923,36 +2304,44 @@ fn find_entity_array_in_body(
                 .map(|i| i + 1)
                 .unwrap_or(0);
             let model_class = before[class_start..].trim();
-            if model_class.is_empty() || model_class.starts_with('$') { continue; }
+            if model_class.is_empty() || model_class.starts_with('$') {
+                continue;
+            }
             let model_simple = model_class.split('\\').next_back().unwrap_or(model_class);
-            if let Some((entity_class, entity_file)) = resolve_model_to_entity(model_simple, src, repo_path)
-                && let Ok(entity_src) = std::fs::read_to_string(&entity_file) {
-                    let entity_schema = extract_casts_schema(&entity_src).or_else(|| {
-                        let s = extract_payload_schema(&entity_src);
-                        let has_props = s.get("properties")
-                            .and_then(|p| p.as_object())
-                            .map(|p| !p.is_empty())
-                            .unwrap_or(false);
-                        if has_props { Some(s) } else { None }
-                    });
-                    if let Some(entity_schema) = entity_schema {
-                        let _ = entity_class;
-                        return Some(json!({ "type": "array", "items": entity_schema }));
-                    }
+            if let Some((entity_class, entity_file)) =
+                resolve_model_to_entity(model_simple, src, repo_path)
+                && let Ok(entity_src) = std::fs::read_to_string(&entity_file)
+            {
+                let entity_schema = extract_casts_schema(&entity_src).or_else(|| {
+                    let s = extract_payload_schema(&entity_src);
+                    let has_props = s
+                        .get("properties")
+                        .and_then(|p| p.as_object())
+                        .map(|p| !p.is_empty())
+                        .unwrap_or(false);
+                    if has_props { Some(s) } else { None }
+                });
+                if let Some(entity_schema) = entity_schema {
+                    let _ = entity_class;
+                    return Some(json!({ "type": "array", "items": entity_schema }));
                 }
+            }
         }
     }
 
     // Pattern B: $this->methodName() — recurse into that method
     if let Some(pos) = body.rfind("$this->") {
         let after = &body[pos + "$this->".len()..];
-        let end = after.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after.len());
+        let end = after
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(after.len());
         let inner_method = &after[..end];
         if !inner_method.is_empty()
             && let Some(inner_body) = extract_method_body(src, inner_method)
-                && let Some(schema) = find_entity_array_in_body(inner_body, src, repo_path, depth - 1) {
-                    return Some(schema);
-                }
+            && let Some(schema) = find_entity_array_in_body(inner_body, src, repo_path, depth - 1)
+        {
+            return Some(schema);
+        }
     }
 
     None
@@ -1967,7 +2356,11 @@ fn resolve_model_to_entity(
     let model_file = resolve_service_file(repo_path, model_class, ctrl_src)?;
     let model_src = std::fs::read_to_string(&model_file).ok()?;
     let full_entity = extract_return_type(&model_src)?;
-    let entity_class = full_entity.split('\\').next_back().unwrap_or(&full_entity).to_string();
+    let entity_class = full_entity
+        .split('\\')
+        .next_back()
+        .unwrap_or(&full_entity)
+        .to_string();
     let entity_file = resolve_class_file(repo_path, &full_entity, &model_src)?;
     Some((entity_class, entity_file))
 }
@@ -1987,34 +2380,53 @@ fn resolve_send_response_schema(
         if let Some(data_rel) = after_sr.find("data:") {
             let depth: i32 = after_sr[..data_rel]
                 .chars()
-                .map(|c| match c { '(' => 1, ')' => -1, _ => 0 })
+                .map(|c| match c {
+                    '(' => 1,
+                    ')' => -1,
+                    _ => 0,
+                })
                 .sum();
             if depth >= 0 {
                 let after_data = after_sr[data_rel + "data:".len()..].trim_start();
                 if let Some(rest) = after_data.strip_prefix('$') {
-                    let var_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(rest.len());
+                    let var_end = rest
+                        .find(|c: char| !c.is_alphanumeric() && c != '_')
+                        .unwrap_or(rest.len());
                     let var_name = &rest[..var_end];
-                    if var_name.is_empty() { search = &search[rel + 1..]; continue; }
+                    if var_name.is_empty() {
+                        search = &search[rel + 1..];
+                        continue;
+                    }
                     let after_var = rest[var_end..].trim_start();
 
                     // Skip ->toArray() — handled by Pass 5
-                    if after_var.starts_with("->toArray(") { search = &search[rel + 1..]; continue; }
+                    if after_var.starts_with("->toArray(") {
+                        search = &search[rel + 1..];
+                        continue;
+                    }
 
                     // Sub-case A: $obj->method() inline
                     if let Some(rest) = after_var.strip_prefix("->") {
                         let after_arrow = rest.trim_start();
-                        let method_end = after_arrow.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after_arrow.len());
+                        let method_end = after_arrow
+                            .find(|c: char| !c.is_alphanumeric() && c != '_')
+                            .unwrap_or(after_arrow.len());
                         let method = &after_arrow[..method_end];
                         if !method.is_empty()
-                            && let Some(class_name) = resolve_var_class(body, var_name, ctrl_src, repo_path)
-                                && let Some(result) = resolve_method_schema(repo_path, &class_name, method, ctrl_src) {
-                                    return Some(result);
-                                }
-                        search = &search[rel + 1..]; continue;
+                            && let Some(class_name) =
+                                resolve_var_class(body, var_name, ctrl_src, repo_path)
+                            && let Some(result) =
+                                resolve_method_schema(repo_path, &class_name, method, ctrl_src)
+                        {
+                            return Some(result);
+                        }
+                        search = &search[rel + 1..];
+                        continue;
                     }
 
                     // Sub-case B: plain $var — trace its assignment
-                    if let Some(result) = trace_var_assignment(body, ctrl_src, var_name, repo_path) {
+                    if let Some(result) = trace_var_assignment(body, ctrl_src, var_name, repo_path)
+                    {
                         return Some(result);
                     }
                 }
@@ -2027,12 +2439,19 @@ fn resolve_send_response_schema(
 
 /// Try to find the concrete class name of a local variable `$var_name`.
 /// Handles: `$var = new ClassName()`, `$var = model(ClassName::class)`.
-fn resolve_var_class(body: &str, var_name: &str, ctrl_src: &str, repo_path: &Path) -> Option<String> {
+fn resolve_var_class(
+    body: &str,
+    var_name: &str,
+    ctrl_src: &str,
+    repo_path: &Path,
+) -> Option<String> {
     // Pattern: $var = new ClassName(
     let new_pat = format!("${var_name} = new ");
     if let Some(pos) = body.find(&new_pat) {
         let after = &body[pos + new_pat.len()..];
-        let end = after.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '\\').unwrap_or(after.len());
+        let end = after
+            .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '\\')
+            .unwrap_or(after.len());
         let class = &after[..end];
         if !class.is_empty() {
             return Some(class.split('\\').next_back().unwrap_or(class).to_string());
@@ -2054,7 +2473,9 @@ fn resolve_var_class(body: &str, var_name: &str, ctrl_src: &str, repo_path: &Pat
     let prop_pat = format!("${var_name} = $this->");
     if let Some(pos) = body.find(&prop_pat) {
         let after = &body[pos + prop_pat.len()..];
-        let end = after.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after.len());
+        let end = after
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(after.len());
         let prop_name = &after[..end];
         if !prop_name.is_empty() {
             // Try to find `private|protected TypeHint $prop_name` in ctrl_src
@@ -2066,7 +2487,12 @@ fn resolve_var_class(body: &str, var_name: &str, ctrl_src: &str, repo_path: &Pat
                 let words: Vec<&str> = last_line.split_whitespace().collect();
                 if words.len() >= 2 {
                     let type_word = words[words.len() - 2].trim_start_matches('?');
-                    if type_word.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                    if type_word
+                        .chars()
+                        .next()
+                        .map(|c| c.is_uppercase())
+                        .unwrap_or(false)
+                    {
                         // Check if this class file exists
                         if resolve_service_file(repo_path, type_word, ctrl_src).is_some() {
                             return Some(type_word.to_string());
@@ -2098,30 +2524,39 @@ fn trace_var_assignment(
 
     // ClassName::staticMethod(...)
     if let Some((class_name, method)) = parse_static_call(rhs)
-        && let Some(result) = resolve_method_schema(repo_path, &class_name, &method, ctrl_src) {
-            return Some(result);
-        }
+        && let Some(result) = resolve_method_schema(repo_path, &class_name, &method, ctrl_src)
+    {
+        return Some(result);
+    }
 
     // (new ClassName(...))->method(...)
     if let Some((class_name, method)) = parse_new_instance_call(rhs)
-        && let Some(result) = resolve_method_schema(repo_path, &class_name, &method, ctrl_src) {
-            return Some(result);
-        }
+        && let Some(result) = resolve_method_schema(repo_path, &class_name, &method, ctrl_src)
+    {
+        return Some(result);
+    }
 
     // $otherVar->method(...)
     if let Some(rest) = rhs.strip_prefix('$') {
-        let var_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(rest.len());
+        let var_end = rest
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(rest.len());
         let other_var = &rest[..var_end];
         let after = rest[var_end..].trim_start();
         if let Some(rest) = after.strip_prefix("->") {
             let after_arrow = rest.trim_start();
-            let method_end = after_arrow.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after_arrow.len());
+            let method_end = after_arrow
+                .find(|c: char| !c.is_alphanumeric() && c != '_')
+                .unwrap_or(after_arrow.len());
             let method = &after_arrow[..method_end];
-            if !method.is_empty() && method != "toArray"
+            if !method.is_empty()
+                && method != "toArray"
                 && let Some(class_name) = resolve_var_class(body, other_var, ctrl_src, repo_path)
-                    && let Some(result) = resolve_method_schema(repo_path, &class_name, method, ctrl_src) {
-                        return Some(result);
-                    }
+                && let Some(result) =
+                    resolve_method_schema(repo_path, &class_name, method, ctrl_src)
+            {
+                return Some(result);
+            }
         }
     }
 
@@ -2132,38 +2567,69 @@ fn trace_var_assignment(
 fn parse_static_call(rhs: &str) -> Option<(String, String)> {
     let cc_pos = rhs.find("::")?;
     let class_part = rhs[..cc_pos].trim();
-    if class_part.starts_with('$') || class_part.is_empty() { return None; }
-    if !class_part.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '\\') { return None; }
+    if class_part.starts_with('$') || class_part.is_empty() {
+        return None;
+    }
+    if !class_part
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '\\')
+    {
+        return None;
+    }
 
     let after_cc = rhs[cc_pos + 2..].trim_start();
-    let method_end = after_cc.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after_cc.len());
+    let method_end = after_cc
+        .find(|c: char| !c.is_alphanumeric() && c != '_')
+        .unwrap_or(after_cc.len());
     let method = &after_cc[..method_end];
-    if method.is_empty() || method == "class" { return None; }
+    if method.is_empty() || method == "class" {
+        return None;
+    }
 
-    let class_simple = class_part.split('\\').next_back().unwrap_or(class_part).to_string();
+    let class_simple = class_part
+        .split('\\')
+        .next_back()
+        .unwrap_or(class_part)
+        .to_string();
     Some((class_simple, method.to_string()))
 }
 
 /// Parse `(new ClassName(...))->method(` from the start of `rhs`.
 fn parse_new_instance_call(rhs: &str) -> Option<(String, String)> {
     let trimmed = rhs.trim_start();
-    if !trimmed.starts_with("(new ") { return None; }
+    if !trimmed.starts_with("(new ") {
+        return None;
+    }
 
     let outer_inner = extract_balanced(trimmed, '(', ')')?;
     // outer_inner = "new ClassName(args)"
     let new_inner = outer_inner.trim_start_matches("new ").trim_start();
-    let class_end = new_inner.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '\\').unwrap_or(new_inner.len());
+    let class_end = new_inner
+        .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '\\')
+        .unwrap_or(new_inner.len());
     let class_name = &new_inner[..class_end];
-    if class_name.is_empty() { return None; }
+    if class_name.is_empty() {
+        return None;
+    }
 
     let after_outer = &trimmed[outer_inner.len() + 2..].trim_start();
-    if !after_outer.starts_with("->") { return None; }
+    if !after_outer.starts_with("->") {
+        return None;
+    }
     let after_arrow = after_outer[2..].trim_start();
-    let method_end = after_arrow.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after_arrow.len());
+    let method_end = after_arrow
+        .find(|c: char| !c.is_alphanumeric() && c != '_')
+        .unwrap_or(after_arrow.len());
     let method = &after_arrow[..method_end];
-    if method.is_empty() { return None; }
+    if method.is_empty() {
+        return None;
+    }
 
-    let class_simple = class_name.split('\\').next_back().unwrap_or(class_name).to_string();
+    let class_simple = class_name
+        .split('\\')
+        .next_back()
+        .unwrap_or(class_name)
+        .to_string();
     Some((class_simple, method.to_string()))
 }
 
@@ -2174,8 +2640,13 @@ fn resolve_service_file(repo_path: &Path, class_name: &str, ctrl_src: &str) -> O
         return Some(p);
     }
     for dir in &["Services", "Libraries", "Models", "Repositories", "Helpers"] {
-        let p = repo_path.join("apps/ci4/app").join(dir).join(format!("{class_name}.php"));
-        if p.exists() { return Some(p); }
+        let p = repo_path
+            .join("apps/ci4/app")
+            .join(dir)
+            .join(format!("{class_name}.php"));
+        if p.exists() {
+            return Some(p);
+        }
     }
     None
 }
@@ -2209,7 +2680,11 @@ fn extract_method_return_annotation(class_src: &str, method_name: &str) -> Optio
         let trimmed = line.trim().trim_start_matches('*').trim();
         if let Some(rest) = trimmed.strip_prefix("@return ") {
             let type_str = rest.split_whitespace().next().unwrap_or("").trim();
-            if !type_str.is_empty() && type_str != "void" && type_str != "null" && type_str != "mixed" {
+            if !type_str.is_empty()
+                && type_str != "void"
+                && type_str != "null"
+                && type_str != "mixed"
+            {
                 return Some(type_str.to_string());
             }
         }
@@ -2229,22 +2704,32 @@ fn schema_from_return_type(return_type: &str, repo_path: &Path, class_src: &str)
                     .and_then(|f| std::fs::read_to_string(&f).ok())
                     .map(|src| {
                         let s = extract_payload_schema(&src);
-                        if s.get("properties").and_then(|p| p.as_object()).map(|p| !p.is_empty()).unwrap_or(false) {
+                        if s.get("properties")
+                            .and_then(|p| p.as_object())
+                            .map(|p| !p.is_empty())
+                            .unwrap_or(false)
+                        {
                             s
                         } else {
                             json!({ "type": "object", "description": inner })
                         }
                     })
                     .unwrap_or_else(|| json!({ "type": "object", "description": inner }))
-            },
+            }
             t => json!({ "type": t }),
         };
         return Some(json!({ "type": "array", "items": item_schema }));
     }
 
     // Collection<Type> or array<Type>
-    if let Some(inner) = return_type.strip_prefix("array<").and_then(|s| s.strip_suffix('>'))
-        .or_else(|| return_type.strip_prefix("Collection<").and_then(|s| s.strip_suffix('>')))
+    if let Some(inner) = return_type
+        .strip_prefix("array<")
+        .and_then(|s| s.strip_suffix('>'))
+        .or_else(|| {
+            return_type
+                .strip_prefix("Collection<")
+                .and_then(|s| s.strip_suffix('>'))
+        })
     {
         let item_schema = match php_type_to_json(inner) {
             "object" => json!({ "type": "object", "description": inner }),
@@ -2261,7 +2746,11 @@ fn schema_from_return_type(return_type: &str, repo_path: &Path, class_src: &str)
                 .and_then(|f| std::fs::read_to_string(&f).ok())
                 .map(|src| {
                     let s = extract_payload_schema(&src);
-                    if s.get("properties").and_then(|p| p.as_object()).map(|p| !p.is_empty()).unwrap_or(false) {
+                    if s.get("properties")
+                        .and_then(|p| p.as_object())
+                        .map(|p| !p.is_empty())
+                        .unwrap_or(false)
+                    {
                         s
                     } else {
                         json!({ "type": "object", "description": return_type })
@@ -2269,7 +2758,7 @@ fn schema_from_return_type(return_type: &str, repo_path: &Path, class_src: &str)
                 })
                 .unwrap_or_else(|| json!({ "type": "object", "description": return_type }));
             Some(schema)
-        },
+        }
         t => Some(json!({ "type": t })),
     }
 }
@@ -2280,13 +2769,19 @@ fn trace_json_data_file(rhs: &str, repo_path: &Path) -> Option<(Value, String)> 
     let apppath_pos = rhs.find("APPPATH")?;
     let after = rhs[apppath_pos + "APPPATH".len()..].trim_start();
     let after_dot = after.trim_start_matches('.').trim_start();
-    if !after_dot.starts_with(['\'', '"']) { return None; }
+    if !after_dot.starts_with(['\'', '"']) {
+        return None;
+    }
     let q = after_dot.as_bytes()[0] as char;
     let qend = find_closing_quote(&after_dot[1..], q)?;
     let rel_path = &after_dot[1..qend + 1];
 
-    let json_path = repo_path.join("apps/ci4/app").join(rel_path.trim_start_matches('/'));
-    if !json_path.exists() { return None; }
+    let json_path = repo_path
+        .join("apps/ci4/app")
+        .join(rel_path.trim_start_matches('/'));
+    if !json_path.exists() {
+        return None;
+    }
     let json_src = std::fs::read_to_string(&json_path).ok()?;
     let json_val: Value = serde_json::from_str(&json_src).ok()?;
 
@@ -2298,7 +2793,11 @@ fn trace_json_data_file(rhs: &str, repo_path: &Path) -> Option<(Value, String)> 
         .map(php_capitalize)
         .collect::<Vec<_>>()
         .join("");
-    let name = if name.is_empty() { "JsonData".to_string() } else { name };
+    let name = if name.is_empty() {
+        "JsonData".to_string()
+    } else {
+        name
+    };
     Some((schema, name))
 }
 
@@ -2311,15 +2810,19 @@ fn infer_schema_from_json(val: &Value) -> Value {
                 props.insert(k.clone(), infer_schema_from_json(v));
             }
             json!({ "type": "object", "properties": Value::Object(props) })
-        },
+        }
         Value::Array(arr) => {
             let item_schema = arr.first().map(infer_schema_from_json).unwrap_or(json!({}));
             json!({ "type": "array", "items": item_schema })
-        },
+        }
         Value::String(_) => json!({ "type": "string" }),
         Value::Number(n) => {
-            if n.is_f64() { json!({ "type": "number" }) } else { json!({ "type": "integer" }) }
-        },
+            if n.is_f64() {
+                json!({ "type": "number" })
+            } else {
+                json!({ "type": "integer" })
+            }
+        }
         Value::Bool(_) => json!({ "type": "boolean" }),
         Value::Null => json!({ "type": "null" }),
     }
@@ -2342,7 +2845,10 @@ mod tests {
 
     #[test]
     fn ci4_path_num_param() {
-        assert_eq!(ci4_path_to_oas("admin/api/v1/shop/(:num)"), "/admin/api/v1/shop/{id}");
+        assert_eq!(
+            ci4_path_to_oas("admin/api/v1/shop/(:num)"),
+            "/admin/api/v1/shop/{id}"
+        );
     }
 
     #[test]
@@ -2363,7 +2869,10 @@ mod tests {
 
     #[test]
     fn schema_component_name_nested() {
-        assert_eq!(schema_component_name("V1/Shop/PutTheme.json"), "V1ShopPutTheme");
+        assert_eq!(
+            schema_component_name("V1/Shop/PutTheme.json"),
+            "V1ShopPutTheme"
+        );
     }
 
     #[test]

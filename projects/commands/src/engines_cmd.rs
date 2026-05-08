@@ -30,7 +30,10 @@ pub fn cmd_engines(action: EnginesAction) -> Result<()> {
             let providers = db::list_llm_providers(&conn)?;
             if providers.is_empty() {
                 println!("{}", "no LLM backends registered".dimmed());
-                println!("{}", "  use `orca engines add <name> <url> [lmstudio|ollama]` to add one".dimmed());
+                println!(
+                    "{}",
+                    "  use `orca engines add <name> <url> [lmstudio|ollama]` to add one".dimmed()
+                );
                 return Ok(());
             }
             for p in &providers {
@@ -39,14 +42,24 @@ pub fn cmd_engines(action: EnginesAction) -> Result<()> {
                 } else {
                     "disabled".dimmed().to_string()
                 };
-                println!("  {} {} {} ({})", p.name.bold(), p.kind.cyan(), p.url, status);
+                println!(
+                    "  {} {} {} ({})",
+                    p.name.bold(),
+                    p.kind.cyan(),
+                    p.url,
+                    status
+                );
             }
         }
 
         EnginesAction::Add { name, url, kind } => {
             let kind = if kind.is_empty() {
                 // Infer kind from URL: default port 11434 → ollama, else lmstudio
-                if url.contains(":11434") { "ollama".to_string() } else { "lmstudio".to_string() }
+                if url.contains(":11434") {
+                    "ollama".to_string()
+                } else {
+                    "lmstudio".to_string()
+                }
             } else {
                 kind
             };

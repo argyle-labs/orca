@@ -138,11 +138,17 @@ pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
         .routes(routes!(api::search_handler))
         .routes(routes!(api::mcp_servers_handler, api::mcp_add_handler))
         .routes(routes!(api::mcp_remove_handler))
-        .routes(routes!(api::mcp_mappings_list_handler, api::mcp_mappings_create_handler))
+        .routes(routes!(
+            api::mcp_mappings_list_handler,
+            api::mcp_mappings_create_handler
+        ))
         .routes(routes!(api::mcp_mappings_delete_handler))
         .routes(routes!(api::mcp_tools_handler))
         .routes(routes!(api::mcp_run_handler))
-        .routes(routes!(api::docker_runtimes_handler, api::docker_runtimes_add_handler))
+        .routes(routes!(
+            api::docker_runtimes_handler,
+            api::docker_runtimes_add_handler
+        ))
         .routes(routes!(api::docker_runtimes_remove_handler))
         .routes(routes!(api::docker_engine_handler))
         .routes(routes!(api::docker_engine_start_handler))
@@ -150,10 +156,16 @@ pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
         .routes(routes!(api::docker_action_handler))
         .routes(routes!(api::ctx7_handler))
         .routes(routes!(api::doc_handler))
-        .routes(routes!(api::get_progress_handler, api::save_progress_handler))
+        .routes(routes!(
+            api::get_progress_handler,
+            api::save_progress_handler
+        ))
         .routes(routes!(api::schema_handler))
         .routes(routes!(api::schema_domains_handler))
-        .routes(routes!(api::schema_databases_handler, api::schema_databases_add_handler))
+        .routes(routes!(
+            api::schema_databases_handler,
+            api::schema_databases_add_handler
+        ))
         .routes(routes!(api::schema_databases_remove_handler))
         .routes(routes!(api::rebuy_health_handler))
         .routes(routes!(api::log_services_handler))
@@ -172,16 +184,26 @@ pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
         .routes(routes!(api::github_prs_handler))
         .routes(routes!(api::github_issues_handler))
         .routes(routes!(api::github_orgs_handler))
-        .routes(routes!(api::plugins_list_handler, api::plugin_install_handler))
+        .routes(routes!(
+            api::plugins_list_handler,
+            api::plugin_install_handler
+        ))
         .routes(routes!(api::plugin_remove_handler))
         .routes(routes!(api::plugin_enable_handler))
         .routes(routes!(api::plugin_disable_handler))
         .routes(routes!(api::plugin_health_handler))
-        .routes(routes!(api::plugin_creds_list_handler, api::plugin_creds_set_handler))
+        .routes(routes!(
+            api::plugin_creds_list_handler,
+            api::plugin_creds_set_handler
+        ))
         .routes(routes!(api::plugin_creds_delete_handler))
         .routes(routes!(api::plugin_creds_sync_handler))
         .routes(routes!(api::plugin_data_list_handler))
-        .routes(routes!(api::plugin_data_get_handler, api::plugin_data_set_handler, api::plugin_data_delete_handler))
+        .routes(routes!(
+            api::plugin_data_get_handler,
+            api::plugin_data_set_handler,
+            api::plugin_data_delete_handler
+        ))
         .routes(routes!(api::system_status_handler))
         .routes(routes!(api::system_action_handler))
         .routes(routes!(api::fs_browse_handler))

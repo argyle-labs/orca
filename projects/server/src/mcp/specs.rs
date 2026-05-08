@@ -5,7 +5,6 @@ pub fn spec_dir() -> std::path::PathBuf {
     orca_scanner::specs_dir()
 }
 
-
 pub fn validate_spec_repo(repo: &str) -> bool {
     !repo.is_empty()
         && repo
@@ -43,22 +42,32 @@ pub fn list_rebuy_specs() -> Result<String> {
     // DB-registered specs (URL-fetched)
     if let Ok(conn) = db::open_default()
         && let Ok(db_specs) = db::list_openapi_specs(&conn)
-            && !db_specs.is_empty() {
-                if !disk_entries.is_empty() { lines.push(String::new()); }
-                lines.push("URL-registered specs:".to_string());
-                for s in db_specs {
-                    let url = s.url.as_deref().unwrap_or("-");
-                    let cached = s.cached_at.as_deref().unwrap_or("-");
-                    let paths = s.spec_json.as_deref()
-                        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-                        .and_then(|v| v["paths"].as_object().map(|p| p.len()))
-                        .unwrap_or(0);
-                    lines.push(format!("• {} ({} paths)  url={}  cached={}", s.name, paths, url, cached));
-                }
-            }
+        && !db_specs.is_empty()
+    {
+        if !disk_entries.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push("URL-registered specs:".to_string());
+        for s in db_specs {
+            let url = s.url.as_deref().unwrap_or("-");
+            let cached = s.cached_at.as_deref().unwrap_or("-");
+            let paths = s
+                .spec_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                .and_then(|v| v["paths"].as_object().map(|p| p.len()))
+                .unwrap_or(0);
+            lines.push(format!(
+                "• {} ({} paths)  url={}  cached={}",
+                s.name, paths, url, cached
+            ));
+        }
+    }
 
     if lines.len() == 1 {
-        lines.push("no specs registered — use `orca spec add <repo>` or `orca spec register`".to_string());
+        lines.push(
+            "no specs registered — use `orca spec add <repo>` or `orca spec register`".to_string(),
+        );
     }
 
     Ok(lines.join("\n"))
@@ -78,10 +87,13 @@ pub fn get_rebuy_spec(args: &Value) -> Result<String> {
     }
     if let Ok(conn) = db::open_default()
         && let Ok(Some(row)) = db::get_openapi_spec(&conn, repo)
-            && let Some(raw) = row.spec_json {
-                return Ok(raw);
-            }
-    anyhow::bail!("no spec for '{repo}' — check ~/orca/openapi/{repo}.json or run `orca spec register`")
+        && let Some(raw) = row.spec_json
+    {
+        return Ok(raw);
+    }
+    anyhow::bail!(
+        "no spec for '{repo}' — check ~/orca/openapi/{repo}.json or run `orca spec register`"
+    )
 }
 
 pub fn get_rebuy_spec_public(args: &Value) -> Result<String> {
@@ -140,8 +152,12 @@ async fn fetch_spec_json(url: &str) -> Result<Value> {
 }
 
 pub async fn spec_register(args: &Value) -> Result<String> {
-    let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name is required"))?;
-    let url  = args["url"].as_str().ok_or_else(|| anyhow::anyhow!("url is required"))?;
+    let name = args["name"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("name is required"))?;
+    let url = args["url"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("url is required"))?;
 
     let spec_json = fetch_spec_json(url).await?;
     let spec_text = serde_json::to_string(&spec_json)?;
@@ -157,11 +173,13 @@ pub async fn spec_register(args: &Value) -> Result<String> {
         enabled: true,
     };
     db::upsert_openapi_spec(&conn, &row)?;
-    Ok(format!("registered '{name}' from {url} ({path_count} paths)"))
+    Ok(format!(
+        "registered '{name}' from {url} ({path_count} paths)"
+    ))
 }
 
 pub async fn spec_refresh(args: &Value) -> Result<String> {
-    let all  = args["all"].as_bool().unwrap_or(false);
+    let all = args["all"].as_bool().unwrap_or(false);
     let name = args["name"].as_str();
 
     let conn = db::open_default()?;
@@ -172,9 +190,13 @@ pub async fn spec_refresh(args: &Value) -> Result<String> {
     } else {
         match name {
             Some(n) => {
-                let s = db_specs.into_iter().find(|s| s.name == n)
+                let s = db_specs
+                    .into_iter()
+                    .find(|s| s.name == n)
                     .ok_or_else(|| anyhow::anyhow!("no spec named '{n}'"))?;
-                if s.url.is_none() { anyhow::bail!("spec '{n}' has no URL — cannot refresh"); }
+                if s.url.is_none() {
+                    anyhow::bail!("spec '{n}' has no URL — cannot refresh");
+                }
                 vec![s]
             }
             None => anyhow::bail!("name or all=true required"),
@@ -187,9 +209,16 @@ pub async fn spec_refresh(args: &Value) -> Result<String> {
 
     let mut results = Vec::new();
     for spec in to_refresh {
-        let url = spec.url.as_ref().expect("pre-filtered list guarantees URL is present").clone();
+        let url = spec
+            .url
+            .as_ref()
+            .expect("pre-filtered list guarantees URL is present")
+            .clone();
         match fetch_spec_json(&url).await {
-            Err(e) => { results.push(format!("✗ {}: {e}", spec.name)); continue; }
+            Err(e) => {
+                results.push(format!("✗ {}: {e}", spec.name));
+                continue;
+            }
             Ok(spec_json) => {
                 let path_count = spec_json["paths"].as_object().map(|p| p.len()).unwrap_or(0);
                 let spec_text = serde_json::to_string(&spec_json)?;
@@ -210,7 +239,9 @@ pub async fn spec_refresh(args: &Value) -> Result<String> {
 }
 
 pub fn spec_unregister(args: &Value) -> Result<String> {
-    let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name is required"))?;
+    let name = args["name"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("name is required"))?;
     let conn = db::open_default()?;
     if db::remove_openapi_spec(&conn, name)? {
         Ok(format!("unregistered '{name}'"))

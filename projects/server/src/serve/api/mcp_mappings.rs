@@ -95,9 +95,7 @@ pub async fn mcp_mappings_create_handler(Json(body): Json<MapRequest>) -> Respon
         confidence: None,
         enabled: true,
     };
-    match db::open_default()
-        .and_then(|conn| db::upsert_mcp_tool_mapping(&conn, &row))
-    {
+    match db::open_default().and_then(|conn| db::upsert_mcp_tool_mapping(&conn, &row)) {
         Ok(()) => Json(OkResponse { ok: true }).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
@@ -120,11 +118,12 @@ pub async fn mcp_mappings_create_handler(Json(body): Json<MapRequest>) -> Respon
 pub async fn mcp_mappings_delete_handler(
     axum::extract::Path(orca_tool): axum::extract::Path<String>,
 ) -> Response {
-    match db::open_default()
-        .and_then(|conn| db::remove_mcp_tool_mapping(&conn, &orca_tool))
-    {
+    match db::open_default().and_then(|conn| db::remove_mcp_tool_mapping(&conn, &orca_tool)) {
         Ok(true) => Json(OkResponse { ok: true }).into_response(),
-        Ok(false) => err(StatusCode::NOT_FOUND, &format!("mapping '{orca_tool}' not found")),
+        Ok(false) => err(
+            StatusCode::NOT_FOUND,
+            &format!("mapping '{orca_tool}' not found"),
+        ),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }

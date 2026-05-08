@@ -118,9 +118,10 @@ pub async fn wait_for_mode(target: DaemonMode, timeout_secs: u64) -> Result<()> 
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     loop {
         if let Ok(Some(s)) = read()
-            && s.mode == target {
-                return Ok(());
-            }
+            && s.mode == target
+        {
+            return Ok(());
+        }
         if Instant::now() >= deadline {
             anyhow::bail!("timed out waiting for daemon mode {:?}", target);
         }
@@ -160,10 +161,7 @@ mod tests {
             serde_json::to_string(&DaemonMode::Parked).unwrap(),
             r#""parked""#
         );
-        assert_eq!(
-            serde_json::to_string(&DaemonMode::Dev).unwrap(),
-            r#""dev""#
-        );
+        assert_eq!(serde_json::to_string(&DaemonMode::Dev).unwrap(), r#""dev""#);
     }
 
     #[test]
@@ -225,7 +223,9 @@ mod tests {
         let original = sample_state();
         write_to(&path, &original).unwrap();
 
-        let restored = read_from(&path).unwrap().expect("expected Some after write");
+        let restored = read_from(&path)
+            .unwrap()
+            .expect("expected Some after write");
         assert_eq!(restored.daemon_pid, original.daemon_pid);
         assert_eq!(restored.active_pid, original.active_pid);
         assert_eq!(restored.port, original.port);
@@ -242,7 +242,11 @@ mod tests {
 
         let state = sample_state();
         let result = write_to(&path, &state);
-        assert!(result.is_ok(), "write_to should create parent dirs: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "write_to should create parent dirs: {:?}",
+            result
+        );
         assert!(path.exists(), "state file should exist after write_to");
     }
 
@@ -258,7 +262,9 @@ mod tests {
 
         set_mode_at(&path, DaemonMode::Parked).unwrap();
 
-        let updated = read_from(&path).unwrap().expect("expected Some after set_mode_at");
+        let updated = read_from(&path)
+            .unwrap()
+            .expect("expected Some after set_mode_at");
         assert_eq!(updated.mode, DaemonMode::Parked, "mode should be updated");
         // All other fields must be unchanged.
         assert_eq!(updated.daemon_pid, original.daemon_pid);
@@ -275,7 +281,10 @@ mod tests {
         // No state file — set_mode_at should succeed silently (nothing to update).
         let result = set_mode_at(&path, DaemonMode::Dev);
         assert!(result.is_ok());
-        assert!(!path.exists(), "no file should be created when state is absent");
+        assert!(
+            !path.exists(),
+            "no file should be created when state is absent"
+        );
     }
 
     // ── clear_at ──────────────────────────────────────────────────────────────
@@ -290,7 +299,10 @@ mod tests {
         assert!(path.exists());
 
         clear_at(&path).unwrap();
-        assert!(!path.exists(), "state file should be removed after clear_at");
+        assert!(
+            !path.exists(),
+            "state file should be removed after clear_at"
+        );
     }
 
     #[test]

@@ -105,39 +105,78 @@ pub fn classify_model(id: &str, backend: &str) -> ModelCapabilities {
 
     // Reasoning models generally can't produce structured tool JSON reliably.
     // Claude is the exception — it's a reasoning model that also does tools.
-    let supports_tools = if is_embed { false }
-        else if is_reasoning { is_claude }
-        else { true };
+    let supports_tools = if is_embed {
+        false
+    } else if is_reasoning {
+        is_claude
+    } else {
+        true
+    };
 
-    let context_window = if is_claude { 200_000 }
-        else if id_lower.contains("128k") { 131_072 }
-        else if id_lower.contains("32k") { 32_768 }
-        else if id_lower.contains("16k") { 16_384 }
-        else { 32_768 };
+    let context_window = if is_claude {
+        200_000
+    } else if id_lower.contains("128k") {
+        131_072
+    } else if id_lower.contains("32k") {
+        32_768
+    } else if id_lower.contains("16k") {
+        16_384
+    } else {
+        32_768
+    };
 
     let preferred_tasks = if is_embed {
         vec![]
     } else if is_claude {
-        vec![TaskKind::Coding, TaskKind::ToolUse, TaskKind::Analysis, TaskKind::Reasoning, TaskKind::Chat]
+        vec![
+            TaskKind::Coding,
+            TaskKind::ToolUse,
+            TaskKind::Analysis,
+            TaskKind::Reasoning,
+            TaskKind::Chat,
+        ]
     } else if is_reasoning {
         vec![TaskKind::Reasoning, TaskKind::Analysis]
     } else if is_code {
         vec![TaskKind::Coding, TaskKind::ToolUse]
     } else if is_qwen {
-        vec![TaskKind::ToolUse, TaskKind::Coding, TaskKind::Chat, TaskKind::Analysis]
+        vec![
+            TaskKind::ToolUse,
+            TaskKind::Coding,
+            TaskKind::Chat,
+            TaskKind::Analysis,
+        ]
     } else {
         vec![TaskKind::Chat, TaskKind::Analysis]
     };
 
     // Rank: lower = preferred when capabilities are otherwise equal.
     // Check small first — a small qwen is still a small model.
-    let rank: u8 = if is_embed { 255 }
-        else if is_small { 50 }          // small models — deprioritize regardless of family
-        else if is_claude { 5 }          // cloud API — great but costs money
-        else if is_qwen && !is_reasoning { 10 }   // best local all-rounder
-        else if is_code { 15 }           // specialized code models
-        else if is_reasoning { 60 }      // reasoning-only: slow, narrow
-        else { 30 };                     // other chat models
+    let rank: u8 = if is_embed {
+        255
+    } else if is_small {
+        50
+    }
+    // small models — deprioritize regardless of family
+    else if is_claude {
+        5
+    }
+    // cloud API — great but costs money
+    else if is_qwen && !is_reasoning {
+        10
+    }
+    // best local all-rounder
+    else if is_code {
+        15
+    }
+    // specialized code models
+    else if is_reasoning {
+        60
+    }
+    // reasoning-only: slow, narrow
+    else {
+        30
+    }; // other chat models
 
     ModelCapabilities {
         supports_tools,
@@ -179,30 +218,41 @@ pub async fn discover_all(config: &Config) -> Vec<DiscoveredModel> {
 
     // DB-registered providers override or supplement the env defaults.
     if let Ok(conn) = db::open(&config.db_path)
-        && let Ok(providers) = db::list_llm_providers(&conn) {
-            for p in providers.into_iter().filter(|p| p.enabled) {
-                // If there's already an entry for this URL, skip (dedup).
-                if !endpoints.iter().any(|(_, u)| u == &p.url) {
-                    endpoints.push((p.kind.clone(), p.url.clone()));
-                }
+        && let Ok(providers) = db::list_llm_providers(&conn)
+    {
+        for p in providers.into_iter().filter(|p| p.enabled) {
+            // If there's already an entry for this URL, skip (dedup).
+            if !endpoints.iter().any(|(_, u)| u == &p.url) {
+                endpoints.push((p.kind.clone(), p.url.clone()));
             }
         }
+    }
 
     // Probe all endpoints concurrently.
-    let probes: Vec<_> = endpoints.into_iter().map(|(kind, url)| async move {
-        let ids = match kind.as_str() {
-            "ollama" => OllamaBackend::new(&url, "").list_models().await.ok(),
-            _ => LMStudioBackend::new(&url, "").list_models().await.ok(),
-        };
-        ids.unwrap_or_default()
-            .into_iter()
-            .filter_map(|id| {
-                let caps = classify_model(&id, &kind);
-                if caps.preferred_tasks.is_empty() { return None; }
-                Some(DiscoveredModel { id, backend: kind.clone(), url: url.clone(), capabilities: caps })
-            })
-            .collect::<Vec<_>>()
-    }).collect();
+    let probes: Vec<_> = endpoints
+        .into_iter()
+        .map(|(kind, url)| async move {
+            let ids = match kind.as_str() {
+                "ollama" => OllamaBackend::new(&url, "").list_models().await.ok(),
+                _ => LMStudioBackend::new(&url, "").list_models().await.ok(),
+            };
+            ids.unwrap_or_default()
+                .into_iter()
+                .filter_map(|id| {
+                    let caps = classify_model(&id, &kind);
+                    if caps.preferred_tasks.is_empty() {
+                        return None;
+                    }
+                    Some(DiscoveredModel {
+                        id,
+                        backend: kind.clone(),
+                        url: url.clone(),
+                        capabilities: caps,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
 
     let mut found: Vec<DiscoveredModel> = join_all(probes).await.into_iter().flatten().collect();
 
@@ -229,10 +279,7 @@ pub async fn discover_all(config: &Config) -> Vec<DiscoveredModel> {
 ///   1. Tool-capable models rank above non-capable when task is ToolUse.
 ///   2. Models with the task in their preferred list rank above those without.
 ///   3. Within the same tier, rank (lower = preferred hardware/family) breaks ties.
-pub fn select_for_task(
-    models: &[DiscoveredModel],
-    task: TaskKind,
-) -> Option<&DiscoveredModel> {
+pub fn select_for_task(models: &[DiscoveredModel], task: TaskKind) -> Option<&DiscoveredModel> {
     if models.is_empty() {
         return None;
     }
@@ -244,7 +291,11 @@ pub fn select_for_task(
             0
         };
         // Primary: does this model prefer this task?
-        let task_match: u16 = if m.capabilities.preferred_tasks.contains(&task) { 0 } else { 100 };
+        let task_match: u16 = if m.capabilities.preferred_tasks.contains(&task) {
+            0
+        } else {
+            100
+        };
         // Tiebreaker: family/hardware rank.
         let rank: u16 = m.capabilities.rank as u16;
 
@@ -259,8 +310,14 @@ pub fn select_for_task(
 pub fn to_config_model(discovered: &DiscoveredModel) -> config::Model {
     match discovered.backend.as_str() {
         "claude" => config::Model::Claude(discovered.id.clone()),
-        "ollama" => config::Model::Ollama { id: discovered.id.clone(), url: discovered.url.clone() },
-        _ => config::Model::LMStudio { id: discovered.id.clone(), url: discovered.url.clone() },
+        "ollama" => config::Model::Ollama {
+            id: discovered.id.clone(),
+            url: discovered.url.clone(),
+        },
+        _ => config::Model::LMStudio {
+            id: discovered.id.clone(),
+            url: discovered.url.clone(),
+        },
     }
 }
 
@@ -321,7 +378,11 @@ mod tests {
     #[test]
     fn small_model_deprioritized() {
         let caps = classify_model("qwen2.5-0.5b-instruct", "lmstudio");
-        assert!(caps.rank >= 50, "small model should rank low, got {}", caps.rank);
+        assert!(
+            caps.rank >= 50,
+            "small model should rank low, got {}",
+            caps.rank
+        );
     }
 
     #[test]
@@ -368,11 +429,14 @@ mod tests {
     #[test]
     fn tool_use_prefers_tool_capable_model() {
         let models = vec![
-            make_model("deepseek-r1-14b", "lmstudio"),  // reasoning, no tools
-            make_model("qwen/qwen3-8b", "lmstudio"),     // chat qwen, tools ok
+            make_model("deepseek-r1-14b", "lmstudio"), // reasoning, no tools
+            make_model("qwen/qwen3-8b", "lmstudio"),   // chat qwen, tools ok
         ];
         let selected = select_for_task(&models, TaskKind::ToolUse).unwrap();
-        assert_eq!(selected.id, "qwen/qwen3-8b", "reasoning model should not be selected for tool use");
+        assert_eq!(
+            selected.id, "qwen/qwen3-8b",
+            "reasoning model should not be selected for tool use"
+        );
     }
 
     #[test]
@@ -382,7 +446,10 @@ mod tests {
             make_model("deepseek-r1-14b", "lmstudio"),
         ];
         let selected = select_for_task(&models, TaskKind::Reasoning).unwrap();
-        assert_eq!(selected.id, "deepseek-r1-14b", "should prefer reasoning model for reasoning tasks");
+        assert_eq!(
+            selected.id, "deepseek-r1-14b",
+            "should prefer reasoning model for reasoning tasks"
+        );
     }
 
     #[test]

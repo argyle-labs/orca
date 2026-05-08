@@ -1,8 +1,8 @@
 use std::fs;
 use tempfile::tempdir;
 
-use orca_agents::{list_embedded_agents, load_agent_prompt};
 use llm::tools::bash::BashPermissions;
+use orca_agents::{list_embedded_agents, load_agent_prompt};
 use orca_fs::{fs as fstool, search};
 
 // These tests verify the tool implementations work correctly.
@@ -37,8 +37,7 @@ fn test_edit_file_replaces_content() {
     let path = dir.path().join("edit.txt");
     fs::write(&path, "hello world foo bar").unwrap();
 
-    let result =
-        fstool::edit_file(path.to_str().unwrap(), "hello world", "goodbye world");
+    let result = fstool::edit_file(path.to_str().unwrap(), "hello world", "goodbye world");
     assert!(result.is_ok());
     assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world foo bar");
 }
@@ -81,8 +80,7 @@ fn test_glob_files_with_base() {
     fs::write(dir.path().join("x.md"), "").unwrap();
     fs::write(dir.path().join("y.md"), "").unwrap();
 
-    let result =
-        search::glob_files("*.md", Some(dir.path().to_str().unwrap())).unwrap();
+    let result = search::glob_files("*.md", Some(dir.path().to_str().unwrap())).unwrap();
     let lines: Vec<&str> = result.lines().collect();
     assert_eq!(lines.len(), 2);
 }
@@ -101,8 +99,7 @@ fn test_grep_content_finds_match() {
     let path = dir.path().join("search.txt");
     fs::write(&path, "line one\nline two needle\nline three\n").unwrap();
 
-    let result =
-        search::grep_content("needle", path.to_str().unwrap(), false).unwrap();
+    let result = search::grep_content("needle", path.to_str().unwrap(), false).unwrap();
     assert!(result.contains("needle"));
     assert!(result.contains(":2:")); // line 2 (1-indexed)
 }
@@ -123,8 +120,7 @@ fn test_grep_content_no_match_returns_message() {
     let path = dir.path().join("file.txt");
     fs::write(&path, "no match here\n").unwrap();
 
-    let result =
-        search::grep_content("xyzzy", path.to_str().unwrap(), false).unwrap();
+    let result = search::grep_content("xyzzy", path.to_str().unwrap(), false).unwrap();
     assert!(result.starts_with("no matches"));
 }
 
@@ -136,8 +132,7 @@ fn test_grep_content_truncates_at_200_lines() {
     let content: String = (0..300).map(|i| format!("line {i} needle\n")).collect();
     fs::write(&path, &content).unwrap();
 
-    let result =
-        search::grep_content("needle", path.to_str().unwrap(), false).unwrap();
+    let result = search::grep_content("needle", path.to_str().unwrap(), false).unwrap();
     assert!(result.contains("truncated"));
 }
 

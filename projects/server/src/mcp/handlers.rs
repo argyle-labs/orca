@@ -1,6 +1,6 @@
 use anyhow::Result;
-use llm::buffer_sink;
 use config::Config;
+use llm::buffer_sink;
 use serde_json::{Value, json};
 
 use crate::agent_backend::{self, Resolution};
@@ -157,7 +157,9 @@ pub fn get_config(args: &Value, config: &Config) -> Result<String> {
             .collect();
         names.sort();
         let list = names.join(", ");
-        return Ok(format!("Available config files: {list}\n\nUse orca_get_config with a name to read one."));
+        return Ok(format!(
+            "Available config files: {list}\n\nUse orca_get_config with a name to read one."
+        ));
     }
 
     // Try exact match, then case-insensitive
@@ -172,18 +174,18 @@ pub fn get_config(args: &Value, config: &Config) -> Result<String> {
     }
 
     // Fallback: case-insensitive scan
-    let found = std::fs::read_dir(&dir)?
-        .flatten()
-        .find(|e| {
-            e.path()
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_uppercase() == name.to_uppercase())
-                .unwrap_or(false)
-        });
+    let found = std::fs::read_dir(&dir)?.flatten().find(|e| {
+        e.path()
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_uppercase() == name.to_uppercase())
+            .unwrap_or(false)
+    });
 
     match found {
         Some(e) => Ok(std::fs::read_to_string(e.path())?),
-        None => Ok(format!("Config file '{name}' not found. Available: use orca_get_config with no name to list.")),
+        None => Ok(format!(
+            "Config file '{name}' not found. Available: use orca_get_config with no name to list."
+        )),
     }
 }
 
@@ -279,13 +281,21 @@ pub fn mcp_list_servers() -> Result<String> {
 }
 
 pub fn mcp_map_tool(args: &Value) -> Result<String> {
-    let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("name required"))?;
-    let orca_tool = args["orca_tool"].as_str().ok_or_else(|| anyhow::anyhow!("orca_tool required"))?;
-    let external_tool = args["external_tool"].as_str().ok_or_else(|| anyhow::anyhow!("external_tool required"))?;
+    let name = args["name"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("name required"))?;
+    let orca_tool = args["orca_tool"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("orca_tool required"))?;
+    let external_tool = args["external_tool"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("external_tool required"))?;
     let conn = db::open_default()?;
     let servers = db::list_mcp_servers(&conn)?;
     if !servers.iter().any(|s| s.name == name) {
-        anyhow::bail!("MCP server '{name}' not found in orca.db — register it first with orca_mcp_add");
+        anyhow::bail!(
+            "MCP server '{name}' not found in orca.db — register it first with orca_mcp_add"
+        );
     }
     let row = db::McpToolMappingRow {
         orca_tool: orca_tool.to_string(),
@@ -300,7 +310,9 @@ pub fn mcp_map_tool(args: &Value) -> Result<String> {
 }
 
 pub fn mcp_unmap_tool(args: &Value) -> Result<String> {
-    let orca_tool = args["orca_tool"].as_str().ok_or_else(|| anyhow::anyhow!("orca_tool required"))?;
+    let orca_tool = args["orca_tool"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("orca_tool required"))?;
     let conn = db::open_default()?;
     if db::remove_mcp_tool_mapping(&conn, orca_tool)? {
         Ok(format!("Unmapped {orca_tool}"))
@@ -322,14 +334,19 @@ pub fn mcp_sync_tools(args: &Value) -> Result<String> {
         servers.iter().collect()
     } else {
         let n = name.expect("name checked above via !all && name.is_none() guard");
-        let s = servers.iter().find(|s| s.name == n)
+        let s = servers
+            .iter()
+            .find(|s| s.name == n)
             .ok_or_else(|| anyhow::anyhow!("server '{n}' not found"))?;
         vec![s]
     };
     let mut lines = Vec::new();
     for server in targets {
         match orca_commands::mcp_sync_server(server, threshold) {
-            Ok((added, skipped)) => lines.push(format!("{}: {} added, {} skipped", server.name, added, skipped)),
+            Ok((added, skipped)) => lines.push(format!(
+                "{}: {} added, {} skipped",
+                server.name, added, skipped
+            )),
             Err(e) => lines.push(format!("{}: error — {e}", server.name)),
         }
     }
@@ -349,9 +366,15 @@ pub fn mcp_list_mappings(args: &Value) -> Result<String> {
     }
     let mut lines = Vec::new();
     for r in &rows {
-        let conf = r.confidence.map(|c| format!(" [{:.0}%]", c * 100.0)).unwrap_or_default();
+        let conf = r
+            .confidence
+            .map(|c| format!(" [{:.0}%]", c * 100.0))
+            .unwrap_or_default();
         let status = if r.enabled { "" } else { " [disabled]" };
-        lines.push(format!("  {} → {}::{}{}{}", r.orca_tool, r.mcp_name, r.external_tool, conf, status));
+        lines.push(format!(
+            "  {} → {}::{}{}{}",
+            r.orca_tool, r.mcp_name, r.external_tool, conf, status
+        ));
     }
     Ok(lines.join("\n"))
 }
@@ -382,10 +405,15 @@ pub fn docker_list_runtimes() -> Result<String> {
     }
     let mut lines = vec!["Registered Docker runtimes:".to_string(), String::new()];
     for r in &rts {
-        let target = r.docker_host()
+        let target = r
+            .docker_host()
             .or_else(|| r.url.clone())
             .unwrap_or_else(|| "(no connection)".to_string());
-        let flag = if r.enabled { " [enabled]" } else { " [disabled]" };
+        let flag = if r.enabled {
+            " [enabled]"
+        } else {
+            " [disabled]"
+        };
         lines.push(format!("  {}{} → {}", r.name, flag, target));
     }
     Ok(lines.join("\n"))
@@ -395,7 +423,8 @@ pub fn plugin_list(args: &Value) -> Result<String> {
     let workspace = args["workspace"].as_str();
     let conn = db::open_default()?;
     let plugins = db::list_plugins(&conn)?;
-    let filtered: Vec<_> = plugins.iter()
+    let filtered: Vec<_> = plugins
+        .iter()
         .filter(|p| workspace.is_none_or(|w| p.tier == w))
         .collect();
     if filtered.is_empty() {
@@ -411,7 +440,9 @@ pub fn plugin_list(args: &Value) -> Result<String> {
 }
 
 pub fn plugin_creds_list(args: &Value) -> Result<String> {
-    let plugin = args["plugin"].as_str().ok_or_else(|| anyhow::anyhow!("plugin required"))?;
+    let plugin = args["plugin"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("plugin required"))?;
     let conn = db::open_default()?;
     let creds = db::list_plugin_credentials(&conn, plugin)?;
     if creds.is_empty() {
@@ -420,7 +451,10 @@ pub fn plugin_creds_list(args: &Value) -> Result<String> {
     let mut lines = vec![format!("Credentials for '{plugin}':")];
     for c in &creds {
         let sync = c.synced_at.as_deref().unwrap_or("never");
-        lines.push(format!("  {} (synced: {}, updated: {})", c.key, sync, c.updated_at));
+        lines.push(format!(
+            "  {} (synced: {}, updated: {})",
+            c.key, sync, c.updated_at
+        ));
     }
     Ok(lines.join("\n"))
 }
@@ -449,7 +483,10 @@ pub fn doc_list_ignore_patterns() -> Result<String> {
     if patterns.is_empty() {
         return Ok("No ignore patterns registered.".to_string());
     }
-    let mut lines = vec!["Doc ignore patterns (applied to all roots):".to_string(), String::new()];
+    let mut lines = vec![
+        "Doc ignore patterns (applied to all roots):".to_string(),
+        String::new(),
+    ];
     for p in &patterns {
         lines.push(format!("  {p}"));
     }
@@ -457,7 +494,9 @@ pub fn doc_list_ignore_patterns() -> Result<String> {
 }
 
 pub fn doc_add_ignore_pattern(args: &Value) -> Result<String> {
-    let pattern = args["pattern"].as_str().ok_or_else(|| anyhow::anyhow!("pattern required"))?;
+    let pattern = args["pattern"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("pattern required"))?;
     let conn = db::open_default()?;
     if db::add_doc_ignore_pattern(&conn, pattern)? {
         Ok(format!("Added ignore pattern '{pattern}'."))
@@ -467,7 +506,9 @@ pub fn doc_add_ignore_pattern(args: &Value) -> Result<String> {
 }
 
 pub fn doc_remove_ignore_pattern(args: &Value) -> Result<String> {
-    let pattern = args["pattern"].as_str().ok_or_else(|| anyhow::anyhow!("pattern required"))?;
+    let pattern = args["pattern"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("pattern required"))?;
     let conn = db::open_default()?;
     if db::remove_doc_ignore_pattern(&conn, pattern)? {
         Ok(format!("Removed ignore pattern '{pattern}'."))
@@ -475,4 +516,3 @@ pub fn doc_remove_ignore_pattern(args: &Value) -> Result<String> {
         Ok(format!("Pattern '{pattern}' not found."))
     }
 }
-

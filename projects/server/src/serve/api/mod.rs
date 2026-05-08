@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::{http::StatusCode, response::{IntoResponse, Json, Response}};
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Json, Response},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
@@ -11,7 +14,13 @@ use super::mcp_client::McpPool;
 pub type McpState = Arc<McpPool>;
 
 pub fn err(code: StatusCode, msg: &str) -> Response {
-    (code, Json(ErrorResponse { error: msg.to_string() })).into_response()
+    (
+        code,
+        Json(ErrorResponse {
+            error: msg.to_string(),
+        }),
+    )
+        .into_response()
 }
 
 /// Run a DB closure and return the result as JSON, or a 500 on error.
@@ -56,7 +65,7 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
-pub use crate::serve::tree::{TreeNode, NodeType};
+pub use crate::serve::tree::{NodeType, TreeNode};
 
 // ── Shared spec/download helpers ─────────────────────────────────────────────
 
@@ -368,7 +377,9 @@ pub struct SchemaDbAddRequest {
     pub domains_file: Option<String>,
 }
 
-fn default_driver() -> String { "mysql".to_string() }
+fn default_driver() -> String {
+    "mysql".to_string()
+}
 
 #[derive(Deserialize, ToSchema)]
 pub struct SpecRegisterRequest {
@@ -407,51 +418,57 @@ pub struct TestRunResponse {
 // `super::SomeType` inside a utoipa macro; always import it via this prelude.
 pub(super) mod prelude {
     #[allow(unused_imports)]
-    pub use super::{CredInfo, DockerRuntimeAddRequest, DockerRuntimeInfo, ErrorResponse, FsBrowseQuery, FsBrowseResponse, FsEntry, LlmProviderAddRequest, LlmProviderInfo, McpServerAddRequest, McpServerInfo, McpState, OkResponse, PluginDataEntry, PluginInfo, SchemaDbAddRequest, SchemaDbInfo, SetCredRequest, SetPluginDataRequest, SpecInfo, SpecRegisterRequest, db_json, db_ok, db_remove, err};
+    pub use super::{
+        CredInfo, DockerRuntimeAddRequest, DockerRuntimeInfo, ErrorResponse, FsBrowseQuery,
+        FsBrowseResponse, FsEntry, LlmProviderAddRequest, LlmProviderInfo, McpServerAddRequest,
+        McpServerInfo, McpState, OkResponse, PluginDataEntry, PluginInfo, SchemaDbAddRequest,
+        SchemaDbInfo, SetCredRequest, SetPluginDataRequest, SpecInfo, SpecRegisterRequest, db_json,
+        db_ok, db_remove, err,
+    };
 }
 
 // ── Sub-modules ───────────────────────────────────────────────────────────────
 
 pub mod atlassian;
-pub mod download;
-pub mod fs;
-pub mod llm;
-pub mod pdf;
 pub mod bitbucket;
-pub mod github;
 pub mod ctx7;
 pub mod docker;
+pub mod docker_registry;
 pub mod docs;
+pub mod download;
+pub mod fs;
+pub mod github;
 pub mod health;
 pub mod learning;
+pub mod llm;
 pub mod logs;
 pub mod mcp;
 pub mod mcp_mappings;
-pub mod schema;
-pub mod docker_registry;
-pub mod schema_registry;
+pub mod pdf;
 pub mod plugins;
+pub mod schema;
+pub mod schema_registry;
 pub mod specs;
 pub mod system;
 pub mod tests_handler;
 
 pub use atlassian::*;
-pub use fs::*;
-pub use plugins::*;
-pub use download::*;
-pub use pdf::*;
 pub use bitbucket::*;
-pub use github::*;
 pub use ctx7::*;
 pub use docker::*;
+pub use docker_registry::*;
 pub use docs::*;
+pub use download::*;
+pub use fs::*;
+pub use github::*;
 pub use health::*;
 pub use learning::*;
 pub use logs::*;
 pub use mcp::*;
 pub use mcp_mappings::*;
+pub use pdf::*;
+pub use plugins::*;
 pub use schema::*;
-pub use docker_registry::*;
 pub use schema_registry::*;
 pub use specs::*;
 pub use system::*;

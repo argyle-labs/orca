@@ -79,7 +79,9 @@ pub async fn mcp_add_handler(Json(body): Json<McpServerAddRequest>) -> Response 
     ),
     tag = "mcp"
 )]
-pub async fn mcp_remove_handler(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
+pub async fn mcp_remove_handler(
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Response {
     db_remove("server", &name, || {
         let conn = db::open_default()?;
         db::remove_mcp_server(&conn, &name)

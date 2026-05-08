@@ -55,7 +55,10 @@ fn get_command(input: &Value) -> String {
 
 fn log_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".orca").join("logs").join("sessions")
+    PathBuf::from(home)
+        .join(".orca")
+        .join("logs")
+        .join("sessions")
 }
 
 fn session_file(session_short: &str, project: &str) -> PathBuf {
@@ -80,7 +83,7 @@ fn block(message: &str) -> ! {
 // ── BashGuard ─────────────────────────────────────────────────────────────────
 
 const DESTRUCTIVE_PATTERNS: &[&str] = &[
-    r"rm\s+-[a-zA-Z]*r[a-zA-Z]*f",  // rm -rf, rm -fr, etc.
+    r"rm\s+-[a-zA-Z]*r[a-zA-Z]*f", // rm -rf, rm -fr, etc.
     r"rm\s+-[a-zA-Z]*f[a-zA-Z]*r",
     r"qm\s+destroy",
     r"pct\s+destroy",
@@ -267,17 +270,32 @@ fn new_uuid() -> String {
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5], bytes[6], bytes[7],
-        bytes[8], bytes[9],
-        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
     )
 }
 
 // ── PII scanner ───────────────────────────────────────────────────────────────
 
 const PII_PATTERNS: &[(&str, &str)] = &[
-    (r"\+?1[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", "US phone number"),
+    (
+        r"\+?1[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}",
+        "US phone number",
+    ),
     (r"\b\d{3}-\d{2}-\d{4}\b", "SSN pattern"),
     (r"yuber\.app", "staging domain"),
     (r"re_[A-Za-z0-9]{20,}", "Resend API key"),
@@ -287,15 +305,11 @@ const PII_PATTERNS: &[(&str, &str)] = &[
     (r"0x[A-Fa-f0-9]{32,}", "hex secret (Turnstile/CF)"),
 ];
 
-
-const PII_SCAN_EXCLUDES: &[&str] = &[
-];
+const PII_SCAN_EXCLUDES: &[&str] = &[];
 
 fn pii_scan() -> Result<()> {
     let input = read_stdin();
-    let file_path = input["tool_input"]["file_path"]
-        .as_str()
-        .unwrap_or("");
+    let file_path = input["tool_input"]["file_path"].as_str().unwrap_or("");
 
     if file_path.is_empty() || !std::path::Path::new(file_path).exists() {
         return Ok(());
@@ -313,11 +327,7 @@ fn pii_scan() -> Result<()> {
     let mut findings: Vec<String> = Vec::new();
     for (pattern, label) in PII_PATTERNS {
         let re = regex::Regex::new(pattern).expect("valid pattern");
-        let matches: Vec<&str> = re
-            .find_iter(&content)
-            .take(3)
-            .map(|m| m.as_str())
-            .collect();
+        let matches: Vec<&str> = re.find_iter(&content).take(3).map(|m| m.as_str()).collect();
         if !matches.is_empty() {
             findings.push(format!("  [{label}]: {}", matches.join(", ")));
         }
@@ -342,16 +352,16 @@ fn pii_scan() -> Result<()> {
 
 #[cfg(test)]
 fn matches_destructive(cmd: &str) -> bool {
-    DESTRUCTIVE_PATTERNS.iter().any(|p| {
-        regex::Regex::new(p).expect("valid pattern").is_match(cmd)
-    })
+    DESTRUCTIVE_PATTERNS
+        .iter()
+        .any(|p| regex::Regex::new(p).expect("valid pattern").is_match(cmd))
 }
 
 #[cfg(test)]
 fn matches_opnsense(cmd: &str) -> bool {
-    OPNSENSE_PATTERNS.iter().any(|p| {
-        regex::Regex::new(p).expect("valid pattern").is_match(cmd)
-    })
+    OPNSENSE_PATTERNS
+        .iter()
+        .any(|p| regex::Regex::new(p).expect("valid pattern").is_match(cmd))
 }
 
 // ── Secrets scan (git commit guard) ──────────────────────────────────────────
@@ -404,11 +414,26 @@ fn secrets_scan() -> Result<()> {
     let diff = String::from_utf8_lossy(&diff_output.stdout);
 
     let secret_patterns: &[(&str, &str)] = &[
-        (r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}", "JWT token"),
-        (r#"[Aa]uthorization["': ]+[Bb]earer [A-Za-z0-9_.\-]{20,}"#, "Bearer token"),
-        (r#"[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]["': =]+[A-Za-z0-9_.\-]{16,}"#, "API key"),
-        (r"-----BEGIN (RSA|EC|OPENSSH|PGP) PRIVATE KEY", "Private key"),
-        (r"[Aa][Ww][Ss]_[Aa][Cc][Cc][Ee][Ss][Ss][_-]?[Kk][Ee][Yy]", "AWS key"),
+        (
+            r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}",
+            "JWT token",
+        ),
+        (
+            r#"[Aa]uthorization["': ]+[Bb]earer [A-Za-z0-9_.\-]{20,}"#,
+            "Bearer token",
+        ),
+        (
+            r#"[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]["': =]+[A-Za-z0-9_.\-]{16,}"#,
+            "API key",
+        ),
+        (
+            r"-----BEGIN (RSA|EC|OPENSSH|PGP) PRIVATE KEY",
+            "Private key",
+        ),
+        (
+            r"[Aa][Ww][Ss]_[Aa][Cc][Cc][Ee][Ss][Ss][_-]?[Kk][Ee][Yy]",
+            "AWS key",
+        ),
     ];
 
     let mut detected: Vec<&str> = Vec::new();
@@ -602,14 +627,21 @@ mod tests {
     fn new_uuid_format_is_valid() {
         let id = new_uuid();
         let parts: Vec<&str> = id.split('-').collect();
-        assert_eq!(parts.len(), 5, "UUID should have 5 dash-separated segments: {id}");
+        assert_eq!(
+            parts.len(),
+            5,
+            "UUID should have 5 dash-separated segments: {id}"
+        );
         assert_eq!(parts[0].len(), 8);
         assert_eq!(parts[1].len(), 4);
         assert_eq!(parts[2].len(), 4);
         assert_eq!(parts[3].len(), 4);
         assert_eq!(parts[4].len(), 12);
         // Version 4 bit
-        assert!(parts[2].starts_with('4'), "version nibble should be 4: {id}");
+        assert!(
+            parts[2].starts_with('4'),
+            "version nibble should be 4: {id}"
+        );
     }
 
     #[test]

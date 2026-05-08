@@ -9,8 +9,8 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use std::marker::PhantomData;
 
-use crate::{OrcaTool, ToolCtx};
 use crate::erased::{ErasedTool, ToolWrapper};
+use crate::{OrcaTool, ToolCtx};
 
 pub struct ToolRegistry {
     tools: Vec<Box<dyn ErasedTool>>,
@@ -79,8 +79,9 @@ impl ToolRegistry {
         ctx: &ToolCtx,
     ) -> Result<String> {
         let args_json = match raw_args {
-            CliArgs::Json(s) => serde_json::from_str(&s)
-                .map_err(|e| anyhow::anyhow!("invalid JSON args: {e}"))?,
+            CliArgs::Json(s) => {
+                serde_json::from_str(&s).map_err(|e| anyhow::anyhow!("invalid JSON args: {e}"))?
+            }
             CliArgs::Pairs(pairs) => {
                 let mut map = serde_json::Map::new();
                 for pair in pairs {
@@ -89,7 +90,8 @@ impl ToolRegistry {
                         .ok_or_else(|| anyhow::anyhow!("expected key=value, got: {pair}"))?;
                     // Try to parse the value as JSON first (handles booleans, numbers, etc.),
                     // fall back to plain string.
-                    let val: Value = serde_json::from_str(v).unwrap_or(Value::String(v.to_string()));
+                    let val: Value =
+                        serde_json::from_str(v).unwrap_or(Value::String(v.to_string()));
                     map.insert(k.to_string(), val);
                 }
                 Value::Object(map)
@@ -160,7 +162,10 @@ mod tests {
         ToolCtx::new(Arc::new(Config {
             anthropic_api_key: None,
             lmstudio_url: "http://localhost:1234".into(),
-            default_model: Model::LMStudio { id: String::new(), url: String::new() },
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
             orca_vault: PathBuf::from("/tmp"),
             vault_root: PathBuf::from("/tmp"),
             memory_root: PathBuf::from("/tmp"),
@@ -211,7 +216,10 @@ mod tests {
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0]["name"], "echo");
         assert_eq!(defs[0]["description"], "Echoes a message.");
-        assert!(defs[0]["inputSchema"].is_object(), "inputSchema must be an object");
+        assert!(
+            defs[0]["inputSchema"].is_object(),
+            "inputSchema must be an object"
+        );
     }
 
     #[test]
@@ -219,7 +227,10 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.register::<EchoTool>();
         let defs = reg.mcp_definitions();
-        assert!(defs[0]["inputSchema"]["$schema"].is_null(), "$schema should be stripped");
+        assert!(
+            defs[0]["inputSchema"]["$schema"].is_null(),
+            "$schema should be stripped"
+        );
     }
 
     #[test]
@@ -235,7 +246,10 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.register::<EchoTool>();
         let ctx = make_ctx();
-        let result = reg.dispatch("echo", serde_json::json!({"message": "hello"}), &ctx).await.unwrap();
+        let result = reg
+            .dispatch("echo", serde_json::json!({"message": "hello"}), &ctx)
+            .await
+            .unwrap();
         assert_eq!(result, "hello");
     }
 
@@ -243,7 +257,10 @@ mod tests {
     async fn dispatch_unknown_tool_returns_error() {
         let reg = ToolRegistry::new();
         let ctx = make_ctx();
-        let err = reg.dispatch("ghost", serde_json::json!({}), &ctx).await.unwrap_err();
+        let err = reg
+            .dispatch("ghost", serde_json::json!({}), &ctx)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("unknown tool"), "got: {err}");
     }
 
@@ -253,7 +270,10 @@ mod tests {
         reg.register::<EchoTool>();
         let ctx = make_ctx();
         // Missing required "message" field
-        let err = reg.dispatch("echo", serde_json::json!({}), &ctx).await.unwrap_err();
+        let err = reg
+            .dispatch("echo", serde_json::json!({}), &ctx)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("invalid args"), "got: {err}");
     }
 
@@ -262,7 +282,10 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.register::<AddTool>();
         let ctx = make_ctx();
-        let result = reg.dispatch("add", serde_json::json!({"a": 7, "b": 3}), &ctx).await.unwrap();
+        let result = reg
+            .dispatch("add", serde_json::json!({"a": 7, "b": 3}), &ctx)
+            .await
+            .unwrap();
         assert_eq!(result, "10");
     }
 
@@ -273,7 +296,14 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.register::<EchoTool>();
         let ctx = make_ctx();
-        let result = reg.cli_dispatch("echo", CliArgs::Json(r#"{"message":"via json"}"#.into()), &ctx).await.unwrap();
+        let result = reg
+            .cli_dispatch(
+                "echo",
+                CliArgs::Json(r#"{"message":"via json"}"#.into()),
+                &ctx,
+            )
+            .await
+            .unwrap();
         assert_eq!(result, "via json");
     }
 
@@ -282,7 +312,14 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.register::<EchoTool>();
         let ctx = make_ctx();
-        let result = reg.cli_dispatch("echo", CliArgs::Pairs(vec!["message=hello pairs".into()]), &ctx).await.unwrap();
+        let result = reg
+            .cli_dispatch(
+                "echo",
+                CliArgs::Pairs(vec!["message=hello pairs".into()]),
+                &ctx,
+            )
+            .await
+            .unwrap();
         assert_eq!(result, "hello pairs");
     }
 
@@ -291,7 +328,14 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.register::<AddTool>();
         let ctx = make_ctx();
-        let result = reg.cli_dispatch("add", CliArgs::Pairs(vec!["a=5".into(), "b=3".into()]), &ctx).await.unwrap();
+        let result = reg
+            .cli_dispatch(
+                "add",
+                CliArgs::Pairs(vec!["a=5".into(), "b=3".into()]),
+                &ctx,
+            )
+            .await
+            .unwrap();
         assert_eq!(result, "8");
     }
 
@@ -300,7 +344,10 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.register::<EchoTool>();
         let ctx = make_ctx();
-        let err = reg.cli_dispatch("echo", CliArgs::Pairs(vec!["no-equals-here".into()]), &ctx).await.unwrap_err();
+        let err = reg
+            .cli_dispatch("echo", CliArgs::Pairs(vec!["no-equals-here".into()]), &ctx)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("expected key=value"), "got: {err}");
     }
 
@@ -309,7 +356,10 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.register::<EchoTool>();
         let ctx = make_ctx();
-        let err = reg.cli_dispatch("echo", CliArgs::Json("{bad json".into()), &ctx).await.unwrap_err();
+        let err = reg
+            .cli_dispatch("echo", CliArgs::Json("{bad json".into()), &ctx)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("invalid JSON"), "got: {err}");
     }
 }

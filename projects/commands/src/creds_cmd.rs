@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use db;
 use clap::Subcommand;
+use db;
 use rusqlite::Connection;
 
 #[derive(Subcommand)]
@@ -110,7 +110,10 @@ pub fn cmd_creds(action: CredsAction) -> Result<()> {
                 let url = resolve_plugin_url(p);
                 // Only HTTP plugins require tokens — skip stdio/subprocess plugins.
                 if url.is_none() {
-                    println!("{:<20} {:<8} {:<10} stdio/subprocess — no token required", p.id, "—", "—");
+                    println!(
+                        "{:<20} {:<8} {:<10} stdio/subprocess — no token required",
+                        p.id, "—", "—"
+                    );
                     continue;
                 }
                 let url = url.expect("url checked as Some above via is_none() guard");
@@ -129,7 +132,10 @@ pub fn cmd_creds(action: CredsAction) -> Result<()> {
 
                 let tok_sym = if token_ok { "✓" } else { "✗" };
                 let http_sym = if http_ok { "✓" } else { "✗" };
-                println!("{:<20} {:<8} {:<10} token:{} http:{}", p.id, tok_sym, http_sym, token_note, http_note);
+                println!(
+                    "{:<20} {:<8} {:<10} token:{} http:{}",
+                    p.id, tok_sym, http_sym, token_note, http_note
+                );
 
                 if !token_ok || !http_ok {
                     any_fail = true;
@@ -185,12 +191,7 @@ pub fn sync_plugin_creds(plugin_id: &str) -> Result<()> {
         }
         let url = format!("{base_url}/creds");
         let body = serde_json::json!({"key": cred.key, "value": cred.value});
-        match client
-            .put(&url)
-            .bearer_auth(&bearer)
-            .json(&body)
-            .send()
-        {
+        match client.put(&url).bearer_auth(&bearer).json(&body).send() {
             Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 204 => {
                 synced += 1;
             }
@@ -217,9 +218,10 @@ pub fn sync_plugin_creds(plugin_id: &str) -> Result<()> {
 
 pub fn resolve_plugin_url(plugin: &db::PluginRow) -> Option<String> {
     if let Some(cmd) = &plugin.mcp_command
-        && (cmd.starts_with("http://") || cmd.starts_with("https://")) {
-            return Some(cmd.trim_end_matches('/').to_string());
-        }
+        && (cmd.starts_with("http://") || cmd.starts_with("https://"))
+    {
+        return Some(cmd.trim_end_matches('/').to_string());
+    }
     for arg in &plugin.mcp_args {
         if arg.starts_with("http://") || arg.starts_with("https://") {
             return Some(arg.trim_end_matches('/').to_string());
@@ -284,14 +286,26 @@ mod tests {
 
     #[test]
     fn resolve_plugin_url_from_http_command() {
-        let p = PluginRow { mcp_command: Some("http://localhost:8080".into()), ..base_plugin("p") };
-        assert_eq!(resolve_plugin_url(&p).as_deref(), Some("http://localhost:8080"));
+        let p = PluginRow {
+            mcp_command: Some("http://localhost:8080".into()),
+            ..base_plugin("p")
+        };
+        assert_eq!(
+            resolve_plugin_url(&p).as_deref(),
+            Some("http://localhost:8080")
+        );
     }
 
     #[test]
     fn resolve_plugin_url_from_https_command_strips_trailing_slash() {
-        let p = PluginRow { mcp_command: Some("https://plugin.example.com/".into()), ..base_plugin("p") };
-        assert_eq!(resolve_plugin_url(&p).as_deref(), Some("https://plugin.example.com"));
+        let p = PluginRow {
+            mcp_command: Some("https://plugin.example.com/".into()),
+            ..base_plugin("p")
+        };
+        assert_eq!(
+            resolve_plugin_url(&p).as_deref(),
+            Some("https://plugin.example.com")
+        );
     }
 
     #[test]
@@ -301,7 +315,10 @@ mod tests {
             mcp_args: vec!["server.js".into(), "http://localhost:9000".into()],
             ..base_plugin("p")
         };
-        assert_eq!(resolve_plugin_url(&p).as_deref(), Some("http://localhost:9000"));
+        assert_eq!(
+            resolve_plugin_url(&p).as_deref(),
+            Some("http://localhost:9000")
+        );
     }
 
     #[test]

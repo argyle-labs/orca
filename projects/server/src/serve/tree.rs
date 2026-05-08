@@ -60,17 +60,10 @@ pub fn get_ignored(root_name: &str) -> HashSet<String> {
         .iter()
         .map(|s| s.to_string())
         .collect(),
-        "orca" => [
-            ".git",
-            "target",
-            "node_modules",
-            "dist",
-            "build",
-            ".next",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect(),
+        "orca" => [".git", "target", "node_modules", "dist", "build", ".next"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
         "dotfiles" => HashSet::new(),
         _ => HashSet::new(),
     }
@@ -102,10 +95,12 @@ pub fn get_search_ignored(root_name: &str) -> HashSet<String> {
 
 fn parse_numeric_prefix(name: &str) -> (Option<u32>, String) {
     if let Some((prefix, rest)) = name.split_once('-')
-        && !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) {
-            let order = prefix.parse::<u32>().ok();
-            return (order, rest.to_string());
-        }
+        && !prefix.is_empty()
+        && prefix.chars().all(|c| c.is_ascii_digit())
+    {
+        let order = prefix.parse::<u32>().ok();
+        return (order, rest.to_string());
+    }
     (None, name.to_string())
 }
 
@@ -438,8 +433,15 @@ mod tests {
     fn extract_title_strips_app_prefix() {
         let tmp = tempfile::tempdir().unwrap();
         let f = tmp.path().join("doc.md");
-        fs::write(&f, "# rebuy-cli-mcp-server \u{2014} Patterns: Idioms and Conventions\nContent.").unwrap();
-        assert_eq!(extract_title(&f), Some("Patterns: Idioms and Conventions".to_string()));
+        fs::write(
+            &f,
+            "# rebuy-cli-mcp-server \u{2014} Patterns: Idioms and Conventions\nContent.",
+        )
+        .unwrap();
+        assert_eq!(
+            extract_title(&f),
+            Some("Patterns: Idioms and Conventions".to_string())
+        );
     }
 
     #[test]

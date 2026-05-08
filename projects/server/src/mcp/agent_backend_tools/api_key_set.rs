@@ -15,8 +15,7 @@ pub struct AgentBackendSetApiKey;
 #[async_trait]
 impl OrcaTool for AgentBackendSetApiKey {
     const NAME: &'static str = "agent_backend_set_api_key";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Store an Anthropic API key in the encrypted orca DB \
+    const DESCRIPTION: &'static str = "[MUTATES STATE] Store an Anthropic API key in the encrypted orca DB \
          (settings table, key 'secrets.anthropic_api_key'). The DB is SQLCipher-encrypted \
          at rest. Required for server-side Anthropic calls.";
     type Args = Args;

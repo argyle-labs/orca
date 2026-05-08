@@ -10,18 +10,21 @@
 /// and the models referenced below available on disk.
 use llm::backend::{LMStudioBackend, ModelBackend, buffer_sink};
 use llm::{Message, StopReason};
-use tool::ToolDef;
 use serde_json::json;
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use tokio_util::sync::CancellationToken;
+use tool::ToolDef;
 
 // Serialize all live tests within a single test-binary run — prevents concurrent
 // load/unload calls when multiple test names are matched by a broad filter.
 static LMS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn acquire_lms() -> MutexGuard<'static, ()> {
-    LMS_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+    LMS_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 // ── Model identifiers ─────────────────────────────────────────────────────────
@@ -71,7 +74,13 @@ async fn lmstudio_basic_chat() {
 
     let messages = vec![Message::user("Reply with exactly the word: pong")];
     let response = backend
-        .chat(&messages, &[], "You are a helpful assistant.", CancellationToken::new(), &sink)
+        .chat(
+            &messages,
+            &[],
+            "You are a helpful assistant.",
+            CancellationToken::new(),
+            &sink,
+        )
         .await
         .expect("chat failed");
 
@@ -109,7 +118,13 @@ async fn lmstudio_multi_turn_context() {
     ];
 
     let response = backend
-        .chat(&messages, &[], "You are a helpful assistant.", CancellationToken::new(), &sink)
+        .chat(
+            &messages,
+            &[],
+            "You are a helpful assistant.",
+            CancellationToken::new(),
+            &sink,
+        )
         .await
         .expect("chat failed");
 
@@ -219,7 +234,11 @@ async fn lmstudio_tool_call_then_answer() {
     let round2_messages = vec![
         Message::user("What is the capital of France? Use the lookup_capital tool."),
         Message::Assistant {
-            text: if r1.text.is_empty() { None } else { Some(r1.text.clone()) },
+            text: if r1.text.is_empty() {
+                None
+            } else {
+                Some(r1.text.clone())
+            },
             tool_calls: r1.tool_calls.clone(),
         },
         Message::ToolResults(vec![ToolResult {
@@ -277,7 +296,10 @@ async fn lmstudio_thinking_model() {
     teardown();
 
     let text = response.text.trim().to_string();
-    assert!(!text.is_empty(), "expected non-empty answer from thinking model");
+    assert!(
+        !text.is_empty(),
+        "expected non-empty answer from thinking model"
+    );
     assert!(
         text.contains("56"),
         "expected '56' in answer; got: {text:?}"
@@ -298,9 +320,7 @@ async fn lmstudio_cancellation() {
     let (sink, buf) = buffer_sink();
     let cancel = CancellationToken::new();
 
-    let messages = vec![Message::user(
-        "Count from 1 to 1000, one number per line.",
-    )];
+    let messages = vec![Message::user("Count from 1 to 1000, one number per line.")];
 
     let cancel_clone = cancel.clone();
     tokio::spawn(async move {
@@ -338,10 +358,10 @@ async fn lmstudio_cancellation() {
 /// not an empty string. This validates the fix for Ollama / llama.cpp compat.
 #[test]
 fn serialize_tool_call_content_is_null() {
-    use llm::backend::serialize::openai_messages;
     use llm::Message;
-    use tool::ToolCall;
+    use llm::backend::serialize::openai_messages;
     use serde_json::Value;
+    use tool::ToolCall;
 
     let messages = vec![Message::Assistant {
         text: None,
@@ -368,8 +388,8 @@ fn serialize_tool_call_content_is_null() {
 /// Serialize: assistant message with text AND tool_calls emits the text as content.
 #[test]
 fn serialize_tool_call_with_text_keeps_content() {
-    use llm::backend::serialize::openai_messages;
     use llm::Message;
+    use llm::backend::serialize::openai_messages;
     use tool::ToolCall;
 
     let messages = vec![Message::Assistant {
@@ -391,7 +411,9 @@ fn serialize_tool_call_with_text_keeps_content() {
 fn serialize_system_prompt_prepended() {
     use llm::backend::serialize::openai_messages;
 
-    let messages = vec![Message::User { content: "hello".into() }];
+    let messages = vec![Message::User {
+        content: "hello".into(),
+    }];
     let serialized = openai_messages(&messages, "You are a robot.");
     let arr = serialized.as_array().unwrap();
     assert_eq!(arr.len(), 2);
@@ -405,7 +427,9 @@ fn serialize_system_prompt_prepended() {
 fn serialize_empty_system_prompt_omitted() {
     use llm::backend::serialize::openai_messages;
 
-    let messages = vec![Message::User { content: "hello".into() }];
+    let messages = vec![Message::User {
+        content: "hello".into(),
+    }];
     let serialized = openai_messages(&messages, "");
     let arr = serialized.as_array().unwrap();
     assert_eq!(arr.len(), 1);
@@ -464,17 +488,26 @@ fn serialize_conversation_order() {
     use tool::{ToolCall, ToolResult};
 
     let messages = vec![
-        Message::User { content: "question".into() },
+        Message::User {
+            content: "question".into(),
+        },
         Message::Assistant {
             text: None,
             tool_calls: vec![ToolCall {
-                id: "c1".into(), name: "lookup".into(), input: json!({"q": "x"}),
+                id: "c1".into(),
+                name: "lookup".into(),
+                input: json!({"q": "x"}),
             }],
         },
         Message::ToolResults(vec![ToolResult {
-            tool_use_id: "c1".into(), content: "result".into(), is_error: false,
+            tool_use_id: "c1".into(),
+            content: "result".into(),
+            is_error: false,
         }]),
-        Message::Assistant { text: Some("final answer".into()), tool_calls: vec![] },
+        Message::Assistant {
+            text: Some("final answer".into()),
+            tool_calls: vec![],
+        },
     ];
 
     let serialized = openai_messages(&messages, "sys");
@@ -545,9 +578,17 @@ async fn lmstudio_tool_error_handled() {
     }];
 
     // Round 1: get a tool call
-    let r1_messages = vec![Message::user("Fetch data from http://example.com and tell me what it says.")];
+    let r1_messages = vec![Message::user(
+        "Fetch data from http://example.com and tell me what it says.",
+    )];
     let r1 = backend
-        .chat(&r1_messages, &tools, "You are a helpful assistant. Use tools when available.", CancellationToken::new(), &sink)
+        .chat(
+            &r1_messages,
+            &tools,
+            "You are a helpful assistant. Use tools when available.",
+            CancellationToken::new(),
+            &sink,
+        )
         .await
         .expect("round 1 failed");
 
@@ -565,7 +606,11 @@ async fn lmstudio_tool_error_handled() {
     let r2_messages = vec![
         Message::user("Fetch data from http://example.com and tell me what it says."),
         Message::Assistant {
-            text: if r1.text.is_empty() { None } else { Some(r1.text.clone()) },
+            text: if r1.text.is_empty() {
+                None
+            } else {
+                Some(r1.text.clone())
+            },
             tool_calls: r1.tool_calls.clone(),
         },
         Message::ToolResults(vec![ToolResult {
@@ -576,7 +621,13 @@ async fn lmstudio_tool_error_handled() {
     ];
 
     let r2 = backend
-        .chat(&r2_messages, &tools, "You are a helpful assistant. Use tools when available.", CancellationToken::new(), &sink2)
+        .chat(
+            &r2_messages,
+            &tools,
+            "You are a helpful assistant. Use tools when available.",
+            CancellationToken::new(),
+            &sink2,
+        )
         .await
         .expect("round 2 failed");
 
@@ -587,7 +638,11 @@ async fn lmstudio_tool_error_handled() {
         !r2.text.is_empty(),
         "expected model to respond to tool error; got empty text"
     );
-    assert_eq!(r2.stop_reason, StopReason::EndTurn, "expected EndTurn after error result");
+    assert_eq!(
+        r2.stop_reason,
+        StopReason::EndTurn,
+        "expected EndTurn after error result"
+    );
 }
 
 /// Orca MCP `run_agent` dispatches a one-shot prompt through the local LLM.
@@ -607,7 +662,10 @@ async fn lmstudio_mcp_run_agent_offload() {
         anthropic_api_key: None,
         lmstudio_url: LMS_URL.to_string(),
         ollama_url: String::new(),
-        default_model: config::Model::LMStudio { id: FAST_MODEL.to_string(), url: String::new() },
+        default_model: config::Model::LMStudio {
+            id: FAST_MODEL.to_string(),
+            url: String::new(),
+        },
         orca_vault: std::path::PathBuf::from(format!("{home}/.orca")),
         vault_root: std::path::PathBuf::from(format!("{home}/orca")),
         memory_root: std::path::PathBuf::from(format!("{home}/.orca/memory")),
@@ -655,8 +713,20 @@ async fn lmstudio_independent_contexts() {
     let msg_b = vec![Message::user("My secret word is BETA. What is it?")];
 
     let (ra, rb) = tokio::join!(
-        backend.chat(&msg_a, &[], "You are a helpful assistant.", CancellationToken::new(), &sink_a),
-        backend.chat(&msg_b, &[], "You are a helpful assistant.", CancellationToken::new(), &sink_b),
+        backend.chat(
+            &msg_a,
+            &[],
+            "You are a helpful assistant.",
+            CancellationToken::new(),
+            &sink_a
+        ),
+        backend.chat(
+            &msg_b,
+            &[],
+            "You are a helpful assistant.",
+            CancellationToken::new(),
+            &sink_b
+        ),
     );
 
     teardown();
@@ -664,9 +734,21 @@ async fn lmstudio_independent_contexts() {
     let text_a = ra.expect("request A failed").text.to_lowercase();
     let text_b = rb.expect("request B failed").text.to_lowercase();
 
-    assert!(text_a.contains("alpha"), "A should contain ALPHA; got: {text_a:?}");
-    assert!(text_b.contains("beta"),  "B should contain BETA; got: {text_b:?}");
+    assert!(
+        text_a.contains("alpha"),
+        "A should contain ALPHA; got: {text_a:?}"
+    );
+    assert!(
+        text_b.contains("beta"),
+        "B should contain BETA; got: {text_b:?}"
+    );
     // Cross-contamination check
-    assert!(!text_a.contains("beta"),  "A should NOT contain BETA; got: {text_a:?}");
-    assert!(!text_b.contains("alpha"), "B should NOT contain ALPHA; got: {text_b:?}");
+    assert!(
+        !text_a.contains("beta"),
+        "A should NOT contain BETA; got: {text_a:?}"
+    );
+    assert!(
+        !text_b.contains("alpha"),
+        "B should NOT contain ALPHA; got: {text_b:?}"
+    );
 }

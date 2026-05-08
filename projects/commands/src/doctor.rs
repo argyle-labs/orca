@@ -1,7 +1,7 @@
 use anyhow::Result;
-use config::Config;
-use config::APP_NAME;
 use colored::Colorize;
+use config::APP_NAME;
+use config::Config;
 
 pub fn cmd_doctor(config: &Config) -> Result<()> {
     let mut issues: Vec<String> = Vec::new();

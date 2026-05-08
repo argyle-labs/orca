@@ -23,7 +23,8 @@ pub fn to_llm_text(input: &str) -> String {
     // Keep link text, drop URL
     let link = LINK.get_or_init(|| Regex::new(r"\[([^\]]+)\]\([^)]+\)").expect("link regex"));
     let hr = HR.get_or_init(|| Regex::new(r"^[-*_]{3,}\s*$").expect("hr regex"));
-    let html_tag = HTML_TAG.get_or_init(|| Regex::new(r"<[a-zA-Z/][^>]*>").expect("html_tag regex"));
+    let html_tag =
+        HTML_TAG.get_or_init(|| Regex::new(r"<[a-zA-Z/][^>]*>").expect("html_tag regex"));
 
     let mut in_fence = false;
     let mut out = String::with_capacity(input.len());
@@ -94,7 +95,10 @@ mod tests {
 
     #[test]
     fn keeps_link_text() {
-        assert_eq!(to_llm_text("[read more](https://example.com)"), "read more\n");
+        assert_eq!(
+            to_llm_text("[read more](https://example.com)"),
+            "read more\n"
+        );
     }
 
     #[test]

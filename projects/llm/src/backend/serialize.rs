@@ -1,6 +1,6 @@
-use crate::types::{Message};
-use tool::ToolDef;
+use crate::types::Message;
 use serde_json::{Value, json};
+use tool::ToolDef;
 
 // ── Anthropic wire format ─────────────────────────────────────────────────────
 
@@ -144,9 +144,16 @@ mod tests {
     use crate::types::Message;
     use tool::{ToolCall, ToolResult};
 
-    fn user(s: &str) -> Message { Message::User { content: s.to_string() } }
+    fn user(s: &str) -> Message {
+        Message::User {
+            content: s.to_string(),
+        }
+    }
     fn assistant(text: &str) -> Message {
-        Message::Assistant { text: Some(text.to_string()), tool_calls: vec![] }
+        Message::Assistant {
+            text: Some(text.to_string()),
+            tool_calls: vec![],
+        }
     }
     fn assistant_with_tool(text: Option<&str>, id: &str, name: &str) -> Message {
         Message::Assistant {
@@ -200,7 +207,10 @@ mod tests {
 
     #[test]
     fn anthropic_assistant_empty_text_omitted() {
-        let msg = Message::Assistant { text: Some(String::new()), tool_calls: vec![] };
+        let msg = Message::Assistant {
+            text: Some(String::new()),
+            tool_calls: vec![],
+        };
         let v = anthropic_messages(&[msg]);
         // Empty text should not appear as a content block — no assistant entry at all.
         assert_eq!(v, json!([]));
@@ -263,14 +273,20 @@ mod tests {
     fn openai_assistant_with_tools_content_is_null() {
         let v = openai_messages(&[assistant_with_tool(None, "tc1", "bash")], "");
         // OpenAI spec: content must be null when tool_calls present
-        assert!(v[0]["content"].is_null(), "content should be null with tool_calls, got: {:?}", v[0]["content"]);
+        assert!(
+            v[0]["content"].is_null(),
+            "content should be null with tool_calls, got: {:?}",
+            v[0]["content"]
+        );
         assert!(v[0]["tool_calls"].is_array());
     }
 
     #[test]
     fn openai_tool_call_arguments_serialized_as_string() {
         let v = openai_messages(&[assistant_with_tool(None, "tc1", "bash")], "");
-        let args = v[0]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+        let args = v[0]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
         // Must be a JSON string, not an object
         let parsed: Value = serde_json::from_str(args).unwrap();
         assert_eq!(parsed["arg"], "val");
@@ -287,8 +303,16 @@ mod tests {
     #[test]
     fn openai_multiple_tool_results_each_get_own_message() {
         let msg = Message::ToolResults(vec![
-            ToolResult { tool_use_id: "t1".into(), content: "a".into(), is_error: false },
-            ToolResult { tool_use_id: "t2".into(), content: "b".into(), is_error: false },
+            ToolResult {
+                tool_use_id: "t1".into(),
+                content: "a".into(),
+                is_error: false,
+            },
+            ToolResult {
+                tool_use_id: "t2".into(),
+                content: "b".into(),
+                is_error: false,
+            },
         ]);
         let v = openai_messages(&[msg], "");
         assert_eq!(v.as_array().unwrap().len(), 2);

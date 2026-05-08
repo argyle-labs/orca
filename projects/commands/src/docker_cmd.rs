@@ -1,6 +1,6 @@
 use anyhow::Result;
-use db::{self, DockerRuntimeRow};
 use clap::Subcommand;
+use db::{self, DockerRuntimeRow};
 
 #[derive(Subcommand, Debug)]
 pub enum DockerAction {
@@ -21,9 +21,7 @@ pub enum DockerAction {
         url: Option<String>,
     },
     /// Remove a Docker runtime from orca.db
-    Remove {
-        name: String,
-    },
+    Remove { name: String },
 }
 
 pub fn cmd_docker(action: DockerAction) -> Result<()> {
@@ -36,16 +34,26 @@ pub fn cmd_docker(action: DockerAction) -> Result<()> {
             } else {
                 println!("Docker runtimes:");
                 for r in &rts {
-                    let target = r.docker_host()
+                    let target = r
+                        .docker_host()
                         .or_else(|| r.url.clone())
                         .unwrap_or_else(|| "(no connection)".to_string());
-                    let flag = if r.enabled { " [enabled]" } else { " [disabled]" };
+                    let flag = if r.enabled {
+                        " [enabled]"
+                    } else {
+                        " [disabled]"
+                    };
                     println!("  {}{} → {}", r.name, flag, target);
                 }
             }
             Ok(())
         }
-        DockerAction::Add { name, socket, host, url } => {
+        DockerAction::Add {
+            name,
+            socket,
+            host,
+            url,
+        } => {
             if socket.is_none() && host.is_none() && url.is_none() {
                 anyhow::bail!("provide --socket <path>, --host <url>, or --url <http-url>");
             }

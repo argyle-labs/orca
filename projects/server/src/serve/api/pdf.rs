@@ -55,7 +55,11 @@ pub async fn pdf_handler(Query(params): Query<PdfQuery>) -> Response {
             Ok(s) => s,
             Err(_) => return err(StatusCode::NOT_FOUND, "file not found"),
         };
-        let stem = target.file_stem().and_then(|s| s.to_str()).unwrap_or("document").to_string();
+        let stem = target
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("document")
+            .to_string();
         match render_pdf(&[(stem.clone(), md)]) {
             Ok(bytes) => pdf_response(bytes, &format!("{stem}.pdf")),
             Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e),
@@ -64,7 +68,11 @@ pub async fn pdf_handler(Query(params): Query<PdfQuery>) -> Response {
         let ignored = get_ignored(&params.root);
         let tree = crate::serve::tree::build_tree_raw(&target, &root_dir, &ignored);
         let files = collect_all_files(&tree);
-        let folder_name = target.file_name().and_then(|s| s.to_str()).unwrap_or("docs").to_string();
+        let folder_name = target
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("docs")
+            .to_string();
 
         let mut pages: Vec<(String, String)> = Vec::new();
         for f in &files {
@@ -121,8 +129,8 @@ fn zip_response(bytes: Vec<u8>, filename: &str) -> Response {
 
 fn build_zip(pages: &[(String, String)], _folder: &str) -> Result<Vec<u8>, String> {
     use std::io::Cursor;
-    use zip::write::{SimpleFileOptions, ZipWriter};
     use zip::CompressionMethod;
+    use zip::write::{SimpleFileOptions, ZipWriter};
 
     let buf = Cursor::new(Vec::new());
     let mut zip = ZipWriter::new(buf);
@@ -132,9 +140,16 @@ fn build_zip(pages: &[(String, String)], _folder: &str) -> Result<Vec<u8>, Strin
         let pdf_bytes = render_pdf(&[(title.clone(), md.clone())])?;
         let safe_name = title
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '-'
+                }
+            })
             .collect::<String>();
-        zip.start_file(format!("{safe_name}.pdf"), opts).map_err(|e| e.to_string())?;
+        zip.start_file(format!("{safe_name}.pdf"), opts)
+            .map_err(|e| e.to_string())?;
         zip.write_all(&pdf_bytes).map_err(|e| e.to_string())?;
     }
 

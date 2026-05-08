@@ -38,8 +38,7 @@ pub struct GetAgent;
 #[async_trait]
 impl OrcaTool for GetAgent {
     const NAME: &'static str = "get_agent";
-    const DESCRIPTION: &'static str =
-        "Return the full system prompt for a named orca agent. Use this to invoke an agent \
+    const DESCRIPTION: &'static str = "Return the full system prompt for a named orca agent. Use this to invoke an agent \
          programmatically via Agent(general-purpose, prompt=<result>+task).";
     type Args = GetAgentArgs;
     async fn run(args: GetAgentArgs, ctx: &ToolCtx) -> Result<String> {
@@ -62,8 +61,7 @@ pub struct GetConfig;
 #[async_trait]
 impl OrcaTool for GetConfig {
     const NAME: &'static str = "get_config";
-    const DESCRIPTION: &'static str =
-        "Read an orca configuration/reference document by name \
+    const DESCRIPTION: &'static str = "Read an orca configuration/reference document by name \
          (e.g. TOOL_RULES, DELEGATION, SEVERITY_RUBRIC, CANONICAL_SOURCES, CODING_RULES). \
          Call with no name to list available files.";
     type Args = GetConfigArgs;
@@ -87,8 +85,7 @@ pub struct GetContext;
 #[async_trait]
 impl OrcaTool for GetContext {
     const NAME: &'static str = "get_context";
-    const DESCRIPTION: &'static str =
-        "Load the memory context for a orca project. Returns MEMORY.md index and all \
+    const DESCRIPTION: &'static str = "Load the memory context for a orca project. Returns MEMORY.md index and all \
          memory files for the project.";
     type Args = GetContextArgs;
     async fn run(args: GetContextArgs, ctx: &ToolCtx) -> Result<String> {
@@ -111,8 +108,7 @@ pub struct SearchLogs;
 #[async_trait]
 impl OrcaTool for SearchLogs {
     const NAME: &'static str = "search_logs";
-    const DESCRIPTION: &'static str =
-        "Search orca session history for a keyword. Returns matching log entries with \
+    const DESCRIPTION: &'static str = "Search orca session history for a keyword. Returns matching log entries with \
          session ID, role, and content preview.";
     type Args = SearchLogsArgs;
     async fn run(args: SearchLogsArgs, ctx: &ToolCtx) -> Result<String> {
@@ -122,9 +118,9 @@ impl OrcaTool for SearchLogs {
         if let Some(llm) = local_llm::discover_local_llm().await
             && let Some(enhanced) =
                 local_llm::present_text_results(&llm, &args.query, &raw, 8000).await
-            {
-                return Ok(enhanced);
-            }
+        {
+            return Ok(enhanced);
+        }
         Ok(raw)
     }
 }

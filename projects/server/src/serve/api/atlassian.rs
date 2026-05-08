@@ -51,7 +51,6 @@ impl AtlassianAuth {
             Self::ApiKey { email, token, .. } => req.basic_auth(email, Some(token)),
         }
     }
-
 }
 
 #[derive(Deserialize)]
@@ -83,12 +82,19 @@ async fn resolve_auth() -> anyhow::Result<AtlassianAuth> {
             .map(|r| r.id)
             .ok_or_else(|| anyhow::anyhow!("no Atlassian sites found for this OAuth token"))?;
 
-        return Ok(AtlassianAuth::OAuth { access_token, cloud_id });
+        return Ok(AtlassianAuth::OAuth {
+            access_token,
+            cloud_id,
+        });
     }
 
     // Fall back to MCP server config or env vars
     let (domain, email, token) = api_key_creds()?;
-    Ok(AtlassianAuth::ApiKey { domain, email, token })
+    Ok(AtlassianAuth::ApiKey {
+        domain,
+        email,
+        token,
+    })
 }
 
 #[derive(Deserialize)]
@@ -109,8 +115,11 @@ async fn try_or_refresh_atlassian(access_token: String) -> anyhow::Result<String
     }
 
     // Access token expired — try refresh
-    let refresh_token = orca_commands::oauth::load_atlassian_refresh_token()
-        .ok_or_else(|| anyhow::anyhow!("Atlassian token expired and no refresh token stored — run `orca login atlassian`"))?;
+    let refresh_token = orca_commands::oauth::load_atlassian_refresh_token().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Atlassian token expired and no refresh token stored — run `orca login atlassian`"
+        )
+    })?;
 
     let client_id = std::env::var("ATLASSIAN_OAUTH_CLIENT_ID")
         .map_err(|_| anyhow::anyhow!("ATLASSIAN_OAUTH_CLIENT_ID not set — cannot refresh token"))?;
@@ -143,31 +152,32 @@ fn api_key_creds() -> anyhow::Result<(String, String, String)> {
     // Try MCP server config
     if let Ok(config) = Config::load()
         && let Ok(conn) = db::open(&config.db_path)
-            && let Ok(servers) = db::list_mcp_servers(&conn)
-                && let Some(server) = servers.into_iter().find(|s| s.name == "atlassian") {
-                    let args = &server.args;
-                    let domain = args
-                        .windows(2)
-                        .find(|w| w[0] == "--domain")
-                        .and_then(|w| w.get(1))
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "rebuyengine.atlassian.net".to_string());
-                    let email = args
-                        .windows(2)
-                        .find(|w| w[0] == "--email")
-                        .and_then(|w| w.get(1))
-                        .map(|s| s.to_string())
-                        .or_else(|| server.env.get("ATLASSIAN_USERNAME").cloned());
-                    let token = args
-                        .windows(2)
-                        .find(|w| w[0] == "--token")
-                        .and_then(|w| w.get(1))
-                        .map(|s| s.to_string())
-                        .or_else(|| server.env.get("ATLASSIAN_API_TOKEN").cloned());
-                    if let (Some(email), Some(token)) = (email, token) {
-                        return Ok((domain, email, token));
-                    }
-                }
+        && let Ok(servers) = db::list_mcp_servers(&conn)
+        && let Some(server) = servers.into_iter().find(|s| s.name == "atlassian")
+    {
+        let args = &server.args;
+        let domain = args
+            .windows(2)
+            .find(|w| w[0] == "--domain")
+            .and_then(|w| w.get(1))
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "rebuyengine.atlassian.net".to_string());
+        let email = args
+            .windows(2)
+            .find(|w| w[0] == "--email")
+            .and_then(|w| w.get(1))
+            .map(|s| s.to_string())
+            .or_else(|| server.env.get("ATLASSIAN_USERNAME").cloned());
+        let token = args
+            .windows(2)
+            .find(|w| w[0] == "--token")
+            .and_then(|w| w.get(1))
+            .map(|s| s.to_string())
+            .or_else(|| server.env.get("ATLASSIAN_API_TOKEN").cloned());
+        if let (Some(email), Some(token)) = (email, token) {
+            return Ok((domain, email, token));
+        }
+    }
 
     // Try environment variables
     let domain = std::env::var("ATLASSIAN_DOMAIN")
@@ -222,16 +232,18 @@ pub async fn jira_issues_handler(Query(q): Query<JiraIssuesQuery>) -> impl IntoR
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
 
-    let jql = q.jql.unwrap_or_else(|| "assignee = currentUser() ORDER BY updated DESC".to_string());
+    let jql = q
+        .jql
+        .unwrap_or_else(|| "assignee = currentUser() ORDER BY updated DESC".to_string());
     let max = q.max_results.unwrap_or(50).to_string();
     let fields = "summary,status,priority,issuetype,assignee,reporter,updated";
     let url = format!("{}/search", auth.jira_base());
 
-    let req = auth.apply(
-        reqwest::Client::new()
-            .get(&url)
-            .query(&[("jql", jql.as_str()), ("maxResults", max.as_str()), ("fields", fields)]),
-    );
+    let req = auth.apply(reqwest::Client::new().get(&url).query(&[
+        ("jql", jql.as_str()),
+        ("maxResults", max.as_str()),
+        ("fields", fields),
+    ]));
 
     atlassian_json_response(req.send().await).await
 }
@@ -287,7 +299,11 @@ pub async fn jira_transition_handler(
     let url = format!("{}/issue/{key}/transitions", auth.jira_base());
     let payload = json!({ "transition": { "id": body.transition_id } });
 
-    match auth.apply(reqwest::Client::new().post(&url).json(&payload)).send().await {
+    match auth
+        .apply(reqwest::Client::new().post(&url).json(&payload))
+        .send()
+        .await
+    {
         Err(e) => err(StatusCode::BAD_GATEWAY, &e.to_string()),
         Ok(resp) => {
             let status = resp.status();
@@ -295,7 +311,10 @@ pub async fn jira_transition_handler(
                 Json(json!({ "ok": true })).into_response()
             } else {
                 let text = resp.text().await.unwrap_or_default();
-                err(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY), &text)
+                err(
+                    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                    &text,
+                )
             }
         }
     }
@@ -324,21 +343,25 @@ pub struct ConfluenceSearchQuery {
     ),
     tag = "confluence"
 )]
-pub async fn confluence_search_handler(Query(q): Query<ConfluenceSearchQuery>) -> impl IntoResponse {
+pub async fn confluence_search_handler(
+    Query(q): Query<ConfluenceSearchQuery>,
+) -> impl IntoResponse {
     let auth = match resolve_auth().await {
         Ok(a) => a,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
 
-    let cql = q.cql.unwrap_or_else(|| "type = page ORDER BY lastModified DESC".to_string());
+    let cql = q
+        .cql
+        .unwrap_or_else(|| "type = page ORDER BY lastModified DESC".to_string());
     let limit = q.limit.unwrap_or(25).to_string();
     let url = format!("{}/content/search", auth.confluence_base());
 
-    let req = auth.apply(
-        reqwest::Client::new()
-            .get(&url)
-            .query(&[("cql", cql.as_str()), ("limit", limit.as_str()), ("expand", "space,excerpt")]),
-    );
+    let req = auth.apply(reqwest::Client::new().get(&url).query(&[
+        ("cql", cql.as_str()),
+        ("limit", limit.as_str()),
+        ("expand", "space,excerpt"),
+    ]));
 
     let domain_for_links = match &auth {
         AtlassianAuth::ApiKey { domain, .. } => Some(domain.clone()),
@@ -357,14 +380,16 @@ pub async fn confluence_search_handler(Query(q): Query<ConfluenceSearchQuery>) -
                         {
                             for r in results.iter_mut() {
                                 if let Some(webui) = r["_links"]["webui"].as_str() {
-                                    r["_links"]["webui"] = json!(format!("https://{domain}/wiki{webui}"));
+                                    r["_links"]["webui"] =
+                                        json!(format!("https://{domain}/wiki{webui}"));
                                 }
                             }
                         }
                         Json(body).into_response()
                     } else {
                         (
-                            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                            StatusCode::from_u16(status.as_u16())
+                                .unwrap_or(StatusCode::BAD_GATEWAY),
                             Json(body),
                         )
                             .into_response()
@@ -391,7 +416,8 @@ async fn atlassian_json_response(
                         Json(body).into_response()
                     } else {
                         (
-                            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                            StatusCode::from_u16(status.as_u16())
+                                .unwrap_or(StatusCode::BAD_GATEWAY),
                             Json(body),
                         )
                             .into_response()

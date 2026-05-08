@@ -7,14 +7,14 @@
 //! `OutputSink` is the streaming output target: stdout for interactive sessions,
 //! a memory buffer (`buffer_sink`) for background jobs.
 
-use config::{Config, Model};
 use crate::types::{BackendResponse, Message};
-use tool::ToolDef;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use config::{Config, Model};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
+use tool::ToolDef;
 
 pub mod claude;
 pub mod lmstudio;
@@ -120,11 +120,19 @@ pub fn build_backend(config: &Config, model: &Model) -> Result<Box<dyn ModelBack
             Ok(Box::new(ClaudeBackend::new(key, id)))
         }
         Model::LMStudio { id, url } => {
-            let base = if url.is_empty() { &config.lmstudio_url } else { url };
+            let base = if url.is_empty() {
+                &config.lmstudio_url
+            } else {
+                url
+            };
             Ok(Box::new(LMStudioBackend::new(base, id)))
         }
         Model::Ollama { id, url } => {
-            let base = if url.is_empty() { &config.ollama_url } else { url };
+            let base = if url.is_empty() {
+                &config.ollama_url
+            } else {
+                url
+            };
             Ok(Box::new(OllamaBackend::new(base, id)))
         }
     }

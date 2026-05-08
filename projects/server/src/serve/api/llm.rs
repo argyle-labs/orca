@@ -25,11 +25,17 @@ pub enum LocalLlmKind {
 
 impl LocalLlm {
     pub fn lmstudio(url: impl Into<String>) -> Self {
-        Self { url: url.into(), kind: LocalLlmKind::LmStudio }
+        Self {
+            url: url.into(),
+            kind: LocalLlmKind::LmStudio,
+        }
     }
 
     pub fn ollama(url: impl Into<String>) -> Self {
-        Self { url: url.into(), kind: LocalLlmKind::Ollama }
+        Self {
+            url: url.into(),
+            kind: LocalLlmKind::Ollama,
+        }
     }
 
     fn completions_url(&self) -> String {
@@ -47,10 +53,13 @@ impl LocalLlm {
 pub async fn discover_local_llm() -> Option<LocalLlm> {
     // 1. DB-registered providers
     if let Ok(conn) = db::open_default()
-        && let Ok(providers) = db::list_llm_providers(&conn) {
-            let enabled: Vec<_> = providers.into_iter().filter(|p| p.enabled).collect();
-            if !enabled.is_empty() {
-                let probes: Vec<_> = enabled.iter().map(|p| {
+        && let Ok(providers) = db::list_llm_providers(&conn)
+    {
+        let enabled: Vec<_> = providers.into_iter().filter(|p| p.enabled).collect();
+        if !enabled.is_empty() {
+            let probes: Vec<_> = enabled
+                .iter()
+                .map(|p| {
                     let url = p.url.clone();
                     let kind = p.kind.clone();
                     async move {
@@ -69,28 +78,30 @@ pub async fn discover_local_llm() -> Option<LocalLlm> {
                             None
                         }
                     }
-                }).collect();
-                let results = futures_util::future::join_all(probes).await;
-                if let Some(llm) = results.into_iter().flatten().next() {
-                    return Some(llm);
-                }
+                })
+                .collect();
+            let results = futures_util::future::join_all(probes).await;
+            if let Some(llm) = results.into_iter().flatten().next() {
+                return Some(llm);
             }
         }
+    }
 
     // 2. Env-var defaults
-    let lms_url = std::env::var("LMSTUDIO_URL")
-        .unwrap_or_else(|_| "http://localhost:1234".to_string());
-    let ollama_url = std::env::var("OLLAMA_URL")
-        .unwrap_or_else(|_| "http://localhost:11434".to_string());
+    let lms_url =
+        std::env::var("LMSTUDIO_URL").unwrap_or_else(|_| "http://localhost:1234".to_string());
+    let ollama_url =
+        std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
 
-    let (lms, ollama) = tokio::join!(
-        probe_lmstudio(&lms_url),
-        probe_ollama(&ollama_url),
-    );
+    let (lms, ollama) = tokio::join!(probe_lmstudio(&lms_url), probe_ollama(&ollama_url),);
 
     // Prefer LM Studio; fall back to Ollama
-    if lms { return Some(LocalLlm::lmstudio(lms_url)); }
-    if ollama { return Some(LocalLlm::ollama(ollama_url)); }
+    if lms {
+        return Some(LocalLlm::lmstudio(lms_url));
+    }
+    if ollama {
+        return Some(LocalLlm::ollama(ollama_url));
+    }
     None
 }
 
@@ -104,21 +115,22 @@ async fn probe_lmstudio(base_url: &str) -> bool {
         Err(_) => return false,
     };
 
-    let Ok(resp) = client
-        .get(format!("{base_url}/v1/models"))
-        .send()
-        .await
-    else {
+    let Ok(resp) = client.get(format!("{base_url}/v1/models")).send().await else {
         return false;
     };
 
-    if !resp.status().is_success() { return false; }
-    let Ok(val) = resp.json::<Value>().await else { return false; };
+    if !resp.status().is_success() {
+        return false;
+    }
+    let Ok(val) = resp.json::<Value>().await else {
+        return false;
+    };
     val["data"]
         .as_array()
-        .map(|arr| arr.iter().any(|m| {
-            !m["id"].as_str().unwrap_or("").contains("embed")
-        }))
+        .map(|arr| {
+            arr.iter()
+                .any(|m| !m["id"].as_str().unwrap_or("").contains("embed"))
+        })
         .unwrap_or(false)
 }
 
@@ -133,11 +145,7 @@ async fn probe_ollama(base_url: &str) -> bool {
     };
 
     // Ollama exposes /api/tags or /v1/models (via OpenAI compat layer)
-    let Ok(resp) = client
-        .get(format!("{base_url}/api/tags"))
-        .send()
-        .await
-    else {
+    let Ok(resp) = client.get(format!("{base_url}/api/tags")).send().await else {
         return false;
     };
 
@@ -146,11 +154,7 @@ async fn probe_ollama(base_url: &str) -> bool {
 
 /// POST a single-turn prompt to a local LLM and return the response text.
 /// Returns `None` on any error, connection failure, or timeout.
-pub async fn complete(
-    llm: &LocalLlm,
-    prompt: &str,
-    timeout_ms: u64,
-) -> Option<String> {
+pub async fn complete(llm: &LocalLlm, prompt: &str, timeout_ms: u64) -> Option<String> {
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(2))
         .timeout(Duration::from_millis(timeout_ms))
@@ -249,6 +253,8 @@ fn extract_json_array(text: &str) -> Option<Vec<Value>> {
 
     let start = inner.find('[')?;
     let end = inner.rfind(']').map(|i| i + 1)?;
-    if end <= start { return None; }
+    if end <= start {
+        return None;
+    }
     serde_json::from_str(&inner[start..end]).ok()
 }

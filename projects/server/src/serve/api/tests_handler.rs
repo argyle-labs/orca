@@ -151,9 +151,9 @@ fn extract_first_number(s: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::ctx7::extract_library_id;
     use super::super::docker::parse_compose_ps;
     use super::super::schema::parse_mysql_tsv;
-    use super::super::ctx7::extract_library_id;
 
     // ── parse_mysql_tsv ────────────────────────────────────────────────────────
 

@@ -1,6 +1,6 @@
 use anyhow::Result;
-use orca_commands::list_embedded_commands;
 use config::Config;
+use orca_commands::list_embedded_commands;
 use orca_fs::fs::expand_tilde;
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -131,9 +131,7 @@ pub fn resolve_within_root(root: &Path, rel: &str) -> Result<PathBuf> {
     let canonical = candidate
         .canonicalize()
         .unwrap_or_else(|_| candidate.clone());
-    let root_canonical = root
-        .canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf());
+    let root_canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     if !canonical.starts_with(&root_canonical) {
         anyhow::bail!("path escapes root: {rel}");
     }
@@ -144,9 +142,10 @@ pub fn resolve_doc_file(root_dir: &Path, doc_path: &str) -> Option<PathBuf> {
     for ext in &[".md", ".mdx", ""] {
         let rel = format!("{doc_path}{ext}");
         if let Ok(full) = resolve_within_root(root_dir, &rel)
-            && full.is_file() {
-                return Some(full);
-            }
+            && full.is_file()
+        {
+            return Some(full);
+        }
     }
     None
 }
@@ -249,8 +248,7 @@ pub fn search_docs(args: &Value, config: &Config) -> Result<String> {
         if !root.path.exists() {
             continue;
         }
-        let files =
-            collect_all_doc_files(&build_doc_tree(&root.path, &root.path, &root.ignored));
+        let files = collect_all_doc_files(&build_doc_tree(&root.path, &root.path, &root.ignored));
         for file in files {
             let rel = file["path"].as_str().unwrap_or("");
             let full = root.path.join(rel);

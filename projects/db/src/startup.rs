@@ -46,8 +46,12 @@ fn migrate_toml_servers_to_db(toml_path: &std::path::Path, db_path: &std::path::
         env: std::collections::HashMap<String, String>,
     }
 
-    let Ok(raw) = std::fs::read_to_string(toml_path) else { return };
-    let Ok(parsed) = toml::from_str::<LegacyToml>(&raw) else { return };
+    let Ok(raw) = std::fs::read_to_string(toml_path) else {
+        return;
+    };
+    let Ok(parsed) = toml::from_str::<LegacyToml>(&raw) else {
+        return;
+    };
     if parsed.mcp.servers.is_empty() {
         return;
     }
@@ -120,8 +124,12 @@ fn migrate_toml_schema_databases_to_db(toml_path: &std::path::Path, db_path: &st
         domains_file: Option<String>,
     }
 
-    let Ok(raw) = std::fs::read_to_string(toml_path) else { return };
-    let Ok(parsed) = toml::from_str::<LegacyToml>(&raw) else { return };
+    let Ok(raw) = std::fs::read_to_string(toml_path) else {
+        return;
+    };
+    let Ok(parsed) = toml::from_str::<LegacyToml>(&raw) else {
+        return;
+    };
     let dbs = parsed.schema.map(|s| s.databases).unwrap_or_default();
     if dbs.is_empty() {
         return;
@@ -129,15 +137,29 @@ fn migrate_toml_schema_databases_to_db(toml_path: &std::path::Path, db_path: &st
 
     let Ok(conn) = open(db_path) else { return };
     for d in &dbs {
-        let host: Option<&str> = if d.host.is_empty() { None } else { Some(&d.host) };
-        let port: Option<i64> = if d.port == 0 { None } else { Some(d.port as i64) };
+        let host: Option<&str> = if d.host.is_empty() {
+            None
+        } else {
+            Some(&d.host)
+        };
+        let port: Option<i64> = if d.port == 0 {
+            None
+        } else {
+            Some(d.port as i64)
+        };
         let _ = conn.execute(
             "INSERT OR IGNORE INTO schema_databases
                 (name, host, port, user, password, database, container, domains_file, enabled)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)",
             rusqlite::params![
-                d.name, host, port, d.user, d.password, d.database,
-                d.container, d.domains_file,
+                d.name,
+                host,
+                port,
+                d.user,
+                d.password,
+                d.database,
+                d.container,
+                d.domains_file,
             ],
         );
     }

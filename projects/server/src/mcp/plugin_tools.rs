@@ -57,8 +57,7 @@ pub struct RemovePlugin;
 #[async_trait]
 impl OrcaTool for RemovePlugin {
     const NAME: &'static str = "remove_plugin";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Remove an installed orca plugin by ID.";
+    const DESCRIPTION: &'static str = "[MUTATES STATE] Remove an installed orca plugin by ID.";
     type Args = RemovePluginArgs;
     async fn run(args: RemovePluginArgs, _: &ToolCtx) -> Result<String> {
         if orca_commands::remove_plugin(&args.id)? {
@@ -143,7 +142,10 @@ impl OrcaTool for SetPluginCred {
     async fn run(args: SetPluginCredArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
         db::set_plugin_credential(&conn, &args.plugin, &args.key, &args.value)?;
-        Ok(format!("Stored credential '{}' for plugin '{}'.", args.key, args.plugin))
+        Ok(format!(
+            "Stored credential '{}' for plugin '{}'.",
+            args.key, args.plugin
+        ))
     }
 }
 
@@ -162,9 +164,15 @@ impl OrcaTool for RemovePluginCred {
     async fn run(args: RemovePluginCredArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
         if db::delete_plugin_credential(&conn, &args.plugin, &args.key)? {
-            Ok(format!("Removed credential '{}' from plugin '{}'.", args.key, args.plugin))
+            Ok(format!(
+                "Removed credential '{}' from plugin '{}'.",
+                args.key, args.plugin
+            ))
         } else {
-            Ok(format!("Credential '{}' not found for plugin '{}'.", args.key, args.plugin))
+            Ok(format!(
+                "Credential '{}' not found for plugin '{}'.",
+                args.key, args.plugin
+            ))
         }
     }
 }

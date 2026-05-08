@@ -1,10 +1,14 @@
-pub use llm::resolve_model;
 pub use llm::estimate_context_window;
+pub use llm::resolve_model;
 
 fn truncate_preview(s: &str, max_chars: usize) -> String {
     let mut chars = s.chars();
     let truncated: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() { format!("{truncated}…") } else { truncated }
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
 }
 
 pub fn history_file() -> Option<std::path::PathBuf> {
@@ -116,7 +120,10 @@ mod tests {
         let content = "a".repeat(400);
         let result = summarize_result("bash", &content, true);
         assert!(result.ends_with('…'), "should be truncated: {result}");
-        assert!(result.chars().count() <= 302, "should not exceed truncation limit + ellipsis");
+        assert!(
+            result.chars().count() <= 302,
+            "should not exceed truncation limit + ellipsis"
+        );
     }
 
     #[test]
@@ -161,7 +168,10 @@ mod tests {
     fn summarize_result_bash_multiline_shows_first_plus_count() {
         let content = "first line\nsecond line\nthird line\n";
         let result = summarize_result("bash", content, false);
-        assert!(result.contains("first line"), "should contain first line: {result}");
+        assert!(
+            result.contains("first line"),
+            "should contain first line: {result}"
+        );
         assert!(result.contains("+2"), "should show +2 more lines: {result}");
     }
 
@@ -204,10 +214,8 @@ pub fn summarize_result(tool: &str, content: &str, is_error: bool) -> String {
             if lines.is_empty() {
                 return "(no matches)".to_string();
             }
-            let files: std::collections::HashSet<&str> = lines
-                .iter()
-                .filter_map(|l| l.split(':').next())
-                .collect();
+            let files: std::collections::HashSet<&str> =
+                lines.iter().filter_map(|l| l.split(':').next()).collect();
             format!("{} match(es) in {} file(s)", lines.len(), files.len())
         }
         "read_file" => {

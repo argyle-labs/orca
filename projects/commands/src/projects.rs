@@ -1,12 +1,15 @@
 use anyhow::Result;
-use config::Config;
-use config::APP_NAME;
 use colored::Colorize;
+use config::APP_NAME;
+use config::Config;
 
 pub fn cmd_projects(config: &Config) -> Result<()> {
     let root = &config.memory_root;
     if !root.exists() {
-        println!("{}", format!("{APP_NAME} vault not found at ~/.{APP_NAME}").red());
+        println!(
+            "{}",
+            format!("{APP_NAME} vault not found at ~/.{APP_NAME}").red()
+        );
         return Ok(());
     }
     println!("{}", "Projects:".green());

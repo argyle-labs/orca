@@ -1,7 +1,7 @@
 use super::{Session, util};
+use colored::Colorize;
 use llm::tools::ToolRegistry;
 use llm::{Message, types::ToolResult};
-use colored::Colorize;
 use tokio_util::sync::CancellationToken;
 
 impl Session {
@@ -17,17 +17,16 @@ impl Session {
             };
         }
 
-        let agent_prompt =
-            match orca_agents::load_agent_prompt(agent, &self.config.agents_dir()) {
-                Some(prompt) => prompt,
-                None => {
-                    return ToolResult {
-                        tool_use_id: String::new(),
-                        content: format!("error: agent @{agent} not found"),
-                        is_error: true,
-                    };
-                }
-            };
+        let agent_prompt = match orca_agents::load_agent_prompt(agent, &self.config.agents_dir()) {
+            Some(prompt) => prompt,
+            None => {
+                return ToolResult {
+                    tool_use_id: String::new(),
+                    content: format!("error: agent @{agent} not found"),
+                    is_error: true,
+                };
+            }
+        };
 
         let agent_icon = util::agent_emoji(agent);
         if self.narration {
@@ -56,10 +55,8 @@ impl Session {
                 .dimmed(),
             );
             self.out_fmt(
-                format!(
-                    "  🦦 Otter: \"Ooh! {agent_icon} @{agent}!  I'll write everything down!\""
-                )
-                .dimmed(),
+                format!("  🦦 Otter: \"Ooh! {agent_icon} @{agent}!  I'll write everything down!\"")
+                    .dimmed(),
             );
             self.out("");
         }

@@ -4,20 +4,20 @@ mod delegate;
 mod ui;
 pub mod util;
 
-use llm::{
-    ModelBackend, OutputSink, build_backend, sink_write, sink_writeln, stdout_sink, Message,
-};
-use llm::tools::ToolRegistry;
-use orca_jobs::JobManager;
-use config::{Config, Model};
+use crate::context::ProjectContext;
 use crate::ledger::TokenLedger;
 use crate::log::SessionLog;
-use crate::context::ProjectContext;
 use crate::tui::{self, TuiAction, TuiApp};
 use anyhow::{Context, Result};
 use colored::Colorize;
+use config::{Config, Model};
 use crossterm::event::{Event, EventStream};
 use futures_util::StreamExt;
+use llm::tools::ToolRegistry;
+use llm::{
+    Message, ModelBackend, OutputSink, build_backend, sink_write, sink_writeln, stdout_sink,
+};
+use orca_jobs::JobManager;
 use rustyline::DefaultEditor;
 use tokio::sync::mpsc;
 

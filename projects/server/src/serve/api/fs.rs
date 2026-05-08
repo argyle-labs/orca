@@ -73,8 +73,7 @@ pub fn check_browse_access(
 }
 
 pub fn list_dirs(dir: &Path) -> Result<Vec<FsEntry>, BrowseError> {
-    let rd = std::fs::read_dir(dir)
-        .map_err(|e| BrowseError::ReadError(e.to_string()))?;
+    let rd = std::fs::read_dir(dir).map_err(|e| BrowseError::ReadError(e.to_string()))?;
     let mut entries: Vec<FsEntry> = rd
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
@@ -106,12 +105,15 @@ pub fn list_dirs(dir: &Path) -> Result<Vec<FsEntry>, BrowseError> {
     ),
     tag = "fs"
 )]
-pub async fn fs_browse_handler(
-    Query(params): Query<FsBrowseQuery>,
-) -> axum::response::Response {
+pub async fn fs_browse_handler(Query(params): Query<FsBrowseQuery>) -> axum::response::Response {
     let home = match dirs::home_dir() {
         Some(h) => h,
-        None => return err(StatusCode::INTERNAL_SERVER_ERROR, "cannot resolve home directory"),
+        None => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot resolve home directory",
+            );
+        }
     };
 
     let conn = match db::open_default() {
@@ -126,7 +128,12 @@ pub async fn fs_browse_handler(
 
     let canonical = match target.canonicalize() {
         Ok(p) => p,
-        Err(_) => return err(StatusCode::BAD_REQUEST, &format!("path not found: {expanded}")),
+        Err(_) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                &format!("path not found: {expanded}"),
+            );
+        }
     };
 
     if !canonical.is_dir() {
@@ -150,7 +157,12 @@ pub async fn fs_browse_handler(
     let entries = match list_dirs(&canonical) {
         Ok(e) => e,
         Err(BrowseError::ReadError(msg)) => return err(StatusCode::INTERNAL_SERVER_ERROR, &msg),
-        Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "failed to read directory"),
+        Err(_) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to read directory",
+            );
+        }
     };
 
     let parent = canonical.parent().map(|p| p.to_string_lossy().into_owned());

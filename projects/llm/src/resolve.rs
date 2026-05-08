@@ -8,10 +8,10 @@
 //! Configuration lives in the `settings` kv table. All failures are hard:
 //! there is no silent fallback between modes.
 
+use crate::discovery::{TaskKind, discover_all, select_for_task, to_config_model};
 use anyhow::{Context, Result};
 use config::{Config, Model};
 use db;
-use crate::discovery::{TaskKind, discover_all, select_for_task, to_config_model};
 
 const KEY_MODE: &str = "agent_backend.mode";
 const KEY_USE_SERVER_ANTHROPIC: &str = "agent_backend.use_server_anthropic";
@@ -46,7 +46,9 @@ impl Mode {
             "local" => Ok(Mode::Local),
             "claude" => Ok(Mode::Claude),
             "hybrid" => Ok(Mode::Hybrid),
-            other => anyhow::bail!("invalid agent_backend mode '{other}' (want: local|claude|hybrid)"),
+            other => {
+                anyhow::bail!("invalid agent_backend mode '{other}' (want: local|claude|hybrid)")
+            }
         }
     }
 
@@ -153,16 +155,17 @@ pub fn decide(
             Some("local") => false,
             Some("claude") => true,
             None => true, // default: Claude
-            Some(other) => anyhow::bail!(
-                "invalid override value: {other} (want: local|claude)"
-            ),
+            Some(other) => anyhow::bail!("invalid override value: {other} (want: local|claude)"),
         },
     };
 
     if !want_claude {
         // Empty model ID — session layer will discover the best available local model
         // (LM Studio or Ollama) at runtime.
-        return Ok(Resolution::Local(Model::LMStudio { id: String::new(), url: String::new() }));
+        return Ok(Resolution::Local(Model::LMStudio {
+            id: String::new(),
+            url: String::new(),
+        }));
     }
 
     if use_server {
@@ -198,8 +201,18 @@ pub async fn resolve_model(config: &Config, task: Option<TaskKind>) -> Result<Mo
     // Honour explicit config first.
     match &config.default_model {
         Model::Claude(id) if !id.is_empty() => return Ok(Model::Claude(id.clone())),
-        Model::LMStudio { id, url } if !id.is_empty() => return Ok(Model::LMStudio { id: id.clone(), url: url.clone() }),
-        Model::Ollama { id, url } if !id.is_empty() => return Ok(Model::Ollama { id: id.clone(), url: url.clone() }),
+        Model::LMStudio { id, url } if !id.is_empty() => {
+            return Ok(Model::LMStudio {
+                id: id.clone(),
+                url: url.clone(),
+            });
+        }
+        Model::Ollama { id, url } if !id.is_empty() => {
+            return Ok(Model::Ollama {
+                id: id.clone(),
+                url: url.clone(),
+            });
+        }
         _ => {}
     }
 
@@ -236,7 +249,10 @@ mod tests {
             anthropic_api_key: key.map(String::from),
             lmstudio_url: "http://localhost:1234".into(),
             ollama_url: "http://localhost:11434".into(),
-            default_model: Model::LMStudio { id: String::new(), url: String::new() },
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
             orca_vault: PathBuf::from("/tmp"),
             vault_root: PathBuf::from("/tmp"),
             memory_root: PathBuf::from("/tmp"),

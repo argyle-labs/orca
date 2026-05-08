@@ -28,7 +28,9 @@ fn main() {
 
         for entry in entries {
             let path = entry.path();
-            let Some(stem) = path.file_stem() else { continue };
+            let Some(stem) = path.file_stem() else {
+                continue;
+            };
             let name = stem.to_string_lossy().to_string();
             // Skip broken symlinks (e.g. macOS project agents on Linux)
             let abs = match path.canonicalize() {

@@ -17,8 +17,7 @@ pub struct AgentBackendSetMode;
 #[async_trait]
 impl OrcaTool for AgentBackendSetMode {
     const NAME: &'static str = "agent_backend_set_mode";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Set the global agent backend mode. \
+    const DESCRIPTION: &'static str = "[MUTATES STATE] Set the global agent backend mode. \
          local = always LM Studio. claude = always route to Claude (server-side if enabled, \
          else delegate to caller). hybrid = check per-agent override; default is Claude \
          when no override is set.";

@@ -1,6 +1,6 @@
 use anyhow::Result;
-use config::APP_NAME;
 use colored::Colorize;
+use config::APP_NAME;
 
 pub async fn cmd_gen(url: &str, out: &str) -> Result<()> {
     // Poll until the backend is reachable (up to 30s after a cargo-watch restart)

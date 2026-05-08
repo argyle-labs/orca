@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use config::{APP_MCP_SERVER, APP_NAME, APP_STATE_DIR};
 use colored::Colorize;
+use config::{APP_MCP_SERVER, APP_NAME, APP_STATE_DIR};
 use std::path::{Path, PathBuf};
 
 const CLAUDE_MD: &str = include_str!("../../../CLAUDE.md");
@@ -8,25 +8,93 @@ const CLAUDE_MD: &str = include_str!("../../../CLAUDE.md");
 // Known project slugs to wire memory symlinks for.
 // Format: (macos_slug, linux_slug, vault_name)
 const MEMORY_PROJECTS: &[(&str, &str, &str)] = &[
-    ("-Users-scottkey",                         "-home-skey",                              "global"),
-    ("-Users-scottkey-code-orca",               "-home-skey-code-orca",                    "orca"),
-    ("-Users-scottkey-code-meerkat",            "-home-skey-code-meerkat",                 "meerkat"),
-    ("-Users-scottkey-code-bardbase",           "-home-skey-code-bardbase",                "bardbase"),
-    ("-Users-scottkey-dotfiles",                "-home-skey-dotfiles",                     "dotfiles"),
-    ("-Users-scottkey-code-rebuy-bod",          "-home-skey-code-rebuy-bod",               "rebuy-bod-root"),
-    ("-Users-scottkey-code-rebuy-bod-bod",      "-home-skey-code-rebuy-bod-bod",           "rebuy-bod"),
-    ("-Users-scottkey-code-rebuy-bod-bod-api",  "-home-skey-code-rebuy-bod-bod-api",       "rebuy-bod-api"),
-    ("-Users-scottkey-code-rebuy-bod-bod-dev",  "-home-skey-code-rebuy-bod-bod-dev",       "rebuy-bod-dev"),
-    ("-Users-scottkey-code-rebuy-bod-tributary","-home-skey-code-rebuy-bod-tributary",     "rebuy-tributary"),
-    ("-Users-scottkey-code-rebuy",              "-home-skey-code-rebuy",                   "rebuy"),
-    ("-Users-scottkey-code-rebuy-rebuy-cli",    "-home-skey-code-rebuy-rebuy-cli",         "rebuy-cli"),
-    ("-Users-scottkey-code-rebuy-admin-api",    "-home-skey-code-rebuy-admin-api",         "admin-api"),
-    ("-Users-scottkey-code-rebuy-admin-nextjs", "-home-skey-code-rebuy-admin-nextjs",      "admin-nextjs"),
-    ("-Users-scottkey-code-rebuy-apiv2",        "-home-skey-code-rebuy-apiv2",             "apiv2"),
-    ("-Users-scottkey-code-rebuy-rebuy-db",     "-home-skey-code-rebuy-rebuy-db",          "rebuy-db"),
-    ("-Users-scottkey-code-rebuy-onsite-js",    "-home-skey-code-rebuy-onsite-js",         "onsite-js"),
-    ("-Users-scottkey-code-rebuy-installer",    "-home-skey-code-rebuy-installer",         "installer"),
-    ("-Users-scottkey-code-rebuy-rebuyengine.com", "-home-skey-code-rebuy-rebuyengine.com","rebuyengine"),
+    ("-Users-scottkey", "-home-skey", "global"),
+    ("-Users-scottkey-code-orca", "-home-skey-code-orca", "orca"),
+    (
+        "-Users-scottkey-code-meerkat",
+        "-home-skey-code-meerkat",
+        "meerkat",
+    ),
+    (
+        "-Users-scottkey-code-bardbase",
+        "-home-skey-code-bardbase",
+        "bardbase",
+    ),
+    (
+        "-Users-scottkey-dotfiles",
+        "-home-skey-dotfiles",
+        "dotfiles",
+    ),
+    (
+        "-Users-scottkey-code-rebuy-bod",
+        "-home-skey-code-rebuy-bod",
+        "rebuy-bod-root",
+    ),
+    (
+        "-Users-scottkey-code-rebuy-bod-bod",
+        "-home-skey-code-rebuy-bod-bod",
+        "rebuy-bod",
+    ),
+    (
+        "-Users-scottkey-code-rebuy-bod-bod-api",
+        "-home-skey-code-rebuy-bod-bod-api",
+        "rebuy-bod-api",
+    ),
+    (
+        "-Users-scottkey-code-rebuy-bod-bod-dev",
+        "-home-skey-code-rebuy-bod-bod-dev",
+        "rebuy-bod-dev",
+    ),
+    (
+        "-Users-scottkey-code-rebuy-bod-tributary",
+        "-home-skey-code-rebuy-bod-tributary",
+        "rebuy-tributary",
+    ),
+    (
+        "-Users-scottkey-code-rebuy",
+        "-home-skey-code-rebuy",
+        "rebuy",
+    ),
+    (
+        "-Users-scottkey-code-rebuy-rebuy-cli",
+        "-home-skey-code-rebuy-rebuy-cli",
+        "rebuy-cli",
+    ),
+    (
+        "-Users-scottkey-code-rebuy-admin-api",
+        "-home-skey-code-rebuy-admin-api",
+        "admin-api",
+    ),
+    (
+        "-Users-scottkey-code-rebuy-admin-nextjs",
+        "-home-skey-code-rebuy-admin-nextjs",
+        "admin-nextjs",
+    ),
+    (
+        "-Users-scottkey-code-rebuy-apiv2",
+        "-home-skey-code-rebuy-apiv2",
+        "apiv2",
+    ),
+    (
+        "-Users-scottkey-code-rebuy-rebuy-db",
+        "-home-skey-code-rebuy-rebuy-db",
+        "rebuy-db",
+    ),
+    (
+        "-Users-scottkey-code-rebuy-onsite-js",
+        "-home-skey-code-rebuy-onsite-js",
+        "onsite-js",
+    ),
+    (
+        "-Users-scottkey-code-rebuy-installer",
+        "-home-skey-code-rebuy-installer",
+        "installer",
+    ),
+    (
+        "-Users-scottkey-code-rebuy-rebuyengine.com",
+        "-home-skey-code-rebuy-rebuyengine.com",
+        "rebuyengine",
+    ),
 ];
 
 pub struct InstallReport {
@@ -37,7 +105,11 @@ pub struct InstallReport {
 
 impl InstallReport {
     fn new() -> Self {
-        Self { done: vec![], skipped: vec![], errors: vec![] }
+        Self {
+            done: vec![],
+            skipped: vec![],
+            errors: vec![],
+        }
     }
 
     fn ok(&mut self, msg: impl Into<String>) {
@@ -53,9 +125,15 @@ impl InstallReport {
     }
 
     pub fn print(&self) {
-        for s in &self.done    { println!("  {} {s}", "✓".green()); }
-        for s in &self.skipped { println!("  {} {s}", "-".dimmed()); }
-        for s in &self.errors  { println!("  {} {s}", "✗".red()); }
+        for s in &self.done {
+            println!("  {} {s}", "✓".green());
+        }
+        for s in &self.skipped {
+            println!("  {} {s}", "-".dimmed());
+        }
+        for s in &self.errors {
+            println!("  {} {s}", "✗".red());
+        }
     }
 
     pub fn success(&self) -> bool {
@@ -80,6 +158,7 @@ pub fn cmd_install_report() -> InstallReport {
     step_claude_md(&home, &mut report);
     step_claude_agents(&home, &mut report);
     step_memory_symlinks(&home, &mut report);
+    step_git_hooks(&mut report);
     step_mcp_registration(&mut report);
     report
 }
@@ -107,7 +186,10 @@ pub fn cmd_install() -> Result<()> {
     report.print();
     println!();
     if report.success() {
-        println!("{}", format!("{APP_NAME} installed successfully.").green().bold());
+        println!(
+            "{}",
+            format!("{APP_NAME} installed successfully.").green().bold()
+        );
         println!("Run {} to start.", APP_NAME.cyan());
     } else {
         println!("{}", "Install completed with errors — see above.".yellow());
@@ -121,7 +203,10 @@ pub fn cmd_uninstall() -> Result<()> {
     let report = cmd_uninstall_report();
     report.print();
     println!();
-    println!("{}", "Memory files and vault contents were NOT removed.".dimmed());
+    println!(
+        "{}",
+        "Memory files and vault contents were NOT removed.".dimmed()
+    );
     println!("{}", format!("{APP_NAME} uninstalled.").yellow().bold());
     Ok(())
 }
@@ -168,7 +253,10 @@ fn step_install_binary(home: &Path, report: &mut InstallReport) {
     let dest = install_bin_path(home);
     let src = match std::env::current_exe() {
         Ok(p) => p,
-        Err(e) => { report.err(format!("binary: cannot resolve current exe: {e}")); return; }
+        Err(e) => {
+            report.err(format!("binary: cannot resolve current exe: {e}"));
+            return;
+        }
     };
 
     if dest == src {
@@ -176,7 +264,10 @@ fn step_install_binary(home: &Path, report: &mut InstallReport) {
         return;
     }
 
-    if let Err(e) = std::fs::create_dir_all(dest.parent().expect("install_bin_path always has a parent dir")) {
+    if let Err(e) = std::fs::create_dir_all(
+        dest.parent()
+            .expect("install_bin_path always has a parent dir"),
+    ) {
         report.err(format!("binary: cannot create ~/.local/bin: {e}"));
         return;
     }
@@ -210,27 +301,45 @@ fn step_claude_md(home: &Path, report: &mut InstallReport) {
     let _ = std::fs::create_dir_all(&claude_dir);
 
     let vault_claude_md = home.join(APP_STATE_DIR).join("CLAUDE.md");
-    let dot_claude_md   = claude_dir.join("CLAUDE.md");
+    let dot_claude_md = claude_dir.join("CLAUDE.md");
 
     // If orca repo is present, symlink through the vault. Otherwise write embedded content.
     let orca_repo_md = home.join("code/orca/CLAUDE.md");
     if orca_repo_md.exists() {
         // vault → repo
-        force_symlink(&orca_repo_md, &vault_claude_md, report, "vault CLAUDE.md → repo");
+        force_symlink(
+            &orca_repo_md,
+            &vault_claude_md,
+            report,
+            "vault CLAUDE.md → repo",
+        );
         // ~/.claude/CLAUDE.md → vault
-        force_symlink(&vault_claude_md, &dot_claude_md, report, "~/.claude/CLAUDE.md → vault");
+        force_symlink(
+            &vault_claude_md,
+            &dot_claude_md,
+            report,
+            "~/.claude/CLAUDE.md → vault",
+        );
     } else {
         // Write embedded content to vault (release install, no repo)
         match std::fs::write(&vault_claude_md, CLAUDE_MD) {
             Ok(_) => report.ok("vault CLAUDE.md written (embedded, no repo)".to_string()),
-            Err(e) => { report.err(format!("vault CLAUDE.md write failed: {e}")); return; }
+            Err(e) => {
+                report.err(format!("vault CLAUDE.md write failed: {e}"));
+                return;
+            }
         }
-        force_symlink(&vault_claude_md, &dot_claude_md, report, "~/.claude/CLAUDE.md → vault");
+        force_symlink(
+            &vault_claude_md,
+            &dot_claude_md,
+            report,
+            "~/.claude/CLAUDE.md → vault",
+        );
     }
 }
 
 fn step_claude_agents(home: &Path, report: &mut InstallReport) {
-    let agents_src  = home.join(APP_STATE_DIR).join("agents");
+    let agents_src = home.join(APP_STATE_DIR).join("agents");
     let agents_link = home.join(".claude/agents");
 
     let _ = std::fs::create_dir_all(&agents_src);
@@ -239,23 +348,31 @@ fn step_claude_agents(home: &Path, report: &mut InstallReport) {
     if agents_link.exists() && !is_symlink(&agents_link) {
         match std::fs::remove_dir_all(&agents_link) {
             Ok(_) => report.ok("~/.claude/agents: removed real dir (replaced with symlink)"),
-            Err(e) => { report.err(format!("~/.claude/agents: cannot remove dir: {e}")); return; }
+            Err(e) => {
+                report.err(format!("~/.claude/agents: cannot remove dir: {e}"));
+                return;
+            }
         }
     }
 
-    force_symlink(&agents_src, &agents_link, report, "~/.claude/agents → vault");
+    force_symlink(
+        &agents_src,
+        &agents_link,
+        report,
+        "~/.claude/agents → vault",
+    );
 }
 
 fn step_memory_symlinks(home: &Path, report: &mut InstallReport) {
     let claude_projects = home.join(".claude/projects");
-    let orca_memory    = home.join(APP_STATE_DIR).join("memory");
-    let on_macos        = cfg!(target_os = "macos");
+    let orca_memory = home.join(APP_STATE_DIR).join("memory");
+    let on_macos = cfg!(target_os = "macos");
 
     for (macos_slug, linux_slug, vault_name) in MEMORY_PROJECTS {
         let slug = if on_macos { macos_slug } else { linux_slug };
         let project_dir = claude_projects.join(slug);
         let memory_link = project_dir.join("memory");
-        let vault_dir   = orca_memory.join(vault_name);
+        let vault_dir = orca_memory.join(vault_name);
 
         let _ = std::fs::create_dir_all(&project_dir);
         let _ = std::fs::create_dir_all(&vault_dir);
@@ -264,13 +381,78 @@ fn step_memory_symlinks(home: &Path, report: &mut InstallReport) {
             // Real dir exists — back it up then remove
             let backup = project_dir.join("memory.bak");
             if let Err(e) = std::fs::rename(&memory_link, &backup) {
-                report.err(format!("memory {vault_name}: cannot back up existing dir: {e}"));
+                report.err(format!(
+                    "memory {vault_name}: cannot back up existing dir: {e}"
+                ));
                 continue;
             }
-            report.ok(format!("memory {vault_name}: backed up existing dir to memory.bak"));
+            report.ok(format!(
+                "memory {vault_name}: backed up existing dir to memory.bak"
+            ));
         }
 
-        force_symlink(&vault_dir, &memory_link, report, &format!("memory/{vault_name}"));
+        force_symlink(
+            &vault_dir,
+            &memory_link,
+            report,
+            &format!("memory/{vault_name}"),
+        );
+    }
+}
+
+fn step_git_hooks(report: &mut InstallReport) {
+    // Find the repo root by walking up from the current exe's directory.
+    // Falls back to CWD. Silently skips if we're not inside a git repo.
+    let repo_root = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .and_then(|p| find_git_root(&p))
+        .or_else(|| std::env::current_dir().ok().and_then(|p| find_git_root(&p)));
+
+    let Some(root) = repo_root else {
+        report.skip("git hooks: not inside an orca git repo — skipped".to_string());
+        return;
+    };
+
+    let hooks_dir = root.join(".githooks");
+    if !hooks_dir.exists() {
+        report.skip("git hooks: .githooks not present — skipped".to_string());
+        return;
+    }
+
+    let output = std::process::Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap_or("."),
+            "config",
+            "core.hooksPath",
+            ".githooks",
+        ])
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            report.ok("git hooks: core.hooksPath = .githooks".to_string());
+        }
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr);
+            report.err(format!("git hooks: failed to set core.hooksPath: {err}"));
+        }
+        Err(e) => {
+            report.err(format!("git hooks: git not found: {e}"));
+        }
+    }
+}
+
+fn find_git_root(start: &Path) -> Option<PathBuf> {
+    let mut dir = start.to_path_buf();
+    loop {
+        if dir.join(".git").exists() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
     }
 }
 
@@ -282,15 +464,27 @@ fn step_mcp_registration(report: &mut InstallReport) {
 
     let orca_bin = match std::env::current_exe() {
         Ok(p) => p,
-        Err(e) => { report.err(format!("MCP: cannot resolve binary path: {e}")); return; }
+        Err(e) => {
+            report.err(format!("MCP: cannot resolve binary path: {e}"));
+            return;
+        }
     };
 
     let status = std::process::Command::new("claude")
-        .args(["mcp", "add", APP_MCP_SERVER, "--", orca_bin.to_str().unwrap_or(APP_NAME), "mcp-serve"])
+        .args([
+            "mcp",
+            "add",
+            APP_MCP_SERVER,
+            "--",
+            orca_bin.to_str().unwrap_or(APP_NAME),
+            "mcp-serve",
+        ])
         .status();
 
     match status {
-        Ok(s) if s.success() => report.ok(format!("MCP: {APP_MCP_SERVER} registered with Claude Code")),
+        Ok(s) if s.success() => {
+            report.ok(format!("MCP: {APP_MCP_SERVER} registered with Claude Code"))
+        }
         Ok(s) => report.err(format!("MCP: claude mcp add exited {s}")),
         Err(e) => report.err(format!("MCP: claude not found or failed: {e}")),
     }
@@ -316,10 +510,13 @@ fn step_remove_mcp(report: &mut InstallReport) {
 }
 
 fn step_remove_claude_md(home: &Path, report: &mut InstallReport) {
-    let vault_link  = home.join(APP_STATE_DIR).join("CLAUDE.md");
-    let dot_link    = home.join(".claude/CLAUDE.md");
+    let vault_link = home.join(APP_STATE_DIR).join("CLAUDE.md");
+    let dot_link = home.join(".claude/CLAUDE.md");
 
-    for (path, label) in [(&dot_link, "~/.claude/CLAUDE.md"), (&vault_link, "vault CLAUDE.md")] {
+    for (path, label) in [
+        (&dot_link, "~/.claude/CLAUDE.md"),
+        (&vault_link, "vault CLAUDE.md"),
+    ] {
         if is_symlink(path) {
             match std::fs::remove_file(path) {
                 Ok(_) => report.ok(format!("{label}: removed symlink")),

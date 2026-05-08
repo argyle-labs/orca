@@ -7,8 +7,8 @@ use serde::Deserialize;
 use serde_json::json;
 use utoipa::ToSchema;
 
-use super::prelude::*;
 use super::Ctx7Response;
+use super::prelude::*;
 use crate::serve::middleware::CorrelationId;
 
 // ── GET /api/ctx7 ─────────────────────────────────────────────────────────────
