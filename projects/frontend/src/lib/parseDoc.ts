@@ -20,10 +20,16 @@ export function parseDoc(raw: string): ParsedDoc {
 
   while (i < lines.length) {
     const line = lines[i];
-    if (!line.trim()) { i++; continue; }
+    if (!line.trim()) {
+      i++;
+      continue;
+    }
 
     const m = /^([^:#][^:]*):\s*(.*)$/.exec(line);
-    if (!m) { i++; continue; }
+    if (!m) {
+      i++;
+      continue;
+    }
     const key = m[1].trim();
     let val = m[2];
 
@@ -33,17 +39,31 @@ export function parseDoc(raw: string): ParsedDoc {
       i++;
       while (i < lines.length) {
         const next = lines[i];
-        if (next.length === 0) { blockLines.push(''); i++; continue; }
-        if (/^\s/.test(next)) { blockLines.push(next.replace(/^\s+/, '')); i++; }
-        else break;
+        if (next.length === 0) {
+          blockLines.push('');
+          i++;
+          continue;
+        }
+        if (/^\s/.test(next)) {
+          blockLines.push(next.replace(/^\s+/, ''));
+          i++;
+        } else break;
       }
-      properties.push({ key, value: fold ? blockLines.join(' ').trim() : blockLines.join('\n').trim() });
+      properties.push({
+        key,
+        value: fold ? blockLines.join(' ').trim() : blockLines.join('\n').trim(),
+      });
       continue;
     }
 
     if (val.trim().startsWith('[') && val.trim().endsWith(']')) {
       const inner = val.trim().slice(1, -1).trim();
-      const items = inner ? inner.split(',').map((s) => stripQuotes(s.trim())).filter(Boolean) : [];
+      const items = inner
+        ? inner
+            .split(',')
+            .map(s => stripQuotes(s.trim()))
+            .filter(Boolean)
+        : [];
       properties.push({ key, value: items });
       i++;
       continue;

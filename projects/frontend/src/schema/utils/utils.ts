@@ -1,4 +1,5 @@
-export const cx = (...args: (string | false | null | undefined)[]) => args.filter(Boolean).join(' ');
+export const cx = (...args: (string | false | null | undefined)[]) =>
+  args.filter(Boolean).join(' ');
 
 export function buildDomainMap(domains: Domain[]): Record<string, Domain> {
   const map: Record<string, Domain> = {};

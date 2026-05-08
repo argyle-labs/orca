@@ -10,8 +10,16 @@ interface CreateCardDragOptions {
   bumpVersion?: () => void;
 }
 
-export function createCardDrag({ getViewport, cam, edges, focusNode, setSelected, bumpVersion }: CreateCardDragOptions) {
-  const dragState: { current: { node: TableNode; ox: number; oy: number; moved: boolean } | null } = { current: null };
+export function createCardDrag({
+  getViewport,
+  cam,
+  edges,
+  focusNode,
+  setSelected,
+  bumpVersion,
+}: CreateCardDragOptions) {
+  const dragState: { current: { node: TableNode; ox: number; oy: number; moved: boolean } | null } =
+    { current: null };
   const clickState = { time: 0, id: '' };
 
   function handleCardPointerDown(ev: PointerEvent, node: TableNode) {
@@ -35,7 +43,8 @@ export function createCardDrag({ getViewport, cam, edges, focusNode, setSelected
     const { x: newX, y: newY } = pointerToWorld(ev.clientX, ev.clientY, rect, cam.current);
     const adjustedX = newX - drag.ox;
     const adjustedY = newY - drag.oy;
-    if (!drag.moved && (Math.abs(adjustedX - node.x) > 3 || Math.abs(adjustedY - node.y) > 3)) drag.moved = true;
+    if (!drag.moved && (Math.abs(adjustedX - node.x) > 3 || Math.abs(adjustedY - node.y) > 3))
+      drag.moved = true;
     if (!drag.moved) return;
 
     node.x = adjustedX;
@@ -75,7 +84,7 @@ export function createCardDrag({ getViewport, cam, edges, focusNode, setSelected
         clickState.time = 0;
         clickState.id = '';
       } else {
-        setSelected((prev) => (prev === node.id ? null : node.id));
+        setSelected(prev => (prev === node.id ? null : node.id));
         clickState.time = now;
         clickState.id = node.id;
       }

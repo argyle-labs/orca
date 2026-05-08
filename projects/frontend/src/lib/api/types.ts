@@ -236,7 +236,7 @@ export interface MpcStatus {
   registered: boolean;
 }
 
-export type NodeType = "file" | "dir";
+export type NodeType = 'file' | 'dir';
 
 export interface OkResponse {
   ok: boolean;

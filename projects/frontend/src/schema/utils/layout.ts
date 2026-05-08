@@ -1,4 +1,16 @@
-import { TABLE_WIDTH, ROW_HEIGHT, HEADER_HEIGHT, MAX_VISIBLE_COLS, TABLE_GAP, DOMAIN_PADDING, DOMAIN_GAP, DOMAIN_HEADER_HEIGHT, GROUP_PADDING, GROUP_HEADER_HEIGHT, GROUP_SUB_GAP } from './constants';
+import {
+  TABLE_WIDTH,
+  ROW_HEIGHT,
+  HEADER_HEIGHT,
+  MAX_VISIBLE_COLS,
+  TABLE_GAP,
+  DOMAIN_PADDING,
+  DOMAIN_GAP,
+  DOMAIN_HEADER_HEIGHT,
+  GROUP_PADDING,
+  GROUP_HEADER_HEIGHT,
+  GROUP_SUB_GAP,
+} from './constants';
 
 export function computeLayout(tables: Table[], fks: FK[], domains: Domain[]): LayoutResult {
   const domainOf: Record<string, Domain> = {};
@@ -8,7 +20,7 @@ export function computeLayout(tables: Table[], fks: FK[], domains: Domain[]): La
     }
   }
 
-  const nodes: TableNode[] = tables.map((table) => {
+  const nodes: TableNode[] = tables.map(table => {
     const visibleRows = Math.min(table.columns.length, MAX_VISIBLE_COLS);
     const overflowIndicator = table.columns.length > MAX_VISIBLE_COLS ? 24 : 0;
 
@@ -19,25 +31,27 @@ export function computeLayout(tables: Table[], fks: FK[], domains: Domain[]): La
       x: 0,
       y: 0,
       w: TABLE_WIDTH,
-      h: HEADER_HEIGHT + visibleRows * ROW_HEIGHT + overflowIndicator + 12
+      h: HEADER_HEIGHT + visibleRows * ROW_HEIGHT + overflowIndicator + 12,
     };
   });
 
-  const nodeMap = Object.fromEntries(nodes.map((n) => [n.id, n]));
+  const nodeMap = Object.fromEntries(nodes.map(n => [n.id, n]));
 
   const edges: Edge[] = fks
-    .map((fk) => ({
+    .map(fk => ({
       source: nodeMap[fk.from],
       target: nodeMap[fk.to],
-      col: fk.fromCol
+      col: fk.fromCol,
     }))
-    .filter((e) => e.source && e.target);
+    .filter(e => e.source && e.target);
 
   function gridLayout(items: TableNode[]) {
     const cols = Math.min(items.length, Math.max(2, Math.ceil(Math.sqrt(items.length * 1.5))));
     const rows = Math.ceil(items.length / cols);
 
-    const rowHeights = Array.from({ length: rows }, (_, row) => Math.max(...Array.from({ length: cols }, (_, col) => items[row * cols + col]?.h ?? 0)));
+    const rowHeights = Array.from({ length: rows }, (_, row) =>
+      Math.max(...Array.from({ length: cols }, (_, col) => items[row * cols + col]?.h ?? 0)),
+    );
 
     let currentY = DOMAIN_PADDING + DOMAIN_HEADER_HEIGHT;
     for (let row = 0; row < rows; row++) {
@@ -53,30 +67,30 @@ export function computeLayout(tables: Table[], fks: FK[], domains: Domain[]): La
 
     return {
       w: cols * TABLE_WIDTH + (cols - 1) * TABLE_GAP + DOMAIN_PADDING * 2,
-      h: currentY - TABLE_GAP + DOMAIN_PADDING
+      h: currentY - TABLE_GAP + DOMAIN_PADDING,
     };
   }
 
   const domainBlocks = domains
-    .map((domain) => ({
+    .map(domain => ({
       domain,
-      nodes: nodes.filter((n) => n.domain === domain)
+      nodes: nodes.filter(n => n.domain === domain),
     }))
-    .filter((block) => block.nodes.length > 0);
+    .filter(block => block.nodes.length > 0);
 
-  const orphanNodes = nodes.filter((n) => !n.domain);
+  const orphanNodes = nodes.filter(n => !n.domain);
   if (orphanNodes.length > 0) {
     domainBlocks.push({
       domain: { key: '_orphan', label: 'Other', color: '#556', tables: [] as string[] },
-      nodes: orphanNodes
+      nodes: orphanNodes,
     });
   }
 
-  const blocks: Block[] = domainBlocks.map((block) => ({
+  const blocks: Block[] = domainBlocks.map(block => ({
     ...block,
     ...gridLayout(block.nodes),
     x: 0,
-    y: 0
+    y: 0,
   }));
 
   const groupedBlocks = new Map<string, Block[]>();
@@ -118,11 +132,11 @@ export function computeLayout(tables: Table[], fks: FK[], domains: Domain[]): La
       w: subX - GROUP_SUB_GAP + GROUP_PADDING,
       h: GROUP_PADDING + GROUP_HEADER_HEIGHT + maxHeight + GROUP_PADDING,
       x: 0,
-      y: 0
+      y: 0,
     };
   });
 
-  const groupsFromUngrouped: Group[] = ungroupedBlocks.map((block) => {
+  const groupsFromUngrouped: Group[] = ungroupedBlocks.map(block => {
     block.x = 0;
     block.y = 0;
     return {
@@ -133,7 +147,7 @@ export function computeLayout(tables: Table[], fks: FK[], domains: Domain[]): La
       w: block.w,
       h: block.h,
       x: 0,
-      y: 0
+      y: 0,
     };
   });
 
@@ -221,7 +235,7 @@ export function computeLayout(tables: Table[], fks: FK[], domains: Domain[]): La
     adj,
     adjT,
     wW: maxX - minX + 400,
-    wH: maxY - minY + 400
+    wH: maxY - minY + 400,
   };
 }
 
@@ -263,10 +277,22 @@ export function edgePath(source: TableNode, target: TableNode) {
     } else {
       // Z-shape: ── then │ then ──
       // The vertical segment runs at midX, which sits in the gap between the two boxes.
-      const r = Math.min(CORNER_R, Math.abs(diffY) / 2, Math.abs(midX - x1) / 2, Math.abs(x2 - midX) / 2);
+      const r = Math.min(
+        CORNER_R,
+        Math.abs(diffY) / 2,
+        Math.abs(midX - x1) / 2,
+        Math.abs(x2 - midX) / 2,
+      );
       const sdx = Math.sign(midX - x1) || 1;
       const sdy = Math.sign(diffY);
-      d = [`M${x1},${y1}`, `L${midX - sdx * r},${y1}`, `Q${midX},${y1} ${midX},${y1 + sdy * r}`, `L${midX},${y2 - sdy * r}`, `Q${midX},${y2} ${midX + sdx * r},${y2}`, `L${x2},${y2}`].join(' ');
+      d = [
+        `M${x1},${y1}`,
+        `L${midX - sdx * r},${y1}`,
+        `Q${midX},${y1} ${midX},${y1 + sdy * r}`,
+        `L${midX},${y2 - sdy * r}`,
+        `Q${midX},${y2} ${midX + sdx * r},${y2}`,
+        `L${x2},${y2}`,
+      ].join(' ');
       mx = midX;
       my = (y1 + y2) / 2;
     }
@@ -282,10 +308,22 @@ export function edgePath(source: TableNode, target: TableNode) {
       my = midY;
     } else {
       // Z-shape: │ then ── then │
-      const r = Math.min(CORNER_R, Math.abs(diffX) / 2, Math.abs(midY - y1) / 2, Math.abs(y2 - midY) / 2);
+      const r = Math.min(
+        CORNER_R,
+        Math.abs(diffX) / 2,
+        Math.abs(midY - y1) / 2,
+        Math.abs(y2 - midY) / 2,
+      );
       const sdy = Math.sign(midY - y1) || 1;
       const sdx = Math.sign(diffX);
-      d = [`M${x1},${y1}`, `L${x1},${midY - sdy * r}`, `Q${x1},${midY} ${x1 + sdx * r},${midY}`, `L${x2 - sdx * r},${midY}`, `Q${x2},${midY} ${x2},${midY + sdy * r}`, `L${x2},${y2}`].join(' ');
+      d = [
+        `M${x1},${y1}`,
+        `L${x1},${midY - sdy * r}`,
+        `Q${x1},${midY} ${x1 + sdx * r},${midY}`,
+        `L${x2 - sdx * r},${midY}`,
+        `Q${x2},${midY} ${x2},${midY + sdy * r}`,
+        `L${x2},${y2}`,
+      ].join(' ');
       mx = (x1 + x2) / 2;
       my = midY;
     }
@@ -296,7 +334,7 @@ export function edgePath(source: TableNode, target: TableNode) {
   const arrow = [
     `${x2},${y2}`,
     `${x2 - arrowLength * Math.cos(arrowAngle - 0.35)},${y2 - arrowLength * Math.sin(arrowAngle - 0.35)}`,
-    `${x2 - arrowLength * Math.cos(arrowAngle + 0.35)},${y2 - arrowLength * Math.sin(arrowAngle + 0.35)}`
+    `${x2 - arrowLength * Math.cos(arrowAngle + 0.35)},${y2 - arrowLength * Math.sin(arrowAngle + 0.35)}`,
   ].join(' ');
 
   return { d, arrow, mx, my };

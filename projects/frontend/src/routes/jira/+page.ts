@@ -12,5 +12,7 @@ export const load: PageLoad = async () => {
   try {
     const issues = await listJiraIssues({ jql: config.jql, maxResults: 50 });
     return { issues: (issues as any)?.issues ?? [], config };
-  } catch { return { issues: [], config }; }
+  } catch {
+    return { issues: [], config };
+  }
 };

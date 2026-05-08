@@ -6,7 +6,9 @@ const KEY = 'orca-section';
 // everything else comes from plugin mode declarations.
 let _section = $state<string>(browser ? (localStorage.getItem(KEY) ?? 'orca') : 'orca');
 
-export function getSection(): string { return _section; }
+export function getSection(): string {
+  return _section;
+}
 
 export function setSection(s: string): void {
   _section = s;

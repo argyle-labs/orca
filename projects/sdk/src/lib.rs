@@ -10,6 +10,7 @@
 //! - [`transport`] — TCP+mTLS plugin transport and `orca/hello` handshake
 //! - [`jsonrpc`] — JSON-RPC 2.0 wire types (shared with server plugin host)
 //! - [`framing`] — length-prefixed frame encode/decode
+//! - [`manifest`] — `orca-plugin.toml` types + parser (part of the contract)
 
 /// SDK version — announced during the `orca/hello` handshake.
 pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -27,8 +28,10 @@ pub enum Flavor {
     Local,
 }
 
+pub mod conformance;
 pub mod framing;
 pub mod jsonrpc;
+pub mod manifest;
 pub mod pki;
 pub mod transport;
 

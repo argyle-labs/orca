@@ -111,7 +111,16 @@ pub async fn serve(
                 tokio::spawn(async move {
                     match acceptor.accept(tcp).await {
                         Ok(tls) => {
-                            if let Err(e) = handle_connection(tls, registry).await {
+                            let peer_cn = match extract_peer_cn(&tls) {
+                                Ok(cn) => cn,
+                                Err(e) => {
+                                    warn!(
+                                        "[plugin-host] {peer} peer cert CN extract failed: {e:#}"
+                                    );
+                                    return;
+                                }
+                            };
+                            if let Err(e) = handle_connection(tls, registry, peer_cn).await {
                                 warn!("[plugin-host] {peer} connection error: {e:#}");
                             }
                         }
@@ -140,9 +149,24 @@ fn build_acceptor(bundle: &pki::NodeBundle) -> Result<TlsAcceptor> {
     Ok(TlsAcceptor::from(Arc::new(server_config)))
 }
 
+/// Pull the Subject CN out of the leaf cert presented by the peer during
+/// the mTLS handshake. `WebPkiClientVerifier` has already validated the
+/// chain, so we only need to read the CN; we do not re-verify the cert.
+fn extract_peer_cn(tls: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>) -> Result<String> {
+    let (_, conn) = tls.get_ref();
+    let certs = conn
+        .peer_certificates()
+        .context("peer presented no client cert (mTLS misconfigured?)")?;
+    let leaf = certs.first().context("peer cert chain empty")?;
+    pki::peer_common_name(leaf.as_ref())
+}
+
 /// Per-connection state carried across frames. Set by `orca/hello`; read by
 /// every subsequent method that needs the plugin's identity.
 struct ConnState {
+    /// Subject CN from the peer's leaf cert. Authoritative — the plugin's
+    /// claim in `orca/hello` must match this exactly.
+    peer_cn: String,
     plugin_id: Option<String>,
     registry: ContextRegistry,
     /// Notifications produced by handlers (and by subscription pumps) that
@@ -163,10 +187,12 @@ impl Drop for ConnState {
 async fn handle_connection(
     tls: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     registry: ContextRegistry,
+    peer_cn: String,
 ) -> Result<()> {
     let (mut reader, mut writer) = tokio::io::split(tls);
     let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<serde_json::Value>();
     let mut state = ConnState {
+        peer_cn,
         plugin_id: None,
         registry,
         notify_tx,
@@ -274,7 +300,6 @@ fn handle_hello(
         "[plugin-host] hello from plugin '{}' (sdk {}, flavor {:?})",
         params.plugin_id, params.sdk_version, params.flavor
     );
-    state.plugin_id = Some(params.plugin_id.clone());
 
     let supported: Vec<String> = SUPPORTED_METHODS.iter().map(|s| s.to_string()).collect();
     let reject = |reason: String| HelloResult {
@@ -284,6 +309,23 @@ fn handle_hello(
         methods: supported.clone(),
         reason: Some(reason),
     };
+
+    // 0. Identity gate. The plugin_id claimed in hello must match the CN
+    // of the cert this connection presented. Otherwise any plugin holding a
+    // CA-signed cert could impersonate any other plugin's id.
+    if params.plugin_id != state.peer_cn {
+        warn!(
+            "[plugin-host] hello rejected: claimed plugin_id '{}' != peer cert CN '{}'",
+            params.plugin_id, state.peer_cn
+        );
+        let result = reject(format!(
+            "plugin_id '{}' does not match peer cert CN '{}'",
+            params.plugin_id, state.peer_cn
+        ));
+        let value = serde_json::to_value(&result).expect("HelloResult serializes");
+        return serde_json::to_value(Response::ok(id, value)).expect("Response serializes");
+    }
+    state.plugin_id = Some(params.plugin_id.clone());
 
     // 1. Version gate.
     let result = match compare_semver(SERVER_VERSION, &params.core_min_required) {
@@ -468,6 +510,16 @@ fn handle_context_publish(
             .expect("Response serializes");
         }
     };
+
+    // Schema gate: if this type_id has been declared via orca/types.declare,
+    // the published payload must conform to the registered JSON Schema.
+    // Undeclared type_ids are allowed through — declaration is currently
+    // opt-in. Once meerkat plugins land, strict-mode (declared-or-reject)
+    // can be turned on.
+    if let Err(reject) = validate_against_declared_schema(&id, &params.value) {
+        return reject;
+    }
+
     let tx = state.registry.channel(&params.context_id);
     // Ignore SendError when no current subscribers — message is just dropped.
     let _ = tx.send((params.context_id, params.value));
@@ -570,6 +622,82 @@ fn handle_context_unsubscribe(
         ))
         .expect("Response serializes"),
     }
+}
+
+/// Look up the declared JSON Schema for `value.type_id` and validate the
+/// payload against it. Returns:
+///   * `Ok(())` if no declaration exists, or the payload conforms.
+///   * `Err(response_value)` — a fully-built JSON-RPC error response — if a
+///     declaration exists and validation fails, or if the DB or schema itself
+///     can't be loaded.
+fn validate_against_declared_schema(
+    id: &serde_json::Value,
+    value: &TypedValue,
+) -> std::result::Result<(), serde_json::Value> {
+    let conn = match db::open_default() {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(serde_json::to_value(Response::err(
+                id.clone(),
+                ErrorObject::internal(&format!("open db: {e}")),
+            ))
+            .expect("Response serializes"));
+        }
+    };
+
+    let row = match db::get_plugin_type(&conn, &value.type_id) {
+        Ok(Some(r)) => r,
+        Ok(None) => return Ok(()), // undeclared → allowed
+        Err(e) => {
+            return Err(serde_json::to_value(Response::err(
+                id.clone(),
+                ErrorObject::internal(&format!("lookup plugin_type {}: {e}", value.type_id)),
+            ))
+            .expect("Response serializes"));
+        }
+    };
+
+    let schema: serde_json::Value = match serde_json::from_str(&row.schema_json) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(serde_json::to_value(Response::err(
+                id.clone(),
+                ErrorObject::internal(&format!(
+                    "stored schema for '{}' is not valid JSON: {e}",
+                    value.type_id
+                )),
+            ))
+            .expect("Response serializes"));
+        }
+    };
+
+    let validator = match jsonschema::validator_for(&schema) {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(serde_json::to_value(Response::err(
+                id.clone(),
+                ErrorObject::internal(&format!(
+                    "stored schema for '{}' is not a valid JSON Schema: {e}",
+                    value.type_id
+                )),
+            ))
+            .expect("Response serializes"));
+        }
+    };
+
+    if let Err(err) = validator.validate(&value.payload) {
+        let reason = format!(
+            "payload for '{}' failed schema validation: {} at {}",
+            value.type_id, err, err.instance_path
+        );
+        return Err(serde_json::to_value(Response::err(
+            id.clone(),
+            ErrorObject::invalid_params(&reason),
+        ))
+        .expect("Response serializes"));
+    }
+
+    Ok(())
 }
 
 /// Compare two dotted-numeric versions (e.g. "0.1.0" vs "0.2.0").

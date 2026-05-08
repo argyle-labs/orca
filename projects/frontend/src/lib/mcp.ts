@@ -1,4 +1,8 @@
-export async function callTool(server: string, name: string, args: Record<string, unknown> = {}): Promise<string> {
+export async function callTool(
+  server: string,
+  name: string,
+  args: Record<string, unknown> = {},
+): Promise<string> {
   const res = await fetch('/api/mcp/run', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -16,7 +20,8 @@ export function stripAnsi(s: string): string {
 export function parseStatus(output: string): boolean | null {
   if (!output) return null;
   const lower = stripAnsi(output).toLowerCase();
-  if (/\b(stopped|not running|not found|not connected|not started|down|failed|error)\b/.test(lower)) return false;
+  if (/\b(stopped|not running|not found|not connected|not started|down|failed|error)\b/.test(lower))
+    return false;
   if (output.includes('"success": false')) return false;
   if (/\b(running|up|healthy|connected|active|started)\b/.test(lower)) return true;
   if (output.includes('"success": true')) return true;

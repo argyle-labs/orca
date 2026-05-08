@@ -12,7 +12,9 @@ function readAttr<T extends string>(attr: string, valid: T[], fallback: T): T {
   try {
     const stored = localStorage.getItem(attr === 'data-theme' ? PALETTE_KEY : MODE_KEY) as T | null;
     if (stored && valid.includes(stored)) return stored;
-  } catch { /* SSR */ }
+  } catch {
+    /* SSR */
+  }
   return fallback;
 }
 
@@ -23,11 +25,15 @@ function applyTheme(palette: Palette, mode: Mode) {
   try {
     localStorage.setItem(PALETTE_KEY, palette);
     localStorage.setItem(MODE_KEY, mode);
-  } catch { /* SSR */ }
+  } catch {
+    /* SSR */
+  }
 }
 
 export function createTheme() {
-  let palette = $state<Palette>(readAttr('data-theme', ['violet', 'ocean', 'ice-age'] as Palette[], 'violet'));
+  let palette = $state<Palette>(
+    readAttr('data-theme', ['violet', 'ocean', 'ice-age'] as Palette[], 'violet'),
+  );
   let mode = $state<Mode>(readAttr('data-mode', ['dark', 'light'] as Mode[], 'dark'));
 
   function setPalette(p: Palette) {
@@ -55,8 +61,12 @@ export function createTheme() {
   }
 
   return {
-    get palette() { return palette; },
-    get mode() { return mode; },
+    get palette() {
+      return palette;
+    },
+    get mode() {
+      return mode;
+    },
     setPalette,
     toggleMode,
     startObserver,

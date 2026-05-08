@@ -54,6 +54,10 @@ async-trait = "0.1"
 
 # Schema derivation for OrcaTool impls
 schemars = { version = "1", features = ["derive"] }
+
+# Runtime JSON-Schema validation: applied to TypedValue payloads on
+# orca/context.publish so declarations from orca/types.declare are enforced.
+jsonschema = { version = "0.30", default-features = false }
 tool    = { package = "orca-tool",    path = "../tool" }
 conversation = { package = "orca-conversation", path = "../conversation" }
 

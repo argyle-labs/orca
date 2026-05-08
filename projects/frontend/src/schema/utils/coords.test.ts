@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { pointerToWorld, fitViewParams, focusNodeParams, zoomByParams, wheelZoomParams } from './coords';
+import {
+  pointerToWorld,
+  fitViewParams,
+  focusNodeParams,
+  zoomByParams,
+  wheelZoomParams,
+} from './coords';
 
 describe('pointerToWorld', () => {
   it('converts screen coords to world space at zoom=1', () => {
@@ -48,7 +54,10 @@ describe('fitViewParams', () => {
   });
 
   it('centers the world in the viewport', () => {
-    const vW = 1000, vH = 800, wW = 1000, wH = 800;
+    const vW = 1000,
+      vH = 800,
+      wW = 1000,
+      wH = 800;
     const { targetX, targetY } = fitViewParams(vW, vH, wW, wH);
     // At zoom 0.9: world visually centered → targetX = targetY = (wW * 0.9 - vW) / 2 / 0.9
     const z = 0.9;
@@ -59,7 +68,14 @@ describe('fitViewParams', () => {
 
 describe('focusNodeParams', () => {
   it('centers the node in the viewport', () => {
-    const node: TableNode = { id: 'n', table: { name: 'n', columns: [] }, x: 500, y: 400, w: 200, h: 100 };
+    const node: TableNode = {
+      id: 'n',
+      table: { name: 'n', columns: [] },
+      x: 500,
+      y: 400,
+      w: 200,
+      h: 100,
+    };
     const { targetX, targetY, targetZoom } = focusNodeParams(1000, 800, node, 1, 1);
     // node center: (500+100, 400+50) = (600, 450)
     // targetX = 600 - 1000/2/1 = 100
@@ -70,13 +86,27 @@ describe('focusNodeParams', () => {
   });
 
   it('uses zoomOverride when provided', () => {
-    const node: TableNode = { id: 'n', table: { name: 'n', columns: [] }, x: 0, y: 0, w: 100, h: 100 };
+    const node: TableNode = {
+      id: 'n',
+      table: { name: 'n', columns: [] },
+      x: 0,
+      y: 0,
+      w: 100,
+      h: 100,
+    };
     const { targetZoom } = focusNodeParams(1000, 800, node, 0.5, 2);
     expect(targetZoom).toBe(2);
   });
 
   it('defaults to max(currentZoom, 0.8)', () => {
-    const node: TableNode = { id: 'n', table: { name: 'n', columns: [] }, x: 0, y: 0, w: 100, h: 100 };
+    const node: TableNode = {
+      id: 'n',
+      table: { name: 'n', columns: [] },
+      x: 0,
+      y: 0,
+      w: 100,
+      h: 100,
+    };
     const { targetZoom: z1 } = focusNodeParams(1000, 800, node, 0.3);
     expect(z1).toBe(0.8);
     const { targetZoom: z2 } = focusNodeParams(1000, 800, node, 1.5);

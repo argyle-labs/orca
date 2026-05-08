@@ -1,8 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import {
-  TABLE_WIDTH, ROW_HEIGHT, HEADER_HEIGHT, MAX_VISIBLE_COLS, TABLE_GAP,
-  DOMAIN_PADDING, DOMAIN_GAP, DOMAIN_HEADER_HEIGHT,
-  GROUP_PADDING, GROUP_HEADER_HEIGHT, GROUP_SUB_GAP,
+  TABLE_WIDTH,
+  ROW_HEIGHT,
+  HEADER_HEIGHT,
+  MAX_VISIBLE_COLS,
+  TABLE_GAP,
+  DOMAIN_PADDING,
+  DOMAIN_GAP,
+  DOMAIN_HEADER_HEIGHT,
+  GROUP_PADDING,
+  GROUP_HEADER_HEIGHT,
+  GROUP_SUB_GAP,
 } from './constants';
 
 describe('layout constants', () => {
@@ -18,8 +26,19 @@ describe('layout constants', () => {
   it('GROUP_HEADER_HEIGHT is 44', () => expect(GROUP_HEADER_HEIGHT).toBe(44));
   it('GROUP_SUB_GAP is 60', () => expect(GROUP_SUB_GAP).toBe(60));
   it('all values are positive numbers', () => {
-    const all = [TABLE_WIDTH, ROW_HEIGHT, HEADER_HEIGHT, MAX_VISIBLE_COLS, TABLE_GAP,
-      DOMAIN_PADDING, DOMAIN_GAP, DOMAIN_HEADER_HEIGHT, GROUP_PADDING, GROUP_HEADER_HEIGHT, GROUP_SUB_GAP];
+    const all = [
+      TABLE_WIDTH,
+      ROW_HEIGHT,
+      HEADER_HEIGHT,
+      MAX_VISIBLE_COLS,
+      TABLE_GAP,
+      DOMAIN_PADDING,
+      DOMAIN_GAP,
+      DOMAIN_HEADER_HEIGHT,
+      GROUP_PADDING,
+      GROUP_HEADER_HEIGHT,
+      GROUP_SUB_GAP,
+    ];
     all.forEach(v => expect(v).toBeGreaterThan(0));
   });
 });

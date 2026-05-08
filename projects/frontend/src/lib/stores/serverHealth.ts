@@ -22,7 +22,9 @@ function createServerHealth() {
 
   function start() {
     check();
-    return () => { if (timer) clearTimeout(timer); };
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
   }
 
   function retry() {
