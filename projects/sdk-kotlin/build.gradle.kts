@@ -17,8 +17,16 @@ version = "0.1.0"
 
 repositories { mavenCentral() }
 
+// Use whichever JDK is running Gradle (must be ≥21). Avoids needing a
+// toolchain download repository for fresh checkouts.
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
 kotlin {
-    jvmToolchain(21)
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
+    }
 }
 
 dependencies {
@@ -26,8 +34,9 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.tomlj:tomlj:1.1.1")
 
-    testImplementation(kotlin("test"))
+    testImplementation(kotlin("test-junit5"))
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
 application {

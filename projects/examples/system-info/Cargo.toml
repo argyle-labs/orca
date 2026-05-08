@@ -1,0 +1,20 @@
+[package]
+name = "orca-example-system-info"
+version = "0.1.0"
+edition.workspace = true
+
+# Local OS metrics (CPU load, memory) published into the
+# `system:metrics` context every interval. A minimal but honest example
+# of how a Rust plugin participates in the orca contract.
+
+[[bin]]
+name = "orca-example-system-info"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+serde_json = "1"
+sysinfo = "0.33"
+tokio = { version = "1", features = ["macros", "rt", "net", "io-util", "sync", "time"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+orca-sdk = { path = "../../sdk" }

@@ -178,3 +178,81 @@ async fn typescript_reference_plugin_is_conformant() {
     );
     assert_eq!(report.steps.len(), 3);
 }
+
+/// Build the Kotlin reference plugin (projects/sdk-kotlin) and run it
+/// through the same conformance checker. Skipped if `gradle` or `java` are
+/// missing — the Rust port remains the gating reference.
+#[tokio::test(flavor = "current_thread")]
+async fn kotlin_reference_plugin_is_conformant() {
+    install_ring();
+
+    if Command::new("gradle").arg("--version").output().is_err()
+        || Command::new("java").arg("--version").output().is_err()
+    {
+        eprintln!("skipping kotlin conformance test: gradle/java not on PATH");
+        return;
+    }
+
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crate has parent")
+        .parent()
+        .expect("workspace root")
+        .to_path_buf();
+    let kt_module = workspace_root.join("projects/sdk-kotlin");
+    assert!(
+        kt_module.join("build.gradle.kts").exists(),
+        "missing Kotlin SDK at {}",
+        kt_module.display()
+    );
+
+    let status = Command::new("gradle")
+        .args(["--no-daemon", "-q", "conformanceJar"])
+        .current_dir(&kt_module)
+        .status()
+        .expect("spawn gradle");
+    assert!(status.success(), "gradle conformanceJar failed: {status}");
+
+    // Locate the built fat-jar (conformance-all classifier).
+    let libs = kt_module.join("build/libs");
+    let jar = std::fs::read_dir(&libs)
+        .expect("read build/libs")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.ends_with("-conformance-all.jar"))
+        })
+        .expect("conformance-all.jar present");
+
+    let outdir = tempfile::tempdir().expect("tempdir for kotlin launcher");
+    let launcher = outdir.path().join("orca-conformance-plugin-kt");
+    std::fs::write(
+        &launcher,
+        format!(
+            "#!/usr/bin/env bash\nexec java -jar {} \"$@\"\n",
+            jar.display()
+        ),
+    )
+    .expect("write launcher");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod launcher");
+    }
+
+    let cfg = SubprocessConfig {
+        plugin_binary: launcher,
+        workdir: None,
+        timeout: Duration::from_secs(30),
+    };
+    let report = run_subprocess(cfg).await.expect("run_subprocess");
+    assert!(
+        report.passed,
+        "Kotlin reference plugin not conformant. Steps: {:#?}",
+        report.steps
+    );
+    assert_eq!(report.steps.len(), 3);
+}
