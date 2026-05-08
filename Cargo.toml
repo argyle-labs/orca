@@ -9,6 +9,7 @@ members = [
     "projects/jobs",
     "projects/llm",
     "projects/scanner",
+    "projects/sdk",
     "projects/server",
     "projects/conversation",
     "projects/state",
