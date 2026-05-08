@@ -10,7 +10,6 @@ export default defineConfig({
     exclude: [
       'node_modules/**',
       'e2e/**',
-      'src/components/**',
     ],
   },
   resolve: {
