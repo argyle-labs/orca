@@ -1,17 +1,33 @@
 name: Release — orca
 
+# Automatic: fires after CI passes on main and auto-detects the bump level
+# from conventional commits since the last release tag.
+#
+# Bump rules (highest wins):
+#   feat!: / BREAKING CHANGE  → major
+#   feat:                      → minor
+#   fix: / perf: / refactor:   → patch
+#   chore: / docs: / ci: etc.  → skip (no release)
+#
+# Manual override: workflow_dispatch lets you force a bump level or channel.
+
 on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
   workflow_dispatch:
     inputs:
       bump:
-        description: "Version bump (applied to next stable version)"
-        required: true
+        description: "Version bump (blank = auto-detect from commits)"
+        required: false
         type: choice
-        options: [patch, minor, major]
-        default: patch
+        options: ['', patch, minor, major]
+        default: ''
       channel:
         description: "Release channel"
-        required: true
+        required: false
         type: choice
         options: [stable, alpha, beta, rc]
         default: stable
@@ -28,34 +44,92 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # ── 1. Compute version, commit to Cargo.toml, tag ────────────────────────
+  # ── 1. Decide whether to release and compute the version ─────────────────
   version:
     runs-on: ubuntu-latest
     outputs:
-      version:      ${{ steps.bump.outputs.version }}
-      tag:          ${{ steps.bump.outputs.tag }}
+      skip:          ${{ steps.bump.outputs.skip }}
+      version:       ${{ steps.bump.outputs.version }}
+      tag:           ${{ steps.bump.outputs.tag }}
       is_prerelease: ${{ steps.bump.outputs.is_prerelease }}
-      previous:     ${{ steps.bump.outputs.previous }}
+      previous:      ${{ steps.bump.outputs.previous }}
+      bump:          ${{ steps.bump.outputs.bump }}
+      channel:       ${{ steps.bump.outputs.channel }}
     steps:
       - uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
+          # For workflow_run, check out the exact commit CI validated.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Compute version
         id: bump
         run: |
-          CHANNEL="${{ inputs.channel }}"
-          TOML=projects/server/Cargo.toml
+          set -euo pipefail
 
-          # Latest stable tag as bump base
-          LATEST_STABLE=$(git tag -l 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          # ── Guard: only proceed when triggered automatically if CI passed ──
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            CONCLUSION="${{ github.event.workflow_run.conclusion }}"
+            if [ "$CONCLUSION" != "success" ]; then
+              echo "CI conclusion=$CONCLUSION — skipping release"
+              echo "skip=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+
+          git fetch --tags --quiet
+
+          # ── Guard: skip if HEAD is itself a release commit (prevents loop) ──
+          HEAD_MSG=$(git log -1 --pretty=format:"%s")
+          if echo "$HEAD_MSG" | grep -qE '^chore: release v'; then
+            echo "HEAD is a release commit — skipping"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # ── Resolve channel ──────────────────────────────────────────────────
+          CHANNEL="${{ inputs.channel }}"
+          [ -z "$CHANNEL" ] && CHANNEL="stable"
+
+          # ── Latest stable tag as the version base ──────────────────────────
+          LATEST_STABLE=$(git tag -l 'v[0-9]*' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
           LATEST_STABLE=${LATEST_STABLE:-v0.0.0}
 
-          VERSION=${LATEST_STABLE#v}
+          # ── Commits since last stable tag (excluding release chore commits) ─
+          if [ "$LATEST_STABLE" = "v0.0.0" ]; then
+            COMMITS=$(git log --pretty=format:"%s" \
+              | grep -v '^chore: release v' | head -200 || true)
+          else
+            COMMITS=$(git log "${LATEST_STABLE}..HEAD" --pretty=format:"%s" \
+              | grep -v '^chore: release v' | head -200 || true)
+          fi
+
+          # ── Auto-detect or use override ─────────────────────────────────────
+          BUMP_OVERRIDE="${{ inputs.bump }}"
+
+          if [ -n "$BUMP_OVERRIDE" ]; then
+            BUMP="$BUMP_OVERRIDE"
+          else
+            if echo "$COMMITS" | grep -qiE '^[a-z]+(\([^)]*\))?!:|BREAKING[[:space:]]CHANGE'; then
+              BUMP="major"
+            elif echo "$COMMITS" | grep -qiE '^feat(\([^)]*\))?[:(]|^feat:'; then
+              BUMP="minor"
+            elif echo "$COMMITS" | grep -qiE '^(fix|perf|refactor)(\([^)]*\))?[:(]'; then
+              BUMP="patch"
+            else
+              echo "No releasable commits since $LATEST_STABLE — skipping"
+              echo "skip=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+
+          # ── Compute next version ─────────────────────────────────────────────
+          VERSION="${LATEST_STABLE#v}"
           IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
 
-          case "${{ inputs.bump }}" in
+          case "$BUMP" in
             major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
             minor) MINOR=$((MINOR+1)); PATCH=0 ;;
             patch) PATCH=$((PATCH+1)) ;;
@@ -79,13 +153,17 @@ jobs:
             IS_PRERELEASE=true
           fi
 
+          echo "Releasing: $LATEST_STABLE → v$NEW  (bump=$BUMP, channel=$CHANNEL)"
+          echo "skip=false"                  >> $GITHUB_OUTPUT
           echo "version=$NEW"               >> $GITHUB_OUTPUT
-          echo "tag=v${NEW}"                >> $GITHUB_OUTPUT
+          echo "tag=v${NEW}"               >> $GITHUB_OUTPUT
           echo "is_prerelease=$IS_PRERELEASE" >> $GITHUB_OUTPUT
-          echo "previous=v${PREV#v}"        >> $GITHUB_OUTPUT
-          echo "Releasing: $LATEST_STABLE → v$NEW (channel=$CHANNEL)"
+          echo "previous=v${PREV#v}"       >> $GITHUB_OUTPUT
+          echo "bump=$BUMP"                 >> $GITHUB_OUTPUT
+          echo "channel=$CHANNEL"           >> $GITHUB_OUTPUT
 
       - name: Write version to Cargo.toml
+        if: steps.bump.outputs.skip != 'true'
         run: |
           NEW="${{ steps.bump.outputs.version }}"
           TOML=projects/server/Cargo.toml
@@ -94,6 +172,7 @@ jobs:
           cargo update -p orca --precise "$NEW" 2>/dev/null || cargo update -p orca || true
 
       - name: Commit and tag
+        if: steps.bump.outputs.skip != 'true'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -105,6 +184,7 @@ jobs:
   # ── 2. Build across all targets ──────────────────────────────────────────
   build:
     needs: version
+    if: needs.version.outputs.skip != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -166,6 +246,7 @@ jobs:
   # ── 3. Changelog + release ───────────────────────────────────────────────
   release:
     needs: [version, build]
+    if: needs.version.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -182,27 +263,29 @@ jobs:
         run: cat artifacts/*.sha256 > artifacts/checksums.sha256
 
       - name: Generate changelog
-        id: changelog
         run: |
           PREV="${{ needs.version.outputs.previous }}"
           NEW="v${{ needs.version.outputs.version }}"
-          CHANNEL="${{ inputs.channel }}"
+          CHANNEL="${{ needs.version.outputs.channel }}"
 
           [ "$PREV" = "v0.0.0" ] && RANGE="HEAD" || RANGE="${PREV}..HEAD"
-          COMMITS=$(git log "$RANGE" --pretty=format:"%s" | head -100)
+          COMMITS=$(git log "$RANGE" --pretty=format:"%s" \
+            | grep -v '^chore: release v' | head -100)
 
           section() {
             local title="$1"; shift
             local items=""
             for prefix in "$@"; do
-              items="$items$(echo "$COMMITS" | grep -i "^${prefix}[:(]" | sed 's/^/- /' || true)"
+              items="$items$(echo "$COMMITS" | grep -i "^${prefix}[:(]" | sed 's/^/- /' || true)"$'\n'
             done
-            [ -n "$(echo "$items" | tr -d '[:space:]')" ] && printf "### %s\n%s\n\n" "$title" "$items"
+            [ -n "$(echo "$items" | tr -d '[:space:]')" ] && printf "### %s\n%s\n" "$title" "$items"
           }
 
           EXTRA="${{ inputs.notes }}"
-          HEADER=""; [ -n "$EXTRA" ] && HEADER="${EXTRA}\n\n---\n\n"
-          [ "$CHANNEL" != "stable" ] && HEADER="${HEADER}> **Pre-release** \`${CHANNEL}\` — not recommended for production.\n\n"
+          HEADER=""
+          [ -n "$EXTRA" ] && HEADER="${EXTRA}\n\n---\n\n"
+          [ "$CHANNEL" != "stable" ] && \
+            HEADER="${HEADER}> **Pre-release** \`${CHANNEL}\` — not recommended for production.\n\n"
 
           BODY="${HEADER}## What's Changed\n\n"
           BODY="${BODY}$(section 'Features'    feat feature)"
@@ -217,8 +300,13 @@ jobs:
             BODY="${HEADER}## What's Changed\n\n$(echo "$COMMITS" | head -50 | sed 's/^/- /')\n\n"
           fi
 
-          BODY="${BODY}## Installation\n\n\`\`\`sh\n# Apple Silicon\ncurl -Lo orca https://github.com/\${{ github.repository }}/releases/download/${NEW}/orca-aarch64-apple-darwin\n\n# Intel Mac\ncurl -Lo orca https://github.com/\${{ github.repository }}/releases/download/${NEW}/orca-x86_64-apple-darwin\n\nchmod +x orca && mv orca ~/.local/bin/orca\n# Clear Gatekeeper quarantine flag:\nxattr -d com.apple.quarantine ~/.local/bin/orca\n\`\`\`\n\n"
-          BODY="${BODY}**Full diff:** [$PREV → $NEW](https://github.com/${{ github.repository }}/compare/${PREV}...${NEW})"
+          REPO="${{ github.repository }}"
+          BODY="${BODY}\n## Installation\n\n\`\`\`sh\n"
+          BODY="${BODY}# Apple Silicon\ncurl -Lo orca https://github.com/${REPO}/releases/download/${NEW}/orca-aarch64-apple-darwin\n\n"
+          BODY="${BODY}# Intel Mac\ncurl -Lo orca https://github.com/${REPO}/releases/download/${NEW}/orca-x86_64-apple-darwin\n\n"
+          BODY="${BODY}chmod +x orca && mv orca ~/.local/bin/orca\n"
+          BODY="${BODY}xattr -d com.apple.quarantine ~/.local/bin/orca  # clear Gatekeeper flag\n\`\`\`\n\n"
+          BODY="${BODY}**Full diff:** [$PREV → $NEW](https://github.com/${REPO}/compare/${PREV}...${NEW})"
 
           printf "%b" "$BODY" > /tmp/changelog.md
 
