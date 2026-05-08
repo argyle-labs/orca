@@ -1,31 +1,37 @@
-name: Release — orca
+name: Release
 
-# Manual release: you choose the bump type and channel.
-# Version number is auto-computed from the latest release tag — no manual
-# editing of Cargo.toml or version strings required.
+# Single, gated release pipeline.
 #
-# Typical flow:
-#   1. Run Pipeline workflow to validate everything.
-#   2. Run this workflow (patch/minor/major + alpha/rc/stable).
-#   3. If pre-release: run Promote workflow when ready to go stable.
+# Flow when triggered:
+#   1. validate     — fmt, clippy, full test suite, SDK isolation, frontend
+#   2. version      — auto-compute the next RC + corresponding stable tag
+#   3. build        — matrix build of all release binaries
+#   4. publish-rc   — gated by `release-rc` environment (manual approval)
+#                     → tags vX.Y.Z-rc.N + creates GitHub pre-release
+#   5. publish-stable — gated by `release-stable` environment (manual approval)
+#                     → tags vX.Y.Z + creates stable release reusing RC artifacts
+#                     → marks RC release as superseded
+#
+# Setup (one-time, in repo settings):
+#   Settings → Environments → New environment:
+#     - "release-rc"     — add yourself as required reviewer
+#     - "release-stable" — add yourself as required reviewer
+#
+# Trigger:
+#   Actions → Release → Run workflow → choose bump type → Run.
+#   Default bump=patch; pick minor/major when those apply.
 
 on:
   workflow_dispatch:
     inputs:
       bump:
-        description: "Version bump"
+        description: "Version bump from latest stable"
         required: true
         type: choice
         options: [patch, minor, major]
         default: patch
-      channel:
-        description: "Release channel"
-        required: true
-        type: choice
-        options: [stable, alpha, beta, rc]
-        default: stable
       notes:
-        description: "Additional release notes (optional, prepended to changelog)"
+        description: "Extra release notes (optional, prepended to changelog)"
         required: false
         type: string
 
@@ -35,21 +41,80 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # ── 1. Compute version, commit to Cargo.toml, tag ────────────────────────
+  # ── 1. Validate ──────────────────────────────────────────────────────────
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-validate-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (all targets)
+        run: RUSTFLAGS="-D warnings" cargo clippy --all-targets -- -D warnings
+
+      - name: Full test suite
+        run: cargo test --workspace
+
+      - name: SDK isolation check
+        run: |
+          if cargo tree -p orca-sdk 2>&1 | grep -E "orca-server|orca-commands|orca-conversation|orca-agents|orca-llm|orca-scanner|rust-embed"; then
+            echo "ERROR: server-only crate found in orca-sdk dependency tree"
+            exit 1
+          fi
+
+  frontend:
+    name: Validate frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: projects/frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: projects/frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run check
+      - run: npm run test:run
+      - run: npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: projects/frontend/dist/
+          retention-days: 7
+
+  # ── 2. Compute next RC + stable versions ─────────────────────────────────
   version:
+    name: Compute version
+    needs: [validate, frontend]
     runs-on: ubuntu-latest
     outputs:
-      version:       ${{ steps.bump.outputs.version }}
-      tag:           ${{ steps.bump.outputs.tag }}
-      is_prerelease: ${{ steps.bump.outputs.is_prerelease }}
-      previous:      ${{ steps.bump.outputs.previous }}
-      channel:       ${{ steps.bump.outputs.channel }}
+      stable_version: ${{ steps.bump.outputs.stable_version }}
+      stable_tag:     ${{ steps.bump.outputs.stable_tag }}
+      rc_version:     ${{ steps.bump.outputs.rc_version }}
+      rc_tag:         ${{ steps.bump.outputs.rc_tag }}
+      previous_stable: ${{ steps.bump.outputs.previous_stable }}
     steps:
       - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
       - name: Compute version
@@ -58,67 +123,47 @@ jobs:
           set -euo pipefail
           git fetch --tags --quiet
 
-          CHANNEL="${{ inputs.channel }}"
           BUMP="${{ inputs.bump }}"
 
-          # Latest stable tag as the version base
+          # Find latest stable tag (vX.Y.Z, no suffix).
           LATEST_STABLE=$(git tag -l 'v[0-9]*' \
             | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
           LATEST_STABLE=${LATEST_STABLE:-v0.0.0}
 
-          VERSION="${LATEST_STABLE#v}"
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
-
+          IFS='.' read -r MAJOR MINOR PATCH <<< "${LATEST_STABLE#v}"
           case "$BUMP" in
             major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
             minor) MINOR=$((MINOR+1)); PATCH=0 ;;
             patch) PATCH=$((PATCH+1)) ;;
           esac
-
           NEXT_STABLE="${MAJOR}.${MINOR}.${PATCH}"
 
-          if [ "$CHANNEL" = "stable" ]; then
-            NEW="$NEXT_STABLE"
-            IS_PRERELEASE=false
-            PREV="$LATEST_STABLE"
+          # Auto-increment RC number for this stable target.
+          LATEST_RC=$(git tag -l "v${NEXT_STABLE}-rc.*" | sort -V | tail -1)
+          if [ -z "$LATEST_RC" ]; then
+            N=1
           else
-            LATEST_PRE=$(git tag -l "v${NEXT_STABLE}-${CHANNEL}.*" | sort -V | tail -1)
-            if [ -z "$LATEST_PRE" ]; then
-              N=1; PREV="$LATEST_STABLE"
-            else
-              N=$(echo "$LATEST_PRE" | sed "s/.*${CHANNEL}\.//"); N=$((N+1))
-              PREV="$LATEST_PRE"
-            fi
-            NEW="${NEXT_STABLE}-${CHANNEL}.${N}"
-            IS_PRERELEASE=true
+            N=$(echo "$LATEST_RC" | sed 's/.*rc\.//')
+            N=$((N+1))
           fi
 
-          echo "Releasing: $LATEST_STABLE → v$NEW  (bump=$BUMP, channel=$CHANNEL)"
-          echo "version=$NEW"               >> $GITHUB_OUTPUT
-          echo "tag=v${NEW}"               >> $GITHUB_OUTPUT
-          echo "is_prerelease=$IS_PRERELEASE" >> $GITHUB_OUTPUT
-          echo "previous=v${PREV#v}"       >> $GITHUB_OUTPUT
-          echo "channel=$CHANNEL"           >> $GITHUB_OUTPUT
+          RC_VERSION="${NEXT_STABLE}-rc.${N}"
 
-      - name: Write version to Cargo.toml
-        run: |
-          NEW="${{ steps.bump.outputs.version }}"
-          TOML=projects/server/Cargo.toml
-          CURRENT=$(grep '^version' "$TOML" | head -1 | sed 's/version = "\(.*\)"/\1/')
-          sed -i "0,/^version = \"${CURRENT}\"/s//version = \"${NEW}\"/" "$TOML"
-          cargo update -p orca --precise "$NEW" 2>/dev/null || cargo update -p orca || true
+          echo "Latest stable : $LATEST_STABLE"
+          echo "Next stable   : v${NEXT_STABLE}"
+          echo "Next RC       : v${RC_VERSION}"
 
-      - name: Commit and tag
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add projects/server/Cargo.toml Cargo.lock
-          git diff --cached --quiet || git commit -m "chore: release ${{ steps.bump.outputs.tag }}"
-          git tag -a "${{ steps.bump.outputs.tag }}" -m "orca ${{ steps.bump.outputs.tag }}"
-          git push origin HEAD --tags
+          {
+            echo "stable_version=$NEXT_STABLE"
+            echo "stable_tag=v${NEXT_STABLE}"
+            echo "rc_version=$RC_VERSION"
+            echo "rc_tag=v${RC_VERSION}"
+            echo "previous_stable=$LATEST_STABLE"
+          } >> "$GITHUB_OUTPUT"
 
-  # ── 2. Build across all targets ──────────────────────────────────────────
+  # ── 3. Build matrix ──────────────────────────────────────────────────────
   build:
+    name: Build ${{ matrix.target }}
     needs: version
     strategy:
       fail-fast: false
@@ -138,12 +183,9 @@ jobs:
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             musl: true
-
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.version.outputs.tag }}
 
       - name: Install musl tools
         if: matrix.musl
@@ -155,7 +197,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: release-build-${{ matrix.target }}
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} --manifest-path projects/server/Cargo.toml
@@ -176,17 +218,23 @@ jobs:
           path: |
             orca-${{ matrix.target }}
             orca-${{ matrix.target }}.sha256
-          retention-days: 1
+          retention-days: 7
 
-  # ── 3. Changelog + release ───────────────────────────────────────────────
-  release:
+  # ── 4. Publish RC (manual approval) ──────────────────────────────────────
+  publish-rc:
+    name: Publish RC (gate)
     needs: [version, build]
     runs-on: ubuntu-latest
+    environment:
+      name: release-rc
+      url: https://github.com/${{ github.repository }}/releases/tag/${{ needs.version.outputs.rc_tag }}
+    outputs:
+      commit: ${{ steps.tag.outputs.commit }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ needs.version.outputs.tag }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/download-artifact@v4
         with:
@@ -196,11 +244,29 @@ jobs:
       - name: Merge checksums
         run: cat artifacts/*.sha256 > artifacts/checksums.sha256
 
-      - name: Generate changelog
+      - name: Write RC version to Cargo.toml
         run: |
-          PREV="${{ needs.version.outputs.previous }}"
-          NEW="v${{ needs.version.outputs.version }}"
-          CHANNEL="${{ needs.version.outputs.channel }}"
+          NEW="${{ needs.version.outputs.rc_version }}"
+          TOML=projects/server/Cargo.toml
+          CURRENT=$(grep '^version' "$TOML" | head -1 | sed 's/version = "\(.*\)"/\1/')
+          sed -i "0,/^version = \"${CURRENT}\"/s//version = \"${NEW}\"/" "$TOML"
+          cargo update -p orca --precise "$NEW" 2>/dev/null || cargo update -p orca || true
+
+      - name: Commit and tag RC
+        id: tag
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add projects/server/Cargo.toml Cargo.lock
+          git diff --cached --quiet || git commit -m "chore: release ${{ needs.version.outputs.rc_tag }}"
+          git tag -a "${{ needs.version.outputs.rc_tag }}" -m "orca ${{ needs.version.outputs.rc_tag }}"
+          git push origin HEAD --tags
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Generate RC changelog
+        run: |
+          PREV="${{ needs.version.outputs.previous_stable }}"
+          NEW="${{ needs.version.outputs.rc_tag }}"
 
           [ "$PREV" = "v0.0.0" ] && RANGE="HEAD" || RANGE="${PREV}..HEAD"
           COMMITS=$(git log "$RANGE" --pretty=format:"%s" \
@@ -218,8 +284,7 @@ jobs:
           EXTRA="${{ inputs.notes }}"
           HEADER=""
           [ -n "$EXTRA" ] && HEADER="${EXTRA}\n\n---\n\n"
-          [ "$CHANNEL" != "stable" ] && \
-            HEADER="${HEADER}> **Pre-release** \`${CHANNEL}\` — not recommended for production.\n\n"
+          HEADER="${HEADER}> **Pre-release** \`rc\` — pending stable promotion approval.\n\n"
 
           BODY="${HEADER}## What's Changed\n\n"
           BODY="${BODY}$(section 'Features'    feat feature)"
@@ -237,20 +302,126 @@ jobs:
           REPO="${{ github.repository }}"
           BODY="${BODY}\n## Installation\n\n\`\`\`sh\n"
           BODY="${BODY}# Apple Silicon\ncurl -Lo orca https://github.com/${REPO}/releases/download/${NEW}/orca-aarch64-apple-darwin\n\n"
-          BODY="${BODY}# Intel Mac\ncurl -Lo orca https://github.com/${REPO}/releases/download/${NEW}/orca-x86_64-apple-darwin\n\n"
-          BODY="${BODY}chmod +x orca && mv orca ~/.local/bin/orca\n"
-          BODY="${BODY}xattr -d com.apple.quarantine ~/.local/bin/orca  # clear Gatekeeper flag\n\`\`\`\n\n"
+          BODY="${BODY}chmod +x orca && mv orca ~/.local/bin/orca\nxattr -d com.apple.quarantine ~/.local/bin/orca\n\`\`\`\n\n"
           BODY="${BODY}**Full diff:** [$PREV → $NEW](https://github.com/${REPO}/compare/${PREV}...${NEW})"
 
           printf "%b" "$BODY" > /tmp/changelog.md
 
-      - name: Create release
+      - name: Create RC release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.version.outputs.tag }}
-          name: orca ${{ needs.version.outputs.tag }}
+          tag_name: ${{ needs.version.outputs.rc_tag }}
+          name: orca ${{ needs.version.outputs.rc_tag }}
           body_path: /tmp/changelog.md
-          prerelease: ${{ needs.version.outputs.is_prerelease }}
+          prerelease: true
           files: |
             artifacts/orca-*
             artifacts/checksums.sha256
+
+  # ── 5. Promote to stable (manual approval) ───────────────────────────────
+  publish-stable:
+    name: Publish stable (gate)
+    needs: [version, publish-rc]
+    runs-on: ubuntu-latest
+    environment:
+      name: release-stable
+      url: https://github.com/${{ github.repository }}/releases/tag/${{ needs.version.outputs.stable_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull RC commit
+        run: git fetch origin && git checkout ${{ needs.publish-rc.outputs.commit }}
+
+      - name: Download RC artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p artifacts
+          gh release download "${{ needs.version.outputs.rc_tag }}" \
+            --dir artifacts \
+            --pattern "orca-*" \
+            --pattern "checksums.sha256"
+          ls -lh artifacts/
+
+      - name: Write stable version to Cargo.toml
+        run: |
+          NEW="${{ needs.version.outputs.stable_version }}"
+          TOML=projects/server/Cargo.toml
+          CURRENT=$(grep '^version' "$TOML" | head -1 | sed 's/version = "\(.*\)"/\1/')
+          sed -i "0,/^version = \"${CURRENT}\"/s//version = \"${NEW}\"/" "$TOML"
+
+      - name: Commit and tag stable
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -B main
+          git add projects/server/Cargo.toml
+          git diff --cached --quiet || git commit -m "chore: release ${{ needs.version.outputs.stable_tag }}"
+          git tag -a "${{ needs.version.outputs.stable_tag }}" \
+            -m "orca ${{ needs.version.outputs.stable_tag }} (promoted from ${{ needs.version.outputs.rc_tag }})"
+          git push origin HEAD:main --tags
+
+      - name: Generate stable changelog
+        run: |
+          STABLE="${{ needs.version.outputs.stable_tag }}"
+          RC="${{ needs.version.outputs.rc_tag }}"
+          PREV="${{ needs.version.outputs.previous_stable }}"
+
+          [ "$PREV" = "v0.0.0" ] && RANGE="HEAD" || RANGE="${PREV}..HEAD"
+          COMMITS=$(git log "$RANGE" --pretty=format:"%s" | head -100)
+
+          section() {
+            local title="$1"; shift
+            local items=""
+            for prefix in "$@"; do
+              items="$items$(echo "$COMMITS" | grep -i "^${prefix}[:(]" | sed 's/^/- /' || true)"$'\n'
+            done
+            [ -n "$(echo "$items" | tr -d '[:space:]')" ] && printf "### %s\n%s\n" "$title" "$items"
+          }
+
+          EXTRA="${{ inputs.notes }}"
+          HEADER=""; [ -n "$EXTRA" ] && HEADER="${EXTRA}\n\n---\n\n"
+          HEADER="${HEADER}> Promoted from \`${RC}\`. Binaries are identical.\n\n"
+
+          BODY="${HEADER}## What's Changed\n\n"
+          BODY="${BODY}$(section 'Features'    feat feature)"
+          BODY="${BODY}$(section 'Bug Fixes'   fix bug)"
+          BODY="${BODY}$(section 'Performance' perf)"
+          BODY="${BODY}$(section 'Refactoring' refactor refact)"
+          BODY="${BODY}$(section 'Build / CI'  build ci chore)"
+          BODY="${BODY}$(section 'Docs'        docs)"
+
+          COUNT=$(printf "%b" "$BODY" | grep -c '^- ' || true)
+          if [ "${COUNT:-0}" -eq 0 ]; then
+            BODY="${HEADER}## What's Changed\n\n$(echo "$COMMITS" | head -50 | sed 's/^/- /')\n\n"
+          fi
+
+          REPO="${{ github.repository }}"
+          BODY="${BODY}\n## Installation\n\n\`\`\`sh\n# Apple Silicon\ncurl -Lo orca https://github.com/${REPO}/releases/download/${STABLE}/orca-aarch64-apple-darwin\n\nchmod +x orca && mv orca ~/.local/bin/orca\nxattr -d com.apple.quarantine ~/.local/bin/orca\n\`\`\`\n\n"
+          BODY="${BODY}**Full diff:** [$PREV → $STABLE](https://github.com/${REPO}/compare/${PREV}...${STABLE})"
+
+          printf "%b" "$BODY" > /tmp/changelog.md
+
+      - name: Create stable release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.stable_tag }}
+          name: orca ${{ needs.version.outputs.stable_tag }}
+          body_path: /tmp/changelog.md
+          prerelease: false
+          files: |
+            artifacts/orca-*
+            artifacts/checksums.sha256
+
+      - name: Mark RC as superseded
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          STABLE="${{ needs.version.outputs.stable_tag }}"
+          RC="${{ needs.version.outputs.rc_tag }}"
+          gh release edit "$RC" \
+            --notes "> **Superseded** — promoted to stable [$STABLE](https://github.com/${{ github.repository }}/releases/tag/${STABLE})." \
+            --prerelease
