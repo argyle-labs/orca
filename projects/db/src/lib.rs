@@ -75,12 +75,29 @@ pub fn open(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+// Thread-local DB path override — each test thread can set its own isolated DB
+// path without racing against other parallel tests. Takes priority over ORCA_DB_PATH.
+thread_local! {
+    static THREAD_DB_PATH: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Set a per-thread DB path override (for integration tests only).
+/// Pass `None` to clear the override and restore default lookup.
+pub fn set_thread_db_path(path: Option<&str>) {
+    THREAD_DB_PATH.with(|p| *p.borrow_mut() = path.map(|s| s.to_string()));
+}
+
 /// Open orca database using the default path (`~/.orca/orca.db`).
 ///
-/// When `ORCA_DB_PATH` is set (e.g. in tests), that path is used instead.
-/// The env-var path skips SQLCipher encryption so an in-process unencrypted
-/// SQLite file can be used for integration tests.
+/// Resolution order:
+///   1. Thread-local override set by `set_thread_db_path` (integration tests).
+///   2. `ORCA_DB_PATH` env var (legacy / CI override).
+///   3. `~/.orca/orca.db` (encrypted, production).
 pub fn open_default() -> Result<Connection> {
+    let thread_path = THREAD_DB_PATH.with(|p| p.borrow().clone());
+    if let Some(path) = thread_path {
+        return open_unencrypted(std::path::Path::new(&path));
+    }
     if let Ok(path) = std::env::var("ORCA_DB_PATH") {
         return open_unencrypted(std::path::Path::new(&path));
     }
