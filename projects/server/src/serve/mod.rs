@@ -18,6 +18,10 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
 pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()> {
+    let pki_dir = db_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join(config::APP_PKI_DIR);
     let app = build_router(dev, db_path);
 
     let addr: SocketAddr = if dev {
@@ -52,6 +56,9 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     // Non-blocking update check — prints a notice if a newer version is available.
     tokio::spawn(orca_commands::startup_update_check());
 
+    // Plugin host: TCP + mTLS on APP_PLUGIN_PORT. Skips gracefully if PKI not initialized.
+    crate::plugin_host::start(&pki_dir, config::APP_PLUGIN_PORT);
+
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -67,6 +74,10 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
 pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
 
+    let pki_dir = db_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join(config::APP_PKI_DIR);
     let addr: SocketAddr = format!("0.0.0.0:{port}").parse()?;
     let app = build_router(false, db_path);
 
@@ -83,6 +94,9 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     }) {
         tracing::warn!("failed to write initial daemon state: {e}");
     }
+
+    // Plugin host: TCP + mTLS. Skips gracefully if PKI not initialized.
+    crate::plugin_host::start(&pki_dir, config::APP_PLUGIN_PORT);
 
     let mut sigterm = signal(SignalKind::terminate())?;
 

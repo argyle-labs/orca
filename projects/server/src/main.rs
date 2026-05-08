@@ -10,8 +10,8 @@ use orca::serve;
 use orca::serve::openapi_spec_json;
 use orca_commands::{
     self as cmd, CredsAction, DaemonAction, DbAction, DockerAction, EnginesAction, HookAction,
-    McpAction, PluginAction, SchemaAction, SpecAction, cmd_install, cmd_logout_atlassian,
-    cmd_logout_github, cmd_oauth_atlassian, cmd_oauth_github, cmd_uninstall,
+    McpAction, PkiAction, PluginAction, SchemaAction, SpecAction, cmd_install,
+    cmd_logout_atlassian, cmd_logout_github, cmd_oauth_atlassian, cmd_oauth_github, cmd_uninstall,
 };
 
 #[derive(Parser)]
@@ -154,6 +154,12 @@ enum Command {
         action: DockerAction,
     },
 
+    /// Manage the orca PKI (CA init, plugin cert issuance)
+    Pki {
+        #[command(subcommand)]
+        action: PkiAction,
+    },
+
     /// Manage orca plugins (register, list, enable/disable)
     Plugin {
         #[command(subcommand)]
@@ -273,6 +279,7 @@ async fn main() -> Result<()> {
         Some(Command::Schema { action }) => cmd::cmd_schema(action),
         Some(Command::Engines { action }) => cmd::cmd_engines(action),
         Some(Command::Docker { action }) => cmd::cmd_docker(action),
+        Some(Command::Pki { action }) => cmd::cmd_pki(action),
         Some(Command::Plugin { action }) => cmd::cmd_plugin(action),
         Some(Command::Creds { action }) => cmd::cmd_creds(action),
         Some(Command::Db { action }) => cmd::cmd_db(action),

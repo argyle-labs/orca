@@ -16,4 +16,5 @@ pub use ::conversation::tui;
 pub mod log_cmd;
 pub mod markdown;
 pub mod mcp;
+pub mod plugin_host;
 pub mod serve;

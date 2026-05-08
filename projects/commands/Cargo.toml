@@ -4,6 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
+orca-sdk     = { path = "../sdk" }
 orca-agents  = { path = "../agents" }
 orca-scanner = { path = "../scanner", features = ["php-ast"] }
 config       = { package = "orca-config", path = "../config" }
@@ -23,6 +24,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "1"
 sha2 = "0.10"
 rusqlite = { version = "0.39", features = ["bundled-sqlcipher"] }
+dirs = "6"
 rand = "0.9"
 regex = "1"
 base64 = "0.22"

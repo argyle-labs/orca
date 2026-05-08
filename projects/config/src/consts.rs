@@ -8,3 +8,7 @@ pub const APP_REPO_URL: &str = "https://github.com/scottdkey/orca";
 pub const APP_REPO_API_URL: &str = "https://api.github.com/repos/scottdkey/orca";
 pub const APP_SYSTEMD_SERVICE: &str = "orca";
 pub const APP_KEYRING_SERVICE: &str = "orca";
+/// Subdirectory inside APP_STATE_DIR where PKI material (CA, certs) is stored.
+pub const APP_PKI_DIR: &str = "pki";
+/// Default TCP port the plugin RPC host listens on.
+pub const APP_PLUGIN_PORT: u16 = 12002;
