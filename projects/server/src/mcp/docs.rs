@@ -143,11 +143,10 @@ pub fn resolve_within_root(root: &Path, rel: &str) -> Result<PathBuf> {
 pub fn resolve_doc_file(root_dir: &Path, doc_path: &str) -> Option<PathBuf> {
     for ext in &[".md", ".mdx", ""] {
         let rel = format!("{doc_path}{ext}");
-        if let Ok(full) = resolve_within_root(root_dir, &rel) {
-            if full.is_file() {
+        if let Ok(full) = resolve_within_root(root_dir, &rel)
+            && full.is_file() {
                 return Some(full);
             }
-        }
     }
     None
 }

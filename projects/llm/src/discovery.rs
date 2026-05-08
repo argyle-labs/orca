@@ -178,8 +178,8 @@ pub async fn discover_all(config: &Config) -> Vec<DiscoveredModel> {
     ];
 
     // DB-registered providers override or supplement the env defaults.
-    if let Ok(conn) = db::open(&config.db_path) {
-        if let Ok(providers) = db::list_llm_providers(&conn) {
+    if let Ok(conn) = db::open(&config.db_path)
+        && let Ok(providers) = db::list_llm_providers(&conn) {
             for p in providers.into_iter().filter(|p| p.enabled) {
                 // If there's already an entry for this URL, skip (dedup).
                 if !endpoints.iter().any(|(_, u)| u == &p.url) {
@@ -187,7 +187,6 @@ pub async fn discover_all(config: &Config) -> Vec<DiscoveredModel> {
                 }
             }
         }
-    }
 
     // Probe all endpoints concurrently.
     let probes: Vec<_> = endpoints.into_iter().map(|(kind, url)| async move {
@@ -230,10 +229,10 @@ pub async fn discover_all(config: &Config) -> Vec<DiscoveredModel> {
 ///   1. Tool-capable models rank above non-capable when task is ToolUse.
 ///   2. Models with the task in their preferred list rank above those without.
 ///   3. Within the same tier, rank (lower = preferred hardware/family) breaks ties.
-pub fn select_for_task<'a>(
-    models: &'a [DiscoveredModel],
+pub fn select_for_task(
+    models: &[DiscoveredModel],
     task: TaskKind,
-) -> Option<&'a DiscoveredModel> {
+) -> Option<&DiscoveredModel> {
     if models.is_empty() {
         return None;
     }

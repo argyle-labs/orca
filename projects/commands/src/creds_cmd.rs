@@ -65,7 +65,7 @@ pub fn cmd_creds(action: CredsAction) -> Result<()> {
                 println!("no credentials stored for plugin '{plugin}'");
                 return Ok(());
             }
-            println!("{:<40} {:<10} {}", "KEY", "SYNCED", "UPDATED");
+            println!("{:<40} {:<10} UPDATED", "KEY", "SYNCED");
             println!("{}", "-".repeat(72));
             for r in &rows {
                 let synced = r.synced_at.as_deref().unwrap_or("never");
@@ -102,7 +102,7 @@ pub fn cmd_creds(action: CredsAction) -> Result<()> {
                 return Ok(());
             }
 
-            println!("{:<20} {:<8} {:<10} {}", "PLUGIN", "TOKEN", "HTTP", "DETAILS");
+            println!("{:<20} {:<8} {:<10} DETAILS", "PLUGIN", "TOKEN", "HTTP");
             println!("{}", "-".repeat(72));
 
             let mut any_fail = false;
@@ -216,11 +216,10 @@ pub fn sync_plugin_creds(plugin_id: &str) -> Result<()> {
 }
 
 pub fn resolve_plugin_url(plugin: &db::PluginRow) -> Option<String> {
-    if let Some(cmd) = &plugin.mcp_command {
-        if cmd.starts_with("http://") || cmd.starts_with("https://") {
+    if let Some(cmd) = &plugin.mcp_command
+        && (cmd.starts_with("http://") || cmd.starts_with("https://")) {
             return Some(cmd.trim_end_matches('/').to_string());
         }
-    }
     for arg in &plugin.mcp_args {
         if arg.starts_with("http://") || arg.starts_with("https://") {
             return Some(arg.trim_end_matches('/').to_string());

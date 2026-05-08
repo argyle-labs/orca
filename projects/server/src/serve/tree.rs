@@ -101,12 +101,11 @@ pub fn get_search_ignored(root_name: &str) -> HashSet<String> {
 }
 
 fn parse_numeric_prefix(name: &str) -> (Option<u32>, String) {
-    if let Some((prefix, rest)) = name.split_once('-') {
-        if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) {
+    if let Some((prefix, rest)) = name.split_once('-')
+        && !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) {
             let order = prefix.parse::<u32>().ok();
             return (order, rest.to_string());
         }
-    }
     (None, name.to_string())
 }
 

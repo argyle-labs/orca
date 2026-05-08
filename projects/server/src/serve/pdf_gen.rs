@@ -172,9 +172,8 @@ fn markdown_to_typst(md: &str) -> String {
                     _             => out.push_str(&format!("{indent}- ")),
                 }
             }
-            Event::End(TagEnd::Item) => {
-                if !out.ends_with('\n') { out.push('\n'); }
-            }
+            Event::End(TagEnd::Item)
+                if !out.ends_with('\n') => { out.push('\n'); }
 
             // Blockquotes
             Event::Start(Tag::BlockQuote(_)) => {

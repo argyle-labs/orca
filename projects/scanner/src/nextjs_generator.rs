@@ -72,11 +72,10 @@ fn walk(root: &Path, dir: &Path, paths: &mut serde_json::Map<String, Value>) -> 
         } else if matches!(
             p.file_name().and_then(|s| s.to_str()),
             Some("route.ts" | "route.tsx" | "route.js")
-        ) {
-            if let Some((api_path, ops)) = scan_route_file(root, &p)? {
+        )
+            && let Some((api_path, ops)) = scan_route_file(root, &p)? {
                 paths.insert(api_path, ops);
             }
-        }
     }
     Ok(())
 }

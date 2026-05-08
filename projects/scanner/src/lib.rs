@@ -407,32 +407,29 @@ pub fn parse_graphql_sdl(repo: &str, sdl: &str) -> Result<GraphQlInfo> {
     let mut enums = Vec::new();
 
     for def in &doc.definitions {
-        match def {
-            Definition::TypeDefinition(td) => match td {
-                TypeDefinition::Object(obj) => match obj.name.as_str() {
-                    "Query" => queries = obj.fields.iter().map(map_operation).collect(),
-                    "Mutation" => mutations = obj.fields.iter().map(map_operation).collect(),
-                    "Subscription" => subscriptions = obj.fields.iter().map(map_operation).collect(),
-                    _ => types.push(GraphQlType {
-                        name: obj.name.clone(),
-                        description: obj.description.clone(),
-                        fields: obj.fields.iter().map(map_field).collect(),
-                    }),
-                },
-                TypeDefinition::InputObject(inp) => inputs.push(GraphQlType {
-                    name: inp.name.clone(),
-                    description: inp.description.clone(),
-                    fields: inp.fields.iter().map(map_input_field).collect(),
+        if let Definition::TypeDefinition(td) = def { match td {
+            TypeDefinition::Object(obj) => match obj.name.as_str() {
+                "Query" => queries = obj.fields.iter().map(map_operation).collect(),
+                "Mutation" => mutations = obj.fields.iter().map(map_operation).collect(),
+                "Subscription" => subscriptions = obj.fields.iter().map(map_operation).collect(),
+                _ => types.push(GraphQlType {
+                    name: obj.name.clone(),
+                    description: obj.description.clone(),
+                    fields: obj.fields.iter().map(map_field).collect(),
                 }),
-                TypeDefinition::Enum(e) => enums.push(GraphQlEnum {
-                    name: e.name.clone(),
-                    description: e.description.clone(),
-                    values: e.values.iter().map(|v| v.name.clone()).collect(),
-                }),
-                _ => {}
             },
+            TypeDefinition::InputObject(inp) => inputs.push(GraphQlType {
+                name: inp.name.clone(),
+                description: inp.description.clone(),
+                fields: inp.fields.iter().map(map_input_field).collect(),
+            }),
+            TypeDefinition::Enum(e) => enums.push(GraphQlEnum {
+                name: e.name.clone(),
+                description: e.description.clone(),
+                values: e.values.iter().map(|v| v.name.clone()).collect(),
+            }),
             _ => {}
-        }
+        } }
     }
 
     Ok(GraphQlInfo { repo: repo.to_string(), queries, mutations, subscriptions, types, inputs, enums })

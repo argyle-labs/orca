@@ -141,10 +141,10 @@ async fn try_or_refresh_atlassian(access_token: String) -> anyhow::Result<String
 /// Read API key credentials from MCP server config, then env vars.
 fn api_key_creds() -> anyhow::Result<(String, String, String)> {
     // Try MCP server config
-    if let Ok(config) = Config::load() {
-        if let Ok(conn) = db::open(&config.db_path) {
-            if let Ok(servers) = db::list_mcp_servers(&conn) {
-                if let Some(server) = servers.into_iter().find(|s| s.name == "atlassian") {
+    if let Ok(config) = Config::load()
+        && let Ok(conn) = db::open(&config.db_path)
+            && let Ok(servers) = db::list_mcp_servers(&conn)
+                && let Some(server) = servers.into_iter().find(|s| s.name == "atlassian") {
                     let args = &server.args;
                     let domain = args
                         .windows(2)
@@ -168,9 +168,6 @@ fn api_key_creds() -> anyhow::Result<(String, String, String)> {
                         return Ok((domain, email, token));
                     }
                 }
-            }
-        }
-    }
 
     // Try environment variables
     let domain = std::env::var("ATLASSIAN_DOMAIN")

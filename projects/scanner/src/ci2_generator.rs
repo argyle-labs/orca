@@ -230,7 +230,7 @@ fn extract_v1_key_routes(body: &str, out: &mut Vec<Endpoint>) {
         // Find arg2 values within this block
         let arg2_values: Vec<String> = arg2_re
             .captures_iter(block)
-            .filter_map(|c| Some(c[1].to_string()))
+            .map(|c| c[1].to_string())
             .collect();
 
         let params = scan_params(block);
@@ -369,11 +369,10 @@ fn scan_required_params(block: &str) -> Vec<String> {
     let mut required = Vec::new();
     for cap in re.captures_iter(block) {
         let name = cap.get(1).or(cap.get(2)).map(|m| m.as_str().to_string());
-        if let Some(n) = name {
-            if !required.contains(&n) {
+        if let Some(n) = name
+            && !required.contains(&n) {
                 required.push(n);
             }
-        }
     }
     required
 }
@@ -509,7 +508,7 @@ fn build_spec(endpoints: Vec<Endpoint>, existing: Option<Value>) -> Value {
         let tag = path_tag(&ep.path);
 
         let mut operation = json!({
-            "operationId": operation_id(&ep.methods.first().map(|s| s.as_str()).unwrap_or("get"), &ep.path),
+            "operationId": operation_id(ep.methods.first().map(|s| s.as_str()).unwrap_or("get"), &ep.path),
             "summary": ep.summary,
             "tags": [tag],
             "parameters": parameters,
@@ -600,11 +599,10 @@ fn build_spec(endpoints: Vec<Endpoint>, existing: Option<Value>) -> Value {
     });
 
     // Carry over components/schemas from existing
-    if let Some(ref ex) = existing {
-        if let Some(schemas) = ex["components"]["schemas"].as_object() {
+    if let Some(ref ex) = existing
+        && let Some(schemas) = ex["components"]["schemas"].as_object() {
             spec["components"]["schemas"] = Value::Object(schemas.clone());
         }
-    }
 
     spec
 }

@@ -396,7 +396,7 @@ pub fn plugin_list(args: &Value) -> Result<String> {
     let conn = db::open_default()?;
     let plugins = db::list_plugins(&conn)?;
     let filtered: Vec<_> = plugins.iter()
-        .filter(|p| workspace.map_or(true, |w| p.tier == w))
+        .filter(|p| workspace.is_none_or(|w| p.tier == w))
         .collect();
     if filtered.is_empty() {
         return Ok("No plugins registered.".to_string());

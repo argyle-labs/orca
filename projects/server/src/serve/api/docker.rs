@@ -66,7 +66,7 @@ pub async fn docker_engine_start_handler() -> Response {
     let home = std::env::var("HOME").unwrap_or_default();
     let local_bin = format!("{home}/.local/bin/colima");
     let candidates: &[&str] = &["/opt/homebrew/bin/colima", "/usr/local/bin/colima", &local_bin];
-    let colima_bin = candidates.iter().find(|p| std::path::Path::new(p).exists()).map(|s| *s);
+    let colima_bin = candidates.iter().find(|p| std::path::Path::new(p).exists()).copied();
     let Some(colima) = colima_bin else {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "colima not found — start Docker Desktop manually");
     };

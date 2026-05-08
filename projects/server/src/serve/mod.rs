@@ -35,8 +35,8 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     // Register as the active dev process so the parked daemon won't auto-reclaim.
     // Use ORCA_DEV_PARENT_PID (the shell script PID) so the registration stays
     // valid across cargo-watch rebuilds — the shell script outlives each server instance.
-    if dev {
-        if let Ok(Some(s)) = state::read() {
+    if dev
+        && let Ok(Some(s)) = state::read() {
             let active_pid = std::env::var("ORCA_DEV_PARENT_PID")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -49,7 +49,6 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
                 tracing::warn!("failed to write dev state: {e}");
             }
         }
-    }
 
     // Non-blocking update check — prints a notice if a newer version is available.
     tokio::spawn(orca_commands::startup_update_check());
@@ -90,8 +89,8 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
 
     // Crash-restart recovery: if launchd restarted us while a dev session was active,
     // wait for the dev server to finish rather than immediately fighting it for the port.
-    if let Ok(Some(mut s)) = state::read() {
-        if s.mode == DaemonMode::Dev {
+    if let Ok(Some(mut s)) = state::read()
+        && s.mode == DaemonMode::Dev {
             info!("[orca] restarted while dev session active — waiting for dev to exit");
             s.daemon_pid = std::process::id();
             if let Err(e) = state::write(&s) {
@@ -118,7 +117,6 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             }
             info!("[orca] dev session ended — binding port {port}");
         }
-    }
 
     loop {
         let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
@@ -249,14 +247,13 @@ fn pid_alive(pid: u32) -> bool {
 /// resolved path). After a redeploy, the symlink is updated to the new binary;
 /// the canonical path from current_exe() points to the old binary on disk.
 fn resolve_daemon_binary() -> String {
-    if let Ok(out) = std::process::Command::new("which").arg("orca").output() {
-        if out.status.success() {
+    if let Ok(out) = std::process::Command::new("which").arg("orca").output()
+        && out.status.success() {
             let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !path.is_empty() {
                 return path;
             }
         }
-    }
     std::env::current_exe()
         .unwrap_or_default()
         .to_string_lossy()

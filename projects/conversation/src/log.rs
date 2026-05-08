@@ -104,22 +104,20 @@ fn read_records(path: &Path) -> Vec<serde_json::Value> {
 
     let mut flags: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for r in &raw {
-        if r["type"].as_str() == Some("flag") {
-            if let (Some(ref_id), Some(note)) = (r["ref"].as_str(), r["note"].as_str()) {
+        if r["type"].as_str() == Some("flag")
+            && let (Some(ref_id), Some(note)) = (r["ref"].as_str(), r["note"].as_str()) {
                 flags.insert(ref_id.to_string(), note.to_string());
             }
-        }
     }
 
     raw.into_iter()
         .filter(|r| r["type"].as_str() != Some("flag"))
         .map(|mut r| {
-            if let Some(id) = r["id"].as_str().map(str::to_string) {
-                if let Some(note) = flags.get(&id) {
+            if let Some(id) = r["id"].as_str().map(str::to_string)
+                && let Some(note) = flags.get(&id) {
                     r["important"] = json!(true);
                     r["note"] = json!(note);
                 }
-            }
             r
         })
         .collect()

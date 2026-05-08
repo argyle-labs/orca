@@ -135,15 +135,12 @@ pub async fn search_handler(
 
     // Attempt LLM reranking when a local model is available.
     // Short timeout (3s) keeps UI search responsive; falls back to raw results silently.
-    if !results.is_empty() && !query.trim().is_empty() {
-        if let Some(local_llm) = llm::discover_local_llm().await {
-            if let Some(reranked) = llm::rerank_results(&local_llm, &query, &results, 3000).await {
-                if !reranked.is_empty() {
+    if !results.is_empty() && !query.trim().is_empty()
+        && let Some(local_llm) = llm::discover_local_llm().await
+            && let Some(reranked) = llm::rerank_results(&local_llm, &query, &results, 3000).await
+                && !reranked.is_empty() {
                     return Json(reranked).into_response();
                 }
-            }
-        }
-    }
 
     Json(results).into_response()
 }
@@ -200,30 +197,26 @@ fn parse_search_response(text: &str, root: &str, out: &mut Vec<serde_json::Value
 
     for (i, line) in lines.iter().enumerate() {
         if let Some(header) = line.strip_prefix("### ") {
-            if let Some(p) = current_path.take() {
-                if !snippets.is_empty() {
+            if let Some(p) = current_path.take()
+                && !snippets.is_empty() {
                     out.push(serde_json::json!({ "root": root, "path": p, "matches": snippets }));
                     snippets = Vec::new();
                 }
-            }
             current_path = Some(header.trim_end_matches(" [inline-docs]"));
         } else {
             let trimmed = line.trim();
-            if let Some(rest) = trimmed.strip_prefix('[') {
-                if let Some(end) = rest.find(']') {
+            if let Some(rest) = trimmed.strip_prefix('[')
+                && let Some(end) = rest.find(']') {
                     let content = rest[end + 1..].trim();
                     if !content.is_empty() { snippets.push(content.to_string()); }
                 }
-            }
         }
         // Flush last entry at end
-        if i == lines.len() - 1 {
-            if let Some(p) = current_path.take() {
-                if !snippets.is_empty() {
+        if i == lines.len() - 1
+            && let Some(p) = current_path.take()
+                && !snippets.is_empty() {
                     out.push(serde_json::json!({ "root": root, "path": p, "matches": snippets }));
                 }
-            }
-        }
     }
 }
 
