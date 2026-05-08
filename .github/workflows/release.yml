@@ -126,8 +126,10 @@ jobs:
           BUMP="${{ inputs.bump }}"
 
           # Find latest stable tag (vX.Y.Z, no suffix).
+          # `grep || true` so a fresh repo with no tags doesn't trip pipefail.
           LATEST_STABLE=$(git tag -l 'v[0-9]*' \
-            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+            | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } \
+            | sort -V | tail -1)
           LATEST_STABLE=${LATEST_STABLE:-v0.0.0}
 
           IFS='.' read -r MAJOR MINOR PATCH <<< "${LATEST_STABLE#v}"
