@@ -75,6 +75,66 @@ jobs:
             exit 1
           fi
 
+  # Plugins-side validation runs in parallel with `validate`. Catches SDK
+  # regressions in Go/TS/Kotlin before we burn a build matrix.
+  validate-plugins:
+    name: Validate plugins (Go/TS/Kotlin)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: projects/sdk-go/go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: projects/sdk-ts/package-lock.json
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Go SDK — gofmt + test
+        working-directory: projects/sdk-go
+        run: |
+          diff=$(gofmt -l .)
+          if [ -n "$diff" ]; then
+            echo "Unformatted Go files:"; echo "$diff"; exit 1
+          fi
+          go test ./...
+
+      - name: Go example — adguard-home compile
+        working-directory: projects/examples/adguard-home
+        run: GOFLAGS=-mod=mod go build ./...
+
+      - name: TS SDK — install + test + typecheck
+        working-directory: projects/sdk-ts
+        run: |
+          npm ci
+          npx tsc -p tsconfig.json --noEmit
+          node --test --experimental-strip-types test/*.test.ts
+
+      - name: TS example — hackernews build
+        working-directory: projects/examples/hackernews
+        run: |
+          npm ci
+          npm run build
+
+      - name: Kotlin SDK — test
+        working-directory: projects/sdk-kotlin
+        run: gradle --no-daemon test
+
+      - name: Kotlin example — github-releases compile
+        working-directory: projects/examples/github-releases
+        run: gradle --no-daemon compileKotlin
+
   frontend:
     name: Validate frontend
     runs-on: ubuntu-latest
@@ -104,7 +164,7 @@ jobs:
   # ── 2. Compute next RC + stable versions ─────────────────────────────────
   version:
     name: Compute version
-    needs: [validate, frontend]
+    needs: [validate, validate-plugins, frontend]
     runs-on: ubuntu-latest
     outputs:
       stable_version: ${{ steps.bump.outputs.stable_version }}
@@ -201,18 +261,26 @@ jobs:
         with:
           key: release-build-${{ matrix.target }}
 
-      - name: Build
+      - name: Build orca
         run: cargo build --release --target ${{ matrix.target }} --manifest-path projects/server/Cargo.toml
 
-      - name: Stage binary
+      - name: Build Rust example plugin (system-info)
+        run: cargo build --release --target ${{ matrix.target }} -p orca-example-system-info
+
+      - name: Stage binaries + checksums
         run: |
-          ASSET="orca-${{ matrix.target }}"
-          cp target/${{ matrix.target }}/release/orca "$ASSET"
+          set -euo pipefail
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "$ASSET" > "${ASSET}.sha256"
+            SUM="sha256sum"
           else
-            shasum -a 256 "$ASSET" > "${ASSET}.sha256"
+            SUM="shasum -a 256"
           fi
+
+          for src in orca orca-example-system-info; do
+            ASSET="${src}-${{ matrix.target }}"
+            cp "target/${{ matrix.target }}/release/${src}" "$ASSET"
+            $SUM "$ASSET" > "${ASSET}.sha256"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
@@ -222,10 +290,90 @@ jobs:
             orca-${{ matrix.target }}.sha256
           retention-days: 7
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orca-example-system-info-${{ matrix.target }}
+          path: |
+            orca-example-system-info-${{ matrix.target }}
+            orca-example-system-info-${{ matrix.target }}.sha256
+          retention-days: 7
+
+  # ── 3b. Build language-portable plugins ──────────────────────────────────
+  # Go cross-compiles, JVM is platform-portable as a fat-JAR, Node ships as
+  # a tarball. So a single Linux runner produces all artifacts.
+  build-plugins-portable:
+    name: Build portable plugins (Go/TS/Kotlin)
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: projects/sdk-go/go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: projects/sdk-ts/package-lock.json
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build Go example (adguard-home) for 4 targets
+        working-directory: projects/examples/adguard-home
+        run: |
+          set -euo pipefail
+          mkdir -p ../../../staging
+          for pair in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
+            os="${pair%/*}"; arch="${pair#*/}"
+            asset="orca-example-adguard-home-${os}-${arch}"
+            GOOS="$os" GOARCH="$arch" GOFLAGS=-mod=mod \
+              go build -trimpath -ldflags="-s -w" -o "../../../staging/${asset}" .
+            sha256sum "../../../staging/${asset}" > "../../../staging/${asset}.sha256"
+          done
+
+      - name: Build TS example (hackernews) tarball
+        working-directory: projects/examples/hackernews
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          # Production-only deps for the runtime tarball.
+          rm -rf node_modules
+          npm ci --omit=dev
+          tar czf ../../../staging/orca-example-hackernews.tgz \
+            dist package.json node_modules
+          ( cd ../../../staging && sha256sum orca-example-hackernews.tgz \
+              > orca-example-hackernews.tgz.sha256 )
+
+      - name: Build Kotlin example (github-releases) fat-JAR
+        working-directory: projects/examples/github-releases
+        run: |
+          set -euo pipefail
+          gradle --no-daemon appJar
+          src=$(ls build/libs/*-all.jar | head -1)
+          asset="../../../staging/orca-example-github-releases.jar"
+          cp "$src" "$asset"
+          ( cd ../../../staging && sha256sum orca-example-github-releases.jar \
+              > orca-example-github-releases.jar.sha256 )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orca-example-plugins-portable
+          path: staging/*
+          retention-days: 7
+
   # ── 4. Publish RC (manual approval) ──────────────────────────────────────
   publish-rc:
     name: Publish RC (gate)
-    needs: [version, build]
+    needs: [version, build, build-plugins-portable]
     runs-on: ubuntu-latest
     environment:
       name: release-rc
@@ -316,6 +464,8 @@ jobs:
           name: orca ${{ needs.version.outputs.rc_tag }}
           body_path: /tmp/changelog.md
           prerelease: true
+          # `orca-*` glob covers both the orca server binaries and the
+          # `orca-example-*` plugin artifacts.
           files: |
             artifacts/orca-*
             artifacts/checksums.sha256
@@ -342,6 +492,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p artifacts
+          # `orca-*` covers both the orca server binaries and the
+          # `orca-example-*` plugin assets uploaded with the RC.
           gh release download "${{ needs.version.outputs.rc_tag }}" \
             --dir artifacts \
             --pattern "orca-*" \

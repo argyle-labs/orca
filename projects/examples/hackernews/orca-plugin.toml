@@ -1,0 +1,16 @@
+[plugin]
+id               = "hackernews"
+version          = "0.1.0"
+min_orca_version = "0.1.0"
+
+[runtime]
+binary = "./run"
+mode   = "process"
+eager  = false
+
+[surfaces]
+mcp = false
+
+[[capabilities]]
+name        = "context.publish"
+sensitivity = "general"
