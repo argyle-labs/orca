@@ -1,16 +1,17 @@
 <script lang="ts">
+  import { Snippet } from 'svelte';
   interface Props {
     color?: 'green' | 'yellow' | 'red' | 'blue' | 'gray' | 'purple';
-    children: import('svelte').Snippet;
+    children: Snippet;
   }
   let { color = 'gray', children }: Props = $props();
   const colors: Record<string, string> = {
-    green:  'var(--color-success)',
+    green: 'var(--color-success)',
     yellow: 'var(--color-warning)',
-    red:    'var(--color-error)',
-    blue:   'var(--color-info)',
+    red: 'var(--color-error)',
+    blue: 'var(--color-info)',
     purple: 'var(--color-accent)',
-    gray:   'var(--color-text-dim)',
+    gray: 'var(--color-text-dim)',
   };
 </script>
 

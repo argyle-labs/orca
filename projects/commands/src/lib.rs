@@ -16,6 +16,7 @@
 //! - `update`   — self-update from GitHub releases; startup update check
 //! - `oauth`    — GitHub device flow + Atlassian PKCE OAuth; token keychain storage
 //! - `plugin_cmd` — plugin registry: add/remove/list/enable/disable from orca-plugin.toml
+//! - `pki_cmd`   — PKI: init CA, issue plugin certs, list issued certs
 
 // Slash command prompts embedded at build time.
 include!(concat!(env!("OUT_DIR"), "/embedded_commands.rs"));
@@ -41,6 +42,7 @@ pub mod hook_cmd;
 pub mod install;
 pub mod mcp_cmd;
 pub mod oauth;
+pub mod pki_cmd;
 pub mod plugin_cmd;
 pub mod projects;
 pub mod schema_cmd;
@@ -63,6 +65,7 @@ pub use oauth::{
     cmd_logout_atlassian, cmd_logout_github, cmd_oauth_atlassian, cmd_oauth_github,
     load_atlassian_access_token, load_github_token,
 };
+pub use pki_cmd::{PkiAction, cmd_pki};
 pub use plugin_cmd::{PluginAction, cmd_plugin};
 pub use plugin_cmd::{install_plugin, remove_plugin};
 pub use projects::cmd_projects;

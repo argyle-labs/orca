@@ -1,33 +1,36 @@
 //! Orca SDK — headless plugin and federation client library.
 //!
-//! This crate is the dependency surface for Meerkat, workers, and native app
-//! shells. It must never depend on orca-server or anything that requires the
-//! `ui` feature.
+//! This crate is the dependency surface for plugins, Meerkat, workers, and
+//! native app shells. It must never depend on orca-server or anything that
+//! requires the `ui` feature.
 //!
-//! ## Planned surface (not yet implemented)
+//! ## Surface
 //!
-//! - Unix socket transport (local plugin ↔ core)
-//! - TCP + mTLS transport (remote plugin / federation node)
-//! - UDP + DTLS transport (telemetry, presence beacons)
-//! - `orca/*` JSON-RPC extension methods (hello, types.declare, context.subscribe)
-//! - Typed Context / TypedValue system
-//! - Version negotiation / drift enforcement
+//! - [`pki`] — CA and node cert generation + loading
+//! - [`transport`] — TCP+mTLS plugin transport and `orca/hello` handshake
+//! - [`jsonrpc`] — JSON-RPC 2.0 wire types (shared with server plugin host)
+//! - [`framing`] — length-prefixed frame encode/decode
 
-/// SDK version — announced during the connection handshake.
+/// SDK version — announced during the `orca/hello` handshake.
 pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Flavors control which transports and capabilities are compiled in.
+/// Flavor controls which transports and capabilities are compiled in.
 #[derive(Default, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Flavor {
     /// Full SDK: all transports, all capability classes.
     Full,
-    /// Headless only: Unix + TCP+mTLS. No UDP, no dashboard push.
+    /// Headless only: TCP+mTLS. No UDP, no dashboard push.
     #[default]
     Headless,
-    /// Minimal: Unix socket only. For same-host plugins with no network surface.
+    /// Local: same-host plugin, no network surface.
     Local,
 }
+
+pub mod framing;
+pub mod jsonrpc;
+pub mod pki;
+pub mod transport;
 
 #[cfg(test)]
 mod tests {
