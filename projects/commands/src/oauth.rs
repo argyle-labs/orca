@@ -235,7 +235,7 @@ pub fn cmd_logout_atlassian() -> Result<()> {
 
 fn pkce_pair() -> (String, String) {
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     let verifier = URL_SAFE_NO_PAD.encode(bytes);
     let digest = Sha256::digest(verifier.as_bytes());
     let challenge = URL_SAFE_NO_PAD.encode(digest.as_slice());
@@ -244,7 +244,7 @@ fn pkce_pair() -> (String, String) {
 
 fn random_hex(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
-    rand::thread_rng().fill_bytes(&mut buf);
+    rand::rng().fill_bytes(&mut buf);
     buf.iter().fold(String::new(), |mut s, b| {
         use std::fmt::Write;
         let _ = write!(s, "{b:02x}");

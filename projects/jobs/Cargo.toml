@@ -1,13 +1,13 @@
 [package]
 name = "orca-jobs"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
 
 [dependencies]
 llm        = { package = "orca-llm",    path = "../llm" }
 config     = { package = "orca-config", path = "../config" }
 tool       = { package = "orca-tool",   path = "../tool" }
 anyhow = "1"
-colored = "2"
+colored = "3"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
