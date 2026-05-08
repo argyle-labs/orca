@@ -151,7 +151,10 @@ mod tests {
 
     #[test]
     fn is_allowed_auto_approve_allows_all() {
-        let perms = BashPermissions { auto_approve: true, ..Default::default() };
+        let perms = BashPermissions {
+            auto_approve: true,
+            ..Default::default()
+        };
         assert!(perms.is_allowed("rm -rf /"));
         assert!(perms.is_allowed("any command at all"));
     }
