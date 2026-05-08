@@ -101,7 +101,7 @@ pub async fn serve(config: &Config) -> Result<()> {
                 // Include static tools not yet migrated to the registry
                 if let Some(arr) = static_tools.as_array() {
                     for t in arr {
-                        if t["name"].as_str().map_or(true, |n| !registry_names.contains(n as &str)) {
+                        if t["name"].as_str().is_none_or(|n| !registry_names.contains(n as &str)) {
                             all_orca.push(t.clone());
                         }
                     }

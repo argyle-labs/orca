@@ -41,9 +41,9 @@ pub fn list_rebuy_specs() -> Result<String> {
     }
 
     // DB-registered specs (URL-fetched)
-    if let Ok(conn) = db::open_default() {
-        if let Ok(db_specs) = db::list_openapi_specs(&conn) {
-            if !db_specs.is_empty() {
+    if let Ok(conn) = db::open_default()
+        && let Ok(db_specs) = db::list_openapi_specs(&conn)
+            && !db_specs.is_empty() {
                 if !disk_entries.is_empty() { lines.push(String::new()); }
                 lines.push("URL-registered specs:".to_string());
                 for s in db_specs {
@@ -56,8 +56,6 @@ pub fn list_rebuy_specs() -> Result<String> {
                     lines.push(format!("• {} ({} paths)  url={}  cached={}", s.name, paths, url, cached));
                 }
             }
-        }
-    }
 
     if lines.len() == 1 {
         lines.push("no specs registered — use `orca spec add <repo>` or `orca spec register`".to_string());
@@ -78,13 +76,11 @@ pub fn get_rebuy_spec(args: &Value) -> Result<String> {
     if let Ok(raw) = std::fs::read_to_string(&path) {
         return Ok(raw);
     }
-    if let Ok(conn) = db::open_default() {
-        if let Ok(Some(row)) = db::get_openapi_spec(&conn, repo) {
-            if let Some(raw) = row.spec_json {
+    if let Ok(conn) = db::open_default()
+        && let Ok(Some(row)) = db::get_openapi_spec(&conn, repo)
+            && let Some(raw) = row.spec_json {
                 return Ok(raw);
             }
-        }
-    }
     anyhow::bail!("no spec for '{repo}' — check ~/orca/openapi/{repo}.json or run `orca spec register`")
 }
 

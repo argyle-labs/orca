@@ -261,7 +261,7 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
                 println!("no plugins registered — use `{APP_NAME} plugin add <path/to/{APP_NAME}-plugin.toml>`");
                 return Ok(());
             }
-            println!("{:<20} {:<10} {:<10} {:<8} {}", "ID", "TIER", "CONTEXT", "COMMANDS", "MCP COMMAND");
+            println!("{:<20} {:<10} {:<10} {:<8} MCP COMMAND", "ID", "TIER", "CONTEXT", "COMMANDS");
             println!("{}", "-".repeat(78));
             for p in &plugins {
                 let status = if p.enabled { "" } else { " [disabled]" };
@@ -283,11 +283,10 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
             let deps = db::list_plugin_deps(&conn, &id)?;
             db::remove_plugin_deps(&conn, &id)?;
             for dep_id in &deps {
-                if !db::plugin_has_parent(&conn, dep_id)? {
-                    if db::remove_plugin(&conn, dep_id)? {
+                if !db::plugin_has_parent(&conn, dep_id)?
+                    && db::remove_plugin(&conn, dep_id)? {
                         println!("removed dependency '{dep_id}'");
                     }
-                }
             }
             if db::remove_plugin(&conn, &id)? {
                 println!("removed plugin '{id}'");
@@ -329,7 +328,7 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
             if rows.is_empty() {
                 println!("no data for plugin '{id}'");
             } else {
-                println!("{:<30} {:<24} {}", "KEY", "UPDATED", "VALUE");
+                println!("{:<30} {:<24} VALUE", "KEY", "UPDATED");
                 println!("{}", "-".repeat(80));
                 for r in rows {
                     let preview = if r.value.len() > 40 { format!("{}…", &r.value[..40]) } else { r.value.clone() };

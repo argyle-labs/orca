@@ -222,7 +222,7 @@ fn step_claude_md(home: &Path, report: &mut InstallReport) {
     } else {
         // Write embedded content to vault (release install, no repo)
         match std::fs::write(&vault_claude_md, CLAUDE_MD) {
-            Ok(_) => report.ok(format!("vault CLAUDE.md written (embedded, no repo)")),
+            Ok(_) => report.ok("vault CLAUDE.md written (embedded, no repo)".to_string()),
             Err(e) => { report.err(format!("vault CLAUDE.md write failed: {e}")); return; }
         }
         force_symlink(&vault_claude_md, &dot_claude_md, report, "~/.claude/CLAUDE.md → vault");

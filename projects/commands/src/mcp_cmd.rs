@@ -71,16 +71,14 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
             }
             let home = std::env::var("HOME").unwrap_or_default();
             let claude_path = format!("{home}/.claude.json");
-            if let Ok(raw) = std::fs::read_to_string(&claude_path) {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
-                    if let Some(servers) = json["mcpServers"].as_object() {
+            if let Ok(raw) = std::fs::read_to_string(&claude_path)
+                && let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw)
+                    && let Some(servers) = json["mcpServers"].as_object() {
                         println!("~/.claude.json servers:");
                         for name in servers.keys() {
                             println!("  {name}");
                         }
                     }
-                }
-            }
             Ok(())
         }
         McpAction::Add { name, command, args, env } => {
@@ -220,14 +218,13 @@ pub fn mcp_sync_server(
     let mut line = String::new();
     while reader.read_line(&mut line)? > 0 {
         let trimmed = line.trim();
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            if v["id"] == 2 {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed)
+            && v["id"] == 2 {
                 if let Some(arr) = v["result"]["tools"].as_array() {
                     external_tools = arr.clone();
                 }
                 break;
             }
-        }
         line.clear();
     }
     let _ = child.kill();

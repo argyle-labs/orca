@@ -57,10 +57,10 @@ impl PhpFile {
             let mut parser = TsParser::new();
             parser.set_language(&LANGUAGE_PHP_ONLY.into()).ok()?;
             let tree = parser.parse(src.as_bytes(), None)?;
-            return Some(PhpFile {
+            Some(PhpFile {
                 source: src.as_bytes().to_vec(),
                 tree,
-            });
+            })
         }
         #[cfg(not(feature = "php-ast"))]
         {
@@ -88,7 +88,7 @@ impl PhpFile {
         { let tree = &self.tree;
             let mut out = Vec::new();
             self.collect_route_calls(tree.root_node(), &mut out);
-            return out;
+            out
         }
         #[cfg(not(feature = "php-ast"))]
         Vec::new()
@@ -96,12 +96,11 @@ impl PhpFile {
 
     #[cfg(feature = "php-ast")]
     fn collect_route_calls<'t>(&self, node: Node<'t>, out: &mut Vec<RouteCall>) {
-        if node.kind() == "member_call_expression" {
-            if let Some(call) = self.try_route_call(node) {
+        if node.kind() == "member_call_expression"
+            && let Some(call) = self.try_route_call(node) {
                 out.push(call);
                 return; // don't recurse into what we already consumed
             }
-        }
         let mut cur = node.walk();
         for child in node.children(&mut cur) {
             self.collect_route_calls(child, out);
@@ -197,9 +196,8 @@ impl PhpFile {
     #[cfg(feature = "php-ast")]
     fn collect_strings(&self, node: Node<'_>, out: &mut Vec<String>) {
         if node.kind() == "string" || node.kind() == "encapsed_string" {
-            if let Some(s) = self.string_value(node) {
-                if !s.is_empty() { out.push(s); }
-            }
+            if let Some(s) = self.string_value(node)
+                && !s.is_empty() { out.push(s); }
             return;
         }
         let mut c = node.walk();
@@ -218,7 +216,7 @@ impl PhpFile {
     pub fn casts_array(&self) -> Option<Vec<(String, String)>> {
         #[cfg(feature = "php-ast")]
         { let tree = &self.tree;
-            return self.find_array_prop(tree.root_node(), "casts");
+            self.find_array_prop(tree.root_node(), "casts")
         }
         #[cfg(not(feature = "php-ast"))]
         None
@@ -232,7 +230,7 @@ impl PhpFile {
     pub fn return_type(&self) -> Option<String> {
         #[cfg(feature = "php-ast")]
         { let tree = &self.tree;
-            return self.find_scalar_prop(tree.root_node(), "returnType");
+            self.find_scalar_prop(tree.root_node(), "returnType")
         }
         #[cfg(not(feature = "php-ast"))]
         None
@@ -240,11 +238,10 @@ impl PhpFile {
 
     #[cfg(feature = "php-ast")]
     fn find_array_prop(&self, node: Node<'_>, prop: &str) -> Option<Vec<(String, String)>> {
-        if self.is_protected_property(node, prop) {
-            if let Some(default) = self.property_default(node, prop) {
+        if self.is_protected_property(node, prop)
+            && let Some(default) = self.property_default(node, prop) {
                 return Some(self.array_key_value_pairs(default));
             }
-        }
         let mut c = node.walk();
         for child in node.children(&mut c) {
             if let Some(r) = self.find_array_prop(child, prop) { return Some(r); }
@@ -254,11 +251,10 @@ impl PhpFile {
 
     #[cfg(feature = "php-ast")]
     fn find_scalar_prop(&self, node: Node<'_>, prop: &str) -> Option<String> {
-        if self.is_protected_property(node, prop) {
-            if let Some(default) = self.property_default(node, prop) {
+        if self.is_protected_property(node, prop)
+            && let Some(default) = self.property_default(node, prop) {
                 return Some(self.text_of(default).to_string());
             }
-        }
         let mut c = node.walk();
         for child in node.children(&mut c) {
             if let Some(r) = self.find_scalar_prop(child, prop) { return Some(r); }
@@ -276,7 +272,8 @@ impl PhpFile {
             })
         };
         if !has_protected { return false; }
-        let has_name = {
+        
+        {
             let mut c = node.walk();
             node.children(&mut c).any(|n| {
                 if n.kind() != "property_element" { return false; }
@@ -284,22 +281,20 @@ impl PhpFile {
                     .map(|v| self.text_of(v).trim_start_matches('$') == prop)
                     .unwrap_or(false)
             })
-        };
-        has_name
+        }
     }
 
     #[cfg(feature = "php-ast")]
     fn property_default<'t>(&self, node: Node<'t>, prop: &str) -> Option<Node<'t>> {
         let mut c = node.walk();
         for child in node.children(&mut c) {
-            if child.kind() == "property_element" {
-                if child.child_by_field_name("name")
+            if child.kind() == "property_element"
+                && child.child_by_field_name("name")
                     .map(|v| self.text_of(v).trim_start_matches('$') == prop)
                     .unwrap_or(false)
                 {
                     return child.child_by_field_name("default");
                 }
-            }
         }
         None
     }
@@ -335,7 +330,7 @@ impl PhpFile {
             let method = self.find_method(tree.root_node(), method_name)?;
             let mut best: Map<String, Value> = Map::new();
             self.collect_set_json(method, &mut best);
-            return if best.is_empty() { None } else { Some(best) };
+            if best.is_empty() { None } else { Some(best) }
         }
         #[cfg(not(feature = "php-ast"))]
         { let _ = method_name; None }
@@ -343,20 +338,18 @@ impl PhpFile {
 
     #[cfg(feature = "php-ast")]
     fn collect_set_json(&self, node: Node<'_>, best: &mut Map<String, Value>) {
-        if node.kind() == "member_call_expression" {
-            if let Some(nm) = node.child_by_field_name("name") {
+        if node.kind() == "member_call_expression"
+            && let Some(nm) = node.child_by_field_name("name") {
                 let n = self.text_of(nm);
-                if n == "setJSON" || n == "setJson" {
-                    if let Some(args) = node.child_by_field_name("arguments") {
+                if (n == "setJSON" || n == "setJson")
+                    && let Some(args) = node.child_by_field_name("arguments") {
                         let a = self.argument_nodes(args);
                         if let Some(first) = a.first() {
                             let props = self.array_to_schema(*first);
                             if props.len() > best.len() { *best = props; }
                         }
                     }
-                }
             }
-        }
         let mut c = node.walk();
         for child in node.children(&mut c) {
             self.collect_set_json(child, best);
@@ -401,7 +394,7 @@ impl PhpFile {
         #[cfg(feature = "php-ast")]
         { let tree = &self.tree;
             let method = self.find_method(tree.root_node(), method_name)?;
-            return self.find_to_array_var(method);
+            self.find_to_array_var(method)
         }
         #[cfg(not(feature = "php-ast"))]
         { let _ = method_name; None }
@@ -409,15 +402,12 @@ impl PhpFile {
 
     #[cfg(feature = "php-ast")]
     fn find_to_array_var(&self, node: Node<'_>) -> Option<String> {
-        if node.kind() == "member_call_expression" || node.kind() == "function_call_expression" {
-            if let Some(name) = node.child_by_field_name("name") {
-                if self.text_of(name) == "sendResponse" {
-                    if let Some(args) = node.child_by_field_name("arguments") {
+        if (node.kind() == "member_call_expression" || node.kind() == "function_call_expression")
+            && let Some(name) = node.child_by_field_name("name")
+                && self.text_of(name) == "sendResponse"
+                    && let Some(args) = node.child_by_field_name("arguments") {
                         return self.data_to_array_var(args);
                     }
-                }
-            }
-        }
         let mut c = node.walk();
         for child in node.children(&mut c) {
             if let Some(v) = self.find_to_array_var(child) { return Some(v); }
@@ -434,17 +424,13 @@ impl PhpFile {
             if self.text_of(name) != "data" { continue; }
             let value = arg.child_by_field_name("value")?;
             // value should be `$var->toArray()`
-            if value.kind() == "member_call_expression" {
-                if let Some(nm) = value.child_by_field_name("name") {
-                    if self.text_of(nm) == "toArray" {
-                        if let Some(obj) = value.child_by_field_name("object") {
-                            if obj.kind() == "variable_name" {
+            if value.kind() == "member_call_expression"
+                && let Some(nm) = value.child_by_field_name("name")
+                    && self.text_of(nm) == "toArray"
+                        && let Some(obj) = value.child_by_field_name("object")
+                            && obj.kind() == "variable_name" {
                                 return Some(self.text_of(obj).trim_start_matches('$').to_string());
                             }
-                        }
-                    }
-                }
-            }
         }
         None
     }
@@ -453,11 +439,9 @@ impl PhpFile {
 
     #[cfg(feature = "php-ast")]
     fn find_method<'t>(&self, node: Node<'t>, method_name: &str) -> Option<Node<'t>> {
-        if node.kind() == "method_declaration" {
-            if let Some(name) = node.child_by_field_name("name") {
-                if self.text_of(name) == method_name { return Some(node); }
-            }
-        }
+        if node.kind() == "method_declaration"
+            && let Some(name) = node.child_by_field_name("name")
+                && self.text_of(name) == method_name { return Some(node); }
         let mut c = node.walk();
         for child in node.children(&mut c) {
             if let Some(r) = self.find_method(child, method_name) { return Some(r); }

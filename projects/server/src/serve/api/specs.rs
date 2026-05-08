@@ -287,11 +287,10 @@ pub async fn specs_get_handler(
     }
     // 2. DB-cached spec (URL-fetched or MCP-synced)
     if let Ok(conn) = db::open_default() {
-        if let Ok(Some(row)) = db::get_openapi_spec(&conn, &repo) {
-            if let Some(raw) = row.spec_json {
+        if let Ok(Some(row)) = db::get_openapi_spec(&conn, &repo)
+            && let Some(raw) = row.spec_json {
                 return serve_spec(&raw, &repo, &query);
             }
-        }
         // 3. Plugin-declared spec dirs
         if let Ok(plugins) = db::list_plugins(&conn) {
             for plugin in plugins.iter().filter(|p| p.specs_dir.is_some() && p.enabled) {

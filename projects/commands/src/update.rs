@@ -15,7 +15,7 @@ pub enum Channel {
 }
 
 impl Channel {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "rc"    => Self::Rc,
             "beta"  => Self::Beta,

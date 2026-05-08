@@ -161,8 +161,8 @@ impl TuiApp {
             }
 
             // Cursor movement — step by char boundaries, not raw bytes
-            (_, KeyCode::Left) => {
-                if self.cursor > 0 {
+            (_, KeyCode::Left)
+                if self.cursor > 0 => {
                     // Walk back to the start of the previous UTF-8 char
                     let prev = self.input[..self.cursor]
                         .char_indices()
@@ -171,7 +171,6 @@ impl TuiApp {
                         .unwrap_or(0);
                     self.cursor = prev;
                 }
-            }
             (_, KeyCode::Right) if self.cursor < self.input.len() => {
                 // Advance by the byte length of the current char
                 let c = self.input[self.cursor..].chars().next().unwrap_or('\0');

@@ -273,7 +273,7 @@ async fn main() -> Result<()> {
         Some(Command::Creds { action }) => cmd::cmd_creds(action),
         Some(Command::Db { action }) => cmd::cmd_db(action),
         Some(Command::Update { channel }) => {
-            let ch = orca_commands::update::Channel::from_str(&channel);
+            let ch = orca_commands::update::Channel::parse(&channel);
             cmd::cmd_update(ch).await
         }
         Some(Command::Install) => cmd_install(),

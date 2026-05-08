@@ -562,6 +562,7 @@ pub fn save_learning_progress(conn: &Connection, page: &str) -> Result<()> {
 // ── Write helpers ─────────────────────────────────────────────────────────────
 
 /// Insert a session event record. Tags should be a JSON array string or empty.
+#[allow(clippy::too_many_arguments)]
 pub fn insert_event(
     conn: &Connection,
     id: &str,
@@ -1116,6 +1117,7 @@ const PLUGIN_COLS: &str =
      context_injection, enabled, command_map, mcp_token_env, COALESCE(nav_links,'[]'),
      COALESCE(search_tools,'[]'), specs_dir, mcp_url";
 
+#[allow(clippy::too_many_arguments)]
 fn parse_plugin_row(
     id: String, manifest_path: String, tier: String, mode: String,
     mcp_command: Option<String>, args_json: String, env_json: String,

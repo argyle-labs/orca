@@ -146,11 +146,10 @@ fn uninstall() -> Result<()> {
 }
 
 fn resolve_binary() -> Result<String> {
-    if let Some(s) = state::read()? {
-        if !s.binary.is_empty() {
+    if let Some(s) = state::read()?
+        && !s.binary.is_empty() {
             return Ok(s.binary);
         }
-    }
     let out = Command::new("which").arg(APP_NAME).output()?;
     if out.status.success() {
         let path = String::from_utf8_lossy(&out.stdout).trim().to_string();

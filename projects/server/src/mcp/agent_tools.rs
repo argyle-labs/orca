@@ -119,13 +119,12 @@ impl OrcaTool for SearchLogs {
         use serde_json::json;
         let v = json!({ "query": args.query });
         let raw = handlers::search_logs(&v, &ctx.config)?;
-        if let Some(llm) = local_llm::discover_local_llm().await {
-            if let Some(enhanced) =
+        if let Some(llm) = local_llm::discover_local_llm().await
+            && let Some(enhanced) =
                 local_llm::present_text_results(&llm, &args.query, &raw, 8000).await
             {
                 return Ok(enhanced);
             }
-        }
         Ok(raw)
     }
 }

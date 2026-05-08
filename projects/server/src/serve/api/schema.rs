@@ -80,11 +80,10 @@ fn load_db_configs() -> Vec<DbConfig> {
     };
 
     // Try DB first
-    if let Ok(rows) = db::list_schema_databases(&conn) {
-        if !rows.is_empty() {
+    if let Ok(rows) = db::list_schema_databases(&conn)
+        && !rows.is_empty() {
             return rows.into_iter().map(DbConfig::from).collect();
         }
-    }
 
     // DB empty — attempt one-shot migration from orca.toml
     let home = std::env::var("HOME").unwrap_or_default();

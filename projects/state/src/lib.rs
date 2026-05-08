@@ -117,11 +117,10 @@ pub fn clear() -> Result<()> {
 pub async fn wait_for_mode(target: DaemonMode, timeout_secs: u64) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     loop {
-        if let Ok(Some(s)) = read() {
-            if s.mode == target {
+        if let Ok(Some(s)) = read()
+            && s.mode == target {
                 return Ok(());
             }
-        }
         if Instant::now() >= deadline {
             anyhow::bail!("timed out waiting for daemon mode {:?}", target);
         }

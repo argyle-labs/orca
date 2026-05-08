@@ -53,14 +53,13 @@ fn resolve_command(command: &str) -> String {
         return command.to_string();
     }
     // which works when PATH is rich (interactive shell, dev mode)
-    if let Ok(out) = std::process::Command::new("which").arg(command).output() {
-        if out.status.success() {
+    if let Ok(out) = std::process::Command::new("which").arg(command).output()
+        && out.status.success() {
             let resolved = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !resolved.is_empty() && std::path::Path::new(&resolved).exists() {
                 return resolved;
             }
         }
-    }
     // Probe known install paths — covers launchd/systemd daemon environments
     let mut candidates: Vec<String> = vec![
         format!("/opt/homebrew/bin/{command}"),  // Apple Silicon Homebrew
@@ -118,7 +117,7 @@ enum Transport {
     Stdio {
         stdin: Mutex<ChildStdin>,
         stdout: Mutex<BufReader<ChildStdout>>,
-        _child: Child,
+        _child: Box<Child>,
     },
     /// HTTP/SSE transport (MCP over Server-Sent Events).
     /// Each request opens a fresh /sse connection, gets a session endpoint, POSTs
@@ -197,7 +196,7 @@ impl McpClient {
             transport: Transport::Stdio {
                 stdin: Mutex::new(stdin),
                 stdout: Mutex::new(stdout),
-                _child: child,
+                _child: Box::new(child),
             },
             request_lock: Mutex::new(()),
             next_id: Mutex::new(0),
@@ -212,13 +211,12 @@ impl McpClient {
         let base_url = cfg.command.trim_end_matches('/').to_string();
 
         let mut headers = reqwest::header::HeaderMap::new();
-        if let Some(token) = &cfg.token {
-            if !token.is_empty() {
+        if let Some(token) = &cfg.token
+            && !token.is_empty() {
                 let val = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
                     .map_err(|e| anyhow::anyhow!("invalid token: {e}"))?;
                 headers.insert(reqwest::header::AUTHORIZATION, val);
             }
-        }
 
         let http = reqwest::Client::builder()
             .default_headers(headers)
@@ -408,8 +406,7 @@ impl McpClient {
                     .header("Accept", "text/event-stream")
                     .send()
                     .await
-                {
-                    if sse_resp.status().is_success() {
+                    && sse_resp.status().is_success() {
                         let mut stream = sse_resp.bytes_stream();
                         let mut buf = String::new();
                         // Read endpoint event.
@@ -438,7 +435,6 @@ impl McpClient {
                             let _ = http.post(&post_url).json(&msg).send().await;
                         }
                     }
-                }
             }
         }
         Ok(())
@@ -492,6 +488,12 @@ pub struct McpPool {
     db_path: Option<std::path::PathBuf>,
 }
 
+impl Default for McpPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl McpPool {
     pub fn new() -> Self {
         McpPool { clients: Mutex::new(HashMap::new()), db_path: None }
@@ -505,8 +507,8 @@ impl McpPool {
         let mut configs = Self::read_claude_configs();
 
         // DB servers take precedence over ~/.claude.json
-        if let Some(db_path) = &self.db_path {
-            if let Ok(conn) = db::open(db_path) {
+        if let Some(db_path) = &self.db_path
+            && let Ok(conn) = db::open(db_path) {
                 if let Ok(rows) = db::list_mcp_servers(&conn) {
                     for row in rows {
                         configs.insert(row.name.clone(), McpServerConfig {
@@ -557,7 +559,6 @@ impl McpPool {
                     }
                 }
             }
-        }
 
         configs
     }
