@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use orca_sdk::framing::{read_frame, write_frame};
 use orca_sdk::jsonrpc::{ErrorObject, Message, Response};
 use orca_sdk::pki;
-use orca_sdk::transport::{HelloParams, HelloResult};
+use orca_sdk::transport::{HelloParams, HelloResult, TypesDeclareParams, TypesDeclareResult};
 use rustls::ServerConfig;
 use rustls::server::WebPkiClientVerifier;
 use serde_json::json;
@@ -97,10 +97,18 @@ fn build_acceptor(bundle: &pki::NodeBundle) -> Result<TlsAcceptor> {
     Ok(TlsAcceptor::from(Arc::new(server_config)))
 }
 
+/// Per-connection state carried across frames. Set by `orca/hello`; read by
+/// every subsequent method that needs the plugin's identity.
+#[derive(Default)]
+struct ConnState {
+    plugin_id: Option<String>,
+}
+
 async fn handle_connection(
     tls: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
 ) -> Result<()> {
     let (mut reader, mut writer) = tokio::io::split(tls);
+    let mut state = ConnState::default();
 
     loop {
         let frame = match read_frame(&mut reader).await {
@@ -115,7 +123,7 @@ async fn handle_connection(
             }
         };
 
-        let response = dispatch(&frame);
+        let response = dispatch(&mut state, &frame);
         if response.is_null() {
             // Notification — no response on the wire.
             continue;
@@ -127,7 +135,7 @@ async fn handle_connection(
     Ok(())
 }
 
-fn dispatch(frame: &[u8]) -> serde_json::Value {
+fn dispatch(state: &mut ConnState, frame: &[u8]) -> serde_json::Value {
     let msg: Message = match serde_json::from_slice(frame) {
         Ok(m) => m,
         Err(e) => {
@@ -143,7 +151,8 @@ fn dispatch(frame: &[u8]) -> serde_json::Value {
         Message::Request(req) => {
             let id = req.id.clone();
             match req.method.as_str() {
-                "orca/hello" => handle_hello(id, req.params),
+                "orca/hello" => handle_hello(state, id, req.params),
+                "orca/types.declare" => handle_types_declare(state, id, req.params),
                 other => {
                     serde_json::to_value(Response::err(id, ErrorObject::method_not_found(other)))
                         .expect("Response serializes")
@@ -158,11 +167,15 @@ fn dispatch(frame: &[u8]) -> serde_json::Value {
 /// Methods the plugin host implements. Plugins announce their required and
 /// optional method dependencies in `orca/hello`; we use this set to decide
 /// whether the connection is `full`, `degraded`, or `rejected`.
-pub const SUPPORTED_METHODS: &[&str] = &["orca/hello"];
+pub const SUPPORTED_METHODS: &[&str] = &["orca/hello", "orca/types.declare"];
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-fn handle_hello(id: serde_json::Value, params: Option<serde_json::Value>) -> serde_json::Value {
+fn handle_hello(
+    state: &mut ConnState,
+    id: serde_json::Value,
+    params: Option<serde_json::Value>,
+) -> serde_json::Value {
     let params: HelloParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
         Some(p) => p,
         None => {
@@ -178,6 +191,7 @@ fn handle_hello(id: serde_json::Value, params: Option<serde_json::Value>) -> ser
         "[plugin-host] hello from plugin '{}' (sdk {}, flavor {:?})",
         params.plugin_id, params.sdk_version, params.flavor
     );
+    state.plugin_id = Some(params.plugin_id.clone());
 
     let supported: Vec<String> = SUPPORTED_METHODS.iter().map(|s| s.to_string()).collect();
     let reject = |reason: String| HelloResult {
@@ -240,6 +254,96 @@ fn handle_hello(id: serde_json::Value, params: Option<serde_json::Value>) -> ser
     };
 
     let value = serde_json::to_value(&result).expect("HelloResult serializes");
+    serde_json::to_value(Response::ok(id, value)).expect("Response serializes")
+}
+
+fn handle_types_declare(
+    state: &ConnState,
+    id: serde_json::Value,
+    params: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let plugin_id = match state.plugin_id.as_deref() {
+        Some(p) => p,
+        None => {
+            return serde_json::to_value(Response::err(
+                id,
+                ErrorObject::invalid_params("orca/types.declare requires prior orca/hello"),
+            ))
+            .expect("Response serializes");
+        }
+    };
+
+    let params: TypesDeclareParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
+        Some(p) => p,
+        None => {
+            return serde_json::to_value(Response::err(
+                id,
+                ErrorObject::invalid_params("orca/types.declare requires { types: [...] }"),
+            ))
+            .expect("Response serializes");
+        }
+    };
+
+    let conn = match db::open_default() {
+        Ok(c) => c,
+        Err(e) => {
+            return serde_json::to_value(Response::err(
+                id,
+                ErrorObject::internal(&format!("open db: {e}")),
+            ))
+            .expect("Response serializes");
+        }
+    };
+
+    let mut accepted = Vec::with_capacity(params.types.len());
+    for decl in &params.types {
+        if decl.type_name.is_empty() {
+            return serde_json::to_value(Response::err(
+                id,
+                ErrorObject::invalid_params("type_name must not be empty"),
+            ))
+            .expect("Response serializes");
+        }
+        let schema_str = match serde_json::to_string(&decl.schema) {
+            Ok(s) => s,
+            Err(e) => {
+                return serde_json::to_value(Response::err(
+                    id,
+                    ErrorObject::invalid_params(&format!(
+                        "schema for '{}' is not serializable: {e}",
+                        decl.type_name
+                    )),
+                ))
+                .expect("Response serializes");
+            }
+        };
+        if let Err(e) = db::upsert_plugin_type(
+            &conn,
+            plugin_id,
+            &decl.type_name,
+            &decl.schema_version,
+            &schema_str,
+            decl.sensitivity.as_str(),
+        ) {
+            return serde_json::to_value(Response::err(
+                id,
+                ErrorObject::internal(&format!(
+                    "upsert plugin_type {plugin_id}.{}: {e}",
+                    decl.type_name
+                )),
+            ))
+            .expect("Response serializes");
+        }
+        accepted.push(format!("{plugin_id}.{}", decl.type_name));
+    }
+
+    info!(
+        "[plugin-host] types.declare from '{plugin_id}' accepted {} type(s)",
+        accepted.len()
+    );
+
+    let result = TypesDeclareResult { accepted };
+    let value = serde_json::to_value(&result).expect("TypesDeclareResult serializes");
     serde_json::to_value(Response::ok(id, value)).expect("Response serializes")
 }
 

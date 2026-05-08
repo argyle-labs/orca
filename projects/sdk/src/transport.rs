@@ -51,6 +51,53 @@ pub struct HelloResult {
     pub reason: Option<String>,
 }
 
+// ── types.declare protocol ────────────────────────────────────────────────────
+
+/// Sensitivity class controlling whether a TypedValue may flow into a `general`
+/// context or is restricted to `sensitive`-tier nodes.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Sensitivity {
+    General,
+    Sensitive,
+}
+
+impl Sensitivity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Sensitivity::General => "general",
+            Sensitivity::Sensitive => "sensitive",
+        }
+    }
+}
+
+/// One type the plugin is announcing. The fully-qualified id is computed as
+/// `<plugin_id>.<type_name>` and must be unique within the plugin.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TypeDeclaration {
+    pub type_name: String,
+    pub schema_version: String,
+    /// JSON Schema document describing the payload shape.
+    pub schema: serde_json::Value,
+    #[serde(default = "default_sensitivity")]
+    pub sensitivity: Sensitivity,
+}
+
+fn default_sensitivity() -> Sensitivity {
+    Sensitivity::General
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TypesDeclareParams {
+    pub types: Vec<TypeDeclaration>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TypesDeclareResult {
+    /// Fully-qualified ids the server accepted (`<plugin_id>.<type_name>`).
+    pub accepted: Vec<String>,
+}
+
 // ── Inner state ───────────────────────────────────────────────────────────────
 
 struct Inner {
@@ -152,6 +199,27 @@ impl TcpTransport {
         let notif = Notification::new(method, params);
         let json = serde_json::to_vec(&notif)?;
         self.inner.lock().await.send_raw(&json).await
+    }
+
+    /// Declare TypedValue types this plugin produces. Sent at startup, after
+    /// `orca/hello`. Returns the list of accepted type ids; errors if any
+    /// declaration was rejected (e.g. invalid sensitivity).
+    pub async fn declare_types(&self, types: Vec<TypeDeclaration>) -> Result<TypesDeclareResult> {
+        let params = TypesDeclareParams { types };
+        let resp = self
+            .call("orca/types.declare", Some(serde_json::to_value(params)?))
+            .await?;
+        if resp.is_error() {
+            let msg = resp
+                .error
+                .as_ref()
+                .map(|e| e.message.as_str())
+                .unwrap_or("unknown error");
+            bail!("orca/types.declare rejected: {msg}");
+        }
+        let result: TypesDeclareResult =
+            serde_json::from_value(resp.result.context("orca/types.declare returned null")?)?;
+        Ok(result)
     }
 
     /// Perform the `orca/hello` handshake. Call this immediately after connecting.
