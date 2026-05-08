@@ -101,3 +101,80 @@ async fn go_reference_plugin_is_conformant() {
     );
     assert_eq!(report.steps.len(), 3);
 }
+
+/// Build the TypeScript reference plugin (projects/sdk-ts) and run it
+/// through the same conformance checker. Skipped if `node` or `npm` are
+/// missing — the Rust port remains the gating reference.
+#[tokio::test(flavor = "current_thread")]
+async fn typescript_reference_plugin_is_conformant() {
+    install_ring();
+
+    if Command::new("node").arg("--version").output().is_err()
+        || Command::new("npm").arg("--version").output().is_err()
+    {
+        eprintln!("skipping ts conformance test: node/npm not on PATH");
+        return;
+    }
+
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crate has parent")
+        .parent()
+        .expect("workspace root")
+        .to_path_buf();
+    let ts_module = workspace_root.join("projects/sdk-ts");
+    assert!(
+        ts_module.join("package.json").exists(),
+        "missing TS SDK at {}",
+        ts_module.display()
+    );
+
+    if !ts_module.join("node_modules").exists() {
+        let status = Command::new("npm")
+            .arg("install")
+            .arg("--no-audit")
+            .arg("--no-fund")
+            .current_dir(&ts_module)
+            .status()
+            .expect("spawn npm install");
+        assert!(status.success(), "npm install failed: {status}");
+    }
+    let status = Command::new("npx")
+        .args(["tsc", "-p", "tsconfig.json"])
+        .current_dir(&ts_module)
+        .status()
+        .expect("spawn tsc");
+    assert!(status.success(), "tsc failed: {status}");
+
+    // Wrapper script so run_subprocess can spawn a single executable.
+    let outdir = tempfile::tempdir().expect("tempdir for ts launcher");
+    let launcher = outdir.path().join("orca-conformance-plugin-ts");
+    let entry = ts_module.join("dist/bin/conformance-plugin.js");
+    std::fs::write(
+        &launcher,
+        format!(
+            "#!/usr/bin/env bash\nexec node {} \"$@\"\n",
+            entry.display()
+        ),
+    )
+    .expect("write launcher");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod launcher");
+    }
+
+    let cfg = SubprocessConfig {
+        plugin_binary: launcher,
+        workdir: None,
+        timeout: Duration::from_secs(20),
+    };
+    let report = run_subprocess(cfg).await.expect("run_subprocess");
+    assert!(
+        report.passed,
+        "TypeScript reference plugin not conformant. Steps: {:#?}",
+        report.steps
+    );
+    assert_eq!(report.steps.len(), 3);
+}

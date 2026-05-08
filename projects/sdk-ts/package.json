@@ -1,0 +1,35 @@
+{
+  "name": "@orca/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TypeScript port of the orca plugin SDK. Wire-compatible with projects/sdk (Rust reference) and projects/sdk-go.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "exports": {
+    ".": "./dist/index.js",
+    "./framing": "./dist/framing.js",
+    "./jsonrpc": "./dist/jsonrpc.js",
+    "./pki": "./dist/pki.js",
+    "./transport": "./dist/transport.js",
+    "./manifest": "./dist/manifest.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test --experimental-strip-types test/*.test.ts",
+    "format": "prettier --write src test bin",
+    "format:check": "prettier --check src test bin"
+  },
+  "dependencies": {
+    "smol-toml": "^1.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "prettier": "^3.6.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
