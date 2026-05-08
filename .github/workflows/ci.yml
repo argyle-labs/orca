@@ -101,7 +101,48 @@ jobs:
       - name: Cook deps (release)
         run: cargo chef cook --release --recipe-path recipe.json
 
-  # ── 4. Rust CI — clippy + test ───────────────────────────────────────────────
+  # ── 4. SDK isolation check ───────────────────────────────────────────────────
+  # Builds orca-sdk in isolation to verify it has no server/ui bleed.
+  # Any dep that should not be in the SDK surface will fail here before it
+  # reaches rust-ci or the release builds.
+  build-sdk:
+    name: SDK — Build & Test (isolation check)
+    runs-on: ubuntu-latest
+    needs: cook-dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-chef
+        run: cargo install cargo-chef --version $CARGO_CHEF_VERSION --locked
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: chef-dev-${{ hashFiles('**/Cargo.lock') }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: recipe-${{ github.sha }}
+
+      - name: Cook deps (ensure present)
+        run: cargo chef cook --recipe-path recipe.json
+
+      - name: Build SDK
+        run: cargo build -p orca-sdk
+
+      - name: Test SDK
+        run: cargo test -p orca-sdk
+
+      - name: Verify no server deps leaked in
+        run: |
+          # Fail if the SDK's dep tree pulls in orca-server or any server-only crate.
+          if cargo tree -p orca-sdk 2>&1 | grep -E "orca-server|orca-commands|orca-conversation|orca-agents|orca-llm|orca-scanner|rust-embed"; then
+            echo "ERROR: server-only crate found in orca-sdk dependency tree"
+            exit 1
+          fi
+
+  # ── 5. Rust CI — clippy + test ───────────────────────────────────────────────
   # Deps are already compiled in cook-dev. Only workspace crates build here.
   rust-ci:
     name: Rust — Clippy & Test
