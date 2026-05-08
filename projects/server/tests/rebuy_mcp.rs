@@ -101,7 +101,9 @@ fn rebuy_db_pool_read_configs_contains_rebuy() {
     let pool = McpPool::new_with_db(db_path);
     let configs = pool.read_configs();
     if !configs.contains_key(REBUY_PLUGIN_ID) {
-        eprintln!("skipping: rebuy not found in McpPool configs — check plugin is enabled and has mcp_command");
+        eprintln!(
+            "skipping: rebuy not found in McpPool configs — check plugin is enabled and has mcp_command"
+        );
         return;
     }
 }
