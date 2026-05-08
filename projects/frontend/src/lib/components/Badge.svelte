@@ -1,8 +1,8 @@
 <script lang="ts">
-  import svelte from 'svelte';
+  import type { Snippet } from 'svelte';
   interface Props {
     color?: 'green' | 'yellow' | 'red' | 'blue' | 'gray' | 'purple';
-    children: svelte.Snippet;
+    children: Snippet;
   }
   let { color = 'gray', children }: Props = $props();
   const colors: Record<string, string> = {

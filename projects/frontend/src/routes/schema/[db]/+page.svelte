@@ -1,28 +1,35 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount } from 'svelte';
+  import type { Component } from 'svelte';
+
   let { data } = $props();
 
-  let container: HTMLDivElement;
-  let instance: { unmount: () => void } | null = null;
+  let SchemaApp = $state<Component<{ data: SchemaData; initialTabName?: string }> | null>(null);
+  let normalized = $state<SchemaData | null>(null);
 
   onMount(async () => {
-    const { mountSchemaApp } = await import('$schema/mount');
-    if (data.schema) {
-      instance = mountSchemaApp(container, data.schema, data.db);
-    } else {
-      container.innerHTML =
-        '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--color-text-dim)">No schema data. Configure a database in System → Schema.</div>';
+    if (!data.schema) return;
+    const mod = await import('$schema/App.svelte');
+    normalized = mod.normalizeSchema(data.schema);
+    if (normalized.tabs.length === 0) {
+      normalized = null;
+      return;
     }
-  });
-
-  onDestroy(() => {
-    instance?.unmount();
+    SchemaApp = mod.default;
   });
 </script>
 
 <svelte:head><title>Schema — orca</title></svelte:head>
 
-<div class="schema-host" bind:this={container}></div>
+<div class="schema-host">
+  {#if !data.schema}
+    <div class="empty">No schema data. Configure a database in System → Schema.</div>
+  {:else if SchemaApp && normalized}
+    <SchemaApp data={normalized} initialTabName={data.db} />
+  {:else if normalized && normalized.tabs.length === 0}
+    <div class="empty">No schema data. Configure a database in System → Schema.</div>
+  {/if}
+</div>
 
 <style>
   .schema-host {
@@ -31,5 +38,12 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+  }
+  .empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--color-text-dim);
   }
 </style>
