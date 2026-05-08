@@ -7,8 +7,10 @@ cd "$ROOT"
 echo "==> rustfmt"
 cargo fmt --all -- --check
 
+# clippy --tests compiles the test profile once; cargo test reuses those artifacts.
+# Running clippy without --tests would compile a second time under a different profile.
 echo "==> clippy"
-cargo clippy -- -D warnings
+RUSTFLAGS="-D warnings" cargo clippy --tests -- -D warnings
 
 echo "==> cargo test"
 cargo test
