@@ -19,6 +19,7 @@ pub struct LMStudioBackend {
 
 impl LMStudioBackend {
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
+        crate::ensure_crypto_provider();
         LMStudioBackend {
             client: Client::builder()
                 // Connect timeout only — no total-request timeout so slow local models

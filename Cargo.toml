@@ -27,3 +27,37 @@ strip = true
 
 [profile.dev]
 opt-level = 0
+
+# Proc-macro crates run AT compile time — optimizing them speeds up every
+# incremental build even after sccache has them cached, because the proc-macro
+# binary still re-executes on each compile that uses it.
+[profile.dev.package.syn]
+opt-level = 3
+[profile.dev.package.proc-macro2]
+opt-level = 3
+[profile.dev.package.quote]
+opt-level = 3
+[profile.dev.package.serde_derive]
+opt-level = 3
+[profile.dev.package.utoipa-gen]
+opt-level = 3
+[profile.dev.package.clap_derive]
+opt-level = 3
+[profile.dev.package.async-trait]
+opt-level = 3
+
+# Heavy pure-Rust deps: compile once (cached by sccache), run fast in tests.
+# opt-level=1 = single optimization pass — much better runtime than 0 with
+# only marginally slower compile; the extra time is paid once and cached.
+[profile.dev.package.tokio]
+opt-level = 1
+[profile.dev.package.rustls]
+opt-level = 1
+[profile.dev.package.ring]
+opt-level = 3
+[profile.dev.package.regex-automata]
+opt-level = 1
+[profile.dev.package.regex-syntax]
+opt-level = 1
+[profile.dev.package.futures-util]
+opt-level = 1

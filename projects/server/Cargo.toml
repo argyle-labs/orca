@@ -38,7 +38,9 @@ clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 
 # HTTP + streaming
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "form", "query"] }
+# rustls-no-provider = no aws-lc; ring is installed as the process-default
+# crypto provider at startup (see main.rs).
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls-no-provider", "form", "query"] }
 futures-util = "0.3"
 
 # Serialization
@@ -75,13 +77,14 @@ pulldown-cmark = "0.13"
 
 # Web server
 axum = { version = "0.8", features = ["macros", "ws"] }
-tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+# Dev proxy only connects to ws://localhost — no TLS needed here.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
 tower-http = { version = "0.6", features = ["cors"] }
 http-body-util = "0.1"
 
 # TLS (for plugin host — shared version with rustls already in the tree)
 rustls          = { version = "0.23", default-features = false, features = ["ring"] }
-tokio-rustls    = "0.26"
+tokio-rustls    = { version = "0.26", default-features = false, features = ["ring"] }
 rustls-pki-types = "1"
 rustls-pemfile  = "2"
 
@@ -96,7 +99,7 @@ typst-assets = { version = "0.14", features = ["fonts"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 # Database drivers (schema introspection — pure Rust, no CLI dependency)
-mysql_async    = { version = "0.36", default-features = false, features = ["default-rustls"] }
+mysql_async    = { version = "0.36", default-features = false, features = ["default-rustls-ring"] }
 tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
 rusqlite       = { version = "0.39", features = ["bundled-sqlcipher"] }
 

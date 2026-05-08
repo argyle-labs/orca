@@ -18,6 +18,7 @@ pub struct ClaudeBackend {
 
 impl ClaudeBackend {
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        crate::ensure_crypto_provider();
         ClaudeBackend {
             client: Client::new(),
             api_key: api_key.into(),
