@@ -46,6 +46,9 @@ pub struct HelloResult {
     /// "full" | "degraded" | "rejected"
     pub status: String,
     pub methods: Vec<String>,
+    /// Human-readable explanation when status is "rejected" or "degraded".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 // ── Inner state ───────────────────────────────────────────────────────────────
@@ -185,8 +188,9 @@ impl TcpTransport {
             serde_json::from_value(resp.result.context("orca/hello returned null result")?)?;
 
         if !result.ok {
+            let reason = result.reason.as_deref().unwrap_or("no reason given");
             bail!(
-                "orca/hello: server returned ok=false (status: {})",
+                "orca/hello: server returned ok=false (status: {}; {reason})",
                 result.status
             );
         }
