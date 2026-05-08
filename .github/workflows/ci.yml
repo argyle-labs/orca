@@ -61,3 +61,30 @@ jobs:
 
       - name: Unit tests
         run: cargo test --lib --workspace
+
+  # ── Go SDK: gofmt + unit tests ───────────────────────────────────────────
+  go:
+    name: Go — Fmt & Unit Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: projects/sdk-go
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: projects/sdk-go/go.sum
+
+      - name: gofmt
+        run: |
+          diff=$(gofmt -l .)
+          if [ -n "$diff" ]; then
+            echo "Unformatted Go files:"
+            echo "$diff"
+            exit 1
+          fi
+
+      - name: Test
+        run: go test ./...

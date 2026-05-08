@@ -45,9 +45,7 @@ describe('buildDomainMap', () => {
   });
 
   it('returns empty map for domains with no tables', () => {
-    const domains: Domain[] = [
-      { key: 'empty', label: 'E', color: '#000', tables: [] },
-    ];
+    const domains: Domain[] = [{ key: 'empty', label: 'E', color: '#000', tables: [] }];
     expect(buildDomainMap(domains)).toEqual({});
   });
 });

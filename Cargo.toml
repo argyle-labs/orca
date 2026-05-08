@@ -13,6 +13,7 @@ members = [
     "projects/llm",
     "projects/scanner",
     "projects/sdk",
+    "projects/conformance-plugin",
     "projects/server",
     "projects/conversation",
     "projects/state",

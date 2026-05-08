@@ -1,4 +1,4 @@
-.PHONY: build install deploy dev run watch clean check release audit lint format test daemon-install daemon-uninstall kill-dev migrate up down
+.PHONY: build install install-hooks deploy dev run watch clean check release audit lint format format-check test daemon-install daemon-uninstall kill-dev migrate up down
 
 INSTALL_PATH := $(HOME)/.local/bin/orca
 ENV_TPL      := .env.orca.tpl
@@ -125,11 +125,35 @@ lint:
 	@echo "→ clippy..."
 	@cargo clippy --workspace -- -D warnings
 
+# Format every language in the repo. Run via pre-commit hook (see install-hooks)
+# and on demand. Each formatter is the canonical one for its language —
+# prettier doesn't speak Rust or Go, so we orchestrate per-language tools.
 format:
-	@echo "→ prettier..."
+	@echo "→ rustfmt (workspace)..."
+	@cargo fmt --all
+	@echo "→ gofmt (sdk-go)..."
+	@cd projects/sdk-go && gofmt -l -w .
+	@echo "→ prettier (frontend src)..."
 	@cd projects/frontend && npx prettier --write src
-	@echo "→ rustfmt..."
-	@cargo fmt --manifest-path projects/server/Cargo.toml
+	@if command -v taplo >/dev/null 2>&1; then \
+	  echo "→ taplo (TOML)..."; \
+	  taplo fmt; \
+	else \
+	  echo "→ skipping TOML (install taplo: 'cargo install taplo-cli --locked')"; \
+	fi
+
+# Verify formatting without writing — used by CI.
+format-check:
+	@echo "→ rustfmt --check..."
+	@cargo fmt --all -- --check
+	@echo "→ gofmt -l (sdk-go)..."
+	@cd projects/sdk-go && diff=$$(gofmt -l .) && if [ -n "$$diff" ]; then echo "unformatted Go files:"; echo "$$diff"; exit 1; fi
+	@echo "→ prettier --check..."
+	@cd projects/frontend && npx prettier --check src
+	@if command -v taplo >/dev/null 2>&1; then \
+	  echo "→ taplo --check..."; \
+	  taplo fmt --check; \
+	fi
 
 test:
 	@echo "→ vitest..."
@@ -140,8 +164,14 @@ test:
 RUST_VERSION := $(shell cat rust-toolchain.toml | grep channel | sed 's/.*"\(.*\)"/\1/')
 NODE_VERSION := $(shell cat .nvmrc | tr -d '[:space:]')
 
+# Point git at the in-repo hooks dir so pre-commit / pre-push are versioned.
+install-hooks:
+	git config core.hooksPath .githooks
+	@chmod +x .githooks/pre-commit .githooks/pre-push 2>/dev/null || true
+	@echo "git hooks → .githooks (pre-commit auto-formats, pre-push runs full checks)"
+
 # Install all required tools and dependencies (idempotent — safe to re-run)
-install:
+install: install-hooks
 	@echo "→ rust $(RUST_VERSION)..."
 	@command -v rustup >/dev/null 2>&1 || \
 	  (echo "  installing rustup..." && \

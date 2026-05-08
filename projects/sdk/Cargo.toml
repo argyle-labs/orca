@@ -17,10 +17,14 @@ name = "orca_sdk"
 anyhow     = "1"
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Manifest format. The orca-plugin manifest IS part of the contract, so
+# the parser lives here in the SDK alongside the protocol types.
+toml       = "1"
 
 # Async runtime: net + io-util for TCP streams; sync for Mutex/oneshot/broadcast/mpsc;
-# rt for the background reader task and notification pumps spawned by TcpTransport.
-tokio = { version = "1", features = ["net", "io-util", "sync", "rt"] }
+# rt for the background reader task and notification pumps spawned by TcpTransport;
+# process + time for the conformance subprocess runner.
+tokio = { version = "1", features = ["net", "io-util", "sync", "rt", "process", "time"] }
 
 # TLS
 rustls          = { version = "0.23", default-features = false, features = ["ring"] }
@@ -30,6 +34,14 @@ tokio-rustls    = { version = "0.26", default-features = false, features = ["rin
 
 # Cert generation (pem + x509-parser required for from_ca_cert_pem)
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+
+# Direct cert parsing: needed to read the peer's CN out of the leaf cert
+# during the mTLS handshake so the plugin host can bind plugin_id → cert.
+x509-parser = "0.16"
+
+# Conformance suite uses tempdirs to stage PKI material and the manifest
+# fixture before spawning the candidate plugin binary.
+tempfile = "3"
 
 [dev-dependencies]
 tempfile = "3"

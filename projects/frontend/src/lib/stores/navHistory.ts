@@ -3,11 +3,18 @@ import { browser } from '$app/environment';
 const KEY = 'orca-nav-history';
 const MAX = 20;
 
-export interface NavEntry { path: string; ts: number; }
+export interface NavEntry {
+  path: string;
+  ts: number;
+}
 
 function load(): NavEntry[] {
   if (!browser) return [];
-  try { return JSON.parse(localStorage.getItem(KEY) ?? '[]'); } catch { return []; }
+  try {
+    return JSON.parse(localStorage.getItem(KEY) ?? '[]');
+  } catch {
+    return [];
+  }
 }
 
 function save(entries: NavEntry[]): void {

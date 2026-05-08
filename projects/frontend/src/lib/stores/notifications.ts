@@ -23,8 +23,8 @@ function createNotifications() {
   return {
     subscribe,
     success: (m: string) => add(m, 'success'),
-    error:   (m: string) => add(m, 'error', 6000),
-    info:    (m: string) => add(m, 'info'),
+    error: (m: string) => add(m, 'error', 6000),
+    info: (m: string) => add(m, 'info'),
     remove,
   };
 }
@@ -32,10 +32,7 @@ function createNotifications() {
 export const notifications = createNotifications();
 
 /** Wraps an async call with try/catch/notify. Returns the result or null on error. */
-export async function act<T>(
-  fn: () => Promise<T>,
-  opts?: { success?: string },
-): Promise<T | null> {
+export async function act<T>(fn: () => Promise<T>, opts?: { success?: string }): Promise<T | null> {
   try {
     const result = await fn();
     if (opts?.success) notifications.success(opts.success);

@@ -9,7 +9,13 @@ interface CreateCameraOptions {
   onBackgroundClick: () => void;
 }
 
-export function createCamera({ getViewport, getWorld, wW, wH, onBackgroundClick }: CreateCameraOptions) {
+export function createCamera({
+  getViewport,
+  getWorld,
+  wW,
+  wH,
+  onBackgroundClick,
+}: CreateCameraOptions) {
   const cam: { current: Cam } = { current: { x: 0, y: 0, z: 1 } };
 
   function applyCameraTransform() {
@@ -37,7 +43,12 @@ export function createCamera({ getViewport, getWorld, wW, wH, onBackgroundClick 
   function fitAll(animate = true) {
     const viewport = getViewport();
     if (!viewport) return;
-    const { targetZoom, targetX, targetY } = fitViewParams(viewport.clientWidth, viewport.clientHeight, wW, wH);
+    const { targetZoom, targetX, targetY } = fitViewParams(
+      viewport.clientWidth,
+      viewport.clientHeight,
+      wW,
+      wH,
+    );
     if (animate) {
       animateCamera(targetX, targetY, targetZoom);
     } else {
@@ -49,14 +60,25 @@ export function createCamera({ getViewport, getWorld, wW, wH, onBackgroundClick 
   function focusNode(node: TableNode, zoom?: number) {
     const viewport = getViewport();
     if (!viewport) return;
-    const { targetX, targetY, targetZoom } = focusNodeParams(viewport.clientWidth, viewport.clientHeight, node, cam.current.z, zoom);
+    const { targetX, targetY, targetZoom } = focusNodeParams(
+      viewport.clientWidth,
+      viewport.clientHeight,
+      node,
+      cam.current.z,
+      zoom,
+    );
     animateCamera(targetX, targetY, targetZoom);
   }
 
   function zoomBy(factor: number) {
     const viewport = getViewport();
     if (!viewport) return;
-    const { targetX, targetY, targetZoom } = zoomByParams(viewport.clientWidth, viewport.clientHeight, cam.current, factor);
+    const { targetX, targetY, targetZoom } = zoomByParams(
+      viewport.clientWidth,
+      viewport.clientHeight,
+      cam.current,
+      factor,
+    );
     animateCamera(targetX, targetY, targetZoom, 200);
   }
 
@@ -81,7 +103,11 @@ export function createCamera({ getViewport, getWorld, wW, wH, onBackgroundClick 
     const handlePointerDown = (ev: PointerEvent) => {
       const target = ev.target as HTMLElement;
       const world = getWorld();
-      const isBackground = target === viewport || target === world || target.tagName === 'svg' || target.id === 'edges-svg';
+      const isBackground =
+        target === viewport ||
+        target === world ||
+        target.tagName === 'svg' ||
+        target.id === 'edges-svg';
       if (isBackground) {
         isPanning = true;
         hasMoved = false;
@@ -94,7 +120,8 @@ export function createCamera({ getViewport, getWorld, wW, wH, onBackgroundClick 
 
     const handlePointerMove = (ev: PointerEvent) => {
       if (!isPanning) return;
-      if (Math.abs(ev.clientX - panStart.x) > 3 || Math.abs(ev.clientY - panStart.y) > 3) hasMoved = true;
+      if (Math.abs(ev.clientX - panStart.x) > 3 || Math.abs(ev.clientY - panStart.y) > 3)
+        hasMoved = true;
       cam.current.x = camStart.x - (ev.clientX - panStart.x) / cam.current.z;
       cam.current.y = camStart.y - (ev.clientY - panStart.y) / cam.current.z;
       applyCameraTransform();
@@ -111,7 +138,14 @@ export function createCamera({ getViewport, getWorld, wW, wH, onBackgroundClick 
     const handleWheel = (ev: WheelEvent) => {
       ev.preventDefault();
       const rect = viewport.getBoundingClientRect();
-      const next = wheelZoomParams(ev.clientX, ev.clientY, rect, cam.current, ev.deltaY, ev.ctrlKey);
+      const next = wheelZoomParams(
+        ev.clientX,
+        ev.clientY,
+        rect,
+        cam.current,
+        ev.deltaY,
+        ev.ctrlKey,
+      );
       Object.assign(cam.current, next);
       applyCameraTransform();
     };

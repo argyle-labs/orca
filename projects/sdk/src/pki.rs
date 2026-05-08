@@ -252,6 +252,29 @@ pub fn list_plugins(pki_dir: &Path) -> Vec<String> {
         .collect()
 }
 
+// ── Peer cert introspection ───────────────────────────────────────────────────
+
+/// Extract the Subject Common Name from a DER-encoded leaf cert.
+///
+/// The plugin host calls this on the peer's leaf cert during the mTLS
+/// handshake, then binds the resulting CN to the connection. Plugins are
+/// then forced to identify as their cert's CN in `orca/hello`, closing the
+/// trust gap where any cert signed by the orca CA could claim any plugin id.
+pub fn peer_common_name(cert_der: &[u8]) -> Result<String> {
+    let (_, parsed) =
+        x509_parser::parse_x509_certificate(cert_der).context("parse peer cert DER")?;
+    let cn = parsed
+        .subject()
+        .iter_common_name()
+        .next()
+        .context("peer cert has no Subject CN")?;
+    let cn = cn
+        .as_str()
+        .context("peer cert CN is not valid UTF-8")?
+        .to_string();
+    Ok(cn)
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn write_pem(path: PathBuf, pem: &str) -> Result<()> {
