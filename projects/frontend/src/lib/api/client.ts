@@ -1,14 +1,10 @@
 // ⚠️  AUTO-GENERATED — do not edit. Run `orca gen` to regenerate.
 import type * as T from './types';
-const BASE = ''; // same-origin — proxied via Vite in dev
-async function request<R>(
-  method: string,
-  path: string,
-  opts?: {
-    query?: Record<string, string | number | boolean | undefined>;
-    body?: unknown;
-  },
-): Promise<R> {
+const BASE = '';  // same-origin — proxied via Vite in dev
+async function request<R>(method: string, path: string, opts?: {
+  query?: Record<string, string | number | boolean | undefined>;
+  body?: unknown;
+}): Promise<R> {
   const url = new URL(BASE + path, window.location.origin);
   if (opts?.query) {
     for (const [k, v] of Object.entries(opts.query)) {
@@ -43,7 +39,8 @@ export async function listBitbucketPRs(params: {
 /** GET /api/bitbucket/repos
 Scans REBUY_ROOT (or ~/code/rebuy) for git dirs with Bitbucket remotes. */
 export async function listBitbucketRepos(): Promise<T.RepoInfo[]> {
-  return request<T.RepoInfo[]>('GET', '/api/bitbucket/repos', {});
+  return request<T.RepoInfo[]>('GET', '/api/bitbucket/repos', {
+  });
 }
 export async function searchConfluence(params: {
   cql?: string; // CQL query (default: type = page ORDER BY lastModified DESC)
@@ -84,13 +81,16 @@ export async function runDockerAction(params: {
   });
 }
 export async function getDockerEngine(): Promise<void> {
-  return request<void>('GET', '/api/docker/engine', {});
+  return request<void>('GET', '/api/docker/engine', {
+  });
 }
 export async function startDockerEngine(): Promise<void> {
-  return request<void>('POST', '/api/docker/engine/start', {});
+  return request<void>('POST', '/api/docker/engine/start', {
+  });
 }
 export async function listDockerRuntimes(): Promise<T.DockerRuntimeInfo[]> {
-  return request<T.DockerRuntimeInfo[]>('GET', '/api/docker/runtimes', {});
+  return request<T.DockerRuntimeInfo[]>('GET', '/api/docker/runtimes', {
+  });
 }
 export async function addDockerRuntime(params: {
   body: T.DockerRuntimeAddRequest;
@@ -102,7 +102,8 @@ export async function addDockerRuntime(params: {
 export async function removeDockerRuntime(params: {
   name: string; // Runtime name
 }): Promise<T.OkResponse> {
-  return request<T.OkResponse>('DELETE', `/api/docker/runtimes/${params.name}`, {});
+  return request<T.OkResponse>('DELETE', `/api/docker/runtimes/${params.name}`, {
+  });
 }
 export async function getDockerServices(params: {
   path: string; // Absolute path to the Docker Compose project directory
@@ -124,7 +125,8 @@ export async function fsBrowse(params: {
   });
 }
 export async function listGithubOrgs(): Promise<unknown> {
-  return request<unknown>('GET', '/api/github/orgs', {});
+  return request<unknown>('GET', '/api/github/orgs', {
+  });
 }
 export async function listGithubRepos(params: {
   type?: string; // Filter type: all | owner | public | private | member
@@ -162,10 +164,12 @@ export async function listGithubPRs(params: {
   });
 }
 export async function getGithubUser(): Promise<unknown> {
-  return request<unknown>('GET', '/api/github/user', {});
+  return request<unknown>('GET', '/api/github/user', {
+  });
 }
 export async function ping(): Promise<void> {
-  return request<void>('GET', '/api/health', {});
+  return request<void>('GET', '/api/health', {
+  });
 }
 export async function listJiraIssues(params: {
   jql?: string; // JQL query (default: assignee = currentUser() ORDER BY updated DESC)
@@ -180,7 +184,8 @@ export async function listJiraIssues(params: {
 export async function getJiraTransitions(params: {
   key: string; // Jira issue key (e.g. PROJ-123)
 }): Promise<unknown> {
-  return request<unknown>('GET', `/api/jira/issues/${params.key}/transitions`, {});
+  return request<unknown>('GET', `/api/jira/issues/${params.key}/transitions`, {
+  });
 }
 export async function transitionJiraIssue(params: {
   key: string; // Jira issue key
@@ -191,9 +196,12 @@ export async function transitionJiraIssue(params: {
   });
 }
 export async function getLearningProgress(): Promise<T.ProgressResponse> {
-  return request<T.ProgressResponse>('GET', '/api/learning/progress', {});
+  return request<T.ProgressResponse>('GET', '/api/learning/progress', {
+  });
 }
-export async function saveLearningProgress(params: { body: T.ProgressRequest }): Promise<void> {
+export async function saveLearningProgress(params: {
+  body: T.ProgressRequest;
+}): Promise<void> {
   return request<void>('POST', '/api/learning/progress', {
     body: params.body,
   });
@@ -210,7 +218,8 @@ export async function getLogs(params: {
   });
 }
 export async function getLogServices(): Promise<T.LogServicesResponse> {
-  return request<T.LogServicesResponse>('GET', '/api/logs/services', {});
+  return request<T.LogServicesResponse>('GET', '/api/logs/services', {
+  });
 }
 export async function listMcpMappings(params: {
   name?: string; // Filter by MCP server name
@@ -221,7 +230,9 @@ export async function listMcpMappings(params: {
     query: { name },
   });
 }
-export async function createMcpMapping(params: { body: T.MapRequest }): Promise<T.OkResponse> {
+export async function createMcpMapping(params: {
+  body: T.MapRequest;
+}): Promise<T.OkResponse> {
   return request<T.OkResponse>('POST', '/api/mcp/mappings', {
     body: params.body,
   });
@@ -229,17 +240,23 @@ export async function createMcpMapping(params: { body: T.MapRequest }): Promise<
 export async function deleteMcpMapping(params: {
   orca_tool: string; // Orca tool name to unmap
 }): Promise<T.OkResponse> {
-  return request<T.OkResponse>('DELETE', `/api/mcp/mappings/${params.orca_tool}`, {});
+  return request<T.OkResponse>('DELETE', `/api/mcp/mappings/${params.orca_tool}`, {
+  });
 }
-export async function runMcpTool(params: { body: T.McpRunRequest }): Promise<T.McpRunResponse> {
+export async function runMcpTool(params: {
+  body: T.McpRunRequest;
+}): Promise<T.McpRunResponse> {
   return request<T.McpRunResponse>('POST', '/api/mcp/run', {
     body: params.body,
   });
 }
 export async function listMcpServers(): Promise<T.McpServerInfo[]> {
-  return request<T.McpServerInfo[]>('GET', '/api/mcp/servers', {});
+  return request<T.McpServerInfo[]>('GET', '/api/mcp/servers', {
+  });
 }
-export async function addMcpServer(params: { body: T.McpServerAddRequest }): Promise<T.OkResponse> {
+export async function addMcpServer(params: {
+  body: T.McpServerAddRequest;
+}): Promise<T.OkResponse> {
   return request<T.OkResponse>('POST', '/api/mcp/servers', {
     body: params.body,
   });
@@ -247,10 +264,12 @@ export async function addMcpServer(params: { body: T.McpServerAddRequest }): Pro
 export async function removeMcpServer(params: {
   name: string; // Server name
 }): Promise<T.OkResponse> {
-  return request<T.OkResponse>('DELETE', `/api/mcp/servers/${params.name}`, {});
+  return request<T.OkResponse>('DELETE', `/api/mcp/servers/${params.name}`, {
+  });
 }
 export async function getMcpTools(): Promise<T.McpToolInfo[]> {
-  return request<T.McpToolInfo[]>('GET', '/api/mcp/tools', {});
+  return request<T.McpToolInfo[]>('GET', '/api/mcp/tools', {
+  });
 }
 export async function downloadPdf(params: {
   root: string; // Root name (orca | rebuy)
@@ -263,8 +282,21 @@ export async function downloadPdf(params: {
     query: { root, path, output },
   });
 }
+export async function listPluginTools(): Promise<T.PluginToolInfo[]> {
+  return request<T.PluginToolInfo[]>('GET', '/api/plugin-tools', {
+  });
+}
+export async function callPluginTool(params: {
+  fq_name: string; // Fully-qualified tool name `<plugin_id>.<name>`
+  body: T.PluginToolCallRequest;
+}): Promise<T.PluginToolCallResponse> {
+  return request<T.PluginToolCallResponse>('POST', `/api/plugin-tools/${params.fq_name}/call`, {
+    body: params.body,
+  });
+}
 export async function listPlugins(): Promise<T.PluginInfo[]> {
-  return request<T.PluginInfo[]>('GET', '/api/plugins', {});
+  return request<T.PluginInfo[]>('GET', '/api/plugins', {
+  });
 }
 export async function installPlugin(params: {
   body: T.PluginInstallRequest;
@@ -276,12 +308,14 @@ export async function installPlugin(params: {
 export async function removePlugin(params: {
   id: string; // Plugin ID
 }): Promise<T.OkResponse> {
-  return request<T.OkResponse>('DELETE', `/api/plugins/${params.id}`, {});
+  return request<T.OkResponse>('DELETE', `/api/plugins/${params.id}`, {
+  });
 }
 export async function listPluginCreds(params: {
   id: string; // Plugin ID
 }): Promise<T.CredInfo[]> {
-  return request<T.CredInfo[]>('GET', `/api/plugins/${params.id}/creds`, {});
+  return request<T.CredInfo[]>('GET', `/api/plugins/${params.id}/creds`, {
+  });
 }
 export async function setPluginCred(params: {
   id: string; // Plugin ID
@@ -294,24 +328,28 @@ export async function setPluginCred(params: {
 export async function syncPluginCreds(params: {
   id: string; // Plugin ID
 }): Promise<T.OkResponse> {
-  return request<T.OkResponse>('POST', `/api/plugins/${params.id}/creds/sync`, {});
+  return request<T.OkResponse>('POST', `/api/plugins/${params.id}/creds/sync`, {
+  });
 }
 export async function deletePluginCred(params: {
   id: string; // Plugin ID
   key: string; // Credential key
 }): Promise<T.OkResponse> {
-  return request<T.OkResponse>('DELETE', `/api/plugins/${params.id}/creds/${params.key}`, {});
+  return request<T.OkResponse>('DELETE', `/api/plugins/${params.id}/creds/${params.key}`, {
+  });
 }
 export async function listPluginData(params: {
   id: string; // Plugin ID
 }): Promise<T.PluginDataEntry[]> {
-  return request<T.PluginDataEntry[]>('GET', `/api/plugins/${params.id}/data`, {});
+  return request<T.PluginDataEntry[]>('GET', `/api/plugins/${params.id}/data`, {
+  });
 }
 export async function getPluginData(params: {
   id: string; // Plugin ID
   key: string; // Data key
 }): Promise<T.PluginDataEntry> {
-  return request<T.PluginDataEntry>('GET', `/api/plugins/${params.id}/data/${params.key}`, {});
+  return request<T.PluginDataEntry>('GET', `/api/plugins/${params.id}/data/${params.key}`, {
+  });
 }
 export async function setPluginData(params: {
   id: string; // Plugin ID
@@ -326,31 +364,38 @@ export async function deletePluginData(params: {
   id: string; // Plugin ID
   key: string; // Data key
 }): Promise<T.OkResponse> {
-  return request<T.OkResponse>('DELETE', `/api/plugins/${params.id}/data/${params.key}`, {});
+  return request<T.OkResponse>('DELETE', `/api/plugins/${params.id}/data/${params.key}`, {
+  });
 }
 export async function disablePlugin(params: {
   id: string; // Plugin ID
 }): Promise<T.OkResponse> {
-  return request<T.OkResponse>('PATCH', `/api/plugins/${params.id}/disable`, {});
+  return request<T.OkResponse>('PATCH', `/api/plugins/${params.id}/disable`, {
+  });
 }
 export async function enablePlugin(params: {
   id: string; // Plugin ID
 }): Promise<T.OkResponse> {
-  return request<T.OkResponse>('PATCH', `/api/plugins/${params.id}/enable`, {});
+  return request<T.OkResponse>('PATCH', `/api/plugins/${params.id}/enable`, {
+  });
 }
 export async function getPluginHealth(params: {
   id: string; // Plugin ID
 }): Promise<void> {
-  return request<void>('GET', `/api/plugins/${params.id}/health`, {});
+  return request<void>('GET', `/api/plugins/${params.id}/health`, {
+  });
 }
 export async function getHealth(): Promise<T.HealthResponse> {
-  return request<T.HealthResponse>('GET', '/api/rebuy/health/local', {});
+  return request<T.HealthResponse>('GET', '/api/rebuy/health/local', {
+  });
 }
 export async function getSchema(): Promise<T.SchemaResponse> {
-  return request<T.SchemaResponse>('GET', '/api/schema', {});
+  return request<T.SchemaResponse>('GET', '/api/schema', {
+  });
 }
 export async function listSchemaDatabases(): Promise<T.SchemaDbInfo[]> {
-  return request<T.SchemaDbInfo[]>('GET', '/api/schema/databases', {});
+  return request<T.SchemaDbInfo[]>('GET', '/api/schema/databases', {
+  });
 }
 export async function addSchemaDatabase(params: {
   body: T.SchemaDbAddRequest;
@@ -362,10 +407,12 @@ export async function addSchemaDatabase(params: {
 export async function removeSchemaDatabase(params: {
   name: string; // Database name
 }): Promise<T.OkResponse> {
-  return request<T.OkResponse>('DELETE', `/api/schema/databases/${params.name}`, {});
+  return request<T.OkResponse>('DELETE', `/api/schema/databases/${params.name}`, {
+  });
 }
 export async function getSchemaDomains(): Promise<void> {
-  return request<void>('GET', '/api/schema/domains', {});
+  return request<void>('GET', '/api/schema/domains', {
+  });
 }
 export async function searchDocs(params: {
   q?: string; // Search query
@@ -378,12 +425,16 @@ export async function searchDocs(params: {
   });
 }
 export async function listSpecs(): Promise<T.SpecMeta[]> {
-  return request<T.SpecMeta[]>('GET', '/api/specs', {});
+  return request<T.SpecMeta[]>('GET', '/api/specs', {
+  });
 }
 export async function listDbSpecs(): Promise<T.SpecInfo[]> {
-  return request<T.SpecInfo[]>('GET', '/api/specs/db', {});
+  return request<T.SpecInfo[]>('GET', '/api/specs/db', {
+  });
 }
-export async function registerSpec(params: { body: T.SpecRegisterRequest }): Promise<T.SpecInfo> {
+export async function registerSpec(params: {
+  body: T.SpecRegisterRequest;
+}): Promise<T.SpecInfo> {
   return request<T.SpecInfo>('POST', '/api/specs/register', {
     body: params.body,
   });
@@ -391,17 +442,20 @@ export async function registerSpec(params: { body: T.SpecRegisterRequest }): Pro
 export async function syncMcpSpecs(params: {
   server: string; // MCP server name (e.g. rebuy-cli)
 }): Promise<T.OkResponse> {
-  return request<T.OkResponse>('POST', `/api/specs/sync-mcp/${params.server}`, {});
+  return request<T.OkResponse>('POST', `/api/specs/sync-mcp/${params.server}`, {
+  });
 }
 export async function refreshSpec(params: {
   name: string; // Spec name to refresh
 }): Promise<T.SpecInfo> {
-  return request<T.SpecInfo>('POST', `/api/specs/${params.name}/refresh`, {});
+  return request<T.SpecInfo>('POST', `/api/specs/${params.name}/refresh`, {
+  });
 }
 export async function unregisterSpec(params: {
   name: string; // Spec name to unregister
 }): Promise<T.OkResponse> {
-  return request<T.OkResponse>('DELETE', `/api/specs/${params.name}/unregister`, {});
+  return request<T.OkResponse>('DELETE', `/api/specs/${params.name}/unregister`, {
+  });
 }
 export async function getSpec(params: {
   repo: string; // Repository name (e.g. admin-api)
@@ -447,7 +501,8 @@ export async function downloadGraphql(params: {
 export async function getSpecGraphqlInfo(params: {
   repo: string; // Repository name (e.g. admin-api)
 }): Promise<T.GraphQlInfo> {
-  return request<T.GraphQlInfo>('GET', `/api/specs/${params.repo}/graphql/info`, {});
+  return request<T.GraphQlInfo>('GET', `/api/specs/${params.repo}/graphql/info`, {
+  });
 }
 export async function proxyGraphql(params: {
   repo: string; // Repository name (e.g. shopify-admin)
@@ -478,7 +533,8 @@ export async function system_action_handler(params: {
 }
 /** GET /api/system/status — installation status for the web UI */
 export async function system_status_handler(): Promise<unknown> {
-  return request<unknown>('GET', '/api/system/status', {});
+  return request<unknown>('GET', '/api/system/status', {
+  });
 }
 export async function runTests(params: {
   suite: string; // Test suite to run: rust | frontend | e2e | all
