@@ -1,5 +1,14 @@
-//! Filesystem and search helpers used by the agent tool registry and other
-//! crates that need read/write/edit/glob/grep against the local filesystem.
+//! Filesystem and search helpers.
+//!
+//! Modules:
+//! - [`fs`] — read/write/edit/exists/mkdir/remove + tilde expansion
+//! - [`atomic`] — atomic write (temp + rename)
+//! - [`hash`] — sha256 / blake3 file hashing
+//! - [`watch`] — async filesystem change notifications
+//! - [`search`] — glob + grep helpers
 
+pub mod atomic;
 pub mod fs;
+pub mod hash;
 pub mod search;
+pub mod watch;

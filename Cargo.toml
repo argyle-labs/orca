@@ -20,6 +20,13 @@ members = [
     "projects/conversation",
     "projects/state",
     "projects/tool",
+    "projects/http",
+    "projects/graphql",
+    "projects/git",
+    "projects/integrations/ntfy",
+    "projects/integrations/dockge",
+    "projects/integrations/smb",
+    "projects/integrations/docker",
 ]
 resolver = "2"
 

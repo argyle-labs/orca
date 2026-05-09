@@ -1,0 +1,338 @@
+name: Release plugin
+
+# Per-plugin release pipeline. Each plugin in `projects/plugins/<name>/`
+# ships independently — its own tags, its own GitHub release, its own
+# version channel.
+#
+# Tag scheme: `<plugin>-v<version>` (stable) or `<plugin>-v<version>-<channel>.N`
+# (pre-release). Examples:
+#   dockge-v0.1.0
+#   dockge-v0.1.0-rc.1
+#   dockge-v0.1.0-alpha.3
+#
+# Each system that consumes the plugin picks a channel (stable / rc / beta /
+# alpha) and tracks the latest release on that channel — see the per-system
+# pinning model in project_plugin_version_pinning.md.
+#
+# Trigger: Actions → "Release plugin" → Run workflow → pick plugin, bump,
+# channel → Run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      plugin:
+        description: 'Plugin id (must match projects/plugins/<id>/)'
+        required: true
+        type: string
+      bump:
+        description: 'Version bump from latest stable for this plugin'
+        required: true
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      channel:
+        description: 'Release channel'
+        required: true
+        type: choice
+        options: [stable, alpha, beta, rc]
+        default: alpha
+      notes:
+        description: 'Extra release notes (optional, prepended to changelog)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  GOFLAGS: -mod=vendor
+
+jobs:
+  validate:
+    name: Validate plugin exists
+    runs-on: ubuntu-latest
+    outputs:
+      plugin_dir: ${{ steps.locate.outputs.plugin_dir }}
+      language:   ${{ steps.locate.outputs.language }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate plugin
+        id: locate
+        run: |
+          set -euo pipefail
+          PLUGIN="${{ inputs.plugin }}"
+          DIR="projects/plugins/${PLUGIN}"
+          if [ ! -d "$DIR" ]; then
+            echo "::error::plugin directory '$DIR' does not exist"
+            exit 1
+          fi
+          # Detect language from build artifacts. Add cases as new SDK
+          # ports start producing plugins.
+          if [ -f "$DIR/go.mod" ]; then
+            LANG=go
+          elif [ -f "$DIR/Cargo.toml" ]; then
+            LANG=rust
+          elif [ -f "$DIR/package.json" ]; then
+            LANG=ts
+          elif [ -f "$DIR/build.gradle" ] || [ -f "$DIR/build.gradle.kts" ]; then
+            LANG=kotlin
+          else
+            echo "::error::cannot detect language for $DIR (no go.mod / Cargo.toml / package.json / build.gradle)"
+            exit 1
+          fi
+          echo "Plugin: $PLUGIN ($LANG) in $DIR"
+          echo "plugin_dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "language=$LANG" >> "$GITHUB_OUTPUT"
+
+      - name: Verify orca-plugin.toml is present
+        run: |
+          set -euo pipefail
+          MANIFEST="${{ steps.locate.outputs.plugin_dir }}/orca-plugin.toml"
+          if [ ! -f "$MANIFEST" ]; then
+            echo "::error::missing $MANIFEST"
+            exit 1
+          fi
+          grep -q '^\[plugin\]' "$MANIFEST" || { echo "::error::no [plugin] table"; exit 1; }
+          grep -q '^id\s*=' "$MANIFEST"     || { echo "::error::no plugin.id"; exit 1; }
+          echo "manifest OK"
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Schema-validate manifest via SDK
+        run: cargo run -p orca-sdk --example validate -- "${{ steps.locate.outputs.plugin_dir }}/orca-plugin.toml"
+
+  version:
+    name: Compute version
+    needs: validate
+    runs-on: ubuntu-latest
+    outputs:
+      version:    ${{ steps.bump.outputs.version }}
+      tag:        ${{ steps.bump.outputs.tag }}
+      previous:   ${{ steps.bump.outputs.previous }}
+      prerelease: ${{ steps.bump.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute version
+        id: bump
+        env:
+          PLUGIN:  ${{ inputs.plugin }}
+          BUMP:    ${{ inputs.bump }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --quiet
+
+          LATEST_STABLE=$(git tag -l "${PLUGIN}-v[0-9]*" \
+            | grep -E "^${PLUGIN}-v[0-9]+\.[0-9]+\.[0-9]+$" \
+            | sort -V | tail -1 || true)
+          LATEST_STABLE=${LATEST_STABLE:-${PLUGIN}-v0.0.0}
+          PREV_VERSION=${LATEST_STABLE#${PLUGIN}-v}
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$PREV_VERSION"
+
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR+1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH+1)) ;;
+          esac
+          NEXT_STABLE="${MAJOR}.${MINOR}.${PATCH}"
+
+          if [ "$CHANNEL" = "stable" ]; then
+            VERSION="$NEXT_STABLE"
+            PRERELEASE=false
+          else
+            LATEST_PRE=$(git tag -l "${PLUGIN}-v${NEXT_STABLE}-${CHANNEL}.*" | sort -V | tail -1 || true)
+            if [ -z "$LATEST_PRE" ]; then
+              N=1
+            else
+              N=$(echo "$LATEST_PRE" | sed "s/.*${CHANNEL}\.//")
+              N=$((N+1))
+            fi
+            VERSION="${NEXT_STABLE}-${CHANNEL}.${N}"
+            PRERELEASE=true
+          fi
+          TAG="${PLUGIN}-v${VERSION}"
+
+          echo "Latest stable : $LATEST_STABLE"
+          echo "Next tag      : $TAG"
+          {
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "previous=$LATEST_STABLE"
+            echo "prerelease=$PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
+
+  build-go:
+    name: Build (Go) ${{ matrix.goos }}/${{ matrix.goarch }}
+    if: needs.validate.outputs.language == 'go'
+    needs: [validate, version]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: linux,  goarch: amd64 }
+          - { goos: linux,  goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: false
+
+      - name: Build
+        working-directory: ${{ needs.validate.outputs.plugin_dir }}
+        env:
+          GOOS:   ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+          PLUGIN:  ${{ inputs.plugin }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p ../../../staging
+          ASSET="orca-plugin-${PLUGIN}-${GOOS}-${GOARCH}"
+          go build -trimpath \
+            -ldflags="-s -w -X main.version=${VERSION}" \
+            -o "../../../staging/${ASSET}" .
+          ( cd ../../../staging && sha256sum "$ASSET" > "${ASSET}.sha256" )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: staging/*
+          retention-days: 7
+
+  build-rust:
+    name: Build (Rust) ${{ matrix.target }}
+    if: needs.validate.outputs.language == 'rust'
+    needs: [validate, version]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, asset_os: linux,  asset_arch: amd64 }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, asset_os: linux, asset_arch: arm64 }
+          - { os: macos-latest,  target: x86_64-apple-darwin, asset_os: darwin, asset_arch: amd64 }
+          - { os: macos-latest,  target: aarch64-apple-darwin, asset_os: darwin, asset_arch: arm64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+
+      - name: Install cross-linker for aarch64-linux
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          cat >> .cargo/config.toml <<'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Build
+        working-directory: ${{ needs.validate.outputs.plugin_dir }}
+        env:
+          PLUGIN:  ${{ inputs.plugin }}
+          VERSION: ${{ needs.version.outputs.version }}
+          TARGET:  ${{ matrix.target }}
+          ASSET_OS:   ${{ matrix.asset_os }}
+          ASSET_ARCH: ${{ matrix.asset_arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p ../../../staging
+          cargo build --release --target "$TARGET"
+          BIN_NAME="orca-plugin-${PLUGIN}"
+          ASSET="orca-plugin-${PLUGIN}-${ASSET_OS}-${ASSET_ARCH}"
+          cp "target/${TARGET}/release/${BIN_NAME}" "../../../staging/${ASSET}"
+          ( cd ../../../staging && shasum -a 256 "$ASSET" > "${ASSET}.sha256" )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.asset_os }}-${{ matrix.asset_arch }}-rust
+          path: staging/*
+          retention-days: 7
+
+  release:
+    name: Tag + create GitHub release
+    needs: [validate, version, build-go, build-rust]
+    if: |
+      always() &&
+      needs.version.result == 'success' &&
+      (needs.build-go.result == 'success' || needs.build-go.result == 'skipped') &&
+      (needs.build-rust.result == 'success' || needs.build-rust.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Merge checksums
+        run: |
+          set -euo pipefail
+          cat artifacts/*.sha256 > artifacts/checksums.sha256
+          ls -lh artifacts/
+
+      - name: Generate changelog
+        env:
+          PLUGIN:   ${{ inputs.plugin }}
+          PREVIOUS: ${{ needs.version.outputs.previous }}
+          TAG:      ${{ needs.version.outputs.tag }}
+          NOTES:    ${{ inputs.notes }}
+          CHANNEL:  ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          PATHSPEC="projects/plugins/${PLUGIN}"
+          if [ "$PREVIOUS" = "${PLUGIN}-v0.0.0" ]; then
+            RANGE="HEAD"
+          else
+            RANGE="${PREVIOUS}..HEAD"
+          fi
+          COMMITS=$(git log "$RANGE" --pretty=format:"%s" -- "$PATHSPEC" | head -100 || true)
+
+          {
+            if [ -n "$NOTES" ]; then
+              printf "%s\n\n---\n\n" "$NOTES"
+            fi
+            if [ "$CHANNEL" != "stable" ]; then
+              printf "> **Pre-release** \`%s\` — pending stable promotion.\n\n" "$CHANNEL"
+            fi
+            printf "## Changes since %s\n\n" "$PREVIOUS"
+            if [ -z "$COMMITS" ]; then
+              echo "_No plugin-scoped commits since the previous tag._"
+            else
+              echo "$COMMITS" | sed 's/^/- /'
+            fi
+            printf "\n## Install\n\nDownload the asset matching your OS/arch below; mark executable; place under \`~/.orca/plugins/%s/bin/\` (or let your orca instance install it via the plugin install flow).\n" "$PLUGIN"
+          } > /tmp/changelog.md
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name:     ${{ needs.version.outputs.tag }}
+          name:         ${{ needs.version.outputs.tag }}
+          body_path:    /tmp/changelog.md
+          prerelease:   ${{ needs.version.outputs.prerelease }}
+          target_commitish: ${{ github.sha }}
+          files: |
+            artifacts/orca-plugin-*
+            artifacts/checksums.sha256

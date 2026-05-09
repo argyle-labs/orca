@@ -80,19 +80,19 @@ pub async fn cmd_oauth_github() -> Result<()> {
     let client_id = std::env::var("GITHUB_OAUTH_CLIENT_ID")
         .context("GITHUB_OAUTH_CLIENT_ID not set — add to .env.orca.tpl and 1Password")?;
 
-    let client = reqwest::Client::new();
+    let client = orca_http::Client::new();
 
     let resp: DeviceCodeResponse = client
         .post("https://github.com/login/device/code")
         .header("Accept", "application/json")
-        .form(&[("client_id", &client_id), ("scope", &"repo".to_string())])
+        .form(vec![
+            ("client_id".into(), client_id.clone()),
+            ("scope".into(), "repo".into()),
+        ])
         .send()
         .await
         .context("device code request failed")?
-        .error_for_status()
-        .context("GitHub API error")?
         .json()
-        .await
         .context("failed to parse device code response")?;
 
     println!();
@@ -115,19 +115,18 @@ pub async fn cmd_oauth_github() -> Result<()> {
         let token_resp: DeviceTokenResponse = client
             .post("https://github.com/login/oauth/access_token")
             .header("Accept", "application/json")
-            .form(&[
-                ("client_id", &client_id),
-                ("device_code", &resp.device_code),
+            .form(vec![
+                ("client_id".into(), client_id.clone()),
+                ("device_code".into(), resp.device_code.clone()),
                 (
-                    "grant_type",
-                    &"urn:ietf:params:oauth:grant-type:device_code".to_string(),
+                    "grant_type".into(),
+                    "urn:ietf:params:oauth:grant-type:device_code".into(),
                 ),
             ])
             .send()
             .await
             .context("token poll request failed")?
             .json()
-            .await
             .context("failed to parse token response")?;
 
         match (token_resp.access_token, token_resp.error.as_deref()) {
@@ -197,23 +196,20 @@ pub async fn cmd_oauth_atlassian() -> Result<()> {
 
     let code = receive_callback(listener, &state)?;
 
-    let token_resp: AtlassianTokenResponse = reqwest::Client::new()
+    let token_resp: AtlassianTokenResponse = orca_http::Client::new()
         .post(ATLASSIAN_TOKEN_URL)
-        .form(&[
-            ("grant_type", "authorization_code"),
-            ("client_id", &client_id),
-            ("client_secret", &client_secret),
-            ("code", &code),
-            ("redirect_uri", &redirect_uri),
-            ("code_verifier", &verifier),
+        .form(vec![
+            ("grant_type".into(), "authorization_code".into()),
+            ("client_id".into(), client_id.clone()),
+            ("client_secret".into(), client_secret.clone()),
+            ("code".into(), code.clone()),
+            ("redirect_uri".into(), redirect_uri.clone()),
+            ("code_verifier".into(), verifier.clone()),
         ])
         .send()
         .await
         .context("token exchange request failed")?
-        .error_for_status()
-        .context("Atlassian token exchange error")?
         .json()
-        .await
         .context("failed to parse token response")?;
 
     store_oauth(

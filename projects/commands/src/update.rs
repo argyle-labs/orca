@@ -67,39 +67,35 @@ pub async fn check_for_update(channel: &Channel) -> Result<Option<UpdateInfo>> {
         _ => bail!("GITHUB_TOKEN not set — cannot check for updates"),
     };
 
-    let client = reqwest::Client::new();
+    let client = orca_http::Client::new();
+    let user_agent = format!("{APP_NAME}/{CURRENT_VERSION}");
+    let auth = format!("Bearer {token}");
+
+    let github_req = |url: String| {
+        client
+            .get(url)
+            .header("Authorization", &auth)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", &user_agent)
+    };
 
     // For stable we can use /releases/latest (always returns stable).
     // For pre-release channels we must scan /releases (paginated list).
     let releases: Vec<Release> = if *channel == Channel::Stable {
         let url = format!("{APP_REPO_API_URL}/releases/latest");
-        let resp = client
-            .get(&url)
-            .header("Authorization", format!("Bearer {token}"))
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .header("User-Agent", format!("{APP_NAME}/{CURRENT_VERSION}"))
-            .send()
-            .await
-            .context("GitHub API request failed")?;
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
+        match github_req(url).send().await {
+            Ok(resp) => vec![resp.json().context("failed to parse release JSON")?],
+            Err(orca_http::HttpError::Status { status: 404, .. }) => return Ok(None),
+            Err(e) => return Err(anyhow::Error::from(e).context("GitHub API request failed")),
         }
-        vec![resp.error_for_status()?.json().await?]
     } else {
         let url = format!("{APP_REPO_API_URL}/releases?per_page=20");
-        client
-            .get(&url)
-            .header("Authorization", format!("Bearer {token}"))
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .header("User-Agent", format!("{APP_NAME}/{CURRENT_VERSION}"))
+        github_req(url)
             .send()
             .await
             .context("GitHub API request failed")?
-            .error_for_status()?
             .json()
-            .await
             .context("failed to parse releases JSON")?
     };
 
@@ -150,7 +146,7 @@ pub async fn check_for_update(channel: &Channel) -> Result<Option<UpdateInfo>> {
 /// Download the new binary, verify its checksum, and atomically replace the current binary.
 pub async fn apply_update(info: &UpdateInfo) -> Result<()> {
     let token = std::env::var("GITHUB_TOKEN").context("GITHUB_TOKEN not set")?;
-    let client = reqwest::Client::new();
+    let client = orca_http::Client::new();
 
     // Download the checksum file first
     let expected_hash = if !info.checksum_url.is_empty() {
@@ -267,22 +263,21 @@ fn is_newer(candidate: &str, current: &str) -> bool {
     parse(candidate) > parse(current)
 }
 
-async fn download_asset(client: &reqwest::Client, url: &str, token: &str) -> Result<Vec<u8>> {
-    let bytes = client
+async fn download_asset(
+    client: &orca_http::Client,
+    url: &str,
+    token: &str,
+) -> Result<Vec<u8>> {
+    let resp = client
         .get(url)
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/octet-stream")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .header("User-Agent", format!("{APP_NAME}/{CURRENT_VERSION}"))
-        .send()
+        .send_bytes()
         .await
-        .context("download request failed")?
-        .error_for_status()
-        .context("download HTTP error")?
-        .bytes()
-        .await
-        .context("failed to read download body")?;
-    Ok(bytes.to_vec())
+        .context("download failed")?;
+    Ok(resp.body)
 }
 
 fn current_binary_path() -> Result<PathBuf> {
