@@ -5,12 +5,12 @@ use config::APP_NAME;
 pub async fn cmd_gen(url: &str, out: &str) -> Result<()> {
     // Poll until the backend is reachable (up to 30s after a cargo-watch restart)
     let spec_url = format!("{url}/api/openapi.json");
-    let client = reqwest::Client::new();
+    let client = orca_http::Client::new();
     let mut attempts = 0;
     loop {
         match client.get(&spec_url).send().await {
-            Ok(r) if r.status().is_success() => break,
-            _ => {
+            Ok(_) => break,
+            Err(_) => {
                 attempts += 1;
                 if attempts >= 30 {
                     anyhow::bail!("backend not reachable at {spec_url} after 30s");

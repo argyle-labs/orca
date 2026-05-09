@@ -1,12 +1,24 @@
-/.env.local
-/target/
-Cargo.lock
-site/src/api/
-site/dist/
-site/node_modules/
-site/.env.local
-site/.env.*.local
+# Env
+.env.local
+.env.*.local
+
+# Worktrees
 .worktrees/
-.svelte-kit
-build
-coverage
+
+# Rust
+target/
+Cargo.lock
+
+# Node / JS
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Svelte / Vite
+.svelte-kit/
+
+# Gradle / Kotlin
+.gradle/
+!gradle/wrapper/gradle-wrapper.jar

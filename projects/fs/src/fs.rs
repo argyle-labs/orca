@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::path::Path;
 
 /// Expand a leading `~/` to the user's home directory.
@@ -29,6 +29,31 @@ pub fn write_file(path: &str, content: &str) -> Result<String> {
     }
     std::fs::write(p, content)?;
     Ok(format!("wrote {} bytes to {path}", content.len()))
+}
+
+/// `true` iff `path` exists. Symlinks resolve to their target.
+pub fn exists(path: &Path) -> bool {
+    path.exists()
+}
+
+/// Create `path` and all missing ancestors. No-op when already present.
+pub fn mkdir_p(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("mkdir -p {}", path.display()))
+}
+
+/// Remove `path`. Files are unlinked; directories are removed recursively.
+/// Errors when the path doesn't exist.
+pub fn remove(path: &Path) -> Result<()> {
+    if !path.exists() {
+        bail!("path not found: {}", path.display());
+    }
+    if path.is_dir() {
+        std::fs::remove_dir_all(path)?;
+    } else {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
 }
 
 /// Replace the first occurrence of `old` with `new` in the file at `path`.

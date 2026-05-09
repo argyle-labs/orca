@@ -10,6 +10,7 @@ orca-scanner = { path = "../scanner", features = ["php-ast"] }
 config       = { package = "orca-config", path = "../config" }
 db           = { package = "orca-db", path = "../db" }
 orca_fs      = { package = "orca-fs", path = "../fs" }
+orca-http    = { path = "../http" }
 profile      = { package = "orca-profile", path = "../profile" }
 state        = { package = "orca-state", path = "../state" }
 
