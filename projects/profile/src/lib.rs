@@ -168,9 +168,7 @@ impl ProfileManager {
         let row = db::create_profile(conn, &id, name, owner_user_id, description)
             .map_err(ProfileError::Other)?;
         let profile = Profile::from_row(row, &self.profiles_root);
-        profile
-            .ensure_dirs()
-            .map_err(|e| ProfileError::Other(e.into()))?;
+        profile.ensure_dirs().map_err(ProfileError::Other)?;
         tracing::info!(profile_id = %profile.id, owner = %owner_user_id, name = %name, "created profile");
         Ok(profile)
     }
@@ -380,10 +378,10 @@ impl ProfileManager {
         user_id: &str,
     ) -> Result<Option<Profile>, ProfileError> {
         // 1. ORCA_PROFILE env (id or name)
-        if let Ok(spec) = std::env::var("ORCA_PROFILE") {
-            if let Some(p) = self.resolve_spec(conn, user_id, &spec)? {
-                return Ok(Some(p));
-            }
+        if let Ok(spec) = std::env::var("ORCA_PROFILE")
+            && let Some(p) = self.resolve_spec(conn, user_id, &spec)?
+        {
+            return Ok(Some(p));
         }
         // 2. Persisted active selection
         if let Some(id) = db::get_active_profile(conn, user_id).map_err(ProfileError::Other)? {

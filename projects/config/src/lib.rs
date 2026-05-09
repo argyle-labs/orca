@@ -4,6 +4,7 @@
 //! DB startup (migrations, API key loading) is handled by `db::startup`.
 
 mod consts;
+pub mod docs;
 pub use consts::*;
 
 use anyhow::{Context, Result};
@@ -124,6 +125,11 @@ impl Config {
         self.app_dir.join("logs/sessions")
     }
 
+    /// Deprecated: config docs are now embedded into the binary via
+    /// `config::docs::get(name)` and `config::docs::list_basenames()`. Path
+    /// returned here exists only for callers that haven't migrated yet — it
+    /// will not exist on most installs.
+    #[deprecated(note = "use config::docs::get(name) — config docs are embedded")]
     pub fn config_dir(&self) -> PathBuf {
         dirs::home_dir()
             .unwrap_or_default()

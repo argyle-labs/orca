@@ -8,5 +8,6 @@ name = "config"
 path = "src/lib.rs"
 
 [dependencies]
-anyhow = "1"
-dirs   = "6"
+anyhow     = "1"
+dirs       = "6"
+rust-embed = "8"
