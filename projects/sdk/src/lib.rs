@@ -33,7 +33,15 @@ pub mod framing;
 pub mod jsonrpc;
 pub mod manifest;
 pub mod pki;
+pub mod tools;
 pub mod transport;
+
+// Re-export the tools surface so plugin authors get one canonical import path.
+pub use tools::{
+    RegisteredTool, TOOLS_CALL_METHOD, TOOLS_DECLARE_METHOD, ToolCallParams, ToolCallResult,
+    ToolDeclaration, ToolFuture, ToolHandler, ToolHandlerError, ToolsDeclareParams,
+    ToolsDeclareResult, tool_error_codes,
+};
 
 #[cfg(test)]
 mod tests {

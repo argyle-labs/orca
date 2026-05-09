@@ -24,6 +24,29 @@ import (
 	"orca/sdk-go/framing"
 	"orca/sdk-go/jsonrpc"
 	"orca/sdk-go/pki"
+	"orca/sdk-go/tools"
+)
+
+// Re-exported tools surface so plugin authors only need to import
+// "orca/sdk-go/transport". Mirrors the Rust SDK's lib.rs re-exports.
+type (
+	ToolDeclaration    = tools.ToolDeclaration
+	ToolsDeclareParams = tools.ToolsDeclareParams
+	ToolsDeclareResult = tools.ToolsDeclareResult
+	ToolCallParams     = tools.ToolCallParams
+	ToolCallResult     = tools.ToolCallResult
+	ToolHandler        = tools.Handler
+	ToolHandlerError   = tools.HandlerError
+	RegisteredTool     = tools.RegisteredTool
+)
+
+// Re-exported tools constants.
+const (
+	ToolsDeclareMethod      = tools.DeclareMethod
+	ToolsCallMethod         = tools.CallMethod
+	ToolErrCodeUnknownTool  = tools.ErrCodeUnknownTool
+	ToolErrCodeSchemaError  = tools.ErrCodeSchemaViolation
+	ToolErrCodeHandlerError = tools.ErrCodeHandlerError
 )
 
 // SDKVersion is announced in orca/hello.
@@ -111,6 +134,11 @@ type Transport struct {
 	notifSubs   []chan jsonrpc.Notification
 	notifClosed bool
 
+	// Tools the plugin has registered for the host to invoke. Keyed by the
+	// bare tool name (no plugin_id prefix).
+	toolsMu sync.Mutex
+	tools   map[string]RegisteredTool
+
 	closeOnce sync.Once
 	closed    chan struct{}
 }
@@ -136,6 +164,7 @@ func Connect(ctx context.Context, addr string, bundle *pki.NodeBundle) (*Transpo
 	t := &Transport{
 		conn:    tlsConn,
 		pending: make(map[uint64]chan jsonrpc.Response),
+		tools:   make(map[string]RegisteredTool),
 		closed:  make(chan struct{}),
 	}
 	t.nextID.Store(1)
@@ -207,9 +236,113 @@ func (t *Transport) readLoop() {
 		case jsonrpc.KindNotification:
 			t.fanout(msg.Notification)
 		case jsonrpc.KindRequest:
-			// Server-to-plugin requests are not part of Phase A.
+			// Spawn a goroutine so a slow handler doesn't stall the read loop.
+			go t.dispatchIncoming(msg.Request)
 		}
 	}
+}
+
+// dispatchIncoming handles a server→plugin request. Currently only
+// orca/tools.call is supported; everything else returns method-not-found.
+func (t *Transport) dispatchIncoming(req jsonrpc.Request) {
+	resp := t.dispatchOne(req)
+	body, err := json.Marshal(resp)
+	if err != nil {
+		return
+	}
+	_ = t.writeFrame(body)
+}
+
+func (t *Transport) dispatchOne(req jsonrpc.Request) jsonrpc.Response {
+	if req.Method != ToolsCallMethod {
+		return jsonrpc.Err(req.ID, jsonrpc.MethodNotFound(req.Method))
+	}
+
+	if len(req.Params) == 0 {
+		return jsonrpc.Err(req.ID, jsonrpc.InvalidParams("missing params"))
+	}
+	var params ToolCallParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return jsonrpc.Err(req.ID, jsonrpc.InvalidParams(err.Error()))
+	}
+
+	t.toolsMu.Lock()
+	rt, exists := t.tools[params.Name]
+	t.toolsMu.Unlock()
+	if !exists {
+		return jsonrpc.Err(req.ID, jsonrpc.ErrorObject{
+			Code:    ToolErrCodeUnknownTool,
+			Message: fmt.Sprintf("unknown tool: %s", params.Name),
+		})
+	}
+
+	ctx := context.Background()
+	result, err := rt.Handler(ctx, params.Arguments)
+	if err != nil {
+		var herr *ToolHandlerError
+		if errors.As(err, &herr) {
+			return jsonrpc.Err(req.ID, jsonrpc.ErrorObject{
+				Code:    ToolErrCodeHandlerError,
+				Message: herr.Message,
+				Data:    herr.Data,
+			})
+		}
+		return jsonrpc.Err(req.ID, jsonrpc.Internal(err.Error()))
+	}
+
+	out := ToolCallResult{Result: result}
+	body, err := json.Marshal(out)
+	if err != nil {
+		return jsonrpc.Err(req.ID, jsonrpc.Internal(err.Error()))
+	}
+	return jsonrpc.OK(req.ID, body)
+}
+
+// RegisterTool registers a tool the host can invoke via orca/tools.call.
+// Bare name (no <plugin_id>. prefix — the host applies the namespace).
+// Re-registering the same name replaces the previous handler. Call this
+// for each tool, then call DeclareTools once to send the batch.
+func (t *Transport) RegisterTool(
+	name, description string,
+	inputSchema json.RawMessage,
+	sensitivity Sensitivity,
+	handler ToolHandler,
+) {
+	decl := ToolDeclaration{
+		Name:        name,
+		Description: description,
+		InputSchema: inputSchema,
+		Sensitivity: tools.Sensitivity(sensitivity),
+	}
+	t.toolsMu.Lock()
+	t.tools[name] = RegisteredTool{Declaration: decl, Handler: handler}
+	t.toolsMu.Unlock()
+}
+
+// DeclareTools sends the registered tool set via orca/tools.declare.
+// Returns the namespaced ids the host accepted. Idempotent — calling
+// again replaces the host-side set.
+func (t *Transport) DeclareTools(ctx context.Context) (*ToolsDeclareResult, error) {
+	t.toolsMu.Lock()
+	decls := make([]ToolDeclaration, 0, len(t.tools))
+	for _, rt := range t.tools {
+		decls = append(decls, rt.Declaration)
+	}
+	t.toolsMu.Unlock()
+
+	params := ToolsDeclareParams{Tools: decls}
+	resp, err := t.Call(ctx, ToolsDeclareMethod, params)
+	if err != nil {
+		return nil, err
+	}
+	if resp.IsError() {
+		return nil, fmt.Errorf("%s rejected: %s", ToolsDeclareMethod, resp.Error.Message)
+	}
+	var result ToolsDeclareResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		return nil, fmt.Errorf("decode ToolsDeclareResult: %w", err)
+	}
+	return &result, nil
 }
 
 func (t *Transport) fanout(n jsonrpc.Notification) {

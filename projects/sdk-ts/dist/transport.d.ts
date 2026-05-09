@@ -1,5 +1,6 @@
 import { type ErrorObject, type Notification, type Response } from './jsonrpc.js';
 import { type NodeBundle } from './pki.js';
+import { type ToolHandler, type ToolsDeclareResult } from './tools.js';
 export declare const SDK_VERSION = "0.1.0";
 export type Flavor = 'full' | 'headless' | 'local';
 export type Sensitivity = 'general' | 'sensitive';
@@ -52,6 +53,8 @@ export declare class Transport {
     private nextID;
     private pending;
     private notifSubs;
+    /** Tools the plugin has registered for the host to invoke, by bare name. */
+    private tools;
     private closed;
     private constructor();
     static connect(opts: ConnectOptions): Promise<Transport>;
@@ -59,6 +62,25 @@ export declare class Transport {
     private readLoop;
     /** Close the underlying socket. Pending calls reject. */
     close(): void;
+    /**
+     * Handle a server→plugin request. Currently only `orca/tools.call` is
+     * supported; everything else returns method-not-found.
+     */
+    private dispatchIncoming;
+    private buildResponseFor;
+    /**
+     * Register a tool the host can invoke via orca/tools.call. Bare name
+     * (no `<plugin_id>.` prefix — the host applies the namespace).
+     * Re-registering the same name replaces the previous handler. Call
+     * this for each tool, then call {@link declareTools} once.
+     */
+    registerTool(name: string, description: string, inputSchema: unknown, sensitivity: Sensitivity, handler: ToolHandler): void;
+    /**
+     * Send the registered tool set via orca/tools.declare. Returns the
+     * namespaced ids the host accepted. Idempotent — calling again
+     * replaces the host-side set.
+     */
+    declareTools(): Promise<ToolsDeclareResult>;
     /** Subscribe to every server-pushed notification on this connection. */
     notifications(handler: (n: Notification) => void): () => void;
     /** Send a request and resolve with the matching response. */

@@ -12,8 +12,11 @@
 
 use anyhow::{Context, Result};
 use orca_sdk::framing::{read_frame, write_frame};
-use orca_sdk::jsonrpc::{ErrorObject, Message, Response};
+use orca_sdk::jsonrpc::{ErrorObject, Message, Request, Response};
 use orca_sdk::pki;
+use orca_sdk::tools::{
+    TOOLS_CALL_METHOD, TOOLS_DECLARE_METHOD, ToolCallParams, ToolsDeclareParams, ToolsDeclareResult,
+};
 use orca_sdk::transport::{
     CONTEXT_EVENT_METHOD, ContextEvent, ContextPublishParams, ContextSubscribeParams,
     ContextSubscribeResult, ContextUnsubscribeParams, HelloParams, HelloResult, TypedValue,
@@ -26,9 +29,11 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
 
@@ -63,21 +68,147 @@ impl ContextRegistry {
     }
 }
 
+// ── Outbound call infrastructure ─────────────────────────────────────────────
+
+/// Pending outbound requests we've sent to the plugin and are waiting on
+/// a Response for. Keyed by JSON-RPC id.
+type Pending = Arc<StdMutex<HashMap<u64, oneshot::Sender<Response>>>>;
+
+/// Handle external code (e.g. the MCP tool registry bridge) holds to talk
+/// to a connected plugin. Cloning is cheap — it shares the underlying
+/// channel + pending demux. Dropped when the plugin disconnects.
+#[derive(Clone)]
+pub struct ConnHandle {
+    plugin_id: String,
+    /// Outbound JSON-RPC frames the writer half of the connection drains.
+    outbound: mpsc::UnboundedSender<serde_json::Value>,
+    pending: Pending,
+    next_id: Arc<AtomicU64>,
+}
+
+impl ConnHandle {
+    pub fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+
+    /// Send a JSON-RPC request to the plugin and await the matching
+    /// response. Times out after `timeout` to avoid leaking pending
+    /// entries when a plugin handler hangs.
+    pub async fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<Response> {
+        let id = self.next_id.fetch_add(1, AtomicOrdering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().unwrap().insert(id, tx);
+        let req = Request::new(id, method, Some(params));
+        let envelope = serde_json::to_value(&req).context("serialize outbound request")?;
+        if self.outbound.send(envelope).is_err() {
+            self.pending.lock().unwrap().remove(&id);
+            anyhow::bail!("plugin '{}' is no longer connected", self.plugin_id);
+        }
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(resp)) => Ok(resp),
+            Ok(Err(_)) => {
+                anyhow::bail!("plugin '{}' disconnected before response", self.plugin_id)
+            }
+            Err(_) => {
+                self.pending.lock().unwrap().remove(&id);
+                anyhow::bail!(
+                    "plugin '{}' did not respond to {} within {:?}",
+                    self.plugin_id,
+                    method,
+                    timeout
+                )
+            }
+        }
+    }
+
+    /// Convenience wrapper around `orca/tools.call`. Returns the opaque
+    /// JSON inside `ToolCallResult.result`, or surfaces the JSON-RPC error.
+    pub async fn call_tool(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<serde_json::Value> {
+        let params = ToolCallParams {
+            name: name.into(),
+            arguments,
+        };
+        let resp = self
+            .call(TOOLS_CALL_METHOD, serde_json::to_value(&params)?, timeout)
+            .await?;
+        if let Some(err) = resp.error {
+            anyhow::bail!("tool '{name}' failed: code={} {}", err.code, err.message);
+        }
+        let result = resp
+            .result
+            .context("tools.call returned neither result nor error")?;
+        // ToolCallResult wraps the tool's payload at "result".
+        Ok(result
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
+    }
+}
+
+/// Process-wide registry of currently-connected plugins. The plugin host
+/// registers a `ConnHandle` on `orca/hello`; external code (MCP layer,
+/// schedulers, etc.) looks up plugins by id to invoke their tools.
+#[derive(Clone, Default)]
+pub struct PluginRegistry {
+    inner: Arc<StdMutex<HashMap<String, ConnHandle>>>,
+}
+
+impl PluginRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(&self, handle: ConnHandle) {
+        self.inner
+            .lock()
+            .unwrap()
+            .insert(handle.plugin_id.clone(), handle);
+    }
+
+    pub fn unregister(&self, plugin_id: &str) {
+        self.inner.lock().unwrap().remove(plugin_id);
+    }
+
+    pub fn get(&self, plugin_id: &str) -> Option<ConnHandle> {
+        self.inner.lock().unwrap().get(plugin_id).cloned()
+    }
+
+    pub fn connected_ids(&self) -> Vec<String> {
+        self.inner.lock().unwrap().keys().cloned().collect()
+    }
+}
+
 /// Start the plugin host in a background task. Returns immediately.
 /// If the PKI directory doesn't contain a CA, logs a warning and skips the host.
-pub fn start(pki_dir: &Path, port: u16) -> tokio::task::JoinHandle<()> {
+/// `plugin_registry` is shared so callers (e.g. the MCP bridge) can look up
+/// connected plugins by id and invoke their tools.
+pub fn start(
+    pki_dir: &Path,
+    port: u16,
+    plugin_registry: PluginRegistry,
+) -> tokio::task::JoinHandle<()> {
     let pki_dir = pki_dir.to_owned();
     tokio::spawn(async move {
-        if let Err(e) = run(&pki_dir, port).await {
+        if let Err(e) = run(&pki_dir, port, plugin_registry).await {
             warn!("[plugin-host] failed to start: {e:#}");
         }
     })
 }
 
-async fn run(pki_dir: &Path, port: u16) -> Result<()> {
+async fn run(pki_dir: &Path, port: u16, plugin_registry: PluginRegistry) -> Result<()> {
     let (listener, acceptor, addr) = bind(pki_dir, port).await?;
     info!("[plugin-host] listening on {addr} (mTLS)");
-    serve(listener, acceptor, ContextRegistry::new()).await
+    serve(listener, acceptor, ContextRegistry::new(), plugin_registry).await
 }
 
 /// Bind a TCP listener and build the mTLS acceptor for the plugin host.
@@ -102,12 +233,14 @@ pub async fn serve(
     listener: TcpListener,
     acceptor: TlsAcceptor,
     registry: ContextRegistry,
+    plugins: PluginRegistry,
 ) -> Result<()> {
     loop {
         match listener.accept().await {
             Ok((tcp, peer)) => {
                 let acceptor = acceptor.clone();
                 let registry = registry.clone();
+                let plugins = plugins.clone();
                 tokio::spawn(async move {
                     match acceptor.accept(tcp).await {
                         Ok(tls) => {
@@ -120,7 +253,8 @@ pub async fn serve(
                                     return;
                                 }
                             };
-                            if let Err(e) = handle_connection(tls, registry, peer_cn).await {
+                            if let Err(e) = handle_connection(tls, registry, plugins, peer_cn).await
+                            {
                                 warn!("[plugin-host] {peer} connection error: {e:#}");
                             }
                         }
@@ -169,9 +303,18 @@ struct ConnState {
     peer_cn: String,
     plugin_id: Option<String>,
     registry: ContextRegistry,
-    /// Notifications produced by handlers (and by subscription pumps) that
-    /// the writer half of the connection should serialize and send.
+    /// Process-wide registry the connection registers itself with on hello
+    /// and unregisters from on drop, so external code can dispatch
+    /// `tools/call` to this plugin via [`PluginRegistry::get`].
+    plugins: PluginRegistry,
+    /// Outbound JSON-RPC frames (notifications + host-initiated requests)
+    /// the writer half of the connection drains.
     notify_tx: mpsc::UnboundedSender<serde_json::Value>,
+    /// Pending host→plugin calls awaiting their Response. Shared with the
+    /// [`ConnHandle`] handed to external callers.
+    pending: Pending,
+    /// Outbound JSON-RPC id allocator, shared with the [`ConnHandle`].
+    next_outbound_id: Arc<AtomicU64>,
     /// Active subscriptions; aborting the JoinHandle stops forwarding events.
     subscriptions: HashMap<String, tokio::task::JoinHandle<()>>,
 }
@@ -181,21 +324,30 @@ impl Drop for ConnState {
         for (_, handle) in self.subscriptions.drain() {
             handle.abort();
         }
+        if let Some(id) = self.plugin_id.as_deref() {
+            self.plugins.unregister(id);
+        }
     }
 }
 
 async fn handle_connection(
     tls: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     registry: ContextRegistry,
+    plugins: PluginRegistry,
     peer_cn: String,
 ) -> Result<()> {
     let (mut reader, mut writer) = tokio::io::split(tls);
     let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<serde_json::Value>();
+    let pending: Pending = Arc::new(StdMutex::new(HashMap::new()));
+    let next_outbound_id = Arc::new(AtomicU64::new(1));
     let mut state = ConnState {
         peer_cn,
         plugin_id: None,
         registry,
+        plugins,
         notify_tx,
+        pending: pending.clone(),
+        next_outbound_id: next_outbound_id.clone(),
         subscriptions: HashMap::new(),
     };
 
@@ -203,10 +355,11 @@ async fn handle_connection(
         tokio::select! {
             biased;
 
-            // Outgoing notifications (from subscription pumps) — flush first
-            // so events don't queue up indefinitely behind a slow client.
-            Some(notif) = notify_rx.recv() => {
-                let bytes = serde_json::to_vec(&notif)?;
+            // Outgoing frames — notifications from subscription pumps and
+            // host-initiated requests from external callers (e.g. ConnHandle::call).
+            // Flush first so events don't queue up behind a slow client.
+            Some(envelope) = notify_rx.recv() => {
+                let bytes = serde_json::to_vec(&envelope)?;
                 write_frame(&mut writer, &bytes).await?;
             }
 
@@ -232,6 +385,8 @@ async fn handle_connection(
         }
     }
 
+    // Fail any in-flight outbound calls so awaiting tasks don't hang.
+    pending.lock().unwrap().clear();
     Ok(())
 }
 
@@ -256,14 +411,26 @@ fn dispatch(state: &mut ConnState, frame: &[u8]) -> serde_json::Value {
                 "orca/context.publish" => handle_context_publish(state, id, req.params),
                 "orca/context.subscribe" => handle_context_subscribe(state, id, req.params),
                 "orca/context.unsubscribe" => handle_context_unsubscribe(state, id, req.params),
+                m if m == TOOLS_DECLARE_METHOD => handle_tools_declare(state, id, req.params),
                 other => {
                     serde_json::to_value(Response::err(id, ErrorObject::method_not_found(other)))
                         .expect("Response serializes")
                 }
             }
         }
+        Message::Response(resp) => {
+            // Reply to a host-initiated call (e.g. tools/call we sent).
+            // Route to the matching oneshot in `state.pending`.
+            if let Some(id) = resp.id.as_u64() {
+                let tx = state.pending.lock().unwrap().remove(&id);
+                if let Some(tx) = tx {
+                    let _ = tx.send(resp);
+                }
+            }
+            json!(null)
+        }
         // Notifications have no id — don't respond.
-        Message::Notification(_) | Message::Response(_) => json!(null),
+        Message::Notification(_) => json!(null),
     }
 }
 
@@ -276,6 +443,8 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "orca/context.publish",
     "orca/context.subscribe",
     "orca/context.unsubscribe",
+    TOOLS_DECLARE_METHOD,
+    TOOLS_CALL_METHOD,
 ];
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -326,6 +495,15 @@ fn handle_hello(
         return serde_json::to_value(Response::ok(id, value)).expect("Response serializes");
     }
     state.plugin_id = Some(params.plugin_id.clone());
+
+    // Make this connection reachable to external code (MCP bridge, etc.)
+    // by registering a handle the registry hands out by plugin_id.
+    state.plugins.register(ConnHandle {
+        plugin_id: params.plugin_id.clone(),
+        outbound: state.notify_tx.clone(),
+        pending: state.pending.clone(),
+        next_id: state.next_outbound_id.clone(),
+    });
 
     // 1. Version gate.
     let result = match compare_semver(SERVER_VERSION, &params.core_min_required) {
@@ -469,6 +647,101 @@ fn handle_types_declare(
 
     let result = TypesDeclareResult { accepted };
     let value = serde_json::to_value(&result).expect("TypesDeclareResult serializes");
+    serde_json::to_value(Response::ok(id, value)).expect("Response serializes")
+}
+
+// ── tools.declare handler ─────────────────────────────────────────────────────
+
+fn handle_tools_declare(
+    state: &ConnState,
+    id: serde_json::Value,
+    params: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let plugin_id = match state.plugin_id.as_deref() {
+        Some(p) => p,
+        None => {
+            return serde_json::to_value(Response::err(
+                id,
+                ErrorObject::invalid_params(&format!(
+                    "{TOOLS_DECLARE_METHOD} requires prior orca/hello"
+                )),
+            ))
+            .expect("Response serializes");
+        }
+    };
+
+    let params: ToolsDeclareParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
+        Some(p) => p,
+        None => {
+            return serde_json::to_value(Response::err(
+                id,
+                ErrorObject::invalid_params(&format!(
+                    "{TOOLS_DECLARE_METHOD} requires {{ tools: [...] }}"
+                )),
+            ))
+            .expect("Response serializes");
+        }
+    };
+
+    // Per-tool validation. Empty name or unserializable schema is an
+    // invalid_params error; the host won't accept a partial set.
+    let mut rows: Vec<(String, String, String, String)> = Vec::with_capacity(params.tools.len());
+    let mut accepted = Vec::with_capacity(params.tools.len());
+    for decl in &params.tools {
+        if decl.name.trim().is_empty() {
+            return serde_json::to_value(Response::err(
+                id,
+                ErrorObject::invalid_params("tool.name must not be empty"),
+            ))
+            .expect("Response serializes");
+        }
+        let schema_str = match serde_json::to_string(&decl.input_schema) {
+            Ok(s) => s,
+            Err(e) => {
+                return serde_json::to_value(Response::err(
+                    id,
+                    ErrorObject::invalid_params(&format!(
+                        "input_schema for '{}' is not serializable: {e}",
+                        decl.name
+                    )),
+                ))
+                .expect("Response serializes");
+            }
+        };
+        rows.push((
+            decl.name.clone(),
+            decl.description.clone(),
+            schema_str,
+            decl.sensitivity.as_str().to_string(),
+        ));
+        accepted.push(format!("{plugin_id}.{}", decl.name));
+    }
+
+    let mut conn = match db::open_default() {
+        Ok(c) => c,
+        Err(e) => {
+            return serde_json::to_value(Response::err(
+                id,
+                ErrorObject::internal(&format!("open db: {e}")),
+            ))
+            .expect("Response serializes");
+        }
+    };
+    if let Err(e) = db::replace_plugin_tools(&mut conn, plugin_id, &rows) {
+        return serde_json::to_value(Response::err(
+            id,
+            ErrorObject::internal(&format!("replace_plugin_tools {plugin_id}: {e}")),
+        ))
+        .expect("Response serializes");
+    }
+
+    info!(
+        "[plugin-host] tools.declare from '{plugin_id}' accepted {} tool(s)",
+        accepted.len()
+    );
+
+    let result = ToolsDeclareResult { accepted };
+    let value = serde_json::to_value(&result).expect("ToolsDeclareResult serializes");
     serde_json::to_value(Response::ok(id, value)).expect("Response serializes")
 }
 

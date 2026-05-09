@@ -57,7 +57,11 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     tokio::spawn(orca_commands::startup_update_check());
 
     // Plugin host: TCP + mTLS on APP_PLUGIN_PORT. Skips gracefully if PKI not initialized.
-    crate::plugin_host::start(&pki_dir, config::APP_PLUGIN_PORT);
+    crate::plugin_host::start(
+        &pki_dir,
+        config::APP_PLUGIN_PORT,
+        crate::plugin_host::PluginRegistry::new(),
+    );
 
     axum::serve(listener, app).await?;
     Ok(())
@@ -96,7 +100,11 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     }
 
     // Plugin host: TCP + mTLS. Skips gracefully if PKI not initialized.
-    crate::plugin_host::start(&pki_dir, config::APP_PLUGIN_PORT);
+    crate::plugin_host::start(
+        &pki_dir,
+        config::APP_PLUGIN_PORT,
+        crate::plugin_host::PluginRegistry::new(),
+    );
 
     let mut sigterm = signal(SignalKind::terminate())?;
 

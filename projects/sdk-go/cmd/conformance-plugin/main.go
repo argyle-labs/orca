@@ -27,9 +27,17 @@ const (
 	scenarioTypeSchemaVersion    = "0.1.0"
 	scenarioContextID            = "conformance:hello"
 	scenarioManifestIDPayloadKey = "manifest_id"
+
+	// Tools surface — must match projects/sdk/src/conformance.rs SCENARIO.
+	scenarioToolName          = "echo"
+	scenarioToolArgKey        = "value"
+	scenarioToolArgValue      = "ping" // host invokes with this value
+	scenarioToolResultEchoKey = "echoed"
 )
 
 const scenarioTypeSchema = `{"type":"object","properties":{"text":{"type":"string"},"manifest_id":{"type":"string"}},"required":["text","manifest_id"]}`
+
+const scenarioToolInputSchema = `{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}`
 
 func envRequired(name string) (string, error) {
 	v := os.Getenv(name)
@@ -108,6 +116,39 @@ func run() error {
 	}); err != nil {
 		return fmt.Errorf("orca/context.publish: %w", err)
 	}
+
+	// Register the echo tool and declare it. The host calls back with
+	// orca/tools.call after seeing the declaration; the read loop dispatches
+	// to the handler below and writes the response on this same connection.
+	tr.RegisterTool(
+		scenarioToolName,
+		"echo back the value argument",
+		json.RawMessage(scenarioToolInputSchema),
+		transport.SensitivityGeneral,
+		func(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
+			var in map[string]string
+			if err := json.Unmarshal(args, &in); err != nil {
+				return nil, &transport.ToolHandlerError{Message: "decode args: " + err.Error()}
+			}
+			v, ok := in[scenarioToolArgKey]
+			if !ok {
+				return nil, &transport.ToolHandlerError{Message: "missing 'value' arg"}
+			}
+			out, err := json.Marshal(map[string]string{scenarioToolResultEchoKey: v})
+			if err != nil {
+				return nil, &transport.ToolHandlerError{Message: err.Error()}
+			}
+			return out, nil
+		},
+	)
+	if _, err := tr.DeclareTools(ctx); err != nil {
+		return fmt.Errorf("orca/tools.declare: %w", err)
+	}
+
+	// Hold the connection open so the host's tools.call can land and the
+	// read loop can serve the response. The conformance harness drives
+	// completion by observing all 5 events; we just need to outlive that.
+	time.Sleep(2 * time.Second)
 	return nil
 }
 

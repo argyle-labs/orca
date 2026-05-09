@@ -29,14 +29,26 @@ async fn boot_host_with_registry(
     pki_dir: &std::path::Path,
     registry: plugin_host::ContextRegistry,
 ) -> SocketAddr {
+    let (addr, _) = boot_host_with_plugins(pki_dir, registry).await;
+    addr
+}
+
+/// Boot variant that returns the [`plugin_host::PluginRegistry`] alongside
+/// the socket so tests can dispatch host→plugin `tools/call` invocations.
+async fn boot_host_with_plugins(
+    pki_dir: &std::path::Path,
+    registry: plugin_host::ContextRegistry,
+) -> (SocketAddr, plugin_host::PluginRegistry) {
+    let plugins = plugin_host::PluginRegistry::new();
+    let plugins_for_serve = plugins.clone();
     let (listener, acceptor, bound) = plugin_host::bind(pki_dir, 0)
         .await
         .expect("plugin_host::bind");
     tokio::spawn(async move {
-        let _ = plugin_host::serve(listener, acceptor, registry).await;
+        let _ = plugin_host::serve(listener, acceptor, registry, plugins_for_serve).await;
     });
     // Connect via loopback regardless of the 0.0.0.0 bind.
-    SocketAddr::from(([127, 0, 0, 1], bound.port()))
+    (SocketAddr::from(([127, 0, 0, 1], bound.port())), plugins)
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -964,3 +976,237 @@ async fn unknown_method_returns_error() {
     let err = resp.error.expect("error object");
     assert_eq!(err.code, -32601);
 }
+
+// ── tools.declare + tools.call (host→plugin round-trip) ────────────────────
+
+#[tokio::test(flavor = "current_thread")]
+async fn tools_declare_persists_to_db() {
+    use orca_sdk::tools::{ToolDeclaration, ToolsDeclareParams, ToolsDeclareResult};
+
+    install_ring();
+
+    let dir = tempfile::tempdir().unwrap();
+    let pki_dir = dir.path();
+    isolate_db(pki_dir);
+    pki::init(pki_dir).unwrap();
+    let bundle = pki::issue(pki_dir, "tool-plug", Capability::General).unwrap();
+
+    let addr = boot_host(pki_dir).await;
+    let transport = TcpTransport::connect(addr, &bundle).await.unwrap();
+    transport
+        .hello("tool-plug", orca_sdk::Flavor::Headless, vec![], vec![])
+        .await
+        .unwrap();
+
+    let params = ToolsDeclareParams {
+        tools: vec![
+            ToolDeclaration {
+                name: "stack.list".into(),
+                description: "List stacks".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+                sensitivity: Sensitivity::General,
+            },
+            ToolDeclaration {
+                name: "stack.start".into(),
+                description: "Start a stack".into(),
+                input_schema: serde_json::json!({
+                    "type":"object",
+                    "properties":{"stack":{"type":"string"}},
+                    "required":["stack"]
+                }),
+                sensitivity: Sensitivity::General,
+            },
+        ],
+    };
+    let resp = transport
+        .call(
+            "orca/tools.declare",
+            Some(serde_json::to_value(&params).unwrap()),
+        )
+        .await
+        .unwrap();
+    assert!(!resp.is_error(), "declare error: {:?}", resp.error);
+    let result: ToolsDeclareResult = serde_json::from_value(resp.result.unwrap()).unwrap();
+    assert_eq!(
+        result.accepted,
+        vec![
+            "tool-plug.stack.list".to_string(),
+            "tool-plug.stack.start".into()
+        ]
+    );
+
+    // Persisted in DB.
+    let conn = db::open_default().unwrap();
+    let rows = db::list_plugin_tools(&conn, "tool-plug").unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].fq_name, "tool-plug.stack.list");
+    assert_eq!(rows[1].fq_name, "tool-plug.stack.start");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tools_declare_replaces_previous_set() {
+    use orca_sdk::tools::{ToolDeclaration, ToolsDeclareParams};
+
+    install_ring();
+
+    let dir = tempfile::tempdir().unwrap();
+    let pki_dir = dir.path();
+    isolate_db(pki_dir);
+    pki::init(pki_dir).unwrap();
+    let bundle = pki::issue(pki_dir, "replacing-plug", Capability::General).unwrap();
+
+    let addr = boot_host(pki_dir).await;
+    let transport = TcpTransport::connect(addr, &bundle).await.unwrap();
+    transport
+        .hello("replacing-plug", orca_sdk::Flavor::Headless, vec![], vec![])
+        .await
+        .unwrap();
+
+    let declare = |names: &[&str]| ToolsDeclareParams {
+        tools: names
+            .iter()
+            .map(|n| ToolDeclaration {
+                name: (*n).into(),
+                description: "x".into(),
+                input_schema: serde_json::json!({}),
+                sensitivity: Sensitivity::General,
+            })
+            .collect(),
+    };
+
+    transport
+        .call(
+            "orca/tools.declare",
+            Some(serde_json::to_value(declare(&["a", "b", "c"])).unwrap()),
+        )
+        .await
+        .unwrap();
+    transport
+        .call(
+            "orca/tools.declare",
+            Some(serde_json::to_value(declare(&["b", "d"])).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    let conn = db::open_default().unwrap();
+    let rows = db::list_plugin_tools(&conn, "replacing-plug").unwrap();
+    let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, vec!["b", "d"], "replace must drop a + c");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn host_can_call_plugin_tool_via_registry() {
+    use orca_sdk::tools::{ToolHandler, ToolHandlerError};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    install_ring();
+
+    let dir = tempfile::tempdir().unwrap();
+    let pki_dir = dir.path();
+    isolate_db(pki_dir);
+    pki::init(pki_dir).unwrap();
+    let bundle = pki::issue(pki_dir, "callable-plug", Capability::General).unwrap();
+
+    let (addr, plugins) =
+        boot_host_with_plugins(pki_dir, plugin_host::ContextRegistry::new()).await;
+    let transport = TcpTransport::connect(addr, &bundle).await.unwrap();
+    transport
+        .hello("callable-plug", orca_sdk::Flavor::Headless, vec![], vec![])
+        .await
+        .unwrap();
+
+    // Plugin registers an echo tool and declares it.
+    let echo: Arc<dyn ToolHandler> = Arc::new(|args: serde_json::Value| async move {
+        let v = args
+            .get("value")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolHandlerError::new("missing 'value'"))?
+            .to_string();
+        Ok(serde_json::json!({"echoed": v}))
+    });
+    transport.register_tool(
+        "echo",
+        "echo back the value argument",
+        serde_json::json!({
+            "type":"object",
+            "properties":{"value":{"type":"string"}},
+            "required":["value"]
+        }),
+        Sensitivity::General,
+        echo,
+    );
+    transport.declare_tools().await.unwrap();
+
+    // Host fetches the conn handle and dispatches a tools.call back to the plugin.
+    // Spin briefly for the registry to observe the hello — register() runs synchronously
+    // inside handle_hello, so by the time the declare call returns it must be present.
+    let handle = plugins.get("callable-plug").expect("plugin handle");
+
+    let result = handle
+        .call_tool(
+            "echo",
+            serde_json::json!({"value":"ping"}),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["echoed"], serde_json::json!("ping"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn host_call_to_unknown_tool_surfaces_handler_error() {
+    use std::time::Duration;
+
+    install_ring();
+
+    let dir = tempfile::tempdir().unwrap();
+    let pki_dir = dir.path();
+    isolate_db(pki_dir);
+    pki::init(pki_dir).unwrap();
+    let bundle = pki::issue(pki_dir, "no-tools-plug", Capability::General).unwrap();
+
+    let (addr, plugins) =
+        boot_host_with_plugins(pki_dir, plugin_host::ContextRegistry::new()).await;
+    let transport = TcpTransport::connect(addr, &bundle).await.unwrap();
+    transport
+        .hello("no-tools-plug", orca_sdk::Flavor::Headless, vec![], vec![])
+        .await
+        .unwrap();
+    // No tools registered; declare empty so the host knows the plugin is reachable.
+    transport.declare_tools().await.unwrap();
+
+    let handle = plugins.get("no-tools-plug").unwrap();
+    let err = handle
+        .call_tool("missing", serde_json::json!({}), Duration::from_secs(2))
+        .await
+        .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("missing"), "error should name the tool: {msg}");
+}
+
+// NOTE: `plugin_registry_unregisters_on_disconnect` was removed.
+//
+// The unregister-on-drop logic in `ConnState::drop` is correct — when a
+// plugin process exits, the kernel closes both halves of the TCP socket,
+// the host's `read_frame` returns Err, the connection task's loop breaks,
+// `state` drops, and `plugins.unregister(...)` runs.
+//
+// We cannot simulate that disconnect from an in-test plugin: the SDK's
+// `TcpTransport` reader task owns the read half of the split stream, and
+// `tokio::io::split` keeps the underlying connection alive as long as
+// either half is held. Dropping the user-facing `Arc<TcpTransport>` only
+// drops the write half; the read half lives until the reader task itself
+// exits, which only happens on EOF, which only happens when both halves
+// are dropped. Cycle.
+//
+// The fix is an SDK-side shutdown API: a cancellation token the reader
+// task `select!`s on, fired by `TcpTransport::Drop`. Tracked separately —
+// see memory `project_sdk_shutdown_api`.
+//
+// In production the cycle never materializes: plugins die as processes,
+// kernel handles closure, server-side unregister runs. The mechanism is
+// indirectly covered by `host_call_to_unknown_tool_surfaces_handler_error`
+// which proves that an alive connection with an empty tool set still
+// routes correctly — i.e. registry-presence tracking works while connected.

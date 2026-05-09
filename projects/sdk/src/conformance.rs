@@ -51,8 +51,12 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
 use crate::framing::{read_frame, write_frame};
-use crate::jsonrpc::{ErrorObject, Message, Response};
+use crate::jsonrpc::{ErrorObject, Message, Request, Response};
 use crate::pki;
+use crate::tools::{
+    TOOLS_CALL_METHOD, TOOLS_DECLARE_METHOD, ToolCallParams, ToolDeclaration, ToolsDeclareParams,
+    ToolsDeclareResult,
+};
 use crate::transport::{
     ContextPublishParams, HelloParams, HelloResult, TypedValue, TypesDeclareParams,
     TypesDeclareResult,
@@ -73,6 +77,15 @@ pub struct Scenario {
     /// Required JSON pointer path in the published payload that must contain
     /// the plugin id (so we can tell the plugin actually parsed the manifest).
     pub manifest_id_payload_key: &'static str,
+    /// Bare tool name the plugin must register. The host calls it with
+    /// [`Self::tool_call_argument_value`] and expects the result payload
+    /// to contain that same value at [`Self::tool_result_echo_key`] —
+    /// proves the plugin's `tools/call` dispatch round-trips arguments.
+    pub tool_name: &'static str,
+    pub tool_input_schema_json: &'static str,
+    pub tool_call_argument_key: &'static str,
+    pub tool_call_argument_value: &'static str,
+    pub tool_result_echo_key: &'static str,
 }
 
 /// The single canonical conformance scenario. Every port reproduces this.
@@ -83,6 +96,11 @@ pub const SCENARIO: Scenario = Scenario {
     type_schema_json: r#"{"type":"object","properties":{"text":{"type":"string"},"manifest_id":{"type":"string"}},"required":["text","manifest_id"]}"#,
     context_id: "conformance:hello",
     manifest_id_payload_key: "manifest_id",
+    tool_name: "echo",
+    tool_input_schema_json: r#"{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}"#,
+    tool_call_argument_key: "value",
+    tool_call_argument_value: "ping",
+    tool_result_echo_key: "echoed",
 };
 
 /// Canonical manifest written to disk before the plugin starts. The plugin
@@ -146,6 +164,14 @@ pub struct Observations {
     pub hello: Option<HelloParams>,
     pub types_declared: Vec<crate::transport::TypeDeclaration>,
     pub publishes: Vec<(String, TypedValue)>,
+    pub tools_declared: Vec<ToolDeclaration>,
+    /// Result payload returned by the plugin's `tools/call` handler when
+    /// the host invoked [`Scenario::tool_name`]. `None` means the call
+    /// never completed (timeout or error).
+    pub tool_call_result: Option<serde_json::Value>,
+    /// Error from the plugin's `tools/call`, if any. Populated when the
+    /// plugin returned a JSON-RPC error instead of a result.
+    pub tool_call_error: Option<String>,
 }
 
 /// Compare observations against the scenario. Pure function — testable
@@ -229,6 +255,55 @@ pub fn check(obs: &Observations, scenario: &Scenario) -> Report {
         }),
     }
 
+    // Step 4: tools.declare — exactly one tool with the expected name
+    if obs.tools_declared.len() == 1 && obs.tools_declared[0].name == scenario.tool_name {
+        steps.push(StepResult {
+            name: "tools.declare",
+            status: StepStatus::Pass,
+            detail: format!("declared {}", obs.tools_declared[0].name),
+        });
+    } else {
+        steps.push(StepResult {
+            name: "tools.declare",
+            status: StepStatus::Fail,
+            detail: format!(
+                "expected one tool named '{}'; got {} tool(s): {:?}",
+                scenario.tool_name,
+                obs.tools_declared.len(),
+                obs.tools_declared
+                    .iter()
+                    .map(|t| t.name.as_str())
+                    .collect::<Vec<_>>()
+            ),
+        });
+    }
+
+    // Step 5: tools.call round-trip — host called the tool, plugin echoed
+    // the argument value at the expected key.
+    let echoed = obs
+        .tool_call_result
+        .as_ref()
+        .and_then(|v| v.get(scenario.tool_result_echo_key))
+        .and_then(|v| v.as_str());
+    match echoed {
+        Some(s) if s == scenario.tool_call_argument_value => steps.push(StepResult {
+            name: "tools.call",
+            status: StepStatus::Pass,
+            detail: format!("echoed '{s}'"),
+        }),
+        _ => steps.push(StepResult {
+            name: "tools.call",
+            status: StepStatus::Fail,
+            detail: format!(
+                "expected payload.{}={}; got result={:?}, error={:?}",
+                scenario.tool_result_echo_key,
+                scenario.tool_call_argument_value,
+                obs.tool_call_result,
+                obs.tool_call_error,
+            ),
+        }),
+    }
+
     Report::from_steps(steps)
 }
 
@@ -286,6 +361,11 @@ pub enum Event {
         context_id: String,
         value: TypedValue,
     },
+    ToolsDeclared(Vec<ToolDeclaration>),
+    ToolCallResult {
+        result: Option<serde_json::Value>,
+        error: Option<String>,
+    },
 }
 
 fn build_acceptor(bundle: &pki::NodeBundle) -> Result<TlsAcceptor> {
@@ -307,6 +387,7 @@ async fn handle_observation_conn(
 ) -> Result<()> {
     let (mut reader, mut writer) = tokio::io::split(tls);
     let mut hello_seen = false;
+    let mut outbound_tool_call_id: Option<serde_json::Value> = None;
 
     loop {
         let frame = match read_frame(&mut reader).await {
@@ -317,72 +398,145 @@ async fn handle_observation_conn(
             Ok(m) => m,
             Err(_) => continue,
         };
-        let req = match msg {
-            Message::Request(r) => r,
-            _ => continue,
-        };
-        let id = req.id.clone();
-
-        let response = match req.method.as_str() {
-            "orca/hello" => {
-                let params: HelloParams = serde_json::from_value(req.params.unwrap_or_default())
-                    .unwrap_or_else(|_| HelloParams {
-                        sdk_version: String::new(),
-                        plugin_id: String::new(),
-                        flavor: crate::Flavor::Headless,
-                        core_min_required: "0.0.0".into(),
-                        methods_required: vec![],
-                        methods_optional: vec![],
-                    });
-                let _ = event_tx.send(Event::Hello(params.clone()));
-                hello_seen = true;
-                let result = HelloResult {
-                    server_version: crate::SDK_VERSION.to_string(),
-                    ok: true,
-                    status: "full".into(),
-                    methods: vec![
-                        "orca/hello".into(),
-                        "orca/types.declare".into(),
-                        "orca/context.publish".into(),
-                    ],
-                    reason: None,
+        match msg {
+            Message::Request(req) => {
+                let id = req.id.clone();
+                let method = req.method.clone();
+                let response = match req.method.as_str() {
+                    "orca/hello" => {
+                        let params: HelloParams = serde_json::from_value(
+                            req.params.unwrap_or_default(),
+                        )
+                        .unwrap_or_else(|_| HelloParams {
+                            sdk_version: String::new(),
+                            plugin_id: String::new(),
+                            flavor: crate::Flavor::Headless,
+                            core_min_required: "0.0.0".into(),
+                            methods_required: vec![],
+                            methods_optional: vec![],
+                        });
+                        let _ = event_tx.send(Event::Hello(params.clone()));
+                        hello_seen = true;
+                        let result = HelloResult {
+                            server_version: crate::SDK_VERSION.to_string(),
+                            ok: true,
+                            status: "full".into(),
+                            methods: vec![
+                                "orca/hello".into(),
+                                "orca/types.declare".into(),
+                                "orca/context.publish".into(),
+                                TOOLS_DECLARE_METHOD.into(),
+                                TOOLS_CALL_METHOD.into(),
+                            ],
+                            reason: None,
+                        };
+                        Response::ok(id, serde_json::to_value(&result)?)
+                    }
+                    "orca/types.declare" => {
+                        if !hello_seen {
+                            Response::err(
+                                id,
+                                ErrorObject::invalid_params("orca/hello required first"),
+                            )
+                        } else {
+                            let params: TypesDeclareParams =
+                                serde_json::from_value(req.params.unwrap_or_default())?;
+                            let plugin_id = SCENARIO.plugin_id;
+                            let accepted: Vec<String> = params
+                                .types
+                                .iter()
+                                .map(|t| format!("{plugin_id}.{}", t.type_name))
+                                .collect();
+                            let _ = event_tx.send(Event::TypesDeclared(params.types));
+                            Response::ok(
+                                id,
+                                serde_json::to_value(&TypesDeclareResult { accepted })?,
+                            )
+                        }
+                    }
+                    "orca/context.publish" => {
+                        if !hello_seen {
+                            Response::err(
+                                id,
+                                ErrorObject::invalid_params("orca/hello required first"),
+                            )
+                        } else {
+                            let params: ContextPublishParams =
+                                serde_json::from_value(req.params.unwrap_or_default())?;
+                            let _ = event_tx.send(Event::Published {
+                                context_id: params.context_id,
+                                value: params.value,
+                            });
+                            Response::ok(id, serde_json::json!({"ok": true}))
+                        }
+                    }
+                    m if m == TOOLS_DECLARE_METHOD => {
+                        if !hello_seen {
+                            Response::err(
+                                id,
+                                ErrorObject::invalid_params("orca/hello required first"),
+                            )
+                        } else {
+                            let params: ToolsDeclareParams =
+                                serde_json::from_value(req.params.unwrap_or_default())?;
+                            let plugin_id = SCENARIO.plugin_id;
+                            let accepted: Vec<String> = params
+                                .tools
+                                .iter()
+                                .map(|t| format!("{plugin_id}.{}", t.name))
+                                .collect();
+                            let _ = event_tx.send(Event::ToolsDeclared(params.tools));
+                            Response::ok(
+                                id,
+                                serde_json::to_value(&ToolsDeclareResult { accepted })?,
+                            )
+                        }
+                    }
+                    other => Response::err(id, ErrorObject::method_not_found(other)),
                 };
-                Response::ok(id, serde_json::to_value(&result)?)
-            }
-            "orca/types.declare" => {
-                if !hello_seen {
-                    Response::err(id, ErrorObject::invalid_params("orca/hello required first"))
-                } else {
-                    let params: TypesDeclareParams =
-                        serde_json::from_value(req.params.unwrap_or_default())?;
-                    let plugin_id = "conformance-plug"; // by convention
-                    let accepted: Vec<String> = params
-                        .types
-                        .iter()
-                        .map(|t| format!("{plugin_id}.{}", t.type_name))
-                        .collect();
-                    let _ = event_tx.send(Event::TypesDeclared(params.types));
-                    Response::ok(id, serde_json::to_value(&TypesDeclareResult { accepted })?)
-                }
-            }
-            "orca/context.publish" => {
-                if !hello_seen {
-                    Response::err(id, ErrorObject::invalid_params("orca/hello required first"))
-                } else {
-                    let params: ContextPublishParams =
-                        serde_json::from_value(req.params.unwrap_or_default())?;
-                    let _ = event_tx.send(Event::Published {
-                        context_id: params.context_id,
-                        value: params.value,
-                    });
-                    Response::ok(id, serde_json::json!({"ok": true}))
-                }
-            }
-            other => Response::err(id, ErrorObject::method_not_found(other)),
-        };
 
-        let bytes = serde_json::to_vec(&response)?;
-        write_frame(&mut writer, &bytes).await?;
+                let bytes = serde_json::to_vec(&response)?;
+                write_frame(&mut writer, &bytes).await?;
+
+                // After accepting the plugin's tools/declare, immediately
+                // call back into the plugin to exercise its dispatch path.
+                if method == TOOLS_DECLARE_METHOD && outbound_tool_call_id.is_none() {
+                    let call_id = serde_json::json!(9001u64);
+                    outbound_tool_call_id = Some(call_id.clone());
+                    let params = ToolCallParams {
+                        name: SCENARIO.tool_name.into(),
+                        arguments: serde_json::json!({
+                            SCENARIO.tool_call_argument_key: SCENARIO.tool_call_argument_value,
+                        }),
+                    };
+                    let req = Request {
+                        jsonrpc: "2.0".into(),
+                        id: call_id,
+                        method: TOOLS_CALL_METHOD.into(),
+                        params: Some(serde_json::to_value(&params)?),
+                    };
+                    let bytes = serde_json::to_vec(&req)?;
+                    write_frame(&mut writer, &bytes).await?;
+                }
+            }
+            Message::Response(resp) => {
+                // Only one outbound request from the conformance host today —
+                // the tools/call we just sent. Match by id.
+                if Some(&resp.id) == outbound_tool_call_id.as_ref() {
+                    let (result, error) = match (resp.result, resp.error) {
+                        (Some(r), _) => {
+                            // ToolCallResult wraps the payload at "result".
+                            let payload = r.get("result").cloned();
+                            (payload, None)
+                        }
+                        (_, Some(e)) => (None, Some(e.message)),
+                        _ => (None, Some("response missing both result and error".into())),
+                    };
+                    let _ = event_tx.send(Event::ToolCallResult { result, error });
+                }
+            }
+            Message::Notification(_) => {}
+        }
     }
     Ok(())
 }
@@ -402,8 +556,18 @@ pub async fn collect_observations(
                 Event::Hello(h) => o.hello = Some(h),
                 Event::TypesDeclared(t) => o.types_declared.extend(t),
                 Event::Published { context_id, value } => o.publishes.push((context_id, value)),
+                Event::ToolsDeclared(t) => o.tools_declared.extend(t),
+                Event::ToolCallResult { result, error } => {
+                    o.tool_call_result = result;
+                    o.tool_call_error = error;
+                }
             }
-            if o.hello.is_some() && !o.types_declared.is_empty() && !o.publishes.is_empty() {
+            if o.hello.is_some()
+                && !o.types_declared.is_empty()
+                && !o.publishes.is_empty()
+                && !o.tools_declared.is_empty()
+                && (o.tool_call_result.is_some() || o.tool_call_error.is_some())
+            {
                 break;
             }
         }
@@ -492,7 +656,9 @@ pub async fn run_subprocess(cfg: SubprocessConfig) -> Result<Report> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::{ToolHandler, ToolHandlerError};
     use crate::transport::{Sensitivity, TcpTransport, TypeDeclaration};
+    use std::sync::Arc;
 
     fn install_ring() {
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -528,6 +694,16 @@ mod tests {
                     }),
                 },
             )],
+            tools_declared: vec![ToolDeclaration {
+                name: SCENARIO.tool_name.into(),
+                description: "echo".into(),
+                input_schema: serde_json::from_str(SCENARIO.tool_input_schema_json).unwrap(),
+                sensitivity: Sensitivity::General,
+            }],
+            tool_call_result: Some(serde_json::json!({
+                SCENARIO.tool_result_echo_key: SCENARIO.tool_call_argument_value,
+            })),
+            tool_call_error: None,
         }
     }
 
@@ -539,7 +715,44 @@ mod tests {
             "expected pass, got steps: {:?}",
             report.steps
         );
-        assert_eq!(report.steps.len(), 3);
+        assert_eq!(report.steps.len(), 5);
+    }
+
+    #[test]
+    fn check_fails_when_tool_not_declared() {
+        let mut o = good_observations();
+        o.tools_declared.clear();
+        let report = check(&o, &SCENARIO);
+        assert!(!report.passed);
+        let step = report
+            .steps
+            .iter()
+            .find(|s| s.name == "tools.declare")
+            .unwrap();
+        assert_eq!(step.status, StepStatus::Fail);
+    }
+
+    #[test]
+    fn check_fails_when_tool_call_echo_wrong() {
+        let mut o = good_observations();
+        o.tool_call_result = Some(serde_json::json!({SCENARIO.tool_result_echo_key: "wrong"}));
+        let report = check(&o, &SCENARIO);
+        assert!(!report.passed);
+        let step = report
+            .steps
+            .iter()
+            .find(|s| s.name == "tools.call")
+            .unwrap();
+        assert_eq!(step.status, StepStatus::Fail);
+    }
+
+    #[test]
+    fn check_fails_when_tool_call_errored() {
+        let mut o = good_observations();
+        o.tool_call_result = None;
+        o.tool_call_error = Some("plugin returned an error".into());
+        let report = check(&o, &SCENARIO);
+        assert!(!report.passed);
     }
 
     #[test]
@@ -600,7 +813,9 @@ mod tests {
 
         let (addr, event_rx) = boot_observation_host(pki_dir).await.unwrap();
 
-        // In-process "plugin": connect, hello, declare, publish.
+        // In-process "plugin": connect, hello, declare types, publish, register
+        // the echo tool, declare it, then idle so its reader task can serve
+        // the host's incoming tools/call.
         let plugin_task = tokio::spawn(async move {
             let transport = TcpTransport::connect(addr, &bundle).await.unwrap();
             transport
@@ -631,6 +846,27 @@ mod tests {
                 )
                 .await
                 .unwrap();
+
+            let echo: Arc<dyn ToolHandler> = Arc::new(|args: serde_json::Value| async move {
+                let v = args
+                    .get(SCENARIO.tool_call_argument_key)
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| ToolHandlerError::new("missing 'value'"))?
+                    .to_string();
+                Ok(serde_json::json!({SCENARIO.tool_result_echo_key: v}))
+            });
+            transport.register_tool(
+                SCENARIO.tool_name,
+                "echo back the value argument",
+                serde_json::from_str(SCENARIO.tool_input_schema_json).unwrap(),
+                Sensitivity::General,
+                echo,
+            );
+            transport.declare_tools().await.unwrap();
+
+            // Hold the connection open so the reader task can serve the
+            // host's incoming tools/call. Drop happens when test ends.
+            tokio::time::sleep(Duration::from_secs(2)).await;
         });
 
         let observations = collect_observations(event_rx, Duration::from_secs(5)).await;
