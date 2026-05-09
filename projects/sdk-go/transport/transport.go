@@ -21,14 +21,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"orca/sdk-go/framing"
-	"orca/sdk-go/jsonrpc"
-	"orca/sdk-go/pki"
-	"orca/sdk-go/tools"
+	"github.com/scottdkey/orca/projects/sdk-go/framing"
+	"github.com/scottdkey/orca/projects/sdk-go/jsonrpc"
+	"github.com/scottdkey/orca/projects/sdk-go/pki"
+	"github.com/scottdkey/orca/projects/sdk-go/tools"
 )
 
 // Re-exported tools surface so plugin authors only need to import
-// "orca/sdk-go/transport". Mirrors the Rust SDK's lib.rs re-exports.
+// "github.com/scottdkey/orca/projects/sdk-go/transport". Mirrors the Rust SDK's lib.rs re-exports.
 type (
 	ToolDeclaration    = tools.ToolDeclaration
 	ToolsDeclareParams = tools.ToolsDeclareParams
