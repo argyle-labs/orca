@@ -151,7 +151,7 @@ When a standards question requires checking external documentation, use `WebFetc
 
 Consult the relevant KB agent before flagging a pattern as non-standard — what looks like an anti-pattern may be an intentional project convention. After making fixes, run the appropriate validation agent to confirm correctness.
 
-See `~/orca/DELEGATION.md` for the full KB and specialist routing table. For canonical type and source locations per project, see `~/orca/CANONICAL_SOURCES.md`.
+See `~/.orca/DELEGATION.md` for the full KB and specialist routing table. For canonical type and source locations per project, see `~/.orca/CANONICAL_SOURCES.md`.
 
 Known reference URLs by language are listed in each profile above. For anything not listed, search for the official language spec or style guide before asserting a standard.
 
@@ -173,7 +173,7 @@ Follows the `/survey-confirm-fix` workflow. Language-specific extensions:
 - Collect all issues silently
 
 ### Phase 2 — Build todo list
-Write to TodoWrite. Prioritized per `~/orca/SEVERITY_RUBRIC.md`. Each item: what it is, where (file:line), what the fix is.
+Write to TodoWrite. Prioritized per `~/.orca/SEVERITY_RUBRIC.md`. Each item: what it is, where (file:line), what the fix is.
 
 ---
 
@@ -183,4 +183,4 @@ Write to TodoWrite. Prioritized per `~/orca/SEVERITY_RUBRIC.md`. Each item: what
 - When a standard is unclear, fetch the authoritative source. Do not assert from memory.
 - Clippy / linters are a floor. Pass them, then go further.
 - Do not add or remove functionality. Standards fixes only.
-- See `~/orca/TOOL_RULES.md` for the standard modification policy (one at a time, confirm each, verify after).
+- See `~/.orca/TOOL_RULES.md` for the standard modification policy (one at a time, confirm each, verify after).

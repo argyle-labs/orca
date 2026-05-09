@@ -29,6 +29,7 @@ llm           = { package = "orca-llm", path = "../llm" }
 config        = { package = "orca-config", path = "../config" }
 db            = { package = "orca-db", path = "../db" }
 orca_fs       = { package = "orca-fs", path = "../fs" }
+profile       = { package = "orca-profile", path = "../profile" }
 state         = { package = "orca-state", path = "../state" }
 
 # CLI

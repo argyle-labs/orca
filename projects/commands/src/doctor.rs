@@ -8,17 +8,17 @@ pub fn cmd_doctor(config: &Config) -> Result<()> {
     let mut ok_count = 0;
 
     // 1. Orca vault exists
-    if config.orca_vault.exists() {
+    if config.app_dir.exists() {
         println!(
             "  {} {APP_NAME} vault: {}",
             "✓".green(),
-            config.orca_vault.display()
+            config.app_dir.display()
         );
         ok_count += 1;
     } else {
         issues.push(format!(
             "{APP_NAME} vault not found at {}",
-            config.orca_vault.display()
+            config.app_dir.display()
         ));
     }
 

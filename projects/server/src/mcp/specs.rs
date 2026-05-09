@@ -92,7 +92,7 @@ pub fn get_rebuy_spec(args: &Value) -> Result<String> {
         return Ok(raw);
     }
     anyhow::bail!(
-        "no spec for '{repo}' — check ~/orca/openapi/{repo}.json or run `orca spec register`"
+        "no spec for '{repo}' — check ~/.orca/openapi/{repo}.json or run `orca spec register`"
     )
 }
 
@@ -105,7 +105,7 @@ pub fn get_rebuy_spec_public(args: &Value) -> Result<String> {
     }
     let path = spec_dir().join(format!("{repo}.public.json"));
     std::fs::read_to_string(&path).map_err(|_| {
-        anyhow::anyhow!("no public spec for '{repo}' — check ~/orca/openapi/{repo}.public.json")
+        anyhow::anyhow!("no public spec for '{repo}' — check ~/.orca/openapi/{repo}.public.json")
     })
 }
 
@@ -118,7 +118,7 @@ pub fn get_rebuy_graphql_schema(args: &Value) -> Result<String> {
     }
     let path = spec_dir().join(format!("{repo}.graphql"));
     std::fs::read_to_string(&path).map_err(|_| {
-        anyhow::anyhow!("no GraphQL schema for '{repo}' — check ~/orca/openapi/{repo}.graphql")
+        anyhow::anyhow!("no GraphQL schema for '{repo}' — check ~/.orca/openapi/{repo}.graphql")
     })
 }
 
@@ -131,7 +131,7 @@ pub fn get_graphql_info(args: &Value) -> Result<String> {
     }
     let path = spec_dir().join(format!("{repo}.graphql"));
     let sdl = std::fs::read_to_string(&path).map_err(|_| {
-        anyhow::anyhow!("no GraphQL schema for '{repo}' — check ~/orca/openapi/{repo}.graphql")
+        anyhow::anyhow!("no GraphQL schema for '{repo}' — check ~/.orca/openapi/{repo}.graphql")
     })?;
     let info = orca_scanner::parse_graphql_sdl(repo, &sdl)?;
     Ok(serde_json::to_string_pretty(&info)?)

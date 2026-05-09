@@ -44,7 +44,7 @@ One paragraph. State: the agent's name, its job, and the core discipline — "yo
 
 When the question requires codebase-specific context, consult the appropriate KB agent.
 
-See `~/orca/DELEGATION.md` for the full routing table.
+See `~/.orca/DELEGATION.md` for the full routing table.
 
 ## Rules
 
@@ -52,15 +52,15 @@ See `~/orca/DELEGATION.md` for the full routing table.
 - Never speculate about runtime behavior without reading the actual code path.
 - Every claim cites a source. No vague assertions.
 - If you do not know something, say so. Do not invent API shapes, behavior, or facts.
-- See `~/orca/TOOL_RULES.md` (read-only agents section).
+- See `~/.orca/TOOL_RULES.md` (read-only agents section).
 
 ## Compliance checklist
 
 Before publishing an agent built on this template, verify every item:
 
 - [ ] `tools` frontmatter does NOT include `Write`, `Edit`, or `TodoWrite/TodoRead`
-- [ ] Rules references `~/orca/TOOL_RULES.md` read-only section
-- [ ] Delegation references `~/orca/DELEGATION.md` — no inline routing tables
+- [ ] Rules references `~/.orca/TOOL_RULES.md` read-only section
+- [ ] Delegation references `~/.orca/DELEGATION.md` — no inline routing tables
 - [ ] No workflow step instructs the agent to write or modify anything
 - [ ] Agent added to wolf.md routing table
-- [ ] Agent added to `~/orca/DELEGATION.md` specialist table
+- [ ] Agent added to `~/.orca/DELEGATION.md` specialist table

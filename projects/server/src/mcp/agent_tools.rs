@@ -42,7 +42,7 @@ impl OrcaTool for GetAgent {
          programmatically via Agent(general-purpose, prompt=<result>+task).";
     type Args = GetAgentArgs;
     async fn run(args: GetAgentArgs, ctx: &ToolCtx) -> Result<String> {
-        let prompt = orca_agents::load_agent_prompt(&args.name, &ctx.config.agents_dir())
+        let prompt = crate::mcp::agent_resolve::load_agent_prompt(&args.name, &ctx.config)
             .ok_or_else(|| anyhow::anyhow!("agent not found: {}", args.name))?;
         Ok(prompt)
     }
@@ -76,7 +76,7 @@ impl OrcaTool for GetConfig {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct GetContextArgs {
-    /// Project name (e.g. halvor, rebuy-db, dotfiles)
+    /// Project name (e.g. meerkat, rebuy-db, dotfiles)
     pub project: String,
 }
 

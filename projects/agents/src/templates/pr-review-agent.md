@@ -61,7 +61,7 @@ Reference `SEVERITY_RUBRIC.md`:
 ```markdown
 ## Severity
 
-See `~/orca/SEVERITY_RUBRIC.md` for definitions. Summary:
+See `~/.orca/SEVERITY_RUBRIC.md` for definitions. Summary:
 - **CRITICAL** — data corruption, downtime, secrets leak — merge blocker
 - **HIGH** — wrong behavior in realistic conditions — merge blocker
 - **MEDIUM** — subtle bugs, missing tests, schema drift

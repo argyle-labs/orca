@@ -35,7 +35,7 @@ Follows the `/survey-confirm-fix` workflow. <AgentName>-specific extensions:
 [What the agent reads, runs, or maps to build its picture. Domain-specific.]
 
 ### Phase 2 — Build todo list
-Prioritized per `~/orca/SEVERITY_RUBRIC.md`. Each item: what it is, where (file:line or component), what the fix is.
+Prioritized per `~/.orca/SEVERITY_RUBRIC.md`. Each item: what it is, where (file:line or component), what the fix is.
 
 ### Phase 3 — Report or fix
 [Report-only agents: describe report format. Fix agents: describe confirm-and-fix loop.]
@@ -71,14 +71,14 @@ Target: <path or scope>
 
 Consult the relevant KB agent for project-specific context before asserting findings.
 
-See `~/orca/DELEGATION.md` for the full routing table.
+See `~/.orca/DELEGATION.md` for the full routing table.
 
 ## Rules
 
 - Never modify anything without explicit permission. Report by default.
 - Every finding must cite file + line (or component name). No vague findings.
-- See `~/orca/SEVERITY_RUBRIC.md` for severity definitions.
-- See `~/orca/TOOL_RULES.md` for modification policy.
+- See `~/.orca/SEVERITY_RUBRIC.md` for severity definitions.
+- See `~/.orca/TOOL_RULES.md` for modification policy.
 
 ## Compliance checklist
 
@@ -87,9 +87,9 @@ Before publishing an agent built on this template, verify every item:
 - [ ] `tools` frontmatter includes `TodoWrite, TodoRead`
 - [ ] `tools` frontmatter does NOT include `Write` or `Edit` (audit agents are read-only)
 - [ ] Workflow references `/survey-confirm-fix` skill
-- [ ] Phase 2 references `~/orca/SEVERITY_RUBRIC.md` — no inline level definitions
-- [ ] Report format section cites `~/orca/agent-templates/audit-report-agent.md`
-- [ ] Rules references `~/orca/TOOL_RULES.md` (read-only section)
-- [ ] Delegation references `~/orca/DELEGATION.md` — no inline routing tables
+- [ ] Phase 2 references `~/.orca/SEVERITY_RUBRIC.md` — no inline level definitions
+- [ ] Report format section cites `~/.orca/agent-templates/audit-report-agent.md`
+- [ ] Rules references `~/.orca/TOOL_RULES.md` (read-only section)
+- [ ] Delegation references `~/.orca/DELEGATION.md` — no inline routing tables
 - [ ] Agent added to wolf.md routing table
-- [ ] Agent added to `~/orca/DELEGATION.md` specialist table
+- [ ] Agent added to `~/.orca/DELEGATION.md` specialist table

@@ -13,16 +13,20 @@ use std::path::PathBuf;
 ///
 /// Static config (API keys, LLM endpoints) lives here.
 /// Dynamic registries (MCP servers, Docker runtimes, etc.) live in `orca.db` — see the db crate.
+///
+/// Field naming note: `app_dir` is the legacy name for the app-dir
+/// (`~/.orca/`). The "vault" concept (`~/orca/`) is dead — see
+/// `project_kill_vault.md`. The field name is kept for now to avoid a
+/// repo-wide rename in this commit; treat it as `app_dir`. The standalone
+/// `vault_root` field (was `~/orca/`) has been removed.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub anthropic_api_key: Option<String>,
     pub lmstudio_url: String,
     pub ollama_url: String,
     pub default_model: Model,
-    /// State/config dir: ~/.orca (db, logs, memory, config)
-    pub orca_vault: PathBuf,
-    /// Obsidian knowledge vault root: ~/orca (or $ORCA_VAULT_ROOT)
-    pub vault_root: PathBuf,
+    /// App state/config dir: `~/.orca/` (db, logs, memory, config, profiles).
+    pub app_dir: PathBuf,
     pub memory_root: PathBuf,
     pub db_path: PathBuf,
 }
@@ -84,12 +88,9 @@ impl Config {
     /// the encrypted DB when no env var is set.
     pub fn load() -> Result<Self> {
         let home = dirs::home_dir().context("no home dir")?;
-        let orca_vault = home.join(consts::APP_STATE_DIR);
-        let vault_root = std::env::var("ORCA_VAULT_ROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| home.join("orca"));
-        let memory_root = orca_vault.join("memory");
-        let db_path = orca_vault.join(consts::APP_DB_FILE);
+        let app_dir = home.join(consts::APP_STATE_DIR);
+        let memory_root = app_dir.join("memory");
+        let db_path = app_dir.join(consts::APP_DB_FILE);
 
         let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
         let lmstudio_url =
@@ -105,15 +106,14 @@ impl Config {
                 id: String::new(),
                 url: String::new(),
             },
-            orca_vault,
-            vault_root,
+            app_dir,
             memory_root,
             db_path,
         })
     }
 
     pub fn orca_toml_path(&self) -> PathBuf {
-        self.orca_vault.join("orca.toml")
+        self.app_dir.join("orca.toml")
     }
 
     pub fn agents_dir(&self) -> PathBuf {
@@ -121,13 +121,19 @@ impl Config {
     }
 
     pub fn logs_dir(&self) -> PathBuf {
-        self.orca_vault.join("logs/sessions")
+        self.app_dir.join("logs/sessions")
     }
 
     pub fn config_dir(&self) -> PathBuf {
         dirs::home_dir()
             .unwrap_or_default()
             .join("code/orca/config")
+    }
+
+    /// Root directory for per-profile content: `~/.orca/profiles/`.
+    /// Each profile's content lives under `<profiles_dir>/<profile-id>/`.
+    pub fn profiles_dir(&self) -> PathBuf {
+        self.app_dir.join(consts::APP_PROFILES_DIR)
     }
 }
 

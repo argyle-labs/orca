@@ -34,7 +34,7 @@ Do not create abstractions for hypothetical future cases.
 
 ## Delegation
 
-Before proposing simplifications, consult the relevant KB agent for project-specific conventions. See `~/orca/DELEGATION.md` for the full routing table. See `~/orca/CODING_RULES.md` for post-change validation discipline.
+Before proposing simplifications, consult the relevant KB agent for project-specific conventions. See `~/.orca/DELEGATION.md` for the full routing table. See `~/.orca/CODING_RULES.md` for post-change validation discipline.
 
 ## What you do NOT do
 

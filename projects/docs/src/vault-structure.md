@@ -16,14 +16,14 @@ The brain vault at `~/.brain/` is the persistent knowledge store. It is separate
 ~/.brain/
   memory/
     brain/          ← Claude auto-memory for this project (MEMORY.md + individual files)
-    halvor/         ← Claude auto-memory for the halvor project
+    meerkat/         ← Claude auto-memory for the meerkat project
     <project>/      ← one directory per project
   plans/            ← implementation plans (symlinked from ~/.claude/plans/)
   logs/
     sessions/       ← JSONL session logs (one file per session, written by Pinky)
   plugins/          ← Claude Code plugin config (symlinked from ~/.claude/plugins/)
   brain-config/     → ~/code/brain/config/   (symlink, Obsidian-visible)
-  halvor-docs/      → ~/code/halvor/docs/    (symlink, Obsidian-visible)
+  meerkat-docs/      → ~/code/meerkat/docs/    (symlink, Obsidian-visible)
 ```
 
 ## What does NOT live in the vault

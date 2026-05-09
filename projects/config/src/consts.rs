@@ -12,3 +12,13 @@ pub const APP_KEYRING_SERVICE: &str = "orca";
 pub const APP_PKI_DIR: &str = "pki";
 /// Default TCP port the plugin RPC host listens on.
 pub const APP_PLUGIN_PORT: u16 = 12002;
+
+/// Subdirectory inside APP_STATE_DIR that holds per-profile content
+/// (`~/.orca/profiles/<profile-id>/`). Profile metadata + ACLs live in `orca.db`.
+pub const APP_PROFILES_DIR: &str = "profiles";
+
+/// Implicit local user identity used until multi-user auth is wired up.
+/// All single-user installs operate as if this user is signed in. The schema
+/// already accepts arbitrary user_ids, so multi-user just adds real identities
+/// alongside this one without migration.
+pub const LOCAL_USER: &str = "local";

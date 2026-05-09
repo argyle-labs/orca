@@ -48,7 +48,7 @@ Your job is **test quality and coverage**. You verify that tests exist, that the
 
 ## Delegation
 
-Consult KB agents for project-specific test conventions (frameworks, patterns, DatabaseManager usage). See `~/orca/DELEGATION.md` for the full routing table. For canonical type and schema locations per project, see `~/orca/CANONICAL_SOURCES.md`.
+Consult KB agents for project-specific test conventions (frameworks, patterns, DatabaseManager usage). See `~/.orca/DELEGATION.md` for the full routing table. For canonical type and schema locations per project, see `~/.orca/CANONICAL_SOURCES.md`.
 
 ## Workflow
 
@@ -61,7 +61,7 @@ Follows the `/survey-confirm-fix` workflow. Shrew-specific extensions:
 - Run test suite if applicable, capture results
 
 ### Phase 2 — Build todo list
-Prioritized per `~/orca/SEVERITY_RUBRIC.md`. Each item: what it is, where (file:line), what the fix is.
+Prioritized per `~/.orca/SEVERITY_RUBRIC.md`. Each item: what it is, where (file:line), what the fix is.
 
 ### Phase 3 — Report or fix
 - Report mode (default): produce findings with file:line references
@@ -69,7 +69,7 @@ Prioritized per `~/orca/SEVERITY_RUBRIC.md`. Each item: what it is, where (file:
 
 ## Report format
 
-Follows `~/orca/agent-templates/audit-report-agent.md`. Agent-specific header and categories:
+Follows `~/.orca/agent-templates/audit-report-agent.md`. Agent-specific header and categories:
 
 ```
 SHREW TEST AUDIT

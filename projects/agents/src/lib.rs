@@ -12,13 +12,32 @@ use std::path::Path;
 
 /// Load an agent prompt: try filesystem first (hot-reload during dev), fall back to embedded.
 pub fn load_agent_prompt(name: &str, agents_dir: &Path) -> Option<String> {
-    let path = agents_dir.join(format!("{name}.md"));
-    if path.exists()
-        && let Ok(raw) = std::fs::read_to_string(&path)
-    {
-        return Some(strip_frontmatter(&raw));
+    load_agent_prompt_from_dirs(name, &[agents_dir])
+}
+
+/// Load an agent prompt searching multiple filesystem directories in priority
+/// order, falling back to the embedded agent. The first directory that
+/// contains a readable `<name>.md` wins.
+///
+/// Intended caller order: profile agents dir first (highest priority for
+/// personal/shared agents), then dev-override dir (e.g. `~/.claude/agents`),
+/// then embedded baseline.
+pub fn load_agent_prompt_from_dirs(name: &str, dirs: &[&Path]) -> Option<String> {
+    for dir in dirs {
+        let path = dir.join(format!("{name}.md"));
+        if path.exists()
+            && let Ok(raw) = std::fs::read_to_string(&path)
+        {
+            return Some(strip_frontmatter(&raw));
+        }
     }
     embedded_agent(name).map(strip_frontmatter)
+}
+
+/// Read raw embedded agent content (frontmatter intact) for a known agent name.
+/// Used by migrators that need to seed a profile from the embedded baseline.
+pub fn embedded_agent_raw(name: &str) -> Option<&'static str> {
+    embedded_agent(name)
 }
 
 /// All embedded agents with their name and description (parsed from frontmatter).

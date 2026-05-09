@@ -56,11 +56,11 @@ Your job is **infrastructure and deployment operations**. You understand CI/CD p
 
 ## Delegation
 
-Consult domain experts for codebase-specific context. See `~/orca/DELEGATION.md` for the full routing table.
+Consult domain experts for codebase-specific context. See `~/.orca/DELEGATION.md` for the full routing table.
 
 ## Report format
 
-Follows `~/orca/agent-templates/audit-report-agent.md`. Agent-specific header and categories:
+Follows `~/.orca/agent-templates/audit-report-agent.md`. Agent-specific header and categories:
 
 ```
 FALCON INFRASTRUCTURE AUDIT

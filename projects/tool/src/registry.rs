@@ -167,8 +167,7 @@ mod tests {
                 id: String::new(),
                 url: String::new(),
             },
-            orca_vault: PathBuf::from("/tmp"),
-            vault_root: PathBuf::from("/tmp"),
+            app_dir: PathBuf::from("/tmp"),
             memory_root: PathBuf::from("/tmp"),
             db_path: PathBuf::from("/tmp/test.db"),
         }))

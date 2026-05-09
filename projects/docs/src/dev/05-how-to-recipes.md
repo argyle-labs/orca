@@ -340,7 +340,7 @@ The agent is now embedded in the binary.
 
 ### Step 3: Override at runtime (optional)
 
-For iterative development, drop the file at `~/orca/agents/myagent.md` — the filesystem lookup runs before the embedded lookup. You can edit the file and test without rebuilding.
+For iterative development, drop the file at `~/.orca/agents/myagent.md` — the filesystem lookup runs before the embedded lookup. You can edit the file and test without rebuilding.
 
 ### Step 4: Test it
 

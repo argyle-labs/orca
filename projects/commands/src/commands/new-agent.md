@@ -15,7 +15,7 @@ Map the answer to the correct template class:
 | Sweeps a target and produces a structured report — no modifications | `audit-report-agent.md` |
 | Reviews a domain, confirms each fix one at a time before applying | `confirm-fix-agent.md` |
 | Reads sources and produces authoritative explanations — never modifies | `read-explain-agent.md` |
-| Operates against the halvor homelab (SSH, Proxmox, OPNsense, NAS) | `homelab-agent.md` |
+| Operates against the meerkat homelab (SSH, Proxmox, OPNsense, NAS) | `homelab-agent.md` |
 | Answers questions about a codebase or technology — no modifications | `kb-agent.md` |
 | Runs a linter and surfaces findings | `lint-agent.md` |
 | Runs the TypeScript compiler and walks through errors | `typecheck-agent.md` |
