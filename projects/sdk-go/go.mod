@@ -2,9 +2,11 @@
 // reference). Targets the same wire contract — same framing, same JSON-RPC
 // shapes, same manifest format, same conformance scenario.
 //
-// Module path is local-only for now; will be republished under a real
-// VCS path once we publish.
-module orca/sdk-go
+// Plugins fetch this module by version from GitHub. Tag releases on the
+// orca repo as `projects/sdk-go/vX.Y.Z` (Go's submodule versioning
+// convention). Consumers in private deployments must set GOPRIVATE so
+// `go get` skips the public proxy and authenticates directly to GitHub.
+module github.com/scottdkey/orca/projects/sdk-go
 
 go 1.26
 
