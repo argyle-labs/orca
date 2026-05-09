@@ -410,10 +410,13 @@ async fn handle_observation_conn(
                         .unwrap_or_else(|_| HelloParams {
                             sdk_version: String::new(),
                             plugin_id: String::new(),
+                            plugin_version: String::new(),
                             flavor: crate::Flavor::Headless,
                             core_min_required: "0.0.0".into(),
                             methods_required: vec![],
                             methods_optional: vec![],
+                            plugins_required: vec![],
+                            plugins_optional: vec![],
                         });
                         let _ = event_tx.send(Event::Hello(params.clone()));
                         hello_seen = true;
@@ -671,10 +674,13 @@ mod tests {
             hello: Some(HelloParams {
                 sdk_version: "0.1.0".into(),
                 plugin_id: SCENARIO.plugin_id.into(),
+                plugin_version: String::new(),
                 flavor: crate::Flavor::Headless,
                 core_min_required: "0.1.0".into(),
                 methods_required: vec![],
                 methods_optional: vec![],
+                plugins_required: vec![],
+                plugins_optional: vec![],
             }),
             types_declared: vec![TypeDeclaration {
                 type_name: SCENARIO.type_name.into(),

@@ -111,6 +111,20 @@ pub async fn serve(config: &Config) -> Result<()> {
                     }
                 }
 
+                // Plugin-declared tools (`<plugin_id>.<tool>`) registered via
+                // orca/tools.declare. Pulled from orca.db so this stdio child
+                // sees them without a shared in-process registry. The actual
+                // dispatch is forwarded to the daemon's HTTP API.
+                for row in load_plugin_tool_rows() {
+                    let schema: Value = serde_json::from_str(&row.input_schema)
+                        .unwrap_or_else(|_| json!({"type": "object"}));
+                    all_orca.push(json!({
+                        "name": row.fq_name,
+                        "description": row.description,
+                        "inputSchema": schema,
+                    }));
+                }
+
                 let orca_names: std::collections::HashSet<&str> =
                     all_orca.iter().filter_map(|t| t["name"].as_str()).collect();
 
@@ -146,7 +160,31 @@ pub async fn serve(config: &Config) -> Result<()> {
                 let name = params["name"].as_str().unwrap_or("");
                 let args = &params["arguments"];
 
-                if let Some((server_name, internal_name)) = tool_registry.get(name).cloned() {
+                if name.contains('.') && is_plugin_tool(name) {
+                    // Plugin-declared tool. Forward to the daemon, which
+                    // dispatches via the in-process PluginRegistry.
+                    match call_plugin_tool(name, args).await {
+                        Ok(result) => reply(
+                            id,
+                            json!({
+                                "content": [{
+                                    "type": "text",
+                                    "text": serde_json::to_string(&result).unwrap_or_default()
+                                }],
+                                "isError": false,
+                                "structuredContent": result,
+                            }),
+                        ),
+                        Err(e) => reply(
+                            id,
+                            json!({
+                                "content": [{ "type": "text", "text": format!("Error: {e}") }],
+                                "isError": true
+                            }),
+                        ),
+                    }
+                } else if let Some((server_name, internal_name)) = tool_registry.get(name).cloned()
+                {
                     // Route to the owning federated server using the internal tool name
                     match pool.get_or_connect(&server_name).await {
                         Err(e) => reply(
@@ -214,6 +252,65 @@ pub async fn serve(config: &Config) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ── Plugin tool bridge ────────────────────────────────────────────────────────
+//
+// `mcp-serve` is a stdio child process spawned by Claude — distinct from the
+// orca daemon, so it cannot share the in-process `PluginRegistry`. Plugin tool
+// declarations are read from orca.db (cheap, no IPC); calls are forwarded to
+// the daemon's HTTP endpoint, which dispatches via the registry.
+
+const PLUGIN_TOOL_HTTP: &str = "http://127.0.0.1:12000";
+const PLUGIN_TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(35);
+
+fn load_plugin_tool_rows() -> Vec<db::PluginToolRow> {
+    match db::open_default().and_then(|c| db::list_all_plugin_tools(&c)) {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("[mcp] could not load plugin tools from db: {e}");
+            Vec::new()
+        }
+    }
+}
+
+fn is_plugin_tool(fq_name: &str) -> bool {
+    db::open_default()
+        .and_then(|c| db::get_plugin_tool(&c, fq_name))
+        .map(|r| r.is_some())
+        .unwrap_or(false)
+}
+
+async fn call_plugin_tool(fq_name: &str, args: &Value) -> Result<Value> {
+    use anyhow::Context;
+    let url = format!("{PLUGIN_TOOL_HTTP}/api/plugin-tools/{fq_name}/call");
+    let body = json!({ "arguments": args.clone() });
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .json(&body)
+        .timeout(PLUGIN_TOOL_CALL_TIMEOUT)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    let payload: Value = resp
+        .json()
+        .await
+        .context("plugin tool response was not JSON")?;
+    if !status.is_success() {
+        let msg = payload
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("unknown error");
+        anyhow::bail!(
+            "plugin tool '{fq_name}' failed ({}): {msg}",
+            status.as_u16()
+        );
+    }
+    Ok(payload
+        .get("result")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null))
 }
 
 // Legacy dispatch — only tools not yet converted to OrcaTool remain here.

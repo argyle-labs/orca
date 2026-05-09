@@ -63,6 +63,14 @@ pub struct Manifest {
     pub surfaces: SurfacesSection,
     #[serde(default)]
     pub capabilities: Vec<CapabilityDecl>,
+    /// Peer plugins this plugin needs at runtime. The host enforces presence
+    /// of required deps before the plugin's tools are dispatchable; optional
+    /// deps degrade rather than reject. Plugins consume peers via
+    /// `transport.invoke_tool` (or, idiomatically, the dep's published
+    /// `client/` package) and do not need to know the peer's transport
+    /// address — the host owns the dispatch.
+    #[serde(default, rename = "depends_on")]
+    pub depends_on: Vec<PluginDependency>,
 }
 
 /// `[plugin]` — identity and version compatibility.
@@ -122,6 +130,25 @@ pub struct SurfacesSection {
     pub jobs: bool,
     pub storage: bool,
     pub federation: bool,
+}
+
+/// `[[depends_on]]` — declares a peer plugin this plugin needs at runtime.
+///
+/// `optional = true` lets the host start this plugin even if the dep is
+/// missing — used for graceful-degrade paths. The default is required.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginDependency {
+    /// Plugin id of the peer (matches the peer's `plugin.id`).
+    pub id: String,
+    /// Minimum semver of the peer that satisfies this dependency.
+    pub min_version: String,
+    /// `true` → host may start this plugin without the peer; consumer is
+    /// expected to handle the missing-peer case (e.g. degrade tools).
+    /// `false` (default) → host rejects/degrades this plugin's hello until
+    /// the peer is connected.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 /// `[[capabilities]]` — what the plugin can do, and at what sensitivity.
@@ -187,6 +214,23 @@ impl Manifest {
             if !seen.insert(cap.name.as_str()) {
                 bail!("duplicate capability '{}'", cap.name);
             }
+        }
+
+        let mut dep_ids = std::collections::HashSet::new();
+        for dep in &self.depends_on {
+            if dep.id.trim().is_empty() {
+                bail!("depends_on.id must not be empty");
+            }
+            if dep.id == self.plugin.id {
+                bail!("plugin '{}' cannot depend on itself", self.plugin.id);
+            }
+            if !dep_ids.insert(dep.id.as_str()) {
+                bail!("duplicate dependency on '{}'", dep.id);
+            }
+            check_semver(
+                &dep.min_version,
+                &format!("depends_on[{}].min_version", dep.id),
+            )?;
         }
 
         Ok(())

@@ -22,7 +22,7 @@ use std::sync::{
 };
 use tokio::io::WriteHalf;
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, broadcast, oneshot};
+use tokio::sync::{Mutex, Notify, broadcast, oneshot};
 use tokio_rustls::{TlsConnector, client::TlsStream};
 
 use crate::framing::{read_frame, write_frame};
@@ -40,12 +40,28 @@ use crate::tools::{
 pub struct HelloParams {
     pub sdk_version: String,
     pub plugin_id: String,
+    /// Plugin's own version, taken from `orca-plugin.toml::plugin.version`.
+    /// The host stores this so `orca/plugins.list` can return it to peers
+    /// and so `depends_on.min_version` constraints can be evaluated.
+    /// Empty string means the plugin didn't announce a version (back-compat
+    /// for SDK clients that pre-date this field).
+    #[serde(default)]
+    pub plugin_version: String,
     pub flavor: crate::Flavor,
     pub core_min_required: String,
     #[serde(default)]
     pub methods_required: Vec<String>,
     #[serde(default)]
     pub methods_optional: Vec<String>,
+    /// Required peer plugins, formatted as `"<id>>=<min_version>"` (e.g.
+    /// `"graphql>=0.1.0"`). Mirrors `manifest.depends_on` with `optional=false`.
+    /// Host rejects/degrades hello when an entry is unsatisfied.
+    #[serde(default)]
+    pub plugins_required: Vec<String>,
+    /// Optional peer plugins. Same format as `plugins_required`. Hello stays
+    /// `full` if all are satisfied; missing optional deps shift to `degraded`.
+    #[serde(default)]
+    pub plugins_optional: Vec<String>,
 }
 
 /// Result returned by the server for `orca/hello`.
@@ -199,6 +215,22 @@ pub struct TcpTransport {
     writer: SharedWriter,
     demux: Arc<Demux>,
     next_id: AtomicU64,
+    /// Cancellation signal for the background reader task. Notified from
+    /// [`TcpTransport::drop`] (and explicit [`shutdown`](Self::shutdown))
+    /// so the reader unblocks from `read_frame` even when the peer is idle.
+    /// Without this, a dropped transport would leave the TCP connection open
+    /// until the peer happens to send something.
+    shutdown: Arc<Notify>,
+}
+
+impl Drop for TcpTransport {
+    fn drop(&mut self) {
+        // Reader task picks this up via the select! arm and breaks the loop,
+        // dropping the read half and closing the connection. notify_waiters
+        // (not notify_one) is used so any future-reader that hasn't yet
+        // entered notified() also sees the signal.
+        self.shutdown.notify_waiters();
+    }
 }
 
 impl TcpTransport {
@@ -238,11 +270,17 @@ impl TcpTransport {
         // upgrade() returns None, the loop breaks, the read half drops,
         // and the OS closes the TCP connection.
         let writer_for_task: Weak<Mutex<WriteHalf<TlsStream<TcpStream>>>> = Arc::downgrade(&writer);
+        let shutdown = Arc::new(Notify::new());
+        let shutdown_for_task = shutdown.clone();
         tokio::spawn(async move {
             loop {
-                let frame = match read_frame(&mut reader).await {
-                    Ok(f) => f,
-                    Err(_) => break, // EOF or transport error — end the task.
+                let frame = tokio::select! {
+                    biased;
+                    _ = shutdown_for_task.notified() => break,
+                    res = read_frame(&mut reader) => match res {
+                        Ok(f) => f,
+                        Err(_) => break, // EOF or transport error — end the task.
+                    },
                 };
                 let msg: Message = match serde_json::from_slice(&frame) {
                     Ok(m) => m,
@@ -289,7 +327,15 @@ impl TcpTransport {
             writer,
             demux,
             next_id: AtomicU64::new(1),
+            shutdown,
         }))
+    }
+
+    /// Explicit shutdown — equivalent to dropping the transport. Lets callers
+    /// close the connection deterministically without waiting for the last
+    /// `Arc<Self>` strong reference to be released.
+    pub fn shutdown(&self) {
+        self.shutdown.notify_waiters();
     }
 
     // ── Low-level primitives ──────────────────────────────────────────────────
@@ -541,13 +587,28 @@ impl TcpTransport {
         methods_required: Vec<String>,
         methods_optional: Vec<String>,
     ) -> Result<HelloResult> {
+        self.hello_full(
+            HelloOptions::new(plugin_id, flavor)
+                .with_required_methods(methods_required)
+                .with_optional_methods(methods_optional),
+        )
+        .await
+    }
+
+    /// Full hello with peer dependency declarations and own version. Use
+    /// this when porting an `orca-plugin.toml` straight through — the
+    /// manifest's `version` and `depends_on` map onto the new fields.
+    pub async fn hello_full(&self, opts: HelloOptions) -> Result<HelloResult> {
         let params = HelloParams {
             sdk_version: crate::SDK_VERSION.to_string(),
-            plugin_id: plugin_id.to_string(),
-            flavor,
-            core_min_required: "0.1.0".to_string(),
-            methods_required,
-            methods_optional,
+            plugin_id: opts.plugin_id.clone(),
+            plugin_version: opts.plugin_version.clone(),
+            flavor: opts.flavor,
+            core_min_required: opts.core_min_required.clone(),
+            methods_required: opts.methods_required.clone(),
+            methods_optional: opts.methods_optional.clone(),
+            plugins_required: opts.plugins_required.clone(),
+            plugins_optional: opts.plugins_optional.clone(),
         };
 
         let resp = self
@@ -575,6 +636,119 @@ impl TcpTransport {
         }
 
         Ok(result)
+    }
+
+    /// Forward a tool call to a peer plugin via the host. `name` is a
+    /// fully-qualified peer tool, e.g. `"graphql.query"`. The host resolves
+    /// the owning plugin, dispatches via its in-process registry, and
+    /// returns the peer's opaque result. `timeout` is the per-call deadline
+    /// the plugin enforces locally; the host may apply a separate budget.
+    ///
+    /// Errors:
+    ///   - peer not connected → JSON-RPC error from the host
+    ///   - peer returned a tool error → propagated as `anyhow!`
+    ///   - timeout → bubbles `oneshot` cancellation
+    pub async fn invoke_tool(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value> {
+        let params = crate::tools::ToolInvokeParams {
+            name: name.to_string(),
+            arguments,
+            timeout_secs: Some(timeout.as_secs().max(1)),
+        };
+        let call = self.call(
+            crate::tools::TOOLS_INVOKE_METHOD,
+            Some(serde_json::to_value(&params)?),
+        );
+        let resp = tokio::time::timeout(timeout, call)
+            .await
+            .map_err(|_| anyhow::anyhow!("orca/tools.invoke timed out after {timeout:?}"))??;
+        if resp.is_error() {
+            let msg = resp
+                .error
+                .as_ref()
+                .map(|e| e.message.as_str())
+                .unwrap_or("unknown error");
+            bail!("orca/tools.invoke '{name}' failed: {msg}");
+        }
+        let value: crate::tools::ToolInvokeResult =
+            serde_json::from_value(resp.result.context("tools.invoke returned null result")?)?;
+        Ok(value.result)
+    }
+
+    /// Ask the host which peer plugins are currently connected. Used at
+    /// startup to fail fast on missing optional deps, or to discover newly
+    /// connected peers without polling.
+    pub async fn list_peers(&self) -> Result<Vec<crate::tools::PeerInfo>> {
+        let resp = self.call(crate::tools::PLUGINS_LIST_METHOD, None).await?;
+        if resp.is_error() {
+            let msg = resp
+                .error
+                .as_ref()
+                .map(|e| e.message.as_str())
+                .unwrap_or("unknown error");
+            bail!("orca/plugins.list failed: {msg}");
+        }
+        let value: crate::tools::PluginsListResult =
+            serde_json::from_value(resp.result.context("plugins.list returned null result")?)?;
+        Ok(value.peers)
+    }
+}
+
+/// Builder for `orca/hello`. Carries the same fields as [`HelloParams`] but
+/// keeps optional fields out of the call signature so adding new manifest
+/// hints later is a non-breaking SDK change.
+#[derive(Debug, Clone)]
+pub struct HelloOptions {
+    plugin_id: String,
+    plugin_version: String,
+    flavor: crate::Flavor,
+    core_min_required: String,
+    methods_required: Vec<String>,
+    methods_optional: Vec<String>,
+    plugins_required: Vec<String>,
+    plugins_optional: Vec<String>,
+}
+
+impl HelloOptions {
+    pub fn new(plugin_id: impl Into<String>, flavor: crate::Flavor) -> Self {
+        Self {
+            plugin_id: plugin_id.into(),
+            plugin_version: String::new(),
+            flavor,
+            core_min_required: "0.1.0".to_string(),
+            methods_required: Vec::new(),
+            methods_optional: Vec::new(),
+            plugins_required: Vec::new(),
+            plugins_optional: Vec::new(),
+        }
+    }
+    pub fn with_plugin_version(mut self, v: impl Into<String>) -> Self {
+        self.plugin_version = v.into();
+        self
+    }
+    pub fn with_core_min_required(mut self, v: impl Into<String>) -> Self {
+        self.core_min_required = v.into();
+        self
+    }
+    pub fn with_required_methods(mut self, m: Vec<String>) -> Self {
+        self.methods_required = m;
+        self
+    }
+    pub fn with_optional_methods(mut self, m: Vec<String>) -> Self {
+        self.methods_optional = m;
+        self
+    }
+    pub fn with_required_plugins(mut self, p: Vec<String>) -> Self {
+        self.plugins_required = p;
+        self
+    }
+    pub fn with_optional_plugins(mut self, p: Vec<String>) -> Self {
+        self.plugins_optional = p;
+        self
     }
 }
 

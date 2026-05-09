@@ -48,6 +48,22 @@ enum class Sensitivity(val wire: String) {
     SENSITIVE("sensitive");
 }
 
+/**
+ * Builder for [Transport.helloFull]. Mirrors HelloOptions in Rust/Go/TS —
+ * not @Serializable; the wire shape is the inline JSON object built in
+ * helloFull(). This data class is the ergonomic input.
+ */
+data class HelloOptions(
+    val pluginId: String,
+    val pluginVersion: String = "",
+    val flavor: Flavor = Flavor.HEADLESS,
+    val coreMinRequired: String = "0.1.0",
+    val methodsRequired: List<String> = emptyList(),
+    val methodsOptional: List<String> = emptyList(),
+    val pluginsRequired: List<String> = emptyList(),
+    val pluginsOptional: List<String> = emptyList(),
+)
+
 @Serializable
 data class HelloResult(
     val server_version: String,
@@ -204,20 +220,68 @@ class Transport private constructor(
         flavor: Flavor = Flavor.HEADLESS,
         methodsRequired: List<String> = emptyList(),
         methodsOptional: List<String> = emptyList(),
-    ): HelloResult {
+    ): HelloResult = helloFull(
+        HelloOptions(
+            pluginId = pluginId,
+            flavor = flavor,
+            methodsRequired = methodsRequired,
+            methodsOptional = methodsOptional,
+        )
+    )
+
+    /**
+     * Full orca/hello with peer-plugin dependencies and own version.
+     * Use this when porting an `orca-plugin.toml` straight through.
+     */
+    suspend fun helloFull(opts: HelloOptions): HelloResult {
         val params = buildJsonObject {
             put("sdk_version", SDK_VERSION)
-            put("plugin_id", pluginId)
-            put("flavor", flavor.wire)
-            put("core_min_required", "0.1.0")
-            put("methods_required", json.encodeToJsonElement(methodsRequired))
-            put("methods_optional", json.encodeToJsonElement(methodsOptional))
+            put("plugin_id", opts.pluginId)
+            if (opts.pluginVersion.isNotEmpty()) put("plugin_version", opts.pluginVersion)
+            put("flavor", opts.flavor.wire)
+            put("core_min_required", opts.coreMinRequired)
+            if (opts.methodsRequired.isNotEmpty())
+                put("methods_required", json.encodeToJsonElement(opts.methodsRequired))
+            if (opts.methodsOptional.isNotEmpty())
+                put("methods_optional", json.encodeToJsonElement(opts.methodsOptional))
+            if (opts.pluginsRequired.isNotEmpty())
+                put("plugins_required", json.encodeToJsonElement(opts.pluginsRequired))
+            if (opts.pluginsOptional.isNotEmpty())
+                put("plugins_optional", json.encodeToJsonElement(opts.pluginsOptional))
         }
         val resp = call("orca/hello", params)
         if (resp.isError) error("orca/hello rejected: ${resp.error?.message}")
         val result = json.decodeFromJsonElement(HelloResult.serializer(), resp.result!!)
         if (!result.ok) error("orca/hello: server returned ok=false (status=${result.status}; ${result.reason ?: "no reason"})")
         return result
+    }
+
+    /**
+     * Forward a tool call to a peer plugin via the host. `fqName` is
+     * `<peer>.<tool>`. The host resolves the owning plugin, dispatches
+     * tools.call, and returns the peer's opaque result. `timeoutMs` is
+     * forwarded to the host (rounded to whole seconds).
+     */
+    suspend fun invokeTool(
+        fqName: String,
+        arguments: JsonElement,
+        timeoutMs: Long = 30_000L,
+    ): JsonElement {
+        val params = buildJsonObject {
+            put("name", fqName)
+            put("arguments", arguments)
+            put("timeout_secs", maxOf(1L, timeoutMs / 1000L))
+        }
+        val resp = call(ToolsProtocol.INVOKE_METHOD, params)
+        if (resp.isError) error("orca/tools.invoke $fqName failed: ${resp.error?.message}")
+        return json.decodeFromJsonElement(ToolInvokeResult.serializer(), resp.result!!).result
+    }
+
+    /** Ask the host which peer plugins are currently connected. */
+    suspend fun listPeers(): List<PeerInfo> {
+        val resp = call(ToolsProtocol.PLUGINS_LIST_METHOD, buildJsonObject {})
+        if (resp.isError) error("orca/plugins.list: ${resp.error?.message}")
+        return json.decodeFromJsonElement(PluginsListResult.serializer(), resp.result!!).peers
     }
 
     suspend fun declareTypes(types: List<TypeDeclaration>): TypesDeclareResult {

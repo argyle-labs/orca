@@ -15,7 +15,9 @@ use orca_sdk::framing::{read_frame, write_frame};
 use orca_sdk::jsonrpc::{ErrorObject, Message, Request, Response};
 use orca_sdk::pki;
 use orca_sdk::tools::{
-    TOOLS_CALL_METHOD, TOOLS_DECLARE_METHOD, ToolCallParams, ToolsDeclareParams, ToolsDeclareResult,
+    PLUGINS_LIST_METHOD, PeerInfo, PluginsListResult, TOOLS_CALL_METHOD, TOOLS_DECLARE_METHOD,
+    TOOLS_INVOKE_METHOD, ToolCallParams, ToolInvokeParams, ToolInvokeResult, ToolsDeclareParams,
+    ToolsDeclareResult,
 };
 use orca_sdk::transport::{
     CONTEXT_EVENT_METHOD, ContextEvent, ContextPublishParams, ContextSubscribeParams,
@@ -30,7 +32,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -80,6 +82,9 @@ type Pending = Arc<StdMutex<HashMap<u64, oneshot::Sender<Response>>>>;
 #[derive(Clone)]
 pub struct ConnHandle {
     plugin_id: String,
+    /// Plugin version announced in `orca/hello.plugin_version`. Empty when
+    /// the peer didn't declare one (legacy SDK clients).
+    plugin_version: String,
     /// Outbound JSON-RPC frames the writer half of the connection drains.
     outbound: mpsc::UnboundedSender<serde_json::Value>,
     pending: Pending,
@@ -89,6 +94,10 @@ pub struct ConnHandle {
 impl ConnHandle {
     pub fn plugin_id(&self) -> &str {
         &self.plugin_id
+    }
+
+    pub fn plugin_version(&self) -> &str {
+        &self.plugin_version
     }
 
     /// Send a JSON-RPC request to the plugin and await the matching
@@ -186,6 +195,40 @@ impl PluginRegistry {
     pub fn connected_ids(&self) -> Vec<String> {
         self.inner.lock().unwrap().keys().cloned().collect()
     }
+
+    /// Snapshot of every connected peer's `(id, version)`. Powers
+    /// `orca/plugins.list`.
+    pub fn connected_peers(&self) -> Vec<PeerInfo> {
+        self.inner
+            .lock()
+            .unwrap()
+            .values()
+            .map(|h| PeerInfo {
+                id: h.plugin_id.clone(),
+                version: h.plugin_version.clone(),
+            })
+            .collect()
+    }
+}
+
+/// Process-global handle to the plugin registry. Set by `start()` so HTTP
+/// handlers and the MCP bridge — which don't otherwise have a reference to
+/// it — can reach connected plugins without threading the value through every
+/// router state struct.
+static GLOBAL_REGISTRY: OnceLock<PluginRegistry> = OnceLock::new();
+
+/// Returns the process-global PluginRegistry. None until `plugin_host::start`
+/// has been called (e.g. unit tests that don't spin up the host).
+pub fn global() -> Option<PluginRegistry> {
+    GLOBAL_REGISTRY.get().cloned()
+}
+
+/// Install `registry` as the process-global. Idempotent: subsequent calls are
+/// silently ignored so duplicate `start()` invocations (dev rebuild paths) are
+/// safe.
+fn install_global(registry: PluginRegistry) -> PluginRegistry {
+    let _ = GLOBAL_REGISTRY.set(registry.clone());
+    GLOBAL_REGISTRY.get().cloned().unwrap_or(registry)
 }
 
 /// Start the plugin host in a background task. Returns immediately.
@@ -198,6 +241,7 @@ pub fn start(
     plugin_registry: PluginRegistry,
 ) -> tokio::task::JoinHandle<()> {
     let pki_dir = pki_dir.to_owned();
+    let plugin_registry = install_global(plugin_registry);
     tokio::spawn(async move {
         if let Err(e) = run(&pki_dir, port, plugin_registry).await {
             warn!("[plugin-host] failed to start: {e:#}");
@@ -412,6 +456,8 @@ fn dispatch(state: &mut ConnState, frame: &[u8]) -> serde_json::Value {
                 "orca/context.subscribe" => handle_context_subscribe(state, id, req.params),
                 "orca/context.unsubscribe" => handle_context_unsubscribe(state, id, req.params),
                 m if m == TOOLS_DECLARE_METHOD => handle_tools_declare(state, id, req.params),
+                m if m == TOOLS_INVOKE_METHOD => handle_tools_invoke(state, id, req.params),
+                m if m == PLUGINS_LIST_METHOD => handle_plugins_list(state, id),
                 other => {
                     serde_json::to_value(Response::err(id, ErrorObject::method_not_found(other)))
                         .expect("Response serializes")
@@ -445,6 +491,8 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "orca/context.unsubscribe",
     TOOLS_DECLARE_METHOD,
     TOOLS_CALL_METHOD,
+    TOOLS_INVOKE_METHOD,
+    PLUGINS_LIST_METHOD,
 ];
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -500,6 +548,7 @@ fn handle_hello(
     // by registering a handle the registry hands out by plugin_id.
     state.plugins.register(ConnHandle {
         plugin_id: params.plugin_id.clone(),
+        plugin_version: params.plugin_version.clone(),
         outbound: state.notify_tx.clone(),
         pending: state.pending.clone(),
         next_id: state.next_outbound_id.clone(),
@@ -533,7 +582,19 @@ fn handle_hello(
                     .filter(|m| !SUPPORTED_METHODS.contains(&m.as_str()))
                     .cloned()
                     .collect();
-                if missing_optional.is_empty() {
+                // 4. Peer plugin dependencies. Required misses → reject.
+                // Optional misses → degraded with reason.
+                let connected = state.plugins.connected_peers();
+                let missing_required_plugins =
+                    unsatisfied_plugin_deps(&params.plugins_required, &connected);
+                let missing_optional_plugins =
+                    unsatisfied_plugin_deps(&params.plugins_optional, &connected);
+
+                if !missing_required_plugins.is_empty() {
+                    reject(format!(
+                        "missing required plugin deps: {missing_required_plugins:?}"
+                    ))
+                } else if missing_optional.is_empty() && missing_optional_plugins.is_empty() {
                     HelloResult {
                         server_version: SERVER_VERSION.to_string(),
                         ok: true,
@@ -542,14 +603,23 @@ fn handle_hello(
                         reason: None,
                     }
                 } else {
+                    let mut reasons = Vec::new();
+                    if !missing_optional.is_empty() {
+                        reasons.push(format!(
+                            "optional methods unavailable: {missing_optional:?}"
+                        ));
+                    }
+                    if !missing_optional_plugins.is_empty() {
+                        reasons.push(format!(
+                            "optional plugin deps unavailable: {missing_optional_plugins:?}"
+                        ));
+                    }
                     HelloResult {
                         server_version: SERVER_VERSION.to_string(),
                         ok: true,
                         status: "degraded".into(),
                         methods: supported,
-                        reason: Some(format!(
-                            "optional methods unavailable: {missing_optional:?}"
-                        )),
+                        reason: Some(reasons.join("; ")),
                     }
                 }
             }
@@ -558,6 +628,53 @@ fn handle_hello(
 
     let value = serde_json::to_value(&result).expect("HelloResult serializes");
     serde_json::to_value(Response::ok(id, value)).expect("Response serializes")
+}
+
+/// Parse a single plugin-dep entry. Accepts `"id"` or `"id>=min_version"`.
+/// Returns `(id, optional_min_version)`. Min-version is parsed but not
+/// validated as semver here — `compare_semver` does that during evaluation.
+fn parse_dep_entry(entry: &str) -> (String, Option<String>) {
+    if let Some((id, min)) = entry.split_once(">=") {
+        (id.trim().to_string(), Some(min.trim().to_string()))
+    } else {
+        (entry.trim().to_string(), None)
+    }
+}
+
+/// Returns the entries from `wanted` that are NOT satisfied by `connected`.
+/// An entry is satisfied when a connected peer with the matching id exists
+/// AND its declared version is `>=` any min-version constraint.
+fn unsatisfied_plugin_deps(wanted: &[String], connected: &[PeerInfo]) -> Vec<String> {
+    let mut unsatisfied = Vec::new();
+    for entry in wanted {
+        let (want_id, want_min) = parse_dep_entry(entry);
+        let peer = match connected.iter().find(|p| p.id == want_id) {
+            Some(p) => p,
+            None => {
+                unsatisfied.push(entry.clone());
+                continue;
+            }
+        };
+        if let Some(min) = want_min {
+            // Empty version on the peer side means "unknown" — accept it
+            // rather than failing closed; legacy SDK clients don't announce
+            // a version. Once everyone announces, callers can tighten this.
+            if peer.version.is_empty() {
+                continue;
+            }
+            match compare_semver(&peer.version, &min) {
+                Ok(Ordering::Less) => {
+                    unsatisfied.push(format!("{}>={} (have {})", want_id, min, peer.version))
+                }
+                Ok(_) => {}
+                Err(_) => unsatisfied.push(format!(
+                    "{}>={} (peer has unparseable version '{}')",
+                    want_id, min, peer.version
+                )),
+            }
+        }
+    }
+    unsatisfied
 }
 
 fn handle_types_declare(
@@ -743,6 +860,147 @@ fn handle_tools_declare(
     let result = ToolsDeclareResult { accepted };
     let value = serde_json::to_value(&result).expect("ToolsDeclareResult serializes");
     serde_json::to_value(Response::ok(id, value)).expect("Response serializes")
+}
+
+// ── tools.invoke + plugins.list handlers ──────────────────────────────────────
+
+/// Default per-call timeout when the caller doesn't override it via
+/// `ToolInvokeParams.timeout_secs`. Mirrors the value used by the MCP HTTP
+/// bridge so direct + indirect routes behave the same.
+const DEFAULT_INVOKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Handle `orca/tools.invoke`. The caller plugin asks the host to dispatch
+/// a tool to a peer. We resolve the fq_name in DB → look up the owning
+/// plugin's `ConnHandle` → forward via `call_tool`. The peer's opaque result
+/// is returned verbatim. Errors are surfaced as JSON-RPC errors so the
+/// caller can act on them — peer-not-connected, tool-not-declared, etc.
+fn handle_tools_invoke(
+    state: &ConnState,
+    id: serde_json::Value,
+    params: Option<serde_json::Value>,
+) -> serde_json::Value {
+    if let Some(reject) = require_hello(state, &id, TOOLS_INVOKE_METHOD) {
+        return reject;
+    }
+    let caller = state.plugin_id.clone().unwrap_or_default();
+
+    let params: ToolInvokeParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
+        Some(p) => p,
+        None => {
+            return serde_json::to_value(Response::err(
+                id,
+                ErrorObject::invalid_params(&format!(
+                    "{TOOLS_INVOKE_METHOD} requires {{ name, arguments? }}"
+                )),
+            ))
+            .expect("Response serializes");
+        }
+    };
+
+    let fq_name = params.name.clone();
+    // Resolve fq_name → (peer_id, bare_tool_name) via DB. The DB is the
+    // source of truth for what each plugin has declared via tools.declare.
+    let row = match db::open_default().and_then(|c| db::get_plugin_tool(&c, &fq_name)) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return serde_json::to_value(Response::err(
+                id,
+                ErrorObject::invalid_params(&format!(
+                    "tool '{fq_name}' is not declared by any connected plugin"
+                )),
+            ))
+            .expect("Response serializes");
+        }
+        Err(e) => {
+            return serde_json::to_value(Response::err(
+                id,
+                ErrorObject::internal(&format!("lookup '{fq_name}': {e}")),
+            ))
+            .expect("Response serializes");
+        }
+    };
+
+    // A plugin invoking its own tool would loop back through its own
+    // tools.call — pointless and easy to mistake. Surface clearly.
+    if row.plugin_id == caller {
+        return serde_json::to_value(Response::err(
+            id,
+            ErrorObject::invalid_params(&format!(
+                "plugin '{caller}' attempted to invoke its own tool '{fq_name}' via the host; \
+                 call the local handler directly"
+            )),
+        ))
+        .expect("Response serializes");
+    }
+
+    let peer = match state.plugins.get(&row.plugin_id) {
+        Some(p) => p,
+        None => {
+            return serde_json::to_value(Response::err(
+                id,
+                ErrorObject::internal(&format!(
+                    "tool '{fq_name}' is declared but plugin '{}' is not currently connected",
+                    row.plugin_id
+                )),
+            ))
+            .expect("Response serializes");
+        }
+    };
+
+    let timeout = params
+        .timeout_secs
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_INVOKE_TIMEOUT);
+    let arguments = params.arguments;
+    let bare_name = row.name.clone();
+    let peer_id = row.plugin_id.clone();
+    let caller_for_log = caller.clone();
+
+    // Dispatch on a detached task: ConnHandle::call_tool is async and our
+    // dispatch path is synchronous (so the read loop can keep moving).
+    // The completion writes the response back over the caller's outbound
+    // channel using the request id we captured.
+    let outbound = state.notify_tx.clone();
+    let id_for_task = id.clone();
+    tokio::spawn(async move {
+        let resp_value = match peer.call_tool(&bare_name, arguments, timeout).await {
+            Ok(value) => {
+                info!("[plugin-host] '{caller_for_log}' invoked '{peer_id}.{bare_name}' (ok)");
+                let result = ToolInvokeResult { result: value };
+                let v = serde_json::to_value(&result).expect("ToolInvokeResult serializes");
+                serde_json::to_value(Response::ok(id_for_task, v)).expect("Response serializes")
+            }
+            Err(e) => {
+                warn!(
+                    "[plugin-host] '{caller_for_log}' invoke '{peer_id}.{bare_name}' failed: {e:#}"
+                );
+                serde_json::to_value(Response::err(
+                    id_for_task,
+                    ErrorObject::internal(&format!("invoke '{fq_name}': {e:#}")),
+                ))
+                .expect("Response serializes")
+            }
+        };
+        let _ = outbound.send(resp_value);
+    });
+
+    // Returning null suppresses the normal sync-write path; the spawned
+    // task writes the actual response when the peer call resolves.
+    json!(null)
+}
+
+/// Handle `orca/plugins.list` — return every connected peer plus its
+/// declared version. Plugins use this to fail fast on missing optional
+/// deps and to discover live peers without polling the registry.
+fn handle_plugins_list(state: &ConnState, id: serde_json::Value) -> serde_json::Value {
+    if let Some(reject) = require_hello(state, &id, PLUGINS_LIST_METHOD) {
+        return reject;
+    }
+    let result = PluginsListResult {
+        peers: state.plugins.connected_peers(),
+    };
+    let v = serde_json::to_value(&result).expect("PluginsListResult serializes");
+    serde_json::to_value(Response::ok(id, v)).expect("Response serializes")
 }
 
 // ── context.* handlers ────────────────────────────────────────────────────────

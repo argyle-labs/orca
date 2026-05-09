@@ -18,6 +18,13 @@ import (
 const (
 	DeclareMethod = "orca/tools.declare"
 	CallMethod    = "orca/tools.call"
+	// InvokeMethod is the plugin → host cross-plugin invocation method.
+	// The plugin supplies a fq_name "<peer>.<tool>" and the host resolves
+	// the owner via the in-process registry, dispatching tools.call.
+	InvokeMethod = "orca/tools.invoke"
+	// PluginsListMethod is the plugin → host peer-enumeration method.
+	// Returns every connected peer plus its declared version.
+	PluginsListMethod = "orca/plugins.list"
 )
 
 // JSON-RPC error codes specific to the tools surface. These extend the
@@ -70,6 +77,31 @@ type ToolCallParams struct {
 // ToolCallResult is the wire shape of orca/tools.call result. Opaque JSON.
 type ToolCallResult struct {
 	Result json.RawMessage `json:"result"`
+}
+
+// ToolInvokeParams is the wire shape of orca/tools.invoke params.
+// Name is the fully-qualified peer tool ("<peer>.<name>").
+type ToolInvokeParams struct {
+	Name        string          `json:"name"`
+	Arguments   json.RawMessage `json:"arguments"`
+	TimeoutSecs *uint64         `json:"timeout_secs,omitempty"`
+}
+
+// ToolInvokeResult is the wire shape of orca/tools.invoke result. The
+// peer's opaque tool result is forwarded verbatim.
+type ToolInvokeResult struct {
+	Result json.RawMessage `json:"result"`
+}
+
+// PeerInfo is one entry in the orca/plugins.list result.
+type PeerInfo struct {
+	ID      string `json:"id"`
+	Version string `json:"version"`
+}
+
+// PluginsListResult is the wire shape of orca/plugins.list result.
+type PluginsListResult struct {
+	Peers []PeerInfo `json:"peers"`
 }
 
 // HandlerError is the application-level error a tool handler can return.

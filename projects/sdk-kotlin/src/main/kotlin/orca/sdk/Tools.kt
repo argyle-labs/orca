@@ -13,6 +13,18 @@ import kotlinx.serialization.json.JsonElement
 object ToolsProtocol {
     const val DECLARE_METHOD = "orca/tools.declare"
     const val CALL_METHOD = "orca/tools.call"
+
+    /**
+     * Plugin → host cross-plugin invocation. Caller supplies a
+     * fully-qualified tool name `<plugin>.<tool>`; host resolves the
+     * owning peer via the in-process registry and forwards tools.call.
+     */
+    const val INVOKE_METHOD = "orca/tools.invoke"
+
+    /**
+     * Plugin → host peer enumeration. Returns connected peers + versions.
+     */
+    const val PLUGINS_LIST_METHOD = "orca/plugins.list"
 }
 
 /**
@@ -60,6 +72,26 @@ data class ToolCallParams(val name: String, val arguments: JsonElement)
 /** Wire shape of orca/tools.call result — opaque JSON. */
 @Serializable
 data class ToolCallResult(val result: JsonElement)
+
+/** Wire shape of orca/tools.invoke params. `name` is fq `<peer>.<tool>`. */
+@Serializable
+data class ToolInvokeParams(
+    val name: String,
+    val arguments: JsonElement,
+    val timeout_secs: Long? = null,
+)
+
+/** Wire shape of orca/tools.invoke result — peer's opaque tool result. */
+@Serializable
+data class ToolInvokeResult(val result: JsonElement)
+
+/** One entry in orca/plugins.list — a connected peer and its version. */
+@Serializable
+data class PeerInfo(val id: String, val version: String)
+
+/** Wire shape of orca/plugins.list result. */
+@Serializable
+data class PluginsListResult(val peers: List<PeerInfo>)
 
 /**
  * Application-level error a tool handler can throw. The transport

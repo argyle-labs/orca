@@ -35,6 +35,10 @@ type (
 	ToolsDeclareResult = tools.ToolsDeclareResult
 	ToolCallParams     = tools.ToolCallParams
 	ToolCallResult     = tools.ToolCallResult
+	ToolInvokeParams   = tools.ToolInvokeParams
+	ToolInvokeResult   = tools.ToolInvokeResult
+	PeerInfo           = tools.PeerInfo
+	PluginsListResult  = tools.PluginsListResult
 	ToolHandler        = tools.Handler
 	ToolHandlerError   = tools.HandlerError
 	RegisteredTool     = tools.RegisteredTool
@@ -44,6 +48,8 @@ type (
 const (
 	ToolsDeclareMethod      = tools.DeclareMethod
 	ToolsCallMethod         = tools.CallMethod
+	InvokeMethod            = tools.InvokeMethod
+	PluginsListMethod       = tools.PluginsListMethod
 	ToolErrCodeUnknownTool  = tools.ErrCodeUnknownTool
 	ToolErrCodeSchemaError  = tools.ErrCodeSchemaViolation
 	ToolErrCodeHandlerError = tools.ErrCodeHandlerError
@@ -73,10 +79,40 @@ const (
 type HelloParams struct {
 	SDKVersion      string   `json:"sdk_version"`
 	PluginID        string   `json:"plugin_id"`
+	PluginVersion   string   `json:"plugin_version,omitempty"`
 	Flavor          Flavor   `json:"flavor"`
 	CoreMinRequired string   `json:"core_min_required"`
-	MethodsRequired []string `json:"methods_required"`
-	MethodsOptional []string `json:"methods_optional"`
+	MethodsRequired []string `json:"methods_required,omitempty"`
+	MethodsOptional []string `json:"methods_optional,omitempty"`
+	// Required peer plugins formatted as "<id>>=<min_version>". Host
+	// rejects/degrades hello when an entry is unsatisfied.
+	PluginsRequired []string `json:"plugins_required,omitempty"`
+	// Optional peer plugins. Missing optional deps shift the hello status
+	// to "degraded" but don't reject.
+	PluginsOptional []string `json:"plugins_optional,omitempty"`
+}
+
+// HelloOptions is the builder for Hello so adding manifest hints later is
+// a non-breaking SDK change. Mirrors orca_sdk::HelloOptions in Rust.
+type HelloOptions struct {
+	PluginID        string
+	PluginVersion   string
+	Flavor          Flavor
+	CoreMinRequired string
+	MethodsRequired []string
+	MethodsOptional []string
+	PluginsRequired []string
+	PluginsOptional []string
+}
+
+// NewHelloOptions returns sensible defaults: core_min_required=0.1.0.
+// Callers fill in the rest as needed.
+func NewHelloOptions(pluginID string, flavor Flavor) HelloOptions {
+	return HelloOptions{
+		PluginID:        pluginID,
+		Flavor:          flavor,
+		CoreMinRequired: "0.1.0",
+	}
 }
 
 // HelloResult mirrors HelloResult on the Rust side.
@@ -423,21 +459,32 @@ func (t *Transport) writeFrame(body []byte) error {
 	return framing.Write(t.conn, body)
 }
 
-// Hello performs the orca/hello handshake.
+// Hello performs the orca/hello handshake. Use HelloFull when announcing
+// peer-plugin dependencies or the plugin's own version.
 func (t *Transport) Hello(ctx context.Context, pluginID string, flavor Flavor, methodsRequired, methodsOptional []string) (*HelloResult, error) {
-	if methodsRequired == nil {
-		methodsRequired = []string{}
-	}
-	if methodsOptional == nil {
-		methodsOptional = []string{}
+	opts := NewHelloOptions(pluginID, flavor)
+	opts.MethodsRequired = methodsRequired
+	opts.MethodsOptional = methodsOptional
+	return t.HelloFull(ctx, opts)
+}
+
+// HelloFull performs orca/hello with the full HelloOptions surface — peer
+// dependencies, plugin version, and methods. Use this when porting an
+// orca-plugin.toml manifest straight through.
+func (t *Transport) HelloFull(ctx context.Context, opts HelloOptions) (*HelloResult, error) {
+	if opts.CoreMinRequired == "" {
+		opts.CoreMinRequired = "0.1.0"
 	}
 	params := HelloParams{
 		SDKVersion:      SDKVersion,
-		PluginID:        pluginID,
-		Flavor:          flavor,
-		CoreMinRequired: "0.1.0",
-		MethodsRequired: methodsRequired,
-		MethodsOptional: methodsOptional,
+		PluginID:        opts.PluginID,
+		PluginVersion:   opts.PluginVersion,
+		Flavor:          opts.Flavor,
+		CoreMinRequired: opts.CoreMinRequired,
+		MethodsRequired: opts.MethodsRequired,
+		MethodsOptional: opts.MethodsOptional,
+		PluginsRequired: opts.PluginsRequired,
+		PluginsOptional: opts.PluginsOptional,
 	}
 	resp, err := t.Call(ctx, "orca/hello", params)
 	if err != nil {
@@ -561,6 +608,57 @@ func (t *Transport) UnsubscribeContext(ctx context.Context, subscriptionID strin
 // idToRaw / rawToID encode JSON-RPC ids as numbers (matching the Rust SDK).
 func idToRaw(id uint64) json.RawMessage {
 	return json.RawMessage(strconv.FormatUint(id, 10))
+}
+
+// InvokeTool forwards a tool call to a peer plugin via the host. fqName
+// is "<peer>.<tool>" — the host resolves the owning plugin via the
+// in-process registry and dispatches tools.call. Returns the peer's
+// opaque result. Errors:
+//   - peer not connected → JSON-RPC error from the host
+//   - peer returned a tool error → propagated as a wrapped error
+//   - timeout → the request future is cancelled when ctx expires
+//
+// The optional timeout argument is forwarded to the host so it can apply
+// its own per-call budget; the local ctx is the authoritative deadline.
+func (t *Transport) InvokeTool(ctx context.Context, fqName string, args json.RawMessage, timeout time.Duration) (json.RawMessage, error) {
+	var timeoutSecs *uint64
+	if timeout > 0 {
+		secs := uint64(timeout.Seconds())
+		if secs == 0 {
+			secs = 1
+		}
+		timeoutSecs = &secs
+	}
+	params := ToolInvokeParams{Name: fqName, Arguments: args, TimeoutSecs: timeoutSecs}
+	resp, err := t.Call(ctx, InvokeMethod, params)
+	if err != nil {
+		return nil, err
+	}
+	if resp.IsError() {
+		return nil, fmt.Errorf("orca/tools.invoke %q: %s", fqName, resp.Error.Message)
+	}
+	var out ToolInvokeResult
+	if err := json.Unmarshal(resp.Result, &out); err != nil {
+		return nil, fmt.Errorf("decode ToolInvokeResult: %w", err)
+	}
+	return out.Result, nil
+}
+
+// ListPeers asks the host which peer plugins are currently connected.
+// Used at startup to fail fast on missing optional deps.
+func (t *Transport) ListPeers(ctx context.Context) ([]PeerInfo, error) {
+	resp, err := t.Call(ctx, PluginsListMethod, struct{}{})
+	if err != nil {
+		return nil, err
+	}
+	if resp.IsError() {
+		return nil, fmt.Errorf("orca/plugins.list: %s", resp.Error.Message)
+	}
+	var out PluginsListResult
+	if err := json.Unmarshal(resp.Result, &out); err != nil {
+		return nil, fmt.Errorf("decode PluginsListResult: %w", err)
+	}
+	return out.Peers, nil
 }
 
 func rawToID(raw json.RawMessage) (uint64, bool) {
