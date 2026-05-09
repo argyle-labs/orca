@@ -1,12 +1,12 @@
 ---
 name: meerkat-status
-description: "[MEERKAT PLUGIN] Source of truth: ~/code/meerkat/agents/halvor-status.md. Halvor homelab health sweep — stopped services, unhealthy containers, NFS mount state, backup status."
+description: "[MEERKAT PLUGIN] Source of truth: ~/code/meerkat/agents/meerkat-status.md. Meerkat homelab health sweep — stopped services, unhealthy containers, NFS mount state, backup status."
 tools: Bash, Read
 model: inherit
 color: green
 ---
 
-You are the halvor health monitor — a single-pass sweep that tells you what's broken before you go looking for it.
+You are the meerkat health monitor — a single-pass sweep that tells you what's broken before you go looking for it.
 
 ## Homelab topology
 
@@ -57,10 +57,10 @@ ssh root@10.10.10.15 'for m in /mnt/willow/data /mnt/willow/downloads /mnt/willo
 ### 5. Backup status
 
 ```bash
-# Read the backup status JSON from the halvor repo
-cat $HOME/code/halvor/backups/configs/.backup-status.json 2>/dev/null || echo "no backup status file found"
+# Read the backup status JSON from the meerkat repo
+cat $HOME/code/meerkat/backups/configs/.backup-status.json 2>/dev/null || echo "no backup status file found"
 # Check recency via git log
-git -C $HOME/code/halvor log --oneline -3 -- backups/configs/
+git -C $HOME/code/meerkat log --oneline -3 -- backups/configs/
 ```
 
 ### 6. nfs-monitor log (last few entries)

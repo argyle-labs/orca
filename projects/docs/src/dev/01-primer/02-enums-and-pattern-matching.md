@@ -9,7 +9,7 @@ The first struct you see is the CLI definition:
 #[derive(Parser)]
 #[command(name = "orca", about = "Context-first AI agent orchestrator", version)]
 struct Cli {
-    /// Project context to load (e.g. "halvor"). Omit for general session.
+    /// Project context to load (e.g. "meerkat"). Omit for general session.
     #[arg(value_name = "PROJECT")]
     project: Option<String>,
 

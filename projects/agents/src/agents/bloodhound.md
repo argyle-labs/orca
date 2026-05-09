@@ -27,8 +27,8 @@ Directory map. What each folder does. For agents entering cold.
 File-level write-through cache. Domain-organized, annotated, with per-entry git hashes for staleness detection.
 
 ```
-~/orca/memory/<project>/index.md
-~/orca/memory/<project>/registry.md
+~/.orca/memory/<project>/index.md
+~/.orca/memory/<project>/registry.md
 ```
 
 ## Index format (Tier 1)
@@ -204,7 +204,7 @@ Store this in the registry header so every query has it without re-reading tscon
 
 ## Registered projects only
 
-Only index projects that have a memory directory at `~/orca/memory/<project>/`. Bloodhound does not self-register. Raven handles registration.
+Only index projects that have a memory directory at `~/.orca/memory/<project>/`. Bloodhound does not self-register. Raven handles registration.
 
 ## Rules
 

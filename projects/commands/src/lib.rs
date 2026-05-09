@@ -44,6 +44,7 @@ pub mod mcp_cmd;
 pub mod oauth;
 pub mod pki_cmd;
 pub mod plugin_cmd;
+pub mod profile_cmd;
 pub mod projects;
 pub mod schema_cmd;
 pub mod spec;
@@ -68,6 +69,7 @@ pub use oauth::{
 pub use pki_cmd::{PkiAction, cmd_pki};
 pub use plugin_cmd::{PluginAction, cmd_plugin};
 pub use plugin_cmd::{install_plugin, remove_plugin};
+pub use profile_cmd::{ProfileAction, cmd_profile};
 pub use projects::cmd_projects;
 pub use schema_cmd::{SchemaAction, cmd_schema};
 pub use spec::{SpecAction, cmd_spec};

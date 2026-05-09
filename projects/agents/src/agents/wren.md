@@ -55,15 +55,15 @@ Every agent must reference the correct canonical docs — no inline re-definitio
 Follows the `/survey-confirm-fix` workflow. Wren-specific extensions:
 
 ### Phase 1 — Survey
-Read every file in `~/orca/agents/`. Read wolf.md's routing table.
+Read every file in `~/.orca/agents/`. Read wolf.md's routing table.
 Read the orca CLI source if needed to verify capabilities. Collect all issues silently.
 
 ### Phase 2 — Build list
-Write to TodoWrite. Prioritized per `~/orca/SEVERITY_RUBRIC.md`. Each item: what it is, where (file:line), what the fix is.
+Write to TodoWrite. Prioritized per `~/.orca/SEVERITY_RUBRIC.md`. Each item: what it is, where (file:line), what the fix is.
 
 ## Rules
 
 - Never modify wren.md. Flag self-issues and move on.
 - One fix per confirmation. Never batch.
 - Do not invent capabilities — only document what exists.
-- See `~/orca/TOOL_RULES.md` for the modification and verify-after policy.
+- See `~/.orca/TOOL_RULES.md` for the modification and verify-after policy.

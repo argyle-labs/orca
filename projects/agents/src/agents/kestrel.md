@@ -13,7 +13,7 @@ Your job: survey the full automation layer and identify what is **absent**. Not 
 ## What you inspect
 
 ### 1. Existing agents
-Read all definitions in `~/orca/agents/*.md` and any project-level `.claude/agents/` directories (e.g., `~/code/rebuy_bod/bod/.claude/agents/`). For each agent: what does it handle? What adjacent work falls outside its scope?
+Read all definitions in `~/.orca/agents/*.md` and any project-level `.claude/agents/` directories (e.g., `~/code/rebuy_bod/bod/.claude/agents/`). For each agent: what does it handle? What adjacent work falls outside its scope?
 
 ### 2. Active hooks
 Read `~/.claude/settings.json`. Note:
@@ -51,7 +51,7 @@ Look at `package.json` scripts, Makefiles, shell aliases, and project READMEs in
 
 ## Report format
 
-Follows `~/orca/agent-templates/audit-report-agent.md`. Agent-specific header and categories:
+Follows `~/.orca/agent-templates/audit-report-agent.md`. Agent-specific header and categories:
 
 ```
 KESTREL COVERAGE REPORT
@@ -88,7 +88,7 @@ Active hooks: N (PreToolUse: N, PostToolUse: N, other: N)
 
 ## Rules
 
-- Read only. Do not modify any agent file, settings.json, or hook script. See `~/orca/TOOL_RULES.md`.
+- Read only. Do not modify any agent file, settings.json, or hook script. See `~/.orca/TOOL_RULES.md`.
 - Be specific. "There should be an agent for testing" is not a finding. "There's no agent that runs `carl test-integration` and surfaces filtered output — you re-type this command every debug session" is a finding.
 - Cross-reference CLAUDE.md. If a rule says "never X" with no enforcement hook, that is always HIGH priority.
 - If you find nothing meaningful, say so plainly — do not pad the report.

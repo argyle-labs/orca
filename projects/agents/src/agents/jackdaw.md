@@ -26,7 +26,7 @@ Not broken things — Bear does that. Not things that need promotion — Magpie 
 
 ### 3. Memory in the wrong project
 
-- A memory file under `memory/halvor/` that describes a `bardbase` decision → move it
+- A memory file under `memory/meerkat/` that describes a `bardbase` decision → move it
 - Project-agnostic content sitting in a project dir → may need graduation (hand off to Magpie) or lateral move
 - Note: Magpie only moves project → global. Jackdaw catches lateral misplacements between projects.
 
@@ -37,8 +37,8 @@ Not broken things — Bear does that. Not things that need promotion — Magpie 
 
 ### 5. Files in wrong directories
 
-- An agent definition outside `~/orca/agents/`
-- A command outside `~/orca/commands/`
+- An agent definition outside `~/.orca/agents/`
+- A command outside `~/.orca/commands/`
 - A memory file dropped in the wrong tree
 - Stale files that were moved but the original wasn't cleaned up
 
@@ -53,14 +53,14 @@ Not broken things — Bear does that. Not things that need promotion — Magpie 
 
 Follows the `/survey-confirm-fix` workflow. Jackdaw-specific:
 
-**Phase 1 — Scan:** Read `~/.claude/CLAUDE.md`, all files in `~/orca/agents/`, `~/orca/memory/*/`, `~/orca/commands/`, and any project-level CLAUDE.md files. Build a map of what lives where.
+**Phase 1 — Scan:** Read `~/.claude/CLAUDE.md`, all files in `~/.orca/agents/`, `~/.orca/memory/*/`, `~/.orca/commands/`, and any project-level CLAUDE.md files. Build a map of what lives where.
 
-**Phase 2 — Detect:** For each file: does the content belong at this scope level? Is it duplicated elsewhere? Is the file in the right directory? Are there hardcoded values that should be dynamic? Prioritized per `~/orca/SEVERITY_RUBRIC.md`.
+**Phase 2 — Detect:** For each file: does the content belong at this scope level? Is it duplicated elsewhere? Is the file in the right directory? Are there hardcoded values that should be dynamic? Prioritized per `~/.orca/SEVERITY_RUBRIC.md`.
 
 **Phase 3 — Report one at a time:**
 ```
 [1/N] MISPLACEMENT
-File: ~/orca/agents/otter.md (line 25)
+File: ~/.orca/agents/otter.md (line 25)
 Content: "Always use /Users/scottkey/brain/"
 Issue: Hardcoded username — should use $HOME or ~ with expansion note
 Proposed fix: Replace with dynamic path resolution

@@ -10,7 +10,7 @@ pub struct ProjectContext {
 
 impl ProjectContext {
     /// Try to resolve a project name to its memory dir.
-    /// Matches: "halvor" → ~/orca/memory/halvor/MEMORY.md
+    /// Matches: "meerkat" → ~/.orca/memory/meerkat/MEMORY.md
     pub fn resolve(name: &str, config: &Config) -> Result<Self> {
         let memory_root = &config.memory_root;
 
@@ -112,8 +112,7 @@ mod tests {
                 id: String::new(),
                 url: String::new(),
             },
-            orca_vault: PathBuf::from("/tmp"),
-            vault_root: PathBuf::from("/tmp"),
+            app_dir: PathBuf::from("/tmp"),
             memory_root,
             db_path: PathBuf::from("/tmp/test.db"),
         }

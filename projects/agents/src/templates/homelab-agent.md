@@ -1,11 +1,11 @@
 ---
 name: homelab-agent
-description: Template for halvor homelab agents. Provides shared path rules, SSH patterns, repo locations, and safety rules. All halvor agents inherit from this template — topology authority is badger.md.
+description: Template for meerkat homelab agents. Provides shared path rules, SSH patterns, repo locations, and safety rules. All meerkat agents inherit from this template — topology authority is badger.md.
 ---
 
 # Homelab Agent Template
 
-Use this template when building an agent that operates against the halvor homelab — SSH operations, health checks, backup validation, deployment, or infrastructure inspection.
+Use this template when building an agent that operates against the meerkat homelab — SSH operations, health checks, backup validation, deployment, or infrastructure inspection.
 
 **Topology authority:** `badger.md` is the canonical source for node IPs, VMID assignments, service locations, and network layout. Homelab agents reference badger for topology context rather than embedding their own copies.
 
@@ -13,7 +13,7 @@ Use this template when building an agent that operates against the halvor homela
 
 ```yaml
 ---
-name: halvor-<role>
+name: meerkat-<role>
 description: <one-line role description>
 tools: Bash, Read
 model: inherit
@@ -26,8 +26,8 @@ Add Glob, Grep, Write, Edit only if the agent reads/writes local files beyond si
 ## Path rules
 
 All paths follow CLAUDE.md path resolution:
-- Local halvor repo: `$HOME/code/halvor` (Bash) or `~/code/halvor` (Read/Glob/Grep)
-- Remote halvor repo: `/opt/halvor` (on freyr and baldur)
+- Local meerkat repo: `$HOME/code/meerkat` (Bash) or `~/code/meerkat` (Read/Glob/Grep)
+- Remote meerkat repo: `/opt/meerkat` (on freyr and baldur)
 - **Never hardcode `/Users/scottkey/` or `/home/skey/`** — use `$HOME` in all Bash commands
 
 ## SSH access
@@ -42,11 +42,11 @@ ssh skey@10.10.10.6   # baldur as non-root (docker group)
 ssh root@10.10.10.17  # pbs — Proxmox Backup Server
 ```
 
-## Halvor repo
+## Meerkat repo
 
-Local: `$HOME/code/halvor`  
-Remote: `/opt/halvor` (synced to freyr and baldur via `git pull`)  
-CLI: `ssh root@10.10.10.8 '/opt/halvor/scripts/halvor <cmd>'` — must run on thor
+Local: `$HOME/code/meerkat`  
+Remote: `/opt/meerkat` (synced to freyr and baldur via `git pull`)  
+CLI: `ssh root@10.10.10.8 '/opt/meerkat/scripts/meerkat <cmd>'` — must run on thor
 
 ## Safety rules
 
@@ -56,7 +56,7 @@ CLI: `ssh root@10.10.10.8 '/opt/halvor/scripts/halvor <cmd>'` — must run on th
 - If a container fails to start after a change, read logs and report — do not retry blindly.
 - Before any non-trivial change, state what you intend to do and wait for confirmation.
 
-## What to include in a halvor agent
+## What to include in a meerkat agent
 
 1. **Role statement** — what this agent does in one sentence
 2. **What it checks / operates on** — specific services, paths, or commands in scope
@@ -82,10 +82,10 @@ Use the `━━━ CATEGORY ━━━` section header format consistent with all
 
 Before publishing an agent built on this template, verify every item:
 
-- [ ] All bash commands use `$HOME/code/halvor` — never hardcoded `/Users/...` or `/home/...`
+- [ ] All bash commands use `$HOME/code/meerkat` — never hardcoded `/Users/...` or `/home/...`
 - [ ] Destructive commands (rm, wipe, destroy) require explicit user confirmation — stated in Rules
 - [ ] OPNsense changes follow the OPNsense Protocol in `badger.md` — referenced or summarized
 - [ ] Output format uses `━━━ CATEGORY ━━━` section headers
 - [ ] Full topology references `@badger` rather than embedding its own copy
 - [ ] Agent added to wolf.md routing table
-- [ ] Agent added to `~/orca/DELEGATION.md` specialist table
+- [ ] Agent added to `~/.orca/DELEGATION.md` specialist table

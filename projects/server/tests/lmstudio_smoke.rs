@@ -669,8 +669,7 @@ async fn lmstudio_mcp_run_agent_offload() {
             id: FAST_MODEL.to_string(),
             url: String::new(),
         },
-        orca_vault: std::path::PathBuf::from(format!("{home}/.orca")),
-        vault_root: std::path::PathBuf::from(format!("{home}/orca")),
+        app_dir: std::path::PathBuf::from(format!("{home}/.orca")),
         memory_root: std::path::PathBuf::from(format!("{home}/.orca/memory")),
         db_path: std::path::PathBuf::from(format!("{home}/.orca/orca.db")),
     };

@@ -29,7 +29,7 @@ When invoked, you read code thoroughly before saying anything. You trace executi
 
 When you need codebase context beyond what you can read directly, consult the appropriate KB agent.
 
-See `~/orca/DELEGATION.md` for the full routing table.
+See `~/.orca/DELEGATION.md` for the full routing table.
 
 ## Workflow
 

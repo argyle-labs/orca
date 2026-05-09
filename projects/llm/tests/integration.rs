@@ -39,8 +39,7 @@ fn test_config() -> Config {
             id: String::new(),
             url: String::new(),
         },
-        orca_vault: PathBuf::from("/tmp/.orca-test"),
-        vault_root: PathBuf::from("/tmp"),
+        app_dir: PathBuf::from("/tmp/.orca-test"),
         memory_root: PathBuf::from("/tmp"),
         db_path: PathBuf::from("/tmp/.orca-test/orca.db"),
     }

@@ -10,14 +10,14 @@ use orca::serve;
 use orca::serve::openapi_spec_json;
 use orca_commands::{
     self as cmd, CredsAction, DaemonAction, DbAction, DockerAction, EnginesAction, HookAction,
-    McpAction, PkiAction, PluginAction, SchemaAction, SpecAction, cmd_install,
+    McpAction, PkiAction, PluginAction, ProfileAction, SchemaAction, SpecAction, cmd_install,
     cmd_logout_atlassian, cmd_logout_github, cmd_oauth_atlassian, cmd_oauth_github, cmd_uninstall,
 };
 
 #[derive(Parser)]
 #[command(name = "orca", about = "Context-first AI agent orchestrator", version)]
 struct Cli {
-    /// Project context to load (e.g. "halvor"). Omit for general session.
+    /// Project context to load (e.g. "meerkat"). Omit for general session.
     #[arg(value_name = "PROJECT")]
     project: Option<String>,
 
@@ -118,7 +118,7 @@ enum Command {
         out: String,
     },
 
-    /// Manage the external API spec registry (~/orca/openapi/)
+    /// Manage the external API spec registry (~/.orca/openapi/)
     Spec {
         #[command(subcommand)]
         action: SpecAction,
@@ -164,6 +164,12 @@ enum Command {
     Plugin {
         #[command(subcommand)]
         action: PluginAction,
+    },
+
+    /// Manage profiles (create, share, set active)
+    Profile {
+        #[command(subcommand)]
+        action: ProfileAction,
     },
 
     /// Manage plugin credentials — store in Orca, sync to plugins
@@ -231,6 +237,13 @@ async fn main() -> Result<()> {
     if config.anthropic_api_key.is_none() {
         config.anthropic_api_key = db::startup::load_api_key(&config);
     }
+    // Ensure a default profile exists for the implicit local user. v1 is
+    // single-user; this becomes per-real-user once auth lands. Failures are
+    // logged but non-fatal so commands that don't need a profile (e.g. setup
+    // flows) still work.
+    if let Err(e) = bootstrap_default_profile(&config) {
+        tracing::warn!("profile bootstrap failed: {e}");
+    }
 
     match cli.command {
         Some(Command::Login { service }) => match service {
@@ -281,6 +294,7 @@ async fn main() -> Result<()> {
         Some(Command::Docker { action }) => cmd::cmd_docker(action),
         Some(Command::Pki { action }) => cmd::cmd_pki(action),
         Some(Command::Plugin { action }) => cmd::cmd_plugin(action),
+        Some(Command::Profile { action }) => cmd::cmd_profile(&config, action),
         Some(Command::Creds { action }) => cmd::cmd_creds(action),
         Some(Command::Db { action }) => cmd::cmd_db(action),
         Some(Command::Update { channel }) => {
@@ -321,6 +335,25 @@ async fn main() -> Result<()> {
 }
 
 /// Direct Claude escalation — loads project context if provided, then sends question.
+/// On first run, ensure the implicit local user has a `default` profile and
+/// that personal-classified agents are migrated into it from the embedded
+/// baseline. Subsequent runs are a no-op once both have happened.
+fn bootstrap_default_profile(config: &Config) -> Result<()> {
+    let conn = db::open(&config.db_path)?;
+    let mgr = profile::ProfileManager::from_config(config);
+    let p = mgr.ensure_default_for(&conn, config::LOCAL_USER)?;
+    let n = mgr.migrate_personal_agents(&conn, &p)?;
+    if n > 0 {
+        tracing::info!(
+            profile_id = %p.id,
+            agents = n,
+            "migrated personal agents into default profile"
+        );
+    }
+    tracing::debug!(profile_id = %p.id, "active profile resolved");
+    Ok(())
+}
+
 async fn escalate(config: &Config, question: &str, project: Option<&str>) -> Result<()> {
     let api_key = config
         .anthropic_api_key

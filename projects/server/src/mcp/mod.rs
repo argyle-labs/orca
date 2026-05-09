@@ -3,6 +3,7 @@
 /// Usage: orca mcp-serve
 /// Register: claude mcp add orca-local -- orca mcp-serve
 mod agent_backend_tools;
+pub mod agent_resolve;
 mod agent_tools;
 mod context7;
 mod docs;

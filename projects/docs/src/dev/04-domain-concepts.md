@@ -65,7 +65,7 @@ The body of the file is the system prompt that Wolf uses.
 **Why this design:** By keeping agent definitions as text files, they can be:
 - Edited without recompiling
 - Versioned in git
-- Overridden at runtime by dropping a file in `~/orca/agents/` (filesystem-first lookup)
+- Overridden at runtime by dropping a file in `~/.orca/agents/` (filesystem-first lookup)
 - Embedded in the binary as fallback
 
 The `load_agent_prompt` function in `projects/agents/src/lib.rs` implements this priority:
@@ -81,10 +81,10 @@ pub fn load_agent_prompt(name: &str, agents_dir: &Path) -> Option<String> {
 }
 ```
 
-1. Check `agents_dir` (usually `~/orca/agents/`) — filesystem wins
+1. Check `agents_dir` (usually `~/.orca/agents/`) — filesystem wins
 2. Fall back to the embedded copy baked into the binary
 
-This means: during development, editing `~/orca/agents/wolf.md` changes Wolf's behavior immediately without rebuilding.
+This means: during development, editing `~/.orca/agents/wolf.md` changes Wolf's behavior immediately without rebuilding.
 
 **Delegation**: Agents can delegate to other agents by addressing them with `@name`. The session loop handles this — when Wolf says "delegate to @bear", the session loads bear's prompt and re-enters the model loop with that context.
 
@@ -114,15 +114,15 @@ The session can switch backends mid-conversation if the user invokes an agent th
 
 ---
 
-## The Vault: Memory at `~/orca/`
+## The Vault: Memory at `~/.orca/`
 
-The "vault" is the directory at `~/orca/` (or wherever `config.vault_dir` points). It is orca's persistent memory — not code, not config, but knowledge about your projects.
+The "vault" is the directory at `~/.orca/` (or wherever `config.vault_dir` points). It is orca's persistent memory — not code, not config, but knowledge about your projects.
 
 Structure:
 ```
-~/orca/
+~/.orca/
   memory/
-    halvor/
+    meerkat/
       MEMORY.md          ← project-specific context injected into system prompt
     rebuy/
       MEMORY.md
@@ -136,7 +136,7 @@ Structure:
   orca.db                ← SQLite: MCP servers, schemas, Docker runtimes, tool mappings
 ```
 
-When you run `orca halvor` (project name as argument), `ProjectContext::resolve("halvor", config)` loads `~/orca/memory/halvor/MEMORY.md` and prepends it to the system prompt. Wolf now knows everything in that file about the Halvor project.
+When you run `orca meerkat` (project name as argument), `ProjectContext::resolve("meerkat", config)` loads `~/.orca/memory/meerkat/MEMORY.md` and prepends it to the system prompt. Wolf now knows everything in that file about the Meerkat project.
 
 The MEMORY.md is plain Markdown — you write it and update it as the project evolves. It is not structured data; it is context written for the AI to read.
 
@@ -156,7 +156,7 @@ fn detect_project_from_cwd(config: &Config) -> Option<String> {
 }
 ```
 
-If your current directory is `~/code/halvor/` and `~/orca/memory/halvor/` exists, orca loads the Halvor context automatically without you specifying it.
+If your current directory is `~/code/meerkat/` and `~/.orca/memory/meerkat/` exists, orca loads the Meerkat context automatically without you specifying it.
 
 ---
 
@@ -181,7 +181,7 @@ Each call to `backend.chat()` passes the full `messages` history. The model sees
 
 This continues until the model returns `stop_reason: "end_turn"` with a final text response.
 
-**Session logs** are written to `~/orca/logs/`. Each session is a JSONL file where each line is a JSON object representing one message (role, content, agent, timestamp, importance flag). The `search_logs` MCP tool queries these.
+**Session logs** are written to `~/.orca/logs/`. Each session is a JSONL file where each line is a JSON object representing one message (role, content, agent, timestamp, importance flag). The `search_logs` MCP tool queries these.
 
 ---
 

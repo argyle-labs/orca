@@ -40,7 +40,7 @@ pub async fn run(args: &Value, config: &Config) -> Result<String> {
             // Server does not call Anthropic. Hand the work back to the caller
             // (a Claude Code session) as a structured envelope. The caller is
             // expected to invoke get_agent + Agent(general-purpose) itself.
-            let agent_prompt = orca_agents::load_agent_prompt(agent, &config.agents_dir())
+            let agent_prompt = crate::mcp::agent_resolve::load_agent_prompt(agent, config)
                 .ok_or_else(|| anyhow::anyhow!("agent not found: {agent}"))?;
             let envelope = json!({
                 "action": "delegate_to_claude_code",

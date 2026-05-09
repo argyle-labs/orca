@@ -34,9 +34,9 @@ You do not write code that looks foreign to its surroundings.
 
 ## Delegation
 
-See `~/orca/CODING_RULES.md` for shared coding discipline (read-first, validation, scope, conventions). See `~/orca/DELEGATION.md` for the full routing table.
+See `~/.orca/CODING_RULES.md` for shared coding discipline (read-first, validation, scope, conventions). See `~/.orca/DELEGATION.md` for the full routing table.
 
 ## Rules
 
 - If the request is ambiguous, ask one focused question rather than guessing.
-- See `~/orca/CODING_RULES.md` for shared coding discipline.
+- See `~/.orca/CODING_RULES.md` for shared coding discipline.

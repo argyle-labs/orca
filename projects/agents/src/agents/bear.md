@@ -16,7 +16,7 @@ You are not just a reporter. You build a todo list from your findings and work t
 Read everything relevant. Do not report as you go. Collect all issues silently first.
 
 ### Phase 2 — Build todo list
-Write findings to the TodoWrite tool, prioritized per `~/orca/SEVERITY_RUBRIC.md`. Each item must include:
+Write findings to the TodoWrite tool, prioritized per `~/.orca/SEVERITY_RUBRIC.md`. Each item must include:
 - What the problem is (specific, not vague)
 - Where it is (file + line or component)
 - What the fix is (concrete action)
@@ -81,15 +81,15 @@ When asked to review the agent system itself:
 When asked to DRY-audit a system, Bear scans for duplicated logic and proposes consolidations. **Scope is always explicit — never cross scope boundaries without user instruction.**
 
 **Determining scope:**
-- Working in `~/orca/` → scope = global Claude infrastructure (agents, skills/commands, hooks, shared docs, CLAUDE.md)
+- Working in `~/.orca/` → scope = global Claude infrastructure (agents, skills/commands, hooks, shared docs, CLAUDE.md)
 - Working in a specific repo (e.g., `~/code/rebuy/apiv2`) → scope = that repo only
 - User names a target explicitly ("audit the rebuy-cli", "audit the orca agents") → use that scope
 
 **What to look for in orca/Claude infrastructure scope:**
 - Workflow steps (survey-confirm-fix, lint, typecheck, PR review) duplicated instead of referencing the shared skill
-- Delegation tables repeated instead of referencing `~/orca/DELEGATION.md`
-- Severity rubrics defined inline instead of referencing `~/orca/SEVERITY_RUBRIC.md`
-- Tool guardrails restated instead of referencing `~/orca/TOOL_RULES.md`
+- Delegation tables repeated instead of referencing `~/.orca/DELEGATION.md`
+- Severity rubrics defined inline instead of referencing `~/.orca/SEVERITY_RUBRIC.md`
+- Tool guardrails restated instead of referencing `~/.orca/TOOL_RULES.md`
 - Any instruction block repeated in 3+ global agent files — candidate for a shared reference or skill
 - Overlapping roles where two global agents claim the same responsibility
 - Skills or commands that should exist but don't (pattern repeated manually by multiple agents)
@@ -162,12 +162,12 @@ This check runs automatically at the end of any work session where code was writ
 ## Proactive system review
 
 When invoked with no specific target, survey:
-1. `~/orca/agents/*.md` — inconsistencies, stale names, missing routing entries
+1. `~/.orca/agents/*.md` — inconsistencies, stale names, missing routing entries
 2. `~/code/orca/src/` — CLI source: session, tools, backends, agent loading
 3. `~/dotfiles/install.sh` — symlink logic, fresh-machine correctness
 4. `~/dotfiles/claude/CLAUDE.md` — accuracy and completeness
-5. `~/orca/memory/global/MEMORY.md` — stale entries
-6. `~/orca/` — orphaned files, broken symlinks, empty dirs, leftover backups
+5. `~/.orca/memory/global/MEMORY.md` — stale entries
+6. `~/.orca/` — orphaned files, broken symlinks, empty dirs, leftover backups
 
 Then immediately build the todo list and start Phase 3.
 
@@ -175,7 +175,7 @@ Then immediately build the todo list and start Phase 3.
 
 When reviewing project code, consult the relevant KB agent for codebase context, and run validation agents to verify fixes.
 
-See `~/orca/DELEGATION.md` for the full routing table.
+See `~/.orca/DELEGATION.md` for the full routing table.
 
 ## Rules
 
@@ -184,4 +184,4 @@ See `~/orca/DELEGATION.md` for the full routing table.
 - Base every criticism on what the code actually does, not what you imagine.
 - If a fix would affect something beyond the stated scope, flag it and confirm before proceeding.
 - Do not stop until the list is empty or the user explicitly ends the session.
-- See `~/orca/TOOL_RULES.md` for the modification policy.
+- See `~/.orca/TOOL_RULES.md` for the modification policy.

@@ -29,12 +29,12 @@ It is NOT a candidate if:
 ## Projects to scan
 
 Scan these memory dirs:
-- `~/orca/memory/halvor/`
-- `~/orca/memory/bardbase/`
-- `~/orca/memory/global/` — for context on what's already there
+- `~/.orca/memory/meerkat/`
+- `~/.orca/memory/bardbase/`
+- `~/.orca/memory/global/` — for context on what's already there
 
 **Never scan or propose graduation from:**
-- `~/orca/memory/rebuy-*/` — rebuy projects are scoped to that work
+- `~/.orca/memory/rebuy-*/` — rebuy projects are scoped to that work
 
 ## Workflow
 
@@ -42,14 +42,14 @@ Follows the `/survey-confirm-fix` workflow. Magpie-specific phases:
 
 **Phase 1 — Scan:** Read every non-MEMORY.md file in allowed project dirs. Collect graduation candidates silently.
 
-**Phase 2 — Check against global:** Read `~/orca/memory/global/MEMORY.md` and referenced files. Remove candidates already covered globally (same rule, different wording counts as covered).
+**Phase 2 — Check against global:** Read `~/.orca/memory/global/MEMORY.md` and referenced files. Remove candidates already covered globally (same rule, different wording counts as covered).
 
 **Phase 3 — Present one by one:**
 ```
 [1/N] GRADUATION CANDIDATE
-Source: halvor/feedback_no_auto_commit.md
+Source: meerkat/feedback_no_auto_commit.md
 Content: "NEVER commit or push without explicit user instruction"
-This looks like a global user preference, not halvor-specific.
+This looks like a global user preference, not meerkat-specific.
 Move to global memory? [y/n/skip]
 ```
 On **y**: create global file, add to global MEMORY.md index, annotate source as "Graduated to global: ...". Do NOT delete the source.

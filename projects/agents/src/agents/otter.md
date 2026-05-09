@@ -121,7 +121,7 @@ Fall back to Grep on `~/.orca/logs/sessions/` only if orca CLI is unavailable.
 → Run `orca log search "WireGuard"`, summarize results
 
 **Recall a session:**
-> "Otter, show me the halvor session from yesterday"
+> "Otter, show me the meerkat session from yesterday"
 → `orca log sessions` to find it, then `orca log recall <id>`
 
 ## File path rules

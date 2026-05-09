@@ -35,7 +35,7 @@ pub use orca_scanner::{GraphQlEnum, GraphQlField, GraphQlInfo, GraphQlOperation,
 // ── External spec registry ────────────────────────────────────────────────────
 // Orca's own spec lives at /api/openapi.json and /api/openapi/public.json.
 // These endpoints serve specs for *external* repos (rebuy and others) that are
-// manually captured and stored in ~/orca/openapi/.
+// manually captured and stored in ~/.orca/openapi/.
 
 #[derive(Serialize, Deserialize, ToSchema, Clone)]
 pub struct SpecFiles {
@@ -376,7 +376,7 @@ pub async fn specs_get_public_handler(
         Ok(raw) => serve_spec(&raw, &format!("{repo}.public"), &query),
         Err(_) => err(
             StatusCode::NOT_FOUND,
-            &format!("no public spec for '{repo}' — create {repo}.public.json in ~/orca/openapi/"),
+            &format!("no public spec for '{repo}' — create {repo}.public.json in ~/.orca/openapi/"),
         ),
     }
 }
@@ -422,7 +422,7 @@ pub async fn specs_get_graphql_handler(
         }
         Err(_) => err(
             StatusCode::NOT_FOUND,
-            &format!("no GraphQL schema for '{repo}' — create {repo}.graphql in ~/orca/openapi/"),
+            &format!("no GraphQL schema for '{repo}' — create {repo}.graphql in ~/.orca/openapi/"),
         ),
     }
 }

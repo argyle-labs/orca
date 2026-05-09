@@ -1,5 +1,6 @@
 // Embedded repo documentation — compiled into the binary from docs/ at build time.
-// Separate from ~/orca (personal vault/memory); these are project-level WHY docs.
+// Separate from ~/.orca/memory (per-user notes); these are project-level WHY docs
+// embedded into the binary at build time.
 // Accessible via root="docs" in all tree/read/search endpoints and MCP tools.
 
 use serde_json::{Value, json};
