@@ -1,16 +1,37 @@
 import { type ErrorObject, type Notification, type Response } from './jsonrpc.js';
 import { type NodeBundle } from './pki.js';
-import { type ToolHandler, type ToolsDeclareResult } from './tools.js';
+import { type PeerInfo, type ToolHandler, type ToolsDeclareResult } from './tools.js';
 export declare const SDK_VERSION = "0.1.0";
 export type Flavor = 'full' | 'headless' | 'local';
 export type Sensitivity = 'general' | 'sensitive';
 export interface HelloParams {
     sdk_version: string;
     plugin_id: string;
+    /** Plugin's own version, from manifest.plugin.version. */
+    plugin_version?: string;
     flavor: Flavor;
     core_min_required: string;
-    methods_required: string[];
-    methods_optional: string[];
+    methods_required?: string[];
+    methods_optional?: string[];
+    /** Required peer plugins, formatted as "<id>>=<min_version>". */
+    plugins_required?: string[];
+    /** Optional peer plugins. Same format. */
+    plugins_optional?: string[];
+}
+/**
+ * Builder shape for {@link Transport.helloFull}. Mirrors the Rust SDK's
+ * HelloOptions — the wire shape is HelloParams; this is the ergonomic
+ * input that adds new fields without breaking existing call sites.
+ */
+export interface HelloOptions {
+    pluginId: string;
+    pluginVersion?: string;
+    flavor: Flavor;
+    coreMinRequired?: string;
+    methodsRequired?: string[];
+    methodsOptional?: string[];
+    pluginsRequired?: string[];
+    pluginsOptional?: string[];
 }
 export interface HelloResult {
     server_version: string;
@@ -86,6 +107,22 @@ export declare class Transport {
     /** Send a request and resolve with the matching response. */
     call(method: string, params?: unknown): Promise<Response>;
     hello(pluginID: string, flavor?: Flavor, methodsRequired?: string[], methodsOptional?: string[]): Promise<HelloResult>;
+    /**
+     * Full hello with peer-plugin dependencies and own version. Use this
+     * when porting an `orca-plugin.toml` straight through.
+     */
+    helloFull(opts: HelloOptions): Promise<HelloResult>;
+    /**
+     * Forward a tool call to a peer plugin via the host. `fqName` is
+     * `<peer>.<tool>`. The host resolves the owning plugin, dispatches
+     * tools.call, and returns the peer's opaque result.
+     *
+     * `timeoutMs` is the local deadline; it's also forwarded to the host
+     * (rounded to whole seconds) so the host applies its own per-call budget.
+     */
+    invokeTool(fqName: string, args: unknown, timeoutMs?: number): Promise<unknown>;
+    /** Ask the host which peer plugins are currently connected. */
+    listPeers(): Promise<PeerInfo[]>;
     declareTypes(types: TypeDeclaration[]): Promise<TypesDeclareResult>;
     publishContext(contextID: string, value: TypedValue): Promise<void>;
     subscribeContext(contextID: string, typeFilter?: string[]): Promise<{
