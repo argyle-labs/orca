@@ -135,58 +135,24 @@ pub fn get_context(args: &Value, config: &Config) -> Result<String> {
     Ok(parts.join("\n"))
 }
 
-pub fn get_config(args: &Value, config: &Config) -> Result<String> {
-    let dir = config.config_dir();
-
-    if !dir.exists() {
-        return Ok(format!("Config dir not found: {}", dir.display()));
-    }
-
+pub fn get_config(args: &Value, _config: &Config) -> Result<String> {
     let name = args["name"].as_str().unwrap_or("").trim();
 
     if name.is_empty() {
-        // List available config files
-        let mut names: Vec<String> = std::fs::read_dir(&dir)?
-            .flatten()
-            .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
-            .filter_map(|e| {
-                e.path()
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-            })
-            .collect();
-        names.sort();
+        let names = config::docs::list_basenames();
         let list = names.join(", ");
         return Ok(format!(
             "Available config files: {list}\n\nUse orca_get_config with a name to read one."
         ));
     }
 
-    // Try exact match, then case-insensitive
-    let candidates = [
-        dir.join(format!("{name}.md")),
-        dir.join(format!("{}.md", name.to_uppercase())),
-    ];
-    for path in &candidates {
-        if path.exists() {
-            return Ok(std::fs::read_to_string(path)?);
-        }
+    if let Some(content) = config::docs::get(name) {
+        return Ok(content);
     }
-
-    // Fallback: case-insensitive scan
-    let found = std::fs::read_dir(&dir)?.flatten().find(|e| {
-        e.path()
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_uppercase() == name.to_uppercase())
-            .unwrap_or(false)
-    });
-
-    match found {
-        Some(e) => Ok(std::fs::read_to_string(e.path())?),
-        None => Ok(format!(
-            "Config file '{name}' not found. Available: use orca_get_config with no name to list."
-        )),
-    }
+    Ok(format!(
+        "Config doc not found: {name}\nAvailable: {}",
+        config::docs::list_basenames().join(", ")
+    ))
 }
 
 pub async fn list_services() -> Result<String> {
