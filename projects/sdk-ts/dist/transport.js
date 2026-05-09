@@ -11,7 +11,7 @@ import { connect as tlsConnect } from 'node:tls';
 import { FrameReader, writeFrame } from './framing.js';
 import { classifyMessage, JSONRPC_VERSION, } from './jsonrpc.js';
 import { clientTlsOptions } from './pki.js';
-import { TOOLS_CALL_METHOD, TOOLS_DECLARE_METHOD, ToolHandlerError, toolErrorCodes, } from './tools.js';
+import { PLUGINS_LIST_METHOD, TOOLS_CALL_METHOD, TOOLS_DECLARE_METHOD, TOOLS_INVOKE_METHOD, ToolHandlerError, toolErrorCodes, } from './tools.js';
 export const SDK_VERSION = '0.1.0';
 export const CONTEXT_EVENT_METHOD = 'orca/context.event';
 export class Transport {
@@ -241,14 +241,34 @@ export class Transport {
         return promise;
     }
     async hello(pluginID, flavor = 'headless', methodsRequired = [], methodsOptional = []) {
+        return this.helloFull({
+            pluginId: pluginID,
+            flavor,
+            methodsRequired,
+            methodsOptional,
+        });
+    }
+    /**
+     * Full hello with peer-plugin dependencies and own version. Use this
+     * when porting an `orca-plugin.toml` straight through.
+     */
+    async helloFull(opts) {
         const params = {
             sdk_version: SDK_VERSION,
-            plugin_id: pluginID,
-            flavor,
-            core_min_required: '0.1.0',
-            methods_required: methodsRequired,
-            methods_optional: methodsOptional,
+            plugin_id: opts.pluginId,
+            flavor: opts.flavor,
+            core_min_required: opts.coreMinRequired ?? '0.1.0',
         };
+        if (opts.pluginVersion !== undefined)
+            params.plugin_version = opts.pluginVersion;
+        if (opts.methodsRequired !== undefined)
+            params.methods_required = opts.methodsRequired;
+        if (opts.methodsOptional !== undefined)
+            params.methods_optional = opts.methodsOptional;
+        if (opts.pluginsRequired !== undefined)
+            params.plugins_required = opts.pluginsRequired;
+        if (opts.pluginsOptional !== undefined)
+            params.plugins_optional = opts.pluginsOptional;
         const resp = await this.call('orca/hello', params);
         if (resp.error)
             throw new Error(`orca/hello rejected: ${resp.error.message}`);
@@ -257,6 +277,36 @@ export class Transport {
             throw new Error(`orca/hello: server returned ok=false (status=${result.status}; ${result.reason ?? 'no reason'})`);
         }
         return result;
+    }
+    /**
+     * Forward a tool call to a peer plugin via the host. `fqName` is
+     * `<peer>.<tool>`. The host resolves the owning plugin, dispatches
+     * tools.call, and returns the peer's opaque result.
+     *
+     * `timeoutMs` is the local deadline; it's also forwarded to the host
+     * (rounded to whole seconds) so the host applies its own per-call budget.
+     */
+    async invokeTool(fqName, args, timeoutMs = 30_000) {
+        const params = {
+            name: fqName,
+            arguments: args,
+            timeout_secs: Math.max(1, Math.round(timeoutMs / 1000)),
+        };
+        const resp = await Promise.race([
+            this.call(TOOLS_INVOKE_METHOD, params),
+            new Promise((_, reject) => setTimeout(() => reject(new Error(`orca/tools.invoke ${fqName} timed out after ${timeoutMs}ms`)), timeoutMs)),
+        ]);
+        if (resp.error) {
+            throw new Error(`orca/tools.invoke ${fqName} failed: ${resp.error.message}`);
+        }
+        return resp.result.result;
+    }
+    /** Ask the host which peer plugins are currently connected. */
+    async listPeers() {
+        const resp = await this.call(PLUGINS_LIST_METHOD, {});
+        if (resp.error)
+            throw new Error(`orca/plugins.list: ${resp.error.message}`);
+        return resp.result.peers;
     }
     async declareTypes(types) {
         const resp = await this.call('orca/types.declare', { types });

@@ -3,6 +3,17 @@ export const TOOLS_DECLARE_METHOD = 'orca/tools.declare';
 /** Method name the host uses to invoke a registered tool. */
 export const TOOLS_CALL_METHOD = 'orca/tools.call';
 /**
+ * Method name for plugin → host cross-plugin invocation. Caller supplies
+ * a fully-qualified tool name `<plugin>.<tool>`; the host resolves the
+ * owning peer via its in-process registry and forwards `tools.call`.
+ */
+export const TOOLS_INVOKE_METHOD = 'orca/tools.invoke';
+/**
+ * Method name for plugin → host peer enumeration. Returns the currently
+ * connected peers and their declared versions.
+ */
+export const PLUGINS_LIST_METHOD = 'orca/plugins.list';
+/**
  * JSON-RPC error codes specific to the tools surface. Extends the
  * standard -32600..-32099 range.
  */
