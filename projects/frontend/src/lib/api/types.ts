@@ -236,7 +236,7 @@ export interface MpcStatus {
   registered: boolean;
 }
 
-export type NodeType = 'file' | 'dir';
+export type NodeType = "file" | "dir";
 
 export interface OkResponse {
   ok: boolean;
@@ -271,6 +271,32 @@ plugin template with separate credentials (e.g. "atlassian@infra"). */
   instanceId?: string | null;
   /** Absolute or ~/ path to the orca-plugin.toml on the server's filesystem. */
   manifest: string;
+}
+
+export interface PluginToolCallRequest {
+  /** Arbitrary JSON the plugin tool expects. Validated by the plugin, not
+by the host — the host is a transparent forwarder. */
+  arguments: unknown;
+  /** Optional override (seconds). Defaults to `DEFAULT_CALL_TIMEOUT`. */
+  timeoutSecs?: number | null;
+}
+
+export interface PluginToolCallResponse {
+  /** Opaque payload returned by the plugin tool. */
+  result: unknown;
+}
+
+export interface PluginToolInfo {
+  /** Whether the owning plugin is currently connected to the host. */
+  connected: boolean;
+  description: string;
+  fqName: string;
+  /** JSON Schema for the tool's input arguments. Returned as a parsed
+object so the MCP layer can pass it straight through. */
+  inputSchema: unknown;
+  name: string;
+  pluginId: string;
+  sensitivity: string;
 }
 
 export interface PrQuery {
