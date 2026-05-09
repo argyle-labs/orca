@@ -198,6 +198,8 @@ pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
         ))
         .routes(routes!(api::plugin_creds_delete_handler))
         .routes(routes!(api::plugin_creds_sync_handler))
+        .routes(routes!(api::plugin_tools_list_handler))
+        .routes(routes!(api::plugin_tool_call_handler))
         .routes(routes!(api::plugin_data_list_handler))
         .routes(routes!(
             api::plugin_data_get_handler,

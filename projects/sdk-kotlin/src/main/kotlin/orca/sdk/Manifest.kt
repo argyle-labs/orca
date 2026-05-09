@@ -35,18 +35,40 @@ data class SurfacesSection(
 
 data class CapabilityDecl(val name: String, val sensitivity: String)
 
+/**
+ * `[[depends_on]]` — peer plugin this plugin needs at runtime. The host
+ * enforces presence of required deps before the plugin's tools are
+ * dispatchable; optional deps degrade rather than reject.
+ */
+data class PluginDependency(
+    val id: String,
+    val minVersion: String,
+    val optional: Boolean = false,
+) {
+    /** "<id>>=<minVersion>" — the form HelloOptions expects. */
+    fun formatDep(): String = if (minVersion.isEmpty()) id else "$id>=$minVersion"
+}
+
 data class Manifest(
     val plugin: PluginSection,
     val runtime: RuntimeSection,
     val surfaces: SurfacesSection,
     val capabilities: List<CapabilityDecl>,
-)
+    val dependsOn: List<PluginDependency> = emptyList(),
+) {
+    /** Required deps formatted for HelloOptions.pluginsRequired. */
+    fun requiredDeps(): List<String> = dependsOn.filter { !it.optional }.map { it.formatDep() }
 
-private val ALLOWED_TOP = setOf("plugin", "runtime", "surfaces", "capabilities")
+    /** Optional deps formatted for HelloOptions.pluginsOptional. */
+    fun optionalDeps(): List<String> = dependsOn.filter { it.optional }.map { it.formatDep() }
+}
+
+private val ALLOWED_TOP = setOf("plugin", "runtime", "surfaces", "capabilities", "depends_on")
 private val ALLOWED_PLUGIN = setOf("id", "version", "min_orca_version")
 private val ALLOWED_RUNTIME = setOf("binary", "image", "mode", "eager")
 private val ALLOWED_SURFACES = setOf("mcp", "cli", "ui", "docs", "jobs", "storage", "federation")
 private val ALLOWED_CAPABILITY = setOf("name", "sensitivity")
+private val ALLOWED_DEPEND = setOf("id", "min_version", "optional")
 
 object ManifestParser {
     fun parseString(s: String): Manifest {
@@ -112,11 +134,31 @@ object ManifestParser {
             }
         }
 
+        val depsArray = parsed.getArray("depends_on")
+        val depIDs = HashSet<String>()
+        val dependsOn = buildList {
+            if (depsArray != null) {
+                for (i in 0 until depsArray.size()) {
+                    val tbl = depsArray.getTable(i)
+                    denyUnknown(tbl.keySet(), ALLOWED_DEPEND, "[[depends_on]]")
+                    val depID = (tbl.getString("id") ?: "").trim()
+                    if (depID.isEmpty()) error("depends_on.id must not be empty")
+                    if (depID == id) error("plugin \"$id\" cannot depend on itself")
+                    if (!depIDs.add(depID)) error("duplicate dependency on \"$depID\"")
+                    val minVersion = tbl.getString("min_version") ?: ""
+                    checkSemver(minVersion, "depends_on[$depID].min_version")
+                    val optional = tbl.getBoolean("optional") ?: false
+                    add(PluginDependency(depID, minVersion, optional))
+                }
+            }
+        }
+
         return Manifest(
             plugin = PluginSection(id, version, minOrca),
             runtime = RuntimeSection(binary, image, mode, eager),
             surfaces = surfaces,
             capabilities = capabilities,
+            dependsOn = dependsOn,
         )
     }
 

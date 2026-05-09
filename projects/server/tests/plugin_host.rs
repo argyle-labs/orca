@@ -1186,27 +1186,173 @@ async fn host_call_to_unknown_tool_surfaces_handler_error() {
     assert!(msg.contains("missing"), "error should name the tool: {msg}");
 }
 
-// NOTE: `plugin_registry_unregisters_on_disconnect` was removed.
-//
-// The unregister-on-drop logic in `ConnState::drop` is correct — when a
-// plugin process exits, the kernel closes both halves of the TCP socket,
-// the host's `read_frame` returns Err, the connection task's loop breaks,
-// `state` drops, and `plugins.unregister(...)` runs.
-//
-// We cannot simulate that disconnect from an in-test plugin: the SDK's
-// `TcpTransport` reader task owns the read half of the split stream, and
-// `tokio::io::split` keeps the underlying connection alive as long as
-// either half is held. Dropping the user-facing `Arc<TcpTransport>` only
-// drops the write half; the read half lives until the reader task itself
-// exits, which only happens on EOF, which only happens when both halves
-// are dropped. Cycle.
-//
-// The fix is an SDK-side shutdown API: a cancellation token the reader
-// task `select!`s on, fired by `TcpTransport::Drop`. Tracked separately —
-// see memory `project_sdk_shutdown_api`.
-//
-// In production the cycle never materializes: plugins die as processes,
-// kernel handles closure, server-side unregister runs. The mechanism is
-// indirectly covered by `host_call_to_unknown_tool_surfaces_handler_error`
-// which proves that an alive connection with an empty tool set still
-// routes correctly — i.e. registry-presence tracking works while connected.
+/// Drop-based shutdown closes the SDK reader task → host sees EOF → registry
+/// unregisters the plugin. Restored after `TcpTransport::Drop` was wired up
+/// to a Notify-driven cancellation.
+#[tokio::test(flavor = "current_thread")]
+async fn plugin_registry_unregisters_on_disconnect() {
+    install_ring();
+
+    let dir = tempfile::tempdir().unwrap();
+    let pki_dir = dir.path();
+    isolate_db(pki_dir);
+    pki::init(pki_dir).unwrap();
+    let bundle = pki::issue(pki_dir, "drop-plug", Capability::General).unwrap();
+
+    let (addr, plugins) =
+        boot_host_with_plugins(pki_dir, plugin_host::ContextRegistry::new()).await;
+    let transport = TcpTransport::connect(addr, &bundle).await.unwrap();
+    transport
+        .hello("drop-plug", orca_sdk::Flavor::Headless, vec![], vec![])
+        .await
+        .unwrap();
+
+    assert!(plugins.get("drop-plug").is_some(), "registered after hello");
+
+    drop(transport);
+
+    // Wait up to 2s for the host's connection task to observe EOF and unregister.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while plugins.get("drop-plug").is_some() {
+        if std::time::Instant::now() >= deadline {
+            panic!("plugin still registered 2s after transport drop");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Cross-plugin invocation: caller asks the host to dispatch to a peer's
+/// declared tool via `orca/tools.invoke`. Validates the full chain — tool
+/// declaration in DB, fq_name resolution, host→peer dispatch, response
+/// routing back to the caller.
+#[tokio::test(flavor = "current_thread")]
+async fn cross_plugin_invoke_routes_through_host() {
+    use orca_sdk::HelloOptions;
+    use orca_sdk::tools::{ToolHandler, ToolHandlerError};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    install_ring();
+
+    let dir = tempfile::tempdir().unwrap();
+    let pki_dir = dir.path();
+    isolate_db(pki_dir);
+    pki::init(pki_dir).unwrap();
+    let provider_bundle = pki::issue(pki_dir, "provider", Capability::General).unwrap();
+    let consumer_bundle = pki::issue(pki_dir, "consumer", Capability::General).unwrap();
+
+    let (addr, _plugins) =
+        boot_host_with_plugins(pki_dir, plugin_host::ContextRegistry::new()).await;
+
+    // ── Provider: declares a "double" tool.
+    let provider = TcpTransport::connect(addr, &provider_bundle).await.unwrap();
+    provider
+        .hello_full(
+            HelloOptions::new("provider", orca_sdk::Flavor::Headless).with_plugin_version("0.2.0"),
+        )
+        .await
+        .unwrap();
+    let double: Arc<dyn ToolHandler> = Arc::new(|args: serde_json::Value| async move {
+        let n = args
+            .get("n")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| ToolHandlerError::new("missing 'n'"))?;
+        Ok(serde_json::json!({"out": n * 2}))
+    });
+    provider.register_tool(
+        "double",
+        "doubles n",
+        serde_json::json!({"type":"object","properties":{"n":{"type":"integer"}},"required":["n"]}),
+        Sensitivity::General,
+        double,
+    );
+    provider.declare_tools().await.unwrap();
+
+    // ── Consumer: declares "provider>=0.1.0" as a required peer dep, then
+    // invokes provider.double via the host.
+    let consumer = TcpTransport::connect(addr, &consumer_bundle).await.unwrap();
+    let hello = consumer
+        .hello_full(
+            HelloOptions::new("consumer", orca_sdk::Flavor::Headless)
+                .with_plugin_version("0.1.0")
+                .with_required_plugins(vec!["provider>=0.1.0".into()]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hello.status, "full", "deps satisfied; expected full");
+
+    let result = consumer
+        .invoke_tool(
+            "provider.double",
+            serde_json::json!({"n": 7}),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["out"], serde_json::json!(14));
+
+    // ── plugins.list returns both peers with their announced versions.
+    let mut peers = consumer.list_peers().await.unwrap();
+    peers.sort_by(|a, b| a.id.cmp(&b.id));
+    assert_eq!(peers.len(), 2);
+    assert_eq!(peers[0].id, "consumer");
+    assert_eq!(peers[0].version, "0.1.0");
+    assert_eq!(peers[1].id, "provider");
+    assert_eq!(peers[1].version, "0.2.0");
+}
+
+/// Hello rejects when a required peer dep isn't connected. Optional deps
+/// degrade rather than reject.
+#[tokio::test(flavor = "current_thread")]
+async fn hello_rejects_when_required_plugin_dep_missing() {
+    use orca_sdk::HelloOptions;
+    install_ring();
+
+    let dir = tempfile::tempdir().unwrap();
+    let pki_dir = dir.path();
+    isolate_db(pki_dir);
+    pki::init(pki_dir).unwrap();
+    let bundle = pki::issue(pki_dir, "needs-peer", Capability::General).unwrap();
+
+    let addr = boot_host(pki_dir).await;
+    let transport = TcpTransport::connect(addr, &bundle).await.unwrap();
+
+    let result = transport
+        .call(
+            "orca/hello",
+            Some(
+                serde_json::to_value(orca_sdk::transport::HelloParams {
+                    sdk_version: "test".into(),
+                    plugin_id: "needs-peer".into(),
+                    plugin_version: "0.1.0".into(),
+                    flavor: orca_sdk::Flavor::Headless,
+                    core_min_required: "0.1.0".into(),
+                    methods_required: vec![],
+                    methods_optional: vec![],
+                    plugins_required: vec!["nonexistent>=0.1.0".into()],
+                    plugins_optional: vec![],
+                })
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    let hr: orca_sdk::transport::HelloResult =
+        serde_json::from_value(result.result.unwrap()).unwrap();
+    assert!(!hr.ok);
+    assert_eq!(hr.status, "rejected");
+    assert!(
+        hr.reason.unwrap_or_default().contains("nonexistent"),
+        "reason should name the missing dep"
+    );
+
+    // Same dep declared optional → degraded, not rejected.
+    let r2 = transport
+        .hello_full(
+            HelloOptions::new("needs-peer", orca_sdk::Flavor::Headless)
+                .with_optional_plugins(vec!["nonexistent>=0.1.0".into()]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r2.status, "degraded");
+}

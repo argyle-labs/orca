@@ -24,7 +24,7 @@ toml       = "1"
 # Async runtime: net + io-util for TCP streams; sync for Mutex/oneshot/broadcast/mpsc;
 # rt for the background reader task and notification pumps spawned by TcpTransport;
 # process + time for the conformance subprocess runner.
-tokio = { version = "1", features = ["net", "io-util", "sync", "rt", "process", "time"] }
+tokio = { version = "1", features = ["net", "io-util", "sync", "rt", "process", "time", "macros"] }
 
 # TLS
 rustls          = { version = "0.23", default-features = false, features = ["ring"] }

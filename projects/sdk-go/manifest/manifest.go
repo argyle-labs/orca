@@ -19,10 +19,54 @@ const Filename = "orca-plugin.toml"
 
 // Manifest is the parsed top-level orca-plugin.toml.
 type Manifest struct {
-	Plugin       PluginSection    `toml:"plugin"`
-	Runtime      RuntimeSection   `toml:"runtime"`
-	Surfaces     SurfacesSection  `toml:"surfaces"`
-	Capabilities []CapabilityDecl `toml:"capabilities"`
+	Plugin       PluginSection      `toml:"plugin"`
+	Runtime      RuntimeSection     `toml:"runtime"`
+	Surfaces     SurfacesSection    `toml:"surfaces"`
+	Capabilities []CapabilityDecl   `toml:"capabilities"`
+	DependsOn    []PluginDependency `toml:"depends_on"`
+}
+
+// PluginDependency declares a peer plugin this plugin needs at runtime.
+// Mirrors orca_sdk::manifest::PluginDependency. Optional=true tells the
+// host the plugin can start without the peer; the consumer is expected
+// to handle missing-peer at runtime.
+type PluginDependency struct {
+	ID         string `toml:"id"`
+	MinVersion string `toml:"min_version"`
+	Optional   bool   `toml:"optional"`
+}
+
+// FormatDep renders a dependency as the "<id>>=<min>" form the host
+// expects in HelloParams.PluginsRequired/Optional.
+func (d PluginDependency) FormatDep() string {
+	if d.MinVersion == "" {
+		return d.ID
+	}
+	return d.ID + ">=" + d.MinVersion
+}
+
+// RequiredDeps returns the formatted entries for required peer deps,
+// ready to plug into HelloOptions.PluginsRequired.
+func (m *Manifest) RequiredDeps() []string {
+	var out []string
+	for _, d := range m.DependsOn {
+		if !d.Optional {
+			out = append(out, d.FormatDep())
+		}
+	}
+	return out
+}
+
+// OptionalDeps returns the formatted entries for optional peer deps,
+// ready to plug into HelloOptions.PluginsOptional.
+func (m *Manifest) OptionalDeps() []string {
+	var out []string
+	for _, d := range m.DependsOn {
+		if d.Optional {
+			out = append(out, d.FormatDep())
+		}
+	}
+	return out
 }
 
 // PluginSection — `[plugin]`.
@@ -123,6 +167,23 @@ func (m *Manifest) validate() error {
 			return fmt.Errorf("duplicate capability %q", c.Name)
 		}
 		seen[c.Name] = struct{}{}
+	}
+
+	depIDs := make(map[string]struct{}, len(m.DependsOn))
+	for _, d := range m.DependsOn {
+		if strings.TrimSpace(d.ID) == "" {
+			return errors.New("depends_on.id must not be empty")
+		}
+		if d.ID == m.Plugin.ID {
+			return fmt.Errorf("plugin %q cannot depend on itself", m.Plugin.ID)
+		}
+		if _, dup := depIDs[d.ID]; dup {
+			return fmt.Errorf("duplicate dependency on %q", d.ID)
+		}
+		depIDs[d.ID] = struct{}{}
+		if err := checkSemver(d.MinVersion, fmt.Sprintf("depends_on[%s].min_version", d.ID)); err != nil {
+			return err
+		}
 	}
 	return nil
 }

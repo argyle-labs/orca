@@ -38,10 +38,15 @@ pub mod transport;
 
 // Re-export the tools surface so plugin authors get one canonical import path.
 pub use tools::{
-    RegisteredTool, TOOLS_CALL_METHOD, TOOLS_DECLARE_METHOD, ToolCallParams, ToolCallResult,
-    ToolDeclaration, ToolFuture, ToolHandler, ToolHandlerError, ToolsDeclareParams,
-    ToolsDeclareResult, tool_error_codes,
+    PLUGINS_LIST_METHOD, PeerInfo, PluginsListResult, RegisteredTool, TOOLS_CALL_METHOD,
+    TOOLS_DECLARE_METHOD, TOOLS_INVOKE_METHOD, ToolCallParams, ToolCallResult, ToolDeclaration,
+    ToolFuture, ToolHandler, ToolHandlerError, ToolInvokeParams, ToolInvokeResult,
+    ToolsDeclareParams, ToolsDeclareResult, tool_error_codes,
 };
+
+// Re-export the hello builder so plugins can declare deps without importing
+// the transport module directly.
+pub use transport::HelloOptions;
 
 #[cfg(test)]
 mod tests {

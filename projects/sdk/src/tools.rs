@@ -51,6 +51,16 @@ pub const TOOLS_DECLARE_METHOD: &str = "orca/tools.declare";
 /// Method name for the host → plugin tool invocation request.
 pub const TOOLS_CALL_METHOD: &str = "orca/tools.call";
 
+/// Method name for plugin → host cross-plugin invocation. The plugin
+/// supplies a fully-qualified tool name (`<plugin_id>.<name>`) and the host
+/// resolves the owning peer + dispatches via the in-process registry.
+pub const TOOLS_INVOKE_METHOD: &str = "orca/tools.invoke";
+
+/// Method name for plugin → host peer enumeration. Returns the currently
+/// connected peers and their declared versions so a plugin can fail fast
+/// when an optional dep is missing or at an incompatible version.
+pub const PLUGINS_LIST_METHOD: &str = "orca/plugins.list";
+
 // ── Wire types ────────────────────────────────────────────────────────────────
 
 /// One tool the plugin is announcing. The fully-qualified id is computed
@@ -98,6 +108,39 @@ pub struct ToolCallParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallResult {
     pub result: Value,
+}
+
+/// Params for `orca/tools.invoke`. `name` is the fully-qualified peer tool,
+/// e.g. `"graphql.query"`. `arguments` is forwarded verbatim to the peer's
+/// `orca/tools.call`. `timeout_secs` overrides the host's default per-call
+/// budget.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolInvokeParams {
+    pub name: String,
+    #[serde(default)]
+    pub arguments: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+/// Result for `orca/tools.invoke`. The opaque JSON the peer returned.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolInvokeResult {
+    pub result: Value,
+}
+
+/// One entry in `orca/plugins.list` — the host's view of a connected peer.
+/// `version` mirrors what the peer announced via `orca/hello.plugin_version`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerInfo {
+    pub id: String,
+    pub version: String,
+}
+
+/// Result for `orca/plugins.list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginsListResult {
+    pub peers: Vec<PeerInfo>,
 }
 
 // ── Error codes ───────────────────────────────────────────────────────────────

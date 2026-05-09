@@ -38,14 +38,27 @@ export interface CapabilityDecl {
   sensitivity: Sensitivity;
 }
 
+/**
+ * `[[depends_on]]` — peer plugin this plugin needs at runtime. The host
+ * enforces presence of required deps before the plugin's tools are
+ * dispatchable; optional deps degrade rather than reject.
+ */
+export interface PluginDependency {
+  id: string;
+  min_version: string;
+  /** Default false — required. */
+  optional?: boolean;
+}
+
 export interface Manifest {
   plugin: PluginSection;
   runtime: RuntimeSection;
   surfaces: SurfacesSection;
   capabilities: CapabilityDecl[];
+  depends_on: PluginDependency[];
 }
 
-const ALLOWED_TOP = new Set(['plugin', 'runtime', 'surfaces', 'capabilities']);
+const ALLOWED_TOP = new Set(['plugin', 'runtime', 'surfaces', 'capabilities', 'depends_on']);
 const ALLOWED_PLUGIN = new Set(['id', 'version', 'min_orca_version']);
 const ALLOWED_RUNTIME = new Set(['binary', 'image', 'mode', 'eager']);
 const ALLOWED_SURFACES = new Set([
@@ -58,6 +71,7 @@ const ALLOWED_SURFACES = new Set([
   'federation',
 ]);
 const ALLOWED_CAPABILITY = new Set(['name', 'sensitivity']);
+const ALLOWED_DEPEND = new Set(['id', 'min_version', 'optional']);
 
 function denyUnknown(obj: Record<string, unknown>, allowed: Set<string>, where: string): void {
   for (const k of Object.keys(obj)) {
@@ -90,6 +104,8 @@ export function parseString(s: string): Manifest {
   denyUnknown(surfacesRaw, ALLOWED_SURFACES, '[surfaces]');
   const capsRaw = (raw['capabilities'] ?? []) as Array<Record<string, unknown>>;
   for (const c of capsRaw) denyUnknown(c, ALLOWED_CAPABILITY, '[[capabilities]]');
+  const depsRaw = (raw['depends_on'] ?? []) as Array<Record<string, unknown>>;
+  for (const d of depsRaw) denyUnknown(d, ALLOWED_DEPEND, '[[depends_on]]');
 
   const id = String(plugin['id'] ?? '').trim();
   if (!id) throw new Error('plugin.id must not be empty');
@@ -145,13 +161,48 @@ export function parseString(s: string): Manifest {
     capabilities.push({ name, sensitivity });
   }
 
+  const dependsOn: PluginDependency[] = [];
+  const depIDs = new Set<string>();
+  for (const d of depsRaw) {
+    const depID = String(d['id'] ?? '').trim();
+    if (!depID) throw new Error('depends_on.id must not be empty');
+    if (depID === id) throw new Error(`plugin "${id}" cannot depend on itself`);
+    if (depIDs.has(depID)) throw new Error(`duplicate dependency on "${depID}"`);
+    depIDs.add(depID);
+    const minVersion = String(d['min_version'] ?? '');
+    checkSemver(minVersion, `depends_on[${depID}].min_version`);
+    const dep: PluginDependency = { id: depID, min_version: minVersion };
+    if (d['optional'] !== undefined) dep.optional = Boolean(d['optional']);
+    dependsOn.push(dep);
+  }
+
   const result: Manifest = {
     plugin: { id, version, min_orca_version: minOrca },
     runtime: { mode: 'process', eager, ...(binary !== undefined ? { binary } : {}), ...(image !== undefined ? { image } : {}) },
     surfaces,
     capabilities,
+    depends_on: dependsOn,
   };
   return result;
+}
+
+/**
+ * Format a {@link PluginDependency} for HelloOptions.pluginsRequired /
+ * pluginsOptional — `<id>>=<min>`.
+ */
+export function formatDep(dep: PluginDependency): string {
+  if (!dep.min_version) return dep.id;
+  return `${dep.id}>=${dep.min_version}`;
+}
+
+/** Required deps formatted for HelloOptions.pluginsRequired. */
+export function requiredDeps(m: Manifest): string[] {
+  return m.depends_on.filter(d => !d.optional).map(formatDep);
+}
+
+/** Optional deps formatted for HelloOptions.pluginsOptional. */
+export function optionalDeps(m: Manifest): string[] {
+  return m.depends_on.filter(d => d.optional === true).map(formatDep);
 }
 
 /** Parse a manifest from a file path. */
