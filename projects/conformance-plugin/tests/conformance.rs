@@ -40,7 +40,7 @@ async fn rust_reference_plugin_is_conformant() {
         "Rust reference plugin not conformant. Steps: {:#?}",
         report.steps
     );
-    assert_eq!(report.steps.len(), 3);
+    assert_eq!(report.steps.len(), 5);
 }
 
 /// Build the Go reference plugin (projects/sdk-go/cmd/conformance-plugin)
@@ -99,7 +99,7 @@ async fn go_reference_plugin_is_conformant() {
         "Go reference plugin not conformant. Steps: {:#?}",
         report.steps
     );
-    assert_eq!(report.steps.len(), 3);
+    assert_eq!(report.steps.len(), 5);
 }
 
 /// Build the TypeScript reference plugin (projects/sdk-ts) and run it
@@ -176,7 +176,7 @@ async fn typescript_reference_plugin_is_conformant() {
         "TypeScript reference plugin not conformant. Steps: {:#?}",
         report.steps
     );
-    assert_eq!(report.steps.len(), 3);
+    assert_eq!(report.steps.len(), 5);
 }
 
 /// Build the Kotlin reference plugin (projects/sdk-kotlin) and run it
@@ -254,5 +254,5 @@ async fn kotlin_reference_plugin_is_conformant() {
         "Kotlin reference plugin not conformant. Steps: {:#?}",
         report.steps
     );
-    assert_eq!(report.steps.len(), 3);
+    assert_eq!(report.steps.len(), 5);
 }

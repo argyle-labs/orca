@@ -21,9 +21,12 @@ use anyhow::{Context, Result, anyhow};
 use orca_sdk::conformance::SCENARIO;
 use orca_sdk::manifest;
 use orca_sdk::pki;
+use orca_sdk::tools::{ToolHandler, ToolHandlerError};
 use orca_sdk::transport::{Sensitivity, TcpTransport, TypeDeclaration, TypedValue};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 fn env_required(name: &str) -> Result<String> {
     std::env::var(name).with_context(|| format!("required env var {name} not set"))
@@ -95,5 +98,28 @@ async fn main() -> Result<()> {
         .await
         .context("orca/context.publish")?;
 
+    // 5. Register the echo tool, declare it, idle so the host's tools.call
+    //    can land and the reader task can dispatch the response.
+    let echo: Arc<dyn ToolHandler> = Arc::new(|args: serde_json::Value| async move {
+        let v = args
+            .get(SCENARIO.tool_call_argument_key)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolHandlerError::new("missing 'value'"))?
+            .to_string();
+        Ok(serde_json::json!({SCENARIO.tool_result_echo_key: v}))
+    });
+    transport.register_tool(
+        SCENARIO.tool_name,
+        "echo back the value argument",
+        serde_json::from_str(SCENARIO.tool_input_schema_json)?,
+        Sensitivity::General,
+        echo,
+    );
+    transport
+        .declare_tools()
+        .await
+        .context("orca/tools.declare")?;
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
     Ok(())
 }

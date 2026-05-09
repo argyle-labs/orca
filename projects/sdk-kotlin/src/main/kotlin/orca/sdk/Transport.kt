@@ -93,6 +93,9 @@ class Transport private constructor(
     private val notifFlow = MutableSharedFlow<Notification>(extraBufferCapacity = 256)
     private val writeMutex = Object()
 
+    /** Tools registered for the host to invoke, keyed by bare name. */
+    private val tools = ConcurrentHashMap<String, RegisteredTool>()
+
     init {
         scope.launch { readLoop() }
     }
@@ -157,7 +160,12 @@ class Transport private constructor(
                         val notif = json.decodeFromJsonElement(Notification.serializer(), raw)
                         notifFlow.tryEmit(notif)
                     }
-                    // Server-to-plugin requests not part of Phase A.
+                    hasMethod && hasId -> {
+                        // Server→plugin request. Dispatch off the read loop
+                        // so a slow handler doesn't stall incoming frames.
+                        val req = json.decodeFromJsonElement(Request.serializer(), raw)
+                        scope.launch { dispatchIncoming(req) }
+                    }
                 }
             }
         } catch (_: Exception) {
@@ -256,6 +264,96 @@ class Transport private constructor(
         val params = buildJsonObject { put("subscription_id", subscriptionId) }
         val resp = call("orca/context.unsubscribe", params)
         if (resp.isError) error("orca/context.unsubscribe rejected: ${resp.error?.message}")
+    }
+
+    // ── Tools surface ─────────────────────────────────────────────────────
+
+    /**
+     * Register a tool the host can invoke via orca/tools.call. Bare name
+     * (no `<plugin_id>.` prefix — the host applies the namespace).
+     * Re-registering the same name replaces the previous handler. Call
+     * this for each tool, then call [declareTools] once.
+     */
+    fun registerTool(
+        name: String,
+        description: String,
+        inputSchema: JsonElement,
+        sensitivity: Sensitivity,
+        handler: ToolHandler,
+    ) {
+        val decl = ToolDeclaration(
+            name = name,
+            description = description,
+            input_schema = inputSchema,
+            sensitivity = sensitivity.wire,
+        )
+        tools[name] = RegisteredTool(decl, handler)
+    }
+
+    /**
+     * Send the registered tool set via orca/tools.declare. Returns the
+     * namespaced ids the host accepted. Idempotent — calling again
+     * replaces the host-side set.
+     */
+    suspend fun declareTools(): ToolsDeclareResult {
+        val decls = tools.values.map { it.declaration }
+        val params = buildJsonObject {
+            put("tools", json.encodeToJsonElement(decls))
+        }
+        val resp = call(ToolsProtocol.DECLARE_METHOD, params)
+        if (resp.isError) error("${ToolsProtocol.DECLARE_METHOD} rejected: ${resp.error?.message}")
+        return json.decodeFromJsonElement(ToolsDeclareResult.serializer(), resp.result!!)
+    }
+
+    private suspend fun dispatchIncoming(req: Request) {
+        val resp = buildResponseFor(req)
+        try {
+            writeBytes(json.encodeToString(Response.serializer(), resp).toByteArray())
+        } catch (_: Exception) {
+            // Connection probably closed; nothing to do.
+        }
+    }
+
+    private suspend fun buildResponseFor(req: Request): Response {
+        if (req.method != ToolsProtocol.CALL_METHOD) {
+            return Response(
+                id = req.id,
+                error = ErrorObject(CODE_METHOD_NOT_FOUND, "method not found: ${req.method}"),
+            )
+        }
+        val params = req.params
+            ?: return Response(
+                id = req.id,
+                error = ErrorObject(CODE_INVALID_PARAMS, "invalid params: missing params"),
+            )
+        val callParams = try {
+            json.decodeFromJsonElement(ToolCallParams.serializer(), params)
+        } catch (e: Exception) {
+            return Response(
+                id = req.id,
+                error = ErrorObject(CODE_INVALID_PARAMS, "invalid params: ${e.message}"),
+            )
+        }
+        val reg = tools[callParams.name]
+            ?: return Response(
+                id = req.id,
+                error = ErrorObject(
+                    ToolErrorCodes.UNKNOWN_TOOL,
+                    "unknown tool: ${callParams.name}",
+                ),
+            )
+        return try {
+            val out = reg.handler.call(callParams.arguments)
+            val result = json.encodeToJsonElement(ToolCallResult(result = out))
+            Response(id = req.id, result = result)
+        } catch (e: ToolHandlerError) {
+            Response(
+                id = req.id,
+                error = ErrorObject(ToolErrorCodes.HANDLER_ERROR, e.message ?: "", e.data),
+            )
+        } catch (e: Exception) {
+            Response(id = req.id, error = ErrorObject(CODE_INTERNAL_ERROR, e.message ?: e.toString()))
+        }
     }
 }
 

@@ -13,6 +13,7 @@
  */
 import * as manifest from '../manifest.js';
 import * as pki from '../pki.js';
+import { ToolHandlerError } from '../tools.js';
 import { Transport, type TypedValue } from '../transport.js';
 
 const SCENARIO = {
@@ -24,6 +25,16 @@ const SCENARIO = {
     type: 'object',
     properties: { text: { type: 'string' }, manifest_id: { type: 'string' } },
     required: ['text', 'manifest_id'],
+  },
+  // Tools surface — must match projects/sdk/src/conformance.rs SCENARIO.
+  toolName: 'echo',
+  toolArgKey: 'value',
+  toolArgValue: 'ping',
+  toolResultEchoKey: 'echoed',
+  toolInputSchema: {
+    type: 'object',
+    properties: { value: { type: 'string' } },
+    required: ['value'],
   },
 } as const;
 
@@ -67,6 +78,26 @@ async function main(): Promise<void> {
       },
     };
     await transport.publishContext(SCENARIO.contextID, value);
+
+    // Register the echo tool, declare it, then idle so the host's
+    // tools.call can land and the read loop can serve the response.
+    transport.registerTool(
+      SCENARIO.toolName,
+      'echo back the value argument',
+      SCENARIO.toolInputSchema,
+      'general',
+      async (args: unknown) => {
+        const obj = args as Record<string, unknown> | null;
+        const v = obj?.[SCENARIO.toolArgKey];
+        if (typeof v !== 'string') {
+          throw new ToolHandlerError(`missing '${SCENARIO.toolArgKey}' arg`);
+        }
+        return { [SCENARIO.toolResultEchoKey]: v };
+      },
+    );
+    await transport.declareTools();
+
+    await new Promise(resolve => setTimeout(resolve, 2000));
   } finally {
     transport.close();
   }

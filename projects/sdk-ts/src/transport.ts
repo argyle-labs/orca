@@ -18,6 +18,19 @@ import {
   type Response,
 } from './jsonrpc.js';
 import { clientTlsOptions, type NodeBundle } from './pki.js';
+import {
+  type RegisteredTool,
+  TOOLS_CALL_METHOD,
+  TOOLS_DECLARE_METHOD,
+  type ToolCallParams,
+  type ToolCallResult,
+  type ToolDeclaration,
+  ToolHandlerError,
+  type ToolHandler,
+  type ToolsDeclareParams,
+  type ToolsDeclareResult,
+  toolErrorCodes,
+} from './tools.js';
 
 export const SDK_VERSION = '0.1.0';
 
@@ -81,6 +94,8 @@ export class Transport {
   private nextID = 1;
   private pending = new Map<number, (resp: Response) => void>();
   private notifSubs = new Set<(n: Notification) => void>();
+  /** Tools the plugin has registered for the host to invoke, by bare name. */
+  private tools = new Map<string, RegisteredTool>();
   private closed = false;
 
   private constructor(socket: TLSSocket) {
@@ -166,8 +181,11 @@ export class Transport {
               /* swallow subscriber errors */
             }
           }
+        } else if (msg.kind === 'request') {
+          // Server→plugin request. Dispatch off the read loop so a slow
+          // handler doesn't stall incoming frames.
+          void this.dispatchIncoming(msg.value);
         }
-        // Server-to-plugin requests are not part of Phase A.
       }
     } catch (err) {
       this.handleClose(err as Error);
@@ -177,6 +195,108 @@ export class Transport {
   /** Close the underlying socket. Pending calls reject. */
   close(): void {
     this.writer.end();
+  }
+
+  /**
+   * Handle a server→plugin request. Currently only `orca/tools.call` is
+   * supported; everything else returns method-not-found.
+   */
+  private async dispatchIncoming(req: Request): Promise<void> {
+    const resp = await this.buildResponseFor(req);
+    try {
+      const body = Buffer.from(JSON.stringify(resp), 'utf8');
+      await writeFrame(this.writer, body);
+    } catch {
+      /* swallow — connection likely closed */
+    }
+  }
+
+  private async buildResponseFor(req: Request): Promise<Response> {
+    if (req.method !== TOOLS_CALL_METHOD) {
+      return {
+        jsonrpc: JSONRPC_VERSION,
+        id: req.id,
+        error: { code: -32601, message: `method not found: ${req.method}` },
+      };
+    }
+    const params = req.params as ToolCallParams | undefined;
+    if (!params || typeof params.name !== 'string') {
+      return {
+        jsonrpc: JSONRPC_VERSION,
+        id: req.id,
+        error: { code: -32602, message: 'invalid params: missing name' },
+      };
+    }
+    const reg = this.tools.get(params.name);
+    if (!reg) {
+      return {
+        jsonrpc: JSONRPC_VERSION,
+        id: req.id,
+        error: {
+          code: toolErrorCodes.UNKNOWN_TOOL,
+          message: `unknown tool: ${params.name}`,
+        },
+      };
+    }
+    try {
+      const out = await reg.handler(params.arguments);
+      const result: ToolCallResult = { result: out };
+      return { jsonrpc: JSONRPC_VERSION, id: req.id, result };
+    } catch (err) {
+      if (err instanceof ToolHandlerError) {
+        return {
+          jsonrpc: JSONRPC_VERSION,
+          id: req.id,
+          error: {
+            code: toolErrorCodes.HANDLER_ERROR,
+            message: err.message,
+            data: err.data,
+          },
+        };
+      }
+      return {
+        jsonrpc: JSONRPC_VERSION,
+        id: req.id,
+        error: { code: -32603, message: (err as Error).message ?? String(err) },
+      };
+    }
+  }
+
+  /**
+   * Register a tool the host can invoke via orca/tools.call. Bare name
+   * (no `<plugin_id>.` prefix — the host applies the namespace).
+   * Re-registering the same name replaces the previous handler. Call
+   * this for each tool, then call {@link declareTools} once.
+   */
+  registerTool(
+    name: string,
+    description: string,
+    inputSchema: unknown,
+    sensitivity: Sensitivity,
+    handler: ToolHandler,
+  ): void {
+    const declaration: ToolDeclaration = {
+      name,
+      description,
+      input_schema: inputSchema,
+      sensitivity,
+    };
+    this.tools.set(name, { declaration, handler });
+  }
+
+  /**
+   * Send the registered tool set via orca/tools.declare. Returns the
+   * namespaced ids the host accepted. Idempotent — calling again
+   * replaces the host-side set.
+   */
+  async declareTools(): Promise<ToolsDeclareResult> {
+    const tools = Array.from(this.tools.values()).map(t => t.declaration);
+    const params: ToolsDeclareParams = { tools };
+    const resp = await this.call(TOOLS_DECLARE_METHOD, params);
+    if (resp.error) {
+      throw new Error(`${TOOLS_DECLARE_METHOD} rejected: ${resp.error.message}`);
+    }
+    return resp.result as ToolsDeclareResult;
   }
 
   /** Subscribe to every server-pushed notification on this connection. */
