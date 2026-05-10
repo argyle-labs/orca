@@ -25,7 +25,7 @@ serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 sha2 = "0.10"
-rusqlite = { version = "0.39", features = ["bundled-sqlcipher"] }
+rusqlite = { version = "0.39", features = ["bundled-sqlcipher-vendored-openssl"] }
 dirs = "6"
 rand = "0.9"
 regex = "1"
