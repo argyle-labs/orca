@@ -45,7 +45,7 @@ impl OrcaTool for AddMcpServer {
          wants to register a new MCP server for orca to federate.";
     type Args = AddMcpServerArgs;
     async fn run(args: AddMcpServerArgs, _: &ToolCtx) -> Result<String> {
-        let row = db::McpServerRow {
+        let row = db::mcp_servers::ServerRow {
             name: args.name.clone(),
             command: args.command,
             args: args.args.unwrap_or_default(),
@@ -53,7 +53,7 @@ impl OrcaTool for AddMcpServer {
             enabled: true,
         };
         let conn = db::open_default()?;
-        db::upsert_mcp_server(&conn, &row)?;
+        db::mcp_servers::upsert(&conn, &row)?;
         Ok(format!("Registered MCP server '{}' in orca.db.", args.name))
     }
 }
@@ -71,7 +71,7 @@ impl OrcaTool for RemoveMcpServer {
     type Args = RemoveMcpServerArgs;
     async fn run(args: RemoveMcpServerArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
-        if db::remove_mcp_server(&conn, &args.name)? {
+        if db::mcp_servers::remove(&conn, &args.name)? {
             Ok(format!("Removed MCP server '{}' from orca.db.", args.name))
         } else {
             Ok(format!("Server '{}' not found in orca.db.", args.name))
@@ -287,7 +287,7 @@ impl OrcaTool for AddDockerRuntime {
         if args.socket_path.is_none() && args.host.is_none() && args.url.is_none() {
             anyhow::bail!("provide socketPath, host, or url");
         }
-        let row = db::DockerRuntimeRow {
+        let row = db::docker_runtimes::RuntimeRow {
             name: args.name.clone(),
             socket_path: args.socket_path,
             host: args.host,
@@ -295,7 +295,7 @@ impl OrcaTool for AddDockerRuntime {
             enabled: true,
         };
         let conn = db::open_default()?;
-        db::upsert_docker_runtime(&conn, &row)?;
+        db::docker_runtimes::upsert(&conn, &row)?;
         Ok(format!(
             "Registered Docker runtime '{}' in orca.db.",
             args.name
@@ -316,7 +316,7 @@ impl OrcaTool for RemoveDockerRuntime {
     type Args = RemoveDockerRuntimeArgs;
     async fn run(args: RemoveDockerRuntimeArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
-        if db::remove_docker_runtime(&conn, &args.name)? {
+        if db::docker_runtimes::remove(&conn, &args.name)? {
             Ok(format!(
                 "Removed Docker runtime '{}' from orca.db.",
                 args.name
@@ -459,7 +459,7 @@ impl OrcaTool for ListProxmoxEndpoints {
     type Args = ListProxmoxEndpointsArgs;
     async fn run(_: ListProxmoxEndpointsArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
-        let rows = db::list_proxmox_endpoints(&conn)?;
+        let rows = db::proxmox::list(&conn)?;
         let redacted: Vec<_> = rows
             .into_iter()
             .map(|r| {
@@ -479,7 +479,7 @@ impl OrcaTool for ListProxmoxEndpoints {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct AddProxmoxEndpointArgs {
-    /// Logical name for this Proxmox endpoint (e.g. "halvor")
+    /// Logical name for this Proxmox endpoint (e.g. "thor/pve")
     pub name: String,
     /// Base URL including scheme + port (e.g. https://pve.lan:8006)
     pub base_url: String,
@@ -498,7 +498,7 @@ impl OrcaTool for AddProxmoxEndpoint {
          Auth uses an API token (PVEAPIToken header).";
     type Args = AddProxmoxEndpointArgs;
     async fn run(args: AddProxmoxEndpointArgs, _: &ToolCtx) -> Result<String> {
-        let row = db::ProxmoxEndpointRow {
+        let row = db::proxmox::EndpointRow {
             name: args.name.clone(),
             base_url: args.base_url,
             token_id: args.token_id,
@@ -507,7 +507,7 @@ impl OrcaTool for AddProxmoxEndpoint {
             enabled: true,
         };
         let conn = db::open_default()?;
-        db::upsert_proxmox_endpoint(&conn, &row)?;
+        db::proxmox::upsert(&conn, &row)?;
         Ok(format!(
             "Registered Proxmox endpoint '{}' in orca.db.",
             args.name
@@ -528,9 +528,96 @@ impl OrcaTool for RemoveProxmoxEndpoint {
     type Args = RemoveProxmoxEndpointArgs;
     async fn run(args: RemoveProxmoxEndpointArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
-        if db::remove_proxmox_endpoint(&conn, &args.name)? {
+        if db::proxmox::remove(&conn, &args.name)? {
             Ok(format!(
                 "Removed Proxmox endpoint '{}' from orca.db.",
+                args.name
+            ))
+        } else {
+            Ok(format!("Endpoint '{}' not found in orca.db.", args.name))
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Home Assistant Endpoints
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ListHomeAssistantEndpointsArgs {}
+pub struct ListHomeAssistantEndpoints;
+#[async_trait]
+impl OrcaTool for ListHomeAssistantEndpoints {
+    const NAME: &'static str = "list_home_assistant_endpoints";
+    const DESCRIPTION: &'static str =
+        "List all Home Assistant endpoints registered in orca.db (tokens are redacted).";
+    type Args = ListHomeAssistantEndpointsArgs;
+    async fn run(_: ListHomeAssistantEndpointsArgs, _: &ToolCtx) -> Result<String> {
+        let conn = db::open_default()?;
+        let rows = db::home_assistant::list(&conn)?;
+        let redacted: Vec<_> = rows
+            .into_iter()
+            .map(|r| {
+                serde_json::json!({
+                    "name": r.name,
+                    "base_url": r.base_url,
+                    "token": "***",
+                    "enabled": r.enabled,
+                })
+            })
+            .collect();
+        Ok(serde_json::to_string_pretty(&redacted)?)
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct AddHomeAssistantEndpointArgs {
+    /// Logical name for this Home Assistant endpoint (e.g. "home")
+    pub name: String,
+    /// Base URL including scheme + port (e.g. http://homeassistant.local:8123)
+    pub base_url: String,
+    /// Long-lived access token; stored as-is, surfaced only when this tool is called
+    pub token: String,
+}
+pub struct AddHomeAssistantEndpoint;
+#[async_trait]
+impl OrcaTool for AddHomeAssistantEndpoint {
+    const NAME: &'static str = "add_home_assistant_endpoint";
+    const DESCRIPTION: &'static str = "[MUTATES STATE] Register or update a Home Assistant endpoint in orca.db. \
+         Auth uses a long-lived access token (Bearer header).";
+    type Args = AddHomeAssistantEndpointArgs;
+    async fn run(args: AddHomeAssistantEndpointArgs, _: &ToolCtx) -> Result<String> {
+        let row = db::home_assistant::EndpointRow {
+            name: args.name.clone(),
+            base_url: args.base_url,
+            token: args.token,
+            enabled: true,
+        };
+        let conn = db::open_default()?;
+        db::home_assistant::upsert(&conn, &row)?;
+        Ok(format!(
+            "Registered Home Assistant endpoint '{}' in orca.db.",
+            args.name
+        ))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RemoveHomeAssistantEndpointArgs {
+    pub name: String,
+}
+pub struct RemoveHomeAssistantEndpoint;
+#[async_trait]
+impl OrcaTool for RemoveHomeAssistantEndpoint {
+    const NAME: &'static str = "remove_home_assistant_endpoint";
+    const DESCRIPTION: &'static str =
+        "[MUTATES STATE] Remove a Home Assistant endpoint from orca.db by name.";
+    type Args = RemoveHomeAssistantEndpointArgs;
+    async fn run(args: RemoveHomeAssistantEndpointArgs, _: &ToolCtx) -> Result<String> {
+        let conn = db::open_default()?;
+        if db::home_assistant::remove(&conn, &args.name)? {
+            Ok(format!(
+                "Removed Home Assistant endpoint '{}' from orca.db.",
                 args.name
             ))
         } else {
@@ -562,6 +649,10 @@ pub fn register(reg: &mut tool::ToolRegistry) {
         .register::<ListProxmoxEndpoints>()
         .register::<AddProxmoxEndpoint>()
         .register::<RemoveProxmoxEndpoint>()
+        // Home Assistant endpoints
+        .register::<ListHomeAssistantEndpoints>()
+        .register::<AddHomeAssistantEndpoint>()
+        .register::<RemoveHomeAssistantEndpoint>()
         // Doc root registry
         .register::<ListDocRoots>()
         .register::<AddDocRoot>()

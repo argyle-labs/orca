@@ -12,7 +12,7 @@ use tool::{OrcaTool, ToolCtx};
 
 fn make_client(name: &str) -> Result<Client> {
     let conn = db::open_default()?;
-    let row = db::get_proxmox_endpoint(&conn, name)?.with_context(|| {
+    let row = db::proxmox::get(&conn, name)?.with_context(|| {
         format!("proxmox endpoint '{name}' not registered (use add_proxmox_endpoint)")
     })?;
     if !row.enabled {

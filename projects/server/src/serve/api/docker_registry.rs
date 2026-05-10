@@ -15,7 +15,7 @@ use super::prelude::*;
 pub async fn docker_runtimes_handler() -> axum::response::Response {
     db_json(|| {
         let conn = db::open_default()?;
-        let rts: Vec<DockerRuntimeInfo> = db::list_docker_runtimes(&conn)?
+        let rts: Vec<DockerRuntimeInfo> = db::docker_runtimes::list(&conn)?
             .into_iter()
             .map(|r| DockerRuntimeInfo {
                 name: r.name,
@@ -46,7 +46,7 @@ pub async fn docker_runtimes_add_handler(
     axum::Json(body): axum::Json<DockerRuntimeAddRequest>,
 ) -> axum::response::Response {
     db_ok(|| {
-        let row = db::DockerRuntimeRow {
+        let row = db::docker_runtimes::RuntimeRow {
             name: body.name,
             socket_path: body.socket_path,
             host: body.host,
@@ -54,7 +54,7 @@ pub async fn docker_runtimes_add_handler(
             enabled: true,
         };
         let conn = db::open_default()?;
-        db::upsert_docker_runtime(&conn, &row)
+        db::docker_runtimes::upsert(&conn, &row)
     })
 }
 
@@ -77,6 +77,6 @@ pub async fn docker_runtimes_remove_handler(
 ) -> axum::response::Response {
     db_remove("runtime", &name, || {
         let conn = db::open_default()?;
-        db::remove_docker_runtime(&conn, &name)
+        db::docker_runtimes::remove(&conn, &name)
     })
 }

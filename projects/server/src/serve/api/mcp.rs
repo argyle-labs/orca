@@ -24,7 +24,7 @@ use crate::serve::middleware::CorrelationId;
 pub async fn mcp_servers_handler() -> Response {
     db_json(|| {
         let conn = db::open_default()?;
-        let servers: Vec<McpServerInfo> = db::list_mcp_servers(&conn)?
+        let servers: Vec<McpServerInfo> = db::mcp_servers::list(&conn)?
             .into_iter()
             .map(|r| McpServerInfo {
                 name: r.name,
@@ -53,7 +53,7 @@ pub async fn mcp_servers_handler() -> Response {
 )]
 pub async fn mcp_add_handler(Json(body): Json<McpServerAddRequest>) -> Response {
     db_ok(|| {
-        let row = db::McpServerRow {
+        let row = db::mcp_servers::ServerRow {
             name: body.name,
             command: body.command,
             args: body.args,
@@ -61,7 +61,7 @@ pub async fn mcp_add_handler(Json(body): Json<McpServerAddRequest>) -> Response 
             enabled: true,
         };
         let conn = db::open_default()?;
-        db::upsert_mcp_server(&conn, &row)
+        db::mcp_servers::upsert(&conn, &row)
     })
 }
 
@@ -84,7 +84,7 @@ pub async fn mcp_remove_handler(
 ) -> Response {
     db_remove("server", &name, || {
         let conn = db::open_default()?;
-        db::remove_mcp_server(&conn, &name)
+        db::mcp_servers::remove(&conn, &name)
     })
 }
 

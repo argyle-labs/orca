@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 fn active_docker_host() -> Option<String> {
     let conn = db::open_default().ok()?;
-    db::active_docker_host(&conn)
+    db::docker_runtimes::active_host(&conn)
 }
 
 /// Resolve a bare command name to an absolute path.
@@ -541,7 +541,7 @@ impl McpPool {
         if let Some(db_path) = &self.db_path
             && let Ok(conn) = db::open(db_path)
         {
-            if let Ok(rows) = db::list_mcp_servers(&conn) {
+            if let Ok(rows) = db::mcp_servers::list(&conn) {
                 for row in rows {
                     configs.insert(
                         row.name.clone(),

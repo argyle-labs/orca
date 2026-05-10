@@ -31,6 +31,7 @@ db            = { package = "orca-db", path = "../db" }
 orca_fs       = { package = "orca-fs", path = "../fs" }
 orca-docker   = { path = "../integrations/docker" }
 orca-proxmox  = { path = "../integrations/proxmox" }
+orca-homeassistant = { path = "../integrations/homeassistant" }
 profile       = { package = "orca-profile", path = "../profile" }
 state         = { package = "orca-state", path = "../state" }
 
