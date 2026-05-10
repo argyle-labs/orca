@@ -240,9 +240,17 @@ jobs:
           name: example-hackernews
           path: hackernews/
 
-      - name: Install runtime deps
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-ts-dist
+          path: sdk-ts/
+
+      - name: Install runtime deps + SDK tarball
         working-directory: hackernews
-        run: npm ci --omit=dev
+        run: |
+          set -euo pipefail
+          npm ci --omit=dev
+          npm install ../sdk-ts/orca-sdk-*.tgz --no-save --omit=dev
 
       - name: Smoke test built artifact
         working-directory: hackernews
