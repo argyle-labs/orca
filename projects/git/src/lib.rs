@@ -18,7 +18,9 @@ pub enum GitError {
     Detached(String),
     #[error("non-fast-forward upstream; pull requires manual merge")]
     NotFastForward,
-    #[error("no committer signature available — pass author or set git config user.{{name,email}}: {0}")]
+    #[error(
+        "no committer signature available — pass author or set git config user.{{name,email}}: {0}"
+    )]
     NoSignature(String),
 }
 
@@ -311,13 +313,7 @@ mod tests {
         let dir = tempdir().unwrap();
         init_repo(dir.path());
         std::fs::write(dir.path().join("a.txt"), "hi").unwrap();
-        let r = commit(
-            dir.path(),
-            "first",
-            &[],
-            &CommitAuthor::default(),
-        )
-        .unwrap();
+        let r = commit(dir.path(), "first", &[], &CommitAuthor::default()).unwrap();
         assert_eq!(r.message, "first");
         assert_eq!(r.oid.len(), 40);
     }

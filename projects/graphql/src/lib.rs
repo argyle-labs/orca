@@ -7,8 +7,8 @@
 use orca_http::{Client as HttpClient, HttpError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use thiserror::Error;
 use std::collections::HashMap;
+use thiserror::Error;
 
 /// Standard GraphQL response envelope: `data` + optional `errors`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,9 +186,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/graphql"))
             .and(header("Content-Type", "application/json"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!({"data": {"ok": true}})),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"ok": true}})))
             .mount(&server)
             .await;
         let endpoint = format!("{}/graphql", server.uri());
@@ -205,8 +203,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!({"errors": [{"message": "boom"}]})),
+                ResponseTemplate::new(200).set_body_json(json!({"errors": [{"message": "boom"}]})),
             )
             .mount(&server)
             .await;

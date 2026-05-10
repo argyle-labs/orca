@@ -309,7 +309,9 @@ fn step_pki_init(home: &Path, report: &mut InstallReport) {
     let pki_dir = home.join(APP_STATE_DIR).join(APP_PKI_DIR);
     let already = pki::ca_cert_path(&pki_dir).exists() && pki::server_cert_path(&pki_dir).exists();
     match pki::init(&pki_dir) {
-        Ok(_) if already => report.skip(format!("pki: already initialized at {}", pki_dir.display())),
+        Ok(_) if already => {
+            report.skip(format!("pki: already initialized at {}", pki_dir.display()))
+        }
         Ok(_) => report.ok(format!("pki: initialized at {}", pki_dir.display())),
         Err(e) => report.err(format!("pki: init failed: {e}")),
     }

@@ -100,10 +100,15 @@ impl Client {
     }
 
     async fn get(&self, path: &str) -> Result<Value, DockgeError> {
-        let resp = self.http.get(self.url(path)).bearer(&self.cfg.token).send().await?;
-        Ok(resp.json::<Value>().unwrap_or_else(|_| {
-            serde_json::json!({"raw": resp.text()})
-        }))
+        let resp = self
+            .http
+            .get(self.url(path))
+            .bearer(&self.cfg.token)
+            .send()
+            .await?;
+        Ok(resp
+            .json::<Value>()
+            .unwrap_or_else(|_| serde_json::json!({"raw": resp.text()})))
     }
 
     fn url(&self, path: &str) -> String {
@@ -124,12 +129,14 @@ mod tests {
             .and(path("/api/stacks"))
             .and(header("authorization", "Bearer t"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"stacks": []})),
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"stacks": []})),
             )
             .mount(&server)
             .await;
-        let v = Client::new(Config::new(server.uri(), "t")).list().await.unwrap();
+        let v = Client::new(Config::new(server.uri(), "t"))
+            .list()
+            .await
+            .unwrap();
         assert!(v["stacks"].is_array());
     }
 

@@ -169,9 +169,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200))
             .mount(&server)
             .await;
-        let c = Client::new(
-            Config::new(server.uri(), "homelab").with_token("abc"),
-        );
+        let c = Client::new(Config::new(server.uri(), "homelab").with_token("abc"));
         let r = c
             .send(Message {
                 message: "disk full",
