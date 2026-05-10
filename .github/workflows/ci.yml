@@ -22,12 +22,9 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # sccache requires CARGO_INCREMENTAL=0 to avoid wrapping incremental builds.
+  # Disable per-target incremental files. Pointless on CI (each job starts
+  # from a Swatinem-restored cache) and inflates the cache by GB.
   CARGO_INCREMENTAL: 0
-  # Per-source-file compile cache backed by GHA cache; complements Swatinem
-  # (which caches whole target/ + ~/.cargo). Cross-job dedupe across runs.
-  SCCACHE_GHA_ENABLED: "true"
-  RUSTC_WRAPPER: sccache
 
 jobs:
   # ── Path-change detector ─────────────────────────────────────────────────
@@ -88,21 +85,8 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - uses: mozilla-actions/sccache-action@v0.0.6
-
-      # sccache talks to the GHA cache service (Azure-backed). When that
-      # backend has a transient outage, sccache --start-server fails and
-      # every cargo invocation dies. Probe once and disable the wrapper
-      # for this job if the backend is unreachable — Swatinem cache still
-      # gives us per-job persistence in that fallback path.
-      - name: Probe sccache (fail-open if GHA cache is down)
-        shell: bash
-        run: |
-          if ! sccache --start-server 2>&1; then
-            echo "sccache backend unavailable — disabling RUSTC_WRAPPER for this job"
-            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-            echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
-          fi
+      - uses: rui314/setup-mold@v1
+        if: runner.os == 'Linux'
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -132,21 +116,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: mozilla-actions/sccache-action@v0.0.6
-
-      # sccache talks to the GHA cache service (Azure-backed). When that
-      # backend has a transient outage, sccache --start-server fails and
-      # every cargo invocation dies. Probe once and disable the wrapper
-      # for this job if the backend is unreachable — Swatinem cache still
-      # gives us per-job persistence in that fallback path.
-      - name: Probe sccache (fail-open if GHA cache is down)
-        shell: bash
-        run: |
-          if ! sccache --start-server 2>&1; then
-            echo "sccache backend unavailable — disabling RUSTC_WRAPPER for this job"
-            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-            echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
-          fi
+      - uses: rui314/setup-mold@v1
+        if: runner.os == 'Linux'
 
       - uses: taiki-e/install-action@v2
         with:
