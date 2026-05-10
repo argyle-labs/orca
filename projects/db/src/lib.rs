@@ -31,7 +31,6 @@ pub mod tool_mappings;
 
 use anyhow::{Context, Result};
 use config::{APP_DB_FILE, APP_STATE_DIR};
-use rand::RngCore;
 use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::Path;
