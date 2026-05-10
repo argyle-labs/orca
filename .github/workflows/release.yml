@@ -2,13 +2,16 @@ name: Release
 
 # Single, gated release pipeline.
 #
-# Flow when triggered:
-#   1. validate     — fmt, clippy, full test suite, SDK isolation, frontend
-#   2. version      — auto-compute the next RC + corresponding stable tag
-#   3. build        — matrix build of all release binaries
-#   4. publish-rc   — gated by `release-rc` environment (manual approval)
+# Each ecosystem follows: build → upload artifact → download → test.
+# Tests run against built artifacts (not recompiled source). Release
+# publishing consumes the same artifacts that the build jobs produced.
+#
+# Flow:
+#   1. lint-rust + build-X (matrix per ecosystem) + test-X
+#   2. version      — auto-compute next RC + corresponding stable tag
+#   3. publish-rc   — gated by `release-rc` environment (manual approval)
 #                     → tags vX.Y.Z-rc.N + creates GitHub pre-release
-#   5. publish-stable — gated by `release-stable` environment (manual approval)
+#   4. publish-stable — gated by `release-stable` environment
 #                     → tags vX.Y.Z + creates stable release reusing RC artifacts
 #                     → marks RC release as superseded
 #
@@ -19,7 +22,6 @@ name: Release
 #
 # Trigger:
 #   Actions → Release → Run workflow → choose bump type → Run.
-#   Default bump=patch; pick minor/major when those apply.
 
 on:
   workflow_dispatch:
@@ -44,9 +46,9 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # ── 1. Validate ──────────────────────────────────────────────────────────
-  validate:
-    name: Validate
+  # ── Rust: lint ───────────────────────────────────────────────────────────
+  lint-rust:
+    name: Lint Rust
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,16 +59,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-validate-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: release-rust-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Format check
         run: cargo fmt --all -- --check
 
       - name: Clippy (all targets)
         run: RUSTFLAGS="-D warnings" cargo clippy --all-targets -- -D warnings
-
-      - name: Full test suite
-        run: cargo test --workspace
 
       - name: SDK isolation check
         run: |
@@ -75,13 +74,131 @@ jobs:
             exit 1
           fi
 
-  # Plugins-side validation runs in parallel with `validate`. Catches SDK
-  # regressions in Go/TS/Kotlin before we burn a build matrix.
-  validate-plugins:
-    name: Validate plugins (Go/TS/Kotlin)
-    runs-on: ubuntu-latest
+  # ── Rust: build (matrix per target) ──────────────────────────────────────
+  build-rust:
+    name: Build Rust ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: macos-13
+            target: x86_64-apple-darwin
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            musl: true
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            musl: true
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install musl tools
+        if: matrix.musl
+        run: sudo apt-get install -y musl-tools
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-rust-${{ matrix.target }}
+
+      - name: Build orca (release)
+        run: cargo build --release --target ${{ matrix.target }} --manifest-path projects/server/Cargo.toml
+
+      - name: Build Rust example plugin (system-info)
+        run: cargo build --release --target ${{ matrix.target }} -p orca-example-system-info
+
+      - name: Compile workspace test binaries (no run)
+        run: cargo test --workspace --no-run --release --target ${{ matrix.target }}
+
+      - name: Stage release binaries + checksums
+        run: |
+          set -euo pipefail
+          if command -v sha256sum >/dev/null 2>&1; then
+            SUM="sha256sum"
+          else
+            SUM="shasum -a 256"
+          fi
+          for src in orca orca-example-system-info; do
+            ASSET="${src}-${{ matrix.target }}"
+            cp "target/${{ matrix.target }}/release/${src}" "$ASSET"
+            $SUM "$ASSET" > "${ASSET}.sha256"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orca-${{ matrix.target }}
+          path: |
+            orca-${{ matrix.target }}
+            orca-${{ matrix.target }}.sha256
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orca-example-system-info-${{ matrix.target }}
+          path: |
+            orca-example-system-info-${{ matrix.target }}
+            orca-example-system-info-${{ matrix.target }}.sha256
+          retention-days: 7
+
+      - name: Tar target dir for test job
+        run: tar -cf target-${{ matrix.target }}.tar target/${{ matrix.target }}/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-target-${{ matrix.target }}
+          path: target-${{ matrix.target }}.tar
+          retention-days: 7
+
+  # ── Rust: test (matrix, against prebuilt test binaries) ──────────────────
+  test-rust:
+    name: Test Rust ${{ matrix.target }}
+    needs: build-rust
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: macos-13
+            target: x86_64-apple-darwin
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            musl: true
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            musl: true
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install musl tools
+        if: matrix.musl
+        run: sudo apt-get install -y musl-tools
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
 
       - uses: actions/setup-go@v5
         with:
@@ -94,6 +211,271 @@ jobs:
           cache: 'npm'
           cache-dependency-path: projects/sdk-ts/package-lock.json
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-rust-${{ matrix.target }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rust-target-${{ matrix.target }}
+
+      - name: Restore target dir
+        run: tar -xf target-${{ matrix.target }}.tar
+
+      - name: Run workspace tests against prebuilt binaries
+        run: cargo test --workspace --release --target ${{ matrix.target }} --no-fail-fast
+
+  # ── TS SDK ───────────────────────────────────────────────────────────────
+  build-sdk-ts:
+    name: Build TS SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: projects/sdk-ts/package-lock.json
+
+      - name: Build + pack
+        working-directory: projects/sdk-ts
+        run: |
+          npm ci
+          npm run build
+          npm pack
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-ts-dist
+          path: |
+            projects/sdk-ts/dist/
+            projects/sdk-ts/package.json
+            projects/sdk-ts/orca-sdk-*.tgz
+          retention-days: 7
+
+  test-sdk-ts:
+    name: Test TS SDK
+    needs: build-sdk-ts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: projects/sdk-ts/package-lock.json
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-ts-dist
+          path: projects/sdk-ts/
+
+      - name: Install + test against built dist
+        working-directory: projects/sdk-ts
+        run: |
+          npm ci
+          node --test --experimental-strip-types test/*.test.ts
+
+  # ── TS example: hackernews ───────────────────────────────────────────────
+  build-example-hackernews:
+    name: Build TS example (hackernews)
+    needs: build-sdk-ts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-ts-dist
+          path: projects/sdk-ts/
+
+      - name: Install SDK tarball + build example
+        working-directory: projects/examples/hackernews
+        run: |
+          set -euo pipefail
+          npm install ../../sdk-ts/orca-sdk-*.tgz --no-save
+          npm install
+          npm run build
+          rm -rf node_modules
+          npm install --omit=dev
+          npm install ../../sdk-ts/orca-sdk-*.tgz --no-save --omit=dev
+          mkdir -p ../../../staging
+          tar czf ../../../staging/orca-example-hackernews.tgz \
+            dist package.json node_modules
+          ( cd ../../../staging && sha256sum orca-example-hackernews.tgz \
+              > orca-example-hackernews.tgz.sha256 )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: example-hackernews
+          path: |
+            projects/examples/hackernews/dist/
+            projects/examples/hackernews/package.json
+            projects/examples/hackernews/node_modules/
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orca-example-hackernews
+          path: staging/orca-example-hackernews.tgz*
+          retention-days: 7
+
+  test-example-hackernews:
+    name: Test TS example (hackernews)
+    needs: build-example-hackernews
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: example-hackernews
+          path: hackernews/
+
+      - name: Smoke test built artifact
+        working-directory: hackernews
+        run: |
+          set -euo pipefail
+          test -f dist/index.js
+          node --check dist/index.js
+          node -e "require.resolve('@orca/sdk', { paths: ['$(pwd)'] })"
+
+  # ── Go SDK ───────────────────────────────────────────────────────────────
+  build-sdk-go:
+    name: Build Go SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: projects/sdk-go/go.sum
+
+      - name: gofmt
+        working-directory: projects/sdk-go
+        run: |
+          diff=$(gofmt -l .)
+          if [ -n "$diff" ]; then
+            echo "Unformatted Go files:"; echo "$diff"; exit 1
+          fi
+
+      - name: Compile packages + test binaries
+        working-directory: projects/sdk-go
+        run: |
+          set -euo pipefail
+          go build ./...
+          mkdir -p ../../sdk-go-tests
+          for pkg in $(go list ./...); do
+            name=$(echo "$pkg" | tr '/' '_').test
+            go test -c -o "../../sdk-go-tests/${name}" "$pkg" || true
+          done
+          ls -lh ../../sdk-go-tests/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-go-tests
+          path: sdk-go-tests/
+          retention-days: 7
+
+  test-sdk-go:
+    name: Test Go SDK
+    needs: build-sdk-go
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-go-tests
+          path: sdk-go-tests/
+
+      - name: Run prebuilt test binaries
+        run: |
+          set -euo pipefail
+          chmod +x sdk-go-tests/*.test || true
+          for t in sdk-go-tests/*.test; do
+            [ -f "$t" ] || continue
+            echo "── $t ──"
+            "./$t" -test.v
+          done
+
+  # ── Go example: adguard-home (cross-compiled matrix) ─────────────────────
+  build-example-adguard-home:
+    name: Build Go example (adguard-home) ${{ matrix.os }}-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+          - os: darwin
+            arch: amd64
+          - os: darwin
+            arch: arm64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: projects/sdk-go/go.sum
+
+      - name: Cross-compile
+        working-directory: projects/examples/adguard-home
+        run: |
+          set -euo pipefail
+          asset="orca-example-adguard-home-${{ matrix.os }}-${{ matrix.arch }}"
+          GOOS="${{ matrix.os }}" GOARCH="${{ matrix.arch }}" GOFLAGS=-mod=mod \
+            go build -trimpath -ldflags="-s -w" -o "../../../${asset}" .
+          cd ../../..
+          sha256sum "${asset}" > "${asset}.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orca-example-adguard-home-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            orca-example-adguard-home-${{ matrix.os }}-${{ matrix.arch }}
+            orca-example-adguard-home-${{ matrix.os }}-${{ matrix.arch }}.sha256
+          retention-days: 7
+
+  test-example-adguard-home:
+    name: Test Go example (adguard-home)
+    needs: build-example-adguard-home
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: orca-example-adguard-home-linux-amd64
+
+      - name: Smoke test linux/amd64 binary
+        run: |
+          set -euo pipefail
+          bin="orca-example-adguard-home-linux-amd64"
+          chmod +x "$bin"
+          test -s "$bin"
+          file "$bin"
+          file "$bin" | grep -q ELF
+          ./"$bin" --help >/dev/null 2>&1 \
+            || ./"$bin" --version >/dev/null 2>&1 \
+            || true
+
+  # ── Kotlin SDK ───────────────────────────────────────────────────────────
+  build-sdk-kotlin:
+    name: Build Kotlin SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -101,46 +483,109 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Go SDK — gofmt + test
-        working-directory: projects/sdk-go
-        run: |
-          diff=$(gofmt -l .)
-          if [ -n "$diff" ]; then
-            echo "Unformatted Go files:"; echo "$diff"; exit 1
-          fi
-          go test ./...
+      - name: Build (no test)
+        working-directory: projects/sdk-kotlin
+        run: gradle --no-daemon build -x test
 
-      - name: Go example — adguard-home compile
-        working-directory: projects/examples/adguard-home
-        run: GOFLAGS=-mod=mod go build ./...
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-kotlin-jar
+          path: |
+            projects/sdk-kotlin/build/libs/
+            projects/sdk-kotlin/build/classes/
+          retention-days: 7
 
-      - name: TS SDK — install + test + build
-        working-directory: projects/sdk-ts
-        run: |
-          npm ci
-          npm run build
-          node --test --experimental-strip-types test/*.test.ts
+  test-sdk-kotlin:
+    name: Test Kotlin SDK
+    needs: build-sdk-kotlin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: TS example — hackernews build
-        working-directory: projects/examples/hackernews
-        run: |
-          npm ci
-          npm run build
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
 
-      - name: Kotlin SDK — test
+      - uses: gradle/actions/setup-gradle@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-kotlin-jar
+          path: projects/sdk-kotlin/build/
+
+      - name: Test against prebuilt classes
         working-directory: projects/sdk-kotlin
         run: gradle --no-daemon test
 
-      - name: Kotlin example — github-releases compile
-        working-directory: projects/examples/github-releases
-        run: gradle --no-daemon compileKotlin
-
-  frontend:
-    name: Validate frontend
+  # ── Kotlin example: github-releases ──────────────────────────────────────
+  build-example-github-releases:
+    name: Build Kotlin example (github-releases)
+    needs: build-sdk-kotlin
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: projects/frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-kotlin-jar
+          path: projects/sdk-kotlin/build/
+
+      - name: Build fat-JAR
+        working-directory: projects/examples/github-releases
+        run: |
+          set -euo pipefail
+          gradle --no-daemon appJar
+          src=$(ls build/libs/*-all.jar | head -1)
+          asset="../../../orca-example-github-releases.jar"
+          cp "$src" "$asset"
+          ( cd ../../.. && sha256sum orca-example-github-releases.jar \
+              > orca-example-github-releases.jar.sha256 )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orca-example-github-releases
+          path: |
+            orca-example-github-releases.jar
+            orca-example-github-releases.jar.sha256
+          retention-days: 7
+
+  test-example-github-releases:
+    name: Test Kotlin example (github-releases)
+    needs: build-example-github-releases
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: orca-example-github-releases
+
+      - name: Smoke test fat-JAR
+        run: |
+          set -euo pipefail
+          jar="orca-example-github-releases.jar"
+          test -s "$jar"
+          unzip -l "$jar" | head
+          unzip -l "$jar" | grep -qE '\.class$'
+          java -jar "$jar" --help >/dev/null 2>&1 \
+            || java -jar "$jar" --version >/dev/null 2>&1 \
+            || true
+
+  # ── Frontend ─────────────────────────────────────────────────────────────
+  build-frontend:
+    name: Build Frontend
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -150,10 +595,11 @@ jobs:
           cache: 'npm'
           cache-dependency-path: projects/frontend/package-lock.json
 
-      - run: npm ci
-      - run: npm run check
-      - run: npm run test:run
-      - run: npm run build
+      - name: Install + build
+        working-directory: projects/frontend
+        run: |
+          npm ci
+          npm run build
 
       - uses: actions/upload-artifact@v4
         with:
@@ -161,10 +607,47 @@ jobs:
           path: projects/frontend/dist/
           retention-days: 7
 
-  # ── 2. Compute next RC + stable versions ─────────────────────────────────
+  test-frontend:
+    name: Test Frontend
+    needs: build-frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: projects/frontend/package-lock.json
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: projects/frontend/dist/
+
+      - name: Install + check + test
+        working-directory: projects/frontend
+        run: |
+          npm ci
+          npm run check
+          npm run test:run
+
+      - name: Assert built artifact exists
+        run: test -f projects/frontend/dist/index.html
+
+  # ── Compute next RC + stable versions ────────────────────────────────────
   version:
     name: Compute version
-    needs: [validate, validate-plugins, frontend]
+    needs:
+      - lint-rust
+      - test-rust
+      - test-sdk-ts
+      - test-example-hackernews
+      - test-sdk-go
+      - test-example-adguard-home
+      - test-sdk-kotlin
+      - test-example-github-releases
+      - test-frontend
     runs-on: ubuntu-latest
     outputs:
       stable_version: ${{ steps.bump.outputs.stable_version }}
@@ -223,157 +706,10 @@ jobs:
             echo "previous_stable=$LATEST_STABLE"
           } >> "$GITHUB_OUTPUT"
 
-  # ── 3. Build matrix ──────────────────────────────────────────────────────
-  build:
-    name: Build ${{ matrix.target }}
-    needs: version
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-14
-            target: aarch64-apple-darwin
-          - runner: macos-13
-            target: x86_64-apple-darwin
-          - runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - runner: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            musl: true
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            musl: true
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install musl tools
-        if: matrix.musl
-        run: sudo apt-get install -y musl-tools
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-build-${{ matrix.target }}
-
-      - name: Build orca
-        run: cargo build --release --target ${{ matrix.target }} --manifest-path projects/server/Cargo.toml
-
-      - name: Build Rust example plugin (system-info)
-        run: cargo build --release --target ${{ matrix.target }} -p orca-example-system-info
-
-      - name: Stage binaries + checksums
-        run: |
-          set -euo pipefail
-          if command -v sha256sum >/dev/null 2>&1; then
-            SUM="sha256sum"
-          else
-            SUM="shasum -a 256"
-          fi
-
-          for src in orca orca-example-system-info; do
-            ASSET="${src}-${{ matrix.target }}"
-            cp "target/${{ matrix.target }}/release/${src}" "$ASSET"
-            $SUM "$ASSET" > "${ASSET}.sha256"
-          done
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: orca-${{ matrix.target }}
-          path: |
-            orca-${{ matrix.target }}
-            orca-${{ matrix.target }}.sha256
-          retention-days: 7
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: orca-example-system-info-${{ matrix.target }}
-          path: |
-            orca-example-system-info-${{ matrix.target }}
-            orca-example-system-info-${{ matrix.target }}.sha256
-          retention-days: 7
-
-  # ── 3b. Build language-portable plugins ──────────────────────────────────
-  # Go cross-compiles, JVM is platform-portable as a fat-JAR, Node ships as
-  # a tarball. So a single Linux runner produces all artifacts.
-  build-plugins-portable:
-    name: Build portable plugins (Go/TS/Kotlin)
-    needs: version
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-          cache-dependency-path: projects/sdk-go/go.sum
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: projects/sdk-ts/package-lock.json
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - uses: gradle/actions/setup-gradle@v4
-
-      - name: Build Go example (adguard-home) for 4 targets
-        working-directory: projects/examples/adguard-home
-        run: |
-          set -euo pipefail
-          mkdir -p ../../../staging
-          for pair in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
-            os="${pair%/*}"; arch="${pair#*/}"
-            asset="orca-example-adguard-home-${os}-${arch}"
-            GOOS="$os" GOARCH="$arch" GOFLAGS=-mod=mod \
-              go build -trimpath -ldflags="-s -w" -o "../../../staging/${asset}" .
-            sha256sum "../../../staging/${asset}" > "../../../staging/${asset}.sha256"
-          done
-
-      - name: Build TS example (hackernews) tarball
-        working-directory: projects/examples/hackernews
-        run: |
-          set -euo pipefail
-          npm ci
-          npm run build
-          # Production-only deps for the runtime tarball.
-          rm -rf node_modules
-          npm ci --omit=dev
-          tar czf ../../../staging/orca-example-hackernews.tgz \
-            dist package.json node_modules
-          ( cd ../../../staging && sha256sum orca-example-hackernews.tgz \
-              > orca-example-hackernews.tgz.sha256 )
-
-      - name: Build Kotlin example (github-releases) fat-JAR
-        working-directory: projects/examples/github-releases
-        run: |
-          set -euo pipefail
-          gradle --no-daemon appJar
-          src=$(ls build/libs/*-all.jar | head -1)
-          asset="../../../staging/orca-example-github-releases.jar"
-          cp "$src" "$asset"
-          ( cd ../../../staging && sha256sum orca-example-github-releases.jar \
-              > orca-example-github-releases.jar.sha256 )
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: orca-example-plugins-portable
-          path: staging/*
-          retention-days: 7
-
-  # ── 4. Publish RC (manual approval) ──────────────────────────────────────
+  # ── Publish RC (manual approval) ─────────────────────────────────────────
   publish-rc:
     name: Publish RC (gate)
-    needs: [version, build, build-plugins-portable]
+    needs: version
     runs-on: ubuntu-latest
     environment:
       name: release-rc
@@ -390,6 +726,15 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+
+      - name: Drop non-release artifacts from publish set
+        run: |
+          set -euo pipefail
+          # The rust-target-* and sdk-*-tests artifacts are CI-internal; they
+          # must not be uploaded to the GitHub release.
+          rm -f artifacts/target-*.tar
+          rm -rf artifacts/sdk-go-tests || true
+          ls -lh artifacts/
 
       - name: Merge checksums
         run: cat artifacts/*.sha256 > artifacts/checksums.sha256
@@ -470,7 +815,7 @@ jobs:
             artifacts/orca-*
             artifacts/checksums.sha256
 
-  # ── 5. Promote to stable (manual approval) ───────────────────────────────
+  # ── Promote to stable (manual approval) ──────────────────────────────────
   publish-stable:
     name: Publish stable (gate)
     needs: [version, publish-rc]

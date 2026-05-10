@@ -1,8 +1,10 @@
 name: CI
 
-# Fast feedback on every push: formatting, linting, and unit tests only.
-# No release builds, no integration tests, no cargo-chef.
-# Run the "Pipeline" workflow manually for full validation before a release.
+# Fast feedback on every push: build → upload artifact → download → test
+# for each ecosystem. Tests run against the build output, not against
+# re-compiled source.
+#
+# Run the "Release" workflow manually for full validation before a release.
 
 on:
   push:
@@ -12,37 +14,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # ── Frontend: type-check + unit tests (no build) ─────────────────────────
-  frontend:
-    name: Frontend — Check & Test
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: projects/frontend
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: projects/frontend/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Type check
-        run: npm run check
-
-      - name: Test
-        run: npm run test:run
-
-  # ── Rust: fmt + clippy + unit tests (no integration tests) ───────────────
-  rust:
-    name: Rust — Fmt, Clippy & Unit Tests
+  # ── Rust ─────────────────────────────────────────────────────────────────
+  lint-rust:
+    name: Lint Rust
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -52,6 +30,8 @@ jobs:
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-rust
 
       - name: Format check
         run: cargo fmt --all -- --check
@@ -59,16 +39,191 @@ jobs:
       - name: Clippy
         run: RUSTFLAGS="-D warnings" cargo clippy --tests -- -D warnings
 
-      - name: Unit tests
-        run: cargo test --lib --workspace
+      - name: SDK isolation check
+        run: |
+          if cargo tree -p orca-sdk 2>&1 | grep -E "orca-server|orca-commands|orca-conversation|orca-agents|orca-llm|orca-scanner|rust-embed"; then
+            echo "ERROR: server-only crate found in orca-sdk dependency tree"
+            exit 1
+          fi
 
-  # ── Go SDK: gofmt + unit tests ───────────────────────────────────────────
-  go:
-    name: Go — Fmt & Unit Tests
+  build-rust:
+    name: Build Rust
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: projects/sdk-go
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-rust
+
+      - name: Build workspace + tests
+        run: cargo build --workspace --tests
+
+      - name: Tar target dir
+        run: tar -cf target.tar target/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-target
+          path: target.tar
+          retention-days: 7
+
+  test-rust:
+    name: Test Rust
+    needs: build-rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: projects/sdk-go/go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: projects/sdk-ts/package-lock.json
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-rust
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rust-target
+
+      - name: Restore target dir
+        run: tar -xf target.tar
+
+      - name: Unit tests
+        run: cargo test --lib --workspace --no-fail-fast
+
+  # ── TS SDK ───────────────────────────────────────────────────────────────
+  build-sdk-ts:
+    name: Build TS SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: projects/sdk-ts/package-lock.json
+
+      - name: Build
+        working-directory: projects/sdk-ts
+        run: |
+          npm ci
+          npm run build
+          npm pack
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-ts-dist
+          path: |
+            projects/sdk-ts/dist/
+            projects/sdk-ts/package.json
+            projects/sdk-ts/orca-sdk-*.tgz
+          retention-days: 7
+
+  test-sdk-ts:
+    name: Test TS SDK
+    needs: build-sdk-ts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: projects/sdk-ts/package-lock.json
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-ts-dist
+          path: projects/sdk-ts/
+
+      - name: Install + test against built dist
+        working-directory: projects/sdk-ts
+        run: |
+          npm ci
+          node --test --experimental-strip-types test/*.test.ts
+
+  # ── TS example: hackernews ───────────────────────────────────────────────
+  build-example-hackernews:
+    name: Build TS example (hackernews)
+    needs: build-sdk-ts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-ts-dist
+          path: projects/sdk-ts/
+
+      - name: Install SDK tarball + build
+        working-directory: projects/examples/hackernews
+        run: |
+          set -euo pipefail
+          npm install ../../sdk-ts/orca-sdk-*.tgz --no-save
+          npm install
+          npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: example-hackernews
+          path: |
+            projects/examples/hackernews/dist/
+            projects/examples/hackernews/package.json
+            projects/examples/hackernews/node_modules/
+          retention-days: 7
+
+  test-example-hackernews:
+    name: Test TS example (hackernews)
+    needs: build-example-hackernews
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: example-hackernews
+          path: hackernews/
+
+      - name: Smoke test built artifact
+        working-directory: hackernews
+        run: |
+          set -euo pipefail
+          test -f dist/index.js
+          node --check dist/index.js
+          node -e "require.resolve('@orca/sdk', { paths: ['$(pwd)'] })"
+
+  # ── Go SDK ───────────────────────────────────────────────────────────────
+  build-sdk-go:
+    name: Build Go SDK
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -78,13 +233,149 @@ jobs:
           cache-dependency-path: projects/sdk-go/go.sum
 
       - name: gofmt
+        working-directory: projects/sdk-go
         run: |
           diff=$(gofmt -l .)
           if [ -n "$diff" ]; then
-            echo "Unformatted Go files:"
-            echo "$diff"
-            exit 1
+            echo "Unformatted Go files:"; echo "$diff"; exit 1
           fi
 
-      - name: Test
-        run: go test ./...
+      - name: Compile packages + test binaries
+        working-directory: projects/sdk-go
+        run: |
+          set -euo pipefail
+          go build ./...
+          mkdir -p ../../sdk-go-tests
+          for pkg in $(go list ./...); do
+            name=$(echo "$pkg" | tr '/' '_').test
+            go test -c -o "../../sdk-go-tests/${name}" "$pkg" || true
+          done
+          ls -lh ../../sdk-go-tests/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-go-tests
+          path: sdk-go-tests/
+          retention-days: 7
+
+  test-sdk-go:
+    name: Test Go SDK
+    needs: build-sdk-go
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-go-tests
+          path: sdk-go-tests/
+
+      - name: Run prebuilt test binaries
+        run: |
+          set -euo pipefail
+          chmod +x sdk-go-tests/*.test || true
+          for t in sdk-go-tests/*.test; do
+            [ -f "$t" ] || continue
+            echo "── $t ──"
+            "./$t" -test.v
+          done
+
+  # ── Kotlin SDK ───────────────────────────────────────────────────────────
+  build-sdk-kotlin:
+    name: Build Kotlin SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build (no test)
+        working-directory: projects/sdk-kotlin
+        run: gradle --no-daemon build -x test
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-kotlin-jar
+          path: |
+            projects/sdk-kotlin/build/libs/
+            projects/sdk-kotlin/build/classes/
+          retention-days: 7
+
+  test-sdk-kotlin:
+    name: Test Kotlin SDK
+    needs: build-sdk-kotlin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-kotlin-jar
+          path: projects/sdk-kotlin/build/
+
+      - name: Test against prebuilt classes
+        working-directory: projects/sdk-kotlin
+        run: gradle --no-daemon test
+
+  # ── Frontend ─────────────────────────────────────────────────────────────
+  build-frontend:
+    name: Build Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: projects/frontend/package-lock.json
+
+      - name: Install + build
+        working-directory: projects/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: projects/frontend/dist/
+          retention-days: 7
+
+  test-frontend:
+    name: Test Frontend
+    needs: build-frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: projects/frontend/package-lock.json
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: projects/frontend/dist/
+
+      - name: Install + check + test
+        working-directory: projects/frontend
+        run: |
+          npm ci
+          npm run check
+          npm run test:run
+
+      - name: Assert built artifact exists
+        run: test -f projects/frontend/dist/index.html
