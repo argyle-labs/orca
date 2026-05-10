@@ -86,8 +86,6 @@ jobs:
         include:
           - runner: macos-14
             target: aarch64-apple-darwin
-          - runner: macos-13
-            target: x86_64-apple-darwin
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
           - runner: ubuntu-latest
@@ -324,9 +322,17 @@ jobs:
           name: example-hackernews
           path: hackernews/
 
-      - name: Install runtime deps
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-ts-dist
+          path: sdk-ts/
+
+      - name: Install runtime deps + SDK tarball
         working-directory: hackernews
-        run: npm ci --omit=dev
+        run: |
+          set -euo pipefail
+          npm ci --omit=dev
+          npm install ../sdk-ts/orca-sdk-*.tgz --no-save --omit=dev
 
       - name: Smoke test built artifact
         working-directory: hackernews
@@ -531,7 +537,7 @@ jobs:
         run: |
           set -euo pipefail
           gradle --no-daemon appJar
-          src=$(ls build/libs/*-all.jar | head -1)
+          src=$(printf '%s\n' build/libs/*-all.jar | head -1)
           asset="../../../orca-example-github-releases.jar"
           cp "$src" "$asset"
           ( cd ../../.. && sha256sum orca-example-github-releases.jar \
@@ -676,7 +682,7 @@ jobs:
           if [ -z "$LATEST_RC" ]; then
             N=1
           else
-            N=$(echo "$LATEST_RC" | sed 's/.*rc\.//')
+            N=${LATEST_RC##*rc.}
             N=$((N+1))
           fi
 
