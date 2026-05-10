@@ -21,6 +21,7 @@ pub mod plugin_installs;
 pub mod plugin_tools;
 pub mod plugin_types;
 pub mod plugins;
+pub mod profile_creds;
 pub mod profiles;
 pub mod proxmox;
 pub mod schema_databases;
@@ -939,62 +940,6 @@ pub fn fs_allow_unrestricted(conn: &Connection) -> bool {
         .unwrap_or(false)
 }
 
-// ── Profile credentials ───────────────────────────────────────────────────────
-
-pub fn set_profile_credential(
-    conn: &Connection,
-    profile_id: &str,
-    key: &str,
-    value: &str,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO profile_credentials (profile_id, key, value) VALUES (?1, ?2, ?3)
-         ON CONFLICT(profile_id, key) DO UPDATE SET
-             value      = excluded.value,
-             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
-        rusqlite::params![profile_id, key, value],
-    )?;
-    Ok(())
-}
-
-pub fn get_profile_credential(
-    conn: &Connection,
-    profile_id: &str,
-    key: &str,
-) -> Result<Option<String>> {
-    conn.query_row(
-        "SELECT value FROM profile_credentials WHERE profile_id = ?1 AND key = ?2",
-        rusqlite::params![profile_id, key],
-        |r| r.get::<_, String>(0),
-    )
-    .map(Some)
-    .or_else(|e| {
-        if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-            Ok(None)
-        } else {
-            Err(e)
-        }
-    })
-    .map_err(Into::into)
-}
-
-pub fn list_profile_credentials(conn: &Connection, profile_id: &str) -> Result<Vec<String>> {
-    let mut stmt =
-        conn.prepare("SELECT key FROM profile_credentials WHERE profile_id = ?1 ORDER BY key")?;
-    let rows = stmt.query_map([profile_id], |r| r.get::<_, String>(0))?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
-pub fn delete_profile_credential(conn: &Connection, profile_id: &str, key: &str) -> Result<bool> {
-    let n = conn.execute(
-        "DELETE FROM profile_credentials WHERE profile_id = ?1 AND key = ?2",
-        rusqlite::params![profile_id, key],
-    )?;
-    Ok(n > 0)
-}
-
-#[cfg(test)]
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;

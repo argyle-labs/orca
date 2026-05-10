@@ -276,7 +276,7 @@ impl ProfileManager {
                 profile: profile_id.to_string(),
             });
         }
-        if !db::delete_profile(conn, profile_id).map_err(ProfileError::Other)? {
+        if !db::profiles::delete(conn, profile_id).map_err(ProfileError::Other)? {
             return Err(ProfileError::NotFound(profile_id.to_string()));
         }
         let dir = self.profiles_root.join(profile_id);
@@ -307,7 +307,7 @@ impl ProfileManager {
                 "cannot share with self (you are the owner)"
             )));
         }
-        db::share_profile(conn, profile_id, with_user_id, role.as_str())
+        db::profiles::share(conn, profile_id, with_user_id, role.as_str())
             .map_err(ProfileError::Other)?;
         Ok(())
     }
@@ -327,7 +327,7 @@ impl ProfileManager {
                 profile: profile_id.to_string(),
             });
         }
-        db::unshare_profile(conn, profile_id, with_user_id).map_err(ProfileError::Other)
+        db::profiles::unshare(conn, profile_id, with_user_id).map_err(ProfileError::Other)
     }
 
     /// List sharees and their roles. Requires admin (owner).
@@ -344,7 +344,7 @@ impl ProfileManager {
                 profile: profile_id.to_string(),
             });
         }
-        let rows = db::list_profile_shares(conn, profile_id).map_err(ProfileError::Other)?;
+        let rows = db::profiles::list_shares(conn, profile_id).map_err(ProfileError::Other)?;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let role = Role::parse(&row.role)
@@ -368,7 +368,7 @@ impl ProfileManager {
                 profile: profile_id.to_string(),
             });
         }
-        db::set_active_profile(conn, user_id, profile_id).map_err(ProfileError::Other)?;
+        db::profiles::set_active(conn, user_id, profile_id).map_err(ProfileError::Other)?;
         Ok(())
     }
 
@@ -386,7 +386,7 @@ impl ProfileManager {
             return Ok(Some(p));
         }
         // 2. Persisted active selection
-        if let Some(id) = db::get_active_profile(conn, user_id).map_err(ProfileError::Other)? {
+        if let Some(id) = db::profiles::get_active(conn, user_id).map_err(ProfileError::Other)? {
             // ACL-check; if access lapsed, fall through.
             if let Ok(p) = self.get(conn, &id, user_id) {
                 return Ok(Some(p));
@@ -430,7 +430,7 @@ impl ProfileManager {
             "default",
             Some("Default profile created on first run"),
         )?;
-        db::set_active_profile(conn, owner_user_id, &p.id).map_err(ProfileError::Other)?;
+        db::profiles::set_active(conn, owner_user_id, &p.id).map_err(ProfileError::Other)?;
         Ok(p)
     }
 
@@ -451,7 +451,7 @@ impl ProfileManager {
                 profile: profile_id.to_string(),
             });
         }
-        db::set_profile_credential(conn, profile_id, key, value).map_err(ProfileError::Other)?;
+        db::profile_creds::set(conn, profile_id, key, value).map_err(ProfileError::Other)?;
         Ok(())
     }
 
@@ -470,7 +470,7 @@ impl ProfileManager {
                 profile: profile_id.to_string(),
             });
         }
-        db::get_profile_credential(conn, profile_id, key).map_err(ProfileError::Other)
+        db::profile_creds::get(conn, profile_id, key).map_err(ProfileError::Other)
     }
 }
 
