@@ -169,7 +169,8 @@ cmd_rc() {
   write_cargo_version "$RC"
 
   log "commit + tag + push"
-  git add "$SERVER_TOML" Cargo.lock
+  git add "$SERVER_TOML"
+  git check-ignore -q Cargo.lock || git add Cargo.lock
   git diff --cached --quiet || git commit -m "chore: release v${RC}"
   git tag -a "v${RC}" -m "orca v${RC}"
   git push origin HEAD --tags
@@ -219,7 +220,8 @@ cmd_promote() {
   write_cargo_version "$stable_version"
 
   log "commit + tag + push"
-  git add "$SERVER_TOML" Cargo.lock
+  git add "$SERVER_TOML"
+  git check-ignore -q Cargo.lock || git add Cargo.lock
   git diff --cached --quiet || git commit -m "chore: release ${stable_tag}"
   git tag -a "$stable_tag" -m "orca ${stable_tag} (promoted from ${latest_rc})"
   git push origin HEAD --tags
