@@ -109,7 +109,7 @@ impl Profile {
         self.root.join("dashboards")
     }
 
-    fn from_row(row: db::ProfileRow, profiles_root: &Path) -> Self {
+    fn from_row(row: db::profiles::ProfileRow, profiles_root: &Path) -> Self {
         let root = profiles_root.join(&row.id);
         Self {
             id: row.id,
@@ -159,13 +159,13 @@ impl ProfileManager {
         name: &str,
         description: Option<&str>,
     ) -> Result<Profile, ProfileError> {
-        if let Some(_existing) = db::get_profile_by_owner_and_name(conn, owner_user_id, name)
+        if let Some(_existing) = db::profiles::get_by_owner_and_name(conn, owner_user_id, name)
             .map_err(ProfileError::Other)?
         {
             return Err(ProfileError::NameTaken(name.to_string()));
         }
         let id = Uuid::new_v4().to_string();
-        let row = db::create_profile(conn, &id, name, owner_user_id, description)
+        let row = db::profiles::create(conn, &id, name, owner_user_id, description)
             .map_err(ProfileError::Other)?;
         let profile = Profile::from_row(row, &self.profiles_root);
         profile.ensure_dirs().map_err(ProfileError::Other)?;
@@ -188,7 +188,7 @@ impl ProfileManager {
                 profile: profile_id.to_string(),
             });
         }
-        let row = db::get_profile(conn, profile_id)
+        let row = db::profiles::get(conn, profile_id)
             .map_err(ProfileError::Other)?
             .ok_or_else(|| ProfileError::NotFound(profile_id.to_string()))?;
         Ok(Profile::from_row(row, &self.profiles_root))
@@ -203,7 +203,7 @@ impl ProfileManager {
         owner_user_id: &str,
         name: &str,
     ) -> Result<Option<Profile>, ProfileError> {
-        let row = db::get_profile_by_owner_and_name(conn, owner_user_id, name)
+        let row = db::profiles::get_by_owner_and_name(conn, owner_user_id, name)
             .map_err(ProfileError::Other)?;
         Ok(row.map(|r| Profile::from_row(r, &self.profiles_root)))
     }
@@ -214,7 +214,7 @@ impl ProfileManager {
         conn: &Connection,
         user_id: &str,
     ) -> Result<Vec<Profile>, ProfileError> {
-        let rows = db::list_profiles_for_user(conn, user_id).map_err(ProfileError::Other)?;
+        let rows = db::profiles::list_for_user(conn, user_id).map_err(ProfileError::Other)?;
         Ok(rows
             .into_iter()
             .map(|r| Profile::from_row(r, &self.profiles_root))
@@ -229,7 +229,7 @@ impl ProfileManager {
         user_id: &str,
     ) -> Result<Access, ProfileError> {
         let role =
-            db::profile_role_for_user(conn, profile_id, user_id).map_err(ProfileError::Other)?;
+            db::profiles::role_for_user(conn, profile_id, user_id).map_err(ProfileError::Other)?;
         Ok(match role.as_deref() {
             Some("owner") => Access::Owner,
             Some("viewer") => Access::Viewer,
@@ -254,7 +254,9 @@ impl ProfileManager {
                 profile: profile_id.to_string(),
             });
         }
-        if !db::update_profile(conn, profile_id, name, description).map_err(ProfileError::Other)? {
+        if !db::profiles::update(conn, profile_id, name, description)
+            .map_err(ProfileError::Other)?
+        {
             return Err(ProfileError::NotFound(profile_id.to_string()));
         }
         Ok(())
