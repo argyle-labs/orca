@@ -135,9 +135,6 @@ jobs:
       - name: Build orca (release)
         run: cargo build --release --target ${{ matrix.target }} --manifest-path projects/server/Cargo.toml
 
-      - name: Build Rust example plugin (system-info)
-        run: cargo build --release --target ${{ matrix.target }} -p orca-example-system-info
-
       - name: Compile workspace test binaries (no run)
         run: cargo test --workspace --no-run --release --target ${{ matrix.target }}
 
@@ -149,11 +146,9 @@ jobs:
           else
             SUM="shasum -a 256"
           fi
-          for src in orca orca-example-system-info; do
-            ASSET="${src}-${{ matrix.target }}"
-            cp "target/${{ matrix.target }}/release/${src}" "$ASSET"
-            $SUM "$ASSET" > "${ASSET}.sha256"
-          done
+          ASSET="orca-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/orca" "$ASSET"
+          $SUM "$ASSET" > "${ASSET}.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -161,14 +156,6 @@ jobs:
           path: |
             orca-${{ matrix.target }}
             orca-${{ matrix.target }}.sha256
-          retention-days: 7
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: orca-example-system-info-${{ matrix.target }}
-          path: |
-            orca-example-system-info-${{ matrix.target }}
-            orca-example-system-info-${{ matrix.target }}.sha256
           retention-days: 7
 
   # ── Rust: test ──────────────────────────────────────────────────────────
@@ -273,88 +260,6 @@ jobs:
           npm ci
           node --test --experimental-strip-types test/*.test.ts
 
-  # ── TS example: hackernews ───────────────────────────────────────────────
-  build-example-hackernews:
-    name: Build TS example (hackernews)
-    needs: build-sdk-ts
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: sdk-ts-dist
-          path: projects/sdk-ts/
-
-      - name: Install SDK tarball + build example
-        working-directory: projects/examples/hackernews
-        run: |
-          set -euo pipefail
-          npm install ../../sdk-ts/orca-sdk-*.tgz --no-save
-          npm install
-          npm run build
-          rm -rf node_modules
-          npm install --omit=dev
-          npm install ../../sdk-ts/orca-sdk-*.tgz --no-save --omit=dev
-          mkdir -p ../../../staging
-          tar czf ../../../staging/orca-example-hackernews.tgz \
-            dist package.json node_modules
-          ( cd ../../../staging && sha256sum orca-example-hackernews.tgz \
-              > orca-example-hackernews.tgz.sha256 )
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: example-hackernews
-          path: |
-            projects/examples/hackernews/dist/
-            projects/examples/hackernews/package.json
-            projects/examples/hackernews/package-lock.json
-          retention-days: 7
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: orca-example-hackernews
-          path: staging/orca-example-hackernews.tgz*
-          retention-days: 7
-
-  test-example-hackernews:
-    name: Test TS example (hackernews)
-    needs: build-example-hackernews
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: example-hackernews
-          path: hackernews/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: sdk-ts-dist
-          path: sdk-ts/
-
-      - name: Install runtime deps + SDK tarball
-        working-directory: hackernews
-        run: |
-          set -euo pipefail
-          npm ci --omit=dev
-          npm install ../sdk-ts/orca-sdk-*.tgz --no-save --omit=dev
-
-      - name: Smoke test built artifact
-        working-directory: hackernews
-        run: |
-          set -euo pipefail
-          test -f dist/index.js
-          node --check dist/index.js
-          node -e "require.resolve('@orca/sdk', { paths: ['$(pwd)'] })"
-
   # ── Go SDK ───────────────────────────────────────────────────────────────
   build-sdk-go:
     name: Build Go SDK
@@ -413,69 +318,6 @@ jobs:
             "./$t" -test.v
           done
 
-  # ── Go example: adguard-home (cross-compiled matrix) ─────────────────────
-  build-example-adguard-home:
-    name: Build Go example (adguard-home) ${{ matrix.os }}-${{ matrix.arch }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: linux
-            arch: amd64
-          - os: linux
-            arch: arm64
-          - os: darwin
-            arch: amd64
-          - os: darwin
-            arch: arm64
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-          cache-dependency-path: projects/sdk-go/go.sum
-
-      - name: Cross-compile
-        working-directory: projects/examples/adguard-home
-        run: |
-          set -euo pipefail
-          asset="orca-example-adguard-home-${{ matrix.os }}-${{ matrix.arch }}"
-          GOOS="${{ matrix.os }}" GOARCH="${{ matrix.arch }}" GOFLAGS=-mod=mod \
-            go build -trimpath -ldflags="-s -w" -o "../../../${asset}" .
-          cd ../../..
-          sha256sum "${asset}" > "${asset}.sha256"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: orca-example-adguard-home-${{ matrix.os }}-${{ matrix.arch }}
-          path: |
-            orca-example-adguard-home-${{ matrix.os }}-${{ matrix.arch }}
-            orca-example-adguard-home-${{ matrix.os }}-${{ matrix.arch }}.sha256
-          retention-days: 7
-
-  test-example-adguard-home:
-    name: Test Go example (adguard-home)
-    needs: build-example-adguard-home
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: orca-example-adguard-home-linux-amd64
-
-      - name: Smoke test linux/amd64 binary
-        run: |
-          set -euo pipefail
-          bin="orca-example-adguard-home-linux-amd64"
-          chmod +x "$bin"
-          test -s "$bin"
-          file "$bin"
-          file "$bin" | grep -q ELF
-          ./"$bin" --help >/dev/null 2>&1 \
-            || ./"$bin" --version >/dev/null 2>&1 \
-            || true
-
   # ── Kotlin SDK ───────────────────────────────────────────────────────────
   build-sdk-kotlin:
     name: Build Kotlin SDK
@@ -524,70 +366,6 @@ jobs:
       - name: Test against prebuilt classes
         working-directory: projects/sdk-kotlin
         run: gradle --no-daemon test
-
-  # ── Kotlin example: github-releases ──────────────────────────────────────
-  build-example-github-releases:
-    name: Build Kotlin example (github-releases)
-    needs: build-sdk-kotlin
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - uses: gradle/actions/setup-gradle@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: sdk-kotlin-jar
-          path: projects/sdk-kotlin/build/
-
-      - name: Build fat-JAR
-        working-directory: projects/examples/github-releases
-        run: |
-          set -euo pipefail
-          gradle --no-daemon appJar
-          src=$(printf '%s\n' build/libs/*-all.jar | head -1)
-          asset="../../../orca-example-github-releases.jar"
-          cp "$src" "$asset"
-          ( cd ../../.. && sha256sum orca-example-github-releases.jar \
-              > orca-example-github-releases.jar.sha256 )
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: orca-example-github-releases
-          path: |
-            orca-example-github-releases.jar
-            orca-example-github-releases.jar.sha256
-          retention-days: 7
-
-  test-example-github-releases:
-    name: Test Kotlin example (github-releases)
-    needs: build-example-github-releases
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: orca-example-github-releases
-
-      - name: Smoke test fat-JAR
-        run: |
-          set -euo pipefail
-          jar="orca-example-github-releases.jar"
-          test -s "$jar"
-          unzip -l "$jar" | head
-          unzip -l "$jar" | grep -qE '\.class$'
-          java -jar "$jar" --help >/dev/null 2>&1 \
-            || java -jar "$jar" --version >/dev/null 2>&1 \
-            || true
 
   # ── Frontend ─────────────────────────────────────────────────────────────
   build-frontend:
@@ -649,11 +427,8 @@ jobs:
       - lint-rust
       - test-rust
       - test-sdk-ts
-      - test-example-hackernews
       - test-sdk-go
-      - test-example-adguard-home
       - test-sdk-kotlin
-      - test-example-github-releases
       - test-frontend
     runs-on: ubuntu-latest
     outputs:
@@ -816,8 +591,6 @@ jobs:
           name: orca ${{ needs.version.outputs.rc_tag }}
           body_path: /tmp/changelog.md
           prerelease: true
-          # `orca-*` glob covers both the orca server binaries and the
-          # `orca-example-*` plugin artifacts.
           files: |
             artifacts/orca-*
             artifacts/checksums.sha256
@@ -844,8 +617,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p artifacts
-          # `orca-*` covers both the orca server binaries and the
-          # `orca-example-*` plugin assets uploaded with the RC.
           gh release download "${{ needs.version.outputs.rc_tag }}" \
             --dir artifacts \
             --pattern "orca-*" \
