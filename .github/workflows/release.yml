@@ -62,6 +62,20 @@ jobs:
 
       - uses: mozilla-actions/sccache-action@v0.0.6
 
+      # sccache talks to the GHA cache service (Azure-backed). When that
+      # backend has a transient outage, sccache --start-server fails and
+      # every cargo invocation dies. Probe once and disable the wrapper
+      # for this job if the backend is unreachable — Swatinem cache still
+      # gives us per-job persistence in that fallback path.
+      - name: Probe sccache (fail-open if GHA cache is down)
+        shell: bash
+        run: |
+          if ! sccache --start-server 2>&1; then
+            echo "sccache backend unavailable — disabling RUSTC_WRAPPER for this job"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
+          fi
+
       # Share the linux-gnu build cache so lint reuses dependency artifacts
       # built by the build-rust matrix (lint runs on ubuntu-latest).
       - uses: Swatinem/rust-cache@v2
@@ -127,6 +141,20 @@ jobs:
 
       - uses: mozilla-actions/sccache-action@v0.0.6
 
+      # sccache talks to the GHA cache service (Azure-backed). When that
+      # backend has a transient outage, sccache --start-server fails and
+      # every cargo invocation dies. Probe once and disable the wrapper
+      # for this job if the backend is unreachable — Swatinem cache still
+      # gives us per-job persistence in that fallback path.
+      - name: Probe sccache (fail-open if GHA cache is down)
+        shell: bash
+        run: |
+          if ! sccache --start-server 2>&1; then
+            echo "sccache backend unavailable — disabling RUSTC_WRAPPER for this job"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
+          fi
+
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-rust-${{ matrix.target }}
@@ -185,6 +213,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: mozilla-actions/sccache-action@v0.0.6
+
+      # sccache talks to the GHA cache service (Azure-backed). When that
+      # backend has a transient outage, sccache --start-server fails and
+      # every cargo invocation dies. Probe once and disable the wrapper
+      # for this job if the backend is unreachable — Swatinem cache still
+      # gives us per-job persistence in that fallback path.
+      - name: Probe sccache (fail-open if GHA cache is down)
+        shell: bash
+        run: |
+          if ! sccache --start-server 2>&1; then
+            echo "sccache backend unavailable — disabling RUSTC_WRAPPER for this job"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
+          fi
 
       - uses: taiki-e/install-action@v2
         with:
