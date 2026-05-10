@@ -113,7 +113,7 @@ zip          = { version = "8", default-features = false, features = ["deflate"]
 # Database drivers (schema introspection — pure Rust, no CLI dependency)
 mysql_async    = { version = "0.36", default-features = false, features = ["default-rustls-ring"] }
 tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
-rusqlite       = { version = "0.39", features = ["bundled-sqlcipher"] }
+rusqlite       = { version = "0.39", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 # OpenAPI
 utoipa = { version = "5", features = ["axum_extras"] }
