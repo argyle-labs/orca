@@ -1219,7 +1219,9 @@ fn validate_against_declared_schema(
     if let Err(err) = validator.validate(&value.payload) {
         let reason = format!(
             "payload for '{}' failed schema validation: {} at {}",
-            value.type_id, err, err.instance_path
+            value.type_id,
+            err,
+            err.instance_path()
         );
         return Err(serde_json::to_value(Response::err(
             id.clone(),

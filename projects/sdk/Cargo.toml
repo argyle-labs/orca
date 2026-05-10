@@ -30,11 +30,11 @@ rustls-pemfile   = { workspace = true }
 tokio-rustls     = { workspace = true }
 
 # Cert generation (pem + x509-parser required for from_ca_cert_pem)
-rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 
 # Direct cert parsing: needed to read the peer's CN out of the leaf cert
 # during the mTLS handshake so the plugin host can bind plugin_id → cert.
-x509-parser = "0.16"
+x509-parser = "0.18"
 
 # Conformance suite uses tempdirs to stage PKI material and the manifest
 # fixture before spawning the candidate plugin binary.
