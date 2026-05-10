@@ -404,6 +404,20 @@ static MIGRATIONS: &[Migration] = &[
         CREATE INDEX IF NOT EXISTS idx_plugin_installs_plugin ON plugin_installs(plugin_id);",
         down: Some("DROP TABLE IF EXISTS plugin_installs;"),
     },
+    Migration {
+        version: 22,
+        description: "add proxmox_endpoints — registered Proxmox VE clusters with API-token auth",
+        up: "CREATE TABLE IF NOT EXISTS proxmox_endpoints (
+            name         TEXT PRIMARY KEY,
+            base_url     TEXT NOT NULL,
+            token_id     TEXT NOT NULL,
+            token_secret TEXT NOT NULL,
+            insecure     INTEGER NOT NULL DEFAULT 0,
+            enabled      INTEGER NOT NULL DEFAULT 1,
+            created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );",
+        down: Some("DROP TABLE IF EXISTS proxmox_endpoints;"),
+    },
 ];
 
 /// Return the currently applied migration version (0 = baseline, no migrations run).
@@ -586,6 +600,16 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             url         TEXT,
             enabled     INTEGER NOT NULL DEFAULT 1,
             created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS proxmox_endpoints (
+            name         TEXT PRIMARY KEY,
+            base_url     TEXT NOT NULL,
+            token_id     TEXT NOT NULL,
+            token_secret TEXT NOT NULL,
+            insecure     INTEGER NOT NULL DEFAULT 0,
+            enabled      INTEGER NOT NULL DEFAULT 1,
+            created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         );
 
         CREATE TABLE IF NOT EXISTS plugins (
@@ -1067,6 +1091,90 @@ pub fn upsert_docker_runtime(conn: &Connection, rt: &DockerRuntimeRow) -> Result
 pub fn remove_docker_runtime(conn: &Connection, name: &str) -> Result<bool> {
     let n = conn.execute(
         "DELETE FROM docker_runtimes WHERE name = ?1",
+        rusqlite::params![name],
+    )?;
+    Ok(n > 0)
+}
+
+// ── Proxmox endpoint registry ────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct ProxmoxEndpointRow {
+    pub name: String,
+    pub base_url: String,
+    pub token_id: String,
+    pub token_secret: String,
+    pub insecure: bool,
+    pub enabled: bool,
+}
+
+pub fn list_proxmox_endpoints(conn: &Connection) -> Result<Vec<ProxmoxEndpointRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT name, base_url, token_id, token_secret, insecure, enabled
+         FROM proxmox_endpoints ORDER BY name",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ProxmoxEndpointRow {
+            name: row.get(0)?,
+            base_url: row.get(1)?,
+            token_id: row.get(2)?,
+            token_secret: row.get(3)?,
+            insecure: row.get::<_, i32>(4)? != 0,
+            enabled: row.get::<_, i32>(5)? != 0,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+pub fn get_proxmox_endpoint(conn: &Connection, name: &str) -> Result<Option<ProxmoxEndpointRow>> {
+    let result = conn.query_row(
+        "SELECT name, base_url, token_id, token_secret, insecure, enabled
+         FROM proxmox_endpoints WHERE name = ?1",
+        rusqlite::params![name],
+        |row| {
+            Ok(ProxmoxEndpointRow {
+                name: row.get(0)?,
+                base_url: row.get(1)?,
+                token_id: row.get(2)?,
+                token_secret: row.get(3)?,
+                insecure: row.get::<_, i32>(4)? != 0,
+                enabled: row.get::<_, i32>(5)? != 0,
+            })
+        },
+    );
+    match result {
+        Ok(row) => Ok(Some(row)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn upsert_proxmox_endpoint(conn: &Connection, ep: &ProxmoxEndpointRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO proxmox_endpoints (name, base_url, token_id, token_secret, insecure, enabled)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(name) DO UPDATE SET
+             base_url     = excluded.base_url,
+             token_id     = excluded.token_id,
+             token_secret = excluded.token_secret,
+             insecure     = excluded.insecure,
+             enabled      = excluded.enabled",
+        rusqlite::params![
+            ep.name,
+            ep.base_url,
+            ep.token_id,
+            ep.token_secret,
+            ep.insecure as i32,
+            ep.enabled as i32,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn remove_proxmox_endpoint(conn: &Connection, name: &str) -> Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM proxmox_endpoints WHERE name = ?1",
         rusqlite::params![name],
     )?;
     Ok(n > 0)
@@ -3106,6 +3214,47 @@ mod registry_tests {
     }
 
     // ── Docker runtimes ───────────────────────────────────────────────────────
+
+    #[test]
+    fn proxmox_endpoint_crud() {
+        let conn = test_conn();
+        let ep = ProxmoxEndpointRow {
+            name: "halvor".into(),
+            base_url: "https://pve.lan:8006".into(),
+            token_id: "root@pam!auto".into(),
+            token_secret: "deadbeef-1111-2222-3333-444444444444".into(),
+            insecure: true,
+            enabled: true,
+        };
+        upsert_proxmox_endpoint(&conn, &ep).unwrap();
+
+        let list = list_proxmox_endpoints(&conn).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "halvor");
+        assert!(list[0].insecure);
+
+        let got = get_proxmox_endpoint(&conn, "halvor").unwrap().unwrap();
+        assert_eq!(got.token_id, "root@pam!auto");
+
+        // Upsert overwrites
+        let ep2 = ProxmoxEndpointRow {
+            name: "halvor".into(),
+            base_url: "https://new.lan:8006".into(),
+            token_id: "root@pam!auto".into(),
+            token_secret: "rotated-uuid".into(),
+            insecure: false,
+            enabled: true,
+        };
+        upsert_proxmox_endpoint(&conn, &ep2).unwrap();
+        let after = get_proxmox_endpoint(&conn, "halvor").unwrap().unwrap();
+        assert_eq!(after.base_url, "https://new.lan:8006");
+        assert_eq!(after.token_secret, "rotated-uuid");
+        assert!(!after.insecure);
+
+        assert!(remove_proxmox_endpoint(&conn, "halvor").unwrap());
+        assert!(list_proxmox_endpoints(&conn).unwrap().is_empty());
+        assert!(get_proxmox_endpoint(&conn, "halvor").unwrap().is_none());
+    }
 
     #[test]
     fn docker_runtime_crud() {
