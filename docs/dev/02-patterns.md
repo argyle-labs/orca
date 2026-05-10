@@ -81,7 +81,7 @@ Orca embeds all its assets — agent prompts, documentation, frontend HTML/JS/CS
 **`rust-embed` pattern** (for whole directories):
 
 ```rust
-// projects/docs/src/lib.rs:6
+// docs/lib.rs:6
 #[derive(rust_embed::RustEmbed)]
 #[folder = "src"]
 struct OrcaDocs;

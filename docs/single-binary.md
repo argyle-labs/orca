@@ -12,7 +12,7 @@ The brain binary ships alone. No `projects/frontend/` directory, no npm runtime,
 struct Assets;
 ```
 
-The same pattern applies to `docs/` (this directory): `projects/docs/src/lib.rs` embeds all markdown files so they're accessible via the API and MCP tools without any filesystem dependency.
+The same pattern applies to `docs/` (this directory): `docs/lib.rs` embeds all markdown files so they're accessible via the API and MCP tools without any filesystem dependency.
 
 ## Build sequence
 

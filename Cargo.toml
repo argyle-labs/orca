@@ -28,6 +28,9 @@ members = [
     "projects/integrations/smb",
     "projects/integrations/docker",
     "projects/integrations/proxmox",
+    "projects/integrations/homeassistant",
+    "projects/integrations/nfs",
+    "projects/integrations/unraid",
 ]
 resolver = "2"
 

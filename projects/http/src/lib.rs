@@ -73,7 +73,9 @@ impl Client {
     pub fn new() -> Self {
         // reqwest's rustls-no-provider feature needs a process-global ring
         // crypto provider before the first client is built. Idempotent.
-        rustls::crypto::ring::default_provider().install_default().ok();
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
         Self::default()
     }
 
@@ -152,7 +154,8 @@ impl RequestBuilder {
         K: Into<String>,
         V: Into<String>,
     {
-        self.headers.extend(headers.into_iter().map(|(k, v)| (k.into(), v.into())));
+        self.headers
+            .extend(headers.into_iter().map(|(k, v)| (k.into(), v.into())));
         self
     }
     pub fn bearer(self, token: impl AsRef<str>) -> Self {
@@ -163,7 +166,9 @@ impl RequestBuilder {
         self
     }
     pub fn json(mut self, body: impl Serialize) -> Self {
-        self.body = Some(Body::Json(serde_json::to_value(body).unwrap_or(Value::Null)));
+        self.body = Some(Body::Json(
+            serde_json::to_value(body).unwrap_or(Value::Null),
+        ));
         self
     }
     pub fn form(mut self, fields: Vec<(String, String)>) -> Self {
@@ -187,7 +192,8 @@ impl RequestBuilder {
     /// (release assets, checksums, archives). Status / headers / size cap
     /// behavior mirror [`send`](Self::send).
     pub async fn send_bytes(self) -> Result<BytesResponse, HttpError> {
-        let parsed = url::Url::parse(&self.url).map_err(|e| HttpError::InvalidUrl(e.to_string()))?;
+        let parsed =
+            url::Url::parse(&self.url).map_err(|e| HttpError::InvalidUrl(e.to_string()))?;
         let client = self.client.pool(self.insecure).await?;
         let mut req = client.request(self.method.clone(), parsed);
         if !self.query.is_empty() {
@@ -237,7 +243,8 @@ impl RequestBuilder {
     }
 
     pub async fn send(self) -> Result<Response, HttpError> {
-        let parsed = url::Url::parse(&self.url).map_err(|e| HttpError::InvalidUrl(e.to_string()))?;
+        let parsed =
+            url::Url::parse(&self.url).map_err(|e| HttpError::InvalidUrl(e.to_string()))?;
         let client = self.client.pool(self.insecure).await?;
         let mut req = client.request(self.method.clone(), parsed);
         if !self.query.is_empty() {
@@ -308,20 +315,16 @@ pub struct Response {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ResponseBody {
-    Json {
-        json: Value,
-    },
-    Text {
-        text: String,
-    },
+    Json { json: Value },
+    Text { text: String },
 }
 
 impl ResponseBody {
     fn from_bytes(b: &[u8]) -> Self {
-        if !b.is_empty() {
-            if let Ok(v) = serde_json::from_slice::<Value>(b) {
-                return ResponseBody::Json { json: v };
-            }
+        if !b.is_empty()
+            && let Ok(v) = serde_json::from_slice::<Value>(b)
+        {
+            return ResponseBody::Json { json: v };
         }
         ResponseBody::Text {
             text: String::from_utf8_lossy(b).into_owned(),
@@ -431,7 +434,9 @@ mod tests {
             .await
             .unwrap_err();
         match err {
-            HttpError::Status { status, response, .. } => {
+            HttpError::Status {
+                status, response, ..
+            } => {
                 assert_eq!(status, 404);
                 assert_eq!(response.status, 404);
                 assert!(matches!(response.body, ResponseBody::Text { .. }));

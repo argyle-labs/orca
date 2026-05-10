@@ -30,10 +30,10 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
 
 /// Write atomically, creating any missing parent directories first.
 pub fn write_atomic_mkdir(path: &Path, contents: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
     }
     write_atomic(path, contents)
 }

@@ -76,7 +76,7 @@ Rust code is organized into modules and crates. A workspace is a collection of c
 
 These topics appear in the codebase but are not covered in depth here, because they build on the six above and are well-documented elsewhere:
 
-- **Closures and iterators** — used heavily in `docs/src/lib.rs` (`filter`, `map`, `collect`); read the Rust Book chapter on iterators once you're comfortable with ownership.
+- **Closures and iterators** — used heavily in `projects/docs/src/lib.rs` (`filter`, `map`, `collect`); read the Rust Book chapter on iterators once you're comfortable with ownership.
 - **Lifetimes in full** — the primer gives you enough to read the code; advanced lifetime annotations rarely appear in orca.
 - **Macros** (`macro_rules!`, proc macros) — `serde` and `clap` use proc macros internally; you use them via `#[derive(...)]` without needing to write them.
 - **Unsafe code** — orca has essentially none.

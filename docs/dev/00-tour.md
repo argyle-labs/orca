@@ -120,7 +120,7 @@ cargo run -- mcp-serve
 | Add an HTTP API endpoint | `projects/server/src/serve/api/` (handler file) + `projects/server/src/serve/api/mod.rs` (router wiring) |
 | Add an MCP tool | `projects/server/src/mcp/mod.rs` (`dispatch` match arm) + `projects/server/src/mcp/handlers.rs` (logic) |
 | Add a new agent | `projects/agents/src/agents/` (new `.md` file with YAML frontmatter) |
-| Add a doc page | `projects/docs/src/` (this directory — any `.md` file is auto-embedded) |
+| Add a doc page | `docs/` (this directory — any `.md` file is auto-embedded) |
 | Change model backend logic | `projects/core/src/backend/` |
 | Change shared types | `projects/utils/src/types.rs` |
 | Change config fields | `projects/utils/src/config.rs` |
@@ -160,7 +160,7 @@ projects/agents/src/
   build.rs              ← code-gen: bakes .md files into embedded_agents.rs
   agents/               ← wolf.md, bear.md, otter.md, ... (YAML frontmatter + prompt body)
 
-projects/docs/src/
+docs/
   lib.rs                ← list(), read(), search(), tree() over embedded docs
   dev/                  ← this directory (developer docs)
 ```
@@ -173,7 +173,7 @@ Three separate things are compiled into the binary at build time:
 
 1. **Agent prompts** (`orca_agents`) — `build.rs` reads every `.md` in `src/agents/`, generates a `match` arm per file using `include_str!`, writes it to `$OUT_DIR/embedded_agents.rs`.
 
-2. **Documentation** (`orca_docs`) — `rust-embed` bakes every `.md` in `projects/docs/src/` into the binary as byte slices. That is how `orca mcp-serve` can serve `read_doc` without touching the filesystem.
+2. **Documentation** (`orca_docs`) — `rust-embed` bakes every `.md` in `docs/` into the binary as byte slices. That is how `orca mcp-serve` can serve `read_doc` without touching the filesystem.
 
 3. **Frontend** (`orca` binary) — the SvelteKit build output (`projects/frontend/dist/`) is embedded with another `rust-embed` struct in `projects/server/src/serve/mod.rs`. The web server serves these static files without a separate CDN or file system path.
 

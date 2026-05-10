@@ -93,16 +93,16 @@ See [`brain.toml.tpl`](projects/server/) for all toml options. Registries are ma
 
 ## Docs
 
-- [Architecture](projects/docs/src/architecture.md) — how the four roles (CLI, TUI, web server, MCP) fit together
-- [Repo structure](projects/docs/src/repo-structure.md) — where everything lives and why
-- [API](projects/docs/src/api.md) — HTTP endpoints, registry CRUD, spec management
-- [MCP server](projects/docs/src/mcp-server.md) — tools exposed to Claude Code + federation model
-- [Frontend](projects/docs/src/frontend.md) — React site, code generation, patterns
-- [Agent model](projects/docs/src/agent-model.md) — agent loading, delegation, and the vault
-- [Local-first model policy](projects/docs/src/local-first.md) — LM Studio default, Claude escalation
-- [Stack](projects/docs/src/stack.md) — language/framework choices and why
-- [Testing](projects/docs/src/testing.md) — test suites and how to run them
-- [Security](projects/docs/src/security.md) — auth, keychain, permission model
+- [Architecture](docs/architecture.md) — how the four roles (CLI, TUI, web server, MCP) fit together
+- [Repo structure](docs/repo-structure.md) — where everything lives and why
+- [API](docs/api.md) — HTTP endpoints, registry CRUD, spec management
+- [MCP server](docs/mcp-server.md) — tools exposed to Claude Code + federation model
+- [Frontend](docs/frontend.md) — React site, code generation, patterns
+- [Agent model](docs/agent-model.md) — agent loading, delegation, and the vault
+- [Local-first model policy](docs/local-first.md) — LM Studio default, Claude escalation
+- [Stack](docs/stack.md) — language/framework choices and why
+- [Testing](docs/testing.md) — test suites and how to run them
+- [Security](docs/security.md) — auth, keychain, permission model
 - [Architecture deep-dive](docs/brain-architecture.md) — crate map, dependency flow, design decisions
 
 ## Make targets

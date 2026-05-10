@@ -6,7 +6,7 @@
 use serde_json::{Value, json};
 
 #[derive(rust_embed::RustEmbed)]
-#[folder = "src"]
+#[folder = "../../docs"]
 struct OrcaDocs;
 
 pub fn list() -> Vec<String> {

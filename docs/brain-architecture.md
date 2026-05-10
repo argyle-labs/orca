@@ -1,6 +1,6 @@
 # Brain Codebase Architecture
 
-Source: `~/code/brain` — Rust Cargo workspace. See also the embedded doc at [`projects/docs/src/architecture.md`](../projects/docs/src/architecture.md).
+Source: `~/code/brain` — Rust Cargo workspace. See also the embedded doc at [`./architecture.md`](./architecture.md).
 
 ## Crate Map
 
@@ -57,7 +57,7 @@ The binary entry point. Four simultaneous roles: CLI, TUI, web server, MCP serve
   - `openapi.rs` — utoipa spec assembly, static `SPEC` OnceLock
   - `tree.rs` — `TreeNode` struct + vault tree builder
   - `mcp_client.rs` — spawns MCP subprocess pool, injects `DOCKER_HOST`
-  - `api/` — handlers, one file per domain (see [API docs](../projects/docs/src/api.md))
+  - `api/` — handlers, one file per domain (see [API docs](./api.md))
 - `context.rs` — `ProjectContext`: resolves project memory, builds system prompt
 - `tui.rs` — crossterm split-pane UI, keybindings
 

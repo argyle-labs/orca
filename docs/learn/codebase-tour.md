@@ -71,10 +71,10 @@ projects/server/src/serve/api/docs.rs  (handler implementation)
 The handler sees `root=docs` and delegates to `brain_docs::read("architecture")`:
 
 ```
-projects/docs/src/lib.rs  →  BrainDocs::get("architecture.md")
+docs/lib.rs  →  BrainDocs::get("architecture.md")
 ```
 
-`BrainDocs` is a `#[derive(RustEmbed)]` struct. At compile time, every `.md` file in `projects/docs/src/` was read from disk and baked into the binary as a static byte slice. At runtime, `BrainDocs::get(...)` does a hashmap lookup — zero filesystem I/O.
+`BrainDocs` is a `#[derive(RustEmbed)]` struct. At compile time, every `.md` file in `docs/` was read from disk and baked into the binary as a static byte slice. At runtime, `BrainDocs::get(...)` does a hashmap lookup — zero filesystem I/O.
 
 ### 5. axum → load function → component
 
@@ -186,7 +186,7 @@ projects/utils/src/state.rs     DaemonState — port handoff file
 ### Embedded content (compiled into binary)
 
 ```
-projects/docs/src/       Project WHY docs — this learning system
+docs/       Project WHY docs — this learning system
 projects/agents/build.rs Reads ~/brain/ai/claude/agents/*.md at compile time
 ```
 
@@ -232,7 +232,7 @@ api.rs handler
   │  root="brain" → serve/tree.rs (filesystem)
   │  root="rebuy" → serve/tree.rs (filesystem)
   ↓
-brain_docs::read()  (docs/src/lib.rs)
+brain_docs::read()  (projects/docs/src/lib.rs)
   │  BrainDocs::get("architecture.md") → static bytes
   ↓
 200 OK + markdown text
