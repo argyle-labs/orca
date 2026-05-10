@@ -1,0 +1,19 @@
+[package]
+name    = "orca-unraid"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "orca_unraid"
+path = "src/lib.rs"
+
+[dependencies]
+orca-graphql = { path = "../../graphql" }
+orca-http    = { path = "../../http" }
+serde        = { version = "1", features = ["derive"] }
+serde_json   = "1"
+thiserror    = "1"
+
+[dev-dependencies]
+tokio    = { version = "1", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"

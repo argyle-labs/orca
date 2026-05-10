@@ -8,9 +8,11 @@
 //! event subscription) we'll add a third layer rather than retro-fitting.
 
 pub mod compose;
+pub mod containers;
 pub mod engine;
 
 pub use compose::{Compose, ComposeError, ServiceStatus, ServiceSummary};
+pub use containers::ContainerSummary;
 pub use engine::{Engine, EngineStatus};
 
 /// Resolve the absolute path of the `docker` CLI for daemon environments

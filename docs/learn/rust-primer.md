@@ -19,7 +19,7 @@ The practical impact: you'll pass `&str` (a borrowed reference to a string) inst
 In brain this shows up everywhere:
 
 ```rust
-// docs/src/lib.rs — borrows the path, doesn't need to own it
+// projects/docs/src/lib.rs — borrows the path, doesn't need to own it
 pub fn read(path: &str) -> Option<String> {
     BrainDocs::get(path).map(|f| String::from_utf8_lossy(&f.data).into_owned())
 }
@@ -201,7 +201,7 @@ let matches: Vec<String> = lines
 Rust code is organized into modules. `pub` makes items visible outside the module.
 
 ```
-projects/docs/src/
+docs/
   lib.rs          pub fn list(), pub fn read(), pub fn tree()
 ```
 

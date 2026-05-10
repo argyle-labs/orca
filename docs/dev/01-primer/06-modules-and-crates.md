@@ -214,7 +214,7 @@ include!(concat!(env!("OUT_DIR"), "/embedded_commands.rs"));
 The `orca_docs` crate uses `rust-embed` instead of a custom build script:
 
 ```rust
-// projects/docs/src/lib.rs:6
+// docs/lib.rs:6
 #[derive(rust_embed::RustEmbed)]
 #[folder = "src"]
 struct OrcaDocs;

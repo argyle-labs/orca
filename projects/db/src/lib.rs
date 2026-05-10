@@ -14,7 +14,46 @@ use anyhow::{Context, Result};
 use config::{APP_DB_FILE, APP_STATE_DIR};
 use rand::RngCore;
 use rusqlite::Connection;
+use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Mutex;
+
+/// Tracks which DB paths have already had `apply_schema` + `run_pending_migrations`
+/// run in this process. Subsequent opens of the same path skip both — the schema
+/// only needs to be ensured once per process lifetime, and re-running on every
+/// open is a hot-path cost (CREATE TABLE IF NOT EXISTS × ~30 tables + a
+/// `user_version` probe) that adds up fast in long-running services like
+/// `mcp-serve`, where every tool dispatch opens a connection.
+static SCHEMA_INITIALIZED: Mutex<Option<HashSet<std::path::PathBuf>>> = Mutex::new(None);
+
+fn ensure_schema_once(conn: &Connection, path: &Path) -> Result<()> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    {
+        let mut guard = SCHEMA_INITIALIZED.lock().unwrap();
+        let set = guard.get_or_insert_with(HashSet::new);
+        if set.contains(&canonical) {
+            return Ok(());
+        }
+    }
+    apply_schema(conn)?;
+    run_pending_migrations(conn)?;
+    SCHEMA_INITIALIZED
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .insert(canonical);
+    Ok(())
+}
+
+/// Forget the process-wide schema-initialized cache. Used by tests that need to
+/// re-run schema setup on a fresh DB path.
+#[doc(hidden)]
+pub fn reset_schema_init_cache() {
+    if let Ok(mut guard) = SCHEMA_INITIALIZED.lock() {
+        *guard = None;
+    }
+}
 
 fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
@@ -69,8 +108,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     conn.execute_batch("PRAGMA journal_mode = WAL;")?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
 
-    apply_schema(&conn)?;
-    run_pending_migrations(&conn)?;
+    ensure_schema_once(&conn, path)?;
 
     Ok(conn)
 }
@@ -114,8 +152,7 @@ pub fn open_unencrypted(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open unencrypted database")?;
     conn.execute_batch("PRAGMA journal_mode = WAL;")?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-    apply_schema(&conn)?;
-    run_pending_migrations(&conn)?;
+    ensure_schema_once(&conn, path)?;
     Ok(conn)
 }
 
@@ -459,7 +496,7 @@ pub fn migrate(conn: &Connection, direction: MigrateDirection, steps: usize) -> 
                 .collect();
 
             if pending.is_empty() {
-                eprintln!("  nothing to migrate (schema at v{current})");
+                tracing::debug!("nothing to migrate (schema at v{current})");
             }
 
             for m in pending {
@@ -485,7 +522,7 @@ pub fn migrate(conn: &Connection, direction: MigrateDirection, steps: usize) -> 
                 .collect();
 
             if to_rollback.is_empty() {
-                eprintln!("  nothing to roll back (schema at v{current})");
+                tracing::debug!("nothing to roll back (schema at v{current})");
             }
 
             for m in to_rollback {

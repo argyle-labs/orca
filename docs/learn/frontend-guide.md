@@ -318,10 +318,10 @@ var(--color-error)       /* error states */
 
 ## Adding a doc to the learning system
 
-Drop a `.md` file into `projects/docs/src/` (or a subdirectory):
+Drop a `.md` file into `docs/` (or a subdirectory):
 
 ```
-projects/docs/src/learn/my-topic.md
+docs/learn/my-topic.md
 ```
 
 It appears in the sidebar under **Docs → learn** after rebuilding the binary. `rust-embed` picks up all `.md` files at compile time — no registration needed.

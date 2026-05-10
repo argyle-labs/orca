@@ -69,12 +69,11 @@ pub async fn check_for_update(channel: &Channel) -> Result<Option<UpdateInfo>> {
 
     let client = orca_http::Client::new();
     let user_agent = format!("{APP_NAME}/{CURRENT_VERSION}");
-    let auth = format!("Bearer {token}");
 
     let github_req = |url: String| {
         client
             .get(url)
-            .header("Authorization", &auth)
+            .bearer(&token)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .header("User-Agent", &user_agent)
@@ -263,11 +262,7 @@ fn is_newer(candidate: &str, current: &str) -> bool {
     parse(candidate) > parse(current)
 }
 
-async fn download_asset(
-    client: &orca_http::Client,
-    url: &str,
-    token: &str,
-) -> Result<Vec<u8>> {
+async fn download_asset(client: &orca_http::Client, url: &str, token: &str) -> Result<Vec<u8>> {
     let resp = client
         .get(url)
         .header("Authorization", format!("Bearer {token}"))

@@ -253,10 +253,7 @@ pub async fn mount(spec: MountSpec<'_>) -> Result<(), SmbError> {
             Credentials::Guest => String::new(),
             Credentials::File(_) => String::new(), // macOS uses keychain; ignored.
         };
-        let url = format!(
-            "//{}{}/{}",
-            auth_part, spec.server, spec.share
-        );
+        let url = format!("//{}{}/{}", auth_part, spec.server, spec.share);
         run_tool(
             "mount_smbfs",
             &[url.as_str(), spec.mountpoint.to_str().unwrap_or("")],
@@ -272,13 +269,8 @@ pub async fn mount(spec: MountSpec<'_>) -> Result<(), SmbError> {
 
 /// Unmount a previously-mounted share.
 pub async fn unmount(mountpoint: &Path) -> Result<(), SmbError> {
-    let tool = if cfg!(target_os = "macos") {
-        "umount"
-    } else {
-        "umount"
-    };
-    which_or_err(tool).await?;
-    run_tool(tool, &[mountpoint.to_str().unwrap_or("")]).await
+    which_or_err("umount").await?;
+    run_tool("umount", &[mountpoint.to_str().unwrap_or("")]).await
 }
 
 /// List shares advertised by `server` via `smbclient -L //server`.
@@ -419,7 +411,11 @@ something invalid
 
     #[tokio::test]
     async fn health_missing_when_path_absent() {
-        let h = health(Path::new("/nonexistent_orca_smb_test"), Duration::from_secs(1)).await;
+        let h = health(
+            Path::new("/nonexistent_orca_smb_test"),
+            Duration::from_secs(1),
+        )
+        .await;
         assert_eq!(h, Health::Missing);
     }
 

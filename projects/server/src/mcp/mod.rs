@@ -46,6 +46,11 @@ fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
 const FEDERATION_SKIP: &[&str] = &["orca-local"];
 
 pub async fn serve(config: &Config) -> Result<()> {
+    // Reqwest is built with `rustls-no-provider`; without this the first HTTPS
+    // client construction (e.g. on tools/list federation calls) panics with
+    // "No provider set" and Claude Code sees zero tools. Mirrors `build_router`.
+    llm::ensure_crypto_provider();
+
     let pool = crate::serve::mcp_client::McpPool::new_with_db(config.db_path.clone());
 
     let config_arc = Arc::new(config.clone());

@@ -357,7 +357,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_agent"
 
 ## Recipe 5: Add a New Doc Page
 
-Documentation is embedded from `projects/docs/src/`. Any `.md` file you add there is automatically:
+Documentation is embedded from `docs/`. Any `.md` file you add there is automatically:
 - Accessible via `read_doc` MCP tool
 - Searchable via `search_docs` MCP tool
 - Listed in the doc tree
@@ -366,9 +366,9 @@ Documentation is embedded from `projects/docs/src/`. Any `.md` file you add ther
 ### Step 1: Create the file
 
 Place it under the appropriate directory:
-- `projects/docs/src/` — top-level pages
-- `projects/docs/src/dev/` — developer documentation (this directory)
-- `projects/docs/src/dev/01-primer/` — Rust primer
+- `docs/` — top-level pages
+- `docs/dev/` — developer documentation (this directory)
+- `docs/dev/01-primer/` — Rust primer
 
 Name it with a number prefix to control sort order: `05-my-topic.md`.
 
@@ -377,7 +377,7 @@ Name it with a number prefix to control sort order: `05-my-topic.md`.
 The first line must be `# Your Title` — the doc system extracts the title from the first `# ` line:
 
 ```rust
-// projects/docs/src/lib.rs:53
+// docs/lib.rs:53
 fn doc_title(path: &str) -> String {
     OrcaDocs::get(path)
         .and_then(|f| {

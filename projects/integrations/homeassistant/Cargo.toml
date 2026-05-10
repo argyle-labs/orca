@@ -1,0 +1,19 @@
+[package]
+name    = "orca-homeassistant"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "orca_homeassistant"
+path = "src/lib.rs"
+
+[dependencies]
+orca-http   = { path = "../../http" }
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+thiserror   = "1"
+urlencoding = "2"
+
+[dev-dependencies]
+tokio    = { version = "1", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
