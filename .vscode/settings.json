@@ -1,0 +1,20 @@
+{
+  "cSpell.words": [
+    "cmark",
+    "crossterm",
+    "impls",
+    "jsonschema",
+    "pemfile",
+    "ratatui",
+    "reqwest",
+    "rusqlite",
+    "rustls",
+    "rustyline",
+    "schemars",
+    "serde",
+    "sqlcipher",
+    "tungstenite",
+    "typst",
+    "utoipa"
+  ]
+}

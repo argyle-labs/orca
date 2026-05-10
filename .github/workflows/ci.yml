@@ -12,6 +12,12 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel in-flight runs when a newer commit arrives on the same ref.
+# Saves runner minutes on rapid-fire pushes / PR force-pushes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -141,6 +147,8 @@ jobs:
   # ── TS SDK ───────────────────────────────────────────────────────────────
   build-sdk-ts:
     name: Build TS SDK
+    needs: changes
+    if: needs.changes.outputs.sdk-ts == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -194,7 +202,8 @@ jobs:
   # ── TS example: hackernews ───────────────────────────────────────────────
   build-example-hackernews:
     name: Build TS example (hackernews)
-    needs: build-sdk-ts
+    needs: [changes, build-sdk-ts]
+    if: needs.changes.outputs.example-hackernews == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -262,6 +271,8 @@ jobs:
   # ── Go SDK ───────────────────────────────────────────────────────────────
   build-sdk-go:
     name: Build Go SDK
+    needs: changes
+    if: needs.changes.outputs.sdk-go == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -320,6 +331,8 @@ jobs:
   # ── Kotlin SDK ───────────────────────────────────────────────────────────
   build-sdk-kotlin:
     name: Build Kotlin SDK
+    needs: changes
+    if: needs.changes.outputs.sdk-kotlin == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -369,6 +382,8 @@ jobs:
   # ── Frontend ─────────────────────────────────────────────────────────────
   build-frontend:
     name: Build Frontend
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

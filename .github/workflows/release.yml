@@ -58,9 +58,11 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      # Share the linux-gnu build cache so lint reuses dependency artifacts
+      # built by the build-rust matrix (lint runs on ubuntu-latest).
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-rust-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: release-rust-x86_64-unknown-linux-gnu
           cache-on-failure: true
 
       - name: Format check
