@@ -2,6 +2,7 @@ pub mod api;
 pub mod mcp_client;
 pub mod middleware;
 mod openapi;
+#[cfg(feature = "pdf")]
 pub mod pdf_gen;
 pub mod tree;
 

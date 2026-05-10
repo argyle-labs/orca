@@ -45,7 +45,6 @@ env:
   RUST_BACKTRACE: 1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   CARGO_INCREMENTAL: 0
-  CARGO_HOME: /home/runner/.cargo
 
 jobs:
   # ── Rust: lint ───────────────────────────────────────────────────────────
@@ -114,8 +113,11 @@ jobs:
         run: sudo apt-get install -y musl-tools
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+
+      # rust-toolchain.toml pins a specific channel; install the target
+      # via rustup so it lands in the active toolchain (not stable).
+      - name: Add cross-compile target
+        run: rustup target add ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:

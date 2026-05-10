@@ -17,6 +17,10 @@ path = "src/main.rs"
 # Only the CLI release artifact enables it via `--features ui`.
 ui = ["dep:rust-embed", "dep:mime_guess"]
 
+# Enable the /api/pdf endpoint — markdown → PDF rendering via typst.
+# Off by default; pulls ~10 MB of typst + font + WASM crates into the binary.
+pdf = ["dep:typst", "dep:typst-pdf", "dep:typst-assets", "dep:zip"]
+
 [dependencies]
 # Workspace crates
 orca-sdk      = { path = "../sdk" }
@@ -100,11 +104,11 @@ rustls-pemfile  = "2"
 mime_guess = { version = "2", optional = true }
 rust-embed = { version = "8", optional = true }
 
-# PDF generation (pure Rust, no external binary required)
-typst        = "0.14"
-typst-pdf    = "0.14"
-typst-assets = { version = "0.14", features = ["fonts"] }
-zip = { version = "8", default-features = false, features = ["deflate"] }
+# PDF generation — gated behind `pdf` feature (off by default, ~10 MB).
+typst        = { version = "0.14", optional = true }
+typst-pdf    = { version = "0.14", optional = true }
+typst-assets = { version = "0.14", features = ["fonts"], optional = true }
+zip          = { version = "8", default-features = false, features = ["deflate"], optional = true }
 
 # Database drivers (schema introspection — pure Rust, no CLI dependency)
 mysql_async    = { version = "0.36", default-features = false, features = ["default-rustls-ring"] }
