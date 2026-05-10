@@ -41,7 +41,7 @@ pub fn list_rebuy_specs() -> Result<String> {
 
     // DB-registered specs (URL-fetched)
     if let Ok(conn) = db::open_default()
-        && let Ok(db_specs) = db::list_openapi_specs(&conn)
+        && let Ok(db_specs) = db::openapi_specs::list(&conn)
         && !db_specs.is_empty()
     {
         if !disk_entries.is_empty() {
@@ -86,7 +86,7 @@ pub fn get_rebuy_spec(args: &Value) -> Result<String> {
         return Ok(raw);
     }
     if let Ok(conn) = db::open_default()
-        && let Ok(Some(row)) = db::get_openapi_spec(&conn, repo)
+        && let Ok(Some(row)) = db::openapi_specs::get(&conn, repo)
         && let Some(raw) = row.spec_json
     {
         return Ok(raw);
@@ -164,7 +164,7 @@ pub async fn spec_register(args: &Value) -> Result<String> {
     let path_count = spec_json["paths"].as_object().map(|p| p.len()).unwrap_or(0);
 
     let conn = db::open_default()?;
-    let row = db::OpenApiSpecRow {
+    let row = db::openapi_specs::OpenApiSpecRow {
         name: name.to_string(),
         url: Some(url.to_string()),
         source_mcp: None,
@@ -172,7 +172,7 @@ pub async fn spec_register(args: &Value) -> Result<String> {
         cached_at: Some(chrono::Utc::now().to_rfc3339()),
         enabled: true,
     };
-    db::upsert_openapi_spec(&conn, &row)?;
+    db::openapi_specs::upsert(&conn, &row)?;
     Ok(format!(
         "registered '{name}' from {url} ({path_count} paths)"
     ))
@@ -183,9 +183,9 @@ pub async fn spec_refresh(args: &Value) -> Result<String> {
     let name = args["name"].as_str();
 
     let conn = db::open_default()?;
-    let db_specs = db::list_openapi_specs(&conn)?;
+    let db_specs = db::openapi_specs::list(&conn)?;
 
-    let to_refresh: Vec<db::OpenApiSpecRow> = if all {
+    let to_refresh: Vec<db::openapi_specs::OpenApiSpecRow> = if all {
         db_specs.into_iter().filter(|s| s.url.is_some()).collect()
     } else {
         match name {
@@ -222,7 +222,7 @@ pub async fn spec_refresh(args: &Value) -> Result<String> {
             Ok(spec_json) => {
                 let path_count = spec_json["paths"].as_object().map(|p| p.len()).unwrap_or(0);
                 let spec_text = serde_json::to_string(&spec_json)?;
-                let row = db::OpenApiSpecRow {
+                let row = db::openapi_specs::OpenApiSpecRow {
                     name: spec.name.clone(),
                     url: Some(url),
                     source_mcp: spec.source_mcp.clone(),
@@ -230,7 +230,7 @@ pub async fn spec_refresh(args: &Value) -> Result<String> {
                     cached_at: Some(chrono::Utc::now().to_rfc3339()),
                     enabled: spec.enabled,
                 };
-                db::upsert_openapi_spec(&conn, &row)?;
+                db::openapi_specs::upsert(&conn, &row)?;
                 results.push(format!("✓ {} ({path_count} paths)", spec.name));
             }
         }
@@ -243,7 +243,7 @@ pub fn spec_unregister(args: &Value) -> Result<String> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("name is required"))?;
     let conn = db::open_default()?;
-    if db::remove_openapi_spec(&conn, name)? {
+    if db::openapi_specs::remove(&conn, name)? {
         Ok(format!("unregistered '{name}'"))
     } else {
         anyhow::bail!("no spec named '{name}'")

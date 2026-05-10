@@ -282,7 +282,7 @@ pub fn mcp_map_tool(args: &Value) -> Result<String> {
             "MCP server '{name}' not found in orca.db — register it first with orca_mcp_add"
         );
     }
-    let row = db::McpToolMappingRow {
+    let row = db::tool_mappings::MappingRow {
         orca_tool: orca_tool.to_string(),
         mcp_name: name.to_string(),
         external_tool: external_tool.to_string(),
@@ -290,7 +290,7 @@ pub fn mcp_map_tool(args: &Value) -> Result<String> {
         confidence: None,
         enabled: true,
     };
-    db::upsert_mcp_tool_mapping(&conn, &row)?;
+    db::tool_mappings::upsert(&conn, &row)?;
     Ok(format!("Mapped {orca_tool} → {name}::{external_tool}"))
 }
 
@@ -299,7 +299,7 @@ pub fn mcp_unmap_tool(args: &Value) -> Result<String> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("orca_tool required"))?;
     let conn = db::open_default()?;
-    if db::remove_mcp_tool_mapping(&conn, orca_tool)? {
+    if db::tool_mappings::remove(&conn, orca_tool)? {
         Ok(format!("Unmapped {orca_tool}"))
     } else {
         Ok(format!("{orca_tool} not found in mcp_tool_mappings"))
@@ -341,10 +341,10 @@ pub fn mcp_sync_tools(args: &Value) -> Result<String> {
 pub fn mcp_list_mappings(args: &Value) -> Result<String> {
     let name = args["name"].as_str();
     let conn = db::open_default()?;
-    let rows: Vec<db::McpToolMappingRow> = if let Some(n) = name {
-        db::list_mcp_tool_mappings(&conn, n)?
+    let rows: Vec<db::tool_mappings::MappingRow> = if let Some(n) = name {
+        db::tool_mappings::list(&conn, n)?
     } else {
-        db::all_mcp_tool_mappings(&conn)?
+        db::tool_mappings::all(&conn)?
     };
     if rows.is_empty() {
         return Ok("(no mappings)".to_string());
@@ -366,7 +366,7 @@ pub fn mcp_list_mappings(args: &Value) -> Result<String> {
 
 pub fn schema_list_databases() -> Result<String> {
     let conn = db::open_default()?;
-    let dbs = db::list_schema_databases(&conn)?;
+    let dbs = db::schema_databases::list(&conn)?;
     if dbs.is_empty() {
         return Ok("No schema databases registered. Use `orca schema add` or orca_schema_add to register one.".to_string());
     }
@@ -407,7 +407,7 @@ pub fn docker_list_runtimes() -> Result<String> {
 pub fn plugin_list(args: &Value) -> Result<String> {
     let workspace = args["workspace"].as_str();
     let conn = db::open_default()?;
-    let plugins = db::list_plugins(&conn)?;
+    let plugins = db::plugins::list(&conn)?;
     let filtered: Vec<_> = plugins
         .iter()
         .filter(|p| workspace.is_none_or(|w| p.tier == w))
@@ -429,7 +429,7 @@ pub fn plugin_creds_list(args: &Value) -> Result<String> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("plugin required"))?;
     let conn = db::open_default()?;
-    let creds = db::list_plugin_credentials(&conn, plugin)?;
+    let creds = db::plugin_creds::list(&conn, plugin)?;
     if creds.is_empty() {
         return Ok(format!("No credentials stored for plugin '{plugin}'."));
     }

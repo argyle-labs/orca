@@ -15,7 +15,7 @@ use super::prelude::*;
 pub async fn schema_databases_handler() -> axum::response::Response {
     db_json(|| {
         let conn = db::open_default()?;
-        let dbs: Vec<SchemaDbInfo> = db::list_schema_databases(&conn)?
+        let dbs: Vec<SchemaDbInfo> = db::schema_databases::list(&conn)?
             .into_iter()
             .map(|r| SchemaDbInfo {
                 name: r.name,
@@ -50,7 +50,7 @@ pub async fn schema_databases_add_handler(
     axum::Json(body): axum::Json<SchemaDbAddRequest>,
 ) -> axum::response::Response {
     db_ok(|| {
-        let row = db::SchemaDbRow {
+        let row = db::schema_databases::SchemaDbRow {
             name: body.name,
             driver: body.driver,
             host: body.host,
@@ -63,7 +63,7 @@ pub async fn schema_databases_add_handler(
             enabled: true,
         };
         let conn = db::open_default()?;
-        db::upsert_schema_database(&conn, &row)
+        db::schema_databases::upsert(&conn, &row)
     })
 }
 
@@ -86,6 +86,6 @@ pub async fn schema_databases_remove_handler(
 ) -> axum::response::Response {
     db_remove("database", &name, || {
         let conn = db::open_default()?;
-        db::remove_schema_database(&conn, &name)
+        db::schema_databases::remove(&conn, &name)
     })
 }

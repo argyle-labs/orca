@@ -62,7 +62,7 @@ pub fn cmd_spec(action: SpecAction) -> Result<()> {
         SpecAction::List => {
             let registry = scanner::SpecRegistry::load()?;
             let conn = db::open_default()?;
-            let db_specs = db::list_openapi_specs(&conn)?;
+            let db_specs = db::openapi_specs::list(&conn)?;
 
             if !registry.entries.is_empty() {
                 println!("{}", "Disk specs:".green());
@@ -177,7 +177,7 @@ pub fn cmd_spec(action: SpecAction) -> Result<()> {
                 .json()
                 .map_err(|e| anyhow::anyhow!("response is not valid JSON: {e}"))?;
             let spec_text = serde_json::to_string(&spec_json)?;
-            let row = db::OpenApiSpecRow {
+            let row = db::openapi_specs::OpenApiSpecRow {
                 name: name.clone(),
                 url: Some(url.clone()),
                 source_mcp: None,
@@ -185,7 +185,7 @@ pub fn cmd_spec(action: SpecAction) -> Result<()> {
                 cached_at: Some(chrono::Utc::now().to_rfc3339()),
                 enabled: true,
             };
-            db::upsert_openapi_spec(&conn, &row)?;
+            db::openapi_specs::upsert(&conn, &row)?;
             let path_count = spec_json["paths"].as_object().map(|p| p.len()).unwrap_or(0);
             println!(
                 "\n{} registered {} from {} ({} paths)",
@@ -198,8 +198,8 @@ pub fn cmd_spec(action: SpecAction) -> Result<()> {
 
         SpecAction::Refresh { name, all } => {
             let conn = db::open_default()?;
-            let db_specs = db::list_openapi_specs(&conn)?;
-            let to_refresh: Vec<db::OpenApiSpecRow> = if all {
+            let db_specs = db::openapi_specs::list(&conn)?;
+            let to_refresh: Vec<db::openapi_specs::OpenApiSpecRow> = if all {
                 db_specs.into_iter().filter(|s| s.url.is_some()).collect()
             } else {
                 match name {
@@ -245,7 +245,7 @@ pub fn cmd_spec(action: SpecAction) -> Result<()> {
                     }
                 };
                 let spec_text = serde_json::to_string(&spec_json)?;
-                let row = db::OpenApiSpecRow {
+                let row = db::openapi_specs::OpenApiSpecRow {
                     name: spec.name.clone(),
                     url: spec.url.clone(),
                     source_mcp: spec.source_mcp.clone(),
@@ -253,7 +253,7 @@ pub fn cmd_spec(action: SpecAction) -> Result<()> {
                     cached_at: Some(chrono::Utc::now().to_rfc3339()),
                     enabled: spec.enabled,
                 };
-                db::upsert_openapi_spec(&conn, &row)?;
+                db::openapi_specs::upsert(&conn, &row)?;
                 let path_count = spec_json["paths"].as_object().map(|p| p.len()).unwrap_or(0);
                 println!(
                     "\n{} refreshed {} ({} paths)",
@@ -266,7 +266,7 @@ pub fn cmd_spec(action: SpecAction) -> Result<()> {
 
         SpecAction::Unregister { name } => {
             let conn = db::open_default()?;
-            if db::remove_openapi_spec(&conn, &name)? {
+            if db::openapi_specs::remove(&conn, &name)? {
                 println!("{} unregistered {}", "✓".green(), name.cyan());
             } else {
                 println!("{}", format!("no spec named '{name}'").dimmed());

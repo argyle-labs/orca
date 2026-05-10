@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Subcommand;
-use db::{self, SchemaDbRow};
+use db::{self, schema_databases::SchemaDbRow};
 
 #[derive(Subcommand, Debug)]
 pub enum SchemaAction {
@@ -40,7 +40,7 @@ pub fn cmd_schema(action: SchemaAction) -> Result<()> {
     match action {
         SchemaAction::List => {
             let conn = db::open_default()?;
-            let dbs = db::list_schema_databases(&conn)?;
+            let dbs = db::schema_databases::list(&conn)?;
             if dbs.is_empty() {
                 println!("No schema databases registered. Use `orca schema add` to add one.");
             } else {
@@ -87,13 +87,13 @@ pub fn cmd_schema(action: SchemaAction) -> Result<()> {
                 enabled: true,
             };
             let conn = db::open_default()?;
-            db::upsert_schema_database(&conn, &row)?;
+            db::schema_databases::upsert(&conn, &row)?;
             println!("added schema database '{name}' [{driver}] to orca.db");
             Ok(())
         }
         SchemaAction::Remove { name } => {
             let conn = db::open_default()?;
-            if db::remove_schema_database(&conn, &name)? {
+            if db::schema_databases::remove(&conn, &name)? {
                 println!("removed '{name}'");
             } else {
                 println!("'{name}' not found in orca.db");

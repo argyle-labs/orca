@@ -16,9 +16,9 @@ fn open_db() -> anyhow::Result<rusqlite::Connection> {
 
 fn store_oauth(service: &str, access_token: &str, refresh_token: Option<&str>) -> Result<()> {
     let conn = open_db()?;
-    db::upsert_oauth_token(
+    db::oauth::upsert(
         &conn,
-        &db::OAuthTokenRow {
+        &db::oauth::TokenRow {
             service: service.to_string(),
             access_token: access_token.to_string(),
             refresh_token: refresh_token.map(str::to_string),
@@ -28,15 +28,15 @@ fn store_oauth(service: &str, access_token: &str, refresh_token: Option<&str>) -
     Ok(())
 }
 
-fn load_oauth(service: &str) -> Option<db::OAuthTokenRow> {
+fn load_oauth(service: &str) -> Option<db::oauth::TokenRow> {
     open_db()
         .ok()
-        .and_then(|conn| db::get_oauth_token(&conn, service).ok().flatten())
+        .and_then(|conn| db::oauth::get(&conn, service).ok().flatten())
 }
 
 fn delete_oauth(service: &str) {
     if let Ok(conn) = open_db() {
-        let _ = db::delete_oauth_token(&conn, service);
+        let _ = db::oauth::delete(&conn, service);
     }
 }
 

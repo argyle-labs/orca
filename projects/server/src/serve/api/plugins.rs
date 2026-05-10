@@ -62,7 +62,7 @@ pub struct SetCredRequest {
 pub async fn plugins_list_handler() -> Response {
     db_json(|| {
         let conn = db::open_default()?;
-        let plugins = db::list_plugins(&conn)?
+        let plugins = db::plugins::list(&conn)?
             .into_iter()
             .map(|p| PluginInfo {
                 id: p.id,
@@ -95,10 +95,10 @@ pub async fn plugins_list_handler() -> Response {
 pub async fn plugin_creds_list_handler(Path(id): Path<String>) -> Response {
     db_json(|| {
         let conn = db::open_default()?;
-        if db::get_plugin(&conn, &id)?.is_none() {
+        if db::plugins::get(&conn, &id)?.is_none() {
             anyhow::bail!("plugin '{}' not found", id);
         }
-        let creds = db::list_plugin_credentials(&conn, &id)?
+        let creds = db::plugin_creds::list(&conn, &id)?
             .into_iter()
             .map(|c| CredInfo {
                 key: c.key,
@@ -131,10 +131,10 @@ pub async fn plugin_creds_set_handler(
 ) -> Response {
     db_ok(|| {
         let conn = db::open_default()?;
-        if db::get_plugin(&conn, &id)?.is_none() {
+        if db::plugins::get(&conn, &id)?.is_none() {
             anyhow::bail!("plugin '{}' not found", id);
         }
-        db::set_plugin_credential(&conn, &id, &body.key, &body.value)?;
+        db::plugin_creds::set(&conn, &id, &body.key, &body.value)?;
         Ok(())
     })
 }
@@ -159,7 +159,7 @@ pub async fn plugin_creds_set_handler(
 pub async fn plugin_creds_delete_handler(Path((id, key)): Path<(String, String)>) -> Response {
     db_remove("credential", &key, || {
         let conn = db::open_default()?;
-        db::delete_plugin_credential(&conn, &id, &key)
+        db::plugin_creds::delete(&conn, &id, &key)
     })
 }
 
@@ -182,7 +182,7 @@ pub async fn plugin_health_handler(Path(id): Path<String>) -> Response {
         let Ok(conn) = db::open_default() else {
             return err(StatusCode::INTERNAL_SERVER_ERROR, "db error");
         };
-        let Ok(Some(plugin)) = db::get_plugin(&conn, &id) else {
+        let Ok(Some(plugin)) = db::plugins::get(&conn, &id) else {
             return err(StatusCode::NOT_FOUND, "plugin not found");
         };
         plugin.mcp_command.filter(|u| u.starts_with("http"))
@@ -193,14 +193,12 @@ pub async fn plugin_health_handler(Path(id): Path<String>) -> Response {
     };
 
     let token = db::open_default().ok().and_then(|conn| {
-        db::list_plugin_credentials(&conn, &id)
-            .ok()
-            .and_then(|creds| {
-                creds
-                    .into_iter()
-                    .find(|c| c.key == "MEERKAT_TOKEN")
-                    .map(|c| c.value)
-            })
+        db::plugin_creds::list(&conn, &id).ok().and_then(|creds| {
+            creds
+                .into_iter()
+                .find(|c| c.key == "MEERKAT_TOKEN")
+                .map(|c| c.value)
+        })
     });
 
     let health_url = format!("{}/health", base_url.trim_end_matches('/'));
@@ -238,7 +236,7 @@ pub async fn plugin_health_handler(Path(id): Path<String>) -> Response {
 pub async fn plugin_data_list_handler(Path(id): Path<String>) -> Response {
     db_json(|| {
         let conn = db::open_default()?;
-        let entries = db::list_plugin_data(&conn, &id)?
+        let entries = db::plugin_data::list(&conn, &id)?
             .into_iter()
             .map(|r| PluginDataEntry {
                 key: r.key,
@@ -270,7 +268,7 @@ pub async fn plugin_data_list_handler(Path(id): Path<String>) -> Response {
 pub async fn plugin_data_get_handler(Path((id, key)): Path<(String, String)>) -> Response {
     db_json(|| {
         let conn = db::open_default()?;
-        match db::get_plugin_data(&conn, &id, &key)? {
+        match db::plugins::get_data(&conn, &id, &key)? {
             Some(r) => Ok(PluginDataEntry {
                 key: r.key,
                 value: r.value,
@@ -304,7 +302,7 @@ pub async fn plugin_data_set_handler(
 ) -> Response {
     db_ok(|| {
         let conn = db::open_default()?;
-        db::set_plugin_data(&conn, &id, &key, &body.value)?;
+        db::plugin_data::set(&conn, &id, &key, &body.value)?;
         Ok(())
     })
 }
@@ -329,7 +327,7 @@ pub async fn plugin_data_set_handler(
 pub async fn plugin_data_delete_handler(Path((id, key)): Path<(String, String)>) -> Response {
     db_remove("data key", &key, || {
         let conn = db::open_default()?;
-        db::delete_plugin_data(&conn, &id, &key)
+        db::plugin_data::delete(&conn, &id, &key)
     })
 }
 
@@ -390,7 +388,7 @@ pub async fn plugin_remove_handler(Path(id): Path<String>) -> Response {
 pub async fn plugin_enable_handler(Path(id): Path<String>) -> Response {
     db_remove("plugin", &id, || {
         let conn = db::open_default()?;
-        db::set_plugin_enabled(&conn, &id, true)
+        db::plugins::set_enabled(&conn, &id, true)
     })
 }
 
@@ -411,7 +409,7 @@ pub async fn plugin_enable_handler(Path(id): Path<String>) -> Response {
 pub async fn plugin_disable_handler(Path(id): Path<String>) -> Response {
     db_remove("plugin", &id, || {
         let conn = db::open_default()?;
-        db::set_plugin_enabled(&conn, &id, false)
+        db::plugins::set_enabled(&conn, &id, false)
     })
 }
 

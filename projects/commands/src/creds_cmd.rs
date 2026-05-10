@@ -54,13 +54,13 @@ pub fn cmd_creds(action: CredsAction) -> Result<()> {
                 }
             };
             let conn = db::open_default()?;
-            db::set_plugin_credential(&conn, &plugin, &key, &value)?;
+            db::plugin_creds::set(&conn, &plugin, &key, &value)?;
             println!("stored credential '{key}' for plugin '{plugin}'");
         }
 
         CredsAction::List { plugin } => {
             let conn = db::open_default()?;
-            let rows = db::list_plugin_credentials(&conn, &plugin)?;
+            let rows = db::plugin_creds::list(&conn, &plugin)?;
             if rows.is_empty() {
                 println!("no credentials stored for plugin '{plugin}'");
                 return Ok(());
@@ -75,7 +75,7 @@ pub fn cmd_creds(action: CredsAction) -> Result<()> {
 
         CredsAction::Remove { plugin, key } => {
             let conn = db::open_default()?;
-            if db::delete_plugin_credential(&conn, &plugin, &key)? {
+            if db::plugin_creds::delete(&conn, &plugin, &key)? {
                 println!("removed credential '{key}' from plugin '{plugin}'");
             } else {
                 println!("credential '{key}' not found for plugin '{plugin}'");
@@ -90,11 +90,11 @@ pub fn cmd_creds(action: CredsAction) -> Result<()> {
             let conn = db::open_default()?;
             let plugins = match plugin {
                 Some(id) => {
-                    let p = db::get_plugin(&conn, &id)?
+                    let p = db::plugins::get(&conn, &id)?
                         .with_context(|| format!("plugin '{id}' not registered"))?;
                     vec![p]
                 }
-                None => db::list_plugins(&conn)?,
+                None => db::plugins::list(&conn)?,
             };
 
             if plugins.is_empty() {
@@ -120,7 +120,7 @@ pub fn cmd_creds(action: CredsAction) -> Result<()> {
 
                 let (token_ok, token_note) = validate_token(&conn, &p.id);
                 let (http_ok, http_note) = {
-                    let tok = db::list_plugin_credentials(&conn, &p.id)
+                    let tok = db::plugin_creds::list(&conn, &p.id)
                         .ok()
                         .and_then(|rows| rows.into_iter().find(|r| r.key == "MEERKAT_TOKEN"))
                         .map(|r| r.value);
@@ -155,7 +155,7 @@ pub fn cmd_creds(action: CredsAction) -> Result<()> {
 pub fn sync_plugin_creds(plugin_id: &str) -> Result<()> {
     let conn = db::open_default()?;
 
-    let creds = db::list_plugin_credentials(&conn, plugin_id)?;
+    let creds = db::plugin_creds::list(&conn, plugin_id)?;
     if creds.is_empty() {
         println!("no credentials to sync for plugin '{plugin_id}'");
         return Ok(());
@@ -164,7 +164,7 @@ pub fn sync_plugin_creds(plugin_id: &str) -> Result<()> {
     // Resolve plugin URL — stored in mcp_args or a dedicated url field.
     // For HTTP plugins the manifest url is stored in mcp_command or mcp_args.
     // Convention: first arg that starts with "http" is the base URL.
-    let plugin = db::get_plugin(&conn, plugin_id)?
+    let plugin = db::plugins::get(&conn, plugin_id)?
         .with_context(|| format!("plugin '{plugin_id}' not registered — run `orca plugin add`"))?;
 
     let base_url = resolve_plugin_url(&plugin)
@@ -207,7 +207,7 @@ pub fn sync_plugin_creds(plugin_id: &str) -> Result<()> {
     }
 
     if failed == 0 {
-        db::mark_plugin_credentials_synced(&conn, plugin_id)?;
+        db::plugin_creds::mark_synced(&conn, plugin_id)?;
         println!("synced {synced} credential(s) to plugin '{plugin_id}'");
     } else {
         println!("synced {synced}, failed {failed} — credentials NOT marked as synced");
@@ -216,7 +216,7 @@ pub fn sync_plugin_creds(plugin_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn resolve_plugin_url(plugin: &db::PluginRow) -> Option<String> {
+pub fn resolve_plugin_url(plugin: &db::plugins::PluginRow) -> Option<String> {
     if let Some(cmd) = &plugin.mcp_command
         && (cmd.starts_with("http://") || cmd.starts_with("https://"))
     {
@@ -232,7 +232,7 @@ pub fn resolve_plugin_url(plugin: &db::PluginRow) -> Option<String> {
 
 /// Returns (ok, note) — whether a MEERKAT_TOKEN credential exists for this plugin.
 fn validate_token(conn: &Connection, plugin_id: &str) -> (bool, String) {
-    match db::list_plugin_credentials(conn, plugin_id) {
+    match db::plugin_creds::list(conn, plugin_id) {
         Ok(rows) => {
             if rows.iter().any(|r| r.key == "MEERKAT_TOKEN") {
                 (true, "stored".into())
@@ -261,7 +261,7 @@ fn ping_plugin(base_url: &str, token: &str) -> (bool, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use db::PluginRow;
+    use db::plugins::PluginRow;
     use std::collections::HashMap;
 
     fn base_plugin(id: &str) -> PluginRow {
