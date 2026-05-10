@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use config::APP_NAME;
-use db::{self, PluginRow};
+use db::{self, plugins::PluginRow};
 use orca_fs::fs::expand_tilde;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -107,14 +107,14 @@ pub fn install_plugin(manifest_path: &str, instance_id: Option<&str>) -> Result<
 /// Public entry point: remove a plugin and cascade-remove exclusive deps.
 pub fn remove_plugin(id: &str) -> Result<bool> {
     let conn = db::open_default()?;
-    let deps = db::list_plugin_deps(&conn, id)?;
-    db::remove_plugin_deps(&conn, id)?;
+    let deps = db::plugins::list_deps(&conn, id)?;
+    db::plugins::remove_deps(&conn, id)?;
     for dep_id in &deps {
-        if !db::plugin_has_parent(&conn, dep_id)? {
-            db::remove_plugin(&conn, dep_id)?;
+        if !db::plugins::has_parent(&conn, dep_id)? {
+            db::plugins::remove(&conn, dep_id)?;
         }
     }
-    db::remove_plugin(&conn, id)
+    db::plugins::remove(&conn, id)
 }
 
 /// Install a single plugin manifest into the DB.
@@ -190,7 +190,7 @@ fn install_manifest(
         search_tools: m.plugin.search_tools,
         specs_dir,
     };
-    db::upsert_plugin(conn, &row)?;
+    db::plugins::upsert(conn, &row)?;
 
     let display_id = if instance_id != m.plugin.id {
         format!("{} (as '{instance_id}')", m.plugin.id)
@@ -217,7 +217,7 @@ fn install_manifest(
             .clone()
             .unwrap_or_else(|| format!("{dep_base_id}@{instance_id}"));
         let dep_id = install_manifest(conn, &dep_path, Some(&dep_instance_id), Some(&mode))?;
-        db::add_plugin_dep(conn, &instance_id, &dep_id)?;
+        db::plugins::add_dep(conn, &instance_id, &dep_id)?;
     }
 
     Ok(instance_id)
@@ -287,7 +287,7 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
         }
 
         PluginAction::List => {
-            let plugins = db::list_plugins(&conn)?;
+            let plugins = db::plugins::list(&conn)?;
             if plugins.is_empty() {
                 println!(
                     "no plugins registered — use `{APP_NAME} plugin add <path/to/{APP_NAME}-plugin.toml>`"
@@ -316,14 +316,14 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
 
         PluginAction::Remove { id } => {
             // Remove deps that were exclusively pulled in by this parent.
-            let deps = db::list_plugin_deps(&conn, &id)?;
-            db::remove_plugin_deps(&conn, &id)?;
+            let deps = db::plugins::list_deps(&conn, &id)?;
+            db::plugins::remove_deps(&conn, &id)?;
             for dep_id in &deps {
-                if !db::plugin_has_parent(&conn, dep_id)? && db::remove_plugin(&conn, dep_id)? {
+                if !db::plugins::has_parent(&conn, dep_id)? && db::plugins::remove(&conn, dep_id)? {
                     println!("removed dependency '{dep_id}'");
                 }
             }
-            if db::remove_plugin(&conn, &id)? {
+            if db::plugins::remove(&conn, &id)? {
                 println!("removed plugin '{id}'");
             } else {
                 println!("plugin '{id}' not found");
@@ -331,7 +331,7 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
         }
 
         PluginAction::Enable { id } => {
-            if db::set_plugin_enabled(&conn, &id, true)? {
+            if db::plugins::set_enabled(&conn, &id, true)? {
                 println!("enabled plugin '{id}'");
             } else {
                 println!("plugin '{id}' not found");
@@ -339,25 +339,25 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
         }
 
         PluginAction::Disable { id } => {
-            if db::set_plugin_enabled(&conn, &id, false)? {
+            if db::plugins::set_enabled(&conn, &id, false)? {
                 println!("disabled plugin '{id}'");
             } else {
                 println!("plugin '{id}' not found");
             }
         }
 
-        PluginAction::DataGet { id, key } => match db::get_plugin_data(&conn, &id, &key)? {
+        PluginAction::DataGet { id, key } => match db::plugin_data::get(&conn, &id, &key)? {
             Some(row) => println!("{}", row.value),
             None => println!("(not set)"),
         },
 
         PluginAction::DataSet { id, key, value } => {
-            db::set_plugin_data(&conn, &id, &key, &value)?;
+            db::plugin_data::set(&conn, &id, &key, &value)?;
             println!("set {id}/{key}");
         }
 
         PluginAction::DataList { id } => {
-            let rows = db::list_plugin_data(&conn, &id)?;
+            let rows = db::plugin_data::list(&conn, &id)?;
             if rows.is_empty() {
                 println!("no data for plugin '{id}'");
             } else {
@@ -375,7 +375,7 @@ pub fn cmd_plugin(action: PluginAction) -> Result<()> {
         }
 
         PluginAction::DataDelete { id, key } => {
-            db::delete_plugin_data(&conn, &id, &key)?;
+            db::plugin_data::delete(&conn, &id, &key)?;
             println!("deleted {id}/{key}");
         }
     }

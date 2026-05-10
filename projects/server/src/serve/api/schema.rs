@@ -28,8 +28,8 @@ struct DbConfig {
     domains_file: Option<String>,
 }
 
-impl From<db::SchemaDbRow> for DbConfig {
-    fn from(r: db::SchemaDbRow) -> Self {
+impl From<db::schema_databases::SchemaDbRow> for DbConfig {
+    fn from(r: db::schema_databases::SchemaDbRow) -> Self {
         let default_port = if r.driver == "postgres" { 5432 } else { 3306 };
         DbConfig {
             name: r.name,
@@ -80,7 +80,7 @@ fn load_db_configs() -> Vec<DbConfig> {
     };
 
     // Try DB first
-    if let Ok(rows) = db::list_schema_databases(&conn)
+    if let Ok(rows) = db::schema_databases::list(&conn)
         && !rows.is_empty()
     {
         return rows.into_iter().map(DbConfig::from).collect();
@@ -96,7 +96,7 @@ fn load_db_configs() -> Vec<DbConfig> {
     {
         let dbs = cfg.schema.map(|s| s.databases).unwrap_or_default();
         for d in &dbs {
-            let row = db::SchemaDbRow {
+            let row = db::schema_databases::SchemaDbRow {
                 name: d.name.clone(),
                 driver: "mysql".to_string(),
                 host: if d.host.is_empty() {
@@ -112,7 +112,7 @@ fn load_db_configs() -> Vec<DbConfig> {
                 domains_file: d.domains_file.clone(),
                 enabled: true,
             };
-            let _ = db::upsert_schema_database(&conn, &row);
+            let _ = db::schema_databases::upsert(&conn, &row);
         }
         if !dbs.is_empty() {
             return dbs

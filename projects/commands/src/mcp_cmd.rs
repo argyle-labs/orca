@@ -129,7 +129,7 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
                     "MCP server '{name}' not found in orca.db — add it first with `orca mcp add`"
                 );
             }
-            let row = db::McpToolMappingRow {
+            let row = db::tool_mappings::MappingRow {
                 orca_tool: orca_tool.clone(),
                 mcp_name: name.clone(),
                 external_tool: external_tool.clone(),
@@ -137,14 +137,14 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
                 confidence: None,
                 enabled: true,
             };
-            db::upsert_mcp_tool_mapping(&conn, &row)?;
+            db::tool_mappings::upsert(&conn, &row)?;
             println!("mapped {orca_tool} → {name}::{external_tool}");
             Ok(())
         }
 
         McpAction::Unmap { orca_tool } => {
             let conn = db::open_default()?;
-            let removed = db::remove_mcp_tool_mapping(&conn, &orca_tool)?;
+            let removed = db::tool_mappings::remove(&conn, &orca_tool)?;
             if removed {
                 println!("unmapped {orca_tool}");
             } else {
@@ -187,10 +187,10 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
 
         McpAction::Mappings { name } => {
             let conn = db::open_default()?;
-            let rows: Vec<db::McpToolMappingRow> = if let Some(n) = &name {
-                db::list_mcp_tool_mappings(&conn, n)?
+            let rows: Vec<db::tool_mappings::MappingRow> = if let Some(n) = &name {
+                db::tool_mappings::list(&conn, n)?
             } else {
-                db::all_mcp_tool_mappings(&conn)?
+                db::tool_mappings::all(&conn)?
             };
             if rows.is_empty() {
                 println!("(no mappings)");
@@ -272,7 +272,7 @@ pub fn mcp_sync_server(server: &ServerRow, _threshold: f64) -> anyhow::Result<(u
         anyhow::bail!("no tools returned from {}", server.name);
     }
 
-    let existing = db::list_mcp_tool_mappings(&conn, &server.name)?;
+    let existing = db::tool_mappings::list(&conn, &server.name)?;
     let already_mapped: std::collections::HashSet<String> = existing
         .iter()
         .filter(|r| r.match_type == "explicit")
@@ -290,11 +290,11 @@ pub fn mcp_sync_server(server: &ServerRow, _threshold: f64) -> anyhow::Result<(u
             skipped += 1;
             continue;
         }
-        if let Ok(Some(_)) = db::lookup_mcp_mapping(&conn, ext_name) {
+        if let Ok(Some(_)) = db::tool_mappings::lookup(&conn, ext_name) {
             skipped += 1;
             continue;
         }
-        let row = db::McpToolMappingRow {
+        let row = db::tool_mappings::MappingRow {
             orca_tool: ext_name.to_string(),
             mcp_name: server.name.clone(),
             external_tool: ext_name.to_string(),
@@ -302,7 +302,7 @@ pub fn mcp_sync_server(server: &ServerRow, _threshold: f64) -> anyhow::Result<(u
             confidence: Some(1.0),
             enabled: true,
         };
-        db::upsert_mcp_tool_mapping(&conn, &row)?;
+        db::tool_mappings::upsert(&conn, &row)?;
         added += 1;
     }
     Ok((added, skipped))

@@ -204,7 +204,7 @@ impl OrcaTool for AddSchema {
          Use container OR host/port, not both.";
     type Args = AddSchemaArgs;
     async fn run(args: AddSchemaArgs, _: &ToolCtx) -> Result<String> {
-        let row = db::SchemaDbRow {
+        let row = db::schema_databases::SchemaDbRow {
             name: args.name.clone(),
             driver: "mysql".to_string(),
             host: args.host,
@@ -217,7 +217,7 @@ impl OrcaTool for AddSchema {
             enabled: true,
         };
         let conn = db::open_default()?;
-        db::upsert_schema_database(&conn, &row)?;
+        db::schema_databases::upsert(&conn, &row)?;
         Ok(format!(
             "Registered schema database '{}' in orca.db.",
             args.name
@@ -238,7 +238,7 @@ impl OrcaTool for RemoveSchema {
     type Args = RemoveSchemaArgs;
     async fn run(args: RemoveSchemaArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
-        if db::remove_schema_database(&conn, &args.name)? {
+        if db::schema_databases::remove(&conn, &args.name)? {
             Ok(format!(
                 "Removed schema database '{}' from orca.db.",
                 args.name

@@ -83,7 +83,7 @@ impl OrcaTool for EnablePlugin {
     type Args = PluginIdArgs;
     async fn run(args: PluginIdArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
-        if db::set_plugin_enabled(&conn, &args.id, true)? {
+        if db::plugins::set_enabled(&conn, &args.id, true)? {
             Ok(format!("Plugin '{}' enabled.", args.id))
         } else {
             Ok(format!("Plugin '{}' not found.", args.id))
@@ -99,7 +99,7 @@ impl OrcaTool for DisablePlugin {
     type Args = PluginIdArgs;
     async fn run(args: PluginIdArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
-        if db::set_plugin_enabled(&conn, &args.id, false)? {
+        if db::plugins::set_enabled(&conn, &args.id, false)? {
             Ok(format!("Plugin '{}' disabled.", args.id))
         } else {
             Ok(format!("Plugin '{}' not found.", args.id))
@@ -141,7 +141,7 @@ impl OrcaTool for SetPluginCred {
     type Args = SetPluginCredArgs;
     async fn run(args: SetPluginCredArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
-        db::set_plugin_credential(&conn, &args.plugin, &args.key, &args.value)?;
+        db::plugin_creds::set(&conn, &args.plugin, &args.key, &args.value)?;
         Ok(format!(
             "Stored credential '{}' for plugin '{}'.",
             args.key, args.plugin
@@ -163,7 +163,7 @@ impl OrcaTool for RemovePluginCred {
     type Args = RemovePluginCredArgs;
     async fn run(args: RemovePluginCredArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
-        if db::delete_plugin_credential(&conn, &args.plugin, &args.key)? {
+        if db::plugin_creds::delete(&conn, &args.plugin, &args.key)? {
             Ok(format!(
                 "Removed credential '{}' from plugin '{}'.",
                 args.key, args.plugin

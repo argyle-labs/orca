@@ -67,7 +67,7 @@ fn rebuy_plugin_registered_in_db() {
     }
 
     let conn = db::open(&db_path).expect("failed to open orca.db");
-    let plugins = db::list_plugins(&conn).expect("failed to list plugins");
+    let plugins = db::plugins::list(&conn).expect("failed to list plugins");
 
     let Some(rebuy) = plugins.iter().find(|p| p.id == REBUY_PLUGIN_ID) else {
         eprintln!("skipping: rebuy plugin not found in orca.db — run `orca plugin sync`");

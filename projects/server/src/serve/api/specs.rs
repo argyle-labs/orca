@@ -189,7 +189,7 @@ pub async fn specs_list_handler() -> Response {
 
     // Append DB-registered specs (URL-fetched / MCP-synced)
     if let Ok(conn) = db::open_default() {
-        if let Ok(db_specs) = db::list_openapi_specs(&conn) {
+        if let Ok(db_specs) = db::openapi_specs::list(&conn) {
             let disk_names: std::collections::HashSet<String> = augmented
                 .iter()
                 .filter_map(|e| e["repo"].as_str().map(|s| s.to_string()))
@@ -222,7 +222,7 @@ pub async fn specs_list_handler() -> Response {
         // Append specs from plugin-declared spec directories (e.g. rebuy → ~/code/rebuy/rebuy-docs/docs/gen).
         // No dedup against orca-namespace specs: same filename in two namespaces is intentional —
         // orca's scanner and the plugin's own tooling may both cover the same service.
-        if let Ok(plugins) = db::list_plugins(&conn) {
+        if let Ok(plugins) = db::plugins::list(&conn) {
             for plugin in plugins
                 .iter()
                 .filter(|p| p.specs_dir.is_some() && p.enabled)
@@ -309,13 +309,13 @@ pub async fn specs_get_handler(
     }
     // 2. DB-cached spec (URL-fetched or MCP-synced)
     if let Ok(conn) = db::open_default() {
-        if let Ok(Some(row)) = db::get_openapi_spec(&conn, &repo)
+        if let Ok(Some(row)) = db::openapi_specs::get(&conn, &repo)
             && let Some(raw) = row.spec_json
         {
             return serve_spec(&raw, &repo, &query);
         }
         // 3. Plugin-declared spec dirs
-        if let Ok(plugins) = db::list_plugins(&conn) {
+        if let Ok(plugins) = db::plugins::list(&conn) {
             for plugin in plugins
                 .iter()
                 .filter(|p| p.specs_dir.is_some() && p.enabled)
@@ -587,7 +587,7 @@ pub async fn specs_register_handler(Json(body): Json<SpecRegisterRequest>) -> Re
         Ok(c) => c,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
-    let row = db::OpenApiSpecRow {
+    let row = db::openapi_specs::OpenApiSpecRow {
         name: body.name.clone(),
         url: Some(body.url.clone()),
         source_mcp: None,
@@ -595,7 +595,7 @@ pub async fn specs_register_handler(Json(body): Json<SpecRegisterRequest>) -> Re
         cached_at: Some(cached_at.clone()),
         enabled: true,
     };
-    if let Err(e) = db::upsert_openapi_spec(&conn, &row) {
+    if let Err(e) = db::openapi_specs::upsert(&conn, &row) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
     }
     Json(SpecInfo {
@@ -633,7 +633,7 @@ pub async fn specs_refresh_handler(Path(name): Path<String>) -> Response {
         Ok(c) => c,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
-    let row = match db::get_openapi_spec(&conn, &name) {
+    let row = match db::openapi_specs::get(&conn, &name) {
         Ok(Some(r)) => r,
         Ok(None) => return err(StatusCode::NOT_FOUND, &format!("no spec named '{name}'")),
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -664,7 +664,7 @@ pub async fn specs_refresh_handler(Path(name): Path<String>) -> Response {
     };
     let path_count = spec_json["paths"].as_object().map(|p| p.len() as u32);
     let cached_at = chrono::Utc::now().to_rfc3339();
-    let updated = db::OpenApiSpecRow {
+    let updated = db::openapi_specs::OpenApiSpecRow {
         name: row.name.clone(),
         url: row.url.clone(),
         source_mcp: row.source_mcp.clone(),
@@ -672,7 +672,7 @@ pub async fn specs_refresh_handler(Path(name): Path<String>) -> Response {
         cached_at: Some(cached_at.clone()),
         enabled: row.enabled,
     };
-    if let Err(e) = db::upsert_openapi_spec(&conn, &updated) {
+    if let Err(e) = db::openapi_specs::upsert(&conn, &updated) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
     }
     Json(SpecInfo {
@@ -709,7 +709,7 @@ pub async fn specs_unregister_handler(Path(name): Path<String>) -> Response {
         Ok(c) => c,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
-    match db::remove_openapi_spec(&conn, &name) {
+    match db::openapi_specs::remove(&conn, &name) {
         Ok(true) => Json(OkResponse { ok: true }).into_response(),
         Ok(false) => err(StatusCode::NOT_FOUND, &format!("no spec named '{name}'")),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -823,7 +823,7 @@ pub async fn specs_sync_mcp_handler(
                     errors.push(format!("{repo}: non-JSON schema"));
                     continue;
                 }
-                let row = db::OpenApiSpecRow {
+                let row = db::openapi_specs::OpenApiSpecRow {
                     name: repo.clone(),
                     url: None,
                     source_mcp: Some(prefix.clone()),
@@ -831,7 +831,7 @@ pub async fn specs_sync_mcp_handler(
                     cached_at: Some(chrono::Utc::now().to_rfc3339()),
                     enabled: true,
                 };
-                match db::upsert_openapi_spec(&conn, &row) {
+                match db::openapi_specs::upsert(&conn, &row) {
                     Ok(_) => synced += 1,
                     Err(e) => errors.push(format!("{repo}: db error: {e}")),
                 }
@@ -864,7 +864,7 @@ pub async fn specs_db_list_handler() -> Response {
         Ok(c) => c,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
-    let rows = match db::list_openapi_specs(&conn) {
+    let rows = match db::openapi_specs::list(&conn) {
         Ok(r) => r,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };

@@ -557,7 +557,7 @@ impl McpPool {
             }
             // Enabled plugins that declare an MCP server are auto-federated.
             // Plugin entries take precedence over ~/.claude.json but not over explicit mcp_servers rows.
-            if let Ok(plugins) = db::list_plugins(&conn) {
+            if let Ok(plugins) = db::plugins::list(&conn) {
                 for p in plugins {
                     if !p.enabled {
                         continue;
@@ -577,7 +577,7 @@ impl McpPool {
                     // receives them without requiring the caller to export them manually.
                     let mut env = p.mcp_env;
                     let mut token: Option<String> = None;
-                    if let Ok(creds) = db::list_plugin_credentials(&conn, &p.id) {
+                    if let Ok(creds) = db::plugin_creds::list(&conn, &p.id) {
                         for c in creds {
                             // If this credential matches token_env, use it as Bearer token.
                             if p.mcp_token_env.as_deref() == Some(c.key.as_str()) {
@@ -700,7 +700,7 @@ impl McpPool {
             .db_path
             .as_ref()
             .and_then(|p| db::open(p).ok())
-            .and_then(|conn| db::list_plugins(&conn).ok())
+            .and_then(|conn| db::plugins::list(&conn).ok())
             .unwrap_or_default()
             .into_iter()
             .filter(|p| p.enabled)

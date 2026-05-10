@@ -32,8 +32,8 @@ import (
 	"os"
 	"time"
 
-	"orca/sdk-go/pki"
-	"orca/sdk-go/transport"
+	"github.com/scottdkey/orca/projects/sdk-go/pki"
+	"github.com/scottdkey/orca/projects/sdk-go/transport"
 )
 
 const (

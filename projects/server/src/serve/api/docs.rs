@@ -154,7 +154,7 @@ async fn call_plugin_search_tools(
 ) -> Vec<serde_json::Value> {
     use db;
     let plugins = db::open_default()
-        .and_then(|conn| db::list_plugins(&conn))
+        .and_then(|conn| db::plugins::list(&conn))
         .unwrap_or_default();
 
     let mut out = Vec::new();
