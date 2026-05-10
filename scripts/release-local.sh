@@ -239,10 +239,13 @@ cmd_promote() {
   generate_changelog "$prev" "$stable_tag" "stable"
 
   log "creating GitHub release ${stable_tag}"
+  # List assets explicitly — globs match overlapping sets (orca-* also catches
+  # *.sha256), which produces duplicate uploads and a 404 from gh.
   gh release create "$stable_tag" \
     --title "orca ${stable_tag}" \
     --notes-file /tmp/orca-changelog.md \
-    dist-release/orca-* dist-release/*.sha256
+    "dist-release/${ASSET}" \
+    "dist-release/${ASSET}.sha256"
 
   log "marking ${latest_rc} as superseded"
   local repo; repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)
