@@ -149,4 +149,3 @@ pub async fn docker_action_handler(Json(body): Json<DockerActionRequest>) -> Res
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
-

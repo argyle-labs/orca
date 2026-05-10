@@ -494,8 +494,7 @@ pub struct AddProxmoxEndpoint;
 #[async_trait]
 impl OrcaTool for AddProxmoxEndpoint {
     const NAME: &'static str = "add_proxmox_endpoint";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Register or update a Proxmox VE endpoint in orca.db. \
+    const DESCRIPTION: &'static str = "[MUTATES STATE] Register or update a Proxmox VE endpoint in orca.db. \
          Auth uses an API token (PVEAPIToken header).";
     type Args = AddProxmoxEndpointArgs;
     async fn run(args: AddProxmoxEndpointArgs, _: &ToolCtx) -> Result<String> {

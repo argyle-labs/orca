@@ -38,8 +38,7 @@ pub fn exists(path: &Path) -> bool {
 
 /// Create `path` and all missing ancestors. No-op when already present.
 pub fn mkdir_p(path: &Path) -> Result<()> {
-    std::fs::create_dir_all(path)
-        .with_context(|| format!("mkdir -p {}", path.display()))
+    std::fs::create_dir_all(path).with_context(|| format!("mkdir -p {}", path.display()))
 }
 
 /// Remove `path`. Files are unlinked; directories are removed recursively.

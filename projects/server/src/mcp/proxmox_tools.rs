@@ -12,8 +12,9 @@ use tool::{OrcaTool, ToolCtx};
 
 fn make_client(name: &str) -> Result<Client> {
     let conn = db::open_default()?;
-    let row = db::get_proxmox_endpoint(&conn, name)?
-        .with_context(|| format!("proxmox endpoint '{name}' not registered (use add_proxmox_endpoint)"))?;
+    let row = db::get_proxmox_endpoint(&conn, name)?.with_context(|| {
+        format!("proxmox endpoint '{name}' not registered (use add_proxmox_endpoint)")
+    })?;
     if !row.enabled {
         anyhow::bail!("proxmox endpoint '{name}' is disabled");
     }
@@ -32,8 +33,7 @@ pub struct ProxmoxListNodes;
 #[async_trait]
 impl OrcaTool for ProxmoxListNodes {
     const NAME: &'static str = "proxmox_list_nodes";
-    const DESCRIPTION: &'static str =
-        "List Proxmox VE cluster nodes for a registered endpoint.";
+    const DESCRIPTION: &'static str = "List Proxmox VE cluster nodes for a registered endpoint.";
     type Args = ProxmoxListNodesArgs;
     async fn run(args: ProxmoxListNodesArgs, _: &ToolCtx) -> Result<String> {
         let client = make_client(&args.endpoint)?;
@@ -99,8 +99,7 @@ pub struct ProxmoxVmAction;
 #[async_trait]
 impl OrcaTool for ProxmoxVmAction {
     const NAME: &'static str = "proxmox_vm_action";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Run a lifecycle action on a Proxmox VM (start/stop/shutdown/reboot). \
+    const DESCRIPTION: &'static str = "[MUTATES STATE] Run a lifecycle action on a Proxmox VM (start/stop/shutdown/reboot). \
          Returns the Proxmox UPID for tracking the async task.";
     type Args = ProxmoxVmActionArgs;
     async fn run(args: ProxmoxVmActionArgs, _: &ToolCtx) -> Result<String> {

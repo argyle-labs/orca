@@ -77,8 +77,7 @@ pub fn watch_anyhow(
     recursive: bool,
     buffer: usize,
 ) -> Result<(RecommendedWatcher, mpsc::Receiver<WatchEvent>)> {
-    watch(path, recursive, buffer)
-        .with_context(|| format!("watch {}", path.display()))
+    watch(path, recursive, buffer).with_context(|| format!("watch {}", path.display()))
 }
 
 #[cfg(test)]
@@ -100,10 +99,7 @@ mod tests {
             .expect("no event in 2s")
             .expect("channel closed");
         assert!(
-            matches!(
-                ev.kind,
-                WatchEventKind::Created | WatchEventKind::Modified
-            ),
+            matches!(ev.kind, WatchEventKind::Created | WatchEventKind::Modified),
             "got {:?}",
             ev.kind
         );

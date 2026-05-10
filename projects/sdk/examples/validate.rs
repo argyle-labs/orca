@@ -50,18 +50,40 @@ fn main() -> ExitCode {
         }
     }
 
-    println!("\n{}/{} manifests valid", manifests.len() - failed, manifests.len());
-    if failed > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS }
+    println!(
+        "\n{}/{} manifests valid",
+        manifests.len() - failed,
+        manifests.len()
+    );
+    if failed > 0 {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 fn surfaces_str(s: &orca_sdk::manifest::SurfacesSection) -> String {
     let mut out = Vec::new();
-    if s.mcp { out.push("mcp"); }
-    if s.cli { out.push("cli"); }
-    if s.ui { out.push("ui"); }
-    if s.docs { out.push("docs"); }
-    if s.jobs { out.push("jobs"); }
-    if s.storage { out.push("storage"); }
-    if s.federation { out.push("federation"); }
+    if s.mcp {
+        out.push("mcp");
+    }
+    if s.cli {
+        out.push("cli");
+    }
+    if s.ui {
+        out.push("ui");
+    }
+    if s.docs {
+        out.push("docs");
+    }
+    if s.jobs {
+        out.push("jobs");
+    }
+    if s.storage {
+        out.push("storage");
+    }
+    if s.federation {
+        out.push("federation");
+    }
     out.join(",")
 }
