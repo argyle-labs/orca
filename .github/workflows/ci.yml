@@ -16,6 +16,8 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_INCREMENTAL: 0
+  CARGO_HOME: /home/runner/.cargo
 
 jobs:
   # ── Path-change detector ─────────────────────────────────────────────────
@@ -79,6 +81,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-rust
+          cache-on-failure: true
 
       - name: Format check
         run: cargo fmt --all -- --check
@@ -93,38 +96,19 @@ jobs:
             exit 1
           fi
 
-  build-rust:
-    name: Build Rust
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-rust
-
-      - name: Build workspace + tests
-        run: cargo build --workspace --tests
-
-      - name: Tar target dir
-        run: tar -cf target.tar target/
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: rust-target
-          path: target.tar
-          retention-days: 7
-
   test-rust:
     name: Test Rust
-    needs: build-rust
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
 
       - uses: actions/setup-java@v4
         with:
@@ -147,16 +131,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-rust
+          cache-on-failure: true
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: rust-target
+      - name: Unit + integration tests
+        run: cargo nextest run --workspace --no-fail-fast
 
-      - name: Restore target dir
-        run: tar -xf target.tar
-
-      - name: Unit tests
-        run: cargo test --lib --workspace --no-fail-fast
+      - name: Doctests
+        run: cargo test --doc --workspace --no-fail-fast
 
   # ── TS SDK ───────────────────────────────────────────────────────────────
   build-sdk-ts:
@@ -242,7 +223,7 @@ jobs:
           path: |
             projects/examples/hackernews/dist/
             projects/examples/hackernews/package.json
-            projects/examples/hackernews/node_modules/
+            projects/examples/hackernews/package-lock.json
           retention-days: 7
 
   test-example-hackernews:
@@ -258,6 +239,10 @@ jobs:
         with:
           name: example-hackernews
           path: hackernews/
+
+      - name: Install runtime deps
+        working-directory: hackernews
+        run: npm ci --omit=dev
 
       - name: Smoke test built artifact
         working-directory: hackernews
