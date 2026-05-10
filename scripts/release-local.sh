@@ -28,25 +28,40 @@ require_clean_tree() {
   fi
 }
 
-require_up_to_date() {
-  # Fetch and refuse to release if local main has diverged from origin/main.
-  # Auto-rebasing here would be too magical: a release commit on top of
-  # surprise upstream changes would also include those changes silently.
-  local branch upstream local remote base
+sync_with_origin() {
+  # Fetch + auto-reconcile main with origin/main so the user doesn't have to
+  # manage divergence manually. Behind → pull --rebase. Ahead → leave (push
+  # will send the commits). Diverged → rebase; fail loudly only on conflict.
+  local branch local remote base
   branch=$(git rev-parse --abbrev-ref HEAD)
   [ "$branch" = "main" ] || die "must be on 'main' to release (current: $branch)"
   git fetch --quiet origin main
   local=$(git rev-parse HEAD)
   remote=$(git rev-parse origin/main)
   base=$(git merge-base HEAD origin/main)
+
   if [ "$local" = "$remote" ]; then
     return 0
   elif [ "$local" = "$base" ]; then
-    die "local main is behind origin/main — run: git pull --rebase"
+    log "local behind origin — rebasing"
+    git pull --rebase --autostash origin main
   elif [ "$remote" = "$base" ]; then
-    die "local main is ahead of origin/main — push or rebase first ($((${#local} > 0)) unpushed commit(s))"
+    log "local has $(git rev-list --count origin/main..HEAD) unpushed commit(s) — will push with release"
   else
-    die "local main has diverged from origin/main — reconcile manually"
+    log "local diverged from origin — attempting rebase"
+    git pull --rebase --autostash origin main || die "rebase failed — resolve conflicts and re-run"
+  fi
+}
+
+drop_stale_local_tag() {
+  # If we computed a tag that already exists locally but not on the remote,
+  # it's a leftover from an earlier failed run. Delete + recompute caller-side.
+  local tag="$1"
+  if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null 2>&1; then
+    if ! git ls-remote --tags --exit-code origin "refs/tags/${tag}" >/dev/null 2>&1; then
+      log "dropping stale local tag ${tag} (not on remote — leftover from prior run)"
+      git tag -d "$tag" >/dev/null
+    fi
   fi
 }
 
@@ -183,8 +198,12 @@ cmd_rc() {
   local bump="${1:-}"; [ -n "$bump" ] || die "usage: release-local.sh rc <patch|minor|major>"
   require_tools
   require_clean_tree
-  require_up_to_date
+  sync_with_origin
 
+  read -r STABLE RC PREV < <(compute_rc "$bump")
+  # Recompute after dropping any stale local tag for this RC, in case a prior
+  # run tagged but never pushed.
+  drop_stale_local_tag "v${RC}"
   read -r STABLE RC PREV < <(compute_rc "$bump")
   log "previous stable : $PREV"
   log "next stable     : v$STABLE"
@@ -224,7 +243,7 @@ cmd_promote() {
   if ! git diff --quiet -- "$SERVER_TOML" || ! git diff --cached --quiet -- "$SERVER_TOML"; then
     die "$SERVER_TOML has uncommitted changes — commit or revert first"
   fi
-  require_up_to_date
+  sync_with_origin
 
   git fetch --tags --quiet
   local latest_rc rc_version stable_version stable_tag prev
