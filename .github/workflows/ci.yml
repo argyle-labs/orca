@@ -18,9 +18,56 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # ── Path-change detector ─────────────────────────────────────────────────
+  # Each downstream job gates on the relevant boolean. A change to any
+  # workflow YAML forces every job to run.
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      workflows:               ${{ steps.filter.outputs.workflows }}
+      rust:                    ${{ steps.filter.outputs.rust }}
+      sdk-ts:                  ${{ steps.filter.outputs.sdk-ts }}
+      example-hackernews:      ${{ steps.filter.outputs.example-hackernews }}
+      sdk-go:                  ${{ steps.filter.outputs.sdk-go }}
+      sdk-kotlin:              ${{ steps.filter.outputs.sdk-kotlin }}
+      frontend:                ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          # `rust` includes every SDK source dir because the cargo
+          # workspace's conformance test exercises the Go/TS/Kotlin SDKs;
+          # any SDK change must re-run the rust integration tests.
+          filters: |
+            workflows:
+              - '.github/workflows/**'
+            rust:
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'projects/sdk-go/**'
+              - 'projects/sdk-ts/**'
+              - 'projects/sdk-kotlin/**'
+            sdk-ts:
+              - 'projects/sdk-ts/**'
+            example-hackernews:
+              - 'projects/examples/hackernews/**'
+              - 'projects/sdk-ts/**'
+            sdk-go:
+              - 'projects/sdk-go/**'
+            sdk-kotlin:
+              - 'projects/sdk-kotlin/**'
+            frontend:
+              - 'projects/frontend/**'
+
   # ── Rust ─────────────────────────────────────────────────────────────────
   lint-rust:
     name: Lint Rust
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
