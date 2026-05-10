@@ -114,11 +114,11 @@ jobs:
         working-directory: projects/examples/adguard-home
         run: GOFLAGS=-mod=mod go build ./...
 
-      - name: TS SDK — install + test + typecheck
+      - name: TS SDK — install + test + build
         working-directory: projects/sdk-ts
         run: |
           npm ci
-          npx tsc -p tsconfig.json --noEmit
+          npm run build
           node --test --experimental-strip-types test/*.test.ts
 
       - name: TS example — hackernews build
