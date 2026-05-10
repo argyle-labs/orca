@@ -114,6 +114,9 @@ build_orca_binary() {
 
 generate_changelog() {
   # $1 = previous stable tag, $2 = new tag, $3 = "rc"|"stable", $4 = optional notes
+  # SIGPIPE from `head` closing early kills `git log | grep | head` pipes under
+  # pipefail. Disable for this function — changelog is best-effort anyway.
+  set +o pipefail
   local prev="$1" new="$2" kind="$3" notes="${4:-}"
   local range commits
   if [ "$prev" = "v0.0.0" ]; then range="HEAD"; else range="${prev}..HEAD"; fi
@@ -150,6 +153,7 @@ generate_changelog() {
     printf "**Full diff:** [%s → %s](https://github.com/%s/compare/%s...%s)\n" "$prev" "$new" "$repo" "$prev" "$new"
     printf "\n_Built locally on %s — host target only (%s)._\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TARGET"
   } > /tmp/orca-changelog.md
+  set -o pipefail
 }
 
 cmd_rc() {
