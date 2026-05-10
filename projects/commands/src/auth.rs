@@ -11,7 +11,7 @@ pub fn cmd_login(config: &Config) -> Result<()> {
         println!(
             "{} API key already set: {}",
             "✓".green(),
-            db::mask_key(key).dimmed()
+            db::settings::mask_key(key).dimmed()
         );
         println!("  {}  no", "[1]".dimmed());
         println!("  {}  yes, replace", "[2]".dimmed());
@@ -35,7 +35,7 @@ pub fn cmd_login(config: &Config) -> Result<()> {
     let key = rpassword_or_stdin()?;
     let key = key.trim().to_string();
 
-    if !db::looks_like_anthropic_key(&key) {
+    if !db::settings::looks_like_anthropic_key(&key) {
         eprintln!(
             "{}",
             "key doesn't look right (expected sk-ant-…) — saving anyway".yellow()
@@ -43,7 +43,7 @@ pub fn cmd_login(config: &Config) -> Result<()> {
     }
 
     let conn = db::open_default()?;
-    db::secret_set(&conn, KEY_NAME, &key)?;
+    db::settings::secret_set(&conn, KEY_NAME, &key)?;
     println!("{}", "API key stored in encrypted orca DB.".green());
     println!(
         "{}",
@@ -54,7 +54,7 @@ pub fn cmd_login(config: &Config) -> Result<()> {
 
 pub fn cmd_logout() -> Result<()> {
     let conn = db::open_default()?;
-    let removed = db::secret_delete(&conn, KEY_NAME)?;
+    let removed = db::settings::secret_delete(&conn, KEY_NAME)?;
     if removed {
         println!("{}", "API key removed from orca DB.".green());
     } else {
@@ -69,7 +69,7 @@ pub fn cmd_auth(config: &Config) -> Result<()> {
             println!(
                 "{} Anthropic API key: {}",
                 "✓".green(),
-                db::mask_key(key).dimmed()
+                db::settings::mask_key(key).dimmed()
             );
         }
         None => {

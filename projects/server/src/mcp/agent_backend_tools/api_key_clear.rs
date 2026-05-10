@@ -18,7 +18,7 @@ impl OrcaTool for AgentBackendClearApiKey {
 
     async fn run(_args: Args, _ctx: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
-        let removed = db::secret_delete(&conn, "anthropic_api_key")?;
+        let removed = db::settings::secret_delete(&conn, "anthropic_api_key")?;
         Ok(if removed {
             "removed Anthropic API key from orca DB".to_string()
         } else {

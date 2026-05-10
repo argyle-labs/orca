@@ -18,8 +18,8 @@ impl OrcaTool for AgentBackendApiKeyStatus {
 
     async fn run(_args: Args, _ctx: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
-        match db::secret_get(&conn, "anthropic_api_key")? {
-            Some(k) => Ok(format!("present: {}", db::mask_key(&k))),
+        match db::settings::secret_get(&conn, "anthropic_api_key")? {
+            Some(k) => Ok(format!("present: {}", db::settings::mask_key(&k))),
             None => Ok("absent".to_string()),
         }
     }

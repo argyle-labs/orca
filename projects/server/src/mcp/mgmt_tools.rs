@@ -358,14 +358,14 @@ impl OrcaTool for AddDocRoot {
         "[MUTATES STATE] Register a documentation root directory in orca.db.";
     type Args = AddDocRootArgs;
     async fn run(args: AddDocRootArgs, _: &ToolCtx) -> Result<String> {
-        let row = db::DocRootRow {
+        let row = db::docs::RootRow {
             name: args.name.clone(),
             path: args.path.clone(),
             description: args.description,
             enabled: true,
         };
         let conn = db::open_default()?;
-        db::upsert_doc_root(&conn, &row)?;
+        db::docs::upsert_root(&conn, &row)?;
         Ok(format!(
             "Registered doc root '{}' → {}",
             args.name, args.path
@@ -386,7 +386,7 @@ impl OrcaTool for RemoveDocRoot {
     type Args = RemoveDocRootArgs;
     async fn run(args: RemoveDocRootArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
-        if db::remove_doc_root(&conn, &args.name)? {
+        if db::docs::remove_root(&conn, &args.name)? {
             Ok(format!("Removed doc root '{}'.", args.name))
         } else {
             Ok(format!("Doc root '{}' not found.", args.name))

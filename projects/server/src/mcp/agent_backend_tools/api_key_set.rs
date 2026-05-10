@@ -25,10 +25,10 @@ impl OrcaTool for AgentBackendSetApiKey {
             anyhow::bail!("key must not be empty");
         }
         let conn = db::open_default()?;
-        db::secret_set(&conn, "anthropic_api_key", &args.key)?;
+        db::settings::secret_set(&conn, "anthropic_api_key", &args.key)?;
         Ok(format!(
             "stored Anthropic API key in encrypted orca DB ({})",
-            db::mask_key(&args.key)
+            db::settings::mask_key(&args.key)
         ))
     }
 }

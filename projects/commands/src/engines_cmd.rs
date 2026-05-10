@@ -27,7 +27,7 @@ pub fn cmd_engines(action: EnginesAction) -> Result<()> {
 
     match action {
         EnginesAction::List => {
-            let providers = db::list_llm_providers(&conn)?;
+            let providers = db::llm::list(&conn)?;
             if providers.is_empty() {
                 println!("{}", "no LLM backends registered".dimmed());
                 println!(
@@ -67,12 +67,12 @@ pub fn cmd_engines(action: EnginesAction) -> Result<()> {
                 "ollama" | "lmstudio" => {}
                 other => anyhow::bail!("unknown backend kind '{other}' (want: ollama|lmstudio)"),
             }
-            db::upsert_llm_provider(&conn, &name, &url, &kind)?;
+            db::llm::upsert(&conn, &name, &url, &kind)?;
             println!("registered {} {} ({})", kind.cyan(), name.bold(), url);
         }
 
         EnginesAction::Remove { name } => {
-            if db::remove_llm_provider(&conn, &name)? {
+            if db::llm::remove(&conn, &name)? {
                 println!("removed {}", name.bold());
             } else {
                 anyhow::bail!("no backend named '{name}'");
@@ -80,7 +80,7 @@ pub fn cmd_engines(action: EnginesAction) -> Result<()> {
         }
 
         EnginesAction::Enable { name } => {
-            if db::set_llm_provider_enabled(&conn, &name, true)? {
+            if db::llm::set_enabled(&conn, &name, true)? {
                 println!("{} enabled", name.bold());
             } else {
                 anyhow::bail!("no backend named '{name}'");
@@ -88,7 +88,7 @@ pub fn cmd_engines(action: EnginesAction) -> Result<()> {
         }
 
         EnginesAction::Disable { name } => {
-            if db::set_llm_provider_enabled(&conn, &name, false)? {
+            if db::llm::set_enabled(&conn, &name, false)? {
                 println!("{} disabled", name.bold());
             } else {
                 anyhow::bail!("no backend named '{name}'");

@@ -737,7 +737,7 @@ fn handle_types_declare(
                 .expect("Response serializes");
             }
         };
-        if let Err(e) = db::upsert_plugin_type(
+        if let Err(e) = db::plugin_types::upsert(
             &conn,
             plugin_id,
             &decl.type_name,
@@ -844,7 +844,7 @@ fn handle_tools_declare(
             .expect("Response serializes");
         }
     };
-    if let Err(e) = db::replace_plugin_tools(&mut conn, plugin_id, &rows) {
+    if let Err(e) = db::plugin_tools::replace(&mut conn, plugin_id, &rows) {
         return serde_json::to_value(Response::err(
             id,
             ErrorObject::internal(&format!("replace_plugin_tools {plugin_id}: {e}")),
@@ -900,7 +900,7 @@ fn handle_tools_invoke(
     let fq_name = params.name.clone();
     // Resolve fq_name → (peer_id, bare_tool_name) via DB. The DB is the
     // source of truth for what each plugin has declared via tools.declare.
-    let row = match db::open_default().and_then(|c| db::get_plugin_tool(&c, &fq_name)) {
+    let row = match db::open_default().and_then(|c| db::plugin_tools::get(&c, &fq_name)) {
         Ok(Some(r)) => r,
         Ok(None) => {
             return serde_json::to_value(Response::err(
@@ -1176,7 +1176,7 @@ fn validate_against_declared_schema(
         }
     };
 
-    let row = match db::get_plugin_type(&conn, &value.type_id) {
+    let row = match db::plugin_types::get(&conn, &value.type_id) {
         Ok(Some(r)) => r,
         Ok(None) => return Ok(()), // undeclared → allowed
         Err(e) => {

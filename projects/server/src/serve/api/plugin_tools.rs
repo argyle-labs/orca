@@ -75,7 +75,7 @@ pub async fn plugin_tools_list_handler() -> Response {
 
     db_json(|| {
         let conn = db::open_default()?;
-        let rows = db::list_all_plugin_tools(&conn)?;
+        let rows = db::plugin_tools::list_all(&conn)?;
         let infos = rows
             .into_iter()
             .map(|r| {
@@ -116,9 +116,9 @@ pub async fn plugin_tool_call_handler(
     Json(req): Json<PluginToolCallRequest>,
 ) -> Response {
     // 1. Resolve fq_name → (plugin_id, tool_name) via DB.
-    let row = match (|| -> anyhow::Result<Option<db::PluginToolRow>> {
+    let row = match (|| -> anyhow::Result<Option<db::plugin_tools::PluginToolRow>> {
         let conn = db::open_default()?;
-        db::get_plugin_tool(&conn, &fq_name)
+        db::plugin_tools::get(&conn, &fq_name)
     })() {
         Ok(Some(r)) => r,
         Ok(None) => {

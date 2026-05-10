@@ -273,8 +273,8 @@ pub async fn serve(config: &Config) -> Result<()> {
 const PLUGIN_TOOL_HTTP: &str = "http://127.0.0.1:12000";
 const PLUGIN_TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(35);
 
-fn load_plugin_tool_rows() -> Vec<db::PluginToolRow> {
-    match db::open_default().and_then(|c| db::list_all_plugin_tools(&c)) {
+fn load_plugin_tool_rows() -> Vec<db::plugin_tools::PluginToolRow> {
+    match db::open_default().and_then(|c| db::plugin_tools::list_all(&c)) {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!("[mcp] could not load plugin tools from db: {e}");
@@ -285,7 +285,7 @@ fn load_plugin_tool_rows() -> Vec<db::PluginToolRow> {
 
 fn is_plugin_tool(fq_name: &str) -> bool {
     db::open_default()
-        .and_then(|c| db::get_plugin_tool(&c, fq_name))
+        .and_then(|c| db::plugin_tools::get(&c, fq_name))
         .map(|r| r.is_some())
         .unwrap_or(false)
 }

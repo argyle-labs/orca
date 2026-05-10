@@ -39,7 +39,10 @@ fn migration_key(profile_id: &str) -> String {
 /// Returns the number of agents written this run.
 pub fn migrate_personal_agents_to_profile(conn: &Connection, profile: &Profile) -> Result<usize> {
     let key = migration_key(&profile.id);
-    if matches!(db::get_setting(conn, &key)?.as_deref(), Some("true")) {
+    if matches!(
+        db::settings::get_legacy(conn, &key)?.as_deref(),
+        Some("true")
+    ) {
         return Ok(0);
     }
 
@@ -68,7 +71,7 @@ pub fn migrate_personal_agents_to_profile(conn: &Connection, profile: &Profile) 
         written += 1;
     }
 
-    db::set_setting(conn, &key, "true")?;
+    db::settings::set_legacy(conn, &key, "true")?;
     Ok(written)
 }
 
