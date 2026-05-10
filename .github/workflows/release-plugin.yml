@@ -55,7 +55,7 @@ jobs:
       plugin_dir: ${{ steps.locate.outputs.plugin_dir }}
       language:   ${{ steps.locate.outputs.language }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Locate plugin
         id: locate
@@ -114,7 +114,7 @@ jobs:
       previous:   ${{ steps.bump.outputs.previous }}
       prerelease: ${{ steps.bump.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -181,7 +181,7 @@ jobs:
           - { goos: linux,  goarch: amd64 }
           - { goos: linux,  goarch: arm64 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-go@v5
         with:
@@ -225,7 +225,7 @@ jobs:
           - { os: macos-latest,  target: aarch64-apple-darwin, asset_os: darwin, asset_arch: arm64 }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -276,7 +276,7 @@ jobs:
       (needs.build-rust.result == 'success' || needs.build-rust.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
