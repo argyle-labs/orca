@@ -27,6 +27,7 @@ members = [
     "projects/integrations/dockge",
     "projects/integrations/smb",
     "projects/integrations/docker",
+    "projects/integrations/proxmox",
 ]
 resolver = "2"
 

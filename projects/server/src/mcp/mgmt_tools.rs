@@ -444,6 +444,102 @@ impl OrcaTool for RemoveDocIgnorePattern {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Proxmox Endpoints
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ListProxmoxEndpointsArgs {}
+pub struct ListProxmoxEndpoints;
+#[async_trait]
+impl OrcaTool for ListProxmoxEndpoints {
+    const NAME: &'static str = "list_proxmox_endpoints";
+    const DESCRIPTION: &'static str =
+        "List all Proxmox VE endpoints registered in orca.db (token secrets are redacted).";
+    type Args = ListProxmoxEndpointsArgs;
+    async fn run(_: ListProxmoxEndpointsArgs, _: &ToolCtx) -> Result<String> {
+        let conn = db::open_default()?;
+        let rows = db::list_proxmox_endpoints(&conn)?;
+        let redacted: Vec<_> = rows
+            .into_iter()
+            .map(|r| {
+                serde_json::json!({
+                    "name": r.name,
+                    "base_url": r.base_url,
+                    "token_id": r.token_id,
+                    "token_secret": "***",
+                    "insecure": r.insecure,
+                    "enabled": r.enabled,
+                })
+            })
+            .collect();
+        Ok(serde_json::to_string_pretty(&redacted)?)
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct AddProxmoxEndpointArgs {
+    /// Logical name for this Proxmox endpoint (e.g. "halvor")
+    pub name: String,
+    /// Base URL including scheme + port (e.g. https://pve.lan:8006)
+    pub base_url: String,
+    /// Token ID in `user@realm!tokenid` format
+    pub token_id: String,
+    /// Token secret (UUID); stored as-is, surfaced only when this tool is called
+    pub token_secret: String,
+    /// Skip TLS verification — common for homelab self-signed certs
+    pub insecure: Option<bool>,
+}
+pub struct AddProxmoxEndpoint;
+#[async_trait]
+impl OrcaTool for AddProxmoxEndpoint {
+    const NAME: &'static str = "add_proxmox_endpoint";
+    const DESCRIPTION: &'static str =
+        "[MUTATES STATE] Register or update a Proxmox VE endpoint in orca.db. \
+         Auth uses an API token (PVEAPIToken header).";
+    type Args = AddProxmoxEndpointArgs;
+    async fn run(args: AddProxmoxEndpointArgs, _: &ToolCtx) -> Result<String> {
+        let row = db::ProxmoxEndpointRow {
+            name: args.name.clone(),
+            base_url: args.base_url,
+            token_id: args.token_id,
+            token_secret: args.token_secret,
+            insecure: args.insecure.unwrap_or(false),
+            enabled: true,
+        };
+        let conn = db::open_default()?;
+        db::upsert_proxmox_endpoint(&conn, &row)?;
+        Ok(format!(
+            "Registered Proxmox endpoint '{}' in orca.db.",
+            args.name
+        ))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RemoveProxmoxEndpointArgs {
+    pub name: String,
+}
+pub struct RemoveProxmoxEndpoint;
+#[async_trait]
+impl OrcaTool for RemoveProxmoxEndpoint {
+    const NAME: &'static str = "remove_proxmox_endpoint";
+    const DESCRIPTION: &'static str =
+        "[MUTATES STATE] Remove a Proxmox VE endpoint from orca.db by name.";
+    type Args = RemoveProxmoxEndpointArgs;
+    async fn run(args: RemoveProxmoxEndpointArgs, _: &ToolCtx) -> Result<String> {
+        let conn = db::open_default()?;
+        if db::remove_proxmox_endpoint(&conn, &args.name)? {
+            Ok(format!(
+                "Removed Proxmox endpoint '{}' from orca.db.",
+                args.name
+            ))
+        } else {
+            Ok(format!("Endpoint '{}' not found in orca.db.", args.name))
+        }
+    }
+}
+
 // ── register ──────────────────────────────────────────────────────────────────
 
 pub fn register(reg: &mut tool::ToolRegistry) {
@@ -463,6 +559,10 @@ pub fn register(reg: &mut tool::ToolRegistry) {
         .register::<ListDockerRuntimes>()
         .register::<AddDockerRuntime>()
         .register::<RemoveDockerRuntime>()
+        // Proxmox endpoints
+        .register::<ListProxmoxEndpoints>()
+        .register::<AddProxmoxEndpoint>()
+        .register::<RemoveProxmoxEndpoint>()
         // Doc root registry
         .register::<ListDocRoots>()
         .register::<AddDocRoot>()

@@ -31,35 +31,54 @@ pub async fn run(args: &Value, config: &Config) -> Result<String> {
 
     let resolution = agent_backend::resolve(agent, config)?;
 
-    let forced_model = match resolution {
-        // Local: let Session run the LM Studio probe in resolve_model so we get
-        // an actual loaded model id rather than the empty placeholder.
-        Resolution::Local(_) => None,
-        Resolution::ServerClaude(m) => Some(m),
-        Resolution::DelegateToClaudeCode => {
-            // Server does not call Anthropic. Hand the work back to the caller
-            // (a Claude Code session) as a structured envelope. The caller is
-            // expected to invoke get_agent + Agent(general-purpose) itself.
-            let agent_prompt = crate::mcp::agent_resolve::load_agent_prompt(agent, config)
-                .ok_or_else(|| anyhow::anyhow!("agent not found: {agent}"))?;
-            let envelope = json!({
-                "action": "delegate_to_claude_code",
-                "agent": agent,
-                "agent_prompt": agent_prompt,
-                "task": prompt,
-            });
-            return Ok(serde_json::to_string_pretty(&envelope)?);
+    match resolution {
+        Resolution::Local(_) => {
+            // Try LM Studio first. If anything goes wrong (server unreachable,
+            // no model loaded, mid-call error) fall back to delegating to
+            // Claude Code so the user's task continues instead of dying.
+            match run_session(agent, &full_prompt, config, None).await {
+                Ok(out) => Ok(out),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "agent_backend",
+                        "local run for @{agent} failed ({e:#}); falling back to claude code"
+                    );
+                    delegate_envelope(agent, prompt, config)
+                }
+            }
         }
-    };
+        Resolution::ServerClaude(m) => run_session(agent, &full_prompt, config, Some(m)).await,
+        Resolution::DelegateToClaudeCode => delegate_envelope(agent, prompt, config),
+    }
+}
 
+async fn run_session(
+    _agent: &str,
+    full_prompt: &str,
+    config: &Config,
+    forced_model: Option<config::Model>,
+) -> Result<String> {
     let (sink, buf) = buffer_sink();
     let ctx = ProjectContext::default();
     let mut session =
         Session::new_with_output_and_model(config.clone(), ctx, sink, forced_model).await?;
-    session.one_shot(full_prompt).await?;
-
+    session.one_shot(full_prompt.to_string()).await?;
     let bytes = buf.lock().unwrap_or_else(|e| e.into_inner());
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Build the structured envelope the caller (a Claude Code session) consumes
+/// to run the agent itself via `get_agent` + `Agent(general-purpose)`.
+fn delegate_envelope(agent: &str, prompt: &str, config: &Config) -> Result<String> {
+    let agent_prompt = crate::mcp::agent_resolve::load_agent_prompt(agent, config)
+        .ok_or_else(|| anyhow::anyhow!("agent not found: {agent}"))?;
+    let envelope = json!({
+        "action": "delegate_to_claude_code",
+        "agent": agent,
+        "agent_prompt": agent_prompt,
+        "task": prompt,
+    });
+    Ok(serde_json::to_string_pretty(&envelope)?)
 }
 
 pub fn search_logs(args: &Value, config: &Config) -> Result<String> {

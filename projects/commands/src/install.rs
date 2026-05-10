@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
-use config::{APP_MCP_SERVER, APP_NAME, APP_STATE_DIR};
+use config::{APP_MCP_SERVER, APP_NAME, APP_PKI_DIR, APP_STATE_DIR};
+use orca_sdk::pki;
 use std::path::{Path, PathBuf};
 
 const CLAUDE_MD: &str = include_str!("../../../CLAUDE.md");
@@ -155,6 +156,7 @@ pub fn cmd_install_report() -> InstallReport {
     let mut report = InstallReport::new();
     step_install_binary(&home, &mut report);
     step_vault_dirs(&home, &mut report);
+    step_pki_init(&home, &mut report);
     step_claude_md(&home, &mut report);
     step_claude_agents(&home, &mut report);
     step_memory_symlinks(&home, &mut report);
@@ -222,6 +224,9 @@ pub fn install_status() -> serde_json::Value {
     let claude_md_path = home.join(".claude/CLAUDE.md");
     let vault_dir = home.join(APP_STATE_DIR);
     let agents_link = home.join(".claude/agents");
+    let pki_dir = vault_dir.join(APP_PKI_DIR);
+    let pki_ca = pki::ca_cert_path(&pki_dir);
+    let pki_server = pki::server_cert_path(&pki_dir);
     let mcp_registered = check_mcp_registered();
 
     serde_json::json!({
@@ -240,6 +245,10 @@ pub fn install_status() -> serde_json::Value {
         "agents": {
             "linked": is_symlink(&agents_link),
             "path": agents_link.to_string_lossy(),
+        },
+        "pki": {
+            "initialized": pki_ca.exists() && pki_server.exists(),
+            "path": pki_dir.to_string_lossy(),
         },
         "mcp": {
             "registered": mcp_registered,
@@ -293,6 +302,16 @@ fn step_vault_dirs(home: &Path, report: &mut InstallReport) {
             Ok(_) => report.ok(format!("vault dir: {}", dir.display())),
             Err(e) => report.err(format!("vault dir {}: {e}", dir.display())),
         }
+    }
+}
+
+fn step_pki_init(home: &Path, report: &mut InstallReport) {
+    let pki_dir = home.join(APP_STATE_DIR).join(APP_PKI_DIR);
+    let already = pki::ca_cert_path(&pki_dir).exists() && pki::server_cert_path(&pki_dir).exists();
+    match pki::init(&pki_dir) {
+        Ok(_) if already => report.skip(format!("pki: already initialized at {}", pki_dir.display())),
+        Ok(_) => report.ok(format!("pki: initialized at {}", pki_dir.display())),
+        Err(e) => report.err(format!("pki: init failed: {e}")),
     }
 }
 

@@ -45,15 +45,17 @@ When delegating to Otter, write `Orca: "Otter, ..."` first, then call the Agent 
 
 # Agent Backend Selection
 
-Each `run_agent` invocation routes to one of three backends based on a global setting plus optional per-agent overrides. All routing is **hard-fail** — there is no silent fallback between backends.
+Each `run_agent` invocation routes to one of three backends based on a global setting plus optional per-agent overrides.
 
 ## Modes
 
 | mode     | behavior |
 |----------|----------|
-| `local`  | Always LM Studio. Errors if LM Studio is unreachable or has no chat model loaded. |
+| `local`  | LM Studio first; on failure (unreachable, no chat model loaded, mid-call error) **falls back to delegating to Claude Code** so the caller's task continues. |
 | `claude` | Always Claude. See "Claude path" below. |
-| `hybrid` | Per-agent override; agents with no override default to Claude. |
+| `hybrid` | Per-agent override; agents with no override default to Claude. The Local fallback applies whenever the resolver picks Local. |
+
+**Server-side Anthropic remains hard-fail**: when `use_server_anthropic = true` but no key is configured, that's an error — the user asked for it, configuration is broken.
 
 ## Claude path
 

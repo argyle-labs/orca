@@ -11,6 +11,18 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tool::{ToolCall, ToolDef};
 
+/// Bail if no streamed chunk arrives for this long. Reasoning models can sit
+/// silently producing internal tokens with no visible output; this keeps the
+/// CLI from hanging forever when the server is genuinely stuck (model crashed,
+/// runtime deadlocked) without penalizing legitimate slow generation —
+/// chunks normally arrive ≪1s apart even on heavily-loaded local hardware.
+const STREAM_INACTIVITY: Duration = Duration::from_secs(60);
+
+/// First-chunk hint — emit a dimmed status line if no token has streamed yet
+/// after this delay. Reassures the user the CLI is alive while a reasoning
+/// model warms up its scratchpad.
+const FIRST_CHUNK_HINT_AFTER: Duration = Duration::from_secs(5);
+
 pub struct LMStudioBackend {
     client: Client,
     base_url: String,
@@ -124,7 +136,7 @@ impl ModelBackend for LMStudioBackend {
             bail!("LM Studio error {status}: {text}");
         }
 
-        parse_lmstudio_stream(response, cancel, output).await
+        parse_lmstudio_stream(response, cancel, output, &self.model).await
     }
 }
 
@@ -132,10 +144,13 @@ async fn parse_lmstudio_stream(
     response: reqwest::Response,
     cancel: CancellationToken,
     output: &OutputSink,
+    model_id: &str,
 ) -> Result<BackendResponse> {
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
     let mut result = BackendResponse::default();
+    let mut got_first_chunk = false;
+    let mut hinted_first_chunk_wait = false;
 
     // Reasoning models (deepseek-r1, qwen3-thinking, etc.) emit to
     // `reasoning_content`. We accumulate it separately so it can serve as the
@@ -151,13 +166,31 @@ async fn parse_lmstudio_stream(
                 sink_writeln(output, &format!("{}", "\n[interrupted]".yellow()));
                 break;
             }
-            chunk = stream.next() => {
-                match chunk {
-                    Some(c) => c,
-                    None => break,
+            // First-chunk hint — fires at most once, only while we're still waiting
+            // on the very first byte. Keeps the user informed without polluting
+            // mid-stream output.
+            _ = tokio::time::sleep(FIRST_CHUNK_HINT_AFTER), if !got_first_chunk && !hinted_first_chunk_wait => {
+                sink_writeln(
+                    output,
+                    &format!("{}", format!("  … waiting for first token from {model_id}").dimmed()),
+                );
+                hinted_first_chunk_wait = true;
+                continue;
+            }
+            result = tokio::time::timeout(STREAM_INACTIVITY, stream.next()) => {
+                match result {
+                    Ok(Some(c)) => c,
+                    Ok(None) => break,
+                    Err(_) => bail!(
+                        "lmstudio: no streamed chunk for {}s (model={model_id}) — \
+                         server appears stuck. The model may be in an unbounded \
+                         reasoning loop; try a more specific prompt or switch model.",
+                        STREAM_INACTIVITY.as_secs(),
+                    ),
                 }
             }
         };
+        got_first_chunk = true;
         let chunk = chunk.context("stream error")?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 

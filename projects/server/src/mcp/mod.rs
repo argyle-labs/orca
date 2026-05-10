@@ -12,6 +12,7 @@ mod handlers;
 mod infra_tools;
 mod mgmt_tools;
 mod plugin_tools;
+mod proxmox_tools;
 mod spec_tools;
 mod specs;
 mod tools;
@@ -35,6 +36,7 @@ fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
     infra_tools::register(&mut reg);
     mgmt_tools::register(&mut reg);
     plugin_tools::register(&mut reg);
+    proxmox_tools::register(&mut reg);
     spec_tools::register(&mut reg);
     (reg, ctx)
 }
