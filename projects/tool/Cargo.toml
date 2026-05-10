@@ -7,15 +7,15 @@ edition.workspace = true
 name = "tool"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { workspace = true }
 
 [dependencies]
 # Orca layer 0-1 only — never import orca-core, orca-agents, etc. here
 config = { package = "orca-config", path = "../config" }
 
-async-trait = "0.1"
-schemars    = { version = "1", features = ["derive"] }
-serde       = { version = "1", features = ["derive"] }
-serde_json  = "1"
-anyhow      = "1"
+async-trait = { workspace = true }
+schemars    = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+anyhow      = { workspace = true }
 futures     = "0.3"

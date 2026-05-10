@@ -775,9 +775,13 @@ fn load_or_create_key() -> Result<String> {
         return Ok(key);
     }
 
-    // First run: generate key, write with restricted permissions
+    // First run: generate key, write with restricted permissions.
+    // rand 0.9 moved OsRng's RngCore impl behind TryRngCore.
+    use rand::TryRngCore;
     let mut bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    rand::rngs::OsRng
+        .try_fill_bytes(&mut bytes)
+        .map_err(|e| anyhow::anyhow!("OsRng failure generating db key: {e}"))?;
     let hex: String = bytes.iter().fold(String::new(), |mut s, b| {
         use std::fmt::Write;
         let _ = write!(s, "{b:02x}");

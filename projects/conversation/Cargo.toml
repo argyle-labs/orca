@@ -13,25 +13,26 @@ orca-jobs   = { path = "../jobs" }
 llm         = { package = "orca-llm",     path = "../llm" }
 config      = { package = "orca-config",  path = "../config" }
 db          = { package = "orca-db",      path = "../db" }
+
 # Async
-anyhow      = "1"
-async-trait = "0.1"
-tokio       = { version = "1", features = ["full"] }
-tokio-util  = "0.7"
-futures-util = "0.3"
+anyhow       = { workspace = true }
+async-trait  = { workspace = true }
+tokio        = { workspace = true }
+tokio-util   = { workspace = true }
+futures-util = { workspace = true }
 
 # Serialization
-chrono     = { version = "0.4", features = ["serde"] }
-serde_json = "1"
-uuid       = { version = "1", features = ["v4"] }
+chrono     = { workspace = true }
+serde_json = { workspace = true }
+uuid       = { workspace = true }
 
 # Terminal
-colored         = "3"
-rustyline       = "18"
-crossterm       = { version = "0.29", features = ["event-stream"] }
-ratatui         = "0.30"
-dirs            = "6"
-unicode-width   = "0.2"
+colored       = { workspace = true }
+rustyline     = { workspace = true }
+crossterm     = { workspace = true }
+ratatui       = { workspace = true }
+dirs          = { workspace = true }
+unicode-width = "0.2"
 
 [dev-dependencies]
-tempfile = "3.27.0"
+tempfile = { workspace = true }

@@ -45,6 +45,8 @@ env:
   RUST_BACKTRACE: 1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   CARGO_INCREMENTAL: 0
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
 
 jobs:
   # ── Rust: lint ───────────────────────────────────────────────────────────
@@ -57,6 +59,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+
+      - uses: mozilla-actions/sccache-action@v0.0.6
 
       # Share the linux-gnu build cache so lint reuses dependency artifacts
       # built by the build-rust matrix (lint runs on ubuntu-latest).
@@ -121,6 +125,8 @@ jobs:
       - name: Add cross-compile target
         run: rustup target add ${{ matrix.target }}
 
+      - uses: mozilla-actions/sccache-action@v0.0.6
+
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-rust-${{ matrix.target }}
@@ -177,6 +183,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.6
 
       - uses: taiki-e/install-action@v2
         with:

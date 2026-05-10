@@ -22,7 +22,12 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # sccache requires CARGO_INCREMENTAL=0 to avoid wrapping incremental builds.
   CARGO_INCREMENTAL: 0
+  # Per-source-file compile cache backed by GHA cache; complements Swatinem
+  # (which caches whole target/ + ~/.cargo). Cross-job dedupe across runs.
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
 
 jobs:
   # ── Path-change detector ─────────────────────────────────────────────────
@@ -83,6 +88,8 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - uses: mozilla-actions/sccache-action@v0.0.6
+
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-rust
@@ -110,6 +117,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.6
 
       - uses: taiki-e/install-action@v2
         with:

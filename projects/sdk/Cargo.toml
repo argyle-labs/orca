@@ -14,23 +14,20 @@ edition.workspace = true
 name = "orca_sdk"
 
 [dependencies]
-anyhow     = "1"
-serde      = { version = "1", features = ["derive"] }
-serde_json = "1"
+anyhow     = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
 # Manifest format. The orca-plugin manifest IS part of the contract, so
 # the parser lives here in the SDK alongside the protocol types.
-toml       = "1"
+toml       = { workspace = true }
 
-# Async runtime: net + io-util for TCP streams; sync for Mutex/oneshot/broadcast/mpsc;
-# rt for the background reader task and notification pumps spawned by TcpTransport;
-# process + time for the conformance subprocess runner.
-tokio = { version = "1", features = ["net", "io-util", "sync", "rt", "process", "time", "macros"] }
+tokio    = { workspace = true }
 
 # TLS
-rustls          = { version = "0.23", default-features = false, features = ["ring"] }
-rustls-pki-types = "1"
-rustls-pemfile  = "2"
-tokio-rustls    = { version = "0.26", default-features = false, features = ["ring"] }
+rustls           = { workspace = true }
+rustls-pki-types = { workspace = true }
+rustls-pemfile   = { workspace = true }
+tokio-rustls     = { workspace = true }
 
 # Cert generation (pem + x509-parser required for from_ca_cert_pem)
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
@@ -41,8 +38,8 @@ x509-parser = "0.16"
 
 # Conformance suite uses tempdirs to stage PKI material and the manifest
 # fixture before spawning the candidate plugin binary.
-tempfile = "3"
+tempfile = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
-tokio    = { version = "1", features = ["rt", "macros"] }
+tempfile = { workspace = true }
+tokio    = { workspace = true }

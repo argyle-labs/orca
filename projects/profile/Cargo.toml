@@ -12,11 +12,11 @@ config       = { package = "orca-config", path = "../config" }
 db           = { package = "orca-db",     path = "../db" }
 orca-agents  = { path = "../agents" }
 
-anyhow   = "1"
-thiserror = "2"
-rusqlite = { version = "0.39", features = ["bundled-sqlcipher-vendored-openssl"] }
-uuid     = { version = "1", features = ["v4"] }
-tracing  = "0.1"
+anyhow    = { workspace = true }
+thiserror = { workspace = true }
+rusqlite  = { workspace = true }
+uuid      = { workspace = true }
+tracing   = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }

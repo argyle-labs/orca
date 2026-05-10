@@ -7,7 +7,7 @@ edition.workspace = true
 llm        = { package = "orca-llm",    path = "../llm" }
 config     = { package = "orca-config", path = "../config" }
 tool       = { package = "orca-tool",   path = "../tool" }
-anyhow = "1"
-colored = "3"
-tokio = { version = "1", features = ["full"] }
-tokio-util = "0.7"
+anyhow     = { workspace = true }
+colored    = { workspace = true }
+tokio      = { workspace = true }
+tokio-util = { workspace = true }
