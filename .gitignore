@@ -22,3 +22,4 @@ coverage/
 # Gradle / Kotlin
 .gradle/
 !gradle/wrapper/gradle-wrapper.jar
+dist-release/

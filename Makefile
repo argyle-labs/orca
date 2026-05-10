@@ -1,4 +1,5 @@
-.PHONY: build install install-hooks deploy dev run watch clean check release audit lint format format-check test daemon-install daemon-uninstall kill-dev migrate up down init doctor
+.PHONY: build install install-hooks deploy dev run watch clean check release rc promote audit lint format format-check test daemon-install daemon-uninstall kill-dev migrate up down init doctor \
+  ci release-build release-build-host release-frontend release-sdk-ts release-sdk-kotlin release-checksums release-stage release-publish release-clean
 
 INSTALL_PATH := $(HOME)/.local/bin/orca
 ENV_TPL      := .env.orca.tpl
@@ -169,6 +170,32 @@ test:
 	@cd projects/frontend && npx vitest run
 	@echo "→ cargo test..."
 	@cargo test --manifest-path projects/server/Cargo.toml
+
+# Local release pipeline (used when GitHub Actions minutes are exhausted).
+# Builds host target only (aarch64-apple-darwin) and pushes to GitHub releases.
+# Mirrors .github/workflows/release.yml's RC-then-stable two-step.
+#   make release rc BUMP=patch   — cut + publish RC
+#   make release promote         — promote latest RC to stable
+#
+# Same dispatch pattern as `make migrate up/down/status` above:
+# RC_OR_PROMOTE picks the action from MAKECMDGOALS; `rc`/`promote` are no-op
+# targets that just exist so make doesn't error on the extra goal.
+BUMP ?= patch
+RC_OR_PROMOTE := $(filter rc promote,$(MAKECMDGOALS))
+
+release:
+ifeq ($(RC_OR_PROMOTE),rc)
+	bash scripts/release-local.sh rc $(BUMP)
+else ifeq ($(RC_OR_PROMOTE),promote)
+	bash scripts/release-local.sh promote
+else
+	@echo "usage: make release rc BUMP=patch|minor|major"; \
+	echo "       make release promote"; \
+	exit 1
+endif
+
+rc promote:
+	@: # handled by the release target above
 
 RUST_VERSION := $(shell cat rust-toolchain.toml | grep channel | sed 's/.*"\(.*\)"/\1/')
 NODE_VERSION := $(shell cat .nvmrc | tr -d '[:space:]')
