@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Subcommand;
-use db::{self, DockerRuntimeRow};
+use db::docker_runtimes::RuntimeRow;
 
 #[derive(Subcommand, Debug)]
 pub enum DockerAction {
@@ -28,7 +28,7 @@ pub fn cmd_docker(action: DockerAction) -> Result<()> {
     match action {
         DockerAction::List => {
             let conn = db::open_default()?;
-            let rts = db::list_docker_runtimes(&conn)?;
+            let rts = db::docker_runtimes::list(&conn)?;
             if rts.is_empty() {
                 println!("No Docker runtimes registered. Use `orca docker add` to add one.");
             } else {
@@ -57,7 +57,7 @@ pub fn cmd_docker(action: DockerAction) -> Result<()> {
             if socket.is_none() && host.is_none() && url.is_none() {
                 anyhow::bail!("provide --socket <path>, --host <url>, or --url <http-url>");
             }
-            let row = DockerRuntimeRow {
+            let row = RuntimeRow {
                 name: name.clone(),
                 socket_path: socket,
                 host,
@@ -65,13 +65,13 @@ pub fn cmd_docker(action: DockerAction) -> Result<()> {
                 enabled: true,
             };
             let conn = db::open_default()?;
-            db::upsert_docker_runtime(&conn, &row)?;
+            db::docker_runtimes::upsert(&conn, &row)?;
             println!("added docker runtime '{name}' to orca.db");
             Ok(())
         }
         DockerAction::Remove { name } => {
             let conn = db::open_default()?;
-            if db::remove_docker_runtime(&conn, &name)? {
+            if db::docker_runtimes::remove(&conn, &name)? {
                 println!("removed '{name}'");
             } else {
                 println!("'{name}' not found in orca.db");

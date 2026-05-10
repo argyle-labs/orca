@@ -9,6 +9,7 @@ mod context7;
 mod docs;
 mod docs_tools;
 mod handlers;
+mod homeassistant_tools;
 mod infra_tools;
 mod mgmt_tools;
 mod plugin_tools;
@@ -37,6 +38,7 @@ fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
     mgmt_tools::register(&mut reg);
     plugin_tools::register(&mut reg);
     proxmox_tools::register(&mut reg);
+    homeassistant_tools::register(&mut reg);
     spec_tools::register(&mut reg);
     (reg, ctx)
 }

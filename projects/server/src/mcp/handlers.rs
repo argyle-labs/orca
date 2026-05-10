@@ -254,7 +254,7 @@ pub async fn run_tests(args: &Value) -> Result<String> {
 
 pub fn mcp_list_servers() -> Result<String> {
     let conn = db::open_default()?;
-    let servers = db::list_mcp_servers(&conn)?;
+    let servers = db::mcp_servers::list(&conn)?;
     if servers.is_empty() {
         return Ok("No MCP servers registered in orca.db.".to_string());
     }
@@ -276,7 +276,7 @@ pub fn mcp_map_tool(args: &Value) -> Result<String> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("external_tool required"))?;
     let conn = db::open_default()?;
-    let servers = db::list_mcp_servers(&conn)?;
+    let servers = db::mcp_servers::list(&conn)?;
     if !servers.iter().any(|s| s.name == name) {
         anyhow::bail!(
             "MCP server '{name}' not found in orca.db — register it first with orca_mcp_add"
@@ -314,8 +314,8 @@ pub fn mcp_sync_tools(args: &Value) -> Result<String> {
         anyhow::bail!("provide name or set all=true");
     }
     let conn = db::open_default()?;
-    let servers = db::list_mcp_servers(&conn)?;
-    let targets: Vec<&db::McpServerRow> = if all {
+    let servers = db::mcp_servers::list(&conn)?;
+    let targets: Vec<&db::mcp_servers::ServerRow> = if all {
         servers.iter().collect()
     } else {
         let n = name.expect("name checked above via !all && name.is_none() guard");
@@ -384,7 +384,7 @@ pub fn schema_list_databases() -> Result<String> {
 
 pub fn docker_list_runtimes() -> Result<String> {
     let conn = db::open_default()?;
-    let rts = db::list_docker_runtimes(&conn)?;
+    let rts = db::docker_runtimes::list(&conn)?;
     if rts.is_empty() {
         return Ok("No Docker runtimes registered. Use `orca docker add` or orca_docker_add to register one.".to_string());
     }

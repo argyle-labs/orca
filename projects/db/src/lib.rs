@@ -8,6 +8,10 @@
 //! the bottom of this file, and a migration entry in `MIGRATIONS` if the table was added
 //! to an already-deployed database.
 
+pub mod docker_runtimes;
+pub mod home_assistant;
+pub mod mcp_servers;
+pub mod proxmox;
 pub mod startup;
 
 use anyhow::{Context, Result};
@@ -55,7 +59,7 @@ pub fn reset_schema_init_cache() {
     }
 }
 
-fn expand_tilde(path: &str) -> String {
+pub(crate) fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
         let home = std::env::var("HOME").unwrap_or_default();
         format!("{home}/{rest}")
@@ -64,11 +68,11 @@ fn expand_tilde(path: &str) -> String {
     }
 }
 
-fn to_json_arr<T: serde::Serialize>(v: &T) -> String {
+pub(crate) fn to_json_arr<T: serde::Serialize>(v: &T) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "[]".into())
 }
 
-fn to_json_obj<T: serde::Serialize>(v: &T) -> String {
+pub(crate) fn to_json_obj<T: serde::Serialize>(v: &T) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "{}".into())
 }
 
@@ -455,6 +459,18 @@ static MIGRATIONS: &[Migration] = &[
         );",
         down: Some("DROP TABLE IF EXISTS proxmox_endpoints;"),
     },
+    Migration {
+        version: 23,
+        description: "add homeassistant_endpoints — registered Home Assistant instances with bearer-token auth",
+        up: "CREATE TABLE IF NOT EXISTS homeassistant_endpoints (
+            name       TEXT PRIMARY KEY,
+            base_url   TEXT NOT NULL,
+            token      TEXT NOT NULL,
+            enabled    INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );",
+        down: Some("DROP TABLE IF EXISTS homeassistant_endpoints;"),
+    },
 ];
 
 /// Return the currently applied migration version (0 = baseline, no migrations run).
@@ -647,6 +663,14 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             insecure     INTEGER NOT NULL DEFAULT 0,
             enabled      INTEGER NOT NULL DEFAULT 1,
             created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS homeassistant_endpoints (
+            name       TEXT PRIMARY KEY,
+            base_url   TEXT NOT NULL,
+            token      TEXT NOT NULL,
+            enabled    INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         );
 
         CREATE TABLE IF NOT EXISTS plugins (
@@ -893,77 +917,6 @@ pub fn important_events(conn: &Connection, project: &str, limit: usize) -> Resul
         .map_err(Into::into)
 }
 
-// ── MCP server registry ───────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-pub struct McpServerRow {
-    pub name: String,
-    pub command: String,
-    pub args: Vec<String>,
-    pub env: std::collections::HashMap<String, String>,
-    pub enabled: bool,
-}
-
-pub fn list_mcp_servers(conn: &Connection) -> Result<Vec<McpServerRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT name, command, args, env, enabled FROM mcp_servers WHERE enabled = 1 ORDER BY name",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, i32>(4)?,
-        ))
-    })?;
-    let mut result = Vec::new();
-    for r in rows {
-        let (name, command, args_json, env_json, enabled) = r?;
-        let args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
-        let env: std::collections::HashMap<String, String> =
-            serde_json::from_str(&env_json).unwrap_or_default();
-        result.push(McpServerRow {
-            name,
-            command,
-            args,
-            env,
-            enabled: enabled != 0,
-        });
-    }
-    Ok(result)
-}
-
-pub fn upsert_mcp_server(conn: &Connection, server: &McpServerRow) -> Result<()> {
-    let args_json = to_json_arr(&server.args);
-    let env_json = to_json_obj(&server.env);
-    conn.execute(
-        "INSERT INTO mcp_servers (name, command, args, env, enabled)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(name) DO UPDATE SET
-             command = excluded.command,
-             args    = excluded.args,
-             env     = excluded.env,
-             enabled = excluded.enabled",
-        rusqlite::params![
-            server.name,
-            server.command,
-            args_json,
-            env_json,
-            server.enabled as i32
-        ],
-    )?;
-    Ok(())
-}
-
-pub fn remove_mcp_server(conn: &Connection, name: &str) -> Result<bool> {
-    let n = conn.execute(
-        "DELETE FROM mcp_servers WHERE name = ?1",
-        rusqlite::params![name],
-    )?;
-    Ok(n > 0)
-}
-
 // ── Schema database registry ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -1037,181 +990,6 @@ pub fn upsert_schema_database(conn: &Connection, db: &SchemaDbRow) -> Result<()>
 pub fn remove_schema_database(conn: &Connection, name: &str) -> Result<bool> {
     let n = conn.execute(
         "DELETE FROM schema_databases WHERE name = ?1",
-        rusqlite::params![name],
-    )?;
-    Ok(n > 0)
-}
-
-// ── Docker runtime registry ───────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-pub struct DockerRuntimeRow {
-    pub name: String,
-    /// Path to the unix socket (e.g. `~/.colima/default/docker.sock`)
-    pub socket_path: Option<String>,
-    /// Full DOCKER_HOST URL for TCP remotes (e.g. `tcp://remote:2376`)
-    pub host: Option<String>,
-    /// HTTP URL for web-based orchestrators (Dockge, Portainer, etc.)
-    pub url: Option<String>,
-    pub enabled: bool,
-}
-
-impl DockerRuntimeRow {
-    /// Returns the DOCKER_HOST value to inject into subprocess environments.
-    /// Only applies to socket/tcp runtimes — web-based runtimes (url only) return None.
-    pub fn docker_host(&self) -> Option<String> {
-        if let Some(sock) = &self.socket_path {
-            let expanded = expand_tilde(sock);
-            Some(format!("unix://{expanded}"))
-        } else {
-            self.host.clone()
-        }
-    }
-}
-
-pub fn list_docker_runtimes(conn: &Connection) -> Result<Vec<DockerRuntimeRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT name, socket_path, host, url, enabled FROM docker_runtimes ORDER BY name",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(DockerRuntimeRow {
-            name: row.get(0)?,
-            socket_path: row.get(1)?,
-            host: row.get(2)?,
-            url: row.get(3)?,
-            enabled: row.get::<_, i32>(4)? != 0,
-        })
-    })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(Into::into)
-}
-
-/// Returns the first enabled socket/tcp runtime's DOCKER_HOST value for subprocess injection.
-/// Web-only runtimes (url, no socket_path/host) are skipped.
-pub fn active_docker_host(conn: &Connection) -> Option<String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT socket_path, host FROM docker_runtimes
-             WHERE enabled = 1 AND (socket_path IS NOT NULL OR host IS NOT NULL)
-             ORDER BY name LIMIT 1",
-        )
-        .ok()?;
-    let (socket_path, host) = stmt
-        .query_row([], |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, Option<String>>(1)?,
-            ))
-        })
-        .ok()?;
-    if let Some(sock) = socket_path {
-        Some(format!("unix://{}", expand_tilde(&sock)))
-    } else {
-        host
-    }
-}
-
-pub fn upsert_docker_runtime(conn: &Connection, rt: &DockerRuntimeRow) -> Result<()> {
-    conn.execute(
-        "INSERT INTO docker_runtimes (name, socket_path, host, url, enabled)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(name) DO UPDATE SET
-             socket_path = excluded.socket_path,
-             host        = excluded.host,
-             url         = excluded.url,
-             enabled     = excluded.enabled",
-        rusqlite::params![rt.name, rt.socket_path, rt.host, rt.url, rt.enabled as i32],
-    )?;
-    Ok(())
-}
-
-pub fn remove_docker_runtime(conn: &Connection, name: &str) -> Result<bool> {
-    let n = conn.execute(
-        "DELETE FROM docker_runtimes WHERE name = ?1",
-        rusqlite::params![name],
-    )?;
-    Ok(n > 0)
-}
-
-// ── Proxmox endpoint registry ────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-pub struct ProxmoxEndpointRow {
-    pub name: String,
-    pub base_url: String,
-    pub token_id: String,
-    pub token_secret: String,
-    pub insecure: bool,
-    pub enabled: bool,
-}
-
-pub fn list_proxmox_endpoints(conn: &Connection) -> Result<Vec<ProxmoxEndpointRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT name, base_url, token_id, token_secret, insecure, enabled
-         FROM proxmox_endpoints ORDER BY name",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(ProxmoxEndpointRow {
-            name: row.get(0)?,
-            base_url: row.get(1)?,
-            token_id: row.get(2)?,
-            token_secret: row.get(3)?,
-            insecure: row.get::<_, i32>(4)? != 0,
-            enabled: row.get::<_, i32>(5)? != 0,
-        })
-    })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(Into::into)
-}
-
-pub fn get_proxmox_endpoint(conn: &Connection, name: &str) -> Result<Option<ProxmoxEndpointRow>> {
-    let result = conn.query_row(
-        "SELECT name, base_url, token_id, token_secret, insecure, enabled
-         FROM proxmox_endpoints WHERE name = ?1",
-        rusqlite::params![name],
-        |row| {
-            Ok(ProxmoxEndpointRow {
-                name: row.get(0)?,
-                base_url: row.get(1)?,
-                token_id: row.get(2)?,
-                token_secret: row.get(3)?,
-                insecure: row.get::<_, i32>(4)? != 0,
-                enabled: row.get::<_, i32>(5)? != 0,
-            })
-        },
-    );
-    match result {
-        Ok(row) => Ok(Some(row)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.into()),
-    }
-}
-
-pub fn upsert_proxmox_endpoint(conn: &Connection, ep: &ProxmoxEndpointRow) -> Result<()> {
-    conn.execute(
-        "INSERT INTO proxmox_endpoints (name, base_url, token_id, token_secret, insecure, enabled)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(name) DO UPDATE SET
-             base_url     = excluded.base_url,
-             token_id     = excluded.token_id,
-             token_secret = excluded.token_secret,
-             insecure     = excluded.insecure,
-             enabled      = excluded.enabled",
-        rusqlite::params![
-            ep.name,
-            ep.base_url,
-            ep.token_id,
-            ep.token_secret,
-            ep.insecure as i32,
-            ep.enabled as i32,
-        ],
-    )?;
-    Ok(())
-}
-
-pub fn remove_proxmox_endpoint(conn: &Connection, name: &str) -> Result<bool> {
-    let n = conn.execute(
-        "DELETE FROM proxmox_endpoints WHERE name = ?1",
         rusqlite::params![name],
     )?;
     Ok(n > 0)
@@ -2884,11 +2662,12 @@ pub fn delete_profile_credential(conn: &Connection, profile_id: &str, key: &str)
 }
 
 #[cfg(test)]
-mod registry_tests {
+#[cfg(test)]
+pub(crate) mod testing {
     use super::*;
 
     /// Open an unencrypted in-memory database with full schema + migrations applied.
-    fn test_conn() -> Connection {
+    pub fn test_conn() -> Connection {
         let conn = Connection::open_in_memory().expect("open_in_memory");
         conn.execute_batch("PRAGMA journal_mode = WAL;").ok();
         conn.execute_batch("PRAGMA foreign_keys = ON;").ok();
@@ -2896,6 +2675,12 @@ mod registry_tests {
         run_pending_migrations(&conn).expect("migrations");
         conn
     }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+    use crate::testing::test_conn;
 
     // ── Migrations ────────────────────────────────────────────────────────────
 
@@ -3123,71 +2908,20 @@ mod registry_tests {
         assert!(results[0].important);
     }
 
-    // ── MCP servers ───────────────────────────────────────────────────────────
-
-    #[test]
-    fn mcp_server_crud() {
-        let conn = test_conn();
-        assert!(list_mcp_servers(&conn).unwrap().is_empty());
-
-        let server = McpServerRow {
-            name: "test-mcp".into(),
-            command: "/usr/bin/node".into(),
-            args: vec!["server.js".into()],
-            env: [("PORT".into(), "3000".into())].into(),
-            enabled: true,
-        };
-        upsert_mcp_server(&conn, &server).unwrap();
-
-        let list = list_mcp_servers(&conn).unwrap();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].name, "test-mcp");
-        assert_eq!(list[0].args, vec!["server.js"]);
-        assert_eq!(list[0].env.get("PORT").map(|s| s.as_str()), Some("3000"));
-
-        assert!(remove_mcp_server(&conn, "test-mcp").unwrap());
-        assert!(list_mcp_servers(&conn).unwrap().is_empty());
-        assert!(!remove_mcp_server(&conn, "test-mcp").unwrap());
-    }
-
-    #[test]
-    fn mcp_server_upsert_updates_existing() {
-        let conn = test_conn();
-        let s = McpServerRow {
-            name: "s".into(),
-            command: "cmd1".into(),
-            args: vec![],
-            env: Default::default(),
-            enabled: true,
-        };
-        upsert_mcp_server(&conn, &s).unwrap();
-        let s2 = McpServerRow {
-            name: "s".into(),
-            command: "cmd2".into(),
-            args: vec![],
-            env: Default::default(),
-            enabled: true,
-        };
-        upsert_mcp_server(&conn, &s2).unwrap();
-        let list = list_mcp_servers(&conn).unwrap();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].command, "cmd2");
-    }
-
     // ── MCP tool mappings ─────────────────────────────────────────────────────
 
     #[test]
     fn mcp_tool_mapping_crud() {
         let conn = test_conn();
         // Need a parent MCP server (FK constraint)
-        let server = McpServerRow {
+        let server = mcp_servers::ServerRow {
             name: "mcp".into(),
             command: "cmd".into(),
             args: vec![],
             env: Default::default(),
             enabled: true,
         };
-        upsert_mcp_server(&conn, &server).unwrap();
+        mcp_servers::upsert(&conn, &server).unwrap();
 
         let mapping = McpToolMappingRow {
             orca_tool: "read_file".into(),
@@ -3248,130 +2982,6 @@ mod registry_tests {
 
         assert!(remove_schema_database(&conn, "mydb").unwrap());
         assert!(list_schema_databases(&conn).unwrap().is_empty());
-    }
-
-    // ── Docker runtimes ───────────────────────────────────────────────────────
-
-    #[test]
-    fn proxmox_endpoint_crud() {
-        let conn = test_conn();
-        let ep = ProxmoxEndpointRow {
-            name: "halvor".into(),
-            base_url: "https://pve.lan:8006".into(),
-            token_id: "root@pam!auto".into(),
-            token_secret: "deadbeef-1111-2222-3333-444444444444".into(),
-            insecure: true,
-            enabled: true,
-        };
-        upsert_proxmox_endpoint(&conn, &ep).unwrap();
-
-        let list = list_proxmox_endpoints(&conn).unwrap();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].name, "halvor");
-        assert!(list[0].insecure);
-
-        let got = get_proxmox_endpoint(&conn, "halvor").unwrap().unwrap();
-        assert_eq!(got.token_id, "root@pam!auto");
-
-        // Upsert overwrites
-        let ep2 = ProxmoxEndpointRow {
-            name: "halvor".into(),
-            base_url: "https://new.lan:8006".into(),
-            token_id: "root@pam!auto".into(),
-            token_secret: "rotated-uuid".into(),
-            insecure: false,
-            enabled: true,
-        };
-        upsert_proxmox_endpoint(&conn, &ep2).unwrap();
-        let after = get_proxmox_endpoint(&conn, "halvor").unwrap().unwrap();
-        assert_eq!(after.base_url, "https://new.lan:8006");
-        assert_eq!(after.token_secret, "rotated-uuid");
-        assert!(!after.insecure);
-
-        assert!(remove_proxmox_endpoint(&conn, "halvor").unwrap());
-        assert!(list_proxmox_endpoints(&conn).unwrap().is_empty());
-        assert!(get_proxmox_endpoint(&conn, "halvor").unwrap().is_none());
-    }
-
-    #[test]
-    fn docker_runtime_crud() {
-        let conn = test_conn();
-        let rt = DockerRuntimeRow {
-            name: "colima".into(),
-            socket_path: Some("~/.colima/default/docker.sock".into()),
-            host: None,
-            url: None,
-            enabled: true,
-        };
-        upsert_docker_runtime(&conn, &rt).unwrap();
-
-        let list = list_docker_runtimes(&conn).unwrap();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].name, "colima");
-
-        let docker_host = list[0].docker_host().unwrap();
-        assert!(docker_host.starts_with("unix://"), "got: {docker_host}");
-        assert!(
-            !docker_host.contains('~'),
-            "tilde should be expanded: {docker_host}"
-        );
-
-        assert!(remove_docker_runtime(&conn, "colima").unwrap());
-        assert!(list_docker_runtimes(&conn).unwrap().is_empty());
-    }
-
-    #[test]
-    fn docker_runtime_tcp_host() {
-        let conn = test_conn();
-        let rt = DockerRuntimeRow {
-            name: "remote".into(),
-            socket_path: None,
-            host: Some("tcp://remote:2376".into()),
-            url: None,
-            enabled: true,
-        };
-        upsert_docker_runtime(&conn, &rt).unwrap();
-        let list = list_docker_runtimes(&conn).unwrap();
-        assert_eq!(list[0].docker_host().as_deref(), Some("tcp://remote:2376"));
-    }
-
-    #[test]
-    fn docker_runtime_web_url_no_docker_host() {
-        let rt = DockerRuntimeRow {
-            name: "portainer".into(),
-            socket_path: None,
-            host: None,
-            url: Some("http://portainer:9000".into()),
-            enabled: true,
-        };
-        assert!(
-            rt.docker_host().is_none(),
-            "web-only runtime should return None for docker_host"
-        );
-    }
-
-    #[test]
-    fn active_docker_host_returns_first_socket() {
-        let conn = test_conn();
-        upsert_docker_runtime(
-            &conn,
-            &DockerRuntimeRow {
-                name: "a".into(),
-                socket_path: Some("/var/run/docker.sock".into()),
-                host: None,
-                url: None,
-                enabled: true,
-            },
-        )
-        .unwrap();
-        let host = active_docker_host(&conn).unwrap();
-        assert!(host.starts_with("unix://"));
-    }
-
-    #[test]
-    fn active_docker_host_none_when_empty() {
-        let conn = test_conn();
-        assert!(active_docker_host(&conn).is_none());
     }
 
     // ── OpenAPI specs ─────────────────────────────────────────────────────────

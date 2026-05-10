@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use db::{self, McpServerRow};
+use db::mcp_servers::ServerRow;
 use std::collections::HashMap;
 
 #[derive(Subcommand, Debug)]
@@ -58,7 +58,7 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
     match action {
         McpAction::List => {
             let conn = db::open_default()?;
-            let servers = db::list_mcp_servers(&conn)?;
+            let servers = db::mcp_servers::list(&conn)?;
             if servers.is_empty() {
                 println!("orca.db servers: (none)");
             } else {
@@ -94,7 +94,7 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
                 })
                 .collect();
 
-            let row = McpServerRow {
+            let row = ServerRow {
                 name: name.clone(),
                 command,
                 args,
@@ -102,13 +102,13 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
                 enabled: true,
             };
             let conn = db::open_default()?;
-            db::upsert_mcp_server(&conn, &row)?;
+            db::mcp_servers::upsert(&conn, &row)?;
             println!("added {name} to orca.db");
             Ok(())
         }
         McpAction::Remove { name } => {
             let conn = db::open_default()?;
-            let removed = db::remove_mcp_server(&conn, &name)?;
+            let removed = db::mcp_servers::remove(&conn, &name)?;
             if removed {
                 println!("removed {name}");
             } else {
@@ -123,7 +123,7 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
             external_tool,
         } => {
             let conn = db::open_default()?;
-            let servers = db::list_mcp_servers(&conn)?;
+            let servers = db::mcp_servers::list(&conn)?;
             if !servers.iter().any(|s| s.name == name) {
                 anyhow::bail!(
                     "MCP server '{name}' not found in orca.db — add it first with `orca mcp add`"
@@ -162,8 +162,8 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
                 anyhow::bail!("usage: orca mcp sync <name> | --all");
             }
             let conn = db::open_default()?;
-            let servers = db::list_mcp_servers(&conn)?;
-            let targets: Vec<&McpServerRow> = if all {
+            let servers = db::mcp_servers::list(&conn)?;
+            let targets: Vec<&ServerRow> = if all {
                 servers.iter().collect()
             } else {
                 let n = name.as_deref().expect("name.is_none() rejected above");
@@ -212,10 +212,7 @@ pub fn cmd_mcp(action: McpAction) -> Result<()> {
     }
 }
 
-pub fn mcp_sync_server(
-    server: &db::McpServerRow,
-    _threshold: f64,
-) -> anyhow::Result<(usize, usize)> {
+pub fn mcp_sync_server(server: &ServerRow, _threshold: f64) -> anyhow::Result<(usize, usize)> {
     let conn = db::open_default()?;
     use std::io::{BufRead, BufReader, Write};
     use std::process::{Command, Stdio};

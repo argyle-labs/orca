@@ -152,7 +152,7 @@ fn api_key_creds() -> anyhow::Result<(String, String, String)> {
     // Try MCP server config
     if let Ok(config) = Config::load()
         && let Ok(conn) = db::open(&config.db_path)
-        && let Ok(servers) = db::list_mcp_servers(&conn)
+        && let Ok(servers) = db::mcp_servers::list(&conn)
         && let Some(server) = servers.into_iter().find(|s| s.name == "atlassian")
     {
         let args = &server.args;
