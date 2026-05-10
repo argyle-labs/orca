@@ -182,11 +182,11 @@ fn unescape_octal(s: &str) -> String {
                     _ => break,
                 }
             }
-            if digits.len() == 3 {
-                if let Ok(n) = u8::from_str_radix(&digits, 8) {
-                    out.push(n as char);
-                    continue;
-                }
+            if digits.len() == 3
+                && let Ok(n) = u8::from_str_radix(&digits, 8)
+            {
+                out.push(n as char);
+                continue;
             }
             out.push('\\');
             out.push_str(&digits);
