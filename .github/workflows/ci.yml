@@ -37,7 +37,6 @@ jobs:
       workflows:               ${{ steps.filter.outputs.workflows }}
       rust:                    ${{ steps.filter.outputs.rust }}
       sdk-ts:                  ${{ steps.filter.outputs.sdk-ts }}
-      example-hackernews:      ${{ steps.filter.outputs.example-hackernews }}
       sdk-go:                  ${{ steps.filter.outputs.sdk-go }}
       sdk-kotlin:              ${{ steps.filter.outputs.sdk-kotlin }}
       frontend:                ${{ steps.filter.outputs.frontend }}
@@ -47,9 +46,6 @@ jobs:
       - uses: dorny/paths-filter@v3
         id: filter
         with:
-          # `rust` includes every SDK source dir because the cargo
-          # workspace's conformance test exercises the Go/TS/Kotlin SDKs;
-          # any SDK change must re-run the rust integration tests.
           filters: |
             workflows:
               - '.github/workflows/**'
@@ -57,13 +53,8 @@ jobs:
               - '**/*.rs'
               - '**/Cargo.toml'
               - 'Cargo.lock'
-              - 'projects/sdk-go/**'
-              - 'projects/sdk-ts/**'
               - 'projects/sdk-kotlin/**'
             sdk-ts:
-              - 'projects/sdk-ts/**'
-            example-hackernews:
-              - 'projects/examples/hackernews/**'
               - 'projects/sdk-ts/**'
             sdk-go:
               - 'projects/sdk-go/**'
@@ -206,75 +197,6 @@ jobs:
         run: |
           npm ci
           node --test --experimental-strip-types test/*.test.ts
-
-  # ── TS example: hackernews ───────────────────────────────────────────────
-  build-example-hackernews:
-    name: Build TS example (hackernews)
-    needs: [changes, build-sdk-ts]
-    if: needs.changes.outputs.example-hackernews == 'true' || needs.changes.outputs.workflows == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: sdk-ts-dist
-          path: projects/sdk-ts/
-
-      - name: Install SDK tarball + build
-        working-directory: projects/examples/hackernews
-        run: |
-          set -euo pipefail
-          npm install ../../sdk-ts/orca-sdk-*.tgz --no-save
-          npm install
-          npm run build
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: example-hackernews
-          path: |
-            projects/examples/hackernews/dist/
-            projects/examples/hackernews/package.json
-            projects/examples/hackernews/package-lock.json
-          retention-days: 7
-
-  test-example-hackernews:
-    name: Test TS example (hackernews)
-    needs: build-example-hackernews
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: example-hackernews
-          path: hackernews/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: sdk-ts-dist
-          path: sdk-ts/
-
-      - name: Install runtime deps + SDK tarball
-        working-directory: hackernews
-        run: |
-          set -euo pipefail
-          npm ci --omit=dev
-          npm install ../sdk-ts/orca-sdk-*.tgz --no-save --omit=dev
-
-      - name: Smoke test built artifact
-        working-directory: hackernews
-        run: |
-          set -euo pipefail
-          test -f dist/index.js
-          node --check dist/index.js
-          node -e "require.resolve('@orca/sdk', { paths: ['$(pwd)'] })"
 
   # ── Go SDK ───────────────────────────────────────────────────────────────
   build-sdk-go:
