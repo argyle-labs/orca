@@ -236,17 +236,10 @@ export interface MpcStatus {
   registered: boolean;
 }
 
-export type NodeType = "file" | "dir";
+export type NodeType = 'file' | 'dir';
 
 export interface OkResponse {
   ok: boolean;
-}
-
-export interface PdfQuery {
-  /** merged (default) | zip */
-  output?: string | null;
-  path: string;
-  root: string;
 }
 
 export interface PluginDataEntry {
