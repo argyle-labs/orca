@@ -268,7 +268,7 @@ pub async fn plugin_data_list_handler(Path(id): Path<String>) -> Response {
 pub async fn plugin_data_get_handler(Path((id, key)): Path<(String, String)>) -> Response {
     db_json(|| {
         let conn = db::open_default()?;
-        match db::plugins::get_data(&conn, &id, &key)? {
+        match db::plugin_data::get(&conn, &id, &key)? {
             Some(r) => Ok(PluginDataEntry {
                 key: r.key,
                 value: r.value,

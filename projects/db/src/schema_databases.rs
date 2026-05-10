@@ -103,11 +103,11 @@ mod tests {
         };
         upsert(&conn, &db).unwrap();
 
-        let list = list(&conn).unwrap();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].name, "mydb");
-        assert_eq!(list[0].port, Some(5432));
-        assert_eq!(list[0].driver, "postgres");
+        let rows = list(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "mydb");
+        assert_eq!(rows[0].port, Some(5432));
+        assert_eq!(rows[0].driver, "postgres");
 
         assert!(remove(&conn, "mydb").unwrap());
         assert!(list(&conn).unwrap().is_empty());

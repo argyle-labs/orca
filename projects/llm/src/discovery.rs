@@ -218,7 +218,7 @@ pub async fn discover_all(config: &Config) -> Vec<DiscoveredModel> {
 
     // DB-registered providers override or supplement the env defaults.
     if let Ok(conn) = db::open(&config.db_path)
-        && let Ok(providers) = db::list_llm_providers(&conn)
+        && let Ok(providers) = db::llm::list(&conn)
     {
         for p in providers.into_iter().filter(|p| p.enabled) {
             // If there's already an entry for this URL, skip (dedup).

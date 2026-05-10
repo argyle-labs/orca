@@ -64,7 +64,7 @@ impl Mode {
 /// Read the active mode from the settings table. Defaults to `local`.
 pub fn current_mode() -> Result<Mode> {
     let conn = db::open_default()?;
-    match db::settings_get(&conn, KEY_MODE)? {
+    match db::settings::get(&conn, KEY_MODE)? {
         Some(s) => Mode::parse(&s),
         None => Ok(Mode::Local),
     }
@@ -72,19 +72,19 @@ pub fn current_mode() -> Result<Mode> {
 
 pub fn set_mode(mode: Mode) -> Result<()> {
     let conn = db::open_default()?;
-    db::settings_set(&conn, KEY_MODE, mode.as_str())
+    db::settings::set(&conn, KEY_MODE, mode.as_str())
 }
 
 pub fn use_server_anthropic() -> Result<bool> {
     let conn = db::open_default()?;
-    Ok(db::settings_get(&conn, KEY_USE_SERVER_ANTHROPIC)?
+    Ok(db::settings::get(&conn, KEY_USE_SERVER_ANTHROPIC)?
         .map(|v| v == "true")
         .unwrap_or(false))
 }
 
 pub fn set_use_server_anthropic(enabled: bool) -> Result<()> {
     let conn = db::open_default()?;
-    db::settings_set(
+    db::settings::set(
         &conn,
         KEY_USE_SERVER_ANTHROPIC,
         if enabled { "true" } else { "false" },
@@ -94,7 +94,7 @@ pub fn set_use_server_anthropic(enabled: bool) -> Result<()> {
 /// Per-agent override. Returns `Some("local"|"claude")` if set, else `None`.
 pub fn get_override(agent: &str) -> Result<Option<String>> {
     let conn = db::open_default()?;
-    db::settings_get(&conn, &format!("{KEY_OVERRIDE_PREFIX}{agent}"))
+    db::settings::get(&conn, &format!("{KEY_OVERRIDE_PREFIX}{agent}"))
 }
 
 pub fn set_override(agent: &str, backend: &str) -> Result<()> {
@@ -103,17 +103,17 @@ pub fn set_override(agent: &str, backend: &str) -> Result<()> {
         other => anyhow::bail!("invalid override backend '{other}' (want: local|claude)"),
     }
     let conn = db::open_default()?;
-    db::settings_set(&conn, &format!("{KEY_OVERRIDE_PREFIX}{agent}"), backend)
+    db::settings::set(&conn, &format!("{KEY_OVERRIDE_PREFIX}{agent}"), backend)
 }
 
 pub fn clear_override(agent: &str) -> Result<bool> {
     let conn = db::open_default()?;
-    db::settings_delete(&conn, &format!("{KEY_OVERRIDE_PREFIX}{agent}"))
+    db::settings::delete(&conn, &format!("{KEY_OVERRIDE_PREFIX}{agent}"))
 }
 
 pub fn list_overrides() -> Result<Vec<(String, String)>> {
     let conn = db::open_default()?;
-    let rows = db::settings_list_prefix(&conn, KEY_OVERRIDE_PREFIX)?;
+    let rows = db::settings::list_prefix(&conn, KEY_OVERRIDE_PREFIX)?;
     Ok(rows
         .into_iter()
         .map(|(k, v)| (k.trim_start_matches(KEY_OVERRIDE_PREFIX).to_string(), v))

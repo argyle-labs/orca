@@ -448,7 +448,7 @@ pub fn plugin_creds_list(args: &Value) -> Result<String> {
 
 pub fn doc_list_roots() -> Result<String> {
     let conn = db::open_default()?;
-    let roots = db::list_doc_roots(&conn)?;
+    let roots = db::docs::list_roots(&conn)?;
     if roots.is_empty() {
         return Ok("No doc roots registered. Use add_doc_root to add one.".to_string());
     }
@@ -464,7 +464,7 @@ pub fn doc_list_roots() -> Result<String> {
 
 pub fn doc_list_ignore_patterns() -> Result<String> {
     let conn = db::open_default()?;
-    let patterns = db::list_doc_ignore_patterns(&conn)?;
+    let patterns = db::docs::list_ignore_patterns(&conn)?;
     if patterns.is_empty() {
         return Ok("No ignore patterns registered.".to_string());
     }
@@ -483,7 +483,7 @@ pub fn doc_add_ignore_pattern(args: &Value) -> Result<String> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("pattern required"))?;
     let conn = db::open_default()?;
-    if db::add_doc_ignore_pattern(&conn, pattern)? {
+    if db::docs::add_ignore_pattern(&conn, pattern)? {
         Ok(format!("Added ignore pattern '{pattern}'."))
     } else {
         Ok(format!("Pattern '{pattern}' already exists."))
@@ -495,7 +495,7 @@ pub fn doc_remove_ignore_pattern(args: &Value) -> Result<String> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("pattern required"))?;
     let conn = db::open_default()?;
-    if db::remove_doc_ignore_pattern(&conn, pattern)? {
+    if db::docs::remove_ignore_pattern(&conn, pattern)? {
         Ok(format!("Removed ignore pattern '{pattern}'."))
     } else {
         Ok(format!("Pattern '{pattern}' not found."))

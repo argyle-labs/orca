@@ -22,7 +22,9 @@ pub fn init(config: &Config) {
 /// Returns `None` if the DB can't be opened or no key is stored.
 pub fn load_api_key(config: &Config) -> Option<String> {
     let conn = open(&config.db_path).ok()?;
-    crate::secret_get(&conn, "anthropic_api_key").ok().flatten()
+    crate::settings::secret_get(&conn, "anthropic_api_key")
+        .ok()
+        .flatten()
 }
 
 fn migrate_toml_servers_to_db(toml_path: &std::path::Path, db_path: &std::path::Path) {

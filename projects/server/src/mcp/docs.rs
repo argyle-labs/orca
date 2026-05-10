@@ -20,11 +20,11 @@ pub fn doc_roots(_config: &Config) -> Vec<DocRoot> {
         Ok(c) => c,
         Err(_) => return vec![],
     };
-    let patterns: HashSet<String> = db::list_doc_ignore_patterns(&conn)
+    let patterns: HashSet<String> = db::docs::list_ignore_patterns(&conn)
         .unwrap_or_default()
         .into_iter()
         .collect();
-    let rows = db::list_doc_roots(&conn).unwrap_or_default();
+    let rows = db::docs::list_roots(&conn).unwrap_or_default();
     rows.into_iter()
         .map(|r| DocRoot {
             name: r.name,

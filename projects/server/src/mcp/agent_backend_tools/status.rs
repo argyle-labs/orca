@@ -23,7 +23,7 @@ impl OrcaTool for AgentBackendStatus {
         let use_server = agent_backend::use_server_anthropic()?;
         let overrides = agent_backend::list_overrides()?;
         let conn = db::open_default()?;
-        let key_present = db::secret_get(&conn, "anthropic_api_key")?.is_some();
+        let key_present = db::settings::secret_get(&conn, "anthropic_api_key")?.is_some();
 
         let mut out = String::new();
         out.push_str(&format!("mode: {}\n", mode.as_str()));

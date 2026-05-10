@@ -220,7 +220,7 @@ async fn types_declare_persists_and_returns_accepted() {
 
     // Verify persistence directly via the DB.
     let conn = db::open_default().unwrap();
-    let rows = db::list_plugin_types(&conn, "type-decl").unwrap();
+    let rows = db::plugin_types::list(&conn, "type-decl").unwrap();
     assert_eq!(rows.len(), 2);
     let series = rows.iter().find(|r| r.type_name == "Series").unwrap();
     assert_eq!(series.fq_type_id, "type-decl.Series");
@@ -299,7 +299,7 @@ async fn types_declare_upserts_on_resubmit() {
         .unwrap();
 
     let conn = db::open_default().unwrap();
-    let row = db::get_plugin_type(&conn, "upsert-plug.Thing")
+    let row = db::plugin_types::get(&conn, "upsert-plug.Thing")
         .unwrap()
         .unwrap();
     assert_eq!(row.schema_version, "0.2.0");
@@ -543,7 +543,7 @@ async fn concurrent_calls_demux_routes_each_response_to_its_request() {
 
     // Every type should have landed in the DB exactly once.
     let conn = db::open_default().unwrap();
-    let rows = db::list_plugin_types(&conn, "stress-plug").unwrap();
+    let rows = db::plugin_types::list(&conn, "stress-plug").unwrap();
     assert_eq!(
         rows.len(),
         N,
@@ -1037,7 +1037,7 @@ async fn tools_declare_persists_to_db() {
 
     // Persisted in DB.
     let conn = db::open_default().unwrap();
-    let rows = db::list_plugin_tools(&conn, "tool-plug").unwrap();
+    let rows = db::plugin_tools::list(&conn, "tool-plug").unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].fq_name, "tool-plug.stack.list");
     assert_eq!(rows[1].fq_name, "tool-plug.stack.start");
@@ -1090,7 +1090,7 @@ async fn tools_declare_replaces_previous_set() {
         .unwrap();
 
     let conn = db::open_default().unwrap();
-    let rows = db::list_plugin_tools(&conn, "replacing-plug").unwrap();
+    let rows = db::plugin_tools::list(&conn, "replacing-plug").unwrap();
     let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
     assert_eq!(names, vec!["b", "d"], "replace must drop a + c");
 }
