@@ -113,7 +113,7 @@ fn list(conn: &Connection, mgr: &ProfileManager, me: &str) -> Result<()> {
         );
         return Ok(());
     }
-    let active = db::get_active_profile(conn, me).ok().flatten();
+    let active = db::profiles::get_active(conn, me).ok().flatten();
     println!("{}", "Profiles:".green());
     for p in profiles {
         let marker = if Some(&p.id) == active.as_ref() {
