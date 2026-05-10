@@ -23,86 +23,84 @@ pdf = ["dep:typst", "dep:typst-pdf", "dep:typst-assets", "dep:zip"]
 
 [dependencies]
 # Workspace crates
-orca-sdk      = { path = "../sdk" }
-orca-agents   = { path = "../agents" }
-orca-commands = { path = "../commands" }
-orca-docs     = { path = "../docs" }
-orca-jobs     = { path = "../jobs" }
-orca-scanner  = { path = "../scanner", features = ["php-ast"] }
-llm           = { package = "orca-llm", path = "../llm" }
-config        = { package = "orca-config", path = "../config" }
-db            = { package = "orca-db", path = "../db" }
-orca_fs       = { package = "orca-fs", path = "../fs" }
-orca-docker   = { path = "../integrations/docker" }
-orca-proxmox  = { path = "../integrations/proxmox" }
+orca-sdk           = { path = "../sdk" }
+orca-agents        = { path = "../agents" }
+orca-commands      = { path = "../commands" }
+orca-docs          = { path = "../docs" }
+orca-jobs          = { path = "../jobs" }
+orca-scanner       = { path = "../scanner", features = ["php-ast"] }
+llm                = { package = "orca-llm", path = "../llm" }
+config             = { package = "orca-config", path = "../config" }
+db                 = { package = "orca-db", path = "../db" }
+orca_fs            = { package = "orca-fs", path = "../fs" }
+orca-docker        = { path = "../integrations/docker" }
+orca-proxmox       = { path = "../integrations/proxmox" }
 orca-homeassistant = { path = "../integrations/homeassistant" }
-profile       = { package = "orca-profile", path = "../profile" }
-state         = { package = "orca-state", path = "../state" }
+profile            = { package = "orca-profile", path = "../profile" }
+state              = { package = "orca-state", path = "../state" }
+tool               = { package = "orca-tool", path = "../tool" }
+conversation       = { package = "orca-conversation", path = "../conversation" }
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { workspace = true }
 
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio        = { workspace = true }
+tokio-util   = { workspace = true }
+futures-util = { workspace = true }
 
 # HTTP + streaming
 # rustls-no-provider = no aws-lc; ring is installed as the process-default
 # crypto provider at startup (see main.rs).
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls-no-provider", "form", "query"] }
-futures-util = "0.3"
+reqwest = { workspace = true }
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = "1"
-serde_yaml = "0.9"
+serde      = { workspace = true }
+serde_json = { workspace = true }
+toml       = { workspace = true }
+serde_yaml = { workspace = true }
 
 # Async traits
-async-trait = "0.1"
+async-trait = { workspace = true }
 
 # Schema derivation for OrcaTool impls
-schemars = { version = "1", features = ["derive"] }
+schemars = { workspace = true }
 
 # Runtime JSON-Schema validation: applied to TypedValue payloads on
 # orca/context.publish so declarations from orca/types.declare are enforced.
-jsonschema = { version = "0.30", default-features = false }
-tool    = { package = "orca-tool",    path = "../tool" }
-conversation = { package = "orca-conversation", path = "../conversation" }
+jsonschema = { workspace = true }
 
 # Error handling
-anyhow = "1"
+anyhow = { workspace = true }
 
 # Terminal / readline
-rustyline = "18"
-colored = "3"
-
-# Cancellation
-tokio-util = "0.7"
+rustyline = { workspace = true }
+colored   = { workspace = true }
 
 # Utilities
-dirs = "6"
-uuid = { version = "1", features = ["v4"] }
-chrono = { version = "0.4", features = ["serde"] }
-glob = "0.3"
-regex = "1"
-pulldown-cmark = "0.13"
+dirs           = { workspace = true }
+uuid           = { workspace = true }
+chrono         = { workspace = true }
+glob           = { workspace = true }
+regex          = { workspace = true }
+pulldown-cmark = { workspace = true }
 
 # Web server
-axum = { version = "0.8", features = ["macros", "ws"] }
+axum = { workspace = true }
 # Dev proxy only connects to ws://localhost — no TLS needed here.
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
 tower-http = { version = "0.6", features = ["cors"] }
 http-body-util = "0.1"
 
 # TLS (for plugin host — shared version with rustls already in the tree)
-rustls          = { version = "0.23", default-features = false, features = ["ring"] }
-tokio-rustls    = { version = "0.26", default-features = false, features = ["ring"] }
-rustls-pki-types = "1"
-rustls-pemfile  = "2"
+rustls           = { workspace = true }
+tokio-rustls     = { workspace = true }
+rustls-pki-types = { workspace = true }
+rustls-pemfile   = { workspace = true }
 
 # Optional — only compiled when `--features ui` embeds the frontend dist/
-mime_guess = { version = "2", optional = true }
-rust-embed = { version = "8", optional = true }
+mime_guess = { workspace = true, optional = true }
+rust-embed = { workspace = true, optional = true }
 
 # PDF generation — gated behind `pdf` feature (off by default, ~10 MB).
 typst        = { version = "0.14", optional = true }
@@ -113,22 +111,22 @@ zip          = { version = "8", default-features = false, features = ["deflate"]
 # Database drivers (schema introspection — pure Rust, no CLI dependency)
 mysql_async    = { version = "0.36", default-features = false, features = ["default-rustls-ring"] }
 tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
-rusqlite       = { version = "0.39", features = ["bundled-sqlcipher-vendored-openssl"] }
+rusqlite       = { workspace = true }
 
 # OpenAPI
-utoipa = { version = "5", features = ["axum_extras"] }
+utoipa = { workspace = true }
 utoipa-axum = "0.2"
 
 # TUI
-ratatui = "0.30"
-crossterm = { version = "0.29", features = ["event-stream"] }
+ratatui   = { workspace = true }
+crossterm = { workspace = true }
 
 # Logging (off by default, enabled via ORCA_LOG=debug)
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
-tower = { version = "0.5", features = ["util"] }
-serde_json = "1"
+tempfile   = { workspace = true }
+tower      = { workspace = true }
+serde_json = { workspace = true }
 db = { package = "orca-db", path = "../db" }

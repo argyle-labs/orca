@@ -8,7 +8,7 @@ name = "orca_nfs"
 path = "src/lib.rs"
 
 [dependencies]
-serde     = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
-tokio     = { version = "1", features = ["process", "time", "rt"] }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+tokio      = { workspace = true }

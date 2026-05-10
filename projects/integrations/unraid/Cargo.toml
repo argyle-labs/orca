@@ -10,10 +10,10 @@ path = "src/lib.rs"
 [dependencies]
 orca-graphql = { path = "../../graphql" }
 orca-http    = { path = "../../http" }
-serde        = { version = "1", features = ["derive"] }
-serde_json   = "1"
-thiserror    = "2"
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
 
 [dev-dependencies]
-tokio    = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio    = { workspace = true }
 wiremock = "0.6"

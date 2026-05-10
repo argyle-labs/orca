@@ -8,12 +8,12 @@ name = "orca_git"
 path = "src/lib.rs"
 
 [dependencies]
-anyhow = "1"
+anyhow    = { workspace = true }
+serde     = { workspace = true }
+thiserror = { workspace = true }
 # libgit2 binding. Vendored static link so the orca host binary stays
 # self-contained without an external libgit2.
 git2 = { version = "0.19", default-features = false, features = ["vendored-libgit2", "vendored-openssl"] }
-serde = { version = "1", features = ["derive"] }
-thiserror = "2"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }
