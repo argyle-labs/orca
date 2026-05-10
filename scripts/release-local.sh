@@ -28,6 +28,28 @@ require_clean_tree() {
   fi
 }
 
+require_up_to_date() {
+  # Fetch and refuse to release if local main has diverged from origin/main.
+  # Auto-rebasing here would be too magical: a release commit on top of
+  # surprise upstream changes would also include those changes silently.
+  local branch upstream local remote base
+  branch=$(git rev-parse --abbrev-ref HEAD)
+  [ "$branch" = "main" ] || die "must be on 'main' to release (current: $branch)"
+  git fetch --quiet origin main
+  local=$(git rev-parse HEAD)
+  remote=$(git rev-parse origin/main)
+  base=$(git merge-base HEAD origin/main)
+  if [ "$local" = "$remote" ]; then
+    return 0
+  elif [ "$local" = "$base" ]; then
+    die "local main is behind origin/main — run: git pull --rebase"
+  elif [ "$remote" = "$base" ]; then
+    die "local main is ahead of origin/main — push or rebase first ($((${#local} > 0)) unpushed commit(s))"
+  else
+    die "local main has diverged from origin/main — reconcile manually"
+  fi
+}
+
 require_tools() {
   command -v gh    >/dev/null || die "gh CLI not installed"
   command -v cargo >/dev/null || die "cargo not installed"
@@ -161,6 +183,7 @@ cmd_rc() {
   local bump="${1:-}"; [ -n "$bump" ] || die "usage: release-local.sh rc <patch|minor|major>"
   require_tools
   require_clean_tree
+  require_up_to_date
 
   read -r STABLE RC PREV < <(compute_rc "$bump")
   log "previous stable : $PREV"
@@ -201,6 +224,7 @@ cmd_promote() {
   if ! git diff --quiet -- "$SERVER_TOML" || ! git diff --cached --quiet -- "$SERVER_TOML"; then
     die "$SERVER_TOML has uncommitted changes — commit or revert first"
   fi
+  require_up_to_date
 
   git fetch --tags --quiet
   local latest_rc rc_version stable_version stable_tag prev
