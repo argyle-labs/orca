@@ -132,6 +132,7 @@ generate_changelog() {
       items="$items$(echo "$commits" | grep -i "^${prefix}[:(]" | sed 's/^/- /' || true)"$'\n'
     done
     [ -n "$(echo "$items" | tr -d '[:space:]')" ] && printf "### %s\n%s\n" "$title" "$items"
+    return 0  # empty section is fine — don't trip errexit in caller
   }
 
   {
