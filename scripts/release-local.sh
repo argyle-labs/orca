@@ -195,7 +195,12 @@ cmd_rc() {
 
 cmd_promote() {
   require_tools
-  require_clean_tree
+  # Don't require a fully clean tree — the rc build regenerates frontend
+  # client/types files that are never committed. Just check Cargo.toml is
+  # clean so the version bump applies cleanly.
+  if ! git diff --quiet -- "$SERVER_TOML" || ! git diff --cached --quiet -- "$SERVER_TOML"; then
+    die "$SERVER_TOML has uncommitted changes — commit or revert first"
+  fi
 
   git fetch --tags --quiet
   local latest_rc rc_version stable_version stable_tag prev
