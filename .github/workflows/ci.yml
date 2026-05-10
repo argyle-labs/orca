@@ -17,7 +17,6 @@ env:
   RUST_BACKTRACE: 1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   CARGO_INCREMENTAL: 0
-  CARGO_HOME: /home/runner/.cargo
 
 jobs:
   # ── Path-change detector ─────────────────────────────────────────────────

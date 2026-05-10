@@ -78,7 +78,6 @@ use super::mcp_client::McpPool;
         super::api::GraphqlProxyRequest,
         super::api::ProgressRequest,
         super::api::ProgressResponse,
-        super::api::PdfQuery,
         super::api::SpecRegisterRequest,
         super::api::SpecInfo,
         super::api::PluginInfo,
@@ -119,7 +118,7 @@ static SPEC: OnceLock<utoipa::openapi::OpenApi> = OnceLock::new();
 /// truth — `routes!(handler)` registers the axum route AND the OpenAPI
 /// metadata. Multi-method paths combine handlers in one `routes!()` call.
 pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
-    OpenApiRouter::with_openapi(ApiDoc::openapi())
+    let router = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(api::ping_handler))
         .routes(routes!(api::specs_list_handler))
         .routes(routes!(api::specs_db_list_handler))
@@ -208,8 +207,10 @@ pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
         ))
         .routes(routes!(api::system_status_handler))
         .routes(routes!(api::system_action_handler))
-        .routes(routes!(api::fs_browse_handler))
-        .routes(routes!(api::pdf_handler))
+        .routes(routes!(api::fs_browse_handler));
+    #[cfg(feature = "pdf")]
+    let router = router.routes(routes!(api::pdf_handler));
+    router
 }
 
 pub(super) fn install_spec(mut spec: utoipa::openapi::OpenApi) {

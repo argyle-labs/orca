@@ -444,6 +444,7 @@ pub mod llm;
 pub mod logs;
 pub mod mcp;
 pub mod mcp_mappings;
+#[cfg(feature = "pdf")]
 pub mod pdf;
 pub mod plugin_tools;
 pub mod plugins;
@@ -467,6 +468,7 @@ pub use learning::*;
 pub use logs::*;
 pub use mcp::*;
 pub use mcp_mappings::*;
+#[cfg(feature = "pdf")]
 pub use pdf::*;
 pub use plugin_tools::*;
 pub use plugins::*;
