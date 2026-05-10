@@ -15,7 +15,7 @@ tempfile  = { workspace = true }
 thiserror = { workspace = true }
 tokio     = { workspace = true }
 blake3    = "1"
-notify    = "6"
+notify    = "8"
 
 [dev-dependencies]
 tokio = { workspace = true }

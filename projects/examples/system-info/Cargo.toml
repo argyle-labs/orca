@@ -17,4 +17,4 @@ serde_json = { workspace = true }
 tokio      = { workspace = true }
 rustls     = { workspace = true }
 orca-sdk   = { path = "../../sdk" }
-sysinfo    = "0.33"
+sysinfo    = "0.39"

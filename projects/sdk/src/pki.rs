@@ -11,7 +11,7 @@
 use anyhow::{Context, Result};
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
-    KeyPair, KeyUsagePurpose,
+    Issuer, KeyPair, KeyUsagePurpose,
 };
 use std::path::{Path, PathBuf};
 
@@ -92,6 +92,7 @@ pub fn init(pki_dir: &Path) -> Result<()> {
 
     // CA
     let ca_key = KeyPair::generate()?;
+    let ca_key_pem = ca_key.serialize_pem();
     let mut ca_params = CertificateParams::new(Vec::<String>::new())?;
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
@@ -104,7 +105,10 @@ pub fn init(pki_dir: &Path) -> Result<()> {
     let ca_cert = ca_params.self_signed(&ca_key)?;
 
     write_pem(ca_cert_path(pki_dir), &ca_cert.pem())?;
-    write_pem(ca_key_path(pki_dir), &ca_key.serialize_pem())?;
+    write_pem(ca_key_path(pki_dir), &ca_key_pem)?;
+
+    // rcgen 0.14 split signing into a separate Issuer that owns the key.
+    let issuer = Issuer::new(ca_params, ca_key);
 
     // Server cert
     let server_dir = pki_dir.join("server");
@@ -121,7 +125,7 @@ pub fn init(pki_dir: &Path) -> Result<()> {
         dn.push(DnType::OrganizationalUnitName, "server");
         server_params.distinguished_name = dn;
     }
-    let server_cert = server_params.signed_by(&server_key, &ca_cert, &ca_key)?;
+    let server_cert = server_params.signed_by(&server_key, &issuer)?;
 
     write_pem(server_cert_path(pki_dir), &server_cert.pem())?;
     write_pem(server_key_path(pki_dir), &server_key.serialize_pem())?;
@@ -140,7 +144,7 @@ pub fn issue(pki_dir: &Path, plugin_id: &str, capability: Capability) -> Result<
         .context("CA key not found — run `orca pki init` first")?;
 
     let ca_key = KeyPair::from_pem(&ca_key_pem)?;
-    let ca_cert = CertificateParams::from_ca_cert_pem(&ca_cert_pem)?.self_signed(&ca_key)?;
+    let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key)?;
 
     let dns_san = format!("{plugin_id}.plugin.orca.local");
     let plugin_key = KeyPair::generate()?;
@@ -154,7 +158,7 @@ pub fn issue(pki_dir: &Path, plugin_id: &str, capability: Capability) -> Result<
         dn.push(DnType::OrganizationalUnitName, capability.as_str());
         params.distinguished_name = dn;
     }
-    let plugin_cert = params.signed_by(&plugin_key, &ca_cert, &ca_key)?;
+    let plugin_cert = params.signed_by(&plugin_key, &issuer)?;
 
     // Persist
     let plugin_dir = pki_dir.join(format!("plugins/{plugin_id}"));

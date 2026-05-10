@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use config::APP_NAME;
-use rand::RngCore;
+// rand 0.10: fill_bytes is on the `Rng` trait (was on `RngCore`).
+use rand::Rng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
