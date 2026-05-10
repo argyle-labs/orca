@@ -1,4 +1,4 @@
-.PHONY: build install install-hooks deploy dev run watch clean check release audit lint format format-check test daemon-install daemon-uninstall kill-dev migrate up down
+.PHONY: build install install-hooks deploy dev run watch clean check release audit lint format format-check test daemon-install daemon-uninstall kill-dev migrate up down init doctor
 
 INSTALL_PATH := $(HOME)/.local/bin/orca
 ENV_TPL      := .env.orca.tpl
@@ -11,6 +11,15 @@ export
 # automatically. Local dev: .env.local sets OP_ACCOUNT to the account where brain
 # secrets live (automations vault).
 OP_RUN := op run --account $(OP_ACCOUNT) --env-file $(ENV_TPL) --
+
+# Verify (and install where possible) the build prerequisites for macOS,
+# Arch / CachyOS, and Debian/Ubuntu hosts. CI runners use the workflow's
+# setup actions instead — `make doctor` is the read-only check.
+init:
+	bash scripts/setup.sh
+
+doctor:
+	bash scripts/setup.sh --check
 
 # Build frontend + release binary (single self-contained binary with embedded assets)
 build:
