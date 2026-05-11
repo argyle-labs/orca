@@ -20,9 +20,13 @@ const KEY_OVERRIDE_PREFIX: &str = "agent_backend.override.";
 /// Resolution outcome — what the caller (run_agent) should do.
 #[derive(Debug, Clone)]
 pub enum Resolution {
-    /// Run the agent locally against LM Studio. The model id may be empty —
-    /// the session layer resolves it from /v1/models.
+    /// Run the agent locally against LM Studio. Hard-fail if unavailable — no
+    /// fallback. Emitted in local mode (ignores overrides) or hybrid with a
+    /// local override when the global mode is also local.
     Local(Model),
+    /// Try local first; if that fails, fall through to the claude path.
+    /// Emitted in claude mode when the per-agent override is "local".
+    LocalThenClaude(Model),
     /// Run the agent against the Anthropic API server-side. Only emitted when
     /// `agent_backend.use_server_anthropic = true` AND a key is present in the
     /// config (env or keychain).
@@ -123,7 +127,9 @@ pub fn list_overrides() -> Result<Vec<(String, String)>> {
 /// Decide how to dispatch an agent invocation. Reads from the settings table.
 pub fn resolve(agent: &str, config: &Config) -> Result<Resolution> {
     let mode = current_mode()?;
-    let agent_override = if matches!(mode, Mode::Hybrid) {
+    // Overrides apply in hybrid and claude modes; in local mode the override is
+    // ignored — everything is forced local with hard-fail.
+    let agent_override = if matches!(mode, Mode::Hybrid | Mode::Claude) {
         get_override(agent)?
     } else {
         None
@@ -135,37 +141,46 @@ pub fn resolve(agent: &str, config: &Config) -> Result<Resolution> {
 /// Pure dispatch logic — no I/O. Exposed for tests.
 ///
 /// Decision tree:
-///   1. mode = local    → Local
-///   2. mode = claude   → Claude path (server or delegate)
-///   3. mode = hybrid   → check override; default (no override) is Claude
+///   local mode  → Local (hard-fail; overrides ignored)
+///   claude mode → check override:
+///                   "local"  → LocalThenClaude (try local, fall back to claude)
+///                   "claude" → Claude path
+///                   none     → Claude path
+///   hybrid mode → check override:
+///                   "local"  → Local (hard-fail)
+///                   "claude" → Claude path
+///                   none     → Claude path (default)
 ///
-/// Claude path: if `use_server_anthropic = true` AND a key is configured,
-/// returns ServerClaude. Otherwise DelegateToClaudeCode. No silent fallback —
-/// if the user opts into server-side and no key is present, that's an error.
+/// Claude path: ServerClaude if use_server_anthropic=true + key present,
+/// else DelegateToClaudeCode.
 pub fn decide(
     mode: Mode,
     agent_override: Option<&str>,
     use_server: bool,
     config: &Config,
 ) -> Result<Resolution> {
-    let want_claude = match mode {
-        Mode::Local => false,
-        Mode::Claude => true,
-        Mode::Hybrid => match agent_override {
-            Some("local") => false,
-            Some("claude") => true,
-            None => true, // default: Claude
-            Some(other) => anyhow::bail!("invalid override value: {other} (want: local|claude)"),
-        },
+    let local_model = || Model::LMStudio {
+        id: String::new(),
+        url: String::new(),
     };
 
-    if !want_claude {
-        // Empty model ID — session layer will discover the best available local model
-        // (LM Studio or Ollama) at runtime.
-        return Ok(Resolution::Local(Model::LMStudio {
-            id: String::new(),
-            url: String::new(),
-        }));
+    match mode {
+        Mode::Local => return Ok(Resolution::Local(local_model())),
+
+        Mode::Claude => {
+            if agent_override == Some("local") {
+                return Ok(Resolution::LocalThenClaude(local_model()));
+            }
+            if let Some(other) = agent_override.filter(|&s| s != "claude") {
+                anyhow::bail!("invalid override value: {other} (want: local|claude)");
+            }
+        }
+
+        Mode::Hybrid => match agent_override {
+            Some("local") => return Ok(Resolution::Local(local_model())),
+            Some("claude") | None => {}
+            Some(other) => anyhow::bail!("invalid override value: {other} (want: local|claude)"),
+        },
     }
 
     if use_server {
@@ -260,21 +275,22 @@ mod tests {
     }
 
     #[test]
-    fn local_mode_always_local() {
+    fn local_mode_always_local_ignores_overrides() {
         let r = decide(Mode::Local, None, false, &cfg_with_key(None)).unwrap();
         assert!(matches!(r, Resolution::Local(_)));
+        // override is ignored in local mode
         let r = decide(Mode::Local, Some("claude"), true, &cfg_with_key(Some("k"))).unwrap();
         assert!(matches!(r, Resolution::Local(_)));
     }
 
     #[test]
-    fn claude_mode_delegates_when_server_disabled() {
+    fn claude_mode_no_override_delegates_when_server_disabled() {
         let r = decide(Mode::Claude, None, false, &cfg_with_key(Some("k"))).unwrap();
         assert!(matches!(r, Resolution::DelegateToClaudeCode));
     }
 
     #[test]
-    fn claude_mode_server_with_key_returns_server_claude() {
+    fn claude_mode_no_override_server_with_key_returns_server_claude() {
         let r = decide(Mode::Claude, None, true, &cfg_with_key(Some("k"))).unwrap();
         assert!(matches!(r, Resolution::ServerClaude(_)));
     }
@@ -286,13 +302,25 @@ mod tests {
     }
 
     #[test]
+    fn claude_mode_local_override_returns_local_then_claude() {
+        let r = decide(Mode::Claude, Some("local"), false, &cfg_with_key(None)).unwrap();
+        assert!(matches!(r, Resolution::LocalThenClaude(_)));
+    }
+
+    #[test]
+    fn claude_mode_claude_override_routes_to_claude_path() {
+        let r = decide(Mode::Claude, Some("claude"), false, &cfg_with_key(None)).unwrap();
+        assert!(matches!(r, Resolution::DelegateToClaudeCode));
+    }
+
+    #[test]
     fn hybrid_no_override_defaults_to_claude_path() {
         let r = decide(Mode::Hybrid, None, false, &cfg_with_key(None)).unwrap();
         assert!(matches!(r, Resolution::DelegateToClaudeCode));
     }
 
     #[test]
-    fn hybrid_local_override_routes_local() {
+    fn hybrid_local_override_routes_local_hard_fail() {
         let r = decide(Mode::Hybrid, Some("local"), true, &cfg_with_key(Some("k"))).unwrap();
         assert!(matches!(r, Resolution::Local(_)));
     }

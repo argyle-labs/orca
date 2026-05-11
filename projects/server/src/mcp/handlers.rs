@@ -24,15 +24,18 @@ pub async fn run(args: &Value, config: &Config) -> Result<String> {
 
     match resolution {
         Resolution::Local(_) => {
-            // Try LM Studio first. If anything goes wrong (server unreachable,
-            // no model loaded, mid-call error) fall back to delegating to
-            // Claude Code so the user's task continues instead of dying.
+            // Hard-fail — local mode never falls back to Claude.
+            run_session(agent, &full_prompt, config, None).await
+        }
+        Resolution::LocalThenClaude(_) => {
+            // Claude mode with a local override: try local first, fall back to
+            // the Claude path (delegate or server) if local is unavailable.
             match run_session(agent, &full_prompt, config, None).await {
                 Ok(out) => Ok(out),
                 Err(e) => {
-                    tracing::warn!(
+                    tracing::info!(
                         target: "agent_backend",
-                        "local run for @{agent} failed ({e:#}); falling back to claude code"
+                        "local run for @{agent} failed ({e:#}); falling back to claude (claude mode)"
                     );
                     delegate_envelope(agent, prompt, config)
                 }
