@@ -57,13 +57,32 @@ cleanup() {
   _CLEANUP_DONE=1
   echo ""
   echo "  stopping dev session..."
-  trap '' TERM
-  [[ -n "${_SERVER_PID:-}" ]]   && kill -- -"$_SERVER_PID"   2>/dev/null || true
-  [[ -n "${_FRONTEND_PID:-}" ]] && kill -- -"$_FRONTEND_PID" 2>/dev/null || true
-  sleep 0.3
-  [[ -n "${_SERVER_PID:-}" ]]   && kill -KILL -- -"$_SERVER_PID"   2>/dev/null || true
-  [[ -n "${_FRONTEND_PID:-}" ]] && kill -KILL -- -"$_FRONTEND_PID" 2>/dev/null || true
-  start_system_daemon
+  trap '' TERM INT
+  # With `set -m`, each `&`-backgrounded pipeline becomes its own job with its
+  # own pgid. `$!` captures the PID of the pipeline's last command (sed), but
+  # the pgid equals the first command (cargo-watch / npm). So address the jobs
+  # by job-spec, which kills the whole pgid regardless of which PID we saw.
+  local jobs
+  jobs=$(jobs -p)
+  for jspec in %1 %2 %3 %4; do
+    kill -TERM "$jspec" 2>/dev/null || true
+  done
+  # Also fall back to direct PIDs in case set -m didn't take or jobs are gone.
+  for pid in $jobs; do
+    kill -TERM "$pid"        2>/dev/null || true
+    kill -TERM -- "-$pid"    2>/dev/null || true
+  done
+  sleep 0.4
+  for jspec in %1 %2 %3 %4; do
+    kill -KILL "$jspec" 2>/dev/null || true
+  done
+  for pid in $jobs; do
+    kill -KILL "$pid"        2>/dev/null || true
+    kill -KILL -- "-$pid"    2>/dev/null || true
+  done
+  # Reload launchd daemon in the background so a slow launchctl can't hang exit.
+  ( start_system_daemon ) &
+  disown 2>/dev/null || true
 }
 trap 'cleanup; exit 0' INT TERM
 
@@ -98,7 +117,7 @@ echo ""
 # the whole process group.
 ORCA_LOG=info,orca=debug,hyper=warn,mio=warn,h2=warn,reqwest=warn,rustls=warn,tower_http=warn cargo watch -q -c -C projects/server \
   -w src -w Cargo.toml \
-  -x build \
+  -x 'build --features ui' \
   -s 'while true; do ORCA_LOG=info,orca=debug,hyper=warn,mio=warn,h2=warn,reqwest=warn,rustls=warn,tower_http=warn ../../target/debug/orca serve --dev; echo "  [server exited — respawning in 1s]"; sleep 1; done' 2>&1 | \
   sed 's/^/[server]   /' &
 _SERVER_PID=$!
