@@ -1,7 +1,7 @@
 //! Management tools: MCP server registry, schema databases, Docker runtimes, doc roots.
 use anyhow::Result;
 use async_trait::async_trait;
-use orca_utils::tool::{OrcaTool, ToolCtx};
+use orca_utils::tool::{OrcaTool, OrcaToolDef, ToolCtx};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::collections::HashMap;

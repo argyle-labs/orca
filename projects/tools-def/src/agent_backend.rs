@@ -70,6 +70,124 @@ impl OrcaToolDef for AgentBackendSetApiKey {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct StatusArgs {}
 
+// ── agent_backend_set_mode ──────────────────────────────────────────────────
+
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SetModeArgs {
+    /// "local" | "claude" | "hybrid"
+    pub mode: String,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SetModeResult {
+    pub mode: String,
+}
+
+pub struct AgentBackendSetMode;
+impl OrcaToolDef for AgentBackendSetMode {
+    const NAME: &'static str = "agent_backend_set_mode";
+    const DESCRIPTION: &'static str = "[MUTATES STATE] Set the global agent backend mode. \
+         local = always LM Studio. claude = always route to Claude (server-side if enabled, \
+         else delegate to caller). hybrid = check per-agent override; default is Claude \
+         when no override is set.";
+    type Args = SetModeArgs;
+    type Output = SetModeResult;
+}
+
+// ── agent_backend_override ──────────────────────────────────────────────────
+
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct OverrideArgs {
+    pub agent: String,
+    /// "local" | "claude" | "clear" (clear removes the override)
+    pub backend: String,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct OverrideResult {
+    pub agent: String,
+    /// Resulting backend, or "none" after clear.
+    pub backend: String,
+    pub cleared: bool,
+}
+
+pub struct AgentBackendOverride;
+impl OrcaToolDef for AgentBackendOverride {
+    const NAME: &'static str = "agent_backend_override";
+    const DESCRIPTION: &'static str = "[MUTATES STATE] Set, change, or clear a per-agent backend override \
+         (only consulted in hybrid mode). backend=clear deletes the override.";
+    type Args = OverrideArgs;
+    type Output = OverrideResult;
+}
+
+// ── agent_backend_use_server_anthropic ──────────────────────────────────────
+
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct UseServerAnthropicArgs {
+    pub enabled: bool,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct UseServerAnthropicResult {
+    pub enabled: bool,
+}
+
+pub struct AgentBackendUseServerAnthropic;
+impl OrcaToolDef for AgentBackendUseServerAnthropic {
+    const NAME: &'static str = "agent_backend_use_server_anthropic";
+    const DESCRIPTION: &'static str = "[MUTATES STATE] Toggle whether the orca server makes Anthropic API calls directly \
+         when the resolver picks Claude. When false (default), Claude-routed agents return \
+         a delegate-to-claude-code envelope instead. Requires a stored API key when true.";
+    type Args = UseServerAnthropicArgs;
+    type Output = UseServerAnthropicResult;
+}
+
+// ── agent_backend_status ────────────────────────────────────────────────────
+
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct AgentBackendStatusArgs {}
+
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct AgentBackendOverrideEntry {
+    pub agent: String,
+    pub backend: String,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct AgentBackendStatusOutput {
+    pub mode: String,
+    pub use_server_anthropic: bool,
+    pub api_key_in_db: bool,
+    pub overrides: Vec<AgentBackendOverrideEntry>,
+}
+
+pub struct AgentBackendStatus;
+impl OrcaToolDef for AgentBackendStatus {
+    const NAME: &'static str = "agent_backend_status";
+    const DESCRIPTION: &'static str = "Show the current agent backend configuration: mode (local|claude|hybrid), \
+         per-agent overrides, and whether server-side Anthropic calls are enabled.";
+    type Args = AgentBackendStatusArgs;
+    type Output = AgentBackendStatusOutput;
+}
+
 pub struct AgentBackendApiKeyStatus;
 impl OrcaToolDef for AgentBackendApiKeyStatus {
     const NAME: &'static str = "agent_backend_api_key_status";
