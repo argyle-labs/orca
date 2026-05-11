@@ -325,7 +325,7 @@ pub struct DockerRuntimeAddRequest {
     pub url: Option<String>,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct LlmProviderInfo {
     pub name: String,
     pub url: String,
@@ -436,6 +436,7 @@ pub mod docker;
 pub mod docker_registry;
 pub mod docs;
 pub mod download;
+pub mod engine;
 pub mod fs;
 pub mod github;
 pub mod health;
@@ -461,6 +462,7 @@ pub use docker::*;
 pub use docker_registry::*;
 pub use docs::*;
 pub use download::*;
+pub use engine::*;
 pub use fs::*;
 pub use github::*;
 pub use health::*;

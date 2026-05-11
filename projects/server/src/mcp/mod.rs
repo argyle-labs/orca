@@ -8,6 +8,7 @@ mod agent_tools;
 mod context7;
 mod docs;
 mod docs_tools;
+pub mod engine_tools;
 mod handlers;
 mod homeassistant_tools;
 mod infra_tools;
@@ -34,6 +35,7 @@ fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
     agent_backend_tools::register(&mut reg);
     agent_tools::register(&mut reg);
     docs_tools::register(&mut reg);
+    engine_tools::register(&mut reg);
     infra_tools::register(&mut reg);
     mgmt_tools::register(&mut reg);
     plugin_tools::register(&mut reg);

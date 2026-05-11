@@ -149,6 +149,10 @@ pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
             api::docker_runtimes_add_handler
         ))
         .routes(routes!(api::docker_runtimes_remove_handler))
+        .routes(routes!(api::engines_list_handler, api::engines_add_handler))
+        .routes(routes!(api::engines_remove_handler))
+        .routes(routes!(api::engines_enable_handler))
+        .routes(routes!(api::engines_disable_handler))
         .routes(routes!(api::docker_engine_handler))
         .routes(routes!(api::docker_engine_start_handler))
         .routes(routes!(api::docker_services_handler))
