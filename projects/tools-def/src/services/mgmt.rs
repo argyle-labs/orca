@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use serde_json::Value;
 use std::collections::HashMap;
 
 // ── MCP servers + tool mappings ─────────────────────────────────────────────
@@ -43,6 +44,17 @@ pub struct SyncToolsServerResult {
     pub error: Option<String>,
 }
 
+/// Live tool description from a federated MCP server. Returned by
+/// `McpRegistryService::list_tools` — surfaces the union of all tools currently
+/// exposed by every registered server (connecting on demand).
+#[derive(Clone)]
+pub struct McpToolMeta {
+    pub server: String,
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
 #[async_trait]
 pub trait McpRegistryService: Send + Sync {
     async fn list_servers(&self) -> Result<Vec<McpServerData>>;
@@ -61,6 +73,14 @@ pub trait McpRegistryService: Send + Sync {
     ) -> Result<Vec<SyncToolsServerResult>>;
 
     async fn list_mappings(&self, name: Option<&str>) -> Result<Vec<ToolMappingData>>;
+
+    /// List tools currently advertised by every registered MCP server
+    /// (connects on demand). Mirrors `GET /api/mcp/tools`.
+    async fn list_tools(&self) -> Result<Vec<McpToolMeta>>;
+
+    /// Invoke a tool on a registered MCP server. Returns the opaque tool
+    /// result `Value`. Mirrors `POST /api/mcp/run`.
+    async fn run_tool(&self, server: &str, name: &str, arguments: Value) -> Result<Value>;
 }
 
 // ── Schema databases ────────────────────────────────────────────────────────
@@ -95,6 +115,15 @@ pub trait SchemaDbService: Send + Sync {
     async fn list(&self) -> Result<Vec<SchemaDbData>>;
     async fn upsert(&self, input: SchemaDbInput) -> Result<()>;
     async fn remove(&self, name: &str) -> Result<bool>;
+
+    /// Build the multi-tab schema view across every configured database.
+    /// Returns an opaque JSON object `{ tabs, showTabs, errors? }` — see
+    /// `SchemaResponse` in the server crate for the full shape.
+    async fn schema(&self) -> Result<Value>;
+
+    /// Concatenate `domains` arrays from every configured database into a
+    /// single flat JSON array.
+    async fn schema_domains(&self) -> Result<Value>;
 }
 
 // ── Docker runtimes ─────────────────────────────────────────────────────────

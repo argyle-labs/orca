@@ -4,12 +4,13 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use orca_tools_def::services::mgmt::{
-    DockerRuntimeData, DockerRuntimeInput, DockerRuntimeService, DocRootData, DocRootInput,
-    DocRootService, HaEndpointData, HaEndpointInput, HaEndpointService, McpRegistryService,
-    McpServerData, McpServerInput, ProxmoxEndpointData, ProxmoxEndpointInput,
-    ProxmoxEndpointService, SchemaDbData, SchemaDbInput, SchemaDbService,
-    SyncToolsServerResult, ToolMappingData,
+    DocRootData, DocRootInput, DocRootService, DockerRuntimeData, DockerRuntimeInput,
+    DockerRuntimeService, HaEndpointData, HaEndpointInput, HaEndpointService, McpRegistryService,
+    McpServerData, McpServerInput, McpToolMeta, ProxmoxEndpointData, ProxmoxEndpointInput,
+    ProxmoxEndpointService, SchemaDbData, SchemaDbInput, SchemaDbService, SyncToolsServerResult,
+    ToolMappingData,
 };
+use serde_json::Value;
 
 // ── MCP registry ────────────────────────────────────────────────────────────
 
@@ -110,6 +111,59 @@ impl McpRegistryService for ServerMcpRegistry {
             }
         }
         Ok(out)
+    }
+
+    async fn list_tools(&self) -> Result<Vec<McpToolMeta>> {
+        let conn = db::open_default()?;
+        let db_path = conn.path().map(std::path::PathBuf::from);
+        drop(conn);
+        let pool = crate::serve::mcp_client::McpPool::new_with_db(db_path);
+        let raw = pool.all_tools().await;
+        Ok(raw
+            .into_iter()
+            .map(|v| McpToolMeta {
+                server: v
+                    .get("server")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                name: v
+                    .get("name")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                description: v
+                    .get("description")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                input_schema: v.get("inputSchema").cloned().unwrap_or(Value::Null),
+            })
+            .collect())
+    }
+
+    async fn run_tool(&self, server: &str, name: &str, arguments: Value) -> Result<Value> {
+        let conn = db::open_default()?;
+        let db_path = conn.path().map(std::path::PathBuf::from);
+        drop(conn);
+        let pool = crate::serve::mcp_client::McpPool::new_with_db(db_path);
+        let client = pool
+            .get_or_connect(server)
+            .await
+            .map_err(|e| anyhow::anyhow!("connect to mcp server '{server}': {e}"))?;
+        // Stable correlation id — this trait method is invoked outside the
+        // HTTP middleware chain.
+        let cid = "tool:run_mcp_tool";
+        match client.call_tool(name, arguments, cid).await {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("MCP server closed") {
+                    pool.evict(server).await;
+                }
+                Err(e)
+            }
+        }
     }
 
     async fn list_mappings(&self, name: Option<&str>) -> Result<Vec<ToolMappingData>> {
