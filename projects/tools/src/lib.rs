@@ -1,4 +1,4 @@
-//! First-party OrcaTool implementations.
+//! First-party OrcaTool aggregation.
 //!
 //! Every tool here is exposed automatically on four surfaces:
 //!   - **MCP** stdio (`tools/list`, `tools/call`)
@@ -7,19 +7,26 @@
 //!   - **WASM client** (`orcaClient.<name>(args)` — when the `wasm` feature
 //!     is enabled and the crate is consumed from `projects/client/wasm/`).
 //!
-//! New tools land here; the macro at the bottom of this file is the single
-//! enrollment point. Server-side glue is intentionally absent — anything that
-//! reaches into server internals stays in `projects/server/src/mcp/` until a
-//! service-trait abstraction lets it move across.
+//! Where impls live:
+//!   - Integration-backed tools (homeassistant, proxmox, …) live in
+//!     `orca-integrations/src/<integration>/tool.rs` — next to their `Client`.
+//!     They're re-exported here for ergonomic enrollment.
+//!   - Registry-style tools that don't wrap a network integration (engine
+//!     backends, agent_backend API-key storage) live in this crate.
+//!
+//! The `orca_tools!{}` macro at the bottom is the single enrollment point.
 
-// Re-exports used by the `orca_tools!` macro so callers don't need their own
-// paths to ToolRegistry.
 #[doc(hidden)]
 pub mod __private {
     pub use orca_utils::tool::ToolRegistry;
 }
 
+pub mod agent_backend;
 pub mod engine;
+
+// Re-export integration-owned tools so the enrollment list below stays flat.
+pub use orca_integrations::homeassistant::tool as homeassistant;
+pub use orca_integrations::proxmox::tool as proxmox;
 
 /// Enroll a set of OrcaTool types as the first-party tool surface.
 ///
@@ -39,9 +46,28 @@ macro_rules! orca_tools {
 }
 
 orca_tools! {
+    // Engine registry (LM Studio / Ollama)
     engine::EngineList,
     engine::EngineAdd,
     engine::EngineRemove,
     engine::EngineEnable,
     engine::EngineDisable,
+
+    // Agent backend — API-key storage (pure DB)
+    agent_backend::AgentBackendClearApiKey,
+    agent_backend::AgentBackendSetApiKey,
+    agent_backend::AgentBackendApiKeyStatus,
+
+    // Home Assistant (impls live in orca-integrations::homeassistant::tool)
+    homeassistant::HaEntityList,
+    homeassistant::HaEntityState,
+    homeassistant::HaAutomationList,
+    homeassistant::HaServiceCall,
+
+    // Proxmox (impls live in orca-integrations::proxmox::tool)
+    proxmox::ProxmoxListNodes,
+    proxmox::ProxmoxListVms,
+    proxmox::ProxmoxListContainers,
+    proxmox::ProxmoxVmAction,
+    proxmox::ProxmoxContainerAction,
 }

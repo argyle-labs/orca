@@ -9,11 +9,9 @@ mod context7;
 mod docs;
 mod docs_tools;
 mod handlers;
-mod homeassistant_tools;
 mod infra_tools;
 mod mgmt_tools;
 mod plugin_tools;
-mod proxmox_tools;
 mod spec_tools;
 mod specs;
 mod tools;
@@ -45,8 +43,6 @@ pub fn register_all_tools(reg: &mut ToolRegistry) {
     infra_tools::register(reg);
     mgmt_tools::register(reg);
     plugin_tools::register(reg);
-    proxmox_tools::register(reg);
-    homeassistant_tools::register(reg);
     spec_tools::register(reg);
 }
 
