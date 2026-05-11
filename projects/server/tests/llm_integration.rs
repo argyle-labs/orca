@@ -131,7 +131,7 @@ async fn lmstudio_if_available() -> Option<LmStudio> {
         .as_ref()?;
     let guard = lmstudio_lock().await;
     Some(LmStudio {
-        backend: LMStudioBackend::new(&lmstudio_url(), &chat_models[0]),
+        backend: LMStudioBackend::new(lmstudio_url(), &chat_models[0]),
         model_id: chat_models[0].clone(),
         _guard: guard,
     })
