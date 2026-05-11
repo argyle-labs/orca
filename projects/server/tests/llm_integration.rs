@@ -1,12 +1,13 @@
 //! Integration tests for the orca-llm crate.
 //!
 //! These tests run against real backends. They skip gracefully when the backend
-//! isn't available — no failures for offline CI. To force-run them:
+//! isn't available — no failures for offline CI.
 //!
-//!   cargo test -p orca-llm --test integration -- --nocapture --test-threads=1
-//!
-//! Use --test-threads=1 when running against LM Studio, which is single-threaded
-//! and returns 500 errors under concurrent load.
+//! All LM Studio access is funnelled through a module-level async mutex
+//! (`LMSTUDIO_LOCK`) so the suite is robust under default `cargo test`
+//! parallelism — LM Studio is single-threaded and returns 500 under concurrent
+//! load. Use `lmstudio_if_available()` (returns a guard-holding fixture) or
+//! `lmstudio_lock()` (returns a bare guard) before any direct LM Studio call.
 //!
 //! Set LMSTUDIO_URL to override the default (http://localhost:1234).
 
@@ -18,7 +19,29 @@ use orca::llm::{
 use orca_utils::config::{Config, Model};
 use serde_json::json;
 use std::path::PathBuf;
+use std::sync::LazyLock;
+use tokio::sync::{Mutex, MutexGuard};
 use tokio_util::sync::CancellationToken;
+
+// ── LM Studio serialization ──────────────────────────────────────────────────
+//
+// LM Studio serves one inference at a time. Tests that hit it must hold this
+// lock for the duration of their HTTP calls so they don't trample each other
+// when cargo runs tests in parallel (the default).
+
+static LMSTUDIO_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+async fn lmstudio_lock() -> MutexGuard<'static, ()> {
+    LMSTUDIO_LOCK.lock().await
+}
+
+/// Result of `lmstudio_if_available()` — owns the serialization guard for
+/// the test's lifetime so the lock auto-releases when the test ends.
+struct LmStudio {
+    backend: LMStudioBackend,
+    model_id: String,
+    _guard: MutexGuard<'static, ()>,
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -59,9 +82,13 @@ fn is_model_unavailable(e: &anyhow::Error) -> bool {
         || s.contains("insufficient system resources")
 }
 
-/// Returns Some(backend) if LM Studio is reachable with at least one chat model,
+/// Returns Some(fixture) if LM Studio is reachable with at least one chat model,
 /// None otherwise (caller should return early — test passes trivially).
-async fn lmstudio_if_available() -> Option<(LMStudioBackend, String)> {
+///
+/// The returned `LmStudio` holds the serialization guard; the lock is released
+/// when the fixture is dropped at end of test scope.
+async fn lmstudio_if_available() -> Option<LmStudio> {
+    let guard = lmstudio_lock().await;
     let url = lmstudio_url();
     let probe = LMStudioBackend::new(&url, "");
     match probe.list_models().await {
@@ -74,10 +101,11 @@ async fn lmstudio_if_available() -> Option<(LMStudioBackend, String)> {
                 eprintln!("SKIP: LM Studio at {url} has no chat models loaded");
                 None
             } else {
-                Some((
-                    LMStudioBackend::new(&url, &chat_models[0]),
-                    chat_models[0].clone(),
-                ))
+                Some(LmStudio {
+                    backend: LMStudioBackend::new(&url, &chat_models[0]),
+                    model_id: chat_models[0].clone(),
+                    _guard: guard,
+                })
             }
         }
         Err(e) => {
@@ -91,6 +119,7 @@ async fn lmstudio_if_available() -> Option<(LMStudioBackend, String)> {
 
 #[tokio::test]
 async fn list_models_returns_strings_when_available() {
+    let _g = lmstudio_lock().await;
     let url = lmstudio_url();
     let backend = LMStudioBackend::new(&url, "");
     match backend.list_models().await {
@@ -113,6 +142,7 @@ async fn list_models_returns_strings_when_available() {
 
 #[tokio::test]
 async fn discover_all_deduplicates_backends() {
+    let _g = lmstudio_lock().await;
     let config = test_config();
     let found = discover_all(&config).await;
     eprintln!(
@@ -157,9 +187,12 @@ async fn discover_all_excludes_embed_models() {
 
 #[tokio::test]
 async fn resolve_model_returns_something_when_lmstudio_available() {
-    let Some((_, _)) = lmstudio_if_available().await else {
+    // Hold the LM Studio lock for the duration of resolve_model since it
+    // probes LM Studio to discover models.
+    let Some(fixture) = lmstudio_if_available().await else {
         return;
     };
+    let _fixture = fixture; // keep the guard alive
 
     let config = test_config();
     match resolve_model(&config, Some(TaskKind::Chat)).await {
@@ -253,7 +286,10 @@ async fn context_window_estimate_is_sensible() {
 
 #[tokio::test]
 async fn lmstudio_chat_returns_non_empty_response() {
-    let Some((backend, model_id)) = lmstudio_if_available().await else {
+    let Some(LmStudio {
+        backend, model_id, ..
+    }) = lmstudio_if_available().await
+    else {
         return;
     };
 
@@ -290,7 +326,10 @@ async fn lmstudio_chat_returns_non_empty_response() {
 
 #[tokio::test]
 async fn lmstudio_chat_streams_to_sink() {
-    let Some((backend, model_id)) = lmstudio_if_available().await else {
+    let Some(LmStudio {
+        backend, model_id, ..
+    }) = lmstudio_if_available().await
+    else {
         return;
     };
 
@@ -333,7 +372,10 @@ async fn lmstudio_empty_response_errors() {
 
 #[tokio::test]
 async fn lmstudio_cancellation_returns_partial_response() {
-    let Some((backend, model_id)) = lmstudio_if_available().await else {
+    let Some(LmStudio {
+        backend, model_id, ..
+    }) = lmstudio_if_available().await
+    else {
         return;
     };
 
@@ -367,7 +409,10 @@ async fn lmstudio_cancellation_returns_partial_response() {
 
 #[tokio::test]
 async fn lmstudio_tool_call_round_trip() {
-    let Some((backend, model_id)) = lmstudio_if_available().await else {
+    let Some(LmStudio {
+        backend, model_id, ..
+    }) = lmstudio_if_available().await
+    else {
         return;
     };
 
@@ -443,7 +488,10 @@ async fn lmstudio_tool_call_round_trip() {
 
 #[tokio::test]
 async fn lmstudio_multi_turn_conversation() {
-    let Some((backend, model_id)) = lmstudio_if_available().await else {
+    let Some(LmStudio {
+        backend, model_id, ..
+    }) = lmstudio_if_available().await
+    else {
         return;
     };
 
@@ -488,6 +536,7 @@ async fn lmstudio_multi_turn_conversation() {
 
 #[tokio::test]
 async fn switching_models_mid_session() {
+    let _g = lmstudio_lock().await;
     let url = lmstudio_url();
     let probe = LMStudioBackend::new(&url, "");
 
@@ -565,6 +614,7 @@ async fn switching_models_mid_session() {
 async fn reasoning_model_fallback_to_reasoning_content() {
     // If we can detect a reasoning model is loaded, verify the reasoning_content
     // fallback works (the backend should not return an empty-response error).
+    let _g = lmstudio_lock().await;
     let url = lmstudio_url();
     let probe = LMStudioBackend::new(&url, "");
 
