@@ -14,7 +14,6 @@ use std::sync::Arc;
 
 use orca_tools_def::engine::{
     AddArgs, EmptyArgs, EngineAdd, EngineDisable, EngineEnable, EngineList, EngineRemove, NameArgs,
-    ProviderDto,
 };
 
 #[derive(Debug, Clone, PartialEq, Subcommand)]
@@ -41,7 +40,7 @@ pub async fn cmd_engines(action: EnginesAction) -> Result<()> {
 
     match action {
         EnginesAction::List => {
-            let providers: Vec<ProviderDto> = EngineList::run(EmptyArgs {}, &ctx).await?;
+            let providers = EngineList::run(EmptyArgs {}, &ctx).await?.0;
             if providers.is_empty() {
                 println!("{}", "no LLM backends registered".dimmed());
                 println!(

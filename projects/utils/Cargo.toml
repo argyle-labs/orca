@@ -8,6 +8,9 @@ name = "orca_utils"
 path = "src/lib.rs"
 
 [dependencies]
+# Local
+orca-tool-trait = { path = "../tool-trait" }
+
 # Standard
 anyhow     = { workspace = true }
 thiserror  = { workspace = true }

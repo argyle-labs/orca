@@ -10,14 +10,12 @@ pub mod types;
 
 pub use ctx::ToolCtx;
 pub use erased::ErasedTool;
+pub use orca_tool_trait::OrcaToolDef;
 pub use registry::ToolRegistry;
 pub use types::{ToolCall, ToolDef, ToolResult};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use schemars::JsonSchema;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
 
 /// One capability: implement this trait and it is automatically available via
 /// MCP, REST (`/api/tools/<name>`), CLI (`orca exec <name>`), and the WASM
@@ -50,19 +48,6 @@ use serde::de::DeserializeOwned;
 /// }
 /// ```
 #[async_trait]
-pub trait OrcaTool: Send + Sync + 'static {
-    const NAME: &'static str;
-    const DESCRIPTION: &'static str;
-
-    /// Args must be deserializable from JSON (for MCP + REST + WASM) and carry
-    /// a JSON Schema (for tools/list, OpenAPI, CLI flag generation, and TS
-    /// type emission).
-    type Args: DeserializeOwned + JsonSchema + Send;
-
-    /// Output must be serializable to JSON (for REST + WASM) and carry a JSON
-    /// Schema (for OpenAPI response bodies + TS type emission). Use `String`
-    /// when the tool genuinely returns human-readable text.
-    type Output: Serialize + JsonSchema + Send + 'static;
-
+pub trait OrcaTool: OrcaToolDef {
     async fn run(args: Self::Args, ctx: &ToolCtx) -> Result<Self::Output>;
 }

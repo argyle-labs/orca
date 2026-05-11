@@ -8,10 +8,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::OrcaToolDef;
 
-#[derive(Deserialize, JsonSchema)]
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ClearArgs {}
 
 /// Outcome of a mutation against the encrypted API-key slot.
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ApiKeyMutationResult {
     /// Whether the slot now holds a key (true after `set`, false after `clear`).
@@ -24,6 +28,8 @@ pub struct ApiKeyMutationResult {
 }
 
 /// Whether a stored API key exists.
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ApiKeyStatus {
     pub present: bool,
@@ -41,7 +47,9 @@ impl OrcaToolDef for AgentBackendClearApiKey {
     type Output = ApiKeyMutationResult;
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SetArgs {
     /// Anthropic API key (sk-ant-...)
     pub key: String,
@@ -57,7 +65,9 @@ impl OrcaToolDef for AgentBackendSetApiKey {
     type Output = ApiKeyMutationResult;
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct StatusArgs {}
 
 pub struct AgentBackendApiKeyStatus;
@@ -79,11 +89,6 @@ mod native {
 
     #[async_trait]
     impl OrcaTool for AgentBackendClearApiKey {
-        const NAME: &'static str = <Self as OrcaToolDef>::NAME;
-        const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
-        type Args = <Self as OrcaToolDef>::Args;
-        type Output = <Self as OrcaToolDef>::Output;
-
         async fn run(_args: ClearArgs, _ctx: &ToolCtx) -> Result<ApiKeyMutationResult> {
             let conn = db::open_default()?;
             let removed = db::settings::secret_delete(&conn, "anthropic_api_key")?;
@@ -101,11 +106,6 @@ mod native {
 
     #[async_trait]
     impl OrcaTool for AgentBackendSetApiKey {
-        const NAME: &'static str = <Self as OrcaToolDef>::NAME;
-        const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
-        type Args = <Self as OrcaToolDef>::Args;
-        type Output = <Self as OrcaToolDef>::Output;
-
         async fn run(args: SetArgs, _ctx: &ToolCtx) -> Result<ApiKeyMutationResult> {
             if args.key.trim().is_empty() {
                 anyhow::bail!("key must not be empty");
@@ -123,11 +123,6 @@ mod native {
 
     #[async_trait]
     impl OrcaTool for AgentBackendApiKeyStatus {
-        const NAME: &'static str = <Self as OrcaToolDef>::NAME;
-        const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
-        type Args = <Self as OrcaToolDef>::Args;
-        type Output = <Self as OrcaToolDef>::Output;
-
         async fn run(_args: StatusArgs, _ctx: &ToolCtx) -> Result<ApiKeyStatus> {
             let conn = db::open_default()?;
             match db::settings::secret_get(&conn, "anthropic_api_key")? {

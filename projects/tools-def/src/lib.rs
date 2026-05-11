@@ -10,9 +10,7 @@
 //! Adding a new tool ⇒ one line in the `declare_tools!{}` block at the bottom
 //! of this file. All four surfaces light up.
 
-use schemars::JsonSchema;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+pub use orca_tool_trait::OrcaToolDef;
 
 pub mod agent_backend;
 pub mod engine;
@@ -25,21 +23,6 @@ pub use json_any::JsonAny;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
-
-/// Compile-time metadata for an OrcaTool — everything except `run`.
-///
-/// Implementations of this trait are wasm-safe by construction: they
-/// reference only types/consts, never `tokio::fs`, `db::*`, or other
-/// native-only code. The WASM client uses these definitions to emit per-tool
-/// wasm-bindgen methods that route over HTTP to the corresponding REST
-/// endpoint.
-pub trait OrcaToolDef: Send + Sync + 'static {
-    const NAME: &'static str;
-    const DESCRIPTION: &'static str;
-
-    type Args: DeserializeOwned + JsonSchema + Send;
-    type Output: Serialize + JsonSchema + Send + 'static;
-}
 
 /// Single source of truth for tool enrollment.
 ///
@@ -67,8 +50,11 @@ macro_rules! declare_tools {
             impl OrcaClient {
                 $(
                     #[wasm_bindgen]
-                    pub async fn $method(&self, args: JsValue) -> Result<JsValue, JsValue> {
-                        self.call_tool(<$tool as OrcaToolDef>::NAME, args).await
+                    pub async fn $method(
+                        &self,
+                        args: <$tool as OrcaToolDef>::Args,
+                    ) -> Result<<$tool as OrcaToolDef>::Output, JsValue> {
+                        self.call_tool_typed::<$tool>(args).await
                     }
                 )*
             }

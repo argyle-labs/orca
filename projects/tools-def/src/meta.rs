@@ -7,7 +7,7 @@ use crate::OrcaToolDef;
 
 #[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-#[derive(Deserialize, JsonSchema)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HealthArgs {}
 
 #[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
@@ -35,10 +35,6 @@ mod native {
 
     #[async_trait]
     impl OrcaTool for ApiHealth {
-        const NAME: &'static str = <Self as OrcaToolDef>::NAME;
-        const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
-        type Args = <Self as OrcaToolDef>::Args;
-        type Output = <Self as OrcaToolDef>::Output;
         async fn run(_args: HealthArgs, _ctx: &ToolCtx) -> Result<HealthOutput> {
             Ok(HealthOutput { ok: true })
         }

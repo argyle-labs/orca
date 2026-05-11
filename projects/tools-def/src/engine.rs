@@ -13,12 +13,12 @@ use crate::OrcaToolDef;
 
 #[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-#[derive(Deserialize, JsonSchema)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct EmptyArgs {}
 
 #[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-#[derive(Deserialize, JsonSchema)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct AddArgs {
     /// Display name, e.g. "lmstudio-local".
     pub name: String,
@@ -31,7 +31,7 @@ pub struct AddArgs {
 
 #[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-#[derive(Deserialize, JsonSchema)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct NameArgs {
     /// Backend name.
     pub name: String,
@@ -47,6 +47,14 @@ pub struct ProviderDto {
     pub enabled: bool,
     pub created_at: String,
 }
+
+/// Newtype wrapping `Vec<ProviderDto>` so it crosses the WASM boundary with a
+/// real TS array type (`ProviderDto[]`) instead of `any`.
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub struct ProviderList(pub Vec<ProviderDto>);
 
 /// Outcome of a mutation (add/remove/enable/disable).
 #[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
@@ -64,7 +72,7 @@ impl OrcaToolDef for EngineList {
     const NAME: &'static str = "engine.list";
     const DESCRIPTION: &'static str = "List registered LLM backends (LM Studio, Ollama).";
     type Args = EmptyArgs;
-    type Output = Vec<ProviderDto>;
+    type Output = ProviderList;
 }
 
 pub struct EngineAdd;
@@ -141,22 +149,16 @@ mod native {
 
     #[async_trait]
     impl OrcaTool for EngineList {
-        const NAME: &'static str = <Self as OrcaToolDef>::NAME;
-        const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
-        type Args = <Self as OrcaToolDef>::Args;
-        type Output = <Self as OrcaToolDef>::Output;
-        async fn run(_args: EmptyArgs, _ctx: &ToolCtx) -> Result<Vec<ProviderDto>> {
+        async fn run(_args: EmptyArgs, _ctx: &ToolCtx) -> Result<ProviderList> {
             let conn = db::open_default()?;
-            Ok(db::llm::list(&conn)?.into_iter().map(Into::into).collect())
+            Ok(ProviderList(
+                db::llm::list(&conn)?.into_iter().map(Into::into).collect(),
+            ))
         }
     }
 
     #[async_trait]
     impl OrcaTool for EngineAdd {
-        const NAME: &'static str = <Self as OrcaToolDef>::NAME;
-        const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
-        type Args = <Self as OrcaToolDef>::Args;
-        type Output = <Self as OrcaToolDef>::Output;
         async fn run(args: AddArgs, _ctx: &ToolCtx) -> Result<EngineOpResult> {
             let conn = db::open_default()?;
             let kind = infer_kind(&args.url, &args.kind)?;
@@ -169,10 +171,6 @@ mod native {
 
     #[async_trait]
     impl OrcaTool for EngineRemove {
-        const NAME: &'static str = <Self as OrcaToolDef>::NAME;
-        const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
-        type Args = <Self as OrcaToolDef>::Args;
-        type Output = <Self as OrcaToolDef>::Output;
         async fn run(args: NameArgs, _ctx: &ToolCtx) -> Result<EngineOpResult> {
             let conn = db::open_default()?;
             if db::llm::remove(&conn, &args.name)? {
@@ -187,10 +185,6 @@ mod native {
 
     #[async_trait]
     impl OrcaTool for EngineEnable {
-        const NAME: &'static str = <Self as OrcaToolDef>::NAME;
-        const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
-        type Args = <Self as OrcaToolDef>::Args;
-        type Output = <Self as OrcaToolDef>::Output;
         async fn run(args: NameArgs, _ctx: &ToolCtx) -> Result<EngineOpResult> {
             let conn = db::open_default()?;
             if db::llm::set_enabled(&conn, &args.name, true)? {
@@ -205,10 +199,6 @@ mod native {
 
     #[async_trait]
     impl OrcaTool for EngineDisable {
-        const NAME: &'static str = <Self as OrcaToolDef>::NAME;
-        const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
-        type Args = <Self as OrcaToolDef>::Args;
-        type Output = <Self as OrcaToolDef>::Output;
         async fn run(args: NameArgs, _ctx: &ToolCtx) -> Result<EngineOpResult> {
             let conn = db::open_default()?;
             if db::llm::set_enabled(&conn, &args.name, false)? {
