@@ -24,10 +24,10 @@ doctor:
 
 # Build frontend + release binary (single self-contained binary with embedded assets).
 # OpenAPI→TS codegen is gone — the frontend now talks to orca exclusively through
-# the WASM OrcaClient, so there's no `gen.ts` step.
+# the WASM OrcaClient, so there's no `gen.ts` step. Spec sync is a separate
+# `make sync` target — running it here put unrelated network IO on the critical
+# path and re-ran on every build.
 build:
-	cargo build --manifest-path projects/server/Cargo.toml
-	target/debug/orca spec sync --all || true
 	cd projects/frontend && npm ci && npm run build
 	cargo build --release --features ui --manifest-path projects/server/Cargo.toml
 	@echo "built → target/release/orca"
@@ -36,6 +36,11 @@ build:
 build-headless:
 	cargo build --release --manifest-path projects/server/Cargo.toml
 	@echo "built (headless) → target/release/orca"
+
+# Refresh synced specs from upstream repos. Independent of build.
+sync:
+	cargo build --manifest-path projects/server/Cargo.toml
+	target/debug/orca spec sync --all
 
 # Refresh external rebuy specs without a full build — useful between rebuys
 specs:

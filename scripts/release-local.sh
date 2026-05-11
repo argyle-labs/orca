@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Local equivalent of .github/workflows/release.yml — used when GitHub Actions
-# minutes are exhausted. Builds host target only (aarch64-apple-darwin) and
-# pushes artifacts to GitHub releases via `gh`.
+# minutes are exhausted. Builds the full target matrix (mac + linux gnu/musl,
+# arm + x86) using cargo-zigbuild for linux cross-compiles, then pushes
+# artifacts to GitHub releases via `gh`.
 #
 # Usage:
 #   scripts/release-local.sh rc <patch|minor|major>   — cut + publish RC
@@ -15,8 +16,21 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-TARGET="aarch64-apple-darwin"
-ASSET="orca-${TARGET}"
+# Mirror the matrix in .github/workflows/release.yml. Linux targets always
+# cross-compile via `cargo zigbuild` (works from any host). The macOS target
+# only builds when the host is itself macOS — we don't ship osxcross.
+HOST_TARGET="$(rustc -vV | awk '/^host:/ {print $2}')"
+LINUX_TARGETS=(
+  x86_64-unknown-linux-gnu
+  x86_64-unknown-linux-musl
+  aarch64-unknown-linux-gnu
+  aarch64-unknown-linux-musl
+)
+case "$(uname -s)" in
+  Darwin) MAC_TARGETS=(aarch64-apple-darwin) ;;
+  *)      MAC_TARGETS=() ;;
+esac
+ALL_TARGETS=("${MAC_TARGETS[@]}" "${LINUX_TARGETS[@]}")
 SERVER_TOML="projects/server/Cargo.toml"
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -66,9 +80,14 @@ drop_stale_local_tag() {
 }
 
 require_tools() {
-  command -v gh    >/dev/null || die "gh CLI not installed"
-  command -v cargo >/dev/null || die "cargo not installed"
+  command -v gh             >/dev/null || die "gh CLI not installed"
+  command -v cargo          >/dev/null || die "cargo not installed"
+  command -v cargo-zigbuild >/dev/null || die "cargo-zigbuild not installed (cargo install cargo-zigbuild + brew install zig)"
+  command -v zig            >/dev/null || die "zig not installed (brew install zig)"
   gh auth status >/dev/null 2>&1 || die "gh not authenticated (run: gh auth login)"
+  for t in "${ALL_TARGETS[@]}"; do
+    rustup target list --installed | grep -qx "$t" || die "rust target missing: $t (rustup target add $t)"
+  done
 }
 
 # Rollback state — set as cmd_rc/cmd_promote progress, consumed by trap on ERR.
@@ -165,18 +184,33 @@ run_checks() {
 }
 
 build_orca_binary() {
-  log "building frontend + embedding into release binary (host=${TARGET})"
-  # Mirror Makefile `build` flow but pinned to TARGET.
-  cargo build --manifest-path "$SERVER_TOML"
-  target/debug/orca spec dump > /tmp/orca-openapi.json
-  target/debug/orca spec sync --all || true
-  ( cd projects/frontend && npm ci && npx tsx scripts/gen.ts --file /tmp/orca-openapi.json && npm run build )
-  cargo build --release --target "$TARGET" --manifest-path "$SERVER_TOML"
+  log "building frontend (shared across all targets)"
+  ( cd projects/frontend && npm ci && npm run build )
 
   mkdir -p dist-release
-  cp "target/${TARGET}/release/orca" "dist-release/${ASSET}"
-  ( cd dist-release && shasum -a 256 "$ASSET" > "${ASSET}.sha256" )
-  cat dist-release/"${ASSET}.sha256"
+  rm -f dist-release/orca-* dist-release/*.sha256
+
+  for t in "${ALL_TARGETS[@]}"; do
+    local asset="orca-${t}"
+    log "building ${t}"
+    if [ "$t" = "$HOST_TARGET" ]; then
+      cargo build --release --features ui --target "$t" --manifest-path "$SERVER_TOML"
+    else
+      cargo zigbuild --release --features ui --target "$t" --manifest-path "$SERVER_TOML"
+    fi
+    cp "target/${t}/release/orca" "dist-release/${asset}"
+    ( cd dist-release && shasum -a 256 "$asset" > "${asset}.sha256" )
+  done
+
+  ls -lh dist-release/
+}
+
+release_assets() {
+  # Print every asset path (binary + sha256) for `gh release create`.
+  for t in "${ALL_TARGETS[@]}"; do
+    echo "dist-release/orca-${t}"
+    echo "dist-release/orca-${t}.sha256"
+  done
 }
 
 generate_changelog() {
@@ -217,9 +251,13 @@ generate_changelog() {
     section 'Build / CI'  build ci chore
     section 'Docs'        docs
 
-    printf "\n## Installation\n\n\`\`\`sh\n# Apple Silicon\ncurl -Lo orca https://github.com/%s/releases/download/%s/%s\n\nchmod +x orca && mv orca ~/.local/bin/orca\nxattr -d com.apple.quarantine ~/.local/bin/orca\n\`\`\`\n\n" "$repo" "$new" "$ASSET"
+    printf "\n## Installation\n\n\`\`\`sh\n"
+    for t in "${ALL_TARGETS[@]}"; do
+      printf "# %s\ncurl -Lo orca https://github.com/%s/releases/download/%s/orca-%s\n\n" "$t" "$repo" "$new" "$t"
+    done
+    printf "chmod +x orca && mv orca ~/.local/bin/orca\n# macOS only:\nxattr -d com.apple.quarantine ~/.local/bin/orca 2>/dev/null || true\n\`\`\`\n\n"
     printf "**Full diff:** [%s → %s](https://github.com/%s/compare/%s...%s)\n" "$prev" "$new" "$repo" "$prev" "$new"
-    printf "\n_Built locally on %s — host target only (%s)._\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TARGET"
+    printf "\n_Built locally on %s — targets: %s._\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${ALL_TARGETS[*]}"
   } > /tmp/orca-changelog.md
   set -o pipefail
 }
@@ -269,8 +307,7 @@ cmd_rc() {
     --title "orca v${RC}" \
     --notes-file /tmp/orca-changelog.md \
     --prerelease \
-    "dist-release/${ASSET}" \
-    "dist-release/${ASSET}.sha256"
+    $(release_assets)
 
   log "done — review the release, then run: scripts/release-local.sh promote"
 }
@@ -335,8 +372,7 @@ cmd_promote() {
   gh release create "$stable_tag" \
     --title "orca ${stable_tag}" \
     --notes-file /tmp/orca-changelog.md \
-    "dist-release/${ASSET}" \
-    "dist-release/${ASSET}.sha256"
+    $(release_assets)
 
   log "marking ${latest_rc} as superseded"
   local repo; repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)
