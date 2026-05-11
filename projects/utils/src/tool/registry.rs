@@ -178,7 +178,7 @@ pub enum CliArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::{OrcaTool, ToolCtx};
+    use crate::tool::{OrcaTool, OrcaToolDef, ToolCtx};
     use anyhow::Result;
     use async_trait::async_trait;
     use schemars::JsonSchema;
@@ -194,12 +194,15 @@ mod tests {
 
     struct EchoTool;
 
-    #[async_trait]
-    impl OrcaTool for EchoTool {
+    impl OrcaToolDef for EchoTool {
         const NAME: &'static str = "echo";
         const DESCRIPTION: &'static str = "Echoes a message.";
         type Args = EchoArgs;
         type Output = String;
+    }
+
+    #[async_trait]
+    impl OrcaTool for EchoTool {
         async fn run(args: EchoArgs, _ctx: &ToolCtx) -> Result<String> {
             Ok(args.message)
         }
@@ -213,12 +216,15 @@ mod tests {
 
     struct AddTool;
 
-    #[async_trait]
-    impl OrcaTool for AddTool {
+    impl OrcaToolDef for AddTool {
         const NAME: &'static str = "add";
         const DESCRIPTION: &'static str = "Adds two numbers.";
         type Args = AddArgs;
         type Output = String;
+    }
+
+    #[async_trait]
+    impl OrcaTool for AddTool {
         async fn run(args: AddArgs, _ctx: &ToolCtx) -> Result<String> {
             Ok((args.a + args.b).to_string())
         }
