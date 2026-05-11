@@ -3,9 +3,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use orca_tools_def::services::plugins::{
-    PluginCredSummary, PluginSummary, PluginsService,
-};
+use orca_tools_def::services::plugins::{PluginCredSummary, PluginSummary, PluginsService};
 
 pub struct ServerPlugins;
 
