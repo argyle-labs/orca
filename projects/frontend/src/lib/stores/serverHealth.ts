@@ -11,7 +11,7 @@ function createServerHealth() {
   let timer: ReturnType<typeof setTimeout> | null = null;
 
   async function check() {
-    let ok = false;
+    let ok: boolean;
     try {
       const client = await orca();
       const result = (await client.health({})) as { ok: boolean };

@@ -11,7 +11,14 @@ export const load: PageLoad = async () => {
 
   try {
     const issues = await listJiraIssues({ jql: config.jql, maxResults: 50 });
-    return { issues: (issues as any)?.issues ?? [], config };
+    const issueList =
+      issues != null &&
+      typeof issues === 'object' &&
+      'issues' in issues &&
+      Array.isArray((issues as { issues: unknown }).issues)
+        ? (issues as { issues: unknown[] }).issues
+        : [];
+    return { issues: issueList, config };
   } catch {
     return { issues: [], config };
   }
