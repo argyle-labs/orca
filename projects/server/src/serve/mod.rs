@@ -515,12 +515,12 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
     // and CLI — one trait impl, three live surfaces (REST + MCP + CLI).
     let api = match orca_utils::config::Config::load() {
         Ok(cfg) => {
-            use orca_utils::tool::{ToolCtx, ToolRegistry};
+            // Reuse the same registry + service-trait setup that the CLI and
+            // MCP-stdio surfaces use, otherwise tools that look up services on
+            // ToolCtx (lifecycle, profile, pki, etc.) return 500.
             let cfg = Arc::new(cfg);
-            let ctx = Arc::new(ToolCtx::new(cfg));
-            let mut reg = ToolRegistry::new();
-            crate::mcp::register_all_tools(&mut reg);
-            api.nest("/api/tools", Arc::new(reg).axum_router(ctx))
+            let (reg, ctx) = crate::mcp::build_tool_registry(cfg);
+            api.nest("/api/tools", Arc::new(reg).axum_router(Arc::new(ctx)))
         }
         Err(e) => {
             tracing::warn!("Config::load failed, /api/tools disabled: {e}");

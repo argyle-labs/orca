@@ -1,83 +1,113 @@
 <script lang="ts">
   import '../app.css';
-  import TopNav from '$lib/components/TopNav.svelte';
-  import Sidebar from '$lib/components/Sidebar.svelte';
-  import SearchModal from '$lib/components/SearchModal.svelte';
-  import CommandPalette from '$lib/components/CommandPalette.svelte';
-  import HealthDashboard from '$lib/components/HealthDashboard.svelte';
-  import Notification from '$lib/components/Notification.svelte';
-  import { page } from '$app/stores';
-  import { recordNav } from '$lib/stores/navHistory';
-  import { serverHealth } from '$lib/stores/serverHealth';
-  import { getPalette, getMode, getFontSize, FONT_SIZES } from '$lib/stores/theme.svelte';
   import { onMount } from 'svelte';
+  import { serverHealth } from '$lib/stores/serverHealth';
+  import {
+    getPalette,
+    getMode,
+    getFontSize,
+    FONT_SIZES,
+  } from '$lib/stores/theme.svelte';
+  import Notification from '$lib/components/Notification.svelte';
+  import StatusDot from '$lib/components/StatusDot.svelte';
+  import ThemeMenu from '$lib/components/ThemeMenu.svelte';
 
   let { children } = $props();
 
-  let searchOpen    = $state(false);
-  let commandOpen   = $state(false);
-  let healthOpen    = $state(false);
-
-  $effect(() => { recordNav($page.url.pathname); });
   $effect(() => {
     document.documentElement.setAttribute('data-theme', getPalette());
     document.documentElement.setAttribute('data-mode', getMode());
-    const px = FONT_SIZES.find(f => f.id === getFontSize())?.px ?? 15;
+    const px = FONT_SIZES.find((f) => f.id === getFontSize())?.px ?? 15;
     document.documentElement.style.fontSize = `${px}px`;
   });
 
   onMount(() => serverHealth.start());
-
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
-    const meta = e.metaKey || e.ctrlKey;
-    if (meta && e.key === 'k') { e.preventDefault(); searchOpen = !searchOpen; }
-    if (meta && e.key === '/') { e.preventDefault(); commandOpen = !commandOpen; }
-  }
-
-  const isFullscreen = $derived(false);
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
-
 <div class="app">
-  <TopNav onsearchopen={() => searchOpen = true} oncommandopen={() => commandOpen = true} />
+  <header class="topbar">
+    <a href="/" class="brand">orca</a>
+
+    <div class="topbar-right">
+      <span class="health">
+        <StatusDot ok={$serverHealth === 'up' ? true : $serverHealth === 'down' ? false : null} />
+        {$serverHealth}
+      </span>
+
+      <ThemeMenu />
+    </div>
+  </header>
 
   {#if $serverHealth === 'down'}
     <div class="server-banner">
-      Brain server is unreachable — <button onclick={() => serverHealth.retry()}>retry</button>
+      Orca backend unreachable —
+      <button onclick={() => serverHealth.retry()}>retry</button>
     </div>
   {/if}
 
-  <!-- Sidebar is always mounted (for plugin/section loading) but renders as a fixed overlay -->
-  <Sidebar onhealthopen={() => healthOpen = true} />
-
-  <div class="app-body">
-    <main class="main-content">{@render children()}</main>
-  </div>
+  <main class="content">{@render children()}</main>
 </div>
 
-<SearchModal    open={searchOpen}  onclose={() => searchOpen  = false} />
-<CommandPalette open={commandOpen} onclose={() => commandOpen = false} />
-<HealthDashboard open={healthOpen} onclose={() => healthOpen  = false} />
 <Notification />
 
 <style>
-  .app { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
-  .app-body { display: flex; flex: 1; overflow: hidden; }
-  .main-content { flex: 1; overflow-y: auto; display: flex; flex-direction: column; }
-
+  .app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+    background: var(--color-bg);
+    color: var(--color-text);
+  }
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 var(--space-4);
+    height: var(--nav-height);
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface);
+  }
+  .brand {
+    font-weight: var(--weight-semibold);
+    letter-spacing: 0.04em;
+    color: var(--color-text);
+    text-decoration: none;
+  }
+  .topbar-right {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    font-size: var(--text-xs);
+  }
+  .health {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 11px;
+  }
+  .content {
+    flex: 1;
+    overflow-y: auto;
+  }
   .server-banner {
-    background: rgba(248,113,113,0.12);
-    border-bottom: 1px solid rgba(248,113,113,0.3);
+    background: rgba(248, 113, 113, 0.12);
+    border-bottom: 1px solid rgba(248, 113, 113, 0.3);
     color: var(--color-error);
     font-size: var(--text-xs);
     padding: 5px var(--space-4);
     text-align: center;
   }
   .server-banner button {
-    background: none; border: none; cursor: pointer;
-    color: var(--color-error); font-size: var(--text-xs);
-    text-decoration: underline; padding: 0;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--color-error);
+    font-size: var(--text-xs);
+    text-decoration: underline;
+    padding: 0;
   }
 </style>

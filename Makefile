@@ -22,14 +22,20 @@ init:
 doctor:
 	bash scripts/setup.sh --check
 
-# Build frontend + release binary (single self-contained binary with embedded assets)
+# Build frontend + release binary (single self-contained binary with embedded assets).
+# OpenAPI→TS codegen is gone — the frontend now talks to orca exclusively through
+# the WASM OrcaClient, so there's no `gen.ts` step.
 build:
 	cargo build --manifest-path projects/server/Cargo.toml
-	target/debug/orca spec dump > /tmp/orca-openapi.json
 	target/debug/orca spec sync --all || true
-	cd projects/frontend && npm ci && npx tsx scripts/gen.ts --file /tmp/orca-openapi.json && npm run build
-	cargo build --release --manifest-path projects/server/Cargo.toml
+	cd projects/frontend && npm ci && npm run build
+	cargo build --release --features ui --manifest-path projects/server/Cargo.toml
 	@echo "built → target/release/orca"
+
+# Headless build — no embedded web UI. Smaller binary; serves API + MCP only.
+build-headless:
+	cargo build --release --manifest-path projects/server/Cargo.toml
+	@echo "built (headless) → target/release/orca"
 
 # Refresh external rebuy specs without a full build — useful between rebuys
 specs:
