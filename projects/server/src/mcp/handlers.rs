@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use crate::agent_backend::{self, Resolution};
 use crate::context::ProjectContext;
-use crate::conversation::conversation::Session;
+use crate::conversation::session::Session;
 
 pub fn agents() -> Result<String> {
     let mut lines = vec!["Available orca agents:".to_string(), String::new()];

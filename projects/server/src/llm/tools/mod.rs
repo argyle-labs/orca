@@ -3,7 +3,7 @@ pub mod bash;
 use crate::llm::backend::{OutputSink, stdout_sink};
 use anyhow::Result;
 use bash::BashPermissions;
-use orca_utils::fs::{fs, search};
+use orca_utils::fs::{ops, search};
 use orca_utils::tool::{ToolDef, ToolResult};
 use serde_json::{Value, json};
 
@@ -146,18 +146,18 @@ impl ToolRegistry {
         match name {
             "read_file" => {
                 let path = str_field(input, "path")?;
-                fs::read_file(&path)
+                ops::read_file(&path)
             }
             "write_file" => {
                 let path = str_field(input, "path")?;
                 let content = str_field(input, "content")?;
-                fs::write_file(&path, &content)
+                ops::write_file(&path, &content)
             }
             "edit_file" => {
                 let path = str_field(input, "path")?;
                 let old = str_field(input, "old_string")?;
                 let new = str_field(input, "new_string")?;
-                fs::edit_file(&path, &old, &new)
+                ops::edit_file(&path, &old, &new)
             }
             "glob" => {
                 let pattern = str_field(input, "pattern")?;

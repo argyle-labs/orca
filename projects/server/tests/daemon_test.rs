@@ -8,7 +8,7 @@
 #[cfg(unix)]
 #[cfg(test)]
 mod daemon_signal_tests {
-    use orca_utils::state::{self, DaemonMode};
+    use orca_utils::state::DaemonMode;
     use std::path::Path;
     use std::time::{Duration, Instant};
     use tempfile::tempdir;

@@ -3,7 +3,7 @@ use tempfile::tempdir;
 
 use orca::agents::{list_embedded_agents, load_agent_prompt};
 use orca::llm::tools::bash::BashPermissions;
-use orca_utils::fs::{fs as fstool, search};
+use orca_utils::fs::{ops, search};
 
 // These tests verify the tool implementations work correctly.
 // They use real filesystem operations via the tempfile crate (no race conditions).
@@ -16,7 +16,7 @@ fn test_read_file() {
     let path = dir.path().join("test.txt");
     fs::write(&path, "hello world").unwrap();
 
-    let result = fstool::read_file(path.to_str().unwrap());
+    let result = ops::read_file(path.to_str().unwrap());
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), "hello world");
 }
@@ -26,7 +26,7 @@ fn test_write_creates_parent_dirs() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("sub/nested/file.txt");
 
-    let result = fstool::write_file(path.to_str().unwrap(), "nested content");
+    let result = ops::write_file(path.to_str().unwrap(), "nested content");
     assert!(result.is_ok());
     assert_eq!(fs::read_to_string(&path).unwrap(), "nested content");
 }
@@ -37,14 +37,14 @@ fn test_edit_file_replaces_content() {
     let path = dir.path().join("edit.txt");
     fs::write(&path, "hello world foo bar").unwrap();
 
-    let result = fstool::edit_file(path.to_str().unwrap(), "hello world", "goodbye world");
+    let result = ops::edit_file(path.to_str().unwrap(), "hello world", "goodbye world");
     assert!(result.is_ok());
     assert_eq!(fs::read_to_string(&path).unwrap(), "goodbye world foo bar");
 }
 
 #[test]
 fn test_edit_file_not_found_returns_error() {
-    let result = fstool::edit_file("/nonexistent/path.txt", "old", "new");
+    let result = ops::edit_file("/nonexistent/path.txt", "old", "new");
     assert!(result.is_err());
 }
 
@@ -54,7 +54,7 @@ fn test_edit_file_old_string_not_found() {
     let path = dir.path().join("file.txt");
     fs::write(&path, "some content").unwrap();
 
-    let result = fstool::edit_file(path.to_str().unwrap(), "not present", "new");
+    let result = ops::edit_file(path.to_str().unwrap(), "not present", "new");
     assert!(result.is_err());
 }
 
