@@ -1,5 +1,10 @@
 [workspace.package]
 edition = "2024"
+# Workspace-wide version. Every member crate sets `version.workspace = true`.
+# Bump this when cutting a release; the runtime binary reports its actual
+# build state (incl. -dev suffix for non-tagged commits) via build.rs →
+# ORCA_VERSION, not this value.
+version = "0.0.3-rc.3"
 
 # Single source of truth for shared external crate versions. Every member
 # crate that uses one of these MUST declare it as `dep = { workspace = true }`

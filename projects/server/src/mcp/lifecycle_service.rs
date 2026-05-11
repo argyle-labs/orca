@@ -238,7 +238,7 @@ impl LifecycleService for ServerLifecycle {
             "disabled"
         };
         Ok(RuntimeSpecReport {
-            version: env!("CARGO_PKG_VERSION").into(),
+            version: env!("ORCA_VERSION").into(),
             frontend: frontend.into(),
             target: env!("ORCA_BUILD_TARGET").into(),
         })

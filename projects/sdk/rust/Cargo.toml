@@ -1,6 +1,6 @@
 [package]
 name    = "orca-sdk"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 
 # orca-sdk is a headless library crate.

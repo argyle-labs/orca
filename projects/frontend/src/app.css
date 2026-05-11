@@ -334,6 +334,17 @@
   --color-info: #2563eb;
 }
 
+/* ── Suppress transitions during the very first paint ──────────────────── */
+/* `.no-transitions` is added to <html> by the inline script in app.html
+   and removed by the root layout after mount. This prevents the
+   pre-hydration → hydration flash from animating (e.g. sidebar appearing
+   then sliding off-screen on mobile reload). */
+html.no-transitions,
+html.no-transitions * {
+  transition: none !important;
+  animation: none !important;
+}
+
 /* ── Reset ──────────────────────────────────────────────────────────────── */
 *,
 *::before,
