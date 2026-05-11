@@ -129,82 +129,6 @@ impl OrcaTool for GetGraphqlInfo {
         specs::get_graphql_info(&json!({ "repo": args.repo }))
     }
 }
-// ── register_spec ─────────────────────────────────────────────────────────────
-
-#[derive(Deserialize, JsonSchema)]
-pub struct RegisterSpecArgs {
-    pub name: String,
-    pub url: String,
-}
-
-pub struct RegisterSpec;
-
-impl OrcaToolDef for RegisterSpec {
-    const NAME: &'static str = "register_spec";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Fetch an OpenAPI spec from a URL and register it in the orca DB. \
-         Use refresh_spec to re-fetch after updates.";
-    type Args = RegisterSpecArgs;
-    type Output = String;
-}
-
-#[async_trait]
-impl OrcaTool for RegisterSpec {
-    async fn run(args: RegisterSpecArgs, _ctx: &ToolCtx) -> Result<String> {
-        use serde_json::json;
-        specs::spec_register(&json!({ "name": args.name, "url": args.url })).await
-    }
-}
-// ── refresh_spec ──────────────────────────────────────────────────────────────
-
-#[derive(Deserialize, JsonSchema)]
-pub struct RefreshSpecArgs {
-    /// Refresh all URL-registered specs
-    pub all: Option<bool>,
-    /// Refresh a specific spec by name
-    pub name: Option<String>,
-}
-
-pub struct RefreshSpec;
-
-impl OrcaToolDef for RefreshSpec {
-    const NAME: &'static str = "refresh_spec";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Re-fetch and update one or all URL-registered OpenAPI specs. \
-         Provide name or set all=true.";
-    type Args = RefreshSpecArgs;
-    type Output = String;
-}
-
-#[async_trait]
-impl OrcaTool for RefreshSpec {
-    async fn run(args: RefreshSpecArgs, _ctx: &ToolCtx) -> Result<String> {
-        use serde_json::json;
-        specs::spec_refresh(&json!({ "all": args.all, "name": args.name })).await
-    }
-}
-// ── unregister_spec ───────────────────────────────────────────────────────────
-
-#[derive(Deserialize, JsonSchema)]
-pub struct UnregisterSpecArgs {
-    pub name: String,
-}
-
-pub struct UnregisterSpec;
-
-impl OrcaToolDef for UnregisterSpec {
-    const NAME: &'static str = "unregister_spec";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Remove a URL-registered OpenAPI spec from the orca DB by name.";
-    type Args = UnregisterSpecArgs;
-    type Output = String;
-}
-
-#[async_trait]
-impl OrcaTool for UnregisterSpec {
-    async fn run(args: UnregisterSpecArgs, _ctx: &ToolCtx) -> Result<String> {
-        use serde_json::json;
-        specs::spec_unregister(&json!({ "name": args.name }))
-    }
-}
 // ── register ──────────────────────────────────────────────────────────────────
 
 pub fn register(reg: &mut orca_utils::tool::ToolRegistry) {
@@ -212,8 +136,5 @@ pub fn register(reg: &mut orca_utils::tool::ToolRegistry) {
         .register::<GetRebuySpec>()
         .register::<GetRebuySpecPublic>()
         .register::<GetRebuyGraphqlSchema>()
-        .register::<GetGraphqlInfo>()
-        .register::<RegisterSpec>()
-        .register::<RefreshSpec>()
-        .register::<UnregisterSpec>();
+        .register::<GetGraphqlInfo>();
 }

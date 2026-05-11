@@ -138,8 +138,8 @@ pub fn get_graphql_info(args: &Value) -> Result<String> {
     Ok(serde_json::to_string_pretty(&info)?)
 }
 
-// ── DB-backed spec management ─────────────────────────────────────────────────
-
+// ── DB-backed spec management — superseded by spec_registry_service.rs ────────
+#[allow(dead_code)]
 async fn fetch_spec_json(url: &str) -> Result<Value> {
     let resp = reqwest::get(url)
         .await
@@ -152,6 +152,7 @@ async fn fetch_spec_json(url: &str) -> Result<Value> {
         .map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))
 }
 
+#[allow(dead_code)]
 pub async fn spec_register(args: &Value) -> Result<String> {
     let name = args["name"]
         .as_str()
@@ -179,6 +180,7 @@ pub async fn spec_register(args: &Value) -> Result<String> {
     ))
 }
 
+#[allow(dead_code)]
 pub async fn spec_refresh(args: &Value) -> Result<String> {
     let all = args["all"].as_bool().unwrap_or(false);
     let name = args["name"].as_str();
@@ -239,6 +241,7 @@ pub async fn spec_refresh(args: &Value) -> Result<String> {
     Ok(results.join("\n"))
 }
 
+#[allow(dead_code)]
 pub fn spec_unregister(args: &Value) -> Result<String> {
     let name = args["name"]
         .as_str()
