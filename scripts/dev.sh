@@ -92,10 +92,14 @@ echo "  orca  →  http://localhost:12000  (rust + vite HMR)"
 echo ""
 
 # ── Start dev servers ─────────────────────────────────────────────────────────
-ORCA_LOG=trace cargo watch -q -c -C projects/server \
+# Respawn the server if it dies between rebuilds. cargo-watch only runs the
+# command on file changes — without this loop, a server panic leaves the
+# backend dead until the next save. Loop exits when the script's trap kills
+# the whole process group.
+ORCA_LOG=info,orca=debug,hyper=warn,mio=warn,h2=warn,reqwest=warn,rustls=warn,tower_http=warn cargo watch -q -c -C projects/server \
   -w src -w Cargo.toml \
   -x build \
-  -s 'ORCA_LOG=trace ../../target/debug/orca serve --dev' 2>&1 | \
+  -s 'while true; do ORCA_LOG=info,orca=debug,hyper=warn,mio=warn,h2=warn,reqwest=warn,rustls=warn,tower_http=warn ../../target/debug/orca serve --dev; echo "  [server exited — respawning in 1s]"; sleep 1; done' 2>&1 | \
   sed 's/^/[server]   /' &
 _SERVER_PID=$!
 

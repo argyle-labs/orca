@@ -1,5 +1,11 @@
 //! MCP server discovery helper — `mcp_sync_server` shared by the management
 //! service impl (orca mcp sync) and the `/api/mcp/sync` REST handler.
+//!
+//! `serde_json::Value` is allowed here because we're parsing wire-level MCP
+//! protocol responses from a remote server we don't control — modelling each
+//! possible MCP `tools/list` shape with typed structs would just be a lossy
+//! re-encoding of the same opaque blob.
+#![allow(clippy::disallowed_types)]
 
 use anyhow::Context;
 use db::mcp_servers::ServerRow;
