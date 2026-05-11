@@ -41,8 +41,7 @@ pub async fn cmd_engines(action: EnginesAction) -> Result<()> {
 
     match action {
         EnginesAction::List => {
-            let json = EngineList::run(EmptyArgs {}, &ctx).await?;
-            let providers: Vec<ProviderDto> = serde_json::from_str(&json)?;
+            let providers: Vec<ProviderDto> = EngineList::run(EmptyArgs {}, &ctx).await?;
             if providers.is_empty() {
                 println!("{}", "no LLM backends registered".dimmed());
                 println!(
@@ -67,20 +66,20 @@ pub async fn cmd_engines(action: EnginesAction) -> Result<()> {
             }
         }
         EnginesAction::Add { name, url, kind } => {
-            let msg = EngineAdd::run(AddArgs { name, url, kind }, &ctx).await?;
-            println!("{msg}");
+            let r = EngineAdd::run(AddArgs { name, url, kind }, &ctx).await?;
+            println!("{}", r.message);
         }
         EnginesAction::Remove { name } => {
-            let msg = EngineRemove::run(NameArgs { name }, &ctx).await?;
-            println!("{msg}");
+            let r = EngineRemove::run(NameArgs { name }, &ctx).await?;
+            println!("{}", r.message);
         }
         EnginesAction::Enable { name } => {
-            let msg = EngineEnable::run(NameArgs { name }, &ctx).await?;
-            println!("{msg}");
+            let r = EngineEnable::run(NameArgs { name }, &ctx).await?;
+            println!("{}", r.message);
         }
         EnginesAction::Disable { name } => {
-            let msg = EngineDisable::run(NameArgs { name }, &ctx).await?;
-            println!("{msg}");
+            let r = EngineDisable::run(NameArgs { name }, &ctx).await?;
+            println!("{}", r.message);
         }
     }
 

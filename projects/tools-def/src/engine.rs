@@ -11,9 +11,13 @@ use crate::OrcaToolDef;
 
 // ── Args ────────────────────────────────────────────────────────────────────
 
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Deserialize, JsonSchema)]
 pub struct EmptyArgs {}
 
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Deserialize, JsonSchema)]
 pub struct AddArgs {
     /// Display name, e.g. "lmstudio-local".
@@ -25,12 +29,16 @@ pub struct AddArgs {
     pub kind: String,
 }
 
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Deserialize, JsonSchema)]
 pub struct NameArgs {
     /// Backend name.
     pub name: String,
 }
 
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProviderDto {
     pub name: String,
@@ -40,6 +48,15 @@ pub struct ProviderDto {
     pub created_at: String,
 }
 
+/// Outcome of a mutation (add/remove/enable/disable).
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct EngineOpResult {
+    /// Human-readable summary of what happened.
+    pub message: String,
+}
+
 // ── Tool unit structs + OrcaToolDef impls ───────────────────────────────────
 
 pub struct EngineList;
@@ -47,7 +64,7 @@ impl OrcaToolDef for EngineList {
     const NAME: &'static str = "engine.list";
     const DESCRIPTION: &'static str = "List registered LLM backends (LM Studio, Ollama).";
     type Args = EmptyArgs;
-    type Output = String;
+    type Output = Vec<ProviderDto>;
 }
 
 pub struct EngineAdd;
@@ -56,7 +73,7 @@ impl OrcaToolDef for EngineAdd {
     const DESCRIPTION: &'static str =
         "Register a new LLM backend. Kind auto-inferred from URL if not supplied.";
     type Args = AddArgs;
-    type Output = String;
+    type Output = EngineOpResult;
 }
 
 pub struct EngineRemove;
@@ -64,7 +81,7 @@ impl OrcaToolDef for EngineRemove {
     const NAME: &'static str = "engine.remove";
     const DESCRIPTION: &'static str = "Remove a registered LLM backend.";
     type Args = NameArgs;
-    type Output = String;
+    type Output = EngineOpResult;
 }
 
 pub struct EngineEnable;
@@ -72,7 +89,7 @@ impl OrcaToolDef for EngineEnable {
     const NAME: &'static str = "engine.enable";
     const DESCRIPTION: &'static str = "Enable a backend for model discovery.";
     type Args = NameArgs;
-    type Output = String;
+    type Output = EngineOpResult;
 }
 
 pub struct EngineDisable;
@@ -80,7 +97,7 @@ impl OrcaToolDef for EngineDisable {
     const NAME: &'static str = "engine.disable";
     const DESCRIPTION: &'static str = "Disable a backend without removing it.";
     type Args = NameArgs;
-    type Output = String;
+    type Output = EngineOpResult;
 }
 
 // ── Native run impls ────────────────────────────────────────────────────────
@@ -128,11 +145,9 @@ mod native {
         const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
         type Args = <Self as OrcaToolDef>::Args;
         type Output = <Self as OrcaToolDef>::Output;
-        async fn run(_args: EmptyArgs, _ctx: &ToolCtx) -> Result<String> {
+        async fn run(_args: EmptyArgs, _ctx: &ToolCtx) -> Result<Vec<ProviderDto>> {
             let conn = db::open_default()?;
-            let providers: Vec<ProviderDto> =
-                db::llm::list(&conn)?.into_iter().map(Into::into).collect();
-            Ok(serde_json::to_string(&providers)?)
+            Ok(db::llm::list(&conn)?.into_iter().map(Into::into).collect())
         }
     }
 
@@ -142,11 +157,13 @@ mod native {
         const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
         type Args = <Self as OrcaToolDef>::Args;
         type Output = <Self as OrcaToolDef>::Output;
-        async fn run(args: AddArgs, _ctx: &ToolCtx) -> Result<String> {
+        async fn run(args: AddArgs, _ctx: &ToolCtx) -> Result<EngineOpResult> {
             let conn = db::open_default()?;
             let kind = infer_kind(&args.url, &args.kind)?;
             db::llm::upsert(&conn, &args.name, &args.url, &kind)?;
-            Ok(format!("registered {kind} {} ({})", args.name, args.url))
+            Ok(EngineOpResult {
+                message: format!("registered {kind} {} ({})", args.name, args.url),
+            })
         }
     }
 
@@ -156,10 +173,12 @@ mod native {
         const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
         type Args = <Self as OrcaToolDef>::Args;
         type Output = <Self as OrcaToolDef>::Output;
-        async fn run(args: NameArgs, _ctx: &ToolCtx) -> Result<String> {
+        async fn run(args: NameArgs, _ctx: &ToolCtx) -> Result<EngineOpResult> {
             let conn = db::open_default()?;
             if db::llm::remove(&conn, &args.name)? {
-                Ok(format!("removed {}", args.name))
+                Ok(EngineOpResult {
+                    message: format!("removed {}", args.name),
+                })
             } else {
                 anyhow::bail!("no backend named '{}'", args.name)
             }
@@ -172,10 +191,12 @@ mod native {
         const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
         type Args = <Self as OrcaToolDef>::Args;
         type Output = <Self as OrcaToolDef>::Output;
-        async fn run(args: NameArgs, _ctx: &ToolCtx) -> Result<String> {
+        async fn run(args: NameArgs, _ctx: &ToolCtx) -> Result<EngineOpResult> {
             let conn = db::open_default()?;
             if db::llm::set_enabled(&conn, &args.name, true)? {
-                Ok(format!("{} enabled", args.name))
+                Ok(EngineOpResult {
+                    message: format!("{} enabled", args.name),
+                })
             } else {
                 anyhow::bail!("no backend named '{}'", args.name)
             }
@@ -188,10 +209,12 @@ mod native {
         const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
         type Args = <Self as OrcaToolDef>::Args;
         type Output = <Self as OrcaToolDef>::Output;
-        async fn run(args: NameArgs, _ctx: &ToolCtx) -> Result<String> {
+        async fn run(args: NameArgs, _ctx: &ToolCtx) -> Result<EngineOpResult> {
             let conn = db::open_default()?;
             if db::llm::set_enabled(&conn, &args.name, false)? {
-                Ok(format!("{} disabled", args.name))
+                Ok(EngineOpResult {
+                    message: format!("{} disabled", args.name),
+                })
             } else {
                 anyhow::bail!("no backend named '{}'", args.name)
             }

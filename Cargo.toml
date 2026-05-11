@@ -74,7 +74,6 @@ pulldown-cmark = "0.13"
 
 [workspace]
 members = [
-    "projects/client/core",
     "projects/client/wasm",
     "projects/db",
     "projects/sdk/rust",
@@ -88,7 +87,6 @@ members = [
 # Build it explicitly: `wasm-pack build projects/client/wasm` (or
 # `cargo build -p orca-client-wasm --target wasm32-unknown-unknown`).
 default-members = [
-    "projects/client/core",
     "projects/db",
     "projects/sdk/rust",
     "projects/server",
