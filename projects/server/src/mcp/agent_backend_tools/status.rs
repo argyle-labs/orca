@@ -1,31 +1,45 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use orca_tools_def::agent_backend::{
-    AgentBackendOverrideEntry, AgentBackendStatus, AgentBackendStatusArgs, AgentBackendStatusOutput,
-};
-use orca_utils::tool::{OrcaTool, ToolCtx};
+use orca_utils::tool::{OrcaTool, OrcaToolDef, ToolCtx};
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 use crate::agent_backend;
 
+#[derive(Deserialize, JsonSchema)]
+pub struct Args {}
+
+pub struct AgentBackendStatus;
+
+impl OrcaToolDef for AgentBackendStatus {
+    const NAME: &'static str = "agent_backend_status";
+    const DESCRIPTION: &'static str = "Show the current agent backend configuration: mode (local|claude|hybrid), \
+         per-agent overrides, and whether server-side Anthropic calls are enabled.";
+    type Args = Args;
+    type Output = String;
+}
+
 #[async_trait]
 impl OrcaTool for AgentBackendStatus {
-    async fn run(
-        _args: AgentBackendStatusArgs,
-        _ctx: &ToolCtx,
-    ) -> Result<AgentBackendStatusOutput> {
+    async fn run(_args: Args, _ctx: &ToolCtx) -> Result<String> {
         let mode = agent_backend::current_mode()?;
         let use_server = agent_backend::use_server_anthropic()?;
         let overrides = agent_backend::list_overrides()?;
         let conn = db::open_default()?;
         let key_present = db::settings::secret_get(&conn, "anthropic_api_key")?.is_some();
-        Ok(AgentBackendStatusOutput {
-            mode: mode.as_str().to_string(),
-            use_server_anthropic: use_server,
-            api_key_in_db: key_present,
-            overrides: overrides
-                .into_iter()
-                .map(|(agent, backend)| AgentBackendOverrideEntry { agent, backend })
-                .collect(),
-        })
+
+        let mut out = String::new();
+        out.push_str(&format!("mode: {}\n", mode.as_str()));
+        out.push_str(&format!("use_server_anthropic: {use_server}\n"));
+        out.push_str(&format!("api_key_in_db: {key_present}\n"));
+        if overrides.is_empty() {
+            out.push_str("overrides: (none)\n");
+        } else {
+            out.push_str("overrides:\n");
+            for (agent, backend) in overrides {
+                out.push_str(&format!("  @{agent} -> {backend}\n"));
+            }
+        }
+        Ok(out)
     }
 }
