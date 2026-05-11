@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types)] // test harness — Value used for flexible response assertions
 //! Integration test: full TCP+mTLS round-trip against the plugin host.
 //!
 //! Boots a real plugin host on an ephemeral port using a fresh PKI directory,
