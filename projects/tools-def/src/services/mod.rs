@@ -14,4 +14,6 @@ pub mod docs;
 #[cfg(feature = "native")]
 pub mod infra;
 #[cfg(feature = "native")]
+pub mod mgmt;
+#[cfg(feature = "native")]
 pub mod plugins;

@@ -10,7 +10,7 @@ pub mod docs_service;
 mod handlers;
 pub mod infra_service;
 mod mgmt_tools;
-mod plugin_tools;
+pub mod plugins_service;
 mod spec_tools;
 mod specs;
 mod tools;
@@ -37,7 +37,6 @@ pub fn register_all_tools(reg: &mut ToolRegistry) {
     // Server-coupled tools that still live here pending service-trait
     // abstractions so they can move to projects/tools/ too.
     mgmt_tools::register(reg);
-    plugin_tools::register(reg);
     spec_tools::register(reg);
 }
 
@@ -60,6 +59,9 @@ fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
     let infra_svc: Arc<dyn orca_tools_def::services::infra::InfraService> =
         Arc::new(crate::mcp::infra_service::ServerInfra);
     ctx.register_service(infra_svc);
+    let plugins_svc: Arc<dyn orca_tools_def::services::plugins::PluginsService> =
+        Arc::new(crate::mcp::plugins_service::ServerPlugins);
+    ctx.register_service(plugins_svc);
     let mut reg = ToolRegistry::new();
     register_all_tools(&mut reg);
     (reg, ctx)

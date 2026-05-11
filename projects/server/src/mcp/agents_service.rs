@@ -25,7 +25,10 @@ impl AgentsService for ServerAgents {
     }
 
     async fn get_agent_prompt(&self, name: &str) -> Result<Option<String>> {
-        Ok(crate::mcp::agent_resolve::load_agent_prompt(name, &self.config))
+        Ok(crate::mcp::agent_resolve::load_agent_prompt(
+            name,
+            &self.config,
+        ))
     }
 
     async fn list_config_docs(&self) -> Result<Vec<String>> {
@@ -59,7 +62,11 @@ impl AgentsService for ServerAgents {
         let mut files = Vec::new();
         for f in entries {
             let path = f.path();
-            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
             let content = std::fs::read_to_string(&path)?;
             files.push(MemoryFileData { name, content });
         }

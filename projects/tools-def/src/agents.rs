@@ -27,6 +27,7 @@ pub struct MemoryFile {
 #[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct LogMatchEntry {
     pub session: String,
     pub role: String,
@@ -169,6 +170,7 @@ pub struct SearchLogsArgs {
 #[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SearchLogsOutput {
     pub query: String,
     pub matches: Vec<LogMatchEntry>,

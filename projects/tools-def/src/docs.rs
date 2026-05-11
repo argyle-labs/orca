@@ -11,6 +11,7 @@ use crate::OrcaToolDef;
 #[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct DocRootEntry {
     pub name: String,
     pub path: String,
@@ -164,6 +165,7 @@ pub struct SearchDocsArgs {
 #[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SearchDocsOutput {
     pub query: String,
     pub hits: Vec<DocSearchHit>,
