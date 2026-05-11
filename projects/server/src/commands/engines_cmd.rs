@@ -1,7 +1,7 @@
 //! CLI surface for the engine domain.
 //!
 //! These subcommands are thin shims that dispatch to the same `OrcaTool`
-//! impls in `crate::mcp::engine_tools` that drive the MCP and REST surfaces.
+//! impls in `orca_tools::engine` that drive the MCP and REST surfaces.
 //! Behaviour lives in one place; this file only handles flag parsing and
 //! human-friendly output formatting.
 

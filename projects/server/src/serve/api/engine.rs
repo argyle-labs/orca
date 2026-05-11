@@ -1,10 +1,11 @@
 //! Engine REST surface — typed axum handlers that delegate to the OrcaTool
-//! impls in `crate::mcp::engine_tools`.
+//! impls in `orca_tools::engine`.
 //!
 //! The tool impls are the single source of truth for behaviour; these
 //! handlers are thin shims providing the typed REST + OpenAPI surface. The
 //! follow-up `#[orca_op]` proc-macro will generate this file from the tool
-//! impl directly.
+//! impl directly. Once that lands, this whole file goes away in favour of
+//! the macro-emitted REST + WASM client surface.
 
 use super::prelude::*;
 use axum::response::IntoResponse;
