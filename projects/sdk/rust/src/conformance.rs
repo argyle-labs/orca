@@ -680,7 +680,7 @@ mod tests {
                 plugin_id: SCENARIO.plugin_id.into(),
                 plugin_version: String::new(),
                 flavor: crate::Flavor::Headless,
-                core_min_required: "0.1.0".into(),
+                core_min_required: "0.0.0".into(),
                 methods_required: vec![],
                 methods_optional: vec![],
                 plugins_required: vec![],

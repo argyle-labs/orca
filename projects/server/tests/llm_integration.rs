@@ -93,31 +93,48 @@ fn is_model_unavailable(e: &anyhow::Error) -> bool {
 /// The returned `LmStudio` holds the serialization guard; the lock is released
 /// when the fixture is dropped at end of test scope.
 async fn lmstudio_if_available() -> Option<LmStudio> {
-    let guard = lmstudio_lock().await;
-    let url = lmstudio_url();
-    let probe = LMStudioBackend::new(&url, "");
-    match probe.list_models().await {
-        Ok(models) => {
-            let chat_models: Vec<_> = models
-                .into_iter()
-                .filter(|m| !m.to_ascii_lowercase().contains("embed"))
-                .collect();
-            if chat_models.is_empty() {
-                eprintln!("SKIP: LM Studio at {url} has no chat models loaded");
-                None
-            } else {
-                Some(LmStudio {
-                    backend: LMStudioBackend::new(&url, &chat_models[0]),
-                    model_id: chat_models[0].clone(),
-                    _guard: guard,
-                })
+    // Probe BEFORE taking the lock so a missing/unreachable LM Studio doesn't
+    // serialize the rest of the suite behind a connect-timeout chain. The
+    // first probe also caches the result so subsequent tests skip instantly.
+    static AVAILABLE: tokio::sync::OnceCell<Option<Vec<String>>> =
+        tokio::sync::OnceCell::const_new();
+    let chat_models = AVAILABLE
+        .get_or_init(|| async {
+            let url = lmstudio_url();
+            let probe = LMStudioBackend::new(&url, "");
+            // Short timeout: if LM Studio isn't up, fail fast instead of
+            // burning the default reqwest connect window per test.
+            match tokio::time::timeout(Duration::from_secs(2), probe.list_models()).await {
+                Ok(Ok(models)) => {
+                    let chat: Vec<_> = models
+                        .into_iter()
+                        .filter(|m| !m.to_ascii_lowercase().contains("embed"))
+                        .collect();
+                    if chat.is_empty() {
+                        eprintln!("SKIP: LM Studio at {url} has no chat models loaded");
+                        None
+                    } else {
+                        Some(chat)
+                    }
+                }
+                Ok(Err(e)) => {
+                    eprintln!("SKIP: LM Studio not available at {url}: {e}");
+                    None
+                }
+                Err(_) => {
+                    eprintln!("SKIP: LM Studio probe timed out at {url}");
+                    None
+                }
             }
-        }
-        Err(e) => {
-            eprintln!("SKIP: LM Studio not available at {url}: {e}");
-            None
-        }
-    }
+        })
+        .await
+        .as_ref()?;
+    let guard = lmstudio_lock().await;
+    Some(LmStudio {
+        backend: LMStudioBackend::new(&lmstudio_url(), &chat_models[0]),
+        model_id: chat_models[0].clone(),
+        _guard: guard,
+    })
 }
 
 // ── Discovery tests ───────────────────────────────────────────────────────────
