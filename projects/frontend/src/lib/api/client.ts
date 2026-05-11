@@ -113,6 +113,29 @@ export async function getDockerServices(params: {
     query: { path },
   });
 }
+export async function listEngines(): Promise<T.LlmProviderInfo[]> {
+  return request<T.LlmProviderInfo[]>('GET', '/api/engines', {});
+}
+export async function addEngine(params: { body: T.LlmProviderAddRequest }): Promise<T.OkResponse> {
+  return request<T.OkResponse>('POST', '/api/engines', {
+    body: params.body,
+  });
+}
+export async function removeEngine(params: {
+  name: string; // Engine name
+}): Promise<T.OkResponse> {
+  return request<T.OkResponse>('DELETE', `/api/engines/${params.name}`, {});
+}
+export async function disableEngine(params: {
+  name: string; // Engine name
+}): Promise<T.OkResponse> {
+  return request<T.OkResponse>('PATCH', `/api/engines/${params.name}/disable`, {});
+}
+export async function enableEngine(params: {
+  name: string; // Engine name
+}): Promise<T.OkResponse> {
+  return request<T.OkResponse>('PATCH', `/api/engines/${params.name}/enable`, {});
+}
 export async function fsBrowse(params: {
   path?: string; // Directory to list (supports ~/). Defaults to home directory.
   allowAll?: boolean; // Request browsing outside home directory (requires fs.allow_unrestricted = true in orca.db).

@@ -290,7 +290,7 @@ async fn main() -> Result<()> {
         Some(Command::Hook { action }) => cmd::cmd_hook(action),
         Some(Command::Mcp { action }) => cmd::cmd_mcp(action),
         Some(Command::Schema { action }) => cmd::cmd_schema(action),
-        Some(Command::Engines { action }) => cmd::cmd_engines(action),
+        Some(Command::Engines { action }) => cmd::cmd_engines(action).await,
         Some(Command::Docker { action }) => cmd::cmd_docker(action),
         Some(Command::Pki { action }) => cmd::cmd_pki(action),
         Some(Command::Plugin { action }) => cmd::cmd_plugin(action),
