@@ -4,8 +4,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use orca_tools_def::orca_lifecycle::{
-    DoctorEntry, DoctorReport, LifecycleReport, ProjectsListReport, SpecDumpReport,
-    UpdateCheckReport,
+    DoctorEntry, DoctorReport, LifecycleReport, ProjectsListReport, RuntimeSpecReport,
+    SpecDumpReport, UpdateCheckReport,
 };
 use orca_tools_def::services::lifecycle::LifecycleService;
 use orca_utils::config::Config;
@@ -228,6 +228,18 @@ impl LifecycleService for ServerLifecycle {
         let spec = crate::serve::openapi_spec_json();
         Ok(SpecDumpReport {
             spec: serde_json::to_string_pretty(&spec)?,
+        })
+    }
+
+    async fn runtime_spec(&self) -> Result<RuntimeSpecReport> {
+        let frontend = if cfg!(feature = "ui") {
+            "embedded"
+        } else {
+            "disabled"
+        };
+        Ok(RuntimeSpecReport {
+            frontend: frontend.into(),
+            target: env!("ORCA_BUILD_TARGET").into(),
         })
     }
 }

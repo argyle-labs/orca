@@ -175,6 +175,7 @@ declare_tools! {
     system_update_apply => orca_lifecycle::SystemUpdateApply  [d:"system", v:"update-apply"],
     projects_list       => orca_lifecycle::ProjectsList       [d:"projects", v:"list"],
     spec_dump           => orca_lifecycle::SpecDump           [d:"spec", v:"dump"],
+    system_runtime_spec => orca_lifecycle::SystemRuntimeSpec  [d:"system", v:"runtime-spec"],
 
     // ── Engine registry (bespoke colored rendering kept in engine.rs) ──────
     engine_list      => engine::EngineList    [d:"engine", v:"list",    cli: manual],

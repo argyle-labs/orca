@@ -60,6 +60,16 @@ pub struct SpecDumpReport {
     pub spec: String,
 }
 
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct RuntimeSpecReport {
+    /// "embedded" when this binary was built with the `ui` feature on, otherwise "disabled".
+    pub frontend: String,
+    /// Build target triple of this binary (e.g. `aarch64-apple-darwin`).
+    pub target: String,
+}
+
 // ── Args ────────────────────────────────────────────────────────────────────
 
 macro_rules! empty_args {
@@ -76,6 +86,7 @@ empty_args!(SystemUninstallArgs);
 empty_args!(SystemDoctorArgs);
 empty_args!(ProjectsListArgs);
 empty_args!(SpecDumpArgs);
+empty_args!(SystemRuntimeSpecArgs);
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
@@ -146,6 +157,15 @@ impl OrcaToolDef for ProjectsList {
     type Output = ProjectsListReport;
 }
 
+pub struct SystemRuntimeSpec;
+impl OrcaToolDef for SystemRuntimeSpec {
+    const NAME: &'static str = "system.runtime-spec";
+    const DESCRIPTION: &'static str = "Report this binary's runtime composition: whether the web UI is embedded, build target triple. \
+         Used by installers to decide whether to fetch a JS runtime alongside the binary.";
+    type Args = SystemRuntimeSpecArgs;
+    type Output = RuntimeSpecReport;
+}
+
 pub struct SpecDump;
 impl OrcaToolDef for SpecDump {
     const NAME: &'static str = "spec.dump";
@@ -208,6 +228,12 @@ mod native {
     impl OrcaTool for SpecDump {
         async fn run(_a: SpecDumpArgs, ctx: &ToolCtx) -> Result<SpecDumpReport> {
             svc(ctx)?.spec_dump().await
+        }
+    }
+    #[async_trait]
+    impl OrcaTool for SystemRuntimeSpec {
+        async fn run(_a: SystemRuntimeSpecArgs, ctx: &ToolCtx) -> Result<RuntimeSpecReport> {
+            svc(ctx)?.runtime_spec().await
         }
     }
 }

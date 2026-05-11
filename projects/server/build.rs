@@ -38,12 +38,13 @@ fn main() {
 
     println!("cargo:rerun-if-changed=build.rs");
 
-    // Ensure frontend/dist exists so RustEmbed doesn't fail before the frontend
-    // is built. Dev mode (--dev flag) skips the static handler at runtime, so
-    // this stub is never served. Release builds run `make build` which populates
-    // dist/ with real assets before the final cargo build.
-    let dist = Path::new(&manifest).join("../frontend/dist");
-    fs::create_dir_all(&dist).expect("failed to create frontend/dist stub");
+    // Only ensure frontend/dist exists when the `ui` feature is on — that's
+    // the only build configuration where RustEmbed reads from it. Headless
+    // builds skip this so they don't touch the frontend tree at all.
+    if env::var_os("CARGO_FEATURE_UI").is_some() {
+        let dist = Path::new(&manifest).join("../frontend/dist");
+        fs::create_dir_all(&dist).expect("failed to create frontend/dist stub");
+    }
 }
 
 fn write_embedded_map(
