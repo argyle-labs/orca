@@ -13,8 +13,11 @@
 pub use orca_tool_trait::OrcaToolDef;
 
 pub mod agent_backend;
+pub mod agents;
+pub mod docs;
 pub mod engine;
 pub mod homeassistant;
+pub mod infra;
 pub mod json_any;
 pub mod meta;
 pub mod proxmox;
@@ -90,6 +93,25 @@ declare_tools! {
     agent_backend_override             => agent_backend::AgentBackendOverride,
     agent_backend_use_server_anthropic => agent_backend::AgentBackendUseServerAnthropic,
     agent_backend_status               => agent_backend::AgentBackendStatus,
+
+    // Agents — listing, prompts, config docs, project memory, log search
+    list_agents  => agents::ListAgents,
+    get_agent    => agents::GetAgent,
+    get_config   => agents::GetConfig,
+    get_context  => agents::GetContext,
+    search_logs  => agents::SearchLogs,
+
+    // Docs — roots, tree, read, search, commands
+    list_roots     => docs::ListRoots,
+    get_tree       => docs::GetTree,
+    read_doc       => docs::ReadDoc,
+    search_docs    => docs::SearchDocs,
+    list_commands  => docs::ListCommands,
+
+    // Infra — docker compose services, logs, tests
+    list_services    => infra::ListServices,
+    get_service_logs => infra::GetServiceLogs,
+    run_tests        => infra::RunTests,
 
     // Home Assistant
     home_assistant_entity_list     => homeassistant::HaEntityList,
