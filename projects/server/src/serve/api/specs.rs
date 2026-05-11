@@ -30,7 +30,7 @@ fn shopify_admin_version() -> String {
 }
 
 use super::prelude::*;
-pub use orca_scanner::{GraphQlEnum, GraphQlField, GraphQlInfo, GraphQlOperation, GraphQlType};
+pub use crate::scanner::{GraphQlEnum, GraphQlField, GraphQlInfo, GraphQlOperation, GraphQlType};
 
 // ── External spec registry ────────────────────────────────────────────────────
 // Orca's own spec lives at /api/openapi.json and /api/openapi/public.json.
@@ -542,7 +542,7 @@ pub async fn specs_graphql_info_handler(Path(repo): Path<String>) -> Response {
             );
         }
     };
-    match orca_scanner::parse_graphql_sdl(&repo, &sdl) {
+    match crate::scanner::parse_graphql_sdl(&repo, &sdl) {
         Ok(info) => Json(info).into_response(),
         Err(e) => err(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string()),
     }

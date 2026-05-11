@@ -1,8 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use orca_utils::tool::{OrcaTool, ToolCtx};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use tool::{OrcaTool, ToolCtx};
 
 use crate::mcp::docs;
 use crate::serve::api::llm as local_llm;
@@ -131,7 +131,7 @@ impl OrcaTool for ListCommands {
 
 // ── register ──────────────────────────────────────────────────────────────────
 
-pub fn register(reg: &mut tool::ToolRegistry) {
+pub fn register(reg: &mut orca_utils::tool::ToolRegistry) {
     reg.register::<ListRoots>()
         .register::<GetTree>()
         .register::<ReadDoc>()

@@ -19,12 +19,12 @@ mod specs;
 mod tools;
 
 use anyhow::Result;
-use config::Config;
+use orca_utils::config::Config;
+use orca_utils::tool::{ToolCtx, ToolRegistry};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tool::{ToolCtx, ToolRegistry};
 
 use handlers::run;
 
@@ -51,7 +51,7 @@ pub async fn serve(config: &Config) -> Result<()> {
     // Reqwest is built with `rustls-no-provider`; without this the first HTTPS
     // client construction (e.g. on tools/list federation calls) panics with
     // "No provider set" and Claude Code sees zero tools. Mirrors `build_router`.
-    llm::ensure_crypto_provider();
+    crate::llm::ensure_crypto_provider();
 
     let pool = crate::serve::mcp_client::McpPool::new_with_db(config.db_path.clone());
 

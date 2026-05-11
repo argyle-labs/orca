@@ -70,7 +70,7 @@ pub use crate::serve::tree::{NodeType, TreeNode};
 // ── Shared spec/download helpers ─────────────────────────────────────────────
 
 pub(super) fn specs_dir() -> std::path::PathBuf {
-    orca_scanner::specs_dir()
+    crate::scanner::specs_dir()
 }
 
 pub(super) fn validate_repo(repo: &str) -> bool {

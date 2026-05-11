@@ -4,7 +4,7 @@
 //! and auto-register any detected runtimes. Call `load_api_key(config)` to read the Anthropic
 //! API key from the encrypted DB when none is provided via environment variable.
 
-use config::Config;
+use orca_utils::config::Config;
 
 use crate::open;
 

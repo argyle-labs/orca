@@ -1,8 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use orca_utils::tool::{OrcaTool, ToolCtx};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use tool::{OrcaTool, ToolCtx};
 
 use crate::mcp::handlers;
 
@@ -42,7 +42,7 @@ impl OrcaTool for AddPlugin {
         "[MUTATES STATE] Install an orca plugin from a manifest path or URL.";
     type Args = AddPluginArgs;
     async fn run(args: AddPluginArgs, _: &ToolCtx) -> Result<String> {
-        let id = orca_commands::install_plugin(&args.manifest, args.instance_id.as_deref())?;
+        let id = crate::commands::install_plugin(&args.manifest, args.instance_id.as_deref())?;
         Ok(format!("Plugin '{id}' installed successfully."))
     }
 }
@@ -60,7 +60,7 @@ impl OrcaTool for RemovePlugin {
     const DESCRIPTION: &'static str = "[MUTATES STATE] Remove an installed orca plugin by ID.";
     type Args = RemovePluginArgs;
     async fn run(args: RemovePluginArgs, _: &ToolCtx) -> Result<String> {
-        if orca_commands::remove_plugin(&args.id)? {
+        if crate::commands::remove_plugin(&args.id)? {
             Ok(format!("Plugin '{}' removed.", args.id))
         } else {
             Ok(format!("Plugin '{}' not found.", args.id))
@@ -189,14 +189,14 @@ impl OrcaTool for SyncPluginCreds {
         "[MUTATES STATE] Sync stored credentials for a plugin to its runtime environment.";
     type Args = SyncPluginCredsArgs;
     async fn run(args: SyncPluginCredsArgs, _: &ToolCtx) -> Result<String> {
-        orca_commands::creds_cmd::sync_plugin_creds(&args.plugin)?;
+        crate::commands::creds_cmd::sync_plugin_creds(&args.plugin)?;
         Ok(format!("Synced credentials for plugin '{}'.", args.plugin))
     }
 }
 
 // ── register ──────────────────────────────────────────────────────────────────
 
-pub fn register(reg: &mut tool::ToolRegistry) {
+pub fn register(reg: &mut orca_utils::tool::ToolRegistry) {
     reg.register::<ListPlugins>()
         .register::<AddPlugin>()
         .register::<RemovePlugin>()

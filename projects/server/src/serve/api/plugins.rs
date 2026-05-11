@@ -348,7 +348,7 @@ pub async fn plugin_data_delete_handler(Path((id, key)): Path<(String, String)>)
 pub async fn plugin_install_handler(Json(body): Json<PluginInstallRequest>) -> Response {
     db_ok(|| {
         let instance_id = body.instance_id.as_deref();
-        orca_commands::install_plugin(&body.manifest, instance_id)?;
+        crate::commands::install_plugin(&body.manifest, instance_id)?;
         Ok(())
     })
 }
@@ -368,7 +368,7 @@ pub async fn plugin_install_handler(Json(body): Json<PluginInstallRequest>) -> R
     tag = "plugins"
 )]
 pub async fn plugin_remove_handler(Path(id): Path<String>) -> Response {
-    db_remove("plugin", &id, || orca_commands::remove_plugin(&id))
+    db_remove("plugin", &id, || crate::commands::remove_plugin(&id))
 }
 
 // ── PATCH /api/plugins/:id/enable ────────────────────────────────────────────
@@ -428,7 +428,7 @@ pub async fn plugin_disable_handler(Path(id): Path<String>) -> Response {
     tag = "plugins"
 )]
 pub async fn plugin_creds_sync_handler(Path(id): Path<String>) -> Response {
-    match orca_commands::creds_cmd::sync_plugin_creds(&id) {
+    match crate::commands::creds_cmd::sync_plugin_creds(&id) {
         Ok(()) => Json(OkResponse { ok: true }).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }

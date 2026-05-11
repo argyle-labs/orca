@@ -8,10 +8,21 @@
 //! - `session`  — interactive REPL + TUI, chat loop, tool execution, job management
 //! - `tui`      — split-pane terminal UI (crossterm/ratatui), keybindings, layout
 
-pub use ::conversation::agent_backend;
-pub use ::conversation::context;
-pub use ::conversation::conversation;
-pub use ::conversation::tui;
+// Absorbed crates — each previously had its own workspace member.
+pub mod agents;
+pub mod commands;
+pub mod conversation;
+pub mod docs;
+pub mod jobs;
+pub mod llm;
+pub mod profile;
+pub mod scanner;
+
+// Re-exports for compatibility with code that previously imported these
+// at the orca-conversation crate root.
+pub use crate::conversation::agent_backend;
+pub use crate::conversation::context;
+pub use crate::conversation::tui;
 
 pub mod log_cmd;
 pub mod markdown;

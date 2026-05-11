@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use utoipa::ToSchema;
 
-use orca_fs::fs::expand_tilde;
+use orca_utils::fs::fs::expand_tilde;
 
 #[derive(Deserialize, ToSchema)]
 pub struct FsBrowseQuery {

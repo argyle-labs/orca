@@ -1,18 +1,18 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use config::Config;
-use llm::{ClaudeBackend, Message, ModelBackend, stdout_sink};
-use orca::context::ProjectContext;
-use orca::conversation::Session;
-use orca::log_cmd::{LogAction, cmd_log};
-use orca::mcp;
-use orca::serve;
-use orca::serve::openapi_spec_json;
-use orca_commands::{
+use orca::commands::{
     self as cmd, CredsAction, DaemonAction, DbAction, DockerAction, EnginesAction, HookAction,
     McpAction, PkiAction, PluginAction, ProfileAction, SchemaAction, SpecAction, cmd_install,
     cmd_logout_atlassian, cmd_logout_github, cmd_oauth_atlassian, cmd_oauth_github, cmd_uninstall,
 };
+use orca::context::ProjectContext;
+use orca::conversation::conversation::Session;
+use orca::llm::{ClaudeBackend, Message, ModelBackend, stdout_sink};
+use orca::log_cmd::{LogAction, cmd_log};
+use orca::mcp;
+use orca::serve;
+use orca::serve::openapi_spec_json;
+use orca_utils::config::Config;
 
 #[derive(Parser)]
 #[command(name = "orca", about = "Context-first AI agent orchestrator", version)]
@@ -298,7 +298,7 @@ async fn main() -> Result<()> {
         Some(Command::Creds { action }) => cmd::cmd_creds(action),
         Some(Command::Db { action }) => cmd::cmd_db(action),
         Some(Command::Update { channel }) => {
-            let ch = orca_commands::update::Channel::parse(&channel);
+            let ch = orca::commands::update::Channel::parse(&channel);
             cmd::cmd_update(ch).await
         }
         Some(Command::Install) => cmd_install(),
@@ -340,8 +340,8 @@ async fn main() -> Result<()> {
 /// baseline. Subsequent runs are a no-op once both have happened.
 fn bootstrap_default_profile(config: &Config) -> Result<()> {
     let conn = db::open(&config.db_path)?;
-    let mgr = profile::ProfileManager::from_config(config);
-    let p = mgr.ensure_default_for(&conn, config::LOCAL_USER)?;
+    let mgr = orca::profile::ProfileManager::from_config(config);
+    let p = mgr.ensure_default_for(&conn, orca_utils::config::LOCAL_USER)?;
     let n = mgr.migrate_personal_agents(&conn, &p)?;
     if n > 0 {
         tracing::info!(
@@ -397,7 +397,7 @@ fn port_in_use(port: u16) -> bool {
 
 /// Park the stable daemon (if running), start dev server, reclaim on exit.
 async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
-    use state::{self, DaemonMode};
+    use orca_utils::state::DaemonMode;
     use std::process::Command;
 
     // Spawn Vite dev server if not already running on 12001
@@ -444,7 +444,7 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
     };
 
     // Park daemon if it's running
-    let (daemon_pid, daemon_binary) = match state::read()? {
+    let (daemon_pid, daemon_binary) = match orca_utils::state::read()? {
         Some(s) if s.mode == DaemonMode::Daemon => {
             // Capture binary now — state file may be gone by the time we need it
             let binary = s.binary.clone();
@@ -452,7 +452,7 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
             Command::new("kill")
                 .args(["-USR1", &pid.to_string()])
                 .status()?;
-            if let Err(e) = state::wait_for_mode(DaemonMode::Parked, 5).await {
+            if let Err(e) = orca_utils::state::wait_for_mode(DaemonMode::Parked, 5).await {
                 // Parking timed out — reclaim immediately so daemon isn't stuck parked
                 let _ = Command::new("kill")
                     .args(["-USR2", &pid.to_string()])
@@ -466,10 +466,10 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
     };
 
     // Mark ourselves as the active dev process
-    if let Some(mut s) = state::read()? {
+    if let Some(mut s) = orca_utils::state::read()? {
         s.mode = DaemonMode::Dev;
         s.active_pid = std::process::id();
-        let _ = state::write(&s);
+        let _ = orca_utils::state::write(&s);
     }
 
     // Run dev server (Ctrl-C will exit)
@@ -481,7 +481,7 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
 
     // Reclaim: read current state (daemon may have been restarted by launchd with a new PID)
     if daemon_pid.is_some() {
-        let current_pid = state::read()
+        let current_pid = orca_utils::state::read()
             .ok()
             .flatten()
             .map(|s| s.daemon_pid)
@@ -502,7 +502,7 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
             println!("[orca] daemon reclaimed port {port}");
         } else {
             // Daemon is not alive and was not restarted by launchd — spawn fresh
-            let binary = state::read()
+            let binary = orca_utils::state::read()
                 .ok()
                 .flatten()
                 .map(|s| s.binary)

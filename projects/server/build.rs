@@ -3,24 +3,67 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
-    let agents_dir = env::var("ORCA_AGENTS_DIR").unwrap_or_else(|_| {
-        let manifest = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
-        format!("{manifest}/../agents")
-    });
-
+    let manifest = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR not set");
-    let dest = Path::new(&out_dir).join("embedded_agents.rs");
 
-    let mut code = String::from("/// Agent prompts embedded at build time.\n");
-    code.push_str("pub fn embedded_agent(name: &str) -> Option<&'static str> {\n");
+    // Embed agent .md prompts (was projects/agents/build.rs).
+    let agents_dir =
+        env::var("ORCA_AGENTS_DIR").unwrap_or_else(|_| format!("{manifest}/src/agents/agents"));
+    write_embedded_map(
+        Path::new(&agents_dir),
+        Path::new(&out_dir).join("embedded_agents.rs"),
+        "embedded_agent",
+        "embedded_agent_names",
+        "Agent",
+    );
+    println!("cargo:rerun-if-env-changed=ORCA_AGENTS_DIR");
+
+    // Embed slash-command .md prompts (was projects/commands/build.rs).
+    let commands_dir = env::var("ORCA_COMMANDS_DIR")
+        .unwrap_or_else(|_| format!("{manifest}/src/commands/commands"));
+    write_embedded_map(
+        Path::new(&commands_dir),
+        Path::new(&out_dir).join("embedded_commands.rs"),
+        "embedded_command",
+        "embedded_command_names",
+        "Slash command",
+    );
+    println!("cargo:rerun-if-env-changed=ORCA_COMMANDS_DIR");
+
+    // Expose the build target triple to the binary (was previously expected
+    // to be supplied externally; emitting it from build.rs keeps `cargo
+    // check` working without env setup).
+    let target = env::var("TARGET").unwrap_or_else(|_| "unknown-target".to_string());
+    println!("cargo:rustc-env=ORCA_BUILD_TARGET={target}");
+
+    println!("cargo:rerun-if-changed=build.rs");
+
+    // Ensure frontend/dist exists so RustEmbed doesn't fail before the frontend
+    // is built. Dev mode (--dev flag) skips the static handler at runtime, so
+    // this stub is never served. Release builds run `make build` which populates
+    // dist/ with real assets before the final cargo build.
+    let dist = Path::new(&manifest).join("../frontend/dist");
+    fs::create_dir_all(&dist).expect("failed to create frontend/dist stub");
+}
+
+fn write_embedded_map(
+    src_dir: &Path,
+    dest: std::path::PathBuf,
+    lookup_fn: &str,
+    names_fn: &str,
+    kind_label: &str,
+) {
+    let mut code = format!("/// {kind_label} prompts embedded at build time.\n");
+    code.push_str(&format!(
+        "pub fn {lookup_fn}(name: &str) -> Option<&'static str> {{\n"
+    ));
     code.push_str("    match name {\n");
 
-    let agents_path = Path::new(&agents_dir);
     let mut names: Vec<String> = vec![];
 
-    if agents_path.exists() {
-        let mut entries: Vec<_> = fs::read_dir(agents_path)
-            .expect("failed to read agents dir")
+    if src_dir.exists() {
+        let mut entries: Vec<_> = fs::read_dir(src_dir)
+            .expect("failed to read embed dir")
             .flatten()
             .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
             .collect();
@@ -28,11 +71,13 @@ fn main() {
 
         for entry in entries {
             let path = entry.path();
-            let name = path.file_stem().unwrap().to_string_lossy().to_string();
-            // Skip broken symlinks (e.g. macOS project agents on Linux)
+            let Some(stem) = path.file_stem() else {
+                continue;
+            };
+            let name = stem.to_string_lossy().to_string();
             let abs = match path.canonicalize() {
                 Ok(p) => p,
-                Err(_) => continue,
+                Err(_) => continue, // skip broken symlinks
             };
             code.push_str(&format!(
                 "        \"{name}\" => Some(include_str!(\"{}\")),\n",
@@ -47,9 +92,13 @@ fn main() {
     code.push_str("    }\n");
     code.push_str("}\n\n");
 
-    // Generate a companion function that lists all embedded agent names.
-    code.push_str("/// All agent names embedded at build time.\n");
-    code.push_str("pub fn embedded_agent_names() -> &'static [&'static str] {\n");
+    code.push_str(&format!(
+        "/// All {} names embedded at build time.\n",
+        kind_label.to_lowercase()
+    ));
+    code.push_str(&format!(
+        "pub fn {names_fn}() -> &'static [&'static str] {{\n"
+    ));
     code.push_str("    &[\n");
     for name in &names {
         code.push_str(&format!("        \"{name}\",\n"));
@@ -57,16 +106,5 @@ fn main() {
     code.push_str("    ]\n");
     code.push_str("}\n");
 
-    fs::write(&dest, code).expect("failed to write embedded_agents.rs");
-
-    println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-env-changed=ORCA_AGENTS_DIR");
-
-    // Ensure frontend/dist exists so RustEmbed doesn't fail before the frontend
-    // is built. Dev mode (--dev flag) skips the static handler at runtime, so
-    // this stub is never served. Release builds run `make build` which populates
-    // dist/ with real assets before the final cargo build.
-    let manifest = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
-    let dist = Path::new(&manifest).join("../frontend/dist");
-    fs::create_dir_all(&dist).expect("failed to create frontend/dist stub");
+    fs::write(&dest, code).expect("failed to write embedded map");
 }

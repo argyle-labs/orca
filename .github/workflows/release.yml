@@ -188,13 +188,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
-          cache-dependency-path: projects/sdk-go/go.sum
+          cache-dependency-path: projects/sdk/go/go.sum
 
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
           cache: 'npm'
-          cache-dependency-path: projects/sdk-ts/package-lock.json
+          cache-dependency-path: projects/sdk/ts/package-lock.json
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -218,10 +218,10 @@ jobs:
         with:
           node-version: '24'
           cache: 'npm'
-          cache-dependency-path: projects/sdk-ts/package-lock.json
+          cache-dependency-path: projects/sdk/ts/package-lock.json
 
       - name: Build + pack
-        working-directory: projects/sdk-ts
+        working-directory: projects/sdk/ts
         run: |
           npm ci
           npm run build
@@ -231,9 +231,9 @@ jobs:
         with:
           name: sdk-ts-dist
           path: |
-            projects/sdk-ts/dist/
-            projects/sdk-ts/package.json
-            projects/sdk-ts/orca-sdk-*.tgz
+            projects/sdk/ts/dist/
+            projects/sdk/ts/package.json
+            projects/sdk/ts/orca-sdk-*.tgz
           retention-days: 7
 
   test-sdk-ts:
@@ -247,15 +247,15 @@ jobs:
         with:
           node-version: '24'
           cache: 'npm'
-          cache-dependency-path: projects/sdk-ts/package-lock.json
+          cache-dependency-path: projects/sdk/ts/package-lock.json
 
       - uses: actions/download-artifact@v4
         with:
           name: sdk-ts-dist
-          path: projects/sdk-ts/
+          path: projects/sdk/ts/
 
       - name: Install + test against built dist
-        working-directory: projects/sdk-ts
+        working-directory: projects/sdk/ts
         run: |
           npm ci
           node --test --experimental-strip-types test/*.test.ts
@@ -270,10 +270,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
-          cache-dependency-path: projects/sdk-go/go.sum
+          cache-dependency-path: projects/sdk/go/go.sum
 
       - name: gofmt
-        working-directory: projects/sdk-go
+        working-directory: projects/sdk/go
         run: |
           diff=$(gofmt -l .)
           if [ -n "$diff" ]; then
@@ -281,7 +281,7 @@ jobs:
           fi
 
       - name: Compile packages + test binaries
-        working-directory: projects/sdk-go
+        working-directory: projects/sdk/go
         run: |
           set -euo pipefail
           go build ./...
@@ -333,15 +333,15 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Build (no test)
-        working-directory: projects/sdk-kotlin
+        working-directory: projects/sdk/kotlin
         run: gradle --no-daemon build -x test
 
       - uses: actions/upload-artifact@v4
         with:
           name: sdk-kotlin-jar
           path: |
-            projects/sdk-kotlin/build/libs/
-            projects/sdk-kotlin/build/classes/
+            projects/sdk/kotlin/build/libs/
+            projects/sdk/kotlin/build/classes/
           retention-days: 7
 
   test-sdk-kotlin:
@@ -361,10 +361,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: sdk-kotlin-jar
-          path: projects/sdk-kotlin/build/
+          path: projects/sdk/kotlin/build/
 
       - name: Test against prebuilt classes
-        working-directory: projects/sdk-kotlin
+        working-directory: projects/sdk/kotlin
         run: gradle --no-daemon test
 
   # ── Frontend ─────────────────────────────────────────────────────────────

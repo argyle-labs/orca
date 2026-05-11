@@ -18,7 +18,7 @@ pub use status::AgentBackendStatus;
 pub use use_server_anthropic::AgentBackendUseServerAnthropic;
 
 /// Register all agent_backend tools into a registry.
-pub fn register(reg: &mut tool::ToolRegistry) {
+pub fn register(reg: &mut orca_utils::tool::ToolRegistry) {
     reg.register::<AgentBackendStatus>()
         .register::<AgentBackendSetMode>()
         .register::<AgentBackendOverride>()

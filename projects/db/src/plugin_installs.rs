@@ -4,7 +4,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Identity placeholder for the local orca node before pod-mesh node identity
-/// lands. Mirrors `config::LOCAL_USER` — once each node has a real id, this
+/// lands. Mirrors `orca_utils::config::LOCAL_USER` — once each node has a real id, this
 /// constant goes away and callers pass the actual `system_id`.
 pub const LOCAL_SYSTEM: &str = "local";
 

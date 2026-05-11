@@ -142,7 +142,7 @@ format:
 	@echo "→ rustfmt (workspace)..."
 	@cargo fmt --all
 	@echo "→ gofmt (sdk-go)..."
-	@cd projects/sdk-go && gofmt -l -w .
+	@cd projects/sdk/go && gofmt -l -w .
 	@echo "→ prettier (frontend src)..."
 	@cd projects/frontend && npx prettier --write src
 	@if command -v taplo >/dev/null 2>&1; then \
@@ -157,7 +157,7 @@ format-check:
 	@echo "→ rustfmt --check..."
 	@cargo fmt --all -- --check
 	@echo "→ gofmt -l (sdk-go)..."
-	@cd projects/sdk-go && diff=$$(gofmt -l .) && if [ -n "$$diff" ]; then echo "unformatted Go files:"; echo "$$diff"; exit 1; fi
+	@cd projects/sdk/go && diff=$$(gofmt -l .) && if [ -n "$$diff" ]; then echo "unformatted Go files:"; echo "$$diff"; exit 1; fi
 	@echo "→ prettier --check..."
 	@cd projects/frontend && npx prettier --check src
 	@if command -v taplo >/dev/null 2>&1; then \

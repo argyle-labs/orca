@@ -1,8 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use orca_utils::tool::{OrcaTool, ToolCtx};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use tool::{OrcaTool, ToolCtx};
 
 #[derive(Deserialize, JsonSchema)]
 pub struct Args {

@@ -10,7 +10,7 @@ use utoipa::ToSchema;
 use super::prelude::*;
 
 fn github_client() -> anyhow::Result<(reqwest::Client, String)> {
-    let token = orca_commands::oauth::load_github_token()
+    let token = crate::commands::oauth::load_github_token()
         .or_else(|| std::env::var("GITHUB_TOKEN").ok())
         .ok_or_else(|| {
             anyhow::anyhow!("no GitHub token — run `orca login github` or set GITHUB_TOKEN")

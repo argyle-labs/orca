@@ -6,11 +6,11 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use orca_homeassistant::{Client, Config, ServiceCall};
+use orca_integrations::homeassistant::{Client, Config, ServiceCall};
+use orca_utils::tool::{OrcaTool, ToolCtx};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use tool::{OrcaTool, ToolCtx};
 
 fn make_client(name: &str) -> Result<Client> {
     let conn = db::open_default()?;
@@ -123,7 +123,7 @@ impl OrcaTool for HaServiceCall {
 
 // ── register ───────────────────────────────────────────────────────────────────
 
-pub fn register(reg: &mut tool::ToolRegistry) {
+pub fn register(reg: &mut orca_utils::tool::ToolRegistry) {
     reg.register::<HaEntityList>()
         .register::<HaEntityState>()
         .register::<HaAutomationList>()
