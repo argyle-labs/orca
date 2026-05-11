@@ -4,8 +4,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use orca_tools_def::services::docs::{
-    DocNodeKind, DocRootSummary, DocTreeNodeData, DocsService, SearchDocHit, SearchDocMatch,
-    SearchDocsData,
+    DocNodeKind, DocRootSummary, DocRootTree, DocTreeNodeData, DocsService, SearchDocHit,
+    SearchDocMatch, SearchDocsData,
 };
 use orca_utils::config::Config;
 use std::sync::Arc;
@@ -100,6 +100,23 @@ impl DocsService for ServerDocs {
             .filter_map(value_to_tree_node)
             .map(|n| node_to_data(&n))
             .collect())
+    }
+
+    async fn get_full_tree(&self, raw: bool) -> Result<Vec<DocRootTree>> {
+        let roots = crate::serve::tree::get_roots();
+        let mut out: Vec<DocRootTree> = Vec::new();
+        for name in roots.keys() {
+            let nodes = if raw {
+                crate::serve::tree::get_root_tree_raw(name)
+            } else {
+                crate::serve::tree::get_root_tree(name)
+            };
+            out.push(DocRootTree {
+                root: name.clone(),
+                nodes: nodes.iter().map(node_to_data).collect(),
+            });
+        }
+        Ok(out)
     }
 
     async fn read_doc(&self, root: &str, path: &str, llm_format: bool) -> Result<String> {

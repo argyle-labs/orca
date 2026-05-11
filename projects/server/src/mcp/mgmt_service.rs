@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use orca_tools_def::mgmt::{GetSchemaOutput, McpContent, RunMcpToolOutput, SchemaDomain};
 use orca_tools_def::services::mgmt::{
     DocRootData, DocRootInput, DocRootService, DockerRuntimeData, DockerRuntimeInput,
     DockerRuntimeService, HaEndpointData, HaEndpointInput, HaEndpointService, McpRegistryService,
@@ -155,7 +156,12 @@ impl McpRegistryService for ServerMcpRegistry {
             .collect())
     }
 
-    async fn run_tool(&self, server: &str, name: &str, arguments: Value) -> Result<Value> {
+    async fn run_tool(
+        &self,
+        server: &str,
+        name: &str,
+        arguments: Value,
+    ) -> Result<RunMcpToolOutput> {
         let pool = make_mcp_pool();
         let client = pool
             .get_or_connect(server)
@@ -164,16 +170,17 @@ impl McpRegistryService for ServerMcpRegistry {
         // Stable correlation id — this trait method is invoked outside the
         // HTTP middleware chain.
         let cid = "tool:run_mcp_tool";
-        match client.call_tool(name, arguments, cid).await {
-            Ok(v) => Ok(v),
+        let raw = match client.call_tool(name, arguments, cid).await {
+            Ok(v) => v,
             Err(e) => {
                 let msg = e.to_string();
                 if msg.contains("MCP server closed") {
                     pool.evict(server).await;
                 }
-                Err(e)
+                return Err(e);
             }
-        }
+        };
+        Ok(parse_mcp_call_result(raw))
     }
 
     async fn list_mappings(&self, name: Option<&str>) -> Result<Vec<ToolMappingData>> {
@@ -243,14 +250,80 @@ impl SchemaDbService for ServerSchemaDb {
         db::schema_databases::remove(&conn, name)
     }
 
-    async fn schema(&self) -> Result<Value> {
+    async fn schema(&self) -> Result<GetSchemaOutput> {
         crate::serve::api::schema::build_schema_response()
             .await
             .map_err(|(status, msg)| anyhow::anyhow!("[{}] {msg}", status.as_u16()))
     }
 
-    async fn schema_domains(&self) -> Result<Value> {
+    async fn schema_domains(&self) -> Result<Vec<SchemaDomain>> {
         Ok(crate::serve::api::schema::build_schema_domains())
+    }
+}
+
+/// Parse the JSON-RPC `result` value of an MCP `tools/call` response into a
+/// typed envelope. Tolerant of partially-shaped servers: missing fields fall
+/// back to sensible defaults rather than failing the call.
+fn parse_mcp_call_result(raw: Value) -> RunMcpToolOutput {
+    let obj = match raw {
+        Value::Object(m) => m,
+        // Some servers return a bare value instead of the envelope. Wrap it
+        // as a single JSON content block so callers see real data.
+        other => {
+            return RunMcpToolOutput {
+                content: vec![McpContent {
+                    kind: "text".to_string(),
+                    text: Some(other.to_string()),
+                    data: None,
+                    mime_type: None,
+                    resource: None,
+                }],
+                is_error: false,
+                structured_content: None,
+            };
+        }
+    };
+
+    let is_error = obj
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let structured_content = obj.get("structuredContent").cloned();
+
+    let content = match obj.get("content") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                serde_json::from_value::<McpContent>(item.clone()).unwrap_or_else(|_| McpContent {
+                    kind: item
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    text: item
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    data: item
+                        .get("data")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    mime_type: item
+                        .get("mimeType")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    resource: item.get("resource").cloned(),
+                })
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    RunMcpToolOutput {
+        content,
+        is_error,
+        structured_content,
     }
 }
 

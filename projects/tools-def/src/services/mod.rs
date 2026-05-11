@@ -10,6 +10,8 @@ pub mod agent_backend;
 #[cfg(feature = "native")]
 pub mod agents;
 #[cfg(feature = "native")]
+pub mod docker;
+#[cfg(feature = "native")]
 pub mod docs;
 #[cfg(feature = "native")]
 pub mod infra;
@@ -19,3 +21,7 @@ pub mod mgmt;
 pub mod plugin_runtime;
 #[cfg(feature = "native")]
 pub mod plugins;
+#[cfg(feature = "native")]
+pub mod spec_registry;
+#[cfg(feature = "native")]
+pub mod system;

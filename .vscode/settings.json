@@ -1,6 +1,7 @@
 {
   "cSpell.words": [
     "cmark",
+    "Creds",
     "crossterm",
     "impls",
     "jsonschema",
@@ -13,6 +14,7 @@
     "schemars",
     "serde",
     "sqlcipher",
+    "stty",
     "tungstenite",
     "typst",
     "utoipa"

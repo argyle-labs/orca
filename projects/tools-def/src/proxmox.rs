@@ -13,6 +13,7 @@ pub struct ProxmoxListNodesArgs {
     pub endpoint: String,
 }
 pub struct ProxmoxListNodes;
+#[allow(clippy::disallowed_types)] // Output is opaque Proxmox node listing — shape dictated by Proxmox API
 impl OrcaToolDef for ProxmoxListNodes {
     const NAME: &'static str = "proxmox_list_nodes";
     const DESCRIPTION: &'static str = "List Proxmox VE cluster nodes for a registered endpoint.";
@@ -29,6 +30,7 @@ pub struct ProxmoxListVmsArgs {
     pub node: String,
 }
 pub struct ProxmoxListVms;
+#[allow(clippy::disallowed_types)] // Output is opaque Proxmox VM listing — shape dictated by Proxmox API
 impl OrcaToolDef for ProxmoxListVms {
     const NAME: &'static str = "proxmox_list_vms";
     const DESCRIPTION: &'static str = "List QEMU VMs on a Proxmox node.";
@@ -45,6 +47,7 @@ pub struct ProxmoxListContainersArgs {
     pub node: String,
 }
 pub struct ProxmoxListContainers;
+#[allow(clippy::disallowed_types)] // Output is opaque Proxmox container listing — shape dictated by Proxmox API
 impl OrcaToolDef for ProxmoxListContainers {
     const NAME: &'static str = "proxmox_list_containers";
     const DESCRIPTION: &'static str = "List LXC containers on a Proxmox node.";
