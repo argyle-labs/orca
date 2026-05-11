@@ -84,12 +84,6 @@ declare_tools! {
     agent_backend_set_api_key    => agent_backend::AgentBackendSetApiKey,
     agent_backend_api_key_status => agent_backend::AgentBackendApiKeyStatus,
 
-    // Agent backend — mode + overrides (run impls in server crate).
-    agent_backend_set_mode             => agent_backend::AgentBackendSetMode,
-    agent_backend_override             => agent_backend::AgentBackendOverride,
-    agent_backend_use_server_anthropic => agent_backend::AgentBackendUseServerAnthropic,
-    agent_backend_status               => agent_backend::AgentBackendStatus,
-
     // Home Assistant
     home_assistant_entity_list     => homeassistant::HaEntityList,
     home_assistant_entity_state    => homeassistant::HaEntityState,
