@@ -1236,13 +1236,16 @@ fn validate_against_declared_schema(
 }
 
 /// Compare two dotted-numeric versions (e.g. "0.1.0" vs "0.2.0").
-/// Pre-release / build metadata segments are not supported — returns Err.
+/// Pre-release / build metadata segments are stripped before comparison —
+/// the server's CARGO_PKG_VERSION often carries an "-rc.N" suffix between
+/// stable cuts, but for handshake purposes "0.0.3-rc.3" satisfies any plugin
+/// asking for "0.0.3" or below.
 fn compare_semver(a: &str, b: &str) -> Result<Ordering> {
     fn parse(v: &str) -> Result<Vec<u64>> {
-        if v.contains('-') || v.contains('+') {
-            anyhow::bail!("pre-release/build metadata not supported");
-        }
-        v.split('.')
+        // Drop "-prerelease" and "+build" suffixes — we only compare the
+        // numeric core, which is enough for a "min required" gate.
+        let core = v.split(['-', '+']).next().unwrap_or(v);
+        core.split('.')
             .map(|p| {
                 p.parse::<u64>()
                     .map_err(|e| anyhow::anyhow!("bad component '{p}': {e}"))

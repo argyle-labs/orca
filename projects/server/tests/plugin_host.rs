@@ -925,7 +925,7 @@ async fn hello_rejects_when_plugin_id_does_not_match_peer_cert_cn() {
         "sdk_version": "0.1.0",
         "plugin_id": "beta",
         "flavor": "headless",
-        "core_min_required": "0.1.0",
+        "core_min_required": "0.0.0",
         "methods_required": [],
         "methods_optional": [],
     });
@@ -1327,7 +1327,7 @@ async fn hello_rejects_when_required_plugin_dep_missing() {
                     plugin_id: "needs-peer".into(),
                     plugin_version: "0.1.0".into(),
                     flavor: orca_sdk::Flavor::Headless,
-                    core_min_required: "0.1.0".into(),
+                    core_min_required: "0.0.0".into(),
                     methods_required: vec![],
                     methods_optional: vec![],
                     plugins_required: vec!["nonexistent>=0.1.0".into()],

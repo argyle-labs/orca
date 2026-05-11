@@ -723,7 +723,7 @@ impl HelloOptions {
             plugin_id: plugin_id.into(),
             plugin_version: String::new(),
             flavor,
-            core_min_required: "0.1.0".to_string(),
+            core_min_required: "0.0.0".to_string(),
             methods_required: Vec::new(),
             methods_optional: Vec::new(),
             plugins_required: Vec::new(),
