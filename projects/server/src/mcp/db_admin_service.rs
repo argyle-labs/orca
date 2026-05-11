@@ -16,11 +16,7 @@ impl ServerDbAdmin {
         let conn = db::open_default()?;
         let before = db::schema_version(&conn)?;
         let after = db::migrate(&conn, direction, steps)?;
-        let applied = if after >= before {
-            after - before
-        } else {
-            before - after
-        };
+        let applied = after.abs_diff(before);
         Ok(DbMigrateReport {
             before,
             after,
