@@ -1,3 +1,4 @@
+pub mod agent_backend_service;
 pub mod backend;
 pub mod discovery;
 pub mod resolve;

@@ -70,6 +70,15 @@ impl OrcaToolDef for AgentBackendSetApiKey {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct StatusArgs {}
 
+pub struct AgentBackendApiKeyStatus;
+impl OrcaToolDef for AgentBackendApiKeyStatus {
+    const NAME: &'static str = "agent_backend_api_key_status";
+    const DESCRIPTION: &'static str = "Report whether an Anthropic API key is stored in the encrypted orca DB. \
+         Never echoes the raw key — only a masked preview.";
+    type Args = StatusArgs;
+    type Output = ApiKeyStatus;
+}
+
 // ── agent_backend_set_mode ──────────────────────────────────────────────────
 
 #[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
@@ -84,6 +93,7 @@ pub struct SetModeArgs {
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SetModeResult {
+    /// Canonical mode string after the change.
     pub mode: String,
 }
 
@@ -114,8 +124,10 @@ pub struct OverrideArgs {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct OverrideResult {
     pub agent: String,
-    /// Resulting backend, or "none" after clear.
-    pub backend: String,
+    /// Resulting backend after the call. `None` when an override was cleared
+    /// (or when no override existed for the agent).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
     pub cleared: bool,
 }
 
@@ -188,22 +200,19 @@ impl OrcaToolDef for AgentBackendStatus {
     type Output = AgentBackendStatusOutput;
 }
 
-pub struct AgentBackendApiKeyStatus;
-impl OrcaToolDef for AgentBackendApiKeyStatus {
-    const NAME: &'static str = "agent_backend_api_key_status";
-    const DESCRIPTION: &'static str = "Report whether an Anthropic API key is stored in the encrypted orca DB. \
-         Never echoes the raw key — only a masked preview.";
-    type Args = StatusArgs;
-    type Output = ApiKeyStatus;
-}
-
 #[cfg(feature = "native")]
 mod native {
     use super::*;
+    use crate::services::agent_backend::AgentBackendService;
     use anyhow::Result;
     use async_trait::async_trait;
     use orca_db as db;
     use orca_utils::tool::{OrcaTool, ToolCtx};
+    use std::sync::Arc;
+
+    fn svc(ctx: &ToolCtx) -> Result<Arc<dyn AgentBackendService>> {
+        ctx.service::<Arc<dyn AgentBackendService>>()
+    }
 
     #[async_trait]
     impl OrcaTool for AgentBackendClearApiKey {
@@ -253,6 +262,76 @@ mod native {
                     masked: None,
                 }),
             }
+        }
+    }
+
+    #[async_trait]
+    impl OrcaTool for AgentBackendSetMode {
+        async fn run(args: SetModeArgs, ctx: &ToolCtx) -> Result<SetModeResult> {
+            let mode = svc(ctx)?.set_mode(&args.mode).await?;
+            Ok(SetModeResult { mode })
+        }
+    }
+
+    #[async_trait]
+    impl OrcaTool for AgentBackendOverride {
+        async fn run(args: OverrideArgs, ctx: &ToolCtx) -> Result<OverrideResult> {
+            let s = svc(ctx)?;
+            if args.backend == "clear" {
+                let removed = s.clear_override(&args.agent).await?;
+                return Ok(OverrideResult {
+                    agent: args.agent,
+                    backend: None,
+                    cleared: removed,
+                });
+            }
+            if !s.agent_exists(&args.agent).await? {
+                anyhow::bail!("unknown agent: {}", args.agent);
+            }
+            s.set_override(&args.agent, &args.backend).await?;
+            Ok(OverrideResult {
+                agent: args.agent,
+                backend: Some(args.backend),
+                cleared: false,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl OrcaTool for AgentBackendUseServerAnthropic {
+        async fn run(
+            args: UseServerAnthropicArgs,
+            ctx: &ToolCtx,
+        ) -> Result<UseServerAnthropicResult> {
+            svc(ctx)?.set_use_server_anthropic(args.enabled).await?;
+            Ok(UseServerAnthropicResult {
+                enabled: args.enabled,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl OrcaTool for AgentBackendStatus {
+        async fn run(
+            _args: AgentBackendStatusArgs,
+            ctx: &ToolCtx,
+        ) -> Result<AgentBackendStatusOutput> {
+            let s = svc(ctx)?;
+            let mode = s.current_mode().await?;
+            let use_server_anthropic = s.use_server_anthropic().await?;
+            let api_key_in_db = s.api_key_present().await?;
+            let overrides = s
+                .list_overrides()
+                .await?
+                .into_iter()
+                .map(|(agent, backend)| AgentBackendOverrideEntry { agent, backend })
+                .collect();
+            Ok(AgentBackendStatusOutput {
+                mode,
+                use_server_anthropic,
+                api_key_in_db,
+                overrides,
+            })
         }
     }
 }
