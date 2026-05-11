@@ -34,6 +34,9 @@ rustls  = { workspace = true }
 # Schema (tool module)
 schemars = { workspace = true }
 
+# Axum (tool module → HTTP surface)
+axum = { workspace = true }
+
 # Embedded assets (config module)
 rust-embed = { workspace = true }
 
