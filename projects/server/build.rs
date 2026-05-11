@@ -97,7 +97,7 @@ fn resolve_version() -> String {
     // to make the "-dev" intent obvious. Falls back to "<sha>-dev" when there's no tag.
     let stripped = described.trim_end_matches("-dirty");
     let parts: Vec<&str> = stripped.rsplitn(3, '-').collect();
-    let formatted = if parts.len() == 3 && parts[0].starts_with('g') {
+    if parts.len() == 3 && parts[0].starts_with('g') {
         // parts = [g<sha>, <N>, <tag>] (reversed)
         let sha = parts[0];
         let n = parts[1];
@@ -114,8 +114,7 @@ fn resolve_version() -> String {
             s.push_str(".dirty");
         }
         s
-    };
-    formatted
+    }
 }
 
 fn write_embedded_map(
