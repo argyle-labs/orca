@@ -1,9 +1,10 @@
 //! Plugin runtime KV — typed tool defs for `get_plugin_data` and
-//! `set_plugin_data`. Values are opaque strings (typically JSON-stringified)
-//! to match the REST + DB surface.
+//! `set_plugin_data`. Values are arbitrary JSON; the underlying TEXT column
+//! holds the JSON-stringified form but callers work with structured data.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::OrcaToolDef;
 
@@ -21,8 +22,10 @@ pub struct GetPluginDataArgs {
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetPluginDataOutput {
-    /// Stored value — opaque string. Typically JSON-stringified by the plugin.
-    pub value: String,
+    /// Stored value — arbitrary JSON. Stored as TEXT in orca.db; the
+    /// host parses/serializes at the edge so callers never see a string.
+    #[cfg_attr(feature = "wasm", tsify(type = "unknown"))]
+    pub value: Value,
 }
 
 pub struct GetPluginData;
@@ -42,8 +45,9 @@ impl OrcaToolDef for GetPluginData {
 pub struct SetPluginDataArgs {
     pub plugin: String,
     pub key: String,
-    /// Opaque value — encoded by the caller (usually `JSON.stringify(obj)`).
-    pub value: String,
+    /// Arbitrary JSON value — the host serializes it to TEXT at the storage edge.
+    #[cfg_attr(feature = "wasm", tsify(type = "unknown"))]
+    pub value: Value,
 }
 
 #[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]

@@ -5,7 +5,7 @@ export const ssr = false;
 
 export const load: PageLoad = async () => {
   const configResult = await getPluginData({ id: 'rebuy', key: 'jira_config' }).catch(() => null);
-  const config = configResult?.value ? JSON.parse(configResult.value) : null;
+  const config = (configResult?.value as { jql?: string; project?: string } | null) ?? null;
 
   if (!config?.jql) return { issues: [], config: null };
 

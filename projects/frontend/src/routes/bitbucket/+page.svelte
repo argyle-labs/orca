@@ -26,7 +26,7 @@
   }
 
   async function saveConfig(values: Record<string, string>) {
-    await setPluginData({ id: 'rebuy', key: 'bitbucket_config', body: { value: JSON.stringify({ workspace: values.workspace }) } });
+    await setPluginData({ id: 'rebuy', key: 'bitbucket_config', body: { value: { workspace: values.workspace } } });
     await invalidateAll();
   }
 

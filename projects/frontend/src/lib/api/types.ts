@@ -261,7 +261,7 @@ export interface OkResponse {
 export interface PluginDataEntry {
   key: string;
   updatedAt: string;
-  value: string;
+  value: unknown;
 }
 
 export interface PluginInfo {
@@ -409,7 +409,7 @@ export interface SetCredRequest {
 }
 
 export interface SetPluginDataRequest {
-  value: string;
+  value: unknown;
 }
 
 export interface SpecDownloadQuery {

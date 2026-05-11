@@ -10,6 +10,7 @@ pub mod docs_service;
 mod handlers;
 pub mod infra_service;
 pub mod mgmt_service;
+pub mod plugin_runtime_service;
 pub mod plugins_service;
 mod spec_tools;
 mod specs;
@@ -61,6 +62,9 @@ fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
     let plugins_svc: Arc<dyn orca_tools_def::services::plugins::PluginsService> =
         Arc::new(crate::mcp::plugins_service::ServerPlugins);
     ctx.register_service(plugins_svc);
+    let plugin_runtime: Arc<dyn orca_tools_def::services::plugin_runtime::PluginRuntimeService> =
+        Arc::new(crate::mcp::plugin_runtime_service::ServerPluginRuntime);
+    ctx.register_service(plugin_runtime);
     {
         use orca_tools_def::services::mgmt::*;
         let mcp_reg: Arc<dyn McpRegistryService> =
