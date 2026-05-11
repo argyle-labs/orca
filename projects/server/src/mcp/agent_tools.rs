@@ -20,6 +20,7 @@ impl OrcaTool for ListAgents {
     const DESCRIPTION: &'static str =
         "List all available orca agents with their names and descriptions.";
     type Args = ListAgentsArgs;
+    type Output = String;
     async fn run(_args: ListAgentsArgs, _ctx: &ToolCtx) -> Result<String> {
         handlers::agents()
     }
@@ -41,6 +42,7 @@ impl OrcaTool for GetAgent {
     const DESCRIPTION: &'static str = "Return the full system prompt for a named orca agent. Use this to invoke an agent \
          programmatically via Agent(general-purpose, prompt=<result>+task).";
     type Args = GetAgentArgs;
+    type Output = String;
     async fn run(args: GetAgentArgs, ctx: &ToolCtx) -> Result<String> {
         let prompt = crate::mcp::agent_resolve::load_agent_prompt(&args.name, &ctx.config)
             .ok_or_else(|| anyhow::anyhow!("agent not found: {}", args.name))?;
@@ -65,6 +67,7 @@ impl OrcaTool for GetConfig {
          (e.g. TOOL_RULES, DELEGATION, SEVERITY_RUBRIC, CANONICAL_SOURCES, CODING_RULES). \
          Call with no name to list available files.";
     type Args = GetConfigArgs;
+    type Output = String;
     async fn run(args: GetConfigArgs, ctx: &ToolCtx) -> Result<String> {
         use serde_json::json;
         let v = json!({ "name": args.name });
@@ -88,6 +91,7 @@ impl OrcaTool for GetContext {
     const DESCRIPTION: &'static str = "Load the memory context for a orca project. Returns MEMORY.md index and all \
          memory files for the project.";
     type Args = GetContextArgs;
+    type Output = String;
     async fn run(args: GetContextArgs, ctx: &ToolCtx) -> Result<String> {
         use serde_json::json;
         let v = json!({ "project": args.project });
@@ -111,6 +115,7 @@ impl OrcaTool for SearchLogs {
     const DESCRIPTION: &'static str = "Search orca session history for a keyword. Returns matching log entries with \
          session ID, role, and content preview.";
     type Args = SearchLogsArgs;
+    type Output = String;
     async fn run(args: SearchLogsArgs, ctx: &ToolCtx) -> Result<String> {
         use serde_json::json;
         let v = json!({ "query": args.query });

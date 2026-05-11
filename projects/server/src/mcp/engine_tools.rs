@@ -87,6 +87,7 @@ impl OrcaTool for EngineList {
     const NAME: &'static str = "engine.list";
     const DESCRIPTION: &'static str = "List registered LLM backends (LM Studio, Ollama).";
     type Args = EmptyArgs;
+    type Output = String;
 
     async fn run(_args: EmptyArgs, _ctx: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
@@ -104,6 +105,7 @@ impl OrcaTool for EngineAdd {
     const DESCRIPTION: &'static str =
         "Register a new LLM backend. Kind auto-inferred from URL if not supplied.";
     type Args = AddArgs;
+    type Output = String;
 
     async fn run(args: AddArgs, _ctx: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
@@ -120,6 +122,7 @@ impl OrcaTool for EngineRemove {
     const NAME: &'static str = "engine.remove";
     const DESCRIPTION: &'static str = "Remove a registered LLM backend.";
     type Args = NameArgs;
+    type Output = String;
 
     async fn run(args: NameArgs, _ctx: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
@@ -138,6 +141,7 @@ impl OrcaTool for EngineEnable {
     const NAME: &'static str = "engine.enable";
     const DESCRIPTION: &'static str = "Enable a backend for model discovery.";
     type Args = NameArgs;
+    type Output = String;
 
     async fn run(args: NameArgs, _ctx: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
@@ -156,6 +160,7 @@ impl OrcaTool for EngineDisable {
     const NAME: &'static str = "engine.disable";
     const DESCRIPTION: &'static str = "Disable a backend without removing it.";
     type Args = NameArgs;
+    type Output = String;
 
     async fn run(args: NameArgs, _ctx: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;

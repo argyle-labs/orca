@@ -40,6 +40,7 @@ impl OrcaTool for HaEntityList {
     const DESCRIPTION: &'static str =
         "List Home Assistant entities for a registered endpoint, optionally filtered by domain.";
     type Args = HaEntityListArgs;
+    type Output = String;
     async fn run(args: HaEntityListArgs, _: &ToolCtx) -> Result<String> {
         let client = make_client(&args.endpoint)?;
         let v = client.entity_list(args.domain.as_deref()).await?;
@@ -61,6 +62,7 @@ impl OrcaTool for HaEntityState {
     const NAME: &'static str = "home_assistant_entity_state";
     const DESCRIPTION: &'static str = "Fetch the current state of a single Home Assistant entity.";
     type Args = HaEntityStateArgs;
+    type Output = String;
     async fn run(args: HaEntityStateArgs, _: &ToolCtx) -> Result<String> {
         let client = make_client(&args.endpoint)?;
         let v = client.entity_state(&args.entity_id).await?;
@@ -80,6 +82,7 @@ impl OrcaTool for HaAutomationList {
     const NAME: &'static str = "home_assistant_automation_list";
     const DESCRIPTION: &'static str = "List Home Assistant automations for a registered endpoint.";
     type Args = HaAutomationListArgs;
+    type Output = String;
     async fn run(args: HaAutomationListArgs, _: &ToolCtx) -> Result<String> {
         let client = make_client(&args.endpoint)?;
         let v = client.automation_list().await?;
@@ -108,6 +111,7 @@ impl OrcaTool for HaServiceCall {
     const DESCRIPTION: &'static str = "[MUTATES STATE] Invoke a Home Assistant service \
          (e.g. light.turn_on, switch.toggle). Returns the list of changed entity states.";
     type Args = HaServiceCallArgs;
+    type Output = String;
     async fn run(args: HaServiceCallArgs, _: &ToolCtx) -> Result<String> {
         let client = make_client(&args.endpoint)?;
         let call = ServiceCall {

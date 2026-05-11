@@ -35,6 +35,7 @@ impl OrcaTool for ProxmoxListNodes {
     const NAME: &'static str = "proxmox_list_nodes";
     const DESCRIPTION: &'static str = "List Proxmox VE cluster nodes for a registered endpoint.";
     type Args = ProxmoxListNodesArgs;
+    type Output = String;
     async fn run(args: ProxmoxListNodesArgs, _: &ToolCtx) -> Result<String> {
         let client = make_client(&args.endpoint)?;
         let v = client.nodes().await?;
@@ -56,6 +57,7 @@ impl OrcaTool for ProxmoxListVms {
     const NAME: &'static str = "proxmox_list_vms";
     const DESCRIPTION: &'static str = "List QEMU VMs on a Proxmox node.";
     type Args = ProxmoxListVmsArgs;
+    type Output = String;
     async fn run(args: ProxmoxListVmsArgs, _: &ToolCtx) -> Result<String> {
         let client = make_client(&args.endpoint)?;
         let v = client.vms(&args.node).await?;
@@ -77,6 +79,7 @@ impl OrcaTool for ProxmoxListContainers {
     const NAME: &'static str = "proxmox_list_containers";
     const DESCRIPTION: &'static str = "List LXC containers on a Proxmox node.";
     type Args = ProxmoxListContainersArgs;
+    type Output = String;
     async fn run(args: ProxmoxListContainersArgs, _: &ToolCtx) -> Result<String> {
         let client = make_client(&args.endpoint)?;
         let v = client.containers(&args.node).await?;
@@ -102,6 +105,7 @@ impl OrcaTool for ProxmoxVmAction {
     const DESCRIPTION: &'static str = "[MUTATES STATE] Run a lifecycle action on a Proxmox VM (start/stop/shutdown/reboot). \
          Returns the Proxmox UPID for tracking the async task.";
     type Args = ProxmoxVmActionArgs;
+    type Output = String;
     async fn run(args: ProxmoxVmActionArgs, _: &ToolCtx) -> Result<String> {
         let client = make_client(&args.endpoint)?;
         let action: Action = args.action.parse()?;
@@ -127,6 +131,7 @@ impl OrcaTool for ProxmoxContainerAction {
     const DESCRIPTION: &'static str =
         "[MUTATES STATE] Run a lifecycle action on a Proxmox LXC container.";
     type Args = ProxmoxContainerActionArgs;
+    type Output = String;
     async fn run(args: ProxmoxContainerActionArgs, _: &ToolCtx) -> Result<String> {
         let client = make_client(&args.endpoint)?;
         let action: Action = args.action.parse()?;

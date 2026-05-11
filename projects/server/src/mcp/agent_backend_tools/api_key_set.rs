@@ -19,6 +19,7 @@ impl OrcaTool for AgentBackendSetApiKey {
          (settings table, key 'secrets.anthropic_api_key'). The DB is SQLCipher-encrypted \
          at rest. Required for server-side Anthropic calls.";
     type Args = Args;
+    type Output = String;
 
     async fn run(args: Args, _ctx: &ToolCtx) -> Result<String> {
         if args.key.trim().is_empty() {

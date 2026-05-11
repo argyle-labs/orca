@@ -19,6 +19,7 @@ impl OrcaTool for ListPlugins {
     const NAME: &'static str = "list_plugins";
     const DESCRIPTION: &'static str = "List all orca plugins registered in orca.db.";
     type Args = ListPluginsArgs;
+    type Output = String;
     async fn run(args: ListPluginsArgs, _: &ToolCtx) -> Result<String> {
         use serde_json::json;
         handlers::plugin_list(&json!({ "workspace": args.workspace }))
@@ -41,6 +42,7 @@ impl OrcaTool for AddPlugin {
     const DESCRIPTION: &'static str =
         "[MUTATES STATE] Install an orca plugin from a manifest path or URL.";
     type Args = AddPluginArgs;
+    type Output = String;
     async fn run(args: AddPluginArgs, _: &ToolCtx) -> Result<String> {
         let id = crate::commands::install_plugin(&args.manifest, args.instance_id.as_deref())?;
         Ok(format!("Plugin '{id}' installed successfully."))
@@ -59,6 +61,7 @@ impl OrcaTool for RemovePlugin {
     const NAME: &'static str = "remove_plugin";
     const DESCRIPTION: &'static str = "[MUTATES STATE] Remove an installed orca plugin by ID.";
     type Args = RemovePluginArgs;
+    type Output = String;
     async fn run(args: RemovePluginArgs, _: &ToolCtx) -> Result<String> {
         if crate::commands::remove_plugin(&args.id)? {
             Ok(format!("Plugin '{}' removed.", args.id))
@@ -81,6 +84,7 @@ impl OrcaTool for EnablePlugin {
     const NAME: &'static str = "enable_plugin";
     const DESCRIPTION: &'static str = "[MUTATES STATE] Enable a registered orca plugin.";
     type Args = PluginIdArgs;
+    type Output = String;
     async fn run(args: PluginIdArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
         if db::plugins::set_enabled(&conn, &args.id, true)? {
@@ -97,6 +101,7 @@ impl OrcaTool for DisablePlugin {
     const NAME: &'static str = "disable_plugin";
     const DESCRIPTION: &'static str = "[MUTATES STATE] Disable a registered orca plugin.";
     type Args = PluginIdArgs;
+    type Output = String;
     async fn run(args: PluginIdArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
         if db::plugins::set_enabled(&conn, &args.id, false)? {
@@ -120,6 +125,7 @@ impl OrcaTool for ListPluginCreds {
     const DESCRIPTION: &'static str =
         "List all stored credentials for a plugin (keys only — values are never returned).";
     type Args = ListPluginCredsArgs;
+    type Output = String;
     async fn run(args: ListPluginCredsArgs, _: &ToolCtx) -> Result<String> {
         use serde_json::json;
         handlers::plugin_creds_list(&json!({ "plugin": args.plugin }))
@@ -139,6 +145,7 @@ impl OrcaTool for SetPluginCred {
     const DESCRIPTION: &'static str =
         "[MUTATES STATE] Store a credential value for a plugin in orca.db.";
     type Args = SetPluginCredArgs;
+    type Output = String;
     async fn run(args: SetPluginCredArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
         db::plugin_creds::set(&conn, &args.plugin, &args.key, &args.value)?;
@@ -161,6 +168,7 @@ impl OrcaTool for RemovePluginCred {
     const DESCRIPTION: &'static str =
         "[MUTATES STATE] Remove a stored credential for a plugin from orca.db.";
     type Args = RemovePluginCredArgs;
+    type Output = String;
     async fn run(args: RemovePluginCredArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
         if db::plugin_creds::delete(&conn, &args.plugin, &args.key)? {
@@ -188,6 +196,7 @@ impl OrcaTool for SyncPluginCreds {
     const DESCRIPTION: &'static str =
         "[MUTATES STATE] Sync stored credentials for a plugin to its runtime environment.";
     type Args = SyncPluginCredsArgs;
+    type Output = String;
     async fn run(args: SyncPluginCredsArgs, _: &ToolCtx) -> Result<String> {
         crate::commands::creds_cmd::sync_plugin_creds(&args.plugin)?;
         Ok(format!("Synced credentials for plugin '{}'.", args.plugin))

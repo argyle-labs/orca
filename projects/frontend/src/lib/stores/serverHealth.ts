@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store';
+import { orca } from '$lib/orcaClient';
 
 export type ServerStatus = 'unknown' | 'up' | 'down';
 
@@ -10,14 +11,16 @@ function createServerHealth() {
   let timer: ReturnType<typeof setTimeout> | null = null;
 
   async function check() {
+    let ok = false;
     try {
-      const res = await fetch('/api/health', { cache: 'no-store' });
-      set(res.ok ? 'up' : 'down');
-      timer = setTimeout(check, res.ok ? POLL_UP_MS : POLL_DOWN_MS);
+      const client = await orca();
+      const result = (await client.health()) as { ok: boolean };
+      ok = !!result?.ok;
     } catch {
-      set('down');
-      timer = setTimeout(check, POLL_DOWN_MS);
+      ok = false;
     }
+    set(ok ? 'up' : 'down');
+    timer = setTimeout(check, ok ? POLL_UP_MS : POLL_DOWN_MS);
   }
 
   function start() {

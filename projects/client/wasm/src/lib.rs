@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use orca_client_core::{
     ClientError, HttpRequest, HttpResponse, OrcaClient as CoreClient, Transport,
 };
+use serde::Serialize;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
@@ -76,7 +77,10 @@ impl OrcaClient {
 
     pub async fn health(&self) -> Result<JsValue, JsValue> {
         let h = self.inner.health().await.map_err(err_to_js)?;
-        serde_wasm_bindgen::to_value(&serde_json::json!({ "ok": h.ok }))
+        // Default serializer emits JS Maps for structs — use the object form
+        // so frontend code can do `result.ok` instead of `result.get('ok')`.
+        let ser = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        h.serialize(&ser)
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }

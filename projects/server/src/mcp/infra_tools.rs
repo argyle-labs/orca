@@ -19,6 +19,7 @@ impl OrcaTool for ListServices {
     const DESCRIPTION: &'static str = "List all running docker compose services across all rebuy projects. \
          Returns project name, path, and per-service state/health/ports.";
     type Args = ListServicesArgs;
+    type Output = String;
     async fn run(_: ListServicesArgs, _: &ToolCtx) -> Result<String> {
         handlers::list_services().await
     }
@@ -44,6 +45,7 @@ impl OrcaTool for GetServiceLogs {
     const DESCRIPTION: &'static str = "Fetch docker compose logs for a running rebuy service. \
          Specify the project path and service name.";
     type Args = GetServiceLogsArgs;
+    type Output = String;
     async fn run(args: GetServiceLogsArgs, _: &ToolCtx) -> Result<String> {
         use serde_json::json;
         handlers::service_logs(&json!({
@@ -71,6 +73,7 @@ impl OrcaTool for RunTests {
     const DESCRIPTION: &'static str = "Run the orca project test suite. Returns test output with pass/fail counts. \
          Suites: rust (cargo test), frontend (vitest), e2e (playwright), all.";
     type Args = RunTestsArgs;
+    type Output = String;
     async fn run(args: RunTestsArgs, _: &ToolCtx) -> Result<String> {
         use serde_json::json;
         handlers::run_tests(&json!({ "suite": args.suite })).await

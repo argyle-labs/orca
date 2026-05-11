@@ -17,6 +17,7 @@ impl OrcaTool for AgentBackendStatus {
     const DESCRIPTION: &'static str = "Show the current agent backend configuration: mode (local|claude|hybrid), \
          per-agent overrides, and whether server-side Anthropic calls are enabled.";
     type Args = Args;
+    type Output = String;
 
     async fn run(_args: Args, _ctx: &ToolCtx) -> Result<String> {
         let mode = agent_backend::current_mode()?;

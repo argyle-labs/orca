@@ -9,7 +9,7 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use std::marker::PhantomData;
 
-use super::erased::{ErasedTool, ToolWrapper};
+use super::erased::{ErasedTool, ToolWrapper, value_to_text};
 use super::{OrcaTool, ToolCtx};
 
 pub struct ToolRegistry {
@@ -48,18 +48,26 @@ impl ToolRegistry {
                 json!({
                     "name": t.name(),
                     "description": t.description(),
-                    "inputSchema": t.schema(),
+                    "inputSchema": t.input_schema(),
                 })
             })
             .collect()
     }
 
-    /// Dispatch a `tools/call` by name. Returns `Err` for unknown tool names.
-    pub async fn dispatch(&self, name: &str, args: Value, ctx: &ToolCtx) -> Result<String> {
+    /// Dispatch a `tools/call` by name, returning a structured JSON value.
+    /// Returns `Err` for unknown tool names.
+    pub async fn dispatch(&self, name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
         match self.tools.iter().find(|t| t.name() == name) {
             Some(tool) => tool.run_json(args, ctx).await,
             None => anyhow::bail!("unknown tool: {name}"),
         }
+    }
+
+    /// Dispatch and render the result as plain text. MCP + CLI use this; REST
+    /// + WASM use `dispatch` directly so they get the structured JSON.
+    pub async fn dispatch_text(&self, name: &str, args: Value, ctx: &ToolCtx) -> Result<String> {
+        let value = self.dispatch(name, args, ctx).await?;
+        Ok(value_to_text(&value))
     }
 
     // ── CLI ───────────────────────────────────────────────────────────────────
@@ -97,7 +105,7 @@ impl ToolRegistry {
                 Value::Object(map)
             }
         };
-        self.dispatch(name, args_json, ctx).await
+        self.dispatch_text(name, args_json, ctx).await
     }
 }
 
@@ -133,6 +141,7 @@ mod tests {
         const NAME: &'static str = "echo";
         const DESCRIPTION: &'static str = "Echoes a message.";
         type Args = EchoArgs;
+        type Output = String;
         async fn run(args: EchoArgs, _ctx: &ToolCtx) -> Result<String> {
             Ok(args.message)
         }
@@ -151,6 +160,7 @@ mod tests {
         const NAME: &'static str = "add";
         const DESCRIPTION: &'static str = "Adds two numbers.";
         type Args = AddArgs;
+        type Output = String;
         async fn run(args: AddArgs, _ctx: &ToolCtx) -> Result<String> {
             Ok((args.a + args.b).to_string())
         }

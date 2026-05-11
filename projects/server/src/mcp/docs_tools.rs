@@ -20,6 +20,7 @@ impl OrcaTool for ListRoots {
     const DESCRIPTION: &'static str =
         "List available documentation roots (rebuy, orca) with file counts and paths.";
     type Args = ListRootsArgs;
+    type Output = String;
     async fn run(_args: ListRootsArgs, ctx: &ToolCtx) -> Result<String> {
         docs::list_roots(&ctx.config)
     }
@@ -43,6 +44,7 @@ impl OrcaTool for GetTree {
     const DESCRIPTION: &'static str = "Get the compacted documentation tree for a root, optionally scoped to a subpath. \
          Returns a JSON tree of .md files.";
     type Args = GetTreeArgs;
+    type Output = String;
     async fn run(args: GetTreeArgs, ctx: &ToolCtx) -> Result<String> {
         use serde_json::json;
         let v = json!({ "root": args.root, "path": args.path });
@@ -70,6 +72,7 @@ impl OrcaTool for ReadDoc {
     const DESCRIPTION: &'static str = "Read a documentation file by root and relative path \
          (e.g. root=rebuy, path=admin-api/README).";
     type Args = ReadDocArgs;
+    type Output = String;
     async fn run(args: ReadDocArgs, ctx: &ToolCtx) -> Result<String> {
         use serde_json::json;
         let v = json!({ "root": args.root, "path": args.path, "format": args.format });
@@ -97,6 +100,7 @@ impl OrcaTool for SearchDocs {
     const DESCRIPTION: &'static str =
         "Search documentation files for a keyword across one or all roots.";
     type Args = SearchDocsArgs;
+    type Output = String;
     async fn run(args: SearchDocsArgs, ctx: &ToolCtx) -> Result<String> {
         use serde_json::json;
         let v = json!({ "query": args.query, "root": args.root, "format": args.format });
@@ -124,6 +128,7 @@ impl OrcaTool for ListCommands {
     const DESCRIPTION: &'static str =
         "List all Claude slash commands and skills from the orca vault.";
     type Args = ListCommandsArgs;
+    type Output = String;
     async fn run(_args: ListCommandsArgs, ctx: &ToolCtx) -> Result<String> {
         docs::list_commands(&ctx.config)
     }
