@@ -1,10 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use orca::commands::{
-    self as cmd, CredsAction, DaemonAction, DbAction, DockerAction, EnginesAction, HookAction,
-    McpAction, PkiAction, PluginAction, ProfileAction, SchemaAction, SpecAction, cmd_install,
-    cmd_logout_atlassian, cmd_logout_github, cmd_oauth_atlassian, cmd_oauth_github, cmd_uninstall,
-};
+use orca::commands::{self as cmd, DaemonAction, HookAction, SpecAction};
 use orca::context::ProjectContext;
 use orca::conversation::session::Session;
 use orca::llm::{ClaudeBackend, Message, ModelBackend, stdout_sink};
@@ -31,27 +27,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Authenticate with a service and store tokens in keychain
-    Login {
-        #[command(subcommand)]
-        service: LoginService,
-    },
-
-    /// Check authentication and connectivity status
-    Auth,
-
-    /// Remove stored credentials from keychain
-    Logout {
-        #[command(subcommand)]
-        service: LoginService,
-    },
-
-    /// List projects (memory dirs in orca vault)
-    Projects,
-
-    /// List available agents
-    Agents,
-
     /// Ask Claude directly (escalation, non-interactive)
     Escalate {
         question: String,
@@ -71,9 +46,6 @@ enum Command {
         #[command(subcommand)]
         action: LogAction,
     },
-
-    /// Validate agent files, symlinks, and config
-    Doctor,
 
     /// One-shot: send prompt to an agent and print response
     Run {
@@ -108,16 +80,6 @@ enum Command {
         port: u16,
     },
 
-    /// Generate TypeScript types and hooks from the OpenAPI schema
-    Gen {
-        /// Backend URL to fetch the spec from
-        #[arg(long, default_value = "http://localhost:12000")]
-        url: String,
-        /// Output directory (relative to frontend/)
-        #[arg(long, default_value = "src/lib/api")]
-        out: String,
-    },
-
     /// Manage the external API spec registry (~/.orca/openapi/)
     Spec {
         #[command(subcommand)]
@@ -130,82 +92,11 @@ enum Command {
         action: HookAction,
     },
 
-    /// Manage MCP servers registered with orca
-    Mcp {
-        #[command(subcommand)]
-        action: McpAction,
-    },
-
-    /// Manage schema databases registered with orca
-    Schema {
-        #[command(subcommand)]
-        action: SchemaAction,
-    },
-
-    /// Manage LLM backends (LM Studio, Ollama) registered with orca
-    Engines {
-        #[command(subcommand)]
-        action: EnginesAction,
-    },
-
-    /// Manage Docker runtimes registered with orca
-    Docker {
-        #[command(subcommand)]
-        action: DockerAction,
-    },
-
-    /// Manage the orca PKI (CA init, plugin cert issuance)
-    Pki {
-        #[command(subcommand)]
-        action: PkiAction,
-    },
-
-    /// Manage orca plugins (register, list, enable/disable)
-    Plugin {
-        #[command(subcommand)]
-        action: PluginAction,
-    },
-
-    /// Manage profiles (create, share, set active)
-    Profile {
-        #[command(subcommand)]
-        action: ProfileAction,
-    },
-
-    /// Manage plugin credentials — store in Orca, sync to plugins
-    Creds {
-        #[command(subcommand)]
-        action: CredsAction,
-    },
-
-    /// Manage the orca.db schema (migrate, status)
-    Db {
-        #[command(subcommand)]
-        action: DbAction,
-    },
-
-    /// Check for and apply updates from GitHub releases
-    Update {
-        /// Release channel: stable (default), rc, beta, alpha
-        #[arg(long, default_value = "stable")]
-        channel: String,
-    },
-
-    /// Install orca: wire symlinks, register MCP server, install binary
-    Install,
-
-    /// Uninstall orca: remove binary, MCP registration, and CLAUDE.md symlinks
-    Uninstall,
-}
-
-#[derive(Subcommand)]
-enum LoginService {
-    /// Store Anthropic API key for Claude escalation
-    Anthropic,
-    /// Authenticate with GitHub via device flow
-    Github,
-    /// Authenticate with Atlassian (Jira + Confluence) via OAuth
-    Atlassian,
+    /// Passthrough for `OrcaOp`-migrated domains — dispatched via inventory.
+    /// Captures any first arg not matching a derive variant above; the
+    /// `orca-tools-def::cli` registry routes it to the right tool.
+    #[command(external_subcommand)]
+    Op(Vec<String>),
 }
 
 #[tokio::main]
@@ -220,6 +111,33 @@ async fn main() -> Result<()> {
         .compact()
         .with_writer(std::io::stderr)
         .init();
+
+    // Short-circuit OrcaOp ops *before* clap parse: the derive `Cli` has a
+    // positional `project: Option<String>` that would otherwise swallow the
+    // domain name (`orca engine list` → project=engine, command="list").
+    //
+    // Require both domain AND verb to be registered (or `--help`) — that way
+    // legacy subcommands like `orca spec dump` still fall through to the
+    // derive parser when their verb isn't a migrated OrcaOp.
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if let Some(dom) = argv.get(1) {
+            let verb_opt = argv.get(2);
+            let is_domain_help =
+                matches!(verb_opt.map(String::as_str), Some("--help") | Some("-h"));
+            let matched = orca_tools_def::cli::ops().any(|o| {
+                o.domain == dom
+                    && (is_domain_help
+                        || verb_opt.is_none()
+                        || verb_opt.is_some_and(|v| o.verb == v))
+            });
+            if matched {
+                let config = Config::load()?;
+                let rest = argv[1..].to_vec();
+                return dispatch_op(rest, config).await;
+            }
+        }
+    }
 
     let cli = Cli::parse();
 
@@ -246,26 +164,9 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
-        Some(Command::Login { service }) => match service {
-            LoginService::Anthropic => cmd::cmd_login(&config),
-            LoginService::Github => cmd_oauth_github().await,
-            LoginService::Atlassian => cmd_oauth_atlassian().await,
-        },
-        Some(Command::Logout { service }) => match service {
-            LoginService::Anthropic => {
-                let _ = cmd::cmd_logout();
-                Ok(())
-            }
-            LoginService::Github => cmd_logout_github(),
-            LoginService::Atlassian => cmd_logout_atlassian(),
-        },
-        Some(Command::Auth) => cmd::cmd_auth(&config),
-        Some(Command::Projects) => cmd::cmd_projects(&config),
-        Some(Command::Agents) => cmd::cmd_agents(&config),
         Some(Command::Escalate { question, project }) => {
             escalate(&config, &question, project.as_deref()).await
         }
-        Some(Command::Doctor) => cmd::cmd_doctor(&config),
         Some(Command::Log { action }) => cmd_log(&config, action),
         Some(Command::Audit { path }) => {
             let abs = std::fs::canonicalize(&path).unwrap_or_else(|_| path.into());
@@ -288,22 +189,7 @@ async fn main() -> Result<()> {
         },
         Some(Command::Dev { port }) => cmd_dev(port, &config).await,
         Some(Command::Hook { action }) => cmd::cmd_hook(action),
-        Some(Command::Mcp { action }) => cmd::cmd_mcp(action),
-        Some(Command::Schema { action }) => cmd::cmd_schema(action),
-        Some(Command::Engines { action }) => cmd::cmd_engines(action).await,
-        Some(Command::Docker { action }) => cmd::cmd_docker(action),
-        Some(Command::Pki { action }) => cmd::cmd_pki(action),
-        Some(Command::Plugin { action }) => cmd::cmd_plugin(action),
-        Some(Command::Profile { action }) => cmd::cmd_profile(&config, action),
-        Some(Command::Creds { action }) => cmd::cmd_creds(action),
-        Some(Command::Db { action }) => cmd::cmd_db(action),
-        Some(Command::Update { channel }) => {
-            let ch = orca::commands::update::Channel::parse(&channel);
-            cmd::cmd_update(ch).await
-        }
-        Some(Command::Install) => cmd_install(),
-        Some(Command::Uninstall) => cmd_uninstall(),
-        Some(Command::Gen { url, out }) => cmd::cmd_gen(&url, &out).await,
+        Some(Command::Op(argv)) => dispatch_op(argv, config).await,
         Some(Command::Spec { action }) => match action {
             SpecAction::Dump => {
                 let spec = openapi_spec_json();
@@ -529,4 +415,31 @@ fn detect_project_from_cwd(config: &Config) -> Option<String> {
         }
     }
     None
+}
+
+/// Dispatch a passthrough subcommand (`orca <domain> <verb> [args]`) to the
+/// `OrcaOp` inventory in `orca-tools-def::cli`. Returns an error if no
+/// (domain, verb) pair matches; clap printed help is preferred over this.
+async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
+    use orca_tools_def::cli as op_cli;
+    use std::sync::Arc;
+
+    argv.insert(0, "orca".to_string());
+    let root = op_cli::build_root(clap::Command::new("orca"));
+    let matches = match root.try_get_matches_from(argv) {
+        Ok(m) => m,
+        Err(e) => e.exit(),
+    };
+
+    // Reuse the MCP path's ToolCtx builder so every service trait (Docker,
+    // Plugins, McpRegistry, etc.) is registered exactly once. The discarded
+    // registry isn't needed for CLI — dispatch goes through `OrcaTool::run`
+    // directly, not the registry walk.
+    let (_reg, ctx) = mcp::build_tool_registry(Arc::new(config));
+    let ctx = Arc::new(ctx);
+
+    match op_cli::try_dispatch(&matches, ctx).await {
+        Some(r) => r,
+        None => anyhow::bail!("no OrcaOp matched"),
+    }
 }

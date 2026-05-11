@@ -11,6 +11,7 @@ use crate::OrcaToolDef;
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HaEntityListArgs {
     /// Name of a Home Assistant endpoint registered via add_home_assistant_endpoint
@@ -30,6 +31,7 @@ impl OrcaToolDef for HaEntityList {
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HaEntityStateArgs {
     pub endpoint: String,
@@ -47,6 +49,7 @@ impl OrcaToolDef for HaEntityState {
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HaAutomationListArgs {
     pub endpoint: String,
@@ -62,6 +65,7 @@ impl OrcaToolDef for HaAutomationList {
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HaServiceCallArgs {
     pub endpoint: String,

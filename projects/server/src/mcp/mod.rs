@@ -5,15 +5,20 @@
 /// Register: claude mcp add orca-local -- orca mcp-serve
 pub mod agent_resolve;
 pub mod agents_service;
+pub mod auth_service;
 mod context7;
+pub mod db_admin_service;
 pub mod docker_service;
 pub mod docs;
 pub mod docs_service;
 mod handlers;
 pub mod infra_service;
+pub mod lifecycle_service;
 pub mod mgmt_service;
+pub mod pki_service;
 pub mod plugin_runtime_service;
 pub mod plugins_service;
+pub mod profile_service;
 pub mod spec_registry_service;
 mod spec_tools;
 mod specs;
@@ -44,7 +49,7 @@ pub fn register_all_tools(reg: &mut ToolRegistry) {
     spec_tools::register(reg);
 }
 
-fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
+pub fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
     use orca_tools_def::services::agent_backend::AgentBackendService;
     let mut ctx = ToolCtx::new(config);
     let agent_backend: Arc<dyn AgentBackendService> =
@@ -78,6 +83,25 @@ fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
     let system_svc: Arc<dyn orca_tools_def::services::system::SystemService> =
         Arc::new(crate::mcp::system_service::ServerSystem);
     ctx.register_service(system_svc);
+    let auth_svc: Arc<dyn orca_tools_def::services::auth::AuthService> =
+        Arc::new(crate::mcp::auth_service::ServerAuth);
+    ctx.register_service(auth_svc);
+    let db_admin: Arc<dyn orca_tools_def::services::db_admin::DbAdminService> =
+        Arc::new(crate::mcp::db_admin_service::ServerDbAdmin);
+    ctx.register_service(db_admin);
+    let pki_svc: Arc<dyn orca_tools_def::services::pki::PkiService> =
+        Arc::new(crate::mcp::pki_service::ServerPki);
+    ctx.register_service(pki_svc);
+    let profile_svc: Arc<dyn orca_tools_def::services::profile::ProfileService> =
+        Arc::new(crate::mcp::profile_service::ServerProfile {
+            config: ctx.config.clone(),
+        });
+    ctx.register_service(profile_svc);
+    let lifecycle_svc: Arc<dyn orca_tools_def::services::lifecycle::LifecycleService> =
+        Arc::new(crate::mcp::lifecycle_service::ServerLifecycle {
+            config: ctx.config.clone(),
+        });
+    ctx.register_service(lifecycle_svc);
     {
         use orca_tools_def::services::mgmt::*;
         let mcp_reg: Arc<dyn McpRegistryService> =

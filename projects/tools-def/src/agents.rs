@@ -41,6 +41,7 @@ pub struct LogMatchEntry {
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListAgentsArgs {}
 
@@ -64,6 +65,7 @@ impl OrcaToolDef for ListAgents {
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetAgentArgs {
     /// Agent name (e.g. owl, fox, crow, bear)
@@ -92,6 +94,7 @@ impl OrcaToolDef for GetAgent {
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetConfigArgs {
     /// Config file basename without extension (e.g. TOOL_RULES). Omit to
@@ -128,6 +131,7 @@ impl OrcaToolDef for GetConfig {
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetContextArgs {
     /// Project name (e.g. meerkat, rebuy-db, dotfiles)
@@ -161,6 +165,7 @@ impl OrcaToolDef for GetContext {
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SearchLogsArgs {
     /// Keyword to search for across all session logs

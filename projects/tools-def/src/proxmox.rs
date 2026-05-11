@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxListNodesArgs {
     /// Name of a Proxmox endpoint registered via add_proxmox_endpoint
@@ -22,6 +23,7 @@ impl OrcaToolDef for ProxmoxListNodes {
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxListVmsArgs {
     pub endpoint: String,
@@ -38,6 +40,7 @@ impl OrcaToolDef for ProxmoxListVms {
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxListContainersArgs {
     pub endpoint: String,
@@ -67,6 +70,7 @@ pub struct ProxmoxActionResult {
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxVmActionArgs {
     pub endpoint: String,
@@ -86,6 +90,7 @@ impl OrcaToolDef for ProxmoxVmAction {
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxContainerActionArgs {
     pub endpoint: String,

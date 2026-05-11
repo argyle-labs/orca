@@ -31,7 +31,7 @@ orca-utils         = { path = "../utils" }
 db                 = { package = "orca-db", path = "../db" }
 orca-integrations  = { path = "../integrations" }
 orca-tools         = { path = "../tools" }
-orca-tools-def     = { path = "../tools-def", features = ["native"] }
+orca-tools-def     = { path = "../tools-def", features = ["native", "cli"] }
 
 # CLI
 clap = { workspace = true }

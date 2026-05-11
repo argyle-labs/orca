@@ -41,6 +41,15 @@ fn delete_oauth(service: &str) {
     }
 }
 
+/// Drop a stored OAuth token without printing. Used by the unified
+/// `AuthService::logout` impl. Returns `true` if a row was removed.
+pub fn delete_oauth_silent(service: &str) -> bool {
+    let Ok(conn) = open_db() else {
+        return false;
+    };
+    db::oauth::delete(&conn, service).ok().unwrap_or(false)
+}
+
 // Public aliases used across the codebase
 pub fn load_github_token() -> Option<String> {
     load_oauth("github").map(|r| r.access_token)
