@@ -8,7 +8,7 @@
 //!   - MCP:  `engine.list`, `engine.add`, …
 //!   - REST: `POST /api/ops/engine.list`, …  (universal exec mount)
 //!   - CLI:  `orca engines <verb>` (existing) — thin shim dispatching to the
-//!           same tool registry.
+//!     same tool registry.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -38,7 +38,7 @@ pub struct NameArgs {
     pub name: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ProviderDto {
     pub name: String,
     pub url: String,

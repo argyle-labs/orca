@@ -15,14 +15,15 @@ use orca_utils::config::Config;
 use orca_utils::tool::{OrcaTool, ToolCtx};
 use std::sync::Arc;
 
-fn ctx() -> Result<ToolCtx, axum::response::Response> {
-    match Config::load() {
-        Ok(cfg) => Ok(ToolCtx::new(Arc::new(cfg))),
-        Err(e) => Err(err(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            &e.to_string(),
-        )),
-    }
+fn ctx() -> Result<ToolCtx, String> {
+    Config::load()
+        .map(|cfg| ToolCtx::new(Arc::new(cfg)))
+        .map_err(|e| e.to_string())
+}
+
+#[allow(clippy::result_large_err)] // Response is large but this is a one-shot early-exit
+fn ctx_or_500(r: Result<ToolCtx, String>) -> Result<ToolCtx, axum::response::Response> {
+    r.map_err(|e| err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &e))
 }
 
 // ── GET /api/engines ─────────────────────────────────────────────────────────
@@ -38,7 +39,7 @@ fn ctx() -> Result<ToolCtx, axum::response::Response> {
     tag = "engines"
 )]
 pub async fn engines_list_handler() -> axum::response::Response {
-    let ctx = match ctx() {
+    let ctx = match ctx_or_500(ctx()) {
         Ok(c) => c,
         Err(r) => return r,
     };
@@ -73,7 +74,7 @@ pub async fn engines_list_handler() -> axum::response::Response {
 pub async fn engines_add_handler(
     axum::Json(body): axum::Json<LlmProviderAddRequest>,
 ) -> axum::response::Response {
-    let ctx = match ctx() {
+    let ctx = match ctx_or_500(ctx()) {
         Ok(c) => c,
         Err(r) => return r,
     };
@@ -104,7 +105,7 @@ pub async fn engines_add_handler(
 pub async fn engines_remove_handler(
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> axum::response::Response {
-    let ctx = match ctx() {
+    let ctx = match ctx_or_500(ctx()) {
         Ok(c) => c,
         Err(r) => return r,
     };
@@ -130,7 +131,7 @@ pub async fn engines_remove_handler(
 pub async fn engines_enable_handler(
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> axum::response::Response {
-    let ctx = match ctx() {
+    let ctx = match ctx_or_500(ctx()) {
         Ok(c) => c,
         Err(r) => return r,
     };
@@ -156,7 +157,7 @@ pub async fn engines_enable_handler(
 pub async fn engines_disable_handler(
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> axum::response::Response {
-    let ctx = match ctx() {
+    let ctx = match ctx_or_500(ctx()) {
         Ok(c) => c,
         Err(r) => return r,
     };

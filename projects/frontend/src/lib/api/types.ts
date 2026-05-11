@@ -157,6 +157,22 @@ export interface JiraIssuesQuery {
   maxResults?: number | null;
 }
 
+export interface LlmProviderAddRequest {
+  /** "lmstudio" | "ollama" */
+  kind?: string | null;
+  name: string;
+  url: string;
+}
+
+export interface LlmProviderInfo {
+  enabled: boolean;
+  /** "lmstudio" | "ollama" */
+  kind: string;
+  name: string;
+  reachable?: boolean | null;
+  url: string;
+}
+
 export interface LogProject {
   path: string;
   project: string;

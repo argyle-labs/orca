@@ -67,19 +67,19 @@ pub async fn cmd_engines(action: EnginesAction) -> Result<()> {
             }
         }
         EnginesAction::Add { name, url, kind } => {
-            let msg = rt.block_on(EngineAdd::run(AddArgs { name, url, kind }, &ctx))?;
+            let msg = EngineAdd::run(AddArgs { name, url, kind }, &ctx).await?;
             println!("{msg}");
         }
         EnginesAction::Remove { name } => {
-            let msg = rt.block_on(EngineRemove::run(NameArgs { name }, &ctx))?;
+            let msg = EngineRemove::run(NameArgs { name }, &ctx).await?;
             println!("{msg}");
         }
         EnginesAction::Enable { name } => {
-            let msg = rt.block_on(EngineEnable::run(NameArgs { name }, &ctx))?;
+            let msg = EngineEnable::run(NameArgs { name }, &ctx).await?;
             println!("{msg}");
         }
         EnginesAction::Disable { name } => {
-            let msg = rt.block_on(EngineDisable::run(NameArgs { name }, &ctx))?;
+            let msg = EngineDisable::run(NameArgs { name }, &ctx).await?;
             println!("{msg}");
         }
     }
