@@ -3,12 +3,12 @@
 /// Usage: orca mcp-serve
 /// Register: claude mcp add orca-local -- orca mcp-serve
 pub mod agent_resolve;
-mod agent_tools;
+pub mod agents_service;
 mod context7;
-mod docs;
-mod docs_tools;
+pub mod docs;
+pub mod docs_service;
 mod handlers;
-mod infra_tools;
+pub mod infra_service;
 mod mgmt_tools;
 mod plugin_tools;
 mod spec_tools;
@@ -36,9 +36,6 @@ pub fn register_all_tools(reg: &mut ToolRegistry) {
 
     // Server-coupled tools that still live here pending service-trait
     // abstractions so they can move to projects/tools/ too.
-    agent_tools::register(reg);
-    docs_tools::register(reg);
-    infra_tools::register(reg);
     mgmt_tools::register(reg);
     plugin_tools::register(reg);
     spec_tools::register(reg);
@@ -50,6 +47,19 @@ fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
     let agent_backend: Arc<dyn AgentBackendService> =
         Arc::new(crate::llm::agent_backend_service::ServerAgentBackend);
     ctx.register_service(agent_backend);
+    let agents_svc: Arc<dyn orca_tools_def::services::agents::AgentsService> =
+        Arc::new(crate::mcp::agents_service::ServerAgents {
+            config: ctx.config.clone(),
+        });
+    ctx.register_service(agents_svc);
+    let docs_svc: Arc<dyn orca_tools_def::services::docs::DocsService> =
+        Arc::new(crate::mcp::docs_service::ServerDocs {
+            config: ctx.config.clone(),
+        });
+    ctx.register_service(docs_svc);
+    let infra_svc: Arc<dyn orca_tools_def::services::infra::InfraService> =
+        Arc::new(crate::mcp::infra_service::ServerInfra);
+    ctx.register_service(infra_svc);
     let mut reg = ToolRegistry::new();
     register_all_tools(&mut reg);
     (reg, ctx)

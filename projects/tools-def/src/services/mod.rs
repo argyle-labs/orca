@@ -9,3 +9,9 @@
 pub mod agent_backend;
 #[cfg(feature = "native")]
 pub mod agents;
+#[cfg(feature = "native")]
+pub mod docs;
+#[cfg(feature = "native")]
+pub mod infra;
+#[cfg(feature = "native")]
+pub mod plugins;
