@@ -10,7 +10,7 @@ pub mod types;
 
 pub use ctx::ToolCtx;
 pub use erased::ErasedTool;
-pub use orca_tool_trait::OrcaToolDef;
+pub use orca_tool_trait::{OrcaOp, OrcaToolDef};
 pub use registry::ToolRegistry;
 pub use types::{ToolCall, ToolDef, ToolResult};
 

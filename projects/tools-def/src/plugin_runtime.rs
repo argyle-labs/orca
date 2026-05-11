@@ -16,6 +16,7 @@ use crate::OrcaToolDef;
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetPluginDataArgs {
     pub plugin: String,
@@ -45,12 +46,14 @@ impl OrcaToolDef for GetPluginData {
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SetPluginDataArgs {
     pub plugin: String,
     pub key: String,
     /// Arbitrary JSON value — the host serializes it to TEXT at the storage edge.
     #[cfg_attr(feature = "wasm", tsify(type = "unknown"))]
+    #[cfg_attr(feature = "cli", arg(skip))]
     pub value: Value,
 }
 

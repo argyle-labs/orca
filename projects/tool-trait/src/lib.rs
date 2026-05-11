@@ -19,3 +19,14 @@ pub trait OrcaToolDef: Send + Sync + 'static {
     type Args: DeserializeOwned + JsonSchema + Send;
     type Output: Serialize + JsonSchema + Send + 'static;
 }
+
+/// Surface-reorg metadata. `NAME` is `<DOMAIN>.<VERB>` by convention; the
+/// extra split lets the unified CLI/REST router build `orca <DOMAIN> <VERB>`
+/// subcommands and per-domain REST prefixes without re-parsing `NAME`.
+///
+/// Optional supertrait: only ops migrated to the unified surface need to
+/// implement it. Existing tools that just satisfy `OrcaToolDef` keep working.
+pub trait OrcaOp: OrcaToolDef {
+    const DOMAIN: &'static str;
+    const VERB: &'static str;
+}

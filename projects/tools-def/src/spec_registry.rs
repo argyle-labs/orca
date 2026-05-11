@@ -182,6 +182,7 @@ pub use graphql_proxy_result_mod::GraphqlProxyResult;
 // list_specs
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListSpecsArgs {}
 
@@ -204,6 +205,7 @@ impl OrcaToolDef for ListSpecs {
 // list_db_specs
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListDbSpecsArgs {}
 
@@ -226,6 +228,7 @@ impl OrcaToolDef for ListDbSpecs {
 // register_spec
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RegisterSpecArgs {
     pub name: String,
@@ -244,6 +247,7 @@ impl OrcaToolDef for RegisterSpec {
 // refresh_spec
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RefreshSpecArgs {
     pub name: String,
@@ -261,6 +265,7 @@ impl OrcaToolDef for RefreshSpec {
 // unregister_spec
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct UnregisterSpecArgs {
     pub name: String,
@@ -285,6 +290,7 @@ impl OrcaToolDef for UnregisterSpec {
 // sync_mcp_specs
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SyncMcpSpecsArgs {
     pub server: String,
@@ -302,6 +308,7 @@ impl OrcaToolDef for SyncMcpSpecs {
 // get_spec_graphql_info
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetSpecGraphqlInfoArgs {
     pub repo: String,

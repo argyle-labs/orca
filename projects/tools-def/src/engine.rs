@@ -13,11 +13,13 @@ use crate::OrcaToolDef;
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct EmptyArgs {}
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct AddArgs {
     /// Display name, e.g. "lmstudio-local".
@@ -26,11 +28,13 @@ pub struct AddArgs {
     pub url: String,
     /// Backend kind: "lmstudio" | "ollama". Inferred from port 11434 if empty.
     #[serde(default)]
+    #[cfg_attr(feature = "cli", arg(default_value = ""))]
     pub kind: String,
 }
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct NameArgs {
     /// Backend name.
@@ -74,7 +78,6 @@ impl OrcaToolDef for EngineList {
     type Args = EmptyArgs;
     type Output = ProviderList;
 }
-
 pub struct EngineAdd;
 impl OrcaToolDef for EngineAdd {
     const NAME: &'static str = "engine.add";
@@ -83,7 +86,6 @@ impl OrcaToolDef for EngineAdd {
     type Args = AddArgs;
     type Output = EngineOpResult;
 }
-
 pub struct EngineRemove;
 impl OrcaToolDef for EngineRemove {
     const NAME: &'static str = "engine.remove";
@@ -91,7 +93,6 @@ impl OrcaToolDef for EngineRemove {
     type Args = NameArgs;
     type Output = EngineOpResult;
 }
-
 pub struct EngineEnable;
 impl OrcaToolDef for EngineEnable {
     const NAME: &'static str = "engine.enable";
@@ -99,13 +100,75 @@ impl OrcaToolDef for EngineEnable {
     type Args = NameArgs;
     type Output = EngineOpResult;
 }
-
 pub struct EngineDisable;
 impl OrcaToolDef for EngineDisable {
     const NAME: &'static str = "engine.disable";
     const DESCRIPTION: &'static str = "Disable a backend without removing it.";
     type Args = NameArgs;
     type Output = EngineOpResult;
+}
+// ── CLI registration — picked up by `orca-tools-def::cli::ops()` ────────────
+#[cfg(feature = "cli")]
+mod cli_register {
+    use super::*;
+    use colored::Colorize;
+
+    crate::register_op! {
+        tool: EngineList,
+        domain: "engine",
+        verb: "list",
+        summary: "List registered LLM backends",
+        render: |out| {
+            if out.0.is_empty() {
+                println!("{}", "no LLM backends registered".dimmed());
+                println!(
+                    "{}",
+                    "  use `orca engine add <name> <url> [lmstudio|ollama]` to add one".dimmed()
+                );
+                return Ok(());
+            }
+            for p in &out.0 {
+                let status = if p.enabled {
+                    "enabled".green().to_string()
+                } else {
+                    "disabled".dimmed().to_string()
+                };
+                println!("  {} {} {} ({})", p.name.bold(), p.kind.cyan(), p.url, status);
+            }
+        }
+    }
+
+    crate::register_op! {
+        tool: EngineAdd,
+        domain: "engine",
+        verb: "add",
+        summary: "Register an LLM backend",
+        render: |out| { println!("{}", out.message); }
+    }
+
+    crate::register_op! {
+        tool: EngineRemove,
+        domain: "engine",
+        verb: "remove",
+        summary: "Remove a registered LLM backend",
+        render: |out| { println!("{}", out.message); }
+    }
+
+    crate::register_op! {
+        tool: EngineEnable,
+        domain: "engine",
+        verb: "enable",
+        summary: "Enable a backend for model discovery",
+        render: |out| { println!("{}", out.message); }
+    }
+
+    crate::register_op! {
+        tool: EngineDisable,
+        domain: "engine",
+        verb: "disable",
+        summary: "Disable a backend without removing it",
+        render: |out| { println!("{}", out.message); }
+    }
 }
 
 // ── Native run impls ────────────────────────────────────────────────────────

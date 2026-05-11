@@ -73,6 +73,7 @@ pub struct DockerLogProject {
 // get_docker_engine
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetDockerEngineArgs {}
 
@@ -88,6 +89,7 @@ impl OrcaToolDef for GetDockerEngine {
 // start_docker_engine
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct StartDockerEngineArgs {}
 
@@ -110,6 +112,7 @@ impl OrcaToolDef for StartDockerEngine {
 // get_docker_services
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetDockerServicesArgs {
     /// Absolute path to the docker-compose project directory.
@@ -128,6 +131,7 @@ impl OrcaToolDef for GetDockerServices {
 // run_docker_action
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RunDockerActionArgs {
@@ -152,6 +156,7 @@ impl OrcaToolDef for RunDockerAction {
 // get_logs
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetLogsArgs {
     /// Absolute path to the compose project.
@@ -183,6 +188,7 @@ impl OrcaToolDef for GetLogs {
 // get_log_services
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetLogServicesArgs {}
 

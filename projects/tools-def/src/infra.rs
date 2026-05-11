@@ -29,6 +29,7 @@ pub struct ProjectServices {
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListServicesArgs {}
 
@@ -52,6 +53,7 @@ impl OrcaToolDef for ListServices {
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetServiceLogsArgs {
     /// Absolute path to the project directory.
@@ -85,6 +87,7 @@ impl OrcaToolDef for GetServiceLogs {
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RunTestsArgs {
     /// Which suite to run: rust | frontend | e2e | all (default: rust).

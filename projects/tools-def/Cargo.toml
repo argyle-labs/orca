@@ -33,6 +33,14 @@ wasm = [
     "dep:serde-wasm-bindgen",
     "dep:tsify",
 ]
+# Surface-reorg: emit clap-driven CLI subcommands from the same tool defs that
+# back MCP/REST/WASM. Implies `native` since dispatch uses OrcaTool::run.
+cli = [
+    "native",
+    "dep:clap",
+    "dep:inventory",
+    "dep:colored",
+]
 
 [dependencies]
 orca-tool-trait = { path = "../tool-trait" }
@@ -47,6 +55,11 @@ orca-integrations = { path = "../integrations", optional = true }
 async-trait       = { workspace = true,         optional = true }
 anyhow            = { workspace = true,         optional = true }
 tokio             = { workspace = true,         optional = true }
+
+# CLI-only deps.
+clap              = { workspace = true,         optional = true }
+inventory         = { workspace = true,         optional = true }
+colored           = { workspace = true,         optional = true }
 
 # Wasm-only deps (declared locally — not used elsewhere in the workspace).
 wasm-bindgen          = { version = "0.2", optional = true }
