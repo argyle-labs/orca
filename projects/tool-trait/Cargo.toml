@@ -1,0 +1,17 @@
+[package]
+name = "orca-tool-trait"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "orca_tool_trait"
+path = "src/lib.rs"
+
+# Wasm-safe by design: this crate carries the `OrcaToolDef` trait and nothing
+# else, so the wasm-side `orca-tools-def` can pull it in without dragging
+# native deps. The native `orca-utils::OrcaTool` adds `: OrcaToolDef` as a
+# supertrait, also via this crate.
+
+[dependencies]
+schemars   = { workspace = true }
+serde      = { workspace = true }

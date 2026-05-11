@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::OrcaToolDef;
 
-#[derive(Deserialize, JsonSchema)]
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxListNodesArgs {
     /// Name of a Proxmox endpoint registered via add_proxmox_endpoint
     pub endpoint: String,
@@ -18,7 +20,9 @@ impl OrcaToolDef for ProxmoxListNodes {
     type Output = crate::JsonAny;
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxListVmsArgs {
     pub endpoint: String,
     /// Node name (e.g. "pve1")
@@ -32,7 +36,9 @@ impl OrcaToolDef for ProxmoxListVms {
     type Output = crate::JsonAny;
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxListContainersArgs {
     pub endpoint: String,
     /// Node name (e.g. "pve1")
@@ -47,6 +53,8 @@ impl OrcaToolDef for ProxmoxListContainers {
 }
 
 /// Result of a Proxmox lifecycle action (start/stop/shutdown/reboot).
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxActionResult {
     pub node: String,
@@ -58,7 +66,9 @@ pub struct ProxmoxActionResult {
     pub status: u16,
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxVmActionArgs {
     pub endpoint: String,
     pub node: String,
@@ -76,7 +86,9 @@ impl OrcaToolDef for ProxmoxVmAction {
     type Output = ProxmoxActionResult;
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxContainerActionArgs {
     pub endpoint: String,
     pub node: String,
@@ -128,10 +140,6 @@ mod native {
 
     #[async_trait]
     impl OrcaTool for ProxmoxListNodes {
-        const NAME: &'static str = <Self as OrcaToolDef>::NAME;
-        const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
-        type Args = <Self as OrcaToolDef>::Args;
-        type Output = <Self as OrcaToolDef>::Output;
         async fn run(args: ProxmoxListNodesArgs, _: &ToolCtx) -> Result<crate::JsonAny> {
             let client = make_client(&args.endpoint)?;
             Ok(client.nodes().await?.into())
@@ -140,10 +148,6 @@ mod native {
 
     #[async_trait]
     impl OrcaTool for ProxmoxListVms {
-        const NAME: &'static str = <Self as OrcaToolDef>::NAME;
-        const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
-        type Args = <Self as OrcaToolDef>::Args;
-        type Output = <Self as OrcaToolDef>::Output;
         async fn run(args: ProxmoxListVmsArgs, _: &ToolCtx) -> Result<crate::JsonAny> {
             let client = make_client(&args.endpoint)?;
             Ok(client.vms(&args.node).await?.into())
@@ -152,10 +156,6 @@ mod native {
 
     #[async_trait]
     impl OrcaTool for ProxmoxListContainers {
-        const NAME: &'static str = <Self as OrcaToolDef>::NAME;
-        const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
-        type Args = <Self as OrcaToolDef>::Args;
-        type Output = <Self as OrcaToolDef>::Output;
         async fn run(args: ProxmoxListContainersArgs, _: &ToolCtx) -> Result<crate::JsonAny> {
             let client = make_client(&args.endpoint)?;
             Ok(client.containers(&args.node).await?.into())
@@ -164,10 +164,6 @@ mod native {
 
     #[async_trait]
     impl OrcaTool for ProxmoxVmAction {
-        const NAME: &'static str = <Self as OrcaToolDef>::NAME;
-        const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
-        type Args = <Self as OrcaToolDef>::Args;
-        type Output = <Self as OrcaToolDef>::Output;
         async fn run(args: ProxmoxVmActionArgs, _: &ToolCtx) -> Result<ProxmoxActionResult> {
             let client = make_client(&args.endpoint)?;
             let action: Action = args.action.parse()?;
@@ -180,10 +176,6 @@ mod native {
 
     #[async_trait]
     impl OrcaTool for ProxmoxContainerAction {
-        const NAME: &'static str = <Self as OrcaToolDef>::NAME;
-        const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
-        type Args = <Self as OrcaToolDef>::Args;
-        type Output = <Self as OrcaToolDef>::Output;
         async fn run(args: ProxmoxContainerActionArgs, _: &ToolCtx) -> Result<ProxmoxActionResult> {
             let client = make_client(&args.endpoint)?;
             let action: Action = args.action.parse()?;

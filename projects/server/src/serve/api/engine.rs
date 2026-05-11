@@ -47,6 +47,7 @@ pub async fn engines_list_handler() -> axum::response::Response {
     match EngineList::run(EmptyArgs {}, &ctx).await {
         Ok(providers) => {
             let v: Vec<LlmProviderInfo> = providers
+                .0
                 .into_iter()
                 .map(|p| LlmProviderInfo {
                     name: p.name,

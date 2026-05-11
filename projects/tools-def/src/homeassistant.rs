@@ -1,12 +1,14 @@
 //! Home Assistant tool defs + native impls.
 
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::OrcaToolDef;
 
-#[derive(Deserialize, JsonSchema)]
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HaEntityListArgs {
     /// Name of a Home Assistant endpoint registered via add_home_assistant_endpoint
     pub endpoint: String,
@@ -22,7 +24,9 @@ impl OrcaToolDef for HaEntityList {
     type Output = crate::JsonAny;
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HaEntityStateArgs {
     pub endpoint: String,
     /// Entity ID (e.g. "light.living_room")
@@ -36,7 +40,9 @@ impl OrcaToolDef for HaEntityState {
     type Output = crate::JsonAny;
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HaAutomationListArgs {
     pub endpoint: String,
 }
@@ -48,7 +54,9 @@ impl OrcaToolDef for HaAutomationList {
     type Output = crate::JsonAny;
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HaServiceCallArgs {
     pub endpoint: String,
     /// Service domain (e.g. "light", "switch", "automation")
@@ -58,6 +66,7 @@ pub struct HaServiceCallArgs {
     /// Optional entity_id target (e.g. "light.living_room")
     pub entity_id: Option<String>,
     /// Optional service data payload merged into the request body
+    #[cfg_attr(feature = "wasm", tsify(type = "Record<string, unknown> | null"))]
     pub data: Option<Map<String, Value>>,
 }
 pub struct HaServiceCall;
@@ -94,10 +103,6 @@ mod native {
 
     #[async_trait]
     impl OrcaTool for HaEntityList {
-        const NAME: &'static str = <Self as OrcaToolDef>::NAME;
-        const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
-        type Args = <Self as OrcaToolDef>::Args;
-        type Output = <Self as OrcaToolDef>::Output;
         async fn run(args: HaEntityListArgs, _: &ToolCtx) -> Result<crate::JsonAny> {
             let client = make_client(&args.endpoint)?;
             Ok(client.entity_list(args.domain.as_deref()).await?.into())
@@ -106,10 +111,6 @@ mod native {
 
     #[async_trait]
     impl OrcaTool for HaEntityState {
-        const NAME: &'static str = <Self as OrcaToolDef>::NAME;
-        const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
-        type Args = <Self as OrcaToolDef>::Args;
-        type Output = <Self as OrcaToolDef>::Output;
         async fn run(args: HaEntityStateArgs, _: &ToolCtx) -> Result<crate::JsonAny> {
             let client = make_client(&args.endpoint)?;
             Ok(client.entity_state(&args.entity_id).await?.into())
@@ -118,10 +119,6 @@ mod native {
 
     #[async_trait]
     impl OrcaTool for HaAutomationList {
-        const NAME: &'static str = <Self as OrcaToolDef>::NAME;
-        const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
-        type Args = <Self as OrcaToolDef>::Args;
-        type Output = <Self as OrcaToolDef>::Output;
         async fn run(args: HaAutomationListArgs, _: &ToolCtx) -> Result<crate::JsonAny> {
             let client = make_client(&args.endpoint)?;
             Ok(client.automation_list().await?.into())
@@ -130,10 +127,6 @@ mod native {
 
     #[async_trait]
     impl OrcaTool for HaServiceCall {
-        const NAME: &'static str = <Self as OrcaToolDef>::NAME;
-        const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
-        type Args = <Self as OrcaToolDef>::Args;
-        type Output = <Self as OrcaToolDef>::Output;
         async fn run(args: HaServiceCallArgs, _: &ToolCtx) -> Result<crate::JsonAny> {
             let client = make_client(&args.endpoint)?;
             let call = ServiceCall {

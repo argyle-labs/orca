@@ -35,9 +35,10 @@ wasm = [
 ]
 
 [dependencies]
-schemars   = { workspace = true }
-serde      = { workspace = true }
-serde_json = { workspace = true }
+orca-tool-trait = { path = "../tool-trait" }
+schemars        = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
 
 # Native-only deps.
 orca-utils        = { path = "../utils",        optional = true }
