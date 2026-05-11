@@ -1,3 +1,5 @@
+// LM Studio provider SDK request/response envelopes; HashMap/Value are wire-format passthrough.
+#![allow(clippy::disallowed_types)]
 use super::{ModelBackend, OutputSink, serialize, sink_write, sink_writeln};
 use crate::llm::types::{BackendResponse, Message, StopReason};
 use anyhow::{Context, Result, bail};

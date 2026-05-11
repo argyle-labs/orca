@@ -1,5 +1,8 @@
 //! Container-level ops via the docker CLI on top of [`crate::run`].
 //! Swap to bollard when streaming/events land.
+// serde_json::Value is intentional: `docker inspect` returns a large,
+// version-dependent JSON array; callers pick the fields they need.
+#![allow(clippy::disallowed_types)]
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

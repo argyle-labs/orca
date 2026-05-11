@@ -1,11 +1,11 @@
 //! Proxmox tool defs + native impls.
+#![allow(clippy::disallowed_types)] // Proxmox API shapes are upstream-defined; JsonAny outputs are intentional
 
+use crate::OrcaToolDef;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::OrcaToolDef;
-
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxListNodesArgs {
@@ -13,7 +13,6 @@ pub struct ProxmoxListNodesArgs {
     pub endpoint: String,
 }
 pub struct ProxmoxListNodes;
-#[allow(clippy::disallowed_types)] // Output is opaque Proxmox node listing — shape dictated by Proxmox API
 impl OrcaToolDef for ProxmoxListNodes {
     const NAME: &'static str = "proxmox_list_nodes";
     const DESCRIPTION: &'static str = "List Proxmox VE cluster nodes for a registered endpoint.";
@@ -21,7 +20,7 @@ impl OrcaToolDef for ProxmoxListNodes {
     type Output = crate::JsonAny;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxListVmsArgs {
@@ -30,7 +29,6 @@ pub struct ProxmoxListVmsArgs {
     pub node: String,
 }
 pub struct ProxmoxListVms;
-#[allow(clippy::disallowed_types)] // Output is opaque Proxmox VM listing — shape dictated by Proxmox API
 impl OrcaToolDef for ProxmoxListVms {
     const NAME: &'static str = "proxmox_list_vms";
     const DESCRIPTION: &'static str = "List QEMU VMs on a Proxmox node.";
@@ -38,7 +36,7 @@ impl OrcaToolDef for ProxmoxListVms {
     type Output = crate::JsonAny;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxListContainersArgs {
@@ -47,7 +45,6 @@ pub struct ProxmoxListContainersArgs {
     pub node: String,
 }
 pub struct ProxmoxListContainers;
-#[allow(clippy::disallowed_types)] // Output is opaque Proxmox container listing — shape dictated by Proxmox API
 impl OrcaToolDef for ProxmoxListContainers {
     const NAME: &'static str = "proxmox_list_containers";
     const DESCRIPTION: &'static str = "List LXC containers on a Proxmox node.";
@@ -55,27 +52,25 @@ impl OrcaToolDef for ProxmoxListContainers {
     type Output = crate::JsonAny;
 }
 
-/// Result of a Proxmox lifecycle action (start/stop/shutdown/reboot).
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+/// Result of a Proxmox lifecycle action.
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxActionResult {
     pub node: String,
     pub vmid: u64,
     pub action: String,
-    /// Proxmox returns a UPID (Unique Process ID) for async tasks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upid: Option<String>,
     pub status: u16,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxVmActionArgs {
     pub endpoint: String,
     pub node: String,
-    /// VMID (numeric ID assigned by Proxmox)
     pub vmid: u64,
     /// One of: start | stop | shutdown | reboot
     pub action: String,
@@ -83,13 +78,13 @@ pub struct ProxmoxVmActionArgs {
 pub struct ProxmoxVmAction;
 impl OrcaToolDef for ProxmoxVmAction {
     const NAME: &'static str = "proxmox_vm_action";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Run a lifecycle action on a Proxmox VM (start/stop/shutdown/reboot). \
-         Returns the Proxmox UPID for tracking the async task.";
+    const DESCRIPTION: &'static str =
+        "[MUTATES STATE] Run a lifecycle action on a Proxmox VM (start/stop/shutdown/reboot).";
     type Args = ProxmoxVmActionArgs;
     type Output = ProxmoxActionResult;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxContainerActionArgs {
@@ -114,11 +109,13 @@ mod native {
     use anyhow::{Context, Result};
     use async_trait::async_trait;
     use orca_db as db;
-    use orca_integrations::proxmox::{Action, ActionResult, Client, Config};
+    use orca_integrations::proxmox::{
+        Client, Config, ProxmoxAction, ProxmoxActionResult as IntResult,
+    };
     use orca_utils::tool::{OrcaTool, ToolCtx};
 
-    impl From<ActionResult> for ProxmoxActionResult {
-        fn from(r: ActionResult) -> Self {
+    impl From<IntResult> for ProxmoxActionResult {
+        fn from(r: IntResult) -> Self {
             Self {
                 node: r.node,
                 vmid: r.vmid,
@@ -169,7 +166,7 @@ mod native {
     impl OrcaTool for ProxmoxVmAction {
         async fn run(args: ProxmoxVmActionArgs, _: &ToolCtx) -> Result<ProxmoxActionResult> {
             let client = make_client(&args.endpoint)?;
-            let action: Action = args.action.parse()?;
+            let action: ProxmoxAction = args.action.parse()?;
             Ok(client
                 .vm_action(&args.node, args.vmid, action)
                 .await?
@@ -181,7 +178,7 @@ mod native {
     impl OrcaTool for ProxmoxContainerAction {
         async fn run(args: ProxmoxContainerActionArgs, _: &ToolCtx) -> Result<ProxmoxActionResult> {
             let client = make_client(&args.endpoint)?;
-            let action: Action = args.action.parse()?;
+            let action: ProxmoxAction = args.action.parse()?;
             Ok(client
                 .container_action(&args.node, args.vmid, action)
                 .await?

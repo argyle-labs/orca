@@ -8,7 +8,7 @@ use crate::OrcaToolDef;
 
 // ── Typed entities ──────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct AgentEntry {
@@ -16,7 +16,7 @@ pub struct AgentEntry {
     pub description: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct MemoryFile {
@@ -24,7 +24,7 @@ pub struct MemoryFile {
     pub content: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -39,12 +39,12 @@ pub struct LogMatchEntry {
 
 // ── list_agents ─────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListAgentsArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListAgentsOutput {
@@ -62,7 +62,7 @@ impl OrcaToolDef for ListAgents {
 
 // ── get_agent ───────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetAgentArgs {
@@ -70,7 +70,7 @@ pub struct GetAgentArgs {
     pub name: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetAgentOutput {
@@ -90,7 +90,7 @@ impl OrcaToolDef for GetAgent {
 
 // ── get_config ──────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetConfigArgs {
@@ -100,7 +100,7 @@ pub struct GetConfigArgs {
     pub name: Option<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetConfigOutput {
@@ -126,7 +126,7 @@ impl OrcaToolDef for GetConfig {
 
 // ── get_context ─────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetContextArgs {
@@ -134,7 +134,7 @@ pub struct GetContextArgs {
     pub project: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetContextOutput {
@@ -159,7 +159,7 @@ impl OrcaToolDef for GetContext {
 
 // ── search_logs ─────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SearchLogsArgs {
@@ -167,7 +167,7 @@ pub struct SearchLogsArgs {
     pub query: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

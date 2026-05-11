@@ -59,7 +59,7 @@ impl OrcaClient {
         let opts = web_sys::RequestInit::new();
         opts.set_method("POST");
         opts.set_mode(web_sys::RequestMode::Cors);
-        opts.set_body(&JsValue::from_str(&body_str));
+        opts.set_body(&JsValue::from_str(body_str));
 
         let headers = web_sys::Headers::new().map_err(|e| jsval_to_err("headers", &e))?;
         headers

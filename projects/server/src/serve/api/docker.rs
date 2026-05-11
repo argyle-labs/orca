@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types)] // upstream Docker API passthrough — shape not owned by orca
 use axum::{
     extract::Query,
     http::StatusCode,

@@ -3,6 +3,7 @@
 //!
 //! The DB column is TEXT (JSON-stringified). We parse on read and serialize
 //! on write so the trait surface stays typed (`serde_json::Value`).
+#![allow(clippy::disallowed_types)] // mirrors trait signature — see trait-level allow
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;

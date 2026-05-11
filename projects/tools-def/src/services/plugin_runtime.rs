@@ -1,4 +1,5 @@
-//! Service trait for the `plugin_runtime` domain — generic per-plugin
+//! Service trait for the `plugin_runtime` domain
+#![allow(clippy::disallowed_types)] // Plugin KV store is free-form by contract — each plugin owns its schema — generic per-plugin
 //! encrypted KV store backed by the `plugin_data` table in orca.db.
 //!
 //! Values cross the trait as `serde_json::Value`. The server-side impl

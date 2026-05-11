@@ -1,5 +1,8 @@
 //! Dockge stack-manager client. Replaces the former `dockge` plugin: same
 //! surface (stack list / start / stop / logs), no plugin scaffolding.
+// serde_json::Value is intentional: Dockge stack-list and log payloads are
+// opaque JSON passed through from the upstream Dockge API.
+#![allow(clippy::disallowed_types)]
 
 use orca_utils::http::{Client as HttpClient, HttpError};
 use serde::{Deserialize, Serialize};

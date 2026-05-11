@@ -28,6 +28,7 @@
 //! parse error), the string-scanning fallback functions below take over.
 //! This means the scanner compiles and works in all configurations; the AST
 //! path simply produces higher-fidelity results.
+#![allow(clippy::disallowed_types)] // OpenAPI document builder — dynamic JSON construction
 use crate::scanner::php_parse::PhpFile;
 use anyhow::Result;
 use serde_json::{Value, json};

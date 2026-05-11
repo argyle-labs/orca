@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types)] // mirrors trait signature — see trait-level allow
 use crate::llm::buffer_sink;
 use anyhow::Result;
 use orca_utils::config::Config;

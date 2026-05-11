@@ -16,6 +16,7 @@ tokio       = { workspace = true }
 urlencoding = { workspace = true }
 
 orca-utils = { path = "../utils" }
+schemars.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }

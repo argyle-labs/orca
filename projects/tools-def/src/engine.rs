@@ -11,12 +11,12 @@ use crate::OrcaToolDef;
 
 // ── Args ────────────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct EmptyArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct AddArgs {
@@ -29,7 +29,7 @@ pub struct AddArgs {
     pub kind: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct NameArgs {
@@ -37,7 +37,7 @@ pub struct NameArgs {
     pub name: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProviderDto {
@@ -50,14 +50,14 @@ pub struct ProviderDto {
 
 /// Newtype wrapping `Vec<ProviderDto>` so it crosses the WASM boundary with a
 /// real TS array type (`ProviderDto[]`) instead of `any`.
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub struct ProviderList(pub Vec<ProviderDto>);
 
 /// Outcome of a mutation (add/remove/enable/disable).
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct EngineOpResult {

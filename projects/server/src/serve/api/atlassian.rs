@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types)] // upstream API passthrough — shape not owned by orca
 use axum::{
     extract::{Path, Query},
     http::StatusCode,

@@ -5,9 +5,11 @@
     "crossterm",
     "impls",
     "jsonschema",
+    "lmstudio",
     "pemfile",
     "ratatui",
     "reqwest",
+    "rpassword",
     "rusqlite",
     "rustls",
     "rustyline",
@@ -15,8 +17,11 @@
     "serde",
     "sqlcipher",
     "stty",
+    "tsify",
     "tungstenite",
     "typst",
-    "utoipa"
+    "upid",
+    "utoipa",
+    "vmid"
   ]
 }

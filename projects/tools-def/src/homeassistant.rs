@@ -1,4 +1,6 @@
 //! Home Assistant tool defs + native impls.
+// HaServiceCallArgs.data uses Map<String, Value> — HA service data is free-form by spec.
+#![allow(clippy::disallowed_types)]
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -7,7 +9,7 @@ use serde_json::{Map, Value};
 
 use crate::OrcaToolDef;
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HaEntityListArgs {
@@ -26,7 +28,7 @@ impl OrcaToolDef for HaEntityList {
     type Output = crate::JsonAny;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HaEntityStateArgs {
@@ -43,7 +45,7 @@ impl OrcaToolDef for HaEntityState {
     type Output = crate::JsonAny;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HaAutomationListArgs {
@@ -58,7 +60,7 @@ impl OrcaToolDef for HaAutomationList {
     type Output = crate::JsonAny;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HaServiceCallArgs {

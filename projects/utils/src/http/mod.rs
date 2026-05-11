@@ -22,6 +22,11 @@
 //! let items: Vec<serde_json::Value> = resp.json()?;
 //! # Ok(()) }
 //! ```
+//!
+//! `serde_json::Value` is used in `ResponseBody::Json` and `Body::Json`
+//! because HTTP response bodies are upstream-controlled — their shape is not
+//! known at this layer. Callers downcast via `Response::json::<T>()`.
+#![allow(clippy::disallowed_types)]
 
 use std::collections::HashMap;
 use std::sync::Arc;

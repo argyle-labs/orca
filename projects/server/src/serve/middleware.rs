@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types)] // request/response body inspection — dynamic JSON shape
 use axum::{
     body::{Body, Bytes},
     extract::Request,

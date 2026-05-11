@@ -28,6 +28,8 @@ pub struct PluginRow {
     pub command_map: std::collections::HashMap<String, String>,
     /// Sidebar nav links this plugin contributes when its mode is active.
     /// JSON array of {href, label} objects, optionally with {section} for grouping.
+    // Plugin-defined nav link objects are free-form; no fixed schema across all plugins.
+    #[allow(clippy::disallowed_types)]
     pub nav_links: Vec<serde_json::Value>,
     /// MCP tools this plugin exposes for orca's unified search (Cmd+K).
     pub search_tools: Vec<PluginSearchTool>,

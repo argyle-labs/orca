@@ -1,4 +1,10 @@
 //! Tool protocol types — the contract between LLM backends and tool execution.
+//!
+//! `serde_json::Value` is used for `ToolCall.input` and `ToolDef.input_schema`
+//! because these are LLM protocol-level opaque blobs — their shapes are
+//! dictated by each tool's own JSON Schema and cannot be typed statically
+//! at this layer. Callers deserialize to concrete types immediately after receipt.
+#![allow(clippy::disallowed_types)]
 
 use serde::{Deserialize, Serialize};
 

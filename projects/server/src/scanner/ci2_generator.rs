@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types)] // OpenAPI document builder — dynamic JSON construction
 /// CI2 OpenAPI generator for rebuyengine.com/api.php.
 /// Static analysis only — no PHP runtime required.
 /// Merges with any existing api.json at the repo root.

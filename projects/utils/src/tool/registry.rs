@@ -4,6 +4,12 @@
 //!   - MCP:  mcp_definitions() → tools/list,  dispatch() → tools/call
 //!   - HTTP: axum_router() → one POST route per tool  (returns Router, caller mounts it)
 //!   - CLI:  clap_command() + cli_dispatch() → `orca exec <name> [flags]`
+//!
+//! `serde_json::Value` is the tool dispatch protocol — args and outputs cross
+//! the type-erased ErasedTool boundary as Value. This is deliberate: the
+//! registry is a multiplexer over many typed tools and cannot know concrete
+//! types at compile time. Callers downcast via serde immediately after dispatch.
+#![allow(clippy::disallowed_types)]
 
 use anyhow::Result;
 use axum::{

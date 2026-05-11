@@ -1,4 +1,5 @@
-//! Service traits for the `mgmt` domain — split into ~6 sub-services per
+//! Service traits for the `mgmt` domain
+#![allow(clippy::disallowed_types)] // MCP protocol args/results and schema blobs are opaque by spec — split into ~6 sub-services per
 //! sub-domain (MCP servers + tool mappings, schema DBs, Docker runtimes,
 //! doc roots + ignore patterns, Proxmox endpoints, Home Assistant endpoints).
 

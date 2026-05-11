@@ -1,5 +1,6 @@
 //! Server-side impls of the 6 mgmt sub-services. Each is a thin shim over a
 //! `db::*` sub-module; sync_tools delegates to `commands::mcp_sync_server`.
+#![allow(clippy::disallowed_types)] // mirrors trait signatures + MCP JSON-RPC protocol — see trait-level allow
 
 use anyhow::Result;
 use async_trait::async_trait;

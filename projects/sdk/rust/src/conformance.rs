@@ -42,6 +42,10 @@
 //!    `manifest.plugin.id` (so we can tell the manifest was actually parsed).
 //! 5. **Exit cleanly** — terminate the process with status 0.
 
+// Test harness records arbitrary plugin I/O (params/results) as opaque Value
+// to stay generic across all conformance scenarios.
+#![allow(clippy::disallowed_types)]
+
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

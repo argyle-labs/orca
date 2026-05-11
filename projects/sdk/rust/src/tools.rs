@@ -1,4 +1,7 @@
 //! Tools surface — plugins declare callable tools, host invokes them.
+// Tool dispatch is type-erased at the protocol boundary: args, result, and
+// input_schema are all free-form JSON mandated by the MCP tool-call contract.
+#![allow(clippy::disallowed_types)]
 //!
 //! Sibling of the `types.declare` / `context.publish` surface in
 //! [`crate::transport`]. Plugins that opt into `surfaces.mcp = true` in

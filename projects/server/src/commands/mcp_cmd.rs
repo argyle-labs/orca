@@ -1,3 +1,5 @@
+// CLI MCP command passing through spec/config blobs; HashMap/Value are protocol-level passthrough.
+#![allow(clippy::disallowed_types)]
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use db::mcp_servers::ServerRow;

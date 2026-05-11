@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types)] // OpenAPI spec construction — dynamic JSON required
 use std::sync::OnceLock;
 
 use utoipa::OpenApi;

@@ -1,5 +1,9 @@
 //! Unraid GraphQL client. Transport (HTTP, headers, retry) is delegated to
 //! [`orca_graphql`] so bug fixes land in one place.
+// serde_json::Value is intentional: all public methods are GraphQL
+// passthrough — the Unraid schema is upstream-defined and returned verbatim
+// to callers who select fields via query strings.
+#![allow(clippy::disallowed_types)]
 
 use orca_utils::graphql::{Client as GraphQlClient, GraphQlErrors, GraphQlResponse, QueryRequest};
 use serde_json::{Value, json};

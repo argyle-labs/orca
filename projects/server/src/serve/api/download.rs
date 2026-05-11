@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types)] // OpenAPI spec serving — dynamic JSON construction for spec blobs
 use axum::{
     extract::{Path, Query},
     http::StatusCode,

@@ -1,6 +1,7 @@
 //! `InfraService` impl — talks to the local orca HTTP API for docker compose
 //! state + service logs, and delegates `run_tests` to the in-process
 //! test-suite runner.
+#![allow(clippy::disallowed_types)] // upstream HTTP passthrough — shape not owned by orca
 
 use anyhow::Result;
 use async_trait::async_trait;

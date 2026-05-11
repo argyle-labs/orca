@@ -11,6 +11,10 @@
 //! Multiple `call()`s may be in flight concurrently — each gets its own id
 //! and waits on its own oneshot.
 
+// RPC envelope frames mirror jsonrpc.rs — params/result are opaque Value at
+// the TCP transport boundary.
+#![allow(clippy::disallowed_types)]
+
 use anyhow::{Context, Result, bail};
 use rustls::pki_types::ServerName;
 use serde_json::Value;

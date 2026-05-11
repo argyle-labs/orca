@@ -1,3 +1,5 @@
+// LLM wire-format serialization helpers; HashMap/Value are protocol-level passthrough.
+#![allow(clippy::disallowed_types)]
 use crate::llm::types::Message;
 use orca_utils::tool::ToolDef;
 use serde_json::{Value, json};

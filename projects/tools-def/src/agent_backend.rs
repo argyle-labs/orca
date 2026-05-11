@@ -8,13 +8,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::OrcaToolDef;
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ClearArgs {}
 
 /// Outcome of a mutation against the encrypted API-key slot.
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ApiKeyMutationResult {
@@ -28,7 +28,7 @@ pub struct ApiKeyMutationResult {
 }
 
 /// Whether a stored API key exists.
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ApiKeyStatus {
@@ -47,7 +47,7 @@ impl OrcaToolDef for AgentBackendClearApiKey {
     type Output = ApiKeyMutationResult;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SetArgs {
@@ -65,7 +65,7 @@ impl OrcaToolDef for AgentBackendSetApiKey {
     type Output = ApiKeyMutationResult;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct StatusArgs {}
@@ -81,7 +81,7 @@ impl OrcaToolDef for AgentBackendApiKeyStatus {
 
 // ── agent_backend_set_mode ──────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SetModeArgs {
@@ -89,7 +89,7 @@ pub struct SetModeArgs {
     pub mode: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SetModeResult {
@@ -110,7 +110,7 @@ impl OrcaToolDef for AgentBackendSetMode {
 
 // ── agent_backend_override ──────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct OverrideArgs {
@@ -119,7 +119,7 @@ pub struct OverrideArgs {
     pub backend: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct OverrideResult {
@@ -142,14 +142,14 @@ impl OrcaToolDef for AgentBackendOverride {
 
 // ── agent_backend_use_server_anthropic ──────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct UseServerAnthropicArgs {
     pub enabled: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct UseServerAnthropicResult {
@@ -168,12 +168,12 @@ impl OrcaToolDef for AgentBackendUseServerAnthropic {
 
 // ── agent_backend_status ────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct AgentBackendStatusArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct AgentBackendOverrideEntry {
@@ -181,7 +181,7 @@ pub struct AgentBackendOverrideEntry {
     pub backend: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct AgentBackendStatusOutput {

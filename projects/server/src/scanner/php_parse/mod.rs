@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types)] // OpenAPI document builder — dynamic JSON construction
 //! PHP source analysis via tree-sitter-php.
 //!
 //! Wraps the tree-sitter PHP grammar to provide typed extraction functions

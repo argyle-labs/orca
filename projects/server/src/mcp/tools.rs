@@ -1,5 +1,6 @@
 // Static tool definitions for tools not yet converted to OrcaTool.
 // TODO: convert run_agent, then delete this file entirely.
+#![allow(clippy::disallowed_types)] // MCP tool-schema JSON blob — dynamic JSON construction required
 use serde_json::{Value, json};
 
 pub fn tool_defs() -> Value {

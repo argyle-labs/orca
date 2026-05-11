@@ -5,6 +5,12 @@
 //! Output is normalized to `serde_json::Value`: text-returning tools end up as
 //! `Value::String`; structured tools serialize directly. Callers that need text
 //! (MCP, CLI) call `value_to_text()` to render.
+//!
+//! `serde_json::Value` is the tool dispatch protocol here — it is the normalized
+//! wire representation across the type-erased boundary (ErasedTool). Every
+//! concrete tool's strongly-typed Args/Output is serialized to/from Value
+//! at the edge. This is the designated opaque layer in the tool surface stack.
+#![allow(clippy::disallowed_types)]
 
 use anyhow::Result;
 use futures::future::BoxFuture;
