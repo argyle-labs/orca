@@ -1280,7 +1280,12 @@ mod tests {
             compare_semver("2.0.0", "1.99.99").unwrap(),
             Ordering::Greater
         );
-        assert!(compare_semver("0.1.0-rc1", "0.1.0").is_err());
+        // Prerelease/build metadata is stripped, not rejected — the numeric
+        // core wins. "0.1.0-rc1" compares equal to "0.1.0".
+        assert_eq!(
+            compare_semver("0.1.0-rc1", "0.1.0").unwrap(),
+            Ordering::Equal
+        );
         assert!(compare_semver("not-a-version", "0.1.0").is_err());
     }
 }
