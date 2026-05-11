@@ -28,6 +28,12 @@ pub struct DocTreeNodeData {
 }
 
 #[derive(Clone)]
+pub struct DocRootTree {
+    pub root: String,
+    pub nodes: Vec<DocTreeNodeData>,
+}
+
+#[derive(Clone)]
 pub struct SearchDocMatch {
     pub line: u32,
     pub text: String,
@@ -54,6 +60,11 @@ pub trait DocsService: Send + Sync {
     /// Compacted tree under `root[/path]`. Errors when the root or path is
     /// unknown.
     async fn get_tree(&self, root: &str, path: Option<&str>) -> Result<Vec<DocTreeNodeData>>;
+
+    /// Build the multi-root tree (every registered root, keyed by name) in
+    /// one call. When `raw` is true, skip compaction so callers see the raw
+    /// filesystem layout.
+    async fn get_full_tree(&self, raw: bool) -> Result<Vec<DocRootTree>>;
 
     /// Read a doc file. When `llm_format` is true, decorative markdown is
     /// stripped to reduce token usage.

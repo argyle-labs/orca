@@ -113,6 +113,41 @@ impl OrcaToolDef for GetTree {
     type Output = GetTreeOutput;
 }
 
+// ── get_full_tree ───────────────────────────────────────────────────────────
+
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct GetFullTreeArgs {
+    /// Pass `true` to skip compaction and return the raw filesystem tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<bool>,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DocRootTreeEntry {
+    pub root: String,
+    pub nodes: Vec<DocTreeNode>,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct GetFullTreeOutput {
+    pub roots: Vec<DocRootTreeEntry>,
+}
+
+pub struct GetFullTree;
+impl OrcaToolDef for GetFullTree {
+    const NAME: &'static str = "get_full_tree";
+    const DESCRIPTION: &'static str = "Multi-root documentation tree — every registered root in one call. When `raw` is \
+         true, returns the uncompacted filesystem layout.";
+    type Args = GetFullTreeArgs;
+    type Output = GetFullTreeOutput;
+}
+
 // ── read_doc ────────────────────────────────────────────────────────────────
 
 #[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
@@ -260,6 +295,22 @@ mod native {
                 path: args.path,
                 nodes: data.into_iter().map(data_to_node).collect(),
             })
+        }
+    }
+
+    #[async_trait]
+    impl OrcaTool for GetFullTree {
+        async fn run(args: GetFullTreeArgs, ctx: &ToolCtx) -> Result<GetFullTreeOutput> {
+            let raw = args.raw.unwrap_or(false);
+            let data = svc(ctx)?.get_full_tree(raw).await?;
+            let roots = data
+                .into_iter()
+                .map(|r| DocRootTreeEntry {
+                    root: r.root,
+                    nodes: r.nodes.into_iter().map(data_to_node).collect(),
+                })
+                .collect();
+            Ok(GetFullTreeOutput { roots })
         }
     }
 

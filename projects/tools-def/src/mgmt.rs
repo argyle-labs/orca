@@ -717,6 +717,9 @@ pub struct McpToolEntry {
     pub server: String,
     pub name: String,
     pub description: String,
+    /// Raw JSON Schema object as advertised by the upstream MCP server.
+    /// Shape is server-defined and cannot be typed statically.
+    #[allow(clippy::disallowed_types)]
     #[cfg_attr(feature = "wasm", tsify(type = "unknown"))]
     pub input_schema: serde_json::Value,
 }
@@ -751,18 +754,63 @@ pub struct RunMcpToolArgs {
     /// Tool name on the server (the internal name, not an orca alias).
     pub tool: String,
     /// JSON arguments object passed straight through to the tool.
+    /// Shape is defined by each upstream MCP tool's own schema — opaque at this layer.
+    #[allow(clippy::disallowed_types)]
     #[serde(default)]
     #[cfg_attr(feature = "wasm", tsify(type = "Record<string, unknown> | null"))]
     pub args: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// One block in an MCP `tools/call` result's `content` array.
+///
+/// MCP spec content kinds: `text` (carries `text`), `image` / `audio`
+/// (carry `data` base64 + `mime_type`), `resource` (carries `resource`).
+/// We preserve every shape: required fields are typed, optional ones are
+/// kept as opaque JSON so we never lose data.
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpContent {
+    /// `"text" | "image" | "audio" | "resource"` per the MCP spec.
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// Opaque MCP `resource` content block — shape is server-defined per MCP spec.
+    #[allow(clippy::disallowed_types)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "wasm", tsify(type = "unknown"))]
+    pub resource: Option<Value>,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunMcpToolOutput {
+    pub content: Vec<McpContent>,
+    pub is_error: bool,
+    /// Structured tool result if the server provided one alongside `content`
+    /// (MCP `structuredContent`). Kept as opaque JSON — its shape is the
+    /// tool's own output schema, which orca cannot know at this layer.
+    #[allow(clippy::disallowed_types)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "wasm", tsify(type = "unknown"))]
+    pub structured_content: Option<Value>,
 }
 
 pub struct RunMcpTool;
 impl OrcaToolDef for RunMcpTool {
     const NAME: &'static str = "run_mcp_tool";
     const DESCRIPTION: &'static str = "[MUTATES STATE] Invoke a tool on a registered MCP server. \
-         Returns the raw `tools/call` result (typically `{ content: [...], isError? }`).";
+         Returns the typed `tools/call` envelope (`{ content, isError, structuredContent? }`).";
     type Args = RunMcpToolArgs;
-    type Output = crate::JsonAny;
+    type Output = RunMcpToolOutput;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1026,29 +1074,30 @@ mod native {
 
     #[async_trait]
     impl OrcaTool for RunMcpTool {
-        async fn run(args: RunMcpToolArgs, ctx: &ToolCtx) -> Result<crate::JsonAny> {
+        async fn run(args: RunMcpToolArgs, ctx: &ToolCtx) -> Result<RunMcpToolOutput> {
             let arguments = match args.args {
                 Some(m) => serde_json::Value::Object(m),
                 None => serde_json::json!({}),
             };
-            let result = mcp(ctx)?
+            mcp(ctx)?
                 .run_tool(&args.server, &args.tool, arguments)
-                .await?;
-            Ok(result.into())
+                .await
         }
     }
 
     #[async_trait]
     impl OrcaTool for GetSchema {
-        async fn run(_args: GetSchemaArgs, ctx: &ToolCtx) -> Result<crate::JsonAny> {
-            Ok(sch(ctx)?.schema().await?.into())
+        async fn run(_args: GetSchemaArgs, ctx: &ToolCtx) -> Result<GetSchemaOutput> {
+            sch(ctx)?.schema().await
         }
     }
 
     #[async_trait]
     impl OrcaTool for GetSchemaDomains {
-        async fn run(_args: GetSchemaDomainsArgs, ctx: &ToolCtx) -> Result<crate::JsonAny> {
-            Ok(sch(ctx)?.schema_domains().await?.into())
+        async fn run(_args: GetSchemaDomainsArgs, ctx: &ToolCtx) -> Result<GetSchemaDomainsOutput> {
+            Ok(GetSchemaDomainsOutput {
+                domains: sch(ctx)?.schema_domains().await?,
+            })
         }
     }
 

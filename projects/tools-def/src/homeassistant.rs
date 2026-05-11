@@ -2,6 +2,7 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+#[allow(clippy::disallowed_types)]
 use serde_json::{Map, Value};
 
 use crate::OrcaToolDef;
@@ -16,6 +17,7 @@ pub struct HaEntityListArgs {
     pub domain: Option<String>,
 }
 pub struct HaEntityList;
+#[allow(clippy::disallowed_types)] // Output is opaque HA entity dump — shape varies per entity domain
 impl OrcaToolDef for HaEntityList {
     const NAME: &'static str = "home_assistant_entity_list";
     const DESCRIPTION: &'static str =
@@ -33,6 +35,7 @@ pub struct HaEntityStateArgs {
     pub entity_id: String,
 }
 pub struct HaEntityState;
+#[allow(clippy::disallowed_types)] // Output is opaque HA entity state blob — shape varies by entity
 impl OrcaToolDef for HaEntityState {
     const NAME: &'static str = "home_assistant_entity_state";
     const DESCRIPTION: &'static str = "Fetch the current state of a single Home Assistant entity.";
@@ -47,6 +50,7 @@ pub struct HaAutomationListArgs {
     pub endpoint: String,
 }
 pub struct HaAutomationList;
+#[allow(clippy::disallowed_types)] // Output is opaque HA automation list — shape dictated by HA upstream
 impl OrcaToolDef for HaAutomationList {
     const NAME: &'static str = "home_assistant_automation_list";
     const DESCRIPTION: &'static str = "List Home Assistant automations for a registered endpoint.";
@@ -65,11 +69,14 @@ pub struct HaServiceCallArgs {
     pub service: String,
     /// Optional entity_id target (e.g. "light.living_room")
     pub entity_id: Option<String>,
-    /// Optional service data payload merged into the request body
+    /// Optional service data payload merged into the request body.
+    /// Shape is service-defined — HA does not publish a typed schema per service.
+    #[allow(clippy::disallowed_types)]
     #[cfg_attr(feature = "wasm", tsify(type = "Record<string, unknown> | null"))]
     pub data: Option<Map<String, Value>>,
 }
 pub struct HaServiceCall;
+#[allow(clippy::disallowed_types)] // Output is opaque HA changed-states list — shape varies per service
 impl OrcaToolDef for HaServiceCall {
     const NAME: &'static str = "home_assistant_service_call";
     const DESCRIPTION: &'static str = "[MUTATES STATE] Invoke a Home Assistant service \

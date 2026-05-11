@@ -14,6 +14,7 @@ pub use orca_tool_trait::OrcaToolDef;
 
 pub mod agent_backend;
 pub mod agents;
+pub mod docker;
 pub mod docs;
 pub mod engine;
 pub mod homeassistant;
@@ -25,7 +26,11 @@ pub mod plugin_runtime;
 pub mod plugins;
 pub mod proxmox;
 pub mod services;
+pub mod spec_registry;
+pub mod system;
 
+/// Re-export of the opaque JSON passthrough wrapper — see `json_any` module for policy.
+#[allow(clippy::disallowed_types)]
 pub use json_any::JsonAny;
 
 #[cfg(feature = "wasm")]
@@ -107,6 +112,7 @@ declare_tools! {
     // Docs — roots, tree, read, search, commands
     list_roots     => docs::ListRoots,
     get_tree       => docs::GetTree,
+    get_full_tree  => docs::GetFullTree,
     read_doc       => docs::ReadDoc,
     search_docs    => docs::SearchDocs,
     list_commands  => docs::ListCommands,
@@ -182,4 +188,26 @@ declare_tools! {
     proxmox_list_containers  => proxmox::ProxmoxListContainers,
     proxmox_vm_action        => proxmox::ProxmoxVmAction,
     proxmox_container_action => proxmox::ProxmoxContainerAction,
+
+    // Docker — engine + compose services + lifecycle + logs
+    get_docker_engine    => docker::GetDockerEngine,
+    start_docker_engine  => docker::StartDockerEngine,
+    get_docker_services  => docker::GetDockerServices,
+    run_docker_action    => docker::RunDockerAction,
+    get_logs             => docker::GetLogs,
+    get_log_services     => docker::GetLogServices,
+
+    // Spec registry — OpenAPI + GraphQL specs
+    list_specs            => spec_registry::ListSpecs,
+    list_db_specs         => spec_registry::ListDbSpecs,
+    register_spec         => spec_registry::RegisterSpec,
+    refresh_spec          => spec_registry::RefreshSpec,
+    unregister_spec       => spec_registry::UnregisterSpec,
+    sync_mcp_specs        => spec_registry::SyncMcpSpecs,
+    get_spec_graphql_info => spec_registry::GetSpecGraphqlInfo,
+    proxy_graphql         => spec_registry::ProxyGraphql,
+
+    // System — orca's own install lifecycle
+    system_status => system::SystemStatus,
+    system_action => system::SystemAction,
 }

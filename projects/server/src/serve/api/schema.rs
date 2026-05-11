@@ -8,8 +8,10 @@ use axum::{
 };
 use mysql_async::Pool;
 use mysql_async::prelude::Queryable;
+use orca_tools_def::mgmt::{
+    GetSchemaOutput, SchemaColumn, SchemaDomain, SchemaForeignKey, SchemaTab, SchemaTableInfo,
+};
 use serde::Deserialize;
-use serde_json::{Value, json};
 
 use super::prelude::*;
 
@@ -135,15 +137,15 @@ fn load_db_configs() -> Vec<DbConfig> {
     vec![]
 }
 
-pub(crate) fn load_domains(domains_file: &Option<String>) -> Value {
+pub(crate) fn load_domains(domains_file: &Option<String>) -> Vec<SchemaDomain> {
     let Some(path) = domains_file else {
-        return json!([]);
+        return Vec::new();
     };
     let expanded = expand_tilde(path);
     std::fs::read_to_string(&expanded)
         .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or(json!([]))
+        .and_then(|raw| serde_json::from_str::<Vec<SchemaDomain>>(&raw).ok())
+        .unwrap_or_default()
 }
 
 // ── GET /api/schema ───────────────────────────────────────────────────────────
@@ -169,7 +171,7 @@ pub async fn schema_handler() -> Response {
 /// Pure builder for the multi-tab schema response. Shared by the HTTP
 /// handler and the `get_schema` OrcaTool service-trait impl so they stay in
 /// lock-step. Returns `(StatusCode, message)` on failure.
-pub(crate) async fn build_schema_response() -> Result<Value, (StatusCode, String)> {
+pub(crate) async fn build_schema_response() -> Result<GetSchemaOutput, (StatusCode, String)> {
     let configs = load_db_configs();
     if configs.is_empty() {
         return Err((
@@ -202,10 +204,14 @@ pub(crate) async fn build_schema_response() -> Result<Value, (StatusCode, String
     } else {
         Some(errors)
     };
-    Ok(json!({ "tabs": tabs, "showTabs": show_tabs, "errors": errors_opt }))
+    Ok(GetSchemaOutput {
+        tabs,
+        show_tabs,
+        errors: errors_opt,
+    })
 }
 
-async fn query_database(cfg: &DbConfig) -> anyhow::Result<Value> {
+async fn query_database(cfg: &DbConfig) -> anyhow::Result<SchemaTab> {
     match cfg.driver.as_str() {
         "postgres" => query_database_postgres(cfg).await,
         "sqlite" => query_database_sqlite(cfg).await,
@@ -217,7 +223,7 @@ async fn query_database(cfg: &DbConfig) -> anyhow::Result<Value> {
 }
 
 /// Native MySQL connection via mysql_async (no CLI dependency).
-async fn query_database_mysql_native(cfg: &DbConfig) -> anyhow::Result<Value> {
+async fn query_database_mysql_native(cfg: &DbConfig) -> anyhow::Result<SchemaTab> {
     let opts = mysql_async::OptsBuilder::default()
         .ip_or_hostname(cfg.host.clone())
         .tcp_port(cfg.port)
@@ -260,7 +266,7 @@ async fn query_database_mysql_native(cfg: &DbConfig) -> anyhow::Result<Value> {
 }
 
 /// Fallback for container-based configs: docker exec mysql CLI inside the container.
-async fn query_database_docker(cfg: &DbConfig, container: &str) -> anyhow::Result<Value> {
+async fn query_database_docker(cfg: &DbConfig, container: &str) -> anyhow::Result<SchemaTab> {
     let db = &cfg.database;
     let pass_arg = format!("-p{}", cfg.password);
     let base_args: Vec<String> = vec![
@@ -332,7 +338,7 @@ async fn query_database_docker(cfg: &DbConfig, container: &str) -> anyhow::Resul
 }
 
 /// Native Postgres connection via tokio-postgres (no CLI dependency).
-async fn query_database_postgres(cfg: &DbConfig) -> anyhow::Result<Value> {
+async fn query_database_postgres(cfg: &DbConfig) -> anyhow::Result<SchemaTab> {
     let conn_str = format!(
         "host={} port={} user={} password={} dbname={}",
         cfg.host, cfg.port, cfg.user, cfg.password, cfg.database
@@ -405,11 +411,11 @@ async fn query_database_postgres(cfg: &DbConfig) -> anyhow::Result<Value> {
 }
 
 /// SQLite introspection via rusqlite (no server, reads file directly).
-async fn query_database_sqlite(cfg: &DbConfig) -> anyhow::Result<Value> {
+async fn query_database_sqlite(cfg: &DbConfig) -> anyhow::Result<SchemaTab> {
     let path = cfg.database.clone();
     let cfg_clone = cfg.clone();
 
-    tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+    tokio::task::spawn_blocking(move || -> anyhow::Result<SchemaTab> {
         let conn = rusqlite::Connection::open_with_flags(
             &path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -498,10 +504,13 @@ fn build_schema_value(
     raw_tables: Vec<(String, Option<String>)>,
     raw_cols: Vec<(String, String, String, String, String, String)>,
     raw_fks: Vec<(String, String, String, String)>,
-) -> Value {
-    let tables: Vec<Value> = raw_tables
+) -> SchemaTab {
+    let tables: Vec<SchemaTableInfo> = raw_tables
         .into_iter()
-        .map(|(name, comment)| json!({ "name": name, "comment": comment.unwrap_or_default() }))
+        .map(|(name, comment)| SchemaTableInfo {
+            name,
+            comment: comment.unwrap_or_default(),
+        })
         .collect();
 
     let mut fk_lookup: HashMap<(String, String), String> = HashMap::new();
@@ -509,35 +518,38 @@ fn build_schema_value(
         fk_lookup.insert((tbl.clone(), col.clone()), ref_tbl.clone());
     }
 
-    let mut columns: HashMap<String, Vec<Value>> = HashMap::new();
+    let mut columns: HashMap<String, Vec<SchemaColumn>> = HashMap::new();
     for (table, col_name, typ, nullable, key, extra) in raw_cols {
         let fk_target = fk_lookup.get(&(table.clone(), col_name.clone())).cloned();
-        columns.entry(table).or_default().push(json!({
-            "name": col_name,
-            "type": typ,
-            "nullable": nullable == "YES",
-            "key": key,
-            "extra": extra,
-            "fk_target": fk_target,
-        }));
+        columns.entry(table).or_default().push(SchemaColumn {
+            name: col_name,
+            type_name: typ,
+            nullable: nullable == "YES",
+            key,
+            extra,
+            fk_target,
+        });
     }
 
-    let foreign_keys: Vec<Value> = raw_fks
+    let foreign_keys: Vec<SchemaForeignKey> = raw_fks
         .into_iter()
-        .map(|(table, column, ref_table, ref_column)| {
-            json!({ "table": table, "column": column, "refTable": ref_table, "refColumn": ref_column })
+        .map(|(table, column, ref_table, ref_column)| SchemaForeignKey {
+            table,
+            column,
+            ref_table,
+            ref_column,
         })
         .collect();
 
     let domains = load_domains(&cfg.domains_file);
 
-    json!({
-        "title": cfg.name,
-        "tables": tables,
-        "columns": columns,
-        "foreignKeys": foreign_keys,
-        "domains": domains,
-    })
+    SchemaTab {
+        title: cfg.name.clone(),
+        tables,
+        columns,
+        foreign_keys,
+        domains,
+    }
 }
 
 // ── GET /api/schema/domains ───────────────────────────────────────────────────
@@ -556,13 +568,11 @@ pub async fn schema_domains_handler() -> Response {
 }
 
 /// Pure builder for the flattened schema-domains array.
-pub(crate) fn build_schema_domains() -> Value {
+pub(crate) fn build_schema_domains() -> Vec<SchemaDomain> {
     let configs = load_db_configs();
-    let mut all: Vec<Value> = Vec::new();
+    let mut all: Vec<SchemaDomain> = Vec::new();
     for cfg in &configs {
-        if let Value::Array(domains) = load_domains(&cfg.domains_file) {
-            all.extend(domains);
-        }
+        all.extend(load_domains(&cfg.domains_file));
     }
-    json!(all)
+    all
 }

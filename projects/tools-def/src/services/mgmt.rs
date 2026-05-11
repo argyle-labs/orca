@@ -52,6 +52,8 @@ pub struct McpToolMeta {
     pub server: String,
     pub name: String,
     pub description: String,
+    /// Raw JSON Schema from the upstream MCP server — shape is server-defined.
+    #[allow(clippy::disallowed_types)]
     pub input_schema: Value,
 }
 
@@ -78,9 +80,16 @@ pub trait McpRegistryService: Send + Sync {
     /// (connects on demand). Mirrors `GET /api/mcp/tools`.
     async fn list_tools(&self) -> Result<Vec<McpToolMeta>>;
 
-    /// Invoke a tool on a registered MCP server. Returns the opaque tool
-    /// result `Value`. Mirrors `POST /api/mcp/run`.
-    async fn run_tool(&self, server: &str, name: &str, arguments: Value) -> Result<Value>;
+    /// Invoke a tool on a registered MCP server. Returns the typed MCP
+    /// `tools/call` envelope. Mirrors `POST /api/mcp/run`.
+    /// `arguments` is opaque — its shape is dictated by each upstream tool's own schema.
+    #[allow(clippy::disallowed_types)]
+    async fn run_tool(
+        &self,
+        server: &str,
+        name: &str,
+        arguments: Value,
+    ) -> Result<crate::mgmt::RunMcpToolOutput>;
 }
 
 // ── Schema databases ────────────────────────────────────────────────────────
@@ -117,13 +126,11 @@ pub trait SchemaDbService: Send + Sync {
     async fn remove(&self, name: &str) -> Result<bool>;
 
     /// Build the multi-tab schema view across every configured database.
-    /// Returns an opaque JSON object `{ tabs, showTabs, errors? }` — see
-    /// `SchemaResponse` in the server crate for the full shape.
-    async fn schema(&self) -> Result<Value>;
+    async fn schema(&self) -> Result<crate::mgmt::GetSchemaOutput>;
 
     /// Concatenate `domains` arrays from every configured database into a
-    /// single flat JSON array.
-    async fn schema_domains(&self) -> Result<Value>;
+    /// single flat list.
+    async fn schema_domains(&self) -> Result<Vec<crate::mgmt::SchemaDomain>>;
 }
 
 // ── Docker runtimes ─────────────────────────────────────────────────────────

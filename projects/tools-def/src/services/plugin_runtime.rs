@@ -12,8 +12,12 @@ use serde_json::Value;
 #[async_trait]
 pub trait PluginRuntimeService: Send + Sync {
     /// Fetch a single key for a plugin. Errors when the key does not exist.
+    /// Value is free-form by contract — each plugin defines its own KV schema.
+    #[allow(clippy::disallowed_types)]
     async fn get(&self, plugin: &str, key: &str) -> Result<Value>;
 
     /// Upsert a single key for a plugin.
+    /// Value is free-form by contract — each plugin defines its own KV schema.
+    #[allow(clippy::disallowed_types)]
     async fn set(&self, plugin: &str, key: &str, value: &Value) -> Result<()>;
 }

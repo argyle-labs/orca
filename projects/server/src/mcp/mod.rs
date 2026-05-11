@@ -5,6 +5,7 @@
 pub mod agent_resolve;
 pub mod agents_service;
 mod context7;
+pub mod docker_service;
 pub mod docs;
 pub mod docs_service;
 mod handlers;
@@ -12,8 +13,10 @@ pub mod infra_service;
 pub mod mgmt_service;
 pub mod plugin_runtime_service;
 pub mod plugins_service;
+pub mod spec_registry_service;
 mod spec_tools;
 mod specs;
+pub mod system_service;
 mod tools;
 
 use anyhow::Result;
@@ -65,6 +68,15 @@ fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
     let plugin_runtime: Arc<dyn orca_tools_def::services::plugin_runtime::PluginRuntimeService> =
         Arc::new(crate::mcp::plugin_runtime_service::ServerPluginRuntime);
     ctx.register_service(plugin_runtime);
+    let docker_svc: Arc<dyn orca_tools_def::services::docker::DockerService> =
+        Arc::new(crate::mcp::docker_service::ServerDocker);
+    ctx.register_service(docker_svc);
+    let spec_registry: Arc<dyn orca_tools_def::services::spec_registry::SpecRegistryService> =
+        Arc::new(crate::mcp::spec_registry_service::ServerSpecRegistry);
+    ctx.register_service(spec_registry);
+    let system_svc: Arc<dyn orca_tools_def::services::system::SystemService> =
+        Arc::new(crate::mcp::system_service::ServerSystem);
+    ctx.register_service(system_svc);
     {
         use orca_tools_def::services::mgmt::*;
         let mcp_reg: Arc<dyn McpRegistryService> =
