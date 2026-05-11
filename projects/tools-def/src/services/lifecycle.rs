@@ -6,7 +6,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::orca_lifecycle::{
-    DoctorReport, LifecycleReport, ProjectsListReport, SpecDumpReport, UpdateCheckReport,
+    DoctorReport, LifecycleReport, ProjectsListReport, RuntimeSpecReport, SpecDumpReport,
+    UpdateCheckReport,
 };
 
 #[async_trait]
@@ -18,4 +19,5 @@ pub trait LifecycleService: Send + Sync {
     async fn update_apply(&self, channel: &str) -> Result<LifecycleReport>;
     async fn projects_list(&self) -> Result<ProjectsListReport>;
     async fn spec_dump(&self) -> Result<SpecDumpReport>;
+    async fn runtime_spec(&self) -> Result<RuntimeSpecReport>;
 }

@@ -183,38 +183,6 @@ pub fn cmd_uninstall_report() -> InstallReport {
     report
 }
 
-pub fn cmd_install() -> Result<()> {
-    println!("{}", format!("{APP_NAME} install").bold());
-    println!();
-    let report = cmd_install_report();
-    report.print();
-    println!();
-    if report.success() {
-        println!(
-            "{}",
-            format!("{APP_NAME} installed successfully.").green().bold()
-        );
-        println!("Run {} to start.", APP_NAME.cyan());
-    } else {
-        println!("{}", "Install completed with errors — see above.".yellow());
-    }
-    Ok(())
-}
-
-pub fn cmd_uninstall() -> Result<()> {
-    println!("{}", format!("{APP_NAME} uninstall").bold());
-    println!();
-    let report = cmd_uninstall_report();
-    report.print();
-    println!();
-    println!(
-        "{}",
-        "Memory files and vault contents were NOT removed.".dimmed()
-    );
-    println!("{}", format!("{APP_NAME} uninstalled.").yellow().bold());
-    Ok(())
-}
-
 /// Machine-readable status for web UI polling.
 pub fn install_status() -> serde_json::Value {
     let home = match home_dir() {
