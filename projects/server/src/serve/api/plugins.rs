@@ -238,10 +238,13 @@ pub async fn plugin_data_list_handler(Path(id): Path<String>) -> Response {
         let conn = db::open_default()?;
         let entries = db::plugin_data::list(&conn, &id)?
             .into_iter()
-            .map(|r| PluginDataEntry {
-                key: r.key,
-                value: r.value,
-                updated_at: r.updated_at,
+            .map(|r| {
+                let value = serde_json::from_str(&r.value).unwrap_or(serde_json::Value::Null);
+                PluginDataEntry {
+                    key: r.key,
+                    value,
+                    updated_at: r.updated_at,
+                }
             })
             .collect::<Vec<_>>();
         Ok(entries)
@@ -269,11 +272,14 @@ pub async fn plugin_data_get_handler(Path((id, key)): Path<(String, String)>) ->
     db_json(|| {
         let conn = db::open_default()?;
         match db::plugin_data::get(&conn, &id, &key)? {
-            Some(r) => Ok(PluginDataEntry {
-                key: r.key,
-                value: r.value,
-                updated_at: r.updated_at,
-            }),
+            Some(r) => {
+                let value = serde_json::from_str(&r.value).unwrap_or(serde_json::Value::Null);
+                Ok(PluginDataEntry {
+                    key: r.key,
+                    value,
+                    updated_at: r.updated_at,
+                })
+            }
             None => anyhow::bail!("key '{}' not found for plugin '{}'", key, id),
         }
     })
@@ -302,7 +308,8 @@ pub async fn plugin_data_set_handler(
 ) -> Response {
     db_ok(|| {
         let conn = db::open_default()?;
-        db::plugin_data::set(&conn, &id, &key, &body.value)?;
+        let text = serde_json::to_string(&body.value)?;
+        db::plugin_data::set(&conn, &id, &key, &text)?;
         Ok(())
     })
 }

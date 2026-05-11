@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::OrcaToolDef;
+use serde_json::Value;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MCP servers + tool mappings
@@ -773,13 +774,89 @@ impl OrcaToolDef for RunMcpTool {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetSchemaArgs {}
 
+/// One row in `tabs[*].tables`.
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SchemaTableInfo {
+    pub name: String,
+    pub comment: String,
+}
+
+/// One column entry within `tabs[*].columns[tableName]`.
+///
+/// Field names match what the HTTP `/api/schema` handler emits today (the
+/// frontend reads `fk_target` snake_case directly).
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SchemaColumn {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub type_name: String,
+    pub nullable: bool,
+    pub key: String,
+    pub extra: String,
+    pub fk_target: Option<String>,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaForeignKey {
+    pub table: String,
+    pub column: String,
+    pub ref_table: String,
+    pub ref_column: String,
+}
+
+/// Domain grouping (loaded from each schema DB's `domainsFile` JSON).
+/// Optional fields (`group`, `subgroup`) are not always present.
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SchemaDomain {
+    pub key: String,
+    pub label: String,
+    pub color: String,
+    pub tables: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subgroup: Option<String>,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaTab {
+    pub title: String,
+    pub tables: Vec<SchemaTableInfo>,
+    pub columns: HashMap<String, Vec<SchemaColumn>>,
+    pub foreign_keys: Vec<SchemaForeignKey>,
+    pub domains: Vec<SchemaDomain>,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GetSchemaOutput {
+    pub tabs: Vec<SchemaTab>,
+    pub show_tabs: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub errors: Option<Vec<String>>,
+}
+
 pub struct GetSchema;
 impl OrcaToolDef for GetSchema {
     const NAME: &'static str = "get_schema";
     const DESCRIPTION: &'static str = "Return the multi-tab schema view across every configured \
          database. Result is `{ tabs, showTabs, errors? }`.";
     type Args = GetSchemaArgs;
-    type Output = crate::JsonAny;
+    type Output = GetSchemaOutput;
 }
 
 #[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
@@ -787,13 +864,20 @@ impl OrcaToolDef for GetSchema {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetSchemaDomainsArgs {}
 
+#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct GetSchemaDomainsOutput {
+    pub domains: Vec<SchemaDomain>,
+}
+
 pub struct GetSchemaDomains;
 impl OrcaToolDef for GetSchemaDomains {
     const NAME: &'static str = "get_schema_domains";
     const DESCRIPTION: &'static str = "Return the flattened list of domain definitions across every \
-         configured database (a JSON array).";
+         configured database.";
     type Args = GetSchemaDomainsArgs;
-    type Output = crate::JsonAny;
+    type Output = GetSchemaDomainsOutput;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

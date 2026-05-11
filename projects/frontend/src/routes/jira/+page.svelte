@@ -15,7 +15,7 @@
     const jql = values.jira_project
       ? `project = ${values.jira_project} ORDER BY updated DESC`
       : 'assignee = currentUser() ORDER BY updated DESC';
-    await setPluginData({ id: 'rebuy', key: 'jira_config', body: { value: JSON.stringify({ jql, project: values.jira_project }) } });
+    await setPluginData({ id: 'rebuy', key: 'jira_config', body: { value: { jql, project: values.jira_project } } });
     await invalidateAll();
   }
 </script>

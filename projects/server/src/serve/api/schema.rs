@@ -160,12 +160,23 @@ pub(crate) fn load_domains(domains_file: &Option<String>) -> Value {
     tag = "schema"
 )]
 pub async fn schema_handler() -> Response {
+    match build_schema_response().await {
+        Ok(v) => Json(v).into_response(),
+        Err((status, msg)) => err(status, &msg),
+    }
+}
+
+/// Pure builder for the multi-tab schema response. Shared by the HTTP
+/// handler and the `get_schema` OrcaTool service-trait impl so they stay in
+/// lock-step. Returns `(StatusCode, message)` on failure.
+pub(crate) async fn build_schema_response() -> Result<Value, (StatusCode, String)> {
     let configs = load_db_configs();
     if configs.is_empty() {
-        return err(
+        return Err((
             StatusCode::NOT_FOUND,
-            "No databases configured — use `orca schema add` or POST /api/schema/databases",
-        );
+            "No databases configured — use `orca schema add` or POST /api/schema/databases"
+                .to_string(),
+        ));
     }
 
     let mut tabs = Vec::new();
@@ -179,10 +190,10 @@ pub async fn schema_handler() -> Response {
     }
 
     if tabs.is_empty() {
-        return err(
+        return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("All databases failed: {}", errors.join("; ")),
-        );
+            format!("All databases failed: {}", errors.join("; ")),
+        ));
     }
 
     let show_tabs = tabs.len() > 1;
@@ -191,7 +202,7 @@ pub async fn schema_handler() -> Response {
     } else {
         Some(errors)
     };
-    Json(json!({ "tabs": tabs, "showTabs": show_tabs, "errors": errors_opt })).into_response()
+    Ok(json!({ "tabs": tabs, "showTabs": show_tabs, "errors": errors_opt }))
 }
 
 async fn query_database(cfg: &DbConfig) -> anyhow::Result<Value> {
@@ -541,6 +552,11 @@ fn build_schema_value(
     tag = "schema"
 )]
 pub async fn schema_domains_handler() -> Response {
+    Json(build_schema_domains()).into_response()
+}
+
+/// Pure builder for the flattened schema-domains array.
+pub(crate) fn build_schema_domains() -> Value {
     let configs = load_db_configs();
     let mut all: Vec<Value> = Vec::new();
     for cfg in &configs {
@@ -548,5 +564,5 @@ pub async fn schema_domains_handler() -> Response {
             all.extend(domains);
         }
     }
-    Json(json!(all)).into_response()
+    json!(all)
 }

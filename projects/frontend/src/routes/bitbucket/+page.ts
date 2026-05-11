@@ -7,7 +7,7 @@ export const load: PageLoad = async () => {
   const configResult = await getPluginData({ id: 'rebuy', key: 'bitbucket_config' }).catch(
     () => null,
   );
-  const config = configResult?.value ? JSON.parse(configResult.value) : null;
+  const config = (configResult?.value as { workspace?: string } | null) ?? null;
 
   try {
     const repos = await listBitbucketRepos();

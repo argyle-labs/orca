@@ -267,14 +267,16 @@ pub struct OkResponse {
 #[derive(Serialize, ToSchema)]
 pub struct PluginDataEntry {
     pub key: String,
-    pub value: String,
+    #[schema(value_type = Object)]
+    pub value: Value,
     #[serde(rename = "updatedAt")]
     pub updated_at: String,
 }
 
 #[derive(Deserialize, ToSchema)]
 pub struct SetPluginDataRequest {
-    pub value: String,
+    #[schema(value_type = Object)]
+    pub value: Value,
 }
 
 #[derive(Serialize, Deserialize, ToSchema, Clone)]

@@ -12,6 +12,22 @@ use orca_tools_def::services::mgmt::{
 };
 use serde_json::Value;
 
+/// Build an `McpPool` rooted at orca's default DB path. Used by the
+/// federation-aware service methods (`list_tools`, `run_tool`) so they see
+/// the same set of registered servers as the HTTP `/api/mcp/*` handlers.
+fn make_mcp_pool() -> crate::serve::mcp_client::McpPool {
+    use orca_utils::config::{APP_DB_FILE, APP_STATE_DIR};
+    if let Ok(path) = std::env::var("ORCA_DB_PATH") {
+        return crate::serve::mcp_client::McpPool::new_with_db(std::path::PathBuf::from(path));
+    }
+    if let Some(home) = dirs::home_dir() {
+        return crate::serve::mcp_client::McpPool::new_with_db(
+            home.join(APP_STATE_DIR).join(APP_DB_FILE),
+        );
+    }
+    crate::serve::mcp_client::McpPool::new()
+}
+
 // ── MCP registry ────────────────────────────────────────────────────────────
 
 pub struct ServerMcpRegistry;
@@ -114,10 +130,7 @@ impl McpRegistryService for ServerMcpRegistry {
     }
 
     async fn list_tools(&self) -> Result<Vec<McpToolMeta>> {
-        let conn = db::open_default()?;
-        let db_path = conn.path().map(std::path::PathBuf::from);
-        drop(conn);
-        let pool = crate::serve::mcp_client::McpPool::new_with_db(db_path);
+        let pool = make_mcp_pool();
         let raw = pool.all_tools().await;
         Ok(raw
             .into_iter()
@@ -143,10 +156,7 @@ impl McpRegistryService for ServerMcpRegistry {
     }
 
     async fn run_tool(&self, server: &str, name: &str, arguments: Value) -> Result<Value> {
-        let conn = db::open_default()?;
-        let db_path = conn.path().map(std::path::PathBuf::from);
-        drop(conn);
-        let pool = crate::serve::mcp_client::McpPool::new_with_db(db_path);
+        let pool = make_mcp_pool();
         let client = pool
             .get_or_connect(server)
             .await
@@ -231,6 +241,16 @@ impl SchemaDbService for ServerSchemaDb {
     async fn remove(&self, name: &str) -> Result<bool> {
         let conn = db::open_default()?;
         db::schema_databases::remove(&conn, name)
+    }
+
+    async fn schema(&self) -> Result<Value> {
+        crate::serve::api::schema::build_schema_response()
+            .await
+            .map_err(|(status, msg)| anyhow::anyhow!("[{}] {msg}", status.as_u16()))
+    }
+
+    async fn schema_domains(&self) -> Result<Value> {
+        Ok(crate::serve::api::schema::build_schema_domains())
     }
 }
 

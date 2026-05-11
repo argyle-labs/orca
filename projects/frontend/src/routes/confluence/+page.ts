@@ -7,6 +7,6 @@ export const load: PageLoad = async () => {
   const configResult = await getPluginData({ id: 'rebuy', key: 'confluence_config' }).catch(
     () => null,
   );
-  const config = configResult?.value ? JSON.parse(configResult.value) : null;
+  const config = (configResult?.value as { space?: string } | null) ?? null;
   return { config };
 };

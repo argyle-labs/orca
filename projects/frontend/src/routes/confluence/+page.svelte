@@ -26,7 +26,7 @@
   }
 
   async function saveConfig(values: Record<string, string>) {
-    await setPluginData({ id: 'rebuy', key: 'confluence_config', body: { value: JSON.stringify({ space: values.space }) } });
+    await setPluginData({ id: 'rebuy', key: 'confluence_config', body: { value: { space: values.space } } });
     await invalidateAll();
   }
 </script>
