@@ -75,10 +75,13 @@ echo "  syncing rebuy specs..."
 stop_system_daemon
 rm -f "$HOME/.orca/state.json"
 for port in 12000 12001; do
+  # -sTCP:LISTEN restricts to listening sockets — without it lsof returns every
+  # process with *any* connection on that port (including your browser holding
+  # open HMR WebSockets), which we'd then SIGTERM.
   while IFS= read -r pid; do
     echo "  clearing :$port (pid $pid)"
     kill "$pid" 2>/dev/null || true
-  done < <(lsof -ti tcp:"$port" 2>/dev/null)
+  done < <(lsof -ti tcp:"$port" -sTCP:LISTEN 2>/dev/null)
 done
 sleep 0.3
 
@@ -93,11 +96,7 @@ ORCA_LOG=trace cargo watch -q -c -C projects/server \
   -w src -w Cargo.toml \
   -x build \
   -s 'ORCA_LOG=trace ../../target/debug/orca serve --dev' 2>&1 | \
-  while IFS= read -r line; do
-    echo "[server]   $line"
-    echo "$line" | grep -q "listening on" && \
-      (sleep 0.5 && orca gen 2>&1 | sed 's/^/[gen]      /') </dev/null &
-  done &
+  sed 's/^/[server]   /' &
 _SERVER_PID=$!
 
 (cd projects/frontend && npm run dev 2>&1 | sed 's/^/[frontend] /') &

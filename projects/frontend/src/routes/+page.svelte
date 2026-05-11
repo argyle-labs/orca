@@ -1,64 +1,78 @@
 <script lang="ts">
-  import { getRecent, timeAgo } from '$lib/stores/navHistory';
-  import { browser } from '$app/environment';
+  import { onMount } from 'svelte';
+  import { orca } from '$lib/orcaClient';
 
-  const recent = browser ? getRecent(12).filter(e => e.path !== '/') : [];
+  let version = $state<string | null>(null);
+  let target = $state<string | null>(null);
+  let frontend = $state<string | null>(null);
+  let error = $state<string | null>(null);
 
-  const QUICK_LINKS = [
-    { href: '/plugins',    label: 'Plugins' },
-    { href: '/schema',     label: 'Schema Explorer' },
-    { href: '/api-docs',   label: 'API Docs' },
-    { href: '/session',    label: 'Agent Session' },
-    { href: '/system',     label: 'System Status' },
-    { href: '/graphql',    label: 'GraphQL IDE' },
-    { href: '/ctx7',       label: 'Library Docs' },
-  ];
+  onMount(async () => {
+    try {
+      const client = await orca();
+      const spec = (await client.system_runtime_spec({})) as {
+        version: string;
+        frontend: string;
+        target: string;
+      };
+      version = spec.version;
+      frontend = spec.frontend;
+      target = spec.target;
+    } catch (e) {
+      error = String(e);
+    }
+  });
 </script>
 
-<svelte:head><title>orca</title></svelte:head>
+<section class="landing">
+  <h1>orca</h1>
+  <p class="lede">No workspace mounted yet.</p>
 
-<div class="home">
-  <h1 class="title">orca</h1>
-  <p class="sub">Local dev tool — docs, services, schema, MCP proxy</p>
-
-  {#if recent.length > 0}
-    <section>
-      <h2 class="section-label">Recently accessed</h2>
-      <div class="grid">
-        {#each recent as entry}
-          <a href={entry.path} class="card">
-            <span class="card-path">{entry.path}</span>
-            <span class="card-time">{timeAgo(entry.ts)}</span>
-          </a>
-        {/each}
-      </div>
-    </section>
-  {:else}
-    <section>
-      <h2 class="section-label">Quick links</h2>
-      <div class="grid">
-        {#each QUICK_LINKS as link}
-          <a href={link.href} class="card"><span class="card-path">{link.label}</span></a>
-        {/each}
-      </div>
-    </section>
-  {/if}
-</div>
+  <div class="meta">
+    {#if error}
+      <span class="err">{error}</span>
+    {:else}
+      <span>version: <code>{version ?? '…'}</code></span>
+      <span>target: <code>{target ?? '…'}</code></span>
+      <span>frontend: <code>{frontend ?? '…'}</code></span>
+    {/if}
+  </div>
+</section>
 
 <style>
-  .home { padding: var(--space-8); max-width: 800px; margin: 0 auto; }
-  .title { font-size: 2.5rem; font-weight: 700; margin-bottom: var(--space-2); }
-  .sub { color: var(--color-text-dim); margin-bottom: var(--space-8); }
-  .section-label { font-size: var(--text-sm); color: var(--color-text-dim); font-weight: 500;
-                   text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: var(--space-3); }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: var(--space-3); }
-  .card {
-    display: flex; flex-direction: column; gap: var(--space-1);
-    padding: var(--space-3) var(--space-4);
-    background: var(--color-surface); border: 1px solid var(--color-border);
-    border-radius: var(--radius-md); text-decoration: none; color: var(--color-text);
+  .landing {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: var(--space-8) var(--space-6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
   }
-  .card:hover { border-color: var(--color-accent); }
-  .card-path { font-size: var(--text-sm); font-family: var(--font-mono); }
-  .card-time { font-size: var(--text-xs); color: var(--color-text-dim); }
+  h1 {
+    font-size: 2rem;
+    letter-spacing: 0.02em;
+    margin: 0;
+  }
+  .lede {
+    color: var(--color-text-muted);
+    margin: 0;
+  }
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-4);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin-top: var(--space-4);
+  }
+  code {
+    color: var(--color-text);
+    background: var(--color-surface-2);
+    border: 1px solid var(--color-border);
+    border-radius: 3px;
+    padding: 1px 5px;
+  }
+  .err {
+    color: var(--color-error);
+  }
 </style>

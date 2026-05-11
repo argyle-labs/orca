@@ -1,11 +1,15 @@
-export type Palette = 'violet' | 'ocean' | 'ice-age';
+export type Palette = 'violet' | 'ocean' | 'ice-age' | 'forest' | 'sunset' | 'rose' | 'mono';
 export type Mode = 'dark' | 'light';
 export type FontSize = 'sm' | 'md' | 'lg';
 
 export const PALETTES: { id: Palette; label: string; symbol: string }[] = [
   { id: 'violet', label: 'Violet', symbol: '◆' },
-  { id: 'ocean', label: 'Ocean', symbol: '🌊' },
+  { id: 'ocean', label: 'Ocean', symbol: '~' },
   { id: 'ice-age', label: 'Ice Age', symbol: '❄' },
+  { id: 'forest', label: 'Forest', symbol: '♣' },
+  { id: 'sunset', label: 'Sunset', symbol: '☀' },
+  { id: 'rose', label: 'Rose', symbol: '✿' },
+  { id: 'mono', label: 'Mono', symbol: '●' },
 ];
 
 export const FONT_SIZES: { id: FontSize; label: string; symbol: string; px: number }[] = [
@@ -18,10 +22,12 @@ const PALETTE_KEY = 'orca-palette';
 const MODE_KEY = 'orca-mode';
 const FONT_SIZE_KEY = 'orca-font-size';
 
+const PALETTE_IDS: Palette[] = ['violet', 'ocean', 'ice-age', 'forest', 'sunset', 'rose', 'mono'];
+
 function readPalette(): Palette {
   try {
     const v = localStorage.getItem(PALETTE_KEY);
-    if (v === 'violet' || v === 'ocean' || v === 'ice-age') return v;
+    if (v && (PALETTE_IDS as string[]).includes(v)) return v as Palette;
   } catch {
     /* SSR */
   }

@@ -64,6 +64,8 @@ pub struct SpecDumpReport {
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RuntimeSpecReport {
+    /// Orca version from `CARGO_PKG_VERSION` at build time.
+    pub version: String,
     /// "embedded" when this binary was built with the `ui` feature on, otherwise "disabled".
     pub frontend: String,
     /// Build target triple of this binary (e.g. `aarch64-apple-darwin`).
