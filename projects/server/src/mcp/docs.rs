@@ -1,7 +1,7 @@
 use crate::commands::list_embedded_commands;
 use anyhow::Result;
 use orca_utils::config::Config;
-use orca_utils::fs::fs::expand_tilde;
+use orca_utils::fs::expand_tilde;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

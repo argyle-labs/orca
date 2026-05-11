@@ -8,7 +8,8 @@
 //! - [`search`] — glob + grep helpers
 
 pub mod atomic;
-pub mod fs;
+pub mod ops;
+pub use ops::*;
 pub mod hash;
 pub mod search;
 pub mod watch;

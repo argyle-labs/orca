@@ -6,7 +6,7 @@ use orca::commands::{
     cmd_logout_atlassian, cmd_logout_github, cmd_oauth_atlassian, cmd_oauth_github, cmd_uninstall,
 };
 use orca::context::ProjectContext;
-use orca::conversation::conversation::Session;
+use orca::conversation::session::Session;
 use orca::llm::{ClaudeBackend, Message, ModelBackend, stdout_sink};
 use orca::log_cmd::{LogAction, cmd_log};
 use orca::mcp;

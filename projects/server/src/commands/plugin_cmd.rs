@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::Subcommand;
 use db::{self, plugins::PluginRow};
 use orca_utils::config::APP_NAME;
-use orca_utils::fs::fs::expand_tilde;
+use orca_utils::fs::expand_tilde;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
