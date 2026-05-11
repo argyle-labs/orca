@@ -17,25 +17,7 @@ wasm-opt = false
 wasm-opt = false
 
 [dependencies]
-orca-client-core = { path = "../core" }
-
-async-trait           = { workspace = true }
-serde                 = { workspace = true }
-serde_json            = { workspace = true }
-
-# Wasm-only deps (declared locally — not used elsewhere in the workspace).
-wasm-bindgen          = "0.2"
-wasm-bindgen-futures  = "0.4"
-js-sys                = "0.3"
-serde-wasm-bindgen    = "0.6"
-
-[dependencies.web-sys]
-version = "0.3"
-features = [
-    "Window",
-    "Request",
-    "RequestInit",
-    "RequestMode",
-    "Response",
-    "Headers",
-]
+# Single dep — tools-def's `wasm` feature emits OrcaClient + every per-tool
+# method. This crate is just the wasm-pack-buildable cdylib wrapper.
+orca-tools-def = { path = "../../tools-def", features = ["wasm"] }
+wasm-bindgen   = "0.2"

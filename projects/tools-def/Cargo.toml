@@ -1,0 +1,65 @@
+[package]
+name = "orca-tools-def"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "orca_tools_def"
+path = "src/lib.rs"
+
+# Three orthogonal feature flavors:
+#   - default (none): wasm-safe metadata only (Args + unit structs + Defs).
+#   - native:         pulls `OrcaTool::run` impls (db, integrations, utils).
+#   - wasm:           pulls wasm-bindgen and emits the `OrcaClient` JS class
+#                     with one method per tool, all calling into REST.
+#
+# Server enables `native`. wasm-pack of `projects/client/wasm` enables `wasm`.
+
+[features]
+default = []
+native = [
+    "dep:orca-utils",
+    "dep:orca-db",
+    "dep:orca-integrations",
+    "dep:async-trait",
+    "dep:anyhow",
+    "dep:tokio",
+]
+wasm = [
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:js-sys",
+    "dep:web-sys",
+    "dep:serde-wasm-bindgen",
+]
+
+[dependencies]
+schemars   = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+
+# Native-only deps.
+orca-utils        = { path = "../utils",        optional = true }
+orca-db           = { package = "orca-db", path = "../db", optional = true }
+orca-integrations = { path = "../integrations", optional = true }
+async-trait       = { workspace = true,         optional = true }
+anyhow            = { workspace = true,         optional = true }
+tokio             = { workspace = true,         optional = true }
+
+# Wasm-only deps (declared locally — not used elsewhere in the workspace).
+wasm-bindgen          = { version = "0.2", optional = true }
+wasm-bindgen-futures  = { version = "0.4", optional = true }
+js-sys                = { version = "0.3", optional = true }
+serde-wasm-bindgen    = { version = "0.6", optional = true }
+
+[dependencies.web-sys]
+version = "0.3"
+optional = true
+features = [
+    "Window",
+    "Request",
+    "RequestInit",
+    "RequestMode",
+    "Response",
+    "Headers",
+]

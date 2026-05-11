@@ -9,8 +9,6 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow      = { workspace = true }
-async-trait = { workspace = true }
-schemars    = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
@@ -18,9 +16,6 @@ tokio       = { workspace = true }
 urlencoding = { workspace = true }
 
 orca-utils = { path = "../utils" }
-# Aliased as `db` to match call-site convention across the workspace. Used by
-# the integration-owned OrcaTool impls to resolve endpoints by name.
-db         = { package = "orca-db", path = "../db" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

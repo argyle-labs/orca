@@ -80,6 +80,7 @@ members = [
     "projects/sdk/rust",
     "projects/server",
     "projects/tools",
+    "projects/tools-def",
     "projects/utils",
     "projects/integrations",
 ]
@@ -92,6 +93,7 @@ default-members = [
     "projects/sdk/rust",
     "projects/server",
     "projects/tools",
+    "projects/tools-def",
     "projects/utils",
     "projects/integrations",
 ]

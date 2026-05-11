@@ -4,8 +4,6 @@
 //! Token format follows Proxmox's documented header:
 //!   Authorization: PVEAPIToken=USER@REALM!TOKENID=UUID
 
-pub mod tool;
-
 use orca_utils::http::{Client as HttpClient, HttpError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
