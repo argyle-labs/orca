@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_types)]
+// test harness — Value used for flexible response assertions
 // Serializes concurrent test execution with a std::Mutex held across await — intentional.
 #![allow(clippy::await_holding_lock)]
 

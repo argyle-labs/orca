@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types)] // test harness — Value used for flexible response assertions
 //! Axum integration tests for the orca HTTP API.
 //!
 //! Each test spins up the real router against a fresh unencrypted SQLite DB
