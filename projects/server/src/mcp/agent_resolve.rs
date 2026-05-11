@@ -8,7 +8,7 @@
 //! Profile lookup failures (DB unavailable, no active profile) degrade
 //! gracefully to the existing two-tier path — never block agent loading.
 
-use config::{Config, LOCAL_USER};
+use orca_utils::config::{Config, LOCAL_USER};
 use std::path::PathBuf;
 
 /// Compute the prioritized list of agent search dirs for the current user.
@@ -26,12 +26,12 @@ pub fn agent_search_dirs(config: &Config) -> Vec<PathBuf> {
 pub fn load_agent_prompt(name: &str, config: &Config) -> Option<String> {
     let dirs = agent_search_dirs(config);
     let refs: Vec<&std::path::Path> = dirs.iter().map(|p| p.as_path()).collect();
-    orca_agents::load_agent_prompt_from_dirs(name, &refs)
+    crate::agents::load_agent_prompt_from_dirs(name, &refs)
 }
 
 fn active_profile_agents_dir(config: &Config) -> Option<PathBuf> {
     let conn = db::open(&config.db_path).ok()?;
-    let mgr = profile::ProfileManager::from_config(config);
+    let mgr = crate::profile::ProfileManager::from_config(config);
     let active = mgr.resolve_active(&conn, LOCAL_USER).ok().flatten()?;
     Some(active.agents_dir())
 }

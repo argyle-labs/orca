@@ -30,7 +30,7 @@ pub mod startup;
 pub mod tool_mappings;
 
 use anyhow::{Context, Result};
-use config::{APP_DB_FILE, APP_STATE_DIR};
+use orca_utils::config::{APP_DB_FILE, APP_STATE_DIR};
 use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::Path;
@@ -438,7 +438,7 @@ static MIGRATIONS: &[Migration] = &[
         version: 21,
         description: "add plugin_installs — per-system version channel + lock for meerkat-managed plugins",
         // system_id is the orca node identity (pod mesh). Until that lands,
-        // single-system installs use 'local' (mirroring config::LOCAL_USER).
+        // single-system installs use 'local' (mirroring orca_utils::config::LOCAL_USER).
         // channel constrains version selection: 'latest' tracks stable, 'latest-rc'
         // tracks pre-release, 'locked' pins to locked_version exactly.
         // desired_version is the last resolved version for the channel; the

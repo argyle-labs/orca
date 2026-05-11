@@ -74,32 +74,11 @@ pulldown-cmark = "0.13"
 
 [workspace]
 members = [
-    "projects/agents",
-    "projects/commands",
-    "projects/config",
     "projects/db",
-    "projects/docs",
-    "projects/fs",
-    "projects/jobs",
-    "projects/llm",
-    "projects/scanner",
-    "projects/sdk",
-    "projects/profile",
+    "projects/sdk/rust",
     "projects/server",
-    "projects/conversation",
-    "projects/state",
-    "projects/tool",
-    "projects/http",
-    "projects/graphql",
-    "projects/git",
-    "projects/integrations/ntfy",
-    "projects/integrations/dockge",
-    "projects/integrations/smb",
-    "projects/integrations/docker",
-    "projects/integrations/proxmox",
-    "projects/integrations/homeassistant",
-    "projects/integrations/nfs",
-    "projects/integrations/unraid",
+    "projects/utils",
+    "projects/integrations",
 ]
 resolver = "2"
 

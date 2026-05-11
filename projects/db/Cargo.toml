@@ -8,7 +8,7 @@ name = "db"
 path = "src/lib.rs"
 
 [dependencies]
-config  = { package = "orca-config", path = "../config" }
+orca-utils = { path = "../utils" }
 
 anyhow     = { workspace = true }
 tracing    = { workspace = true }

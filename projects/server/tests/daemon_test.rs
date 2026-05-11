@@ -8,7 +8,7 @@
 #[cfg(unix)]
 #[cfg(test)]
 mod daemon_signal_tests {
-    use state::{self, DaemonMode};
+    use orca_utils::state::{self, DaemonMode};
     use std::path::Path;
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
@@ -32,7 +32,7 @@ mod daemon_signal_tests {
                 panic!("timed out waiting for mode={target:?}");
             }
             std::thread::sleep(POLL);
-            if let Ok(Some(s)) = state::read_from(state_path)
+            if let Ok(Some(s)) = orca_utils::state::read_from(state_path)
                 && s.mode == target
             {
                 return s.daemon_pid;

@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 pub fn spec_dir() -> std::path::PathBuf {
-    orca_scanner::specs_dir()
+    crate::scanner::specs_dir()
 }
 
 pub fn validate_spec_repo(repo: &str) -> bool {
@@ -133,7 +133,7 @@ pub fn get_graphql_info(args: &Value) -> Result<String> {
     let sdl = std::fs::read_to_string(&path).map_err(|_| {
         anyhow::anyhow!("no GraphQL schema for '{repo}' — check ~/.orca/openapi/{repo}.graphql")
     })?;
-    let info = orca_scanner::parse_graphql_sdl(repo, &sdl)?;
+    let info = crate::scanner::parse_graphql_sdl(repo, &sdl)?;
     Ok(serde_json::to_string_pretty(&info)?)
 }
 

@@ -1,0 +1,52 @@
+[package]
+name = "orca-utils"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "orca_utils"
+path = "src/lib.rs"
+
+[dependencies]
+# Standard
+anyhow     = { workspace = true }
+thiserror  = { workspace = true }
+chrono     = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+url        = { workspace = true }
+dirs       = { workspace = true }
+glob       = { workspace = true }
+sha2       = { workspace = true }
+tempfile   = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# Async traits / futures (tool module)
+async-trait = { workspace = true }
+futures     = "0.3"
+
+# HTTP/TLS (http module)
+reqwest = { workspace = true }
+rustls  = { workspace = true }
+
+# Schema (tool module)
+schemars = { workspace = true }
+
+# Embedded assets (config module)
+rust-embed = { workspace = true }
+
+# Hashing (fs module)
+blake3 = "1"
+
+# Filesystem watch (fs module)
+notify = "8"
+
+# libgit2 (git module) — vendored static
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl"] }
+
+[dev-dependencies]
+tokio    = { workspace = true }
+tempfile = { workspace = true }
+wiremock = "0.6"

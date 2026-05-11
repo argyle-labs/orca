@@ -1,15 +1,15 @@
+use crate::llm::buffer_sink;
 use anyhow::Result;
-use config::Config;
-use llm::buffer_sink;
+use orca_utils::config::Config;
 use serde_json::{Value, json};
 
 use crate::agent_backend::{self, Resolution};
 use crate::context::ProjectContext;
-use crate::conversation::Session;
+use crate::conversation::conversation::Session;
 
 pub fn agents() -> Result<String> {
     let mut lines = vec!["Available orca agents:".to_string(), String::new()];
-    for (name, desc) in orca_agents::list_embedded_agents() {
+    for (name, desc) in crate::agents::list_embedded_agents() {
         let short: String = desc.chars().take(100).collect();
         let ellipsis = if desc.len() > 100 { "…" } else { "" };
         lines.push(format!("@{name}: {short}{ellipsis}"));
@@ -56,7 +56,7 @@ async fn run_session(
     _agent: &str,
     full_prompt: &str,
     config: &Config,
-    forced_model: Option<config::Model>,
+    forced_model: Option<orca_utils::config::Model>,
 ) -> Result<String> {
     let (sink, buf) = buffer_sink();
     let ctx = ProjectContext::default();
@@ -86,7 +86,7 @@ pub fn search_logs(args: &Value, config: &Config) -> Result<String> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("query is required"))?;
 
-    let matches = conversation::log::search_logs(&config.logs_dir(), query, 20)?;
+    let matches = crate::conversation::log::search_logs(&config.logs_dir(), query, 20)?;
     if matches.is_empty() {
         return Ok(format!("No matches for '{query}'"));
     }
@@ -158,19 +158,19 @@ pub fn get_config(args: &Value, _config: &Config) -> Result<String> {
     let name = args["name"].as_str().unwrap_or("").trim();
 
     if name.is_empty() {
-        let names = config::docs::list_basenames();
+        let names = orca_utils::config::docs::list_basenames();
         let list = names.join(", ");
         return Ok(format!(
             "Available config files: {list}\n\nUse orca_get_config with a name to read one."
         ));
     }
 
-    if let Some(content) = config::docs::get(name) {
+    if let Some(content) = orca_utils::config::docs::get(name) {
         return Ok(content);
     }
     Ok(format!(
         "Config doc not found: {name}\nAvailable: {}",
-        config::docs::list_basenames().join(", ")
+        orca_utils::config::docs::list_basenames().join(", ")
     ))
 }
 
@@ -327,7 +327,7 @@ pub fn mcp_sync_tools(args: &Value) -> Result<String> {
     };
     let mut lines = Vec::new();
     for server in targets {
-        match orca_commands::mcp_sync_server(server, threshold) {
+        match crate::commands::mcp_sync_server(server, threshold) {
             Ok((added, skipped)) => lines.push(format!(
                 "{}: {} added, {} skipped",
                 server.name, added, skipped

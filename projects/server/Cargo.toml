@@ -15,31 +15,21 @@ path = "src/main.rs"
 # Embed the compiled frontend (projects/frontend/dist/) into the binary.
 # Off by default — headless builds (Meerkat, workers, native app backends) never set this.
 # Only the CLI release artifact enables it via `--features ui`.
-ui = ["dep:rust-embed", "dep:mime_guess"]
+ui = ["dep:mime_guess"]
 
 # Enable the /api/pdf endpoint — markdown → PDF rendering via typst.
 # Off by default; pulls ~10 MB of typst + font + WASM crates into the binary.
 pdf = ["dep:typst", "dep:typst-pdf", "dep:typst-assets", "dep:zip"]
 
+# Enable AST-based PHP analysis via tree-sitter-php (was scanner's php-ast feature).
+php-ast = ["dep:tree-sitter", "dep:tree-sitter-php"]
+
 [dependencies]
 # Workspace crates
-orca-sdk           = { path = "../sdk" }
-orca-agents        = { path = "../agents" }
-orca-commands      = { path = "../commands" }
-orca-docs          = { path = "../docs" }
-orca-jobs          = { path = "../jobs" }
-orca-scanner       = { path = "../scanner", features = ["php-ast"] }
-llm                = { package = "orca-llm", path = "../llm" }
-config             = { package = "orca-config", path = "../config" }
+orca-sdk           = { path = "../sdk/rust" }
+orca-utils         = { path = "../utils" }
 db                 = { package = "orca-db", path = "../db" }
-orca_fs            = { package = "orca-fs", path = "../fs" }
-orca-docker        = { path = "../integrations/docker" }
-orca-proxmox       = { path = "../integrations/proxmox" }
-orca-homeassistant = { path = "../integrations/homeassistant" }
-profile            = { package = "orca-profile", path = "../profile" }
-state              = { package = "orca-state", path = "../state" }
-tool               = { package = "orca-tool", path = "../tool" }
-conversation       = { package = "orca-conversation", path = "../conversation" }
+orca-integrations  = { path = "../integrations" }
 
 # CLI
 clap = { workspace = true }
@@ -52,7 +42,8 @@ futures-util = { workspace = true }
 # HTTP + streaming
 # rustls-no-provider = no aws-lc; ring is installed as the process-default
 # crypto provider at startup (see main.rs).
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }
+url     = { workspace = true }
 
 # Serialization
 serde      = { workspace = true }
@@ -71,7 +62,21 @@ schemars = { workspace = true }
 jsonschema = { workspace = true }
 
 # Error handling
-anyhow = { workspace = true }
+anyhow    = { workspace = true }
+thiserror = { workspace = true }
+
+# Crypto / encoding (from merged commands + scanner)
+sha2   = { workspace = true }
+rand   = { workspace = true }
+base64 = "0.22"
+
+# Text width measurement (TUI from merged conversation)
+unicode-width = "0.2"
+
+# Scanner deps (from merged scanner crate)
+graphql-parser  = "0.4"
+tree-sitter     = { version = "0.24", optional = true }
+tree-sitter-php = { version = "0.24", optional = true }
 
 # Terminal / readline
 rustyline = { workspace = true }
@@ -98,9 +103,10 @@ tokio-rustls     = { workspace = true }
 rustls-pki-types = { workspace = true }
 rustls-pemfile   = { workspace = true }
 
-# Optional — only compiled when `--features ui` embeds the frontend dist/
+# rust-embed: now always built — needed by docs/agents modules for embedded
+# assets. mime_guess stays gated to the `ui` feature (serves frontend dist).
+rust-embed = { workspace = true }
 mime_guess = { workspace = true, optional = true }
-rust-embed = { workspace = true, optional = true }
 
 # PDF generation — gated behind `pdf` feature (off by default, ~10 MB).
 typst        = { version = "0.14", optional = true }

@@ -1,8 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use orca_utils::tool::{OrcaTool, ToolCtx};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use tool::{OrcaTool, ToolCtx};
 
 use crate::agent_backend;
 
@@ -32,7 +32,7 @@ impl OrcaTool for AgentBackendOverride {
             });
         }
 
-        if !orca_agents::list_embedded_agents()
+        if !crate::agents::list_embedded_agents()
             .iter()
             .any(|(name, _)| name == &args.agent)
         {

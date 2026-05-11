@@ -1,8 +1,8 @@
+use crate::conversation::log;
 use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;
-use config::Config;
-use conversation::log;
+use orca_utils::config::Config;
 
 #[derive(Subcommand)]
 pub enum LogAction {

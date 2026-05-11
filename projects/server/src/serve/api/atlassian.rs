@@ -3,7 +3,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Json},
 };
-use config::Config;
+use orca_utils::config::Config;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use utoipa::ToSchema;
@@ -60,7 +60,7 @@ struct AccessibleResource {
 
 /// Resolve credentials: try OAuth DB token first (with auto-refresh), fall back to API key config.
 async fn resolve_auth() -> anyhow::Result<AtlassianAuth> {
-    if let Some(access_token) = orca_commands::oauth::load_atlassian_access_token() {
+    if let Some(access_token) = crate::commands::oauth::load_atlassian_access_token() {
         // Try the stored access token; if 401, attempt refresh.
         let access_token = match try_or_refresh_atlassian(access_token).await {
             Ok(t) => t,
@@ -115,11 +115,12 @@ async fn try_or_refresh_atlassian(access_token: String) -> anyhow::Result<String
     }
 
     // Access token expired — try refresh
-    let refresh_token = orca_commands::oauth::load_atlassian_refresh_token().ok_or_else(|| {
-        anyhow::anyhow!(
-            "Atlassian token expired and no refresh token stored — run `orca login atlassian`"
-        )
-    })?;
+    let refresh_token =
+        crate::commands::oauth::load_atlassian_refresh_token().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Atlassian token expired and no refresh token stored — run `orca login atlassian`"
+            )
+        })?;
 
     let client_id = std::env::var("ATLASSIAN_OAUTH_CLIENT_ID")
         .map_err(|_| anyhow::anyhow!("ATLASSIAN_OAUTH_CLIENT_ID not set — cannot refresh token"))?;
@@ -142,7 +143,7 @@ async fn try_or_refresh_atlassian(access_token: String) -> anyhow::Result<String
         .await?;
 
     // Persist the new access token
-    let _ = orca_commands::oauth::update_atlassian_access_token(&resp.access_token);
+    let _ = crate::commands::oauth::update_atlassian_access_token(&resp.access_token);
 
     Ok(resp.access_token)
 }

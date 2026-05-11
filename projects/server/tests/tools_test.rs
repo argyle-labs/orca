@@ -1,9 +1,9 @@
 use std::fs;
 use tempfile::tempdir;
 
-use llm::tools::bash::BashPermissions;
-use orca_agents::{list_embedded_agents, load_agent_prompt};
-use orca_fs::{fs as fstool, search};
+use orca::agents::{list_embedded_agents, load_agent_prompt};
+use orca::llm::tools::bash::BashPermissions;
+use orca_utils::fs::{fs as fstool, search};
 
 // These tests verify the tool implementations work correctly.
 // They use real filesystem operations via the tempfile crate (no race conditions).

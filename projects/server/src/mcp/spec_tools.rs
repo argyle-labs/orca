@@ -1,8 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use orca_utils::tool::{OrcaTool, ToolCtx};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use tool::{OrcaTool, ToolCtx};
 
 use crate::mcp::specs;
 
@@ -183,7 +183,7 @@ impl OrcaTool for UnregisterSpec {
 
 // ── register ──────────────────────────────────────────────────────────────────
 
-pub fn register(reg: &mut tool::ToolRegistry) {
+pub fn register(reg: &mut orca_utils::tool::ToolRegistry) {
     reg.register::<ListRebuySpecs>()
         .register::<GetRebuySpec>()
         .register::<GetRebuySpecPublic>()

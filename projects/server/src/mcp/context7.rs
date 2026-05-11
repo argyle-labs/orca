@@ -1,5 +1,5 @@
 use anyhow::Result;
-use config::Config;
+use orca_utils::config::Config;
 use serde_json::Value;
 
 /// Proxy a context7 tool call through the configured context7 MCP server.
@@ -8,14 +8,9 @@ pub async fn proxy_context7(tool: &str, args: &Value, config: &Config) -> Result
     use crate::serve::mcp_client::McpPool;
 
     let pool = McpPool::new_with_db(config.db_path.clone());
-    let server_name = pool
-        .find_ctx7_server()
-        .await
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "context7 not found — add it via `orca plugin add ~/code/orca/projects/adapters/context7/orca-plugin.toml`"
-            )
-        })?;
+    let server_name = pool.find_ctx7_server().await.ok_or_else(|| {
+        anyhow::anyhow!("context7 not found — install the context7 plugin via the SDK plugin flow")
+    })?;
 
     let client = pool.get_or_connect(&server_name).await?;
     let result = client.call_tool(tool, args.clone(), "orca-mcp").await?;

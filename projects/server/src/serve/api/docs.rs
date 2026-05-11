@@ -116,7 +116,7 @@ pub async fn search_handler(
         }
     }
     if root_filter == "all" || root_filter == "docs" {
-        for (path, matches) in orca_docs::search(&query) {
+        for (path, matches) in crate::docs::search(&query) {
             let file_path = path.trim_end_matches(".md").replace('\\', "/").to_string();
             results.push(json!({ "root": "docs", "path": file_path, "matches": matches }));
         }
@@ -272,7 +272,7 @@ pub async fn doc_handler(Query(params): Query<DocQuery>) -> Response {
     };
 
     if params.root == "docs" {
-        return match orca_docs::read(&params.path) {
+        return match crate::docs::read(&params.path) {
             Some(content) => (
                 StatusCode::OK,
                 [("content-type", "text/plain; charset=utf-8")],

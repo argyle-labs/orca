@@ -5,10 +5,10 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use orca_proxmox::{Action, Client, Config};
+use orca_integrations::proxmox::{Action, Client, Config};
+use orca_utils::tool::{OrcaTool, ToolCtx};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use tool::{OrcaTool, ToolCtx};
 
 fn make_client(name: &str) -> Result<Client> {
     let conn = db::open_default()?;
@@ -139,7 +139,7 @@ impl OrcaTool for ProxmoxContainerAction {
 
 // ── register ───────────────────────────────────────────────────────────────────
 
-pub fn register(reg: &mut tool::ToolRegistry) {
+pub fn register(reg: &mut orca_utils::tool::ToolRegistry) {
     reg.register::<ProxmoxListNodes>()
         .register::<ProxmoxListVms>()
         .register::<ProxmoxListContainers>()

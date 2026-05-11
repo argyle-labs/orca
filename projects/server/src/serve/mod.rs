@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::Result;
 use axum::Router;
 use axum::routing::get;
-use state::{self, DaemonMode, DaemonState};
+use orca_utils::state::{DaemonMode, DaemonState};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
@@ -22,7 +22,7 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     let pki_dir = db_path
         .parent()
         .unwrap_or(std::path::Path::new("."))
-        .join(config::APP_PKI_DIR);
+        .join(orca_utils::config::APP_PKI_DIR);
     let app = build_router(dev, db_path);
 
     let addr: SocketAddr = if dev {
@@ -40,12 +40,12 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     // Register as the active dev process so the parked daemon won't auto-reclaim.
     // Use ORCA_DEV_PARENT_PID (the shell script PID) so the registration stays
     // valid across cargo-watch rebuilds — the shell script outlives each server instance.
-    if dev && let Ok(Some(s)) = state::read() {
+    if dev && let Ok(Some(s)) = orca_utils::state::read() {
         let active_pid = std::env::var("ORCA_DEV_PARENT_PID")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(std::process::id);
-        if let Err(e) = state::write(&DaemonState {
+        if let Err(e) = orca_utils::state::write(&DaemonState {
             mode: DaemonMode::Dev,
             active_pid,
             ..s
@@ -55,12 +55,12 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     }
 
     // Non-blocking update check — prints a notice if a newer version is available.
-    tokio::spawn(orca_commands::startup_update_check());
+    tokio::spawn(crate::commands::startup_update_check());
 
     // Plugin host: TCP + mTLS on APP_PLUGIN_PORT. Skips gracefully if PKI not initialized.
     crate::plugin_host::start(
         &pki_dir,
-        config::APP_PLUGIN_PORT,
+        orca_utils::config::APP_PLUGIN_PORT,
         crate::plugin_host::PluginRegistry::new(),
     );
 
@@ -82,13 +82,13 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     let pki_dir = db_path
         .parent()
         .unwrap_or(std::path::Path::new("."))
-        .join(config::APP_PKI_DIR);
+        .join(orca_utils::config::APP_PKI_DIR);
     let addr: SocketAddr = format!("0.0.0.0:{port}").parse()?;
     let app = build_router(false, db_path);
 
     let binary = resolve_daemon_binary();
 
-    if let Err(e) = state::write(&DaemonState {
+    if let Err(e) = orca_utils::state::write(&DaemonState {
         daemon_pid: std::process::id(),
         active_pid: std::process::id(),
         port,
@@ -103,7 +103,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     // Plugin host: TCP + mTLS. Skips gracefully if PKI not initialized.
     crate::plugin_host::start(
         &pki_dir,
-        config::APP_PLUGIN_PORT,
+        orca_utils::config::APP_PLUGIN_PORT,
         crate::plugin_host::PluginRegistry::new(),
     );
 
@@ -111,12 +111,12 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
 
     // Crash-restart recovery: if launchd restarted us while a dev session was active,
     // wait for the dev server to finish rather than immediately fighting it for the port.
-    if let Ok(Some(mut s)) = state::read()
+    if let Ok(Some(mut s)) = orca_utils::state::read()
         && s.mode == DaemonMode::Dev
     {
         info!("[orca] restarted while dev session active — waiting for dev to exit");
         s.daemon_pid = std::process::id();
-        if let Err(e) = state::write(&s) {
+        if let Err(e) = orca_utils::state::write(&s) {
             tracing::warn!("failed to update daemon_pid in state: {e}");
         }
 
@@ -126,11 +126,11 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             tokio::select! {
                 _ = sigusr2.recv() => break,
                 _ = sigterm.recv() => {
-                    let _ = state::clear();
+                    let _ = orca_utils::state::clear();
                     return Ok(());
                 }
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                    if let Ok(Some(s)) = state::read() {
+                    if let Ok(Some(s)) = orca_utils::state::read() {
                         if s.mode != DaemonMode::Dev || !pid_alive(s.active_pid) { break; }
                     } else {
                         break;
@@ -146,10 +146,10 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             anyhow::anyhow!("failed to bind {addr}: {e} — is port {port} already in use?")
         })?;
         info!("[orca] daemon listening on http://localhost:{port}");
-        if let Err(e) = state::set_mode(DaemonMode::Daemon) {
+        if let Err(e) = orca_utils::state::set_mode(DaemonMode::Daemon) {
             tracing::warn!("failed to set daemon mode: {e}");
         }
-        if let Err(e) = state::set_active_pid(std::process::id()) {
+        if let Err(e) = orca_utils::state::set_active_pid(std::process::id()) {
             tracing::warn!("failed to set active_pid: {e}");
         }
 
@@ -160,12 +160,12 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             _ = sigusr1.recv() => true,
             _ = sigterm.recv() => {
                 info!("[orca] daemon shutting down");
-                let _ = state::clear();
+                let _ = orca_utils::state::clear();
                 return Ok(());
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("[orca] daemon shutting down");
-                let _ = state::clear();
+                let _ = orca_utils::state::clear();
                 return Ok(());
             }
         };
@@ -180,7 +180,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         let mut sigusr2 = signal(SignalKind::user_defined2())?;
 
         // Port released (listener dropped by select! cancellation)
-        if let Err(e) = state::set_mode(DaemonMode::Parked) {
+        if let Err(e) = orca_utils::state::set_mode(DaemonMode::Parked) {
             tracing::warn!("failed to set parked mode: {e}");
         }
         info!("[orca] daemon parked — port {port} released");
@@ -193,12 +193,12 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                 }
                 _ = sigterm.recv() => {
                     info!("[orca] daemon shutting down (while parked)");
-                    let _ = state::clear();
+                    let _ = orca_utils::state::clear();
                     return Ok(());
                 }
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {
                     // Auto-reclaim if dev process died OR nobody ever took the port
-                    if let Ok(Some(s)) = state::read() {
+                    if let Ok(Some(s)) = orca_utils::state::read() {
                         let abandoned = match s.mode {
                             DaemonMode::Dev => !pid_alive(s.active_pid),
                             // Parked with active_pid still pointing at daemon → dev never started
@@ -216,7 +216,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         // Outer loop: rebind and serve again
     }
 
-    let _ = state::clear();
+    let _ = orca_utils::state::clear();
     Ok(())
 }
 
@@ -481,7 +481,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
     use std::sync::Arc;
 
     // Ensures reqwest (rustls-no-provider) has a crypto provider; idempotent.
-    llm::ensure_crypto_provider();
+    crate::llm::ensure_crypto_provider();
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -521,7 +521,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
 /// Write orca's generated OpenAPI spec to ~/.orca/specs/orca.json so it
 /// lives alongside rebuy's scanner-generated specs and can be compared to them.
 fn write_orca_spec_to_disk() {
-    let dir = orca_scanner::specs_dir();
+    let dir = crate::scanner::specs_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!("could not create openapi dir {}: {e}", dir.display());
         return;
