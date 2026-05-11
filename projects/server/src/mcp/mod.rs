@@ -2,7 +2,6 @@
 ///
 /// Usage: orca mcp-serve
 /// Register: claude mcp add orca-local -- orca mcp-serve
-mod agent_backend_tools;
 pub mod agent_resolve;
 mod agent_tools;
 mod context7;
@@ -37,7 +36,6 @@ pub fn register_all_tools(reg: &mut ToolRegistry) {
 
     // Server-coupled tools that still live here pending service-trait
     // abstractions so they can move to projects/tools/ too.
-    agent_backend_tools::register(reg);
     agent_tools::register(reg);
     docs_tools::register(reg);
     infra_tools::register(reg);
@@ -47,7 +45,11 @@ pub fn register_all_tools(reg: &mut ToolRegistry) {
 }
 
 fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
-    let ctx = ToolCtx::new(config);
+    use orca_tools_def::services::agent_backend::AgentBackendService;
+    let mut ctx = ToolCtx::new(config);
+    let agent_backend: Arc<dyn AgentBackendService> =
+        Arc::new(crate::llm::agent_backend_service::ServerAgentBackend);
+    ctx.register_service(agent_backend);
     let mut reg = ToolRegistry::new();
     register_all_tools(&mut reg);
     (reg, ctx)

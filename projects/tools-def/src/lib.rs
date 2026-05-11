@@ -18,6 +18,7 @@ pub mod homeassistant;
 pub mod json_any;
 pub mod meta;
 pub mod proxmox;
+pub mod services;
 
 pub use json_any::JsonAny;
 
@@ -83,6 +84,12 @@ declare_tools! {
     agent_backend_clear_api_key  => agent_backend::AgentBackendClearApiKey,
     agent_backend_set_api_key    => agent_backend::AgentBackendSetApiKey,
     agent_backend_api_key_status => agent_backend::AgentBackendApiKeyStatus,
+
+    // Agent backend — mode/override/status (service-trait dispatch)
+    agent_backend_set_mode             => agent_backend::AgentBackendSetMode,
+    agent_backend_override             => agent_backend::AgentBackendOverride,
+    agent_backend_use_server_anthropic => agent_backend::AgentBackendUseServerAnthropic,
+    agent_backend_status               => agent_backend::AgentBackendStatus,
 
     // Home Assistant
     home_assistant_entity_list     => homeassistant::HaEntityList,
