@@ -13,18 +13,20 @@ pub struct ListServicesArgs {}
 
 pub struct ListServices;
 
-#[async_trait]
-impl OrcaTool for ListServices {
+impl OrcaToolDef for ListServices {
     const NAME: &'static str = "list_services";
     const DESCRIPTION: &'static str = "List all running docker compose services across all rebuy projects. \
          Returns project name, path, and per-service state/health/ports.";
     type Args = ListServicesArgs;
     type Output = String;
+}
+
+#[async_trait]
+impl OrcaTool for ListServices {
     async fn run(_: ListServicesArgs, _: &ToolCtx) -> Result<String> {
         handlers::list_services().await
     }
 }
-
 // ── get_service_logs ──────────────────────────────────────────────────────────
 
 #[derive(Deserialize, JsonSchema)]
@@ -39,13 +41,16 @@ pub struct GetServiceLogsArgs {
 
 pub struct GetServiceLogs;
 
-#[async_trait]
-impl OrcaTool for GetServiceLogs {
+impl OrcaToolDef for GetServiceLogs {
     const NAME: &'static str = "get_service_logs";
     const DESCRIPTION: &'static str = "Fetch docker compose logs for a running rebuy service. \
          Specify the project path and service name.";
     type Args = GetServiceLogsArgs;
     type Output = String;
+}
+
+#[async_trait]
+impl OrcaTool for GetServiceLogs {
     async fn run(args: GetServiceLogsArgs, _: &ToolCtx) -> Result<String> {
         use serde_json::json;
         handlers::service_logs(&json!({
@@ -56,7 +61,6 @@ impl OrcaTool for GetServiceLogs {
         .await
     }
 }
-
 // ── run_tests ─────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize, JsonSchema)]
@@ -67,19 +71,21 @@ pub struct RunTestsArgs {
 
 pub struct RunTests;
 
-#[async_trait]
-impl OrcaTool for RunTests {
+impl OrcaToolDef for RunTests {
     const NAME: &'static str = "run_tests";
     const DESCRIPTION: &'static str = "Run the orca project test suite. Returns test output with pass/fail counts. \
          Suites: rust (cargo test), frontend (vitest), e2e (playwright), all.";
     type Args = RunTestsArgs;
     type Output = String;
+}
+
+#[async_trait]
+impl OrcaTool for RunTests {
     async fn run(args: RunTestsArgs, _: &ToolCtx) -> Result<String> {
         use serde_json::json;
         handlers::run_tests(&json!({ "suite": args.suite })).await
     }
 }
-
 // ── register ──────────────────────────────────────────────────────────────────
 
 pub fn register(reg: &mut orca_utils::tool::ToolRegistry) {

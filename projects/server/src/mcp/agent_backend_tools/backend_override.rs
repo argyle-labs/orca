@@ -15,14 +15,16 @@ pub struct Args {
 
 pub struct AgentBackendOverride;
 
-#[async_trait]
-impl OrcaTool for AgentBackendOverride {
+impl OrcaToolDef for AgentBackendOverride {
     const NAME: &'static str = "agent_backend_override";
     const DESCRIPTION: &'static str = "[MUTATES STATE] Set, change, or clear a per-agent backend override \
          (only consulted in hybrid mode). backend=clear deletes the override.";
     type Args = Args;
     type Output = String;
+}
 
+#[async_trait]
+impl OrcaTool for AgentBackendOverride {
     async fn run(args: Args, _ctx: &ToolCtx) -> Result<String> {
         if args.backend == "clear" {
             let removed = agent_backend::clear_override(&args.agent)?;

@@ -14,18 +14,20 @@ pub struct ListRootsArgs {}
 
 pub struct ListRoots;
 
-#[async_trait]
-impl OrcaTool for ListRoots {
+impl OrcaToolDef for ListRoots {
     const NAME: &'static str = "list_roots";
     const DESCRIPTION: &'static str =
         "List available documentation roots (rebuy, orca) with file counts and paths.";
     type Args = ListRootsArgs;
     type Output = String;
+}
+
+#[async_trait]
+impl OrcaTool for ListRoots {
     async fn run(_args: ListRootsArgs, ctx: &ToolCtx) -> Result<String> {
         docs::list_roots(&ctx.config)
     }
 }
-
 // ── get_tree ──────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize, JsonSchema)]
@@ -38,20 +40,22 @@ pub struct GetTreeArgs {
 
 pub struct GetTree;
 
-#[async_trait]
-impl OrcaTool for GetTree {
+impl OrcaToolDef for GetTree {
     const NAME: &'static str = "get_tree";
     const DESCRIPTION: &'static str = "Get the compacted documentation tree for a root, optionally scoped to a subpath. \
          Returns a JSON tree of .md files.";
     type Args = GetTreeArgs;
     type Output = String;
+}
+
+#[async_trait]
+impl OrcaTool for GetTree {
     async fn run(args: GetTreeArgs, ctx: &ToolCtx) -> Result<String> {
         use serde_json::json;
         let v = json!({ "root": args.root, "path": args.path });
         docs::get_tree(&v, &ctx.config)
     }
 }
-
 // ── read_doc ──────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize, JsonSchema)]
@@ -66,20 +70,22 @@ pub struct ReadDocArgs {
 
 pub struct ReadDoc;
 
-#[async_trait]
-impl OrcaTool for ReadDoc {
+impl OrcaToolDef for ReadDoc {
     const NAME: &'static str = "read_doc";
     const DESCRIPTION: &'static str = "Read a documentation file by root and relative path \
          (e.g. root=rebuy, path=admin-api/README).";
     type Args = ReadDocArgs;
     type Output = String;
+}
+
+#[async_trait]
+impl OrcaTool for ReadDoc {
     async fn run(args: ReadDocArgs, ctx: &ToolCtx) -> Result<String> {
         use serde_json::json;
         let v = json!({ "root": args.root, "path": args.path, "format": args.format });
         docs::read_doc(&v, &ctx.config)
     }
 }
-
 // ── search_docs ───────────────────────────────────────────────────────────────
 
 #[derive(Deserialize, JsonSchema)]
@@ -94,13 +100,16 @@ pub struct SearchDocsArgs {
 
 pub struct SearchDocs;
 
-#[async_trait]
-impl OrcaTool for SearchDocs {
+impl OrcaToolDef for SearchDocs {
     const NAME: &'static str = "search_docs";
     const DESCRIPTION: &'static str =
         "Search documentation files for a keyword across one or all roots.";
     type Args = SearchDocsArgs;
     type Output = String;
+}
+
+#[async_trait]
+impl OrcaTool for SearchDocs {
     async fn run(args: SearchDocsArgs, ctx: &ToolCtx) -> Result<String> {
         use serde_json::json;
         let v = json!({ "query": args.query, "root": args.root, "format": args.format });
@@ -114,7 +123,6 @@ impl OrcaTool for SearchDocs {
         Ok(raw)
     }
 }
-
 // ── list_commands ─────────────────────────────────────────────────────────────
 
 #[derive(Deserialize, JsonSchema)]
@@ -122,18 +130,20 @@ pub struct ListCommandsArgs {}
 
 pub struct ListCommands;
 
-#[async_trait]
-impl OrcaTool for ListCommands {
+impl OrcaToolDef for ListCommands {
     const NAME: &'static str = "list_commands";
     const DESCRIPTION: &'static str =
         "List all Claude slash commands and skills from the orca vault.";
     type Args = ListCommandsArgs;
     type Output = String;
+}
+
+#[async_trait]
+impl OrcaTool for ListCommands {
     async fn run(_args: ListCommandsArgs, ctx: &ToolCtx) -> Result<String> {
         docs::list_commands(&ctx.config)
     }
 }
-
 // ── register ──────────────────────────────────────────────────────────────────
 
 pub fn register(reg: &mut orca_utils::tool::ToolRegistry) {
