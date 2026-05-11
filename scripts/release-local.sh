@@ -71,6 +71,36 @@ require_tools() {
   gh auth status >/dev/null 2>&1 || die "gh not authenticated (run: gh auth login)"
 }
 
+# Rollback state — set as cmd_rc/cmd_promote progress, consumed by trap on ERR.
+RB_TAG=""
+RB_COMMIT=0
+RB_CARGO=0
+RB_PUSHED=0
+
+rollback() {
+  local code=$?
+  trap - ERR EXIT
+  set +e
+  if [ "$RB_PUSHED" -eq 1 ]; then
+    log "rollback: tag + commit already pushed to origin — leaving state intact"
+    log "         (delete the remote tag + GitHub release manually if needed)"
+    exit "$code"
+  fi
+  log "rollback: undoing partial release state"
+  if [ -n "$RB_TAG" ] && git rev-parse -q --verify "refs/tags/${RB_TAG}" >/dev/null 2>&1; then
+    log "  deleting local tag ${RB_TAG}"
+    git tag -d "$RB_TAG" >/dev/null
+  fi
+  if [ "$RB_COMMIT" -eq 1 ]; then
+    log "  reverting release commit (git reset --hard HEAD~1)"
+    git reset --hard HEAD~1 >/dev/null
+  elif [ "$RB_CARGO" -eq 1 ]; then
+    log "  reverting ${SERVER_TOML} + Cargo.lock"
+    git checkout -- "$SERVER_TOML" Cargo.lock 2>/dev/null || true
+  fi
+  exit "$code"
+}
+
 current_cargo_version() {
   grep '^version' "$SERVER_TOML" | head -1 | sed 's/version = "\(.*\)"/\1/'
 }
@@ -212,15 +242,25 @@ cmd_rc() {
   run_checks
   build_orca_binary
 
+  # From here on, any failure must roll back. Anything before this point only
+  # reads state (or drops a stale local-only tag, which is already idempotent).
+  trap rollback ERR
+
   log "bumping ${SERVER_TOML} → ${RC}"
   write_cargo_version "$RC"
+  RB_CARGO=1
 
   log "commit + tag + push"
   git add "$SERVER_TOML"
   git check-ignore -q Cargo.lock || git add Cargo.lock
-  git diff --cached --quiet || git commit -m "chore: release v${RC}"
+  if ! git diff --cached --quiet; then
+    git commit -m "chore: release v${RC}"
+    RB_COMMIT=1
+  fi
   git tag -a "v${RC}" -m "orca v${RC}"
+  RB_TAG="v${RC}"
   git push origin HEAD --tags
+  RB_PUSHED=1
 
   generate_changelog "$PREV" "v${RC}" "rc"
 
@@ -269,15 +309,23 @@ cmd_promote() {
   gh release download "$latest_rc" --dir dist-release --pattern "orca-*" --pattern "*.sha256"
   ls -lh dist-release/
 
+  trap rollback ERR
+
   log "bumping ${SERVER_TOML} → ${stable_version}"
   write_cargo_version "$stable_version"
+  RB_CARGO=1
 
   log "commit + tag + push"
   git add "$SERVER_TOML"
   git check-ignore -q Cargo.lock || git add Cargo.lock
-  git diff --cached --quiet || git commit -m "chore: release ${stable_tag}"
+  if ! git diff --cached --quiet; then
+    git commit -m "chore: release ${stable_tag}"
+    RB_COMMIT=1
+  fi
   git tag -a "$stable_tag" -m "orca ${stable_tag} (promoted from ${latest_rc})"
+  RB_TAG="$stable_tag"
   git push origin HEAD --tags
+  RB_PUSHED=1
 
   generate_changelog "$prev" "$stable_tag" "stable"
 
