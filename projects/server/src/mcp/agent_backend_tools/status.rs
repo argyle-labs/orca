@@ -11,14 +11,16 @@ pub struct Args {}
 
 pub struct AgentBackendStatus;
 
-#[async_trait]
-impl OrcaTool for AgentBackendStatus {
+impl OrcaToolDef for AgentBackendStatus {
     const NAME: &'static str = "agent_backend_status";
     const DESCRIPTION: &'static str = "Show the current agent backend configuration: mode (local|claude|hybrid), \
          per-agent overrides, and whether server-side Anthropic calls are enabled.";
     type Args = Args;
     type Output = String;
+}
 
+#[async_trait]
+impl OrcaTool for AgentBackendStatus {
     async fn run(_args: Args, _ctx: &ToolCtx) -> Result<String> {
         let mode = agent_backend::current_mode()?;
         let use_server = agent_backend::use_server_anthropic()?;
