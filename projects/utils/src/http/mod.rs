@@ -12,7 +12,7 @@
 //!
 //! ```no_run
 //! # async fn doit() -> anyhow::Result<()> {
-//! let client = orca_http::Client::new();
+//! let client = orca_utils::http::Client::new();
 //! let resp = client
 //!     .get("https://api.example.com/items")
 //!     .header("Authorization", "Bearer xyz")

@@ -1,7 +1,21 @@
+//! CLI surface for the engine domain.
+//!
+//! These subcommands are thin shims that dispatch to the same `OrcaTool`
+//! impls in `crate::mcp::engine_tools` that drive the MCP and REST surfaces.
+//! Behaviour lives in one place; this file only handles flag parsing and
+//! human-friendly output formatting.
+
 use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;
-use db;
+use orca_utils::config::Config;
+use orca_utils::tool::{OrcaTool, ToolCtx};
+use std::sync::Arc;
+
+use crate::mcp::engine_tools::{
+    AddArgs, EmptyArgs, EngineAdd, EngineDisable, EngineEnable, EngineList, EngineRemove, NameArgs,
+    ProviderDto,
+};
 
 #[derive(Debug, Clone, PartialEq, Subcommand)]
 pub enum EnginesAction {
@@ -22,12 +36,13 @@ pub enum EnginesAction {
     Disable { name: String },
 }
 
-pub fn cmd_engines(action: EnginesAction) -> Result<()> {
-    let conn = db::open_default()?;
+pub async fn cmd_engines(action: EnginesAction) -> Result<()> {
+    let ctx = ToolCtx::new(Arc::new(Config::load()?));
 
     match action {
         EnginesAction::List => {
-            let providers = db::llm::list(&conn)?;
+            let json = EngineList::run(EmptyArgs {}, &ctx).await?;
+            let providers: Vec<ProviderDto> = serde_json::from_str(&json)?;
             if providers.is_empty() {
                 println!("{}", "no LLM backends registered".dimmed());
                 println!(
@@ -36,7 +51,7 @@ pub fn cmd_engines(action: EnginesAction) -> Result<()> {
                 );
                 return Ok(());
             }
-            for p in &providers {
+            for p in providers {
                 let status = if p.enabled {
                     "enabled".green().to_string()
                 } else {
@@ -51,48 +66,21 @@ pub fn cmd_engines(action: EnginesAction) -> Result<()> {
                 );
             }
         }
-
         EnginesAction::Add { name, url, kind } => {
-            let kind = if kind.is_empty() {
-                // Infer kind from URL: default port 11434 → ollama, else lmstudio
-                if url.contains(":11434") {
-                    "ollama".to_string()
-                } else {
-                    "lmstudio".to_string()
-                }
-            } else {
-                kind
-            };
-            match kind.as_str() {
-                "ollama" | "lmstudio" => {}
-                other => anyhow::bail!("unknown backend kind '{other}' (want: ollama|lmstudio)"),
-            }
-            db::llm::upsert(&conn, &name, &url, &kind)?;
-            println!("registered {} {} ({})", kind.cyan(), name.bold(), url);
+            let msg = rt.block_on(EngineAdd::run(AddArgs { name, url, kind }, &ctx))?;
+            println!("{msg}");
         }
-
         EnginesAction::Remove { name } => {
-            if db::llm::remove(&conn, &name)? {
-                println!("removed {}", name.bold());
-            } else {
-                anyhow::bail!("no backend named '{name}'");
-            }
+            let msg = rt.block_on(EngineRemove::run(NameArgs { name }, &ctx))?;
+            println!("{msg}");
         }
-
         EnginesAction::Enable { name } => {
-            if db::llm::set_enabled(&conn, &name, true)? {
-                println!("{} enabled", name.bold());
-            } else {
-                anyhow::bail!("no backend named '{name}'");
-            }
+            let msg = rt.block_on(EngineEnable::run(NameArgs { name }, &ctx))?;
+            println!("{msg}");
         }
-
         EnginesAction::Disable { name } => {
-            if db::llm::set_enabled(&conn, &name, false)? {
-                println!("{} disabled", name.bold());
-            } else {
-                anyhow::bail!("no backend named '{name}'");
-            }
+            let msg = rt.block_on(EngineDisable::run(NameArgs { name }, &ctx))?;
+            println!("{msg}");
         }
     }
 
