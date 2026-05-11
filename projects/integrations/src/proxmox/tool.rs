@@ -1,14 +1,15 @@
-//! MCP data tools for Proxmox endpoints registered in orca.db.
+//! OrcaTool impls for the Proxmox integration.
 //!
-//! Mgmt CRUD lives in `mgmt_tools.rs`. This module exposes the actual
-//! Proxmox VE operations: list nodes / VMs / containers, lifecycle actions.
+//! Lives next to the `Client` so renames + schema changes happen in one place.
+//! `orca-tools` aggregates these into the unified surface via `orca_tools!{}`.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use orca_integrations::proxmox::{Action, Client, Config};
 use orca_utils::tool::{OrcaTool, ToolCtx};
 use schemars::JsonSchema;
 use serde::Deserialize;
+
+use super::{Action, Client, Config};
 
 fn make_client(name: &str) -> Result<Client> {
     let conn = db::open_default()?;
@@ -140,14 +141,4 @@ impl OrcaTool for ProxmoxContainerAction {
             .await?;
         Ok(serde_json::to_string_pretty(&result)?)
     }
-}
-
-// ── register ───────────────────────────────────────────────────────────────────
-
-pub fn register(reg: &mut orca_utils::tool::ToolRegistry) {
-    reg.register::<ProxmoxListNodes>()
-        .register::<ProxmoxListVms>()
-        .register::<ProxmoxListContainers>()
-        .register::<ProxmoxVmAction>()
-        .register::<ProxmoxContainerAction>();
 }

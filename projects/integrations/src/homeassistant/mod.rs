@@ -1,5 +1,7 @@
 //! Home Assistant REST client.
 
+pub mod tool;
+
 use orca_utils::http::{Client as HttpClient, HttpError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
