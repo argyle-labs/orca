@@ -37,7 +37,6 @@ pub fn register_all_tools(reg: &mut ToolRegistry) {
 
     // Server-coupled tools that still live here pending service-trait
     // abstractions so they can move to projects/tools/ too.
-    agent_backend_tools::register(reg);
     agent_tools::register(reg);
     docs_tools::register(reg);
     infra_tools::register(reg);
