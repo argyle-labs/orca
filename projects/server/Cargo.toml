@@ -30,6 +30,7 @@ orca-sdk           = { path = "../sdk/rust" }
 orca-utils         = { path = "../utils" }
 db                 = { package = "orca-db", path = "../db" }
 orca-integrations  = { path = "../integrations" }
+orca-tools         = { path = "../tools" }
 
 # CLI
 clap = { workspace = true }

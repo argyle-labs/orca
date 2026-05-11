@@ -6,8 +6,15 @@
 //!   - CLI:  clap_command() + cli_dispatch() → `orca exec <name> [flags]`
 
 use anyhow::Result;
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    http::StatusCode,
+    routing::post,
+};
 use serde_json::{Value, json};
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use super::erased::{ErasedTool, ToolWrapper, value_to_text};
 use super::{OrcaTool, ToolCtx};
@@ -70,6 +77,57 @@ impl ToolRegistry {
         Ok(value_to_text(&value))
     }
 
+    // ── HTTP / REST ──────────────────────────────────────────────────────────
+
+    /// Build an axum router that exposes every registered tool as
+    /// `POST /<name>` with a JSON body matching `input_schema()` and a JSON
+    /// response matching `output_schema()`. The caller decides where to mount
+    /// it (typically `.nest("/api/tools", reg.axum_router(ctx))`).
+    pub fn axum_router(self: Arc<Self>, ctx: Arc<ToolCtx>) -> Router {
+        // Single wildcard route — the path segment is the tool name. Keeping
+        // it one route (vs N) means utoipa registration can be done later by
+        // walking `self.tools`, without rewiring axum.
+        Router::new()
+            .route("/{name}", post(http_dispatch))
+            .with_state(ToolHttpState {
+                registry: self,
+                ctx,
+            })
+    }
+}
+
+#[derive(Clone)]
+struct ToolHttpState {
+    registry: Arc<ToolRegistry>,
+    ctx: Arc<ToolCtx>,
+}
+
+async fn http_dispatch(
+    State(state): State<ToolHttpState>,
+    Path(name): Path<String>,
+    Json(args): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // Unknown tool → 404; bad args / tool failure → 500 with the error body.
+    if !state.registry.names().iter().any(|n| *n == name) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("unknown tool: {name}") })),
+        ));
+    }
+    state
+        .registry
+        .dispatch(&name, args, &state.ctx)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })
+}
+
+impl ToolRegistry {
     // ── CLI ───────────────────────────────────────────────────────────────────
 
     /// Returns all registered tool names — used to build CLI help text.

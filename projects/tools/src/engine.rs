@@ -1,18 +1,17 @@
 //! Engine domain — LLM backend registry (LM Studio, Ollama).
 //!
 //! Five ops: list, add, remove, enable, disable. Each implements `OrcaTool`
-//! so it lands on MCP + REST + CLI from one definition (proc-macro to
-//! collapse the boilerplate is a follow-up).
+//! so it lands on MCP + REST + CLI + WASM client from one definition.
 //!
 //! Naming convention (per surface-reorg plan):
 //!   - MCP:  `engine.list`, `engine.add`, …
-//!   - REST: `POST /api/ops/engine.list`, …  (universal exec mount)
+//!   - REST: `POST /api/tools/engine.list`, …
 //!   - CLI:  `orca engines <verb>` (existing) — thin shim dispatching to the
 //!     same tool registry.
 
 use anyhow::Result;
 use async_trait::async_trait;
-use orca_utils::tool::{OrcaTool, ToolCtx, ToolRegistry};
+use orca_utils::tool::{OrcaTool, ToolCtx};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -170,12 +169,4 @@ impl OrcaTool for EngineDisable {
             anyhow::bail!("no backend named '{}'", args.name)
         }
     }
-}
-
-pub fn register(reg: &mut ToolRegistry) {
-    reg.register::<EngineList>()
-        .register::<EngineAdd>()
-        .register::<EngineRemove>()
-        .register::<EngineEnable>()
-        .register::<EngineDisable>();
 }

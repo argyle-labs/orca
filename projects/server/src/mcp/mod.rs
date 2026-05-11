@@ -8,7 +8,6 @@ mod agent_tools;
 mod context7;
 mod docs;
 mod docs_tools;
-pub mod engine_tools;
 mod handlers;
 mod homeassistant_tools;
 mod infra_tools;
@@ -29,19 +28,32 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use handlers::run;
 
+/// Populate a ToolRegistry with every server-side OrcaTool. Single source of
+/// truth — called by MCP stdio, the HTTP /api/tools router, and (eventually)
+/// the WASM client surface.
+pub fn register_all_tools(reg: &mut ToolRegistry) {
+    // First-party tools that live in the neutral `orca-tools` crate. The
+    // `orca_tools!` macro there is the single enrollment point; new tools
+    // should land in `projects/tools/` and join that macro.
+    orca_tools::register_all(reg);
+
+    // Server-coupled tools that still live here pending service-trait
+    // abstractions so they can move to projects/tools/ too.
+    agent_backend_tools::register(reg);
+    agent_tools::register(reg);
+    docs_tools::register(reg);
+    infra_tools::register(reg);
+    mgmt_tools::register(reg);
+    plugin_tools::register(reg);
+    proxmox_tools::register(reg);
+    homeassistant_tools::register(reg);
+    spec_tools::register(reg);
+}
+
 fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
     let ctx = ToolCtx::new(config);
     let mut reg = ToolRegistry::new();
-    agent_backend_tools::register(&mut reg);
-    agent_tools::register(&mut reg);
-    docs_tools::register(&mut reg);
-    engine_tools::register(&mut reg);
-    infra_tools::register(&mut reg);
-    mgmt_tools::register(&mut reg);
-    plugin_tools::register(&mut reg);
-    proxmox_tools::register(&mut reg);
-    homeassistant_tools::register(&mut reg);
-    spec_tools::register(&mut reg);
+    register_all_tools(&mut reg);
     (reg, ctx)
 }
 

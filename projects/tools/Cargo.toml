@@ -1,0 +1,26 @@
+[package]
+name = "orca-tools"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "orca_tools"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Enabled by client/wasm to emit wasm-bindgen + tsify exports for every
+# tool. Server-side consumers leave it off so they don't pull web-sys.
+wasm = []
+
+[dependencies]
+orca-utils        = { path = "../utils" }
+orca-integrations = { path = "../integrations" }
+# Aliased as `db` to match existing call sites (matches projects/server).
+db                = { package = "orca-db", path = "../db" }
+
+anyhow      = { workspace = true }
+async-trait = { workspace = true }
+schemars    = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }

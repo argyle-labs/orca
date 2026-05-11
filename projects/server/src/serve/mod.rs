@@ -511,6 +511,23 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         .layer(axum::middleware::from_fn(middleware::log_requests))
         .layer(cors);
 
+    // Mount the OrcaTool registry under /api/tools. Same registry as MCP stdio
+    // and CLI — one trait impl, three live surfaces (REST + MCP + CLI).
+    let api = match orca_utils::config::Config::load() {
+        Ok(cfg) => {
+            use orca_utils::tool::{ToolCtx, ToolRegistry};
+            let cfg = Arc::new(cfg);
+            let ctx = Arc::new(ToolCtx::new(cfg));
+            let mut reg = ToolRegistry::new();
+            crate::mcp::register_all_tools(&mut reg);
+            api.nest("/api/tools", Arc::new(reg).axum_router(ctx))
+        }
+        Err(e) => {
+            tracing::warn!("Config::load failed, /api/tools disabled: {e}");
+            api
+        }
+    };
+
     if dev {
         api.fallback(dev_proxy_handler)
     } else {

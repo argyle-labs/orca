@@ -12,7 +12,7 @@ use orca_utils::config::Config;
 use orca_utils::tool::{OrcaTool, ToolCtx};
 use std::sync::Arc;
 
-use crate::mcp::engine_tools::{
+use orca_tools::engine::{
     AddArgs, EmptyArgs, EngineAdd, EngineDisable, EngineEnable, EngineList, EngineRemove, NameArgs,
     ProviderDto,
 };
