@@ -19,7 +19,7 @@ impl OrcaToolDef for HaEntityList {
     const DESCRIPTION: &'static str =
         "List Home Assistant entities for a registered endpoint, optionally filtered by domain.";
     type Args = HaEntityListArgs;
-    type Output = String;
+    type Output = crate::JsonAny;
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -33,7 +33,7 @@ impl OrcaToolDef for HaEntityState {
     const NAME: &'static str = "home_assistant_entity_state";
     const DESCRIPTION: &'static str = "Fetch the current state of a single Home Assistant entity.";
     type Args = HaEntityStateArgs;
-    type Output = String;
+    type Output = crate::JsonAny;
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -45,7 +45,7 @@ impl OrcaToolDef for HaAutomationList {
     const NAME: &'static str = "home_assistant_automation_list";
     const DESCRIPTION: &'static str = "List Home Assistant automations for a registered endpoint.";
     type Args = HaAutomationListArgs;
-    type Output = String;
+    type Output = crate::JsonAny;
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -66,7 +66,7 @@ impl OrcaToolDef for HaServiceCall {
     const DESCRIPTION: &'static str = "[MUTATES STATE] Invoke a Home Assistant service \
          (e.g. light.turn_on, switch.toggle). Returns the list of changed entity states.";
     type Args = HaServiceCallArgs;
-    type Output = String;
+    type Output = crate::JsonAny;
 }
 
 #[cfg(feature = "native")]
@@ -98,10 +98,9 @@ mod native {
         const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
         type Args = <Self as OrcaToolDef>::Args;
         type Output = <Self as OrcaToolDef>::Output;
-        async fn run(args: HaEntityListArgs, _: &ToolCtx) -> Result<String> {
+        async fn run(args: HaEntityListArgs, _: &ToolCtx) -> Result<crate::JsonAny> {
             let client = make_client(&args.endpoint)?;
-            let v = client.entity_list(args.domain.as_deref()).await?;
-            Ok(serde_json::to_string_pretty(&v)?)
+            Ok(client.entity_list(args.domain.as_deref()).await?.into())
         }
     }
 
@@ -111,10 +110,9 @@ mod native {
         const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
         type Args = <Self as OrcaToolDef>::Args;
         type Output = <Self as OrcaToolDef>::Output;
-        async fn run(args: HaEntityStateArgs, _: &ToolCtx) -> Result<String> {
+        async fn run(args: HaEntityStateArgs, _: &ToolCtx) -> Result<crate::JsonAny> {
             let client = make_client(&args.endpoint)?;
-            let v = client.entity_state(&args.entity_id).await?;
-            Ok(serde_json::to_string_pretty(&v)?)
+            Ok(client.entity_state(&args.entity_id).await?.into())
         }
     }
 
@@ -124,10 +122,9 @@ mod native {
         const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
         type Args = <Self as OrcaToolDef>::Args;
         type Output = <Self as OrcaToolDef>::Output;
-        async fn run(args: HaAutomationListArgs, _: &ToolCtx) -> Result<String> {
+        async fn run(args: HaAutomationListArgs, _: &ToolCtx) -> Result<crate::JsonAny> {
             let client = make_client(&args.endpoint)?;
-            let v = client.automation_list().await?;
-            Ok(serde_json::to_string_pretty(&v)?)
+            Ok(client.automation_list().await?.into())
         }
     }
 
@@ -137,7 +134,7 @@ mod native {
         const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
         type Args = <Self as OrcaToolDef>::Args;
         type Output = <Self as OrcaToolDef>::Output;
-        async fn run(args: HaServiceCallArgs, _: &ToolCtx) -> Result<String> {
+        async fn run(args: HaServiceCallArgs, _: &ToolCtx) -> Result<crate::JsonAny> {
             let client = make_client(&args.endpoint)?;
             let call = ServiceCall {
                 domain: args.domain,
@@ -145,8 +142,7 @@ mod native {
                 entity_id: args.entity_id,
                 data: args.data.unwrap_or_default(),
             };
-            let v = client.service_call(&call).await?;
-            Ok(serde_json::to_string_pretty(&v)?)
+            Ok(client.service_call(&call).await?.into())
         }
     }
 }

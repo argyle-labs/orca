@@ -1,7 +1,7 @@
 //! Proxmox tool defs + native impls.
 
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::OrcaToolDef;
 
@@ -15,7 +15,7 @@ impl OrcaToolDef for ProxmoxListNodes {
     const NAME: &'static str = "proxmox_list_nodes";
     const DESCRIPTION: &'static str = "List Proxmox VE cluster nodes for a registered endpoint.";
     type Args = ProxmoxListNodesArgs;
-    type Output = String;
+    type Output = crate::JsonAny;
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -29,7 +29,7 @@ impl OrcaToolDef for ProxmoxListVms {
     const NAME: &'static str = "proxmox_list_vms";
     const DESCRIPTION: &'static str = "List QEMU VMs on a Proxmox node.";
     type Args = ProxmoxListVmsArgs;
-    type Output = String;
+    type Output = crate::JsonAny;
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -43,7 +43,19 @@ impl OrcaToolDef for ProxmoxListContainers {
     const NAME: &'static str = "proxmox_list_containers";
     const DESCRIPTION: &'static str = "List LXC containers on a Proxmox node.";
     type Args = ProxmoxListContainersArgs;
-    type Output = String;
+    type Output = crate::JsonAny;
+}
+
+/// Result of a Proxmox lifecycle action (start/stop/shutdown/reboot).
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ProxmoxActionResult {
+    pub node: String,
+    pub vmid: u64,
+    pub action: String,
+    /// Proxmox returns a UPID (Unique Process ID) for async tasks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upid: Option<String>,
+    pub status: u16,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -61,7 +73,7 @@ impl OrcaToolDef for ProxmoxVmAction {
     const DESCRIPTION: &'static str = "[MUTATES STATE] Run a lifecycle action on a Proxmox VM (start/stop/shutdown/reboot). \
          Returns the Proxmox UPID for tracking the async task.";
     type Args = ProxmoxVmActionArgs;
-    type Output = String;
+    type Output = ProxmoxActionResult;
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -78,7 +90,7 @@ impl OrcaToolDef for ProxmoxContainerAction {
     const DESCRIPTION: &'static str =
         "[MUTATES STATE] Run a lifecycle action on a Proxmox LXC container.";
     type Args = ProxmoxContainerActionArgs;
-    type Output = String;
+    type Output = ProxmoxActionResult;
 }
 
 #[cfg(feature = "native")]
@@ -87,8 +99,20 @@ mod native {
     use anyhow::{Context, Result};
     use async_trait::async_trait;
     use orca_db as db;
-    use orca_integrations::proxmox::{Action, Client, Config};
+    use orca_integrations::proxmox::{Action, ActionResult, Client, Config};
     use orca_utils::tool::{OrcaTool, ToolCtx};
+
+    impl From<ActionResult> for ProxmoxActionResult {
+        fn from(r: ActionResult) -> Self {
+            Self {
+                node: r.node,
+                vmid: r.vmid,
+                action: r.action,
+                upid: r.upid,
+                status: r.status,
+            }
+        }
+    }
 
     fn make_client(name: &str) -> Result<Client> {
         let conn = db::open_default()?;
@@ -108,10 +132,9 @@ mod native {
         const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
         type Args = <Self as OrcaToolDef>::Args;
         type Output = <Self as OrcaToolDef>::Output;
-        async fn run(args: ProxmoxListNodesArgs, _: &ToolCtx) -> Result<String> {
+        async fn run(args: ProxmoxListNodesArgs, _: &ToolCtx) -> Result<crate::JsonAny> {
             let client = make_client(&args.endpoint)?;
-            let v = client.nodes().await?;
-            Ok(serde_json::to_string_pretty(&v)?)
+            Ok(client.nodes().await?.into())
         }
     }
 
@@ -121,10 +144,9 @@ mod native {
         const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
         type Args = <Self as OrcaToolDef>::Args;
         type Output = <Self as OrcaToolDef>::Output;
-        async fn run(args: ProxmoxListVmsArgs, _: &ToolCtx) -> Result<String> {
+        async fn run(args: ProxmoxListVmsArgs, _: &ToolCtx) -> Result<crate::JsonAny> {
             let client = make_client(&args.endpoint)?;
-            let v = client.vms(&args.node).await?;
-            Ok(serde_json::to_string_pretty(&v)?)
+            Ok(client.vms(&args.node).await?.into())
         }
     }
 
@@ -134,10 +156,9 @@ mod native {
         const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
         type Args = <Self as OrcaToolDef>::Args;
         type Output = <Self as OrcaToolDef>::Output;
-        async fn run(args: ProxmoxListContainersArgs, _: &ToolCtx) -> Result<String> {
+        async fn run(args: ProxmoxListContainersArgs, _: &ToolCtx) -> Result<crate::JsonAny> {
             let client = make_client(&args.endpoint)?;
-            let v = client.containers(&args.node).await?;
-            Ok(serde_json::to_string_pretty(&v)?)
+            Ok(client.containers(&args.node).await?.into())
         }
     }
 
@@ -147,11 +168,13 @@ mod native {
         const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
         type Args = <Self as OrcaToolDef>::Args;
         type Output = <Self as OrcaToolDef>::Output;
-        async fn run(args: ProxmoxVmActionArgs, _: &ToolCtx) -> Result<String> {
+        async fn run(args: ProxmoxVmActionArgs, _: &ToolCtx) -> Result<ProxmoxActionResult> {
             let client = make_client(&args.endpoint)?;
             let action: Action = args.action.parse()?;
-            let result = client.vm_action(&args.node, args.vmid, action).await?;
-            Ok(serde_json::to_string_pretty(&result)?)
+            Ok(client
+                .vm_action(&args.node, args.vmid, action)
+                .await?
+                .into())
         }
     }
 
@@ -161,13 +184,13 @@ mod native {
         const DESCRIPTION: &'static str = <Self as OrcaToolDef>::DESCRIPTION;
         type Args = <Self as OrcaToolDef>::Args;
         type Output = <Self as OrcaToolDef>::Output;
-        async fn run(args: ProxmoxContainerActionArgs, _: &ToolCtx) -> Result<String> {
+        async fn run(args: ProxmoxContainerActionArgs, _: &ToolCtx) -> Result<ProxmoxActionResult> {
             let client = make_client(&args.endpoint)?;
             let action: Action = args.action.parse()?;
-            let result = client
+            Ok(client
                 .container_action(&args.node, args.vmid, action)
-                .await?;
-            Ok(serde_json::to_string_pretty(&result)?)
+                .await?
+                .into())
         }
     }
 }

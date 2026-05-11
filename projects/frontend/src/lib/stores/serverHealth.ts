@@ -14,7 +14,7 @@ function createServerHealth() {
     let ok = false;
     try {
       const client = await orca();
-      const result = (await client.health()) as { ok: boolean };
+      const result = (await client.health({})) as { ok: boolean };
       ok = !!result?.ok;
     } catch {
       ok = false;

@@ -17,8 +17,11 @@ use serde::de::DeserializeOwned;
 pub mod agent_backend;
 pub mod engine;
 pub mod homeassistant;
+pub mod json_any;
 pub mod meta;
 pub mod proxmox;
+
+pub use json_any::JsonAny;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;

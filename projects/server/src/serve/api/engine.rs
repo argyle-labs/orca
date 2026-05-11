@@ -45,13 +45,19 @@ pub async fn engines_list_handler() -> axum::response::Response {
         Err(r) => return r,
     };
     match EngineList::run(EmptyArgs {}, &ctx).await {
-        Ok(json) => match serde_json::from_str::<Vec<LlmProviderInfo>>(&json) {
-            Ok(v) => axum::Json(v).into_response(),
-            Err(e) => err(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                &e.to_string(),
-            ),
-        },
+        Ok(providers) => {
+            let v: Vec<LlmProviderInfo> = providers
+                .into_iter()
+                .map(|p| LlmProviderInfo {
+                    name: p.name,
+                    url: p.url,
+                    kind: p.kind,
+                    enabled: p.enabled,
+                    reachable: None,
+                })
+                .collect();
+            axum::Json(v).into_response()
+        }
         Err(e) => err(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             &e.to_string(),
