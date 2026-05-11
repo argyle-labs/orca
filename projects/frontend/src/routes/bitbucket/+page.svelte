@@ -47,7 +47,7 @@
   {:else}
     <div class="header">
       <h1>Bitbucket <span class="ws-badge">{config.workspace}</span></h1>
-      <button class="reconfigure" onclick={() => setPluginData({ id: 'rebuy', key: 'bitbucket_config', body: { value: '' } }).then(() => invalidateAll())}>
+      <button class="reconfigure" onclick={() => setPluginData({ id: 'rebuy', key: 'bitbucket_config', body: { value: {} } }).then(() => invalidateAll())}>
         Reconfigure
       </button>
     </div>

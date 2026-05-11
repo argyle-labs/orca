@@ -14,6 +14,7 @@ export async function callTool(
 }
 
 export function stripAnsi(s: string): string {
+  // eslint-disable-next-line no-control-regex
   return s.replace(/(\x1b|\x1B)\[[\d;]*m|\[[\d;]+m/g, '');
 }
 

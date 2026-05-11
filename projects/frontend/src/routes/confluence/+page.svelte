@@ -45,7 +45,7 @@
   {:else}
     <div class="header">
       <h1>Confluence {#if config.space}<span class="space-badge">{config.space}</span>{/if}</h1>
-      <button class="reconfigure" onclick={() => setPluginData({ id: 'rebuy', key: 'confluence_config', body: { value: '' } }).then(() => invalidateAll())}>
+      <button class="reconfigure" onclick={() => setPluginData({ id: 'rebuy', key: 'confluence_config', body: { value: {} } }).then(() => invalidateAll())}>
         Reconfigure
       </button>
     </div>

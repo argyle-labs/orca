@@ -31,7 +31,7 @@ export function parseDoc(raw: string): ParsedDoc {
       continue;
     }
     const key = m[1].trim();
-    let val = m[2];
+    const val = m[2];
 
     if (/^[|>][-+]?$/.test(val.trim())) {
       const fold = val.trim().startsWith('>');

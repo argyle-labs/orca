@@ -59,6 +59,7 @@ interface TabData {
   drift?: DriftReport;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 interface SchemaData {
   tabs: TabData[];
   showTabs: boolean;
@@ -84,12 +85,14 @@ interface Edge {
   col: string;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 interface Cam {
   x: number;
   y: number;
   z: number;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 interface LegendItem {
   key: string;
   label: string;
@@ -117,6 +120,7 @@ type Group = {
   y: number;
 };
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 interface LayoutResult {
   nodes: TableNode[];
   nodeMap: Record<string, TableNode>;

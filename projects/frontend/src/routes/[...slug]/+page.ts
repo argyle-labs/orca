@@ -13,7 +13,7 @@ export const load: PageLoad = async ({ params }) => {
   try {
     const raw = await getDoc({ root, path });
     return { content: String(raw ?? ''), root, path };
-  } catch (e: any) {
-    throw error(404, e?.message ?? 'Not found');
+  } catch (e: unknown) {
+    throw error(404, e instanceof Error ? e.message : 'Not found');
   }
 };

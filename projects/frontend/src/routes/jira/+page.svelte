@@ -34,7 +34,7 @@
   {:else}
     <div class="header">
       <h1>Jira</h1>
-      <button class="reconfigure" onclick={() => setPluginData({ id: 'rebuy', key: 'jira_config', body: { value: '' } }).then(() => invalidateAll())}>
+      <button class="reconfigure" onclick={() => setPluginData({ id: 'rebuy', key: 'jira_config', body: { value: {} } }).then(() => invalidateAll())}>
         Reconfigure
       </button>
     </div>
