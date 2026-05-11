@@ -1,5 +1,8 @@
 //! JSON-RPC 2.0 wire types shared between the SDK (plugin side) and the server
 //! plugin host.
+// JSON-RPC 2.0 protocol envelopes (id/params/result/error.data) are inherently
+// opaque — the spec mandates Value at the boundary.
+#![allow(clippy::disallowed_types)]
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

@@ -1,5 +1,6 @@
 //! `DocsService` impl — wraps `crate::mcp::docs` helpers and the embedded
 //! vault accessor `crate::docs`.
+#![allow(clippy::disallowed_types)] // forced by docs::tree() / build_doc_tree() / collect_all_doc_files() returning Value
 
 use anyhow::Result;
 use async_trait::async_trait;

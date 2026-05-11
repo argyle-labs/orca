@@ -3,6 +3,8 @@
 //! Listens on `0.0.0.0:<APP_PLUGIN_PORT>` (default 12002). Requires client
 //! certificates signed by the orca CA. Dispatches JSON-RPC 2.0 frames.
 //!
+// JSON-RPC dispatcher between host and plugins; HashMap/Value are protocol-level passthrough.
+#![allow(clippy::disallowed_types)]
 //! Phase A methods:
 //!   orca/hello  — version + capability handshake. Returns `full` when all
 //!                 required and optional methods are supported, `degraded`

@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types)] // doc tree helpers return Vec<Value> — forced by this module's contract
 use crate::commands::list_embedded_commands;
 use anyhow::Result;
 use orca_utils::config::Config;

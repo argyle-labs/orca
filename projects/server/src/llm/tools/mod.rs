@@ -1,3 +1,5 @@
+// Tool-use bridging between LLM blobs and typed tools; HashMap/Value are wire-format passthrough.
+#![allow(clippy::disallowed_types)]
 pub mod bash;
 
 use crate::llm::backend::{OutputSink, stdout_sink};

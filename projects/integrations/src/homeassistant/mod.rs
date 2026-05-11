@@ -1,4 +1,7 @@
 //! Home Assistant REST client.
+// serde_json::Value is intentional: HA entity state attributes are
+// free-form by design — each integration defines its own attribute schema.
+#![allow(clippy::disallowed_types)]
 
 use orca_utils::http::{Client as HttpClient, HttpError};
 use serde::{Deserialize, Serialize};

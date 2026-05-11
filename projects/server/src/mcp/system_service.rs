@@ -1,5 +1,6 @@
 //! Server-side impl of `SystemService` — orca's own install lifecycle plus
 //! the install-status snapshot.
+#![allow(clippy::disallowed_types)] // install_status() returns Value — local helpers forced by that boundary
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;

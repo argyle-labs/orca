@@ -1,6 +1,10 @@
 //! Plugin runtime KV — typed tool defs for `get_plugin_data` and
 //! `set_plugin_data`. Values are arbitrary JSON; the underlying TEXT column
 //! holds the JSON-stringified form but callers work with structured data.
+//!
+//! `serde_json::Value` is used intentionally here — the plugin KV store is
+//! free-form by contract; each plugin defines its own per-key schema.
+#![allow(clippy::disallowed_types)]
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -10,7 +14,7 @@ use crate::OrcaToolDef;
 
 // ── get_plugin_data ─────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetPluginDataArgs {
@@ -18,7 +22,7 @@ pub struct GetPluginDataArgs {
     pub key: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetPluginDataOutput {
@@ -39,7 +43,7 @@ impl OrcaToolDef for GetPluginData {
 
 // ── set_plugin_data ─────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SetPluginDataArgs {
@@ -50,7 +54,7 @@ pub struct SetPluginDataArgs {
     pub value: Value,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SetPluginDataOutput {

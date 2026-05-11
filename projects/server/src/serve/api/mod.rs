@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types)] // MCP/plugin tool invocation — opaque result passthrough
 use std::collections::HashMap;
 use std::sync::Arc;
 

@@ -2,6 +2,8 @@
 // Separate from ~/.orca/memory (per-user notes); these are project-level WHY docs
 // embedded into the binary at build time.
 // Accessible via root="docs" in all tree/read/search endpoints and MCP tools.
+// HashMap/Value used for doc metadata blobs; protocol-level passthrough.
+#![allow(clippy::disallowed_types)]
 
 use serde_json::{Value, json};
 

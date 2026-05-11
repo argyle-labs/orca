@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types)] // local LLM HTTP passthrough — response shape not owned by orca
 /// Lightweight local-LLM helper for non-streaming one-shot completions.
 ///
 /// Supports LM Studio (OpenAI-compatible at `/v1/chat/completions`) and

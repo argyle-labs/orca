@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types)] // OpenAPI document builder — dynamic JSON construction
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

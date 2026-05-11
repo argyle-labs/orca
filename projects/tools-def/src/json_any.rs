@@ -2,6 +2,9 @@
 //! shape-fluid upstream payloads (e.g. Home Assistant entity dumps, Proxmox
 //! cluster listings). Serializes transparently as the inner value; TS sees it
 //! as `unknown` rather than a useless stringified blob.
+// JsonAny IS the designated opaque escape hatch — all Value/JsonAny uses in
+// this file are intentional by definition.
+#![allow(clippy::disallowed_types)]
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -11,7 +14,7 @@ use serde_json::Value;
 /// (e.g. Home Assistant entity dumps, Proxmox cluster listings, MCP structuredContent).
 /// Using `Value` here is intentional — the upstream schema is not owned by orca.
 #[allow(clippy::disallowed_types)]
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]

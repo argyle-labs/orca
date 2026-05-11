@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types)] // MCP JSON-RPC protocol — opaque tool args/results required
 /// MCP stdio server — exposes orca tools to Claude Code via JSON-RPC 2.0.
 ///
 /// Usage: orca mcp-serve

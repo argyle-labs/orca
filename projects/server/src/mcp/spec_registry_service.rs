@@ -1,5 +1,6 @@
 //! Server-side impl of `SpecRegistryService` — mirrors the HTTP handlers in
 //! `serve::api::specs` but typed all the way through.
+#![allow(clippy::disallowed_types)] // OpenAPI spec registry — dynamic JSON construction for spec blobs
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;

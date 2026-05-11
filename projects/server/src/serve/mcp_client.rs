@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types)] // MCP JSON-RPC protocol — opaque tool args/results
 use std::collections::HashMap;
 use std::sync::Arc;
 

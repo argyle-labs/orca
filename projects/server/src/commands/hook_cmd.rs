@@ -1,3 +1,5 @@
+// CLI command that passes through spec/config blobs; HashMap/Value are protocol-level passthrough.
+#![allow(clippy::disallowed_types)]
 use anyhow::Result;
 use chrono::Utc;
 use clap::Subcommand;

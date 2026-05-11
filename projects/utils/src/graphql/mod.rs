@@ -3,6 +3,11 @@
 //! Stateless: every call carries the endpoint, headers, query, and variables.
 //! Bug fixes to GraphQL transport land here once and propagate to every
 //! consumer (e.g. unraid). Composes with [`orca_http`] underneath.
+//!
+//! `serde_json::Value` is used throughout because GraphQL response envelopes
+//! are schemaless at this transport layer — `data`, `errors`, `extensions`,
+//! `path`, `locations` all have shapes that vary per-server and per-query.
+#![allow(clippy::disallowed_types)]
 
 use crate::http::{Client as HttpClient, HttpError};
 use serde::{Deserialize, Serialize};

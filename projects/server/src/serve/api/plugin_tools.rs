@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types)] // plugin tool call — opaque result passthrough
 //! HTTP surface for plugin-declared tools.
 //!
 //! `mcp-serve` runs in a separate process from the orca daemon, so it cannot

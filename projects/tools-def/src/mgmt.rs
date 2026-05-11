@@ -8,13 +8,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::OrcaToolDef;
+// Value is used only in MCP-federation inner modules where all Value uses are
+// legitimate opaque blobs (MCP protocol-level). The allow on each mod block
+// covers derive expansions; this import-level allow covers the import itself.
+#[allow(clippy::disallowed_types)]
 use serde_json::Value;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MCP servers + tool mappings
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct McpServerEntry {
@@ -25,7 +29,7 @@ pub struct McpServerEntry {
     pub enabled: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct MappingEntry {
@@ -38,7 +42,7 @@ pub struct MappingEntry {
     pub enabled: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SyncToolsServerEntry {
@@ -51,12 +55,12 @@ pub struct SyncToolsServerEntry {
 
 // ── list_mcp_servers ────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListMcpServersArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListMcpServersOutput {
@@ -74,7 +78,7 @@ impl OrcaToolDef for ListMcpServers {
 
 // ── add_mcp_server ──────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct AddMcpServerArgs {
@@ -86,7 +90,7 @@ pub struct AddMcpServerArgs {
     pub env: Option<HashMap<String, String>>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct McpServerMutationResult {
@@ -105,7 +109,7 @@ impl OrcaToolDef for AddMcpServer {
 
 // ── remove_mcp_server ───────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RemoveMcpServerArgs {
@@ -122,7 +126,7 @@ impl OrcaToolDef for RemoveMcpServer {
 
 // ── map_tool / unmap_tool ───────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct MapToolArgs {
@@ -131,7 +135,7 @@ pub struct MapToolArgs {
     pub external_tool: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct MapToolResult {
@@ -149,14 +153,14 @@ impl OrcaToolDef for MapTool {
     type Output = MapToolResult;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct UnmapToolArgs {
     pub orca_tool: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct UnmapToolResult {
@@ -174,7 +178,7 @@ impl OrcaToolDef for UnmapTool {
 
 // ── sync_tools ──────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SyncToolsArgs {
@@ -186,7 +190,7 @@ pub struct SyncToolsArgs {
     pub threshold: Option<f64>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SyncToolsOutput {
@@ -204,7 +208,7 @@ impl OrcaToolDef for SyncTools {
 
 // ── list_tool_mappings ──────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListToolMappingsArgs {
@@ -213,7 +217,7 @@ pub struct ListToolMappingsArgs {
     pub name: Option<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListToolMappingsOutput {
@@ -233,7 +237,7 @@ impl OrcaToolDef for ListToolMappings {
 // Schema databases
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -253,12 +257,12 @@ pub struct SchemaDbEntry {
     pub enabled: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListSchemasArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListSchemasOutput {
@@ -274,7 +278,7 @@ impl OrcaToolDef for ListSchemas {
     type Output = ListSchemasOutput;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -293,7 +297,7 @@ pub struct AddSchemaArgs {
     pub domains_file: Option<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SchemaMutationResult {
@@ -310,7 +314,7 @@ impl OrcaToolDef for AddSchema {
     type Output = SchemaMutationResult;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RemoveSchemaArgs {
@@ -330,7 +334,7 @@ impl OrcaToolDef for RemoveSchema {
 // Docker runtimes
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -345,12 +349,12 @@ pub struct DockerRuntimeEntry {
     pub enabled: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListDockerRuntimesArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListDockerRuntimesOutput {
@@ -365,7 +369,7 @@ impl OrcaToolDef for ListDockerRuntimes {
     type Output = ListDockerRuntimesOutput;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -379,7 +383,7 @@ pub struct AddDockerRuntimeArgs {
     pub url: Option<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DockerRuntimeMutationResult {
@@ -396,7 +400,7 @@ impl OrcaToolDef for AddDockerRuntime {
     type Output = DockerRuntimeMutationResult;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RemoveDockerRuntimeArgs {
@@ -416,7 +420,7 @@ impl OrcaToolDef for RemoveDockerRuntime {
 // Doc roots + ignore patterns
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DocRootRegEntry {
@@ -427,12 +431,12 @@ pub struct DocRootRegEntry {
     pub enabled: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListDocRootsArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListDocRootsOutput {
@@ -447,7 +451,7 @@ impl OrcaToolDef for ListDocRoots {
     type Output = ListDocRootsOutput;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct AddDocRootArgs {
@@ -457,7 +461,7 @@ pub struct AddDocRootArgs {
     pub description: Option<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DocRootMutationResult {
@@ -474,7 +478,7 @@ impl OrcaToolDef for AddDocRoot {
     type Output = DocRootMutationResult;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RemoveDocRootArgs {
@@ -490,12 +494,12 @@ impl OrcaToolDef for RemoveDocRoot {
     type Output = DocRootMutationResult;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListDocIgnorePatternsArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListDocIgnorePatternsOutput {
@@ -511,14 +515,14 @@ impl OrcaToolDef for ListDocIgnorePatterns {
     type Output = ListDocIgnorePatternsOutput;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DocIgnorePatternArgs {
     pub pattern: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DocIgnorePatternMutationResult {
@@ -548,7 +552,7 @@ impl OrcaToolDef for RemoveDocIgnorePattern {
 // Proxmox endpoints
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -560,12 +564,12 @@ pub struct ProxmoxEndpointEntry {
     pub enabled: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListProxmoxEndpointsArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListProxmoxEndpointsOutput {
@@ -581,7 +585,7 @@ impl OrcaToolDef for ListProxmoxEndpoints {
     type Output = ListProxmoxEndpointsOutput;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -594,7 +598,7 @@ pub struct AddProxmoxEndpointArgs {
     pub insecure: Option<bool>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxMutationResult {
@@ -611,7 +615,7 @@ impl OrcaToolDef for AddProxmoxEndpoint {
     type Output = ProxmoxMutationResult;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RemoveProxmoxEndpointArgs {
@@ -631,7 +635,7 @@ impl OrcaToolDef for RemoveProxmoxEndpoint {
 // Home Assistant endpoints
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -641,12 +645,12 @@ pub struct HaEndpointEntry {
     pub enabled: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListHomeAssistantEndpointsArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListHomeAssistantEndpointsOutput {
@@ -662,7 +666,7 @@ impl OrcaToolDef for ListHomeAssistantEndpoints {
     type Output = ListHomeAssistantEndpointsOutput;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -672,7 +676,7 @@ pub struct AddHomeAssistantEndpointArgs {
     pub token: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HaMutationResult {
@@ -689,7 +693,7 @@ impl OrcaToolDef for AddHomeAssistantEndpoint {
     type Output = HaMutationResult;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RemoveHomeAssistantEndpointArgs {
@@ -707,34 +711,108 @@ impl OrcaToolDef for RemoveHomeAssistantEndpoint {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MCP federation — list_mcp_tools / run_mcp_tool
+//
+// These structs carry MCP protocol-level opaque blobs (input_schema, args,
+// resource, structured_content) whose shapes are defined by upstream MCP
+// servers, not by orca. serde_json::Value is the documented escape hatch.
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct McpToolEntry {
-    pub server: String,
-    pub name: String,
-    pub description: String,
-    /// Raw JSON Schema object as advertised by the upstream MCP server.
-    /// Shape is server-defined and cannot be typed statically.
-    #[allow(clippy::disallowed_types)]
-    #[cfg_attr(feature = "wasm", tsify(type = "unknown"))]
-    pub input_schema: serde_json::Value,
+// Inner module so the #[allow] suppresses derives' expanded Value uses too.
+#[allow(clippy::disallowed_types)]
+mod mcp_fed {
+    use super::*;
+
+    /// `input_schema` is raw JSON Schema from the upstream MCP server — shape is server-defined.
+    #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+    #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    #[serde(rename_all = "camelCase")]
+    pub struct McpToolEntry {
+        pub server: String,
+        pub name: String,
+        pub description: String,
+        /// Raw JSON Schema as advertised by the upstream MCP server — shape is server-defined.
+        #[cfg_attr(feature = "wasm", tsify(type = "unknown"))]
+        pub input_schema: serde_json::Value,
+    }
+
+    #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+    #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    pub struct ListMcpToolsArgs {}
+
+    #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+    #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    pub struct ListMcpToolsOutput {
+        pub tools: Vec<McpToolEntry>,
+    }
+
+    /// `args` is passed straight through to the upstream MCP tool — its shape is
+    /// dictated by each tool's own input schema and cannot be typed statically.
+    #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+    #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    pub struct RunMcpToolArgs {
+        /// Registered MCP server name.
+        pub server: String,
+        /// Tool name on the server (the internal name, not an orca alias).
+        pub tool: String,
+        /// JSON arguments object passed straight through to the tool.
+        /// Opaque by the MCP protocol — shape is dictated by each tool's own input schema.
+        #[serde(default)]
+        #[cfg_attr(feature = "wasm", tsify(type = "Record<string, unknown> | null"))]
+        pub args: Option<serde_json::Map<String, serde_json::Value>>,
+    }
+
+    /// One block in an MCP `tools/call` result's `content` array.
+    ///
+    /// MCP spec content kinds: `text` (carries `text`), `image` / `audio`
+    /// (carry `data` base64 + `mime_type`), `resource` (carries `resource`).
+    /// We preserve every shape: required fields are typed, optional ones are
+    /// kept as opaque JSON so we never lose data.
+    #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+    #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    #[serde(rename_all = "camelCase")]
+    pub struct McpContent {
+        /// `"text" | "image" | "audio" | "resource"` per the MCP spec.
+        #[serde(rename = "type")]
+        pub kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub data: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub mime_type: Option<String>,
+        /// Opaque MCP `resource` content block — shape is server-defined per MCP spec.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "wasm", tsify(type = "unknown"))]
+        pub resource: Option<Value>,
+    }
+
+    /// `structured_content` is opaque — its shape is each tool's own output schema,
+    /// which orca cannot know at this layer (MCP passthrough).
+    #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+    #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    #[serde(rename_all = "camelCase")]
+    pub struct RunMcpToolOutput {
+        pub content: Vec<McpContent>,
+        pub is_error: bool,
+        /// Structured tool result if the server provided one alongside `content`
+        /// (MCP `structuredContent`). Kept as opaque JSON — its shape is the
+        /// tool's own output schema, which orca cannot know at this layer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "wasm", tsify(type = "unknown"))]
+        pub structured_content: Option<Value>,
+    }
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct ListMcpToolsArgs {}
-
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct ListMcpToolsOutput {
-    pub tools: Vec<McpToolEntry>,
-}
+pub use mcp_fed::{
+    ListMcpToolsArgs, ListMcpToolsOutput, McpContent, McpToolEntry, RunMcpToolArgs,
+    RunMcpToolOutput,
+};
 
 pub struct ListMcpTools;
 impl OrcaToolDef for ListMcpTools {
@@ -743,65 +821,6 @@ impl OrcaToolDef for ListMcpTools {
         "List every tool advertised by every registered MCP server (connects on demand).";
     type Args = ListMcpToolsArgs;
     type Output = ListMcpToolsOutput;
-}
-
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct RunMcpToolArgs {
-    /// Registered MCP server name.
-    pub server: String,
-    /// Tool name on the server (the internal name, not an orca alias).
-    pub tool: String,
-    /// JSON arguments object passed straight through to the tool.
-    /// Shape is defined by each upstream MCP tool's own schema — opaque at this layer.
-    #[allow(clippy::disallowed_types)]
-    #[serde(default)]
-    #[cfg_attr(feature = "wasm", tsify(type = "Record<string, unknown> | null"))]
-    pub args: Option<serde_json::Map<String, serde_json::Value>>,
-}
-
-/// One block in an MCP `tools/call` result's `content` array.
-///
-/// MCP spec content kinds: `text` (carries `text`), `image` / `audio`
-/// (carry `data` base64 + `mime_type`), `resource` (carries `resource`).
-/// We preserve every shape: required fields are typed, optional ones are
-/// kept as opaque JSON so we never lose data.
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct McpContent {
-    /// `"text" | "image" | "audio" | "resource"` per the MCP spec.
-    #[serde(rename = "type")]
-    pub kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mime_type: Option<String>,
-    /// Opaque MCP `resource` content block — shape is server-defined per MCP spec.
-    #[allow(clippy::disallowed_types)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "wasm", tsify(type = "unknown"))]
-    pub resource: Option<Value>,
-}
-
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct RunMcpToolOutput {
-    pub content: Vec<McpContent>,
-    pub is_error: bool,
-    /// Structured tool result if the server provided one alongside `content`
-    /// (MCP `structuredContent`). Kept as opaque JSON — its shape is the
-    /// tool's own output schema, which orca cannot know at this layer.
-    #[allow(clippy::disallowed_types)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "wasm", tsify(type = "unknown"))]
-    pub structured_content: Option<Value>,
 }
 
 pub struct RunMcpTool;
@@ -817,13 +836,13 @@ impl OrcaToolDef for RunMcpTool {
 // Schema view — get_schema / get_schema_domains
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetSchemaArgs {}
 
 /// One row in `tabs[*].tables`.
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SchemaTableInfo {
@@ -835,7 +854,7 @@ pub struct SchemaTableInfo {
 ///
 /// Field names match what the HTTP `/api/schema` handler emits today (the
 /// frontend reads `fk_target` snake_case directly).
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SchemaColumn {
@@ -848,7 +867,7 @@ pub struct SchemaColumn {
     pub fk_target: Option<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -861,7 +880,7 @@ pub struct SchemaForeignKey {
 
 /// Domain grouping (loaded from each schema DB's `domainsFile` JSON).
 /// Optional fields (`group`, `subgroup`) are not always present.
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SchemaDomain {
@@ -875,7 +894,7 @@ pub struct SchemaDomain {
     pub subgroup: Option<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -887,7 +906,7 @@ pub struct SchemaTab {
     pub domains: Vec<SchemaDomain>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -907,12 +926,12 @@ impl OrcaToolDef for GetSchema {
     type Output = GetSchemaOutput;
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetSchemaDomainsArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify_next::Tsify))]
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetSchemaDomainsOutput {

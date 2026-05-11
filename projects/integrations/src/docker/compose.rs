@@ -1,5 +1,8 @@
 //! Docker Compose project wrapper. Search for the compose file, list
 //! services, run lifecycle actions, parse `compose ps` output.
+// serde_json::Value is used as a transient intermediate in parse_compose_ps
+// to decode JSON-lines from `docker compose ps`; all outputs are typed structs.
+#![allow(clippy::disallowed_types)]
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

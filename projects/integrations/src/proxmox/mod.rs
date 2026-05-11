@@ -3,6 +3,10 @@
 //!
 //! Token format follows Proxmox's documented header:
 //!   Authorization: PVEAPIToken=USER@REALM!TOKENID=UUID
+// serde_json::Value is intentional: Proxmox GET endpoints return a large,
+// version-dependent `data` envelope that is passed through to callers.
+// Typed structs are used where the shape is stable (ActionResult, lifecycle).
+#![allow(clippy::disallowed_types)]
 
 use orca_utils::http::{Client as HttpClient, HttpError};
 use serde::{Deserialize, Serialize};
@@ -58,21 +62,21 @@ pub enum ProxmoxError {
 
 /// Allowed lifecycle actions on VMs and containers. Constraining the set up
 /// front keeps callers from forwarding arbitrary strings to the Proxmox API.
-#[derive(Debug, Clone, Copy)]
-pub enum Action {
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum ProxmoxAction {
     Start,
     Stop,
     Shutdown,
     Reboot,
 }
 
-impl Action {
+impl ProxmoxAction {
     pub fn as_str(self) -> &'static str {
         match self {
-            Action::Start => "start",
-            Action::Stop => "stop",
-            Action::Shutdown => "shutdown",
-            Action::Reboot => "reboot",
+            ProxmoxAction::Start => "start",
+            ProxmoxAction::Stop => "stop",
+            ProxmoxAction::Shutdown => "shutdown",
+            ProxmoxAction::Reboot => "reboot",
         }
     }
 }
@@ -104,21 +108,21 @@ impl std::str::FromStr for GuestKind {
     }
 }
 
-impl std::str::FromStr for Action {
+impl std::str::FromStr for ProxmoxAction {
     type Err = ProxmoxError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "start" => Ok(Action::Start),
-            "stop" => Ok(Action::Stop),
-            "shutdown" => Ok(Action::Shutdown),
-            "reboot" => Ok(Action::Reboot),
+            "start" => Ok(ProxmoxAction::Start),
+            "stop" => Ok(ProxmoxAction::Stop),
+            "shutdown" => Ok(ProxmoxAction::Shutdown),
+            "reboot" => Ok(ProxmoxAction::Reboot),
             other => Err(ProxmoxError::BadAction(other.to_string())),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActionResult {
+pub struct ProxmoxActionResult {
     pub node: String,
     pub vmid: u64,
     pub action: String,
@@ -304,8 +308,8 @@ impl Client {
         &self,
         node: &str,
         vmid: u64,
-        action: Action,
-    ) -> Result<ActionResult, ProxmoxError> {
+        action: ProxmoxAction,
+    ) -> Result<ProxmoxActionResult, ProxmoxError> {
         self.lifecycle("qemu", node, vmid, action).await
     }
 
@@ -314,8 +318,8 @@ impl Client {
         &self,
         node: &str,
         vmid: u64,
-        action: Action,
-    ) -> Result<ActionResult, ProxmoxError> {
+        action: ProxmoxAction,
+    ) -> Result<ProxmoxActionResult, ProxmoxError> {
         self.lifecycle("lxc", node, vmid, action).await
     }
 
@@ -324,8 +328,8 @@ impl Client {
         kind: &'static str,
         node: &str,
         vmid: u64,
-        action: Action,
-    ) -> Result<ActionResult, ProxmoxError> {
+        action: ProxmoxAction,
+    ) -> Result<ProxmoxActionResult, ProxmoxError> {
         if node.is_empty() {
             return Err(ProxmoxError::Missing("node"));
         }
@@ -347,7 +351,7 @@ impl Client {
             .json::<Value>()
             .ok()
             .and_then(|v| v.get("data").and_then(|d| d.as_str().map(str::to_string)));
-        Ok(ActionResult {
+        Ok(ProxmoxActionResult {
             node: node.to_string(),
             vmid,
             action: action.as_str().to_string(),
@@ -429,7 +433,7 @@ mod tests {
             .mount(&server)
             .await;
         let r = Client::new(cfg(server.uri()))
-            .vm_action("pve1", 100, Action::Start)
+            .vm_action("pve1", 100, ProxmoxAction::Start)
             .await
             .unwrap();
         assert_eq!(r.action, "start");
@@ -446,7 +450,7 @@ mod tests {
             .mount(&server)
             .await;
         Client::new(cfg(server.uri()))
-            .container_action("pve1", 200, Action::Stop)
+            .container_action("pve1", 200, ProxmoxAction::Stop)
             .await
             .unwrap();
     }
@@ -586,11 +590,14 @@ mod tests {
 
     #[test]
     fn action_parses_known_strings() {
-        assert!(matches!("start".parse::<Action>().unwrap(), Action::Start));
         assert!(matches!(
-            "shutdown".parse::<Action>().unwrap(),
-            Action::Shutdown
+            "start".parse::<ProxmoxAction>().unwrap(),
+            ProxmoxAction::Start
         ));
-        assert!("foo".parse::<Action>().is_err());
+        assert!(matches!(
+            "shutdown".parse::<ProxmoxAction>().unwrap(),
+            ProxmoxAction::Shutdown
+        ));
+        assert!("foo".parse::<ProxmoxAction>().is_err());
     }
 }
