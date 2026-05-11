@@ -21,6 +21,7 @@ impl OrcaTool for ListMcpServers {
     const DESCRIPTION: &'static str = "List all MCP servers registered in orca.db (orca's own managed registry). \
          Does not include ~/.claude.json servers managed by Claude Code directly.";
     type Args = ListMcpServersArgs;
+    type Output = String;
     async fn run(_: ListMcpServersArgs, _: &ToolCtx) -> Result<String> {
         handlers::mcp_list_servers()
     }
@@ -44,6 +45,7 @@ impl OrcaTool for AddMcpServer {
     const DESCRIPTION: &'static str = "[MUTATES STATE] Add or update an MCP server in orca.db. Use this when the user \
          wants to register a new MCP server for orca to federate.";
     type Args = AddMcpServerArgs;
+    type Output = String;
     async fn run(args: AddMcpServerArgs, _: &ToolCtx) -> Result<String> {
         let row = db::mcp_servers::ServerRow {
             name: args.name.clone(),
@@ -69,6 +71,7 @@ impl OrcaTool for RemoveMcpServer {
     const NAME: &'static str = "remove_mcp_server";
     const DESCRIPTION: &'static str = "[MUTATES STATE] Remove an MCP server from orca.db by name.";
     type Args = RemoveMcpServerArgs;
+    type Output = String;
     async fn run(args: RemoveMcpServerArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
         if db::mcp_servers::remove(&conn, &args.name)? {
@@ -93,6 +96,7 @@ impl OrcaTool for MapTool {
     const DESCRIPTION: &'static str =
         "[MUTATES STATE] Map an orca tool name to a specific tool on a registered MCP server.";
     type Args = MapToolArgs;
+    type Output = String;
     async fn run(args: MapToolArgs, _: &ToolCtx) -> Result<String> {
         use serde_json::json;
         handlers::mcp_map_tool(&json!({
@@ -113,6 +117,7 @@ impl OrcaTool for UnmapTool {
     const NAME: &'static str = "unmap_tool";
     const DESCRIPTION: &'static str = "[MUTATES STATE] Remove a tool mapping from orca.db.";
     type Args = UnmapToolArgs;
+    type Output = String;
     async fn run(args: UnmapToolArgs, _: &ToolCtx) -> Result<String> {
         use serde_json::json;
         handlers::mcp_unmap_tool(&json!({ "orca_tool": args.orca_tool }))
@@ -135,6 +140,7 @@ impl OrcaTool for SyncTools {
     const DESCRIPTION: &'static str = "[MUTATES STATE] Auto-discover and map tools from registered MCP servers. \
          Provide name or set all=true.";
     type Args = SyncToolsArgs;
+    type Output = String;
     async fn run(args: SyncToolsArgs, _: &ToolCtx) -> Result<String> {
         use serde_json::json;
         handlers::mcp_sync_tools(&json!({
@@ -157,6 +163,7 @@ impl OrcaTool for ListToolMappings {
     const DESCRIPTION: &'static str =
         "List all tool mappings in orca.db, optionally filtered by server name.";
     type Args = ListToolMappingsArgs;
+    type Output = String;
     async fn run(args: ListToolMappingsArgs, _: &ToolCtx) -> Result<String> {
         use serde_json::json;
         handlers::mcp_list_mappings(&json!({ "name": args.name }))
@@ -176,6 +183,7 @@ impl OrcaTool for ListSchemas {
     const DESCRIPTION: &'static str =
         "List all MySQL/MariaDB schema databases registered in orca.db.";
     type Args = ListSchemasArgs;
+    type Output = String;
     async fn run(_: ListSchemasArgs, _: &ToolCtx) -> Result<String> {
         handlers::schema_list_databases()
     }
@@ -203,6 +211,7 @@ impl OrcaTool for AddSchema {
     const DESCRIPTION: &'static str = "[MUTATES STATE] Add or update a schema database in orca.db. \
          Use container OR host/port, not both.";
     type Args = AddSchemaArgs;
+    type Output = String;
     async fn run(args: AddSchemaArgs, _: &ToolCtx) -> Result<String> {
         let row = db::schema_databases::SchemaDbRow {
             name: args.name.clone(),
@@ -236,6 +245,7 @@ impl OrcaTool for RemoveSchema {
     const DESCRIPTION: &'static str =
         "[MUTATES STATE] Remove a schema database from orca.db by name.";
     type Args = RemoveSchemaArgs;
+    type Output = String;
     async fn run(args: RemoveSchemaArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
         if db::schema_databases::remove(&conn, &args.name)? {
@@ -261,6 +271,7 @@ impl OrcaTool for ListDockerRuntimes {
     const NAME: &'static str = "list_docker_runtimes";
     const DESCRIPTION: &'static str = "List all Docker runtimes registered in orca.db.";
     type Args = ListDockerRuntimesArgs;
+    type Output = String;
     async fn run(_: ListDockerRuntimesArgs, _: &ToolCtx) -> Result<String> {
         handlers::docker_list_runtimes()
     }
@@ -283,6 +294,7 @@ impl OrcaTool for AddDockerRuntime {
     const DESCRIPTION: &'static str = "[MUTATES STATE] Register a Docker runtime in orca.db. \
          Provide socketPath, host, or url.";
     type Args = AddDockerRuntimeArgs;
+    type Output = String;
     async fn run(args: AddDockerRuntimeArgs, _: &ToolCtx) -> Result<String> {
         if args.socket_path.is_none() && args.host.is_none() && args.url.is_none() {
             anyhow::bail!("provide socketPath, host, or url");
@@ -314,6 +326,7 @@ impl OrcaTool for RemoveDockerRuntime {
     const DESCRIPTION: &'static str =
         "[MUTATES STATE] Remove a Docker runtime from orca.db by name.";
     type Args = RemoveDockerRuntimeArgs;
+    type Output = String;
     async fn run(args: RemoveDockerRuntimeArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
         if db::docker_runtimes::remove(&conn, &args.name)? {
@@ -339,6 +352,7 @@ impl OrcaTool for ListDocRoots {
     const NAME: &'static str = "list_doc_roots";
     const DESCRIPTION: &'static str = "List all documentation roots registered in orca.db.";
     type Args = ListDocRootsArgs;
+    type Output = String;
     async fn run(_: ListDocRootsArgs, _: &ToolCtx) -> Result<String> {
         handlers::doc_list_roots()
     }
@@ -357,6 +371,7 @@ impl OrcaTool for AddDocRoot {
     const DESCRIPTION: &'static str =
         "[MUTATES STATE] Register a documentation root directory in orca.db.";
     type Args = AddDocRootArgs;
+    type Output = String;
     async fn run(args: AddDocRootArgs, _: &ToolCtx) -> Result<String> {
         let row = db::docs::RootRow {
             name: args.name.clone(),
@@ -384,6 +399,7 @@ impl OrcaTool for RemoveDocRoot {
     const DESCRIPTION: &'static str =
         "[MUTATES STATE] Remove a documentation root from orca.db by name.";
     type Args = RemoveDocRootArgs;
+    type Output = String;
     async fn run(args: RemoveDocRootArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
         if db::docs::remove_root(&conn, &args.name)? {
@@ -403,6 +419,7 @@ impl OrcaTool for ListDocIgnorePatterns {
     const DESCRIPTION: &'static str =
         "List directory names excluded from all doc roots (e.g. node_modules, .git).";
     type Args = ListDocIgnorePatternsArgs;
+    type Output = String;
     async fn run(_: ListDocIgnorePatternsArgs, _: &ToolCtx) -> Result<String> {
         handlers::doc_list_ignore_patterns()
     }
@@ -420,6 +437,7 @@ impl OrcaTool for AddDocIgnorePattern {
     const DESCRIPTION: &'static str =
         "[MUTATES STATE] Add a directory name to the global doc ignore list.";
     type Args = AddDocIgnorePatternArgs;
+    type Output = String;
     async fn run(args: AddDocIgnorePatternArgs, _: &ToolCtx) -> Result<String> {
         use serde_json::json;
         handlers::doc_add_ignore_pattern(&json!({ "pattern": args.pattern }))
@@ -438,6 +456,7 @@ impl OrcaTool for RemoveDocIgnorePattern {
     const DESCRIPTION: &'static str =
         "[MUTATES STATE] Remove a directory name from the global doc ignore list.";
     type Args = RemoveDocIgnorePatternArgs;
+    type Output = String;
     async fn run(args: RemoveDocIgnorePatternArgs, _: &ToolCtx) -> Result<String> {
         use serde_json::json;
         handlers::doc_remove_ignore_pattern(&json!({ "pattern": args.pattern }))
@@ -457,6 +476,7 @@ impl OrcaTool for ListProxmoxEndpoints {
     const DESCRIPTION: &'static str =
         "List all Proxmox VE endpoints registered in orca.db (token secrets are redacted).";
     type Args = ListProxmoxEndpointsArgs;
+    type Output = String;
     async fn run(_: ListProxmoxEndpointsArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
         let rows = db::proxmox::list(&conn)?;
@@ -497,6 +517,7 @@ impl OrcaTool for AddProxmoxEndpoint {
     const DESCRIPTION: &'static str = "[MUTATES STATE] Register or update a Proxmox VE endpoint in orca.db. \
          Auth uses an API token (PVEAPIToken header).";
     type Args = AddProxmoxEndpointArgs;
+    type Output = String;
     async fn run(args: AddProxmoxEndpointArgs, _: &ToolCtx) -> Result<String> {
         let row = db::proxmox::EndpointRow {
             name: args.name.clone(),
@@ -526,6 +547,7 @@ impl OrcaTool for RemoveProxmoxEndpoint {
     const DESCRIPTION: &'static str =
         "[MUTATES STATE] Remove a Proxmox VE endpoint from orca.db by name.";
     type Args = RemoveProxmoxEndpointArgs;
+    type Output = String;
     async fn run(args: RemoveProxmoxEndpointArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
         if db::proxmox::remove(&conn, &args.name)? {
@@ -552,6 +574,7 @@ impl OrcaTool for ListHomeAssistantEndpoints {
     const DESCRIPTION: &'static str =
         "List all Home Assistant endpoints registered in orca.db (tokens are redacted).";
     type Args = ListHomeAssistantEndpointsArgs;
+    type Output = String;
     async fn run(_: ListHomeAssistantEndpointsArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
         let rows = db::home_assistant::list(&conn)?;
@@ -586,6 +609,7 @@ impl OrcaTool for AddHomeAssistantEndpoint {
     const DESCRIPTION: &'static str = "[MUTATES STATE] Register or update a Home Assistant endpoint in orca.db. \
          Auth uses a long-lived access token (Bearer header).";
     type Args = AddHomeAssistantEndpointArgs;
+    type Output = String;
     async fn run(args: AddHomeAssistantEndpointArgs, _: &ToolCtx) -> Result<String> {
         let row = db::home_assistant::EndpointRow {
             name: args.name.clone(),
@@ -613,6 +637,7 @@ impl OrcaTool for RemoveHomeAssistantEndpoint {
     const DESCRIPTION: &'static str =
         "[MUTATES STATE] Remove a Home Assistant endpoint from orca.db by name.";
     type Args = RemoveHomeAssistantEndpointArgs;
+    type Output = String;
     async fn run(args: RemoveHomeAssistantEndpointArgs, _: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;
         if db::home_assistant::remove(&conn, &args.name)? {

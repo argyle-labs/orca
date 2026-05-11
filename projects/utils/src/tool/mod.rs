@@ -16,16 +16,25 @@ pub use types::{ToolCall, ToolDef, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
 use schemars::JsonSchema;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-/// One capability: implement this trait and it is automatically available via MCP,
-/// HTTP POST, and `orca exec <name>`. No other files to edit.
+/// One capability: implement this trait and it is automatically available via
+/// MCP, REST (`/api/tools/<name>`), CLI (`orca exec <name>`), and the WASM
+/// client (`orcaClient.<name>(args)`). No other files to edit.
+///
+/// `Args` and `Output` are both `JsonSchema` so each surface can emit the
+/// right typed wrapper: utoipa for REST/OpenAPI, MCP `tools/list`, CLI flags,
+/// and wasm-bindgen `.d.ts` types for the frontend.
 ///
 /// # Implementing
 ///
 /// ```rust,ignore
 /// #[derive(Deserialize, JsonSchema)]
 /// pub struct Args { pub mode: String }
+///
+/// #[derive(Serialize, JsonSchema)]
+/// pub struct Output { pub mode: String, pub applied: bool }
 ///
 /// pub struct MyTool;
 ///
@@ -34,8 +43,9 @@ use serde::de::DeserializeOwned;
 ///     const NAME: &'static str = "my_tool";
 ///     const DESCRIPTION: &'static str = "Does the thing.";
 ///     type Args = Args;
-///     async fn run(args: Args, _ctx: &ToolCtx) -> Result<String> {
-///         Ok(format!("mode={}", args.mode))
+///     type Output = Output;
+///     async fn run(args: Args, _ctx: &ToolCtx) -> Result<Output> {
+///         Ok(Output { mode: args.mode, applied: true })
 ///     }
 /// }
 /// ```
@@ -44,9 +54,15 @@ pub trait OrcaTool: Send + Sync + 'static {
     const NAME: &'static str;
     const DESCRIPTION: &'static str;
 
-    /// Args must be deserializable from JSON (for MCP + HTTP) and carry a JSON Schema
-    /// (for tools/list and dynamic CLI flag generation).
+    /// Args must be deserializable from JSON (for MCP + REST + WASM) and carry
+    /// a JSON Schema (for tools/list, OpenAPI, CLI flag generation, and TS
+    /// type emission).
     type Args: DeserializeOwned + JsonSchema + Send;
 
-    async fn run(args: Self::Args, ctx: &ToolCtx) -> Result<String>;
+    /// Output must be serializable to JSON (for REST + WASM) and carry a JSON
+    /// Schema (for OpenAPI response bodies + TS type emission). Use `String`
+    /// when the tool genuinely returns human-readable text.
+    type Output: Serialize + JsonSchema + Send + 'static;
+
+    async fn run(args: Self::Args, ctx: &ToolCtx) -> Result<Self::Output>;
 }

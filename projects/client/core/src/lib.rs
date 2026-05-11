@@ -7,7 +7,7 @@
 //! only the bytes-in/bytes-out plumbing.
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -63,7 +63,7 @@ impl<T: Transport> OrcaClient<T> {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Health {
     pub ok: bool,
 }

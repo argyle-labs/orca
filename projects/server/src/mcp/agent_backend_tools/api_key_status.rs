@@ -15,6 +15,7 @@ impl OrcaTool for AgentBackendApiKeyStatus {
     const DESCRIPTION: &'static str = "Report whether an Anthropic API key is stored in the encrypted orca DB. \
          Never echoes the raw key — only a masked preview.";
     type Args = Args;
+    type Output = String;
 
     async fn run(_args: Args, _ctx: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;

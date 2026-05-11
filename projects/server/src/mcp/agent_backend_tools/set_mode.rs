@@ -22,6 +22,7 @@ impl OrcaTool for AgentBackendSetMode {
          else delegate to caller). hybrid = check per-agent override; default is Claude \
          when no override is set.";
     type Args = Args;
+    type Output = String;
 
     async fn run(args: Args, _ctx: &ToolCtx) -> Result<String> {
         let mode = agent_backend::Mode::parse(&args.mode)?;

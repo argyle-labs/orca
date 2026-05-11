@@ -226,8 +226,10 @@ pub async fn serve(config: &Config) -> Result<()> {
                         }
                     }
                 } else if orca_registry.names().contains(&name) {
-                    // Route through OrcaTool registry
-                    let result = orca_registry.dispatch(name, args.clone(), &tool_ctx).await;
+                    // MCP wants text — Value::String passes through, structs pretty-print.
+                    let result = orca_registry
+                        .dispatch_text(name, args.clone(), &tool_ctx)
+                        .await;
                     match result {
                         Ok(text) => reply(
                             id,

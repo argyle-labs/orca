@@ -19,6 +19,7 @@ impl OrcaTool for ListRebuySpecs {
     const DESCRIPTION: &'static str = "List all registered OpenAPI specs for rebuy repos. Returns repo name, description, \
          path count, and whether a public or GraphQL schema is available.";
     type Args = ListRebuySpecsArgs;
+    type Output = String;
     async fn run(_args: ListRebuySpecsArgs, _ctx: &ToolCtx) -> Result<String> {
         specs::list_rebuy_specs()
     }
@@ -40,6 +41,7 @@ impl OrcaTool for GetRebuySpec {
     const DESCRIPTION: &'static str = "Read the full OpenAPI spec for a rebuy repo (e.g. admin-api, apiv2). \
          Returns the complete JSON spec.";
     type Args = GetRebuySpecArgs;
+    type Output = String;
     async fn run(args: GetRebuySpecArgs, _ctx: &ToolCtx) -> Result<String> {
         use serde_json::json;
         specs::get_rebuy_spec(&json!({ "repo": args.repo }))
@@ -62,6 +64,7 @@ impl OrcaTool for GetRebuySpecPublic {
     const DESCRIPTION: &'static str = "Read the public-only OpenAPI spec for a rebuy repo. Contains only publicly \
          documented endpoints.";
     type Args = GetRebuySpecPublicArgs;
+    type Output = String;
     async fn run(args: GetRebuySpecPublicArgs, _ctx: &ToolCtx) -> Result<String> {
         use serde_json::json;
         specs::get_rebuy_spec_public(&json!({ "repo": args.repo }))
@@ -84,6 +87,7 @@ impl OrcaTool for GetRebuyGraphqlSchema {
     const DESCRIPTION: &'static str =
         "Read the raw GraphQL SDL schema for a rebuy repo. Returns the full SDL text.";
     type Args = GetRebuyGraphqlSchemaArgs;
+    type Output = String;
     async fn run(args: GetRebuyGraphqlSchemaArgs, _ctx: &ToolCtx) -> Result<String> {
         use serde_json::json;
         specs::get_rebuy_graphql_schema(&json!({ "repo": args.repo }))
@@ -108,6 +112,7 @@ impl OrcaTool for GetGraphqlInfo {
          Use this instead of get_rebuy_graphql_schema when you need to reason about the schema \
          rather than read the raw SDL.";
     type Args = GetGraphqlInfoArgs;
+    type Output = String;
     async fn run(args: GetGraphqlInfoArgs, _ctx: &ToolCtx) -> Result<String> {
         use serde_json::json;
         specs::get_graphql_info(&json!({ "repo": args.repo }))
@@ -130,6 +135,7 @@ impl OrcaTool for RegisterSpec {
     const DESCRIPTION: &'static str = "[MUTATES STATE] Fetch an OpenAPI spec from a URL and register it in the orca DB. \
          Use refresh_spec to re-fetch after updates.";
     type Args = RegisterSpecArgs;
+    type Output = String;
     async fn run(args: RegisterSpecArgs, _ctx: &ToolCtx) -> Result<String> {
         use serde_json::json;
         specs::spec_register(&json!({ "name": args.name, "url": args.url })).await
@@ -154,6 +160,7 @@ impl OrcaTool for RefreshSpec {
     const DESCRIPTION: &'static str = "[MUTATES STATE] Re-fetch and update one or all URL-registered OpenAPI specs. \
          Provide name or set all=true.";
     type Args = RefreshSpecArgs;
+    type Output = String;
     async fn run(args: RefreshSpecArgs, _ctx: &ToolCtx) -> Result<String> {
         use serde_json::json;
         specs::spec_refresh(&json!({ "all": args.all, "name": args.name })).await
@@ -175,6 +182,7 @@ impl OrcaTool for UnregisterSpec {
     const DESCRIPTION: &'static str =
         "[MUTATES STATE] Remove a URL-registered OpenAPI spec from the orca DB by name.";
     type Args = UnregisterSpecArgs;
+    type Output = String;
     async fn run(args: UnregisterSpecArgs, _ctx: &ToolCtx) -> Result<String> {
         use serde_json::json;
         specs::spec_unregister(&json!({ "name": args.name }))

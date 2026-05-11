@@ -15,6 +15,7 @@ impl OrcaTool for AgentBackendClearApiKey {
     const DESCRIPTION: &'static str =
         "[MUTATES STATE] Remove the stored Anthropic API key from the encrypted orca DB.";
     type Args = Args;
+    type Output = String;
 
     async fn run(_args: Args, _ctx: &ToolCtx) -> Result<String> {
         let conn = db::open_default()?;

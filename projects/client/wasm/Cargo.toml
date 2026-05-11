@@ -8,6 +8,14 @@ name = "orca_client_wasm"
 path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
+# wasm-pack's bundled wasm-opt is too old for the bulk-memory ops the modern
+# wasm-bindgen runtime emits. Skip it; size shrinks via release profile + LTO.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[package.metadata.wasm-pack.profile.dev]
+wasm-opt = false
+
 [dependencies]
 orca-client-core = { path = "../core" }
 

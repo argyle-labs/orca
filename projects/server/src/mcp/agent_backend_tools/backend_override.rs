@@ -21,6 +21,7 @@ impl OrcaTool for AgentBackendOverride {
     const DESCRIPTION: &'static str = "[MUTATES STATE] Set, change, or clear a per-agent backend override \
          (only consulted in hybrid mode). backend=clear deletes the override.";
     type Args = Args;
+    type Output = String;
 
     async fn run(args: Args, _ctx: &ToolCtx) -> Result<String> {
         if args.backend == "clear" {
