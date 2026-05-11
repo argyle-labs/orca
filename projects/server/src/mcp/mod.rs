@@ -9,7 +9,7 @@ pub mod docs;
 pub mod docs_service;
 mod handlers;
 pub mod infra_service;
-mod mgmt_tools;
+pub mod mgmt_service;
 pub mod plugins_service;
 mod spec_tools;
 mod specs;
@@ -36,7 +36,6 @@ pub fn register_all_tools(reg: &mut ToolRegistry) {
 
     // Server-coupled tools that still live here pending service-trait
     // abstractions so they can move to projects/tools/ too.
-    mgmt_tools::register(reg);
     spec_tools::register(reg);
 }
 
@@ -62,6 +61,25 @@ fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
     let plugins_svc: Arc<dyn orca_tools_def::services::plugins::PluginsService> =
         Arc::new(crate::mcp::plugins_service::ServerPlugins);
     ctx.register_service(plugins_svc);
+    {
+        use orca_tools_def::services::mgmt::*;
+        let mcp_reg: Arc<dyn McpRegistryService> =
+            Arc::new(crate::mcp::mgmt_service::ServerMcpRegistry);
+        ctx.register_service(mcp_reg);
+        let schemas: Arc<dyn SchemaDbService> = Arc::new(crate::mcp::mgmt_service::ServerSchemaDb);
+        ctx.register_service(schemas);
+        let docker_rt: Arc<dyn DockerRuntimeService> =
+            Arc::new(crate::mcp::mgmt_service::ServerDockerRuntime);
+        ctx.register_service(docker_rt);
+        let doc_root: Arc<dyn DocRootService> = Arc::new(crate::mcp::mgmt_service::ServerDocRoot);
+        ctx.register_service(doc_root);
+        let proxmox_ep: Arc<dyn ProxmoxEndpointService> =
+            Arc::new(crate::mcp::mgmt_service::ServerProxmoxEndpoint);
+        ctx.register_service(proxmox_ep);
+        let ha_ep: Arc<dyn HaEndpointService> =
+            Arc::new(crate::mcp::mgmt_service::ServerHaEndpoint);
+        ctx.register_service(ha_ep);
+    }
     let mut reg = ToolRegistry::new();
     register_all_tools(&mut reg);
     (reg, ctx)

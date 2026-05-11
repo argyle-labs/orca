@@ -20,6 +20,8 @@ pub mod homeassistant;
 pub mod infra;
 pub mod json_any;
 pub mod meta;
+pub mod mgmt;
+pub mod plugin_runtime;
 pub mod plugins;
 pub mod proxmox;
 pub mod services;
@@ -124,6 +126,49 @@ declare_tools! {
     set_plugin_cred     => plugins::SetPluginCred,
     remove_plugin_cred  => plugins::RemovePluginCred,
     sync_plugin_creds   => plugins::SyncPluginCreds,
+
+    // Mgmt — MCP federation (live tools + run)
+    list_mcp_tools       => mgmt::ListMcpTools,
+    run_mcp_tool         => mgmt::RunMcpTool,
+    // Mgmt — schema view
+    get_schema           => mgmt::GetSchema,
+    get_schema_domains   => mgmt::GetSchemaDomains,
+
+    // Plugin runtime KV
+    get_plugin_data => plugin_runtime::GetPluginData,
+    set_plugin_data => plugin_runtime::SetPluginData,
+
+    // Mgmt — MCP servers + mappings
+    list_mcp_servers     => mgmt::ListMcpServers,
+    add_mcp_server       => mgmt::AddMcpServer,
+    remove_mcp_server    => mgmt::RemoveMcpServer,
+    map_tool             => mgmt::MapTool,
+    unmap_tool           => mgmt::UnmapTool,
+    sync_tools           => mgmt::SyncTools,
+    list_tool_mappings   => mgmt::ListToolMappings,
+    // Mgmt — schema databases
+    list_schemas         => mgmt::ListSchemas,
+    add_schema           => mgmt::AddSchema,
+    remove_schema        => mgmt::RemoveSchema,
+    // Mgmt — docker runtimes
+    list_docker_runtimes  => mgmt::ListDockerRuntimes,
+    add_docker_runtime    => mgmt::AddDockerRuntime,
+    remove_docker_runtime => mgmt::RemoveDockerRuntime,
+    // Mgmt — doc roots + ignore patterns
+    list_doc_roots             => mgmt::ListDocRoots,
+    add_doc_root               => mgmt::AddDocRoot,
+    remove_doc_root            => mgmt::RemoveDocRoot,
+    list_doc_ignore_patterns   => mgmt::ListDocIgnorePatterns,
+    add_doc_ignore_pattern     => mgmt::AddDocIgnorePattern,
+    remove_doc_ignore_pattern  => mgmt::RemoveDocIgnorePattern,
+    // Mgmt — proxmox endpoints
+    list_proxmox_endpoints   => mgmt::ListProxmoxEndpoints,
+    add_proxmox_endpoint     => mgmt::AddProxmoxEndpoint,
+    remove_proxmox_endpoint  => mgmt::RemoveProxmoxEndpoint,
+    // Mgmt — home assistant endpoints
+    list_home_assistant_endpoints  => mgmt::ListHomeAssistantEndpoints,
+    add_home_assistant_endpoint    => mgmt::AddHomeAssistantEndpoint,
+    remove_home_assistant_endpoint => mgmt::RemoveHomeAssistantEndpoint,
 
     // Home Assistant
     home_assistant_entity_list     => homeassistant::HaEntityList,
