@@ -223,46 +223,6 @@ pub fn docker_list_runtimes() -> Result<String> {
     Ok(lines.join("\n"))
 }
 
-pub fn plugin_list(args: &Value) -> Result<String> {
-    let workspace = args["workspace"].as_str();
-    let conn = db::open_default()?;
-    let plugins = db::plugins::list(&conn)?;
-    let filtered: Vec<_> = plugins
-        .iter()
-        .filter(|p| workspace.is_none_or(|w| p.tier == w))
-        .collect();
-    if filtered.is_empty() {
-        return Ok("No plugins registered.".to_string());
-    }
-    let mut lines = vec!["Registered plugins:".to_string(), String::new()];
-    for p in &filtered {
-        let status = if p.enabled { "enabled" } else { "disabled" };
-        let cmd = p.mcp_command.as_deref().unwrap_or("(stdio)");
-        lines.push(format!("  {} [{}] ({}) → {}", p.id, p.tier, status, cmd));
-    }
-    Ok(lines.join("\n"))
-}
-
-pub fn plugin_creds_list(args: &Value) -> Result<String> {
-    let plugin = args["plugin"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("plugin required"))?;
-    let conn = db::open_default()?;
-    let creds = db::plugin_creds::list(&conn, plugin)?;
-    if creds.is_empty() {
-        return Ok(format!("No credentials stored for plugin '{plugin}'."));
-    }
-    let mut lines = vec![format!("Credentials for '{plugin}':")];
-    for c in &creds {
-        let sync = c.synced_at.as_deref().unwrap_or("never");
-        lines.push(format!(
-            "  {} (synced: {}, updated: {})",
-            c.key, sync, c.updated_at
-        ));
-    }
-    Ok(lines.join("\n"))
-}
-
 // ── Doc root registry ─────────────────────────────────────────────────────────
 
 pub fn doc_list_roots() -> Result<String> {

@@ -20,6 +20,7 @@ pub mod homeassistant;
 pub mod infra;
 pub mod json_any;
 pub mod meta;
+pub mod plugins;
 pub mod proxmox;
 pub mod services;
 
@@ -112,6 +113,17 @@ declare_tools! {
     list_services    => infra::ListServices,
     get_service_logs => infra::GetServiceLogs,
     run_tests        => infra::RunTests,
+
+    // Plugins — registry + credentials
+    list_plugins        => plugins::ListPlugins,
+    add_plugin          => plugins::AddPlugin,
+    remove_plugin       => plugins::RemovePlugin,
+    enable_plugin       => plugins::EnablePlugin,
+    disable_plugin      => plugins::DisablePlugin,
+    list_plugin_creds   => plugins::ListPluginCreds,
+    set_plugin_cred     => plugins::SetPluginCred,
+    remove_plugin_cred  => plugins::RemovePluginCred,
+    sync_plugin_creds   => plugins::SyncPluginCreds,
 
     // Home Assistant
     home_assistant_entity_list     => homeassistant::HaEntityList,
