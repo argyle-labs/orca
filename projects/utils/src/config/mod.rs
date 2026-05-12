@@ -117,10 +117,6 @@ impl Config {
         self.app_dir.join("orca.toml")
     }
 
-    pub fn agents_dir(&self) -> PathBuf {
-        dirs::home_dir().unwrap_or_default().join(".claude/agents")
-    }
-
     pub fn logs_dir(&self) -> PathBuf {
         self.app_dir.join("logs/sessions")
     }

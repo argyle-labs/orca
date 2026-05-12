@@ -60,7 +60,7 @@ impl ProjectContext {
     /// `full_persona` = false: stripped-down prompt for local models that don't handle complex personas.
     pub fn build_system_prompt_for_backend(&self, config: &Config, full_persona: bool) -> String {
         let base = if full_persona {
-            crate::agents::load_agent_prompt("wolf", &config.agents_dir()).unwrap_or_else(|| {
+            crate::mcp::agent_resolve::load_agent_prompt("wolf", config).unwrap_or_else(|| {
                 eprintln!("warning: wolf.md not found — using minimal fallback prompt");
                 "You are an AI assistant. Be precise, efficient, and honest.".to_string()
             })

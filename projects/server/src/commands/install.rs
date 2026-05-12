@@ -160,7 +160,11 @@ pub fn cmd_install_report() -> InstallReport {
     step_vault_dirs(&home, &mut report);
     step_pki_init(&home, &mut report);
     step_claude_md(&home, &mut report);
-    step_claude_agents(&home, &mut report);
+    // Agents are served via the orca-local MCP server (list_agents / get_agent /
+    // run_agent), not by a `~/.claude/agents` symlink. On hosts upgraded from
+    // older orca versions, sweep the old symlink so Claude Code doesn't see
+    // duplicate agent definitions from two sources.
+    step_remove_legacy_agents_link(&home, &mut report);
     step_memory_symlinks(&home, &mut report);
     step_git_hooks(&mut report);
     step_mcp_registration(&mut report);
@@ -179,6 +183,7 @@ pub fn cmd_uninstall_report() -> InstallReport {
     let mut report = InstallReport::new();
     step_remove_mcp(&mut report);
     step_remove_claude_md(&home, &mut report);
+    step_remove_legacy_agents_link(&home, &mut report);
     step_remove_binary(&home, &mut report);
     report
 }
@@ -193,7 +198,6 @@ pub fn install_status() -> serde_json::Value {
     let binary_path = install_bin_path(&home);
     let claude_md_path = home.join(".claude/CLAUDE.md");
     let vault_dir = home.join(APP_STATE_DIR);
-    let agents_link = home.join(".claude/agents");
     let pki_dir = vault_dir.join(APP_PKI_DIR);
     let pki_ca = pki::ca_cert_path(&pki_dir);
     let pki_server = pki::server_cert_path(&pki_dir);
@@ -211,10 +215,6 @@ pub fn install_status() -> serde_json::Value {
         "vault": {
             "exists": vault_dir.exists(),
             "path": vault_dir.to_string_lossy(),
-        },
-        "agents": {
-            "linked": is_symlink(&agents_link),
-            "path": agents_link.to_string_lossy(),
         },
         "pki": {
             "initialized": pki_ca.exists() && pki_server.exists(),
@@ -280,11 +280,7 @@ fn step_install_binary(home: &Path, report: &mut InstallReport) {
 
 fn step_vault_dirs(home: &Path, report: &mut InstallReport) {
     let vault = home.join(APP_STATE_DIR);
-    let dirs = [
-        vault.join("memory"),
-        vault.join("agents"),
-        vault.join("logs/sessions"),
-    ];
+    let dirs = [vault.join("memory"), vault.join("logs/sessions")];
     for dir in &dirs {
         match std::fs::create_dir_all(dir) {
             Ok(_) => report.ok(format!("vault dir: {}", dir.display())),
@@ -347,29 +343,22 @@ fn step_claude_md(home: &Path, report: &mut InstallReport) {
     }
 }
 
-fn step_claude_agents(home: &Path, report: &mut InstallReport) {
-    let agents_src = home.join(APP_STATE_DIR).join("agents");
+/// Sweep the legacy `~/.claude/agents` symlink that older orca installs
+/// created. Agents are now served exclusively via the orca-local MCP server
+/// (list_agents / get_agent / run_agent), so the on-disk link only causes
+/// Claude Code to see duplicate definitions. Idempotent: silent no-op when
+/// nothing's there. Real directories are left alone — if a user has hand-
+/// curated content under `~/.claude/agents/`, we don't want to nuke it.
+fn step_remove_legacy_agents_link(home: &Path, report: &mut InstallReport) {
     let agents_link = home.join(".claude/agents");
-
-    let _ = std::fs::create_dir_all(&agents_src);
-
-    // Remove real dir if it exists so we can place the symlink
-    if agents_link.exists() && !is_symlink(&agents_link) {
-        match std::fs::remove_dir_all(&agents_link) {
-            Ok(_) => report.ok("~/.claude/agents: removed real dir (replaced with symlink)"),
-            Err(e) => {
-                report.err(format!("~/.claude/agents: cannot remove dir: {e}"));
-                return;
-            }
+    if is_symlink(&agents_link) {
+        match std::fs::remove_file(&agents_link) {
+            Ok(_) => report.ok("~/.claude/agents: removed legacy symlink (agents now via MCP)"),
+            Err(e) => report.err(format!("~/.claude/agents: remove failed: {e}")),
         }
+    } else if agents_link.exists() {
+        report.skip("~/.claude/agents: real directory present — not touching (move or delete manually if obsolete)");
     }
-
-    force_symlink(
-        &agents_src,
-        &agents_link,
-        report,
-        "~/.claude/agents → vault",
-    );
 }
 
 fn step_memory_symlinks(home: &Path, report: &mut InstallReport) {
