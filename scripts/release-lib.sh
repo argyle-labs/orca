@@ -232,7 +232,8 @@ run_release_checks() {
   log "cargo clippy"
   RUSTFLAGS="-D warnings" cargo clippy --all-targets -- -D warnings
   log "SDK isolation"
-  if cargo tree -p orca-sdk 2>&1 | grep -E "orca-server|orca-commands|orca-conversation|orca-agents|orca-llm|orca-scanner|rust-embed"; then
+  _sdk_tree=$(cargo tree -p orca-sdk 2>&1 || true)
+  if echo "$_sdk_tree" | grep -qE "orca-server|orca-commands|orca-conversation|orca-agents|orca-llm|orca-scanner|rust-embed"; then
     die "server-only crate found in orca-sdk dependency tree"
   fi
   log "cargo test (workspace)"
@@ -263,7 +264,8 @@ build_frontend() {
 #
 # Args: $1 = target triple, $2 = cargo -j value
 cargo_build_target() {
-  local target="$1" jobs="$2"
+  local target="$1"
+  local jobs="$2"
   cd "$REPO_ROOT"
 
   local features_args=()
@@ -298,7 +300,8 @@ cargo_build_target() {
 # Copy the compiled binary into dist-release/ and write its sha256. Only
 # called on the release path — `make build` skips this.
 stage_target_asset() {
-  local target="$1" asset="orca-${target}"
+  local target="$1"
+  local asset="orca-${target}"
   local target_dir="${REPO_ROOT}/target-release/${target}"
   cd "$REPO_ROOT"
   mkdir -p "$DIST_DIR"
@@ -396,7 +399,11 @@ mapfile_to_array() {
 #       $5..=target list (for install snippet)
 generate_changelog() {
   set +o pipefail
-  local prev="$1" new="$2" kind="$3" notes="${4:-}"; shift 4 || true
+  local prev="$1"
+  local new="$2"
+  local kind="$3"
+  local notes="${4:-}"
+  shift 4 || true
   local targets=("$@")
   [ "${#targets[@]}" -gt 0 ] || mapfile_to_array targets default_targets
 
@@ -447,7 +454,8 @@ generate_changelog() {
 #
 # Args: $1=tag (e.g. "v0.0.4") [$2=--include-rc]
 prepend_changelog() {
-  local tag="$1" include_rc=0
+  local tag="$1"
+  local include_rc=0
   [ "${2:-}" = "--include-rc" ] && include_rc=1
 
   # Skip RC tags unless explicitly asked
