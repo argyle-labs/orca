@@ -266,12 +266,20 @@ cargo_build_target() {
   local features_args=()
   [ -n "$RELEASE_FEATURES" ] && features_args=(--features "$RELEASE_FEATURES")
 
+  # Pin the macOS deployment target to 11.0 for all Apple builds.
+  # Without this, the current OS version (e.g. 26.4 on macOS beta) leaks into
+  # MACOSX_DEPLOYMENT_TARGET and cargo-zigbuild passes an invalid -mmacosx-version-min.
+  local extra_env=()
+  case "$target" in
+    *-apple-darwin) extra_env=(env MACOSX_DEPLOYMENT_TARGET=11.0) ;;
+  esac
+
   log "building ${target} (profile=${RELEASE_PROFILE}, cargo -j${jobs}${RELEASE_FEATURES:+, features=$RELEASE_FEATURES})"
   if [ "$target" = "$(host_target)" ]; then
-    cargo build --profile "$RELEASE_PROFILE" --jobs "$jobs" "${features_args[@]}" \
+    "${extra_env[@]}" cargo build --profile "$RELEASE_PROFILE" --jobs "$jobs" "${features_args[@]}" \
       --target "$target" --manifest-path "$SERVER_TOML"
   else
-    cargo zigbuild --profile "$RELEASE_PROFILE" --jobs "$jobs" "${features_args[@]}" \
+    "${extra_env[@]}" cargo zigbuild --profile "$RELEASE_PROFILE" --jobs "$jobs" "${features_args[@]}" \
       --target "$target" --manifest-path "$SERVER_TOML"
   fi
 }
