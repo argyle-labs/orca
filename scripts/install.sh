@@ -133,23 +133,44 @@ ensure_orca_user() {
     return 0
   fi
   [ -n "$ADMIN_PUBKEY" ] || die "running as root with no orca user — pass --admin-pubkey \"\$(cat ~/.ssh/id_ed25519.pub)\" so the controller can ssh in later"
-  need useradd
-  warn "creating system user '$ORCA_USER' (home $ORCA_HOME_DIR, no sudo, no extra blanket access)"
-  useradd \
-    --system \
-    --create-home \
-    --home-dir "$ORCA_HOME_DIR" \
-    --shell /bin/bash \
-    "$ORCA_USER"
-  # Best-effort group adds. Skip silently if the group doesn't exist on this host.
+
+  # Pick a shell that actually exists. Alpine/busybox systems often have no
+  # /bin/bash and useradd's default '-s /bin/bash' fails with a warning + the
+  # subsequent `su - orca` blowing up. Prefer bash when present, fall back to sh.
+  ORCA_SHELL=/bin/sh
+  [ -x /bin/bash ] && ORCA_SHELL=/bin/bash
+
+  warn "creating system user '$ORCA_USER' (home $ORCA_HOME_DIR, shell $ORCA_SHELL, no sudo)"
+  if command -v useradd >/dev/null 2>&1; then
+    useradd \
+      --system \
+      --create-home \
+      --home-dir "$ORCA_HOME_DIR" \
+      --shell "$ORCA_SHELL" \
+      "$ORCA_USER"
+  elif command -v adduser >/dev/null 2>&1; then
+    # busybox adduser (Alpine). -S = system user, -D = no password, -H would skip
+    # home creation — we want home, so omit -H. Shell + home-dir are positional flags.
+    adduser -S -D -h "$ORCA_HOME_DIR" -s "$ORCA_SHELL" "$ORCA_USER"
+  else
+    die "neither useradd nor adduser found — cannot create $ORCA_USER"
+  fi
+
+  # Best-effort group adds. Skip silently if the group doesn't exist.
   for grp in docker systemd-journal; do
     if getent group "$grp" >/dev/null 2>&1; then
-      usermod -aG "$grp" "$ORCA_USER" || warn "could not add $ORCA_USER to $grp"
+      if command -v usermod >/dev/null 2>&1; then
+        usermod -aG "$grp" "$ORCA_USER" || warn "could not add $ORCA_USER to $grp"
+      elif command -v addgroup >/dev/null 2>&1; then
+        addgroup "$ORCA_USER" "$grp" || warn "could not add $ORCA_USER to $grp"
+      fi
     fi
   done
+
   # Linger so the user-systemd session survives without an interactive login.
-  if command -v loginctl >/dev/null 2>&1; then
-    loginctl enable-linger "$ORCA_USER" || warn "loginctl enable-linger failed (user-systemd may not run on boot)"
+  # Only meaningful on systemd hosts; harmless to skip elsewhere.
+  if command -v loginctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    loginctl enable-linger "$ORCA_USER" || warn "loginctl enable-linger failed"
   fi
   install_orca_ssh_key
 }
@@ -162,7 +183,7 @@ install_orca_ssh_key() {
   printf '%s\n' "$ADMIN_PUBKEY" > "$_auth"
   chmod 700 "$_ssh_dir"
   chmod 600 "$_auth"
-  chown -R "$ORCA_USER:$ORCA_USER" "$_ssh_dir"
+  chown -R "$ORCA_USER" "$_ssh_dir"
 }
 
 # When we end up running as root, set install paths under orca's home.
@@ -314,13 +335,28 @@ printf '%s\n' "$CHANNEL" > "${ORCA_HOME_TARGET}/channel"
 
 # Hand the tree over to the orca user when running as root.
 if [ "$RUN_AS_ORCA" = "1" ]; then
-  chown -R "$ORCA_USER:$ORCA_USER" "$ORCA_HOME_DIR/.local" "$ORCA_HOME_TARGET"
+  chown -R "$ORCA_USER" "$ORCA_HOME_DIR/.local" "$ORCA_HOME_TARGET"
   echo "✓ installed: ${INSTALL_DIR}/orca  (channel: ${CHANNEL}, user: ${ORCA_USER})"
-  echo "→ bootstrapping daemon as ${ORCA_USER}"
-  if command -v runuser >/dev/null 2>&1; then
-    runuser -u "$ORCA_USER" -- "${INSTALL_DIR}/orca" daemon install || warn "daemon install failed — run it manually as $ORCA_USER"
+
+  # `orca daemon install` today only knows systemd (Linux) and launchd (macOS).
+  # On Slackware/Unraid/OpenRC/etc. it will fail to spawn systemctl. Probe
+  # before invoking so we give a clear next-step instead of a cryptic IO error.
+  if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    echo "→ bootstrapping daemon as ${ORCA_USER}"
+    # Re-export PATH explicitly — `runuser -u` doesn't run a login shell so the
+    # inherited PATH may not include /usr/bin where systemctl lives.
+    _ORCA_PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+    if command -v runuser >/dev/null 2>&1; then
+      runuser -u "$ORCA_USER" -- env PATH="$_ORCA_PATH" "${INSTALL_DIR}/orca" daemon install \
+        || warn "daemon install failed — run it manually as $ORCA_USER"
+    else
+      su - "$ORCA_USER" -c "PATH='$_ORCA_PATH' '${INSTALL_DIR}/orca' daemon install" \
+        || warn "daemon install failed — run it manually as $ORCA_USER"
+    fi
   else
-    su - "$ORCA_USER" -c "${INSTALL_DIR}/orca daemon install" || warn "daemon install failed — run it manually as $ORCA_USER"
+    warn "no systemd detected — skipping 'orca daemon install'"
+    warn "  binary is at ${INSTALL_DIR}/orca; you'll need an OS-native service"
+    warn "  unit (OpenRC, rc.d, supervised, etc.) to autostart on boot."
   fi
   exit 0
 fi
