@@ -91,20 +91,17 @@ impl TestApp {
         self.call(req).await
     }
 
-    /// Point `open_default()` at this test's isolated DB for the duration of the closure.
-    /// Uses a thread-local override so parallel tests on different threads don't race.
+    /// Point `open_default()` at this test's isolated DB for the duration of
+    /// the closure. Uses a tokio task-local override so handlers see the
+    /// scoped path across `.await` points and worker-thread moves.
     #[allow(clippy::ptr_arg)]
     fn with_db<F, Fut>(db_path: &PathBuf, f: F) -> impl std::future::Future<Output = ()>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
-        let db_path = db_path.to_string_lossy().to_string();
-        async move {
-            db::set_thread_db_path(Some(&db_path));
-            f().await;
-            db::set_thread_db_path(None);
-        }
+        let db_path = db_path.clone();
+        async move { db::with_db_path(db_path, f()).await }
     }
 }
 

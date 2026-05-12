@@ -196,14 +196,42 @@ pub fn open(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-// Thread-local DB path override — each test thread can set its own isolated DB
-// path without racing against other parallel tests. Takes priority over ORCA_DB_PATH.
-thread_local! {
-    static THREAD_DB_PATH: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+// Task-local DB path override — flows with the tokio task tree, surviving
+// `.await` points, `tokio::spawn`, and worker-thread moves alike. This is
+// the primary, robust override mechanism. Use `with_db_path(path, fut)` to
+// scope a future.
+//
+// Why task_local and not thread_local: handlers in axum can await mid-request,
+// and the multi-threaded runtime is free to resume them on a different worker.
+// A thread_local set on the test thread is invisible there → silent fallback
+// to `~/.orca/orca.db`, which on a clean machine doesn't exist → 500s.
+tokio::task_local! {
+    static TASK_DB_PATH: std::path::PathBuf;
 }
 
-/// Set a per-thread DB path override (for integration tests only).
-/// Pass `None` to clear the override and restore default lookup.
+// Legacy thread-local override — kept as a fallback for tests written before
+// the task-local existed. New code should use `with_db_path`. Removal is
+// blocked on migrating ~20 call sites in tests/plugin_host.rs.
+thread_local! {
+    static THREAD_DB_PATH: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `fut` with `path` as the active DB-path override. Every `open_default()`
+/// call inside the future (and inside any task spawned from it) sees `path`.
+/// Used by integration tests to isolate against an ephemeral SQLite file.
+pub fn with_db_path<F>(
+    path: std::path::PathBuf,
+    fut: F,
+) -> tokio::task::futures::TaskLocalFuture<std::path::PathBuf, F>
+where
+    F: std::future::Future,
+{
+    TASK_DB_PATH.scope(path, fut)
+}
+
+/// Legacy: set a per-thread DB path override. Prefer `with_db_path` — this
+/// breaks the moment a handler awaits and resumes on another worker thread.
 pub fn set_thread_db_path(path: Option<&str>) {
     THREAD_DB_PATH.with(|p| *p.borrow_mut() = path.map(|s| s.to_string()));
 }
@@ -211,12 +239,15 @@ pub fn set_thread_db_path(path: Option<&str>) {
 /// Open orca database using the default path (`~/.orca/orca.db`).
 ///
 /// Resolution order:
-///   1. Thread-local override set by `set_thread_db_path` (integration tests).
-///   2. `ORCA_DB_PATH` env var (legacy / CI override).
-///   3. `~/.orca/orca.db` (encrypted, production).
+///   1. Task-local override set by `with_db_path` (preferred — async-safe).
+///   2. Thread-local override set by `set_thread_db_path` (legacy fallback).
+///   3. `ORCA_DB_PATH` env var (CI / scripts).
+///   4. `~/.orca/orca.db` (encrypted, production).
 pub fn open_default() -> Result<Connection> {
-    let thread_path = THREAD_DB_PATH.with(|p| p.borrow().clone());
-    if let Some(path) = thread_path {
+    if let Ok(path) = TASK_DB_PATH.try_with(|p| p.clone()) {
+        return open_unencrypted(&path);
+    }
+    if let Some(path) = THREAD_DB_PATH.with(|p| p.borrow().clone()) {
         return open_unencrypted(std::path::Path::new(&path));
     }
     if let Ok(path) = std::env::var("ORCA_DB_PATH") {
