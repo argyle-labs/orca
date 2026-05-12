@@ -369,6 +369,111 @@ pub async fn cmd_update(channel_arg: &str) -> Result<()> {
     Ok(())
 }
 
+// ── sha256 cache for `--check` ───────────────────────────────────────────────
+//
+// `orca update --check` is a cheap preview: it resolves the target version
+// and pre-fetches the `.sha256` blob so a subsequent `orca update` (or an
+// out-of-band download via install.sh) can verify against the cached hash
+// without round-tripping to GitHub a second time.
+//
+// Cache shape:   $ORCA_HOME/cache/sha256/<version>.sha256
+// TTL:           14 days (CHECK_CACHE_TTL_SECS) — large enough that nightly
+//                CI smoke runs reuse a single hash; small enough that stale
+//                entries from abandoned RC trains don't linger forever.
+// Pruning:       lazy. Every `--check` walks the cache dir once and removes
+//                anything past TTL. Cheap (≤ N files, single stat each).
+
+const CHECK_CACHE_TTL_SECS: u64 = 14 * 24 * 3600;
+
+fn check_cache_dir() -> Option<PathBuf> {
+    let dir = std::env::var_os("ORCA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".orca")))?;
+    Some(dir.join("cache").join("sha256"))
+}
+
+/// Drop any cached sha256 files older than `CHECK_CACHE_TTL_SECS`. Best-effort
+/// — read/stat failures are skipped, never propagated.
+fn prune_check_cache() {
+    let Some(dir) = check_cache_dir() else { return };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age.as_secs() > CHECK_CACHE_TTL_SECS {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Path where a given version's sha256 is cached.
+fn cached_sha256_path(version: &str) -> Option<PathBuf> {
+    Some(check_cache_dir()?.join(format!("{version}.sha256")))
+}
+
+/// Write a checksum blob to the cache. Touches mtime so TTL is from "last
+/// observed" rather than "first written" — a long-lived RC that keeps
+/// re-validating stays warm.
+fn write_cached_sha256(version: &str, body: &[u8]) -> Result<PathBuf> {
+    let path = cached_sha256_path(version).context("no ORCA_HOME or HOME set")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create_dir_all {}", parent.display()))?;
+    }
+    std::fs::write(&path, body).with_context(|| format!("write {}", path.display()))?;
+    Ok(path)
+}
+
+/// CLI entry: `orca update --check`. Resolves the target version on the
+/// channel and (if newer than current) downloads the matching .sha256 into
+/// the local cache. Does NOT replace the running binary.
+pub async fn cmd_update_check(channel_arg: &str) -> Result<()> {
+    prune_check_cache();
+    let channel = resolve_channel(channel_arg);
+    let token = resolve_github_token();
+    println!(
+        "[orca] current version: v{CURRENT_VERSION} ({BUILD_TARGET}, channel={})",
+        channel.as_marker()
+    );
+    println!("[orca] checking for updates (preview only)...");
+
+    match check_for_update(&channel, &token).await? {
+        None => {
+            println!("[orca] already up to date");
+        }
+        Some(info) => {
+            println!("[orca] new version available: v{}", info.version);
+            if let Some(pin) = resolve_pin_veto(&info) {
+                println!("[orca] pinned to {pin} — `orca update --unpin` to upgrade");
+            }
+            // Pre-fetch the checksum so the subsequent `orca update` (or a
+            // separate install.sh push) can verify without a second GH round-trip.
+            if info.checksum_url.is_empty() {
+                println!("[orca] no checksum URL on release — skipping cache");
+            } else {
+                match download_asset(&orca_utils::http::Client::new(), &info.checksum_url, &token)
+                    .await
+                {
+                    Ok(bytes) => match write_cached_sha256(&info.version, &bytes) {
+                        Ok(path) => println!("[orca] cached sha256 → {}", path.display()),
+                        Err(e) => eprintln!("[orca] warning: cache write failed: {e}"),
+                    },
+                    Err(e) => eprintln!("[orca] warning: sha256 download failed: {e}"),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Set a version pin. The pin prevents `orca update` from upgrading past
 /// the specified version. Use `cmd_update_unpin` to clear.
 pub fn cmd_update_pin(version: &str) -> Result<String> {

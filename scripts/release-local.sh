@@ -180,11 +180,31 @@ cmd_promote() {
     --notes "> **Superseded** — promoted to stable [${stable_tag}](https://github.com/${repo}/releases/tag/${stable_tag})." \
     --prerelease
 
+  # Remove every now-superseded RC release for this version so the releases
+  # page only carries the stable tag. Opt out with PROMOTE_KEEP_RCS=1 if you
+  # want to inspect the RC trail post-promotion.
+  if [ "${PROMOTE_KEEP_RCS:-0}" = "1" ]; then
+    log "PROMOTE_KEEP_RCS=1 — keeping RC releases in place"
+  else
+    cleanup_rcs "$stable_version"
+  fi
+
   log "done — ${stable_tag} published"
 }
 
+cmd_cleanup_rcs() {
+  local stable="${1:-}"
+  [ -n "$stable" ] || die "usage: release-local.sh cleanup-rcs <stable-version> [--dry-run]
+  e.g. release-local.sh cleanup-rcs 0.0.3
+       release-local.sh cleanup-rcs 0.0.3 --dry-run"
+  # Accept either bare "0.0.3" or "v0.0.3" for ergonomics.
+  stable="${stable#v}"
+  cleanup_rcs "$stable" "${2:-}"
+}
+
 case "${1:-}" in
-  rc)      shift; cmd_rc "$@" ;;
-  promote) shift; cmd_promote "$@" ;;
-  *) die "usage: release-local.sh {rc <patch|minor|major> | promote}" ;;
+  rc)           shift; cmd_rc "$@" ;;
+  promote)      shift; cmd_promote "$@" ;;
+  cleanup-rcs)  shift; cmd_cleanup_rcs "$@" ;;
+  *) die "usage: release-local.sh {rc <patch|minor|major> | promote | cleanup-rcs <ver> [--dry-run]}" ;;
 esac

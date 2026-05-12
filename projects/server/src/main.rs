@@ -86,6 +86,28 @@ enum Command {
         action: SpecAction,
     },
 
+    /// Check or apply binary updates from GitHub releases on the configured channel.
+    ///
+    /// With no flags: applies the latest update on the channel marker
+    /// (~/.orca/channel). Use --channel to switch (also rewrites the marker).
+    /// Use --check to preview (downloads + caches the .sha256 only).
+    Update {
+        /// Channel override: stable | rc | beta | alpha. Falls back to the
+        /// channel marker, then to "stable" if no marker is set.
+        #[arg(long)]
+        channel: Option<String>,
+        /// Preview only — resolve the target version + cache its sha256,
+        /// do not download or swap the binary.
+        #[arg(long)]
+        check: bool,
+        /// Pin to a version. Future `orca update` runs will not upgrade past this.
+        #[arg(long, value_name = "VERSION", conflicts_with = "unpin")]
+        pin: Option<String>,
+        /// Clear the version pin. `orca update` resumes following the channel.
+        #[arg(long, conflicts_with = "pin")]
+        unpin: bool,
+    },
+
     /// Claude Code hook handlers (session-start, bash-guard, pii-scan, etc.)
     Hook {
         #[command(subcommand)]
@@ -190,6 +212,26 @@ async fn main() -> Result<()> {
         Some(Command::Dev { port }) => cmd_dev(port, &config).await,
         Some(Command::Hook { action }) => cmd::cmd_hook(action),
         Some(Command::Op(argv)) => dispatch_op(argv, config).await,
+        Some(Command::Update {
+            channel,
+            check,
+            pin,
+            unpin,
+        }) => {
+            if let Some(v) = pin {
+                let pinned = cmd::update::cmd_update_pin(&v)?;
+                println!("[orca] pinned to {pinned}");
+                Ok(())
+            } else if unpin {
+                cmd::update::cmd_update_unpin()?;
+                println!("[orca] pin cleared");
+                Ok(())
+            } else if check {
+                cmd::update::cmd_update_check(channel.as_deref().unwrap_or("")).await
+            } else {
+                cmd::update::cmd_update(channel.as_deref().unwrap_or("")).await
+            }
+        }
         Some(Command::Spec { action }) => match action {
             SpecAction::Dump => {
                 let spec = openapi_spec_json();
