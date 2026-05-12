@@ -1,7 +1,7 @@
 //! PKI: CA generation, node cert issuance, and cert/key loading.
 //!
 //! All material lives under `~/.orca/pki/`:
-//!   ca.cert.pem / ca.key.pem          — root CA (generated once by `orca pki init`)
+//!   ca.cert.pem / ca.key.pem          — root CA (generated once by `orca pki ca-init`)
 //!   server/node.cert.pem / node.key.pem — server cert (generated alongside the CA)
 //!   plugins/<id>/node.cert.pem / node.key.pem — per-plugin cert
 //!
@@ -139,9 +139,9 @@ pub fn init(pki_dir: &Path) -> Result<()> {
 /// exist — caller must run `init` first.
 pub fn issue(pki_dir: &Path, plugin_id: &str, capability: Capability) -> Result<NodeBundle> {
     let ca_cert_pem = std::fs::read_to_string(ca_cert_path(pki_dir))
-        .context("CA cert not found — run `orca pki init` first")?;
+        .context("CA cert not found — run `orca pki ca-init` first")?;
     let ca_key_pem = std::fs::read_to_string(ca_key_path(pki_dir))
-        .context("CA key not found — run `orca pki init` first")?;
+        .context("CA key not found — run `orca pki ca-init` first")?;
 
     let ca_key = KeyPair::from_pem(&ca_key_pem)?;
     let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key)?;
@@ -182,11 +182,11 @@ pub fn issue(pki_dir: &Path, plugin_id: &str, capability: Capability) -> Result<
 pub fn load_server(pki_dir: &Path) -> Result<NodeBundle> {
     Ok(NodeBundle {
         cert_pem: std::fs::read_to_string(server_cert_path(pki_dir))
-            .context("server cert not found — run `orca pki init`")?,
+            .context("server cert not found — run `orca pki ca-init`")?,
         key_pem: std::fs::read_to_string(server_key_path(pki_dir))
-            .context("server key not found — run `orca pki init`")?,
+            .context("server key not found — run `orca pki ca-init`")?,
         ca_cert_pem: std::fs::read_to_string(ca_cert_path(pki_dir))
-            .context("CA cert not found — run `orca pki init`")?,
+            .context("CA cert not found — run `orca pki ca-init`")?,
     })
 }
 
@@ -203,7 +203,7 @@ pub fn load_plugin(pki_dir: &Path, plugin_id: &str) -> Result<NodeBundle> {
         key_pem: std::fs::read_to_string(plugin_key_path(pki_dir, plugin_id))
             .with_context(|| format!("plugin key not found for '{plugin_id}'"))?,
         ca_cert_pem: std::fs::read_to_string(ca_cert_path(pki_dir))
-            .context("CA cert not found — run `orca pki init`")?,
+            .context("CA cert not found — run `orca pki ca-init`")?,
     })
 }
 

@@ -167,7 +167,20 @@ fn pid_alive(pid: u32) -> bool {
 
 fn install(port: u16) -> Result<()> {
     let binary = resolve_binary()?;
+    ensure_pki()?;
     install_service(&binary, port)
+}
+
+// PKI bundle is required for the plugin-host to start. `pki::init` is
+// idempotent, so we run it unconditionally on `daemon install` to avoid the
+// first-boot warning where the daemon comes up without the plugin-host.
+fn ensure_pki() -> Result<()> {
+    let home = std::env::var("HOME")?;
+    let pki_dir = std::path::PathBuf::from(home)
+        .join(APP_STATE_DIR)
+        .join(orca_utils::config::APP_PKI_DIR);
+    orca_sdk::pki::init(&pki_dir)?;
+    Ok(())
 }
 
 fn uninstall() -> Result<()> {
