@@ -6,75 +6,177 @@
 #   curl -fsSL https://github.com/scottdkey/orca/releases/latest/download/install.sh | sh
 #
 # Flags / env overrides:
-#   --version <tag>     ORCA_VERSION       e.g. v0.0.4-rc.1 (default: latest stable)
-#   --target  <triple>  ORCA_TARGET        e.g. x86_64-unknown-linux-musl (default: auto-detect)
-#   --dir     <path>    ORCA_INSTALL_DIR   install directory (default: ~/.local/bin)
-#   --rc, --prerelease  ORCA_PRERELEASE=1  install newest pre-release (RC); pins channel=rc
-#   GITHUB_TOKEN        required — releases are private (export before running or pipe inline)
+#   --version <tag>      ORCA_VERSION         e.g. v0.0.4-rc.1 (default: latest stable)
+#   --target  <triple>   ORCA_TARGET          e.g. x86_64-unknown-linux-musl (default: auto-detect)
+#   --dir     <path>     ORCA_INSTALL_DIR     install directory (default: ~/.local/bin)
+#   --rc, --prerelease   ORCA_PRERELEASE=1    install newest pre-release (RC); pins channel=rc
+#   --from-file <path>   ORCA_FROM_FILE       skip GitHub fetch; install this local binary instead
+#                                             (use with a sibling <file>.sha256 or set --skip-sha)
+#   --skip-sha           ORCA_SKIP_SHA=1      skip sha256 verification (push mode w/ pre-verified bytes)
+#   --admin-pubkey <key> ORCA_ADMIN_PUBKEY    SSH pubkey to install for the orca service user
+#                                             — REQUIRED when running as root and orca user is new
+#   GITHUB_TOKEN         required for download mode — releases are private
+#
+# Root-mode auto-bootstrap:
+#   When invoked as root, install.sh creates a least-privileged `orca` service
+#   user (home /var/lib/orca, groups docker+systemd-journal best-effort, NO sudo)
+#   and installs the binary into that user's home. Lingering is enabled so the
+#   user-systemd session persists without an active login. Root SSH keys are
+#   NEVER copied — orca's authorized_keys come from --admin-pubkey only.
 #
 # Channel marker is written to $ORCA_HOME/channel ($ORCA_HOME defaults to ~/.orca).
 # Valid marker values: 'stable' or 'rc' (matches the `orca update` channel enum).
-# The running app reads this to know which channel to pull future updates from.
 #
 # Examples:
 #   sh install.sh
 #   sh install.sh --version v0.0.3-rc.4
 #   sh install.sh --target x86_64-unknown-linux-musl
+#   sh install.sh --from-file /tmp/orca --skip-sha          # push install
+#   sh install.sh --admin-pubkey "ssh-ed25519 AAAA... me"   # root-mode
 
 set -eu
 
 REPO="scottdkey/orca"
 VERSION="${ORCA_VERSION:-}"
 TARGET="${ORCA_TARGET:-}"
-INSTALL_DIR="${ORCA_INSTALL_DIR:-$HOME/.local/bin}"
+INSTALL_DIR="${ORCA_INSTALL_DIR:-}"
 PRERELEASE="${ORCA_PRERELEASE:-0}"
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+FROM_FILE="${ORCA_FROM_FILE:-}"
+SKIP_SHA="${ORCA_SKIP_SHA:-0}"
+ADMIN_PUBKEY="${ORCA_ADMIN_PUBKEY:-}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --version)     VERSION="$2"; shift 2 ;;
-    --target)      TARGET="$2"; shift 2 ;;
-    --dir)         INSTALL_DIR="$2"; shift 2 ;;
+    --version)         VERSION="$2"; shift 2 ;;
+    --target)          TARGET="$2"; shift 2 ;;
+    --dir)             INSTALL_DIR="$2"; shift 2 ;;
     --rc|--prerelease) PRERELEASE=1; shift ;;
-    -h|--help)     sed -n '2,22p' "$0"; exit 0 ;;
+    --from-file)       FROM_FILE="$2"; shift 2 ;;
+    --skip-sha)        SKIP_SHA=1; shift ;;
+    --admin-pubkey)    ADMIN_PUBKEY="$2"; shift 2 ;;
+    -h|--help)         sed -n '2,32p' "$0" 2>/dev/null || echo "see scripts/install.sh header"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
 
 die() { echo "install.sh: $*" >&2; exit 1; }
+warn() { echo "install.sh: warning: $*" >&2; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
 
-[ -n "$GITHUB_TOKEN" ] || die "GITHUB_TOKEN is required (releases are private) — export GITHUB_TOKEN before running"
-
-need curl
 need chmod
 need mv
 need mkdir
 
-# Authenticated GitHub API helper — returns JSON. Usage: gh_api <url> [extra curl flags...]
-# Pinned API version: 2022-11-28 (current stable as of 2026-05; see
-# https://docs.github.com/en/rest/about-the-rest-api/api-versions).
-gh_api() {
-  _url="$1"; shift
-  curl -fsSL \
-    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    "$@" "$_url"
+# ── download abstraction (device-agnostic: curl preferred, wget fallback) ────
+# Two callable shapes:
+#   http_get_json   <url>            → prints JSON to stdout
+#   http_get_asset  <url> <out>      → writes octet-stream bytes to file
+# Both add the GitHub auth + API-version headers when GITHUB_TOKEN is set.
+HTTP_TOOL=""
+if command -v curl >/dev/null 2>&1; then
+  HTTP_TOOL=curl
+elif command -v wget >/dev/null 2>&1; then
+  HTTP_TOOL=wget
+fi
+
+http_get_json() {
+  _url="$1"
+  case "$HTTP_TOOL" in
+    curl)
+      curl -fsSL \
+        -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+        -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "$_url"
+      ;;
+    wget)
+      wget -qO- \
+        --header="Authorization: Bearer ${GITHUB_TOKEN}" \
+        --header="Accept: application/vnd.github+json" \
+        --header="X-GitHub-Api-Version: 2022-11-28" \
+        "$_url"
+      ;;
+    *) die "need curl or wget to fetch from GitHub (use --from-file for push install)" ;;
+  esac
 }
 
-# Authenticated GitHub asset download — returns raw bytes. Usage: gh_asset <url> <output-file>
-# Separate from gh_api so we send ONE Accept header (octet-stream). GitHub
-# routes on the first Accept header it sees — mixing them with gh_api was the
-# original source of "the .sha256 file is full of JSON" bugs.
-gh_asset() {
+http_get_asset() {
   _url="$1"; _out="$2"
-  curl -fsSL \
-    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-    -H "Accept: application/octet-stream" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    -o "$_out" "$_url"
+  case "$HTTP_TOOL" in
+    curl)
+      curl -fsSL \
+        -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+        -H "Accept: application/octet-stream" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        -o "$_out" "$_url"
+      ;;
+    wget)
+      wget -qO "$_out" \
+        --header="Authorization: Bearer ${GITHUB_TOKEN}" \
+        --header="Accept: application/octet-stream" \
+        --header="X-GitHub-Api-Version: 2022-11-28" \
+        "$_url"
+      ;;
+    *) die "need curl or wget (use --from-file for push install)" ;;
+  esac
 }
+
+# ── root-mode bootstrap ─────────────────────────────────────────────────────
+# When running as root we create the `orca` service user and install for them.
+# This is the only branch that mutates /etc/passwd or /var/lib. Idempotent.
+ORCA_USER="orca"
+ORCA_HOME_DIR="/var/lib/orca"
+
+ensure_orca_user() {
+  if id "$ORCA_USER" >/dev/null 2>&1; then
+    return 0
+  fi
+  [ -n "$ADMIN_PUBKEY" ] || die "running as root with no orca user — pass --admin-pubkey \"\$(cat ~/.ssh/id_ed25519.pub)\" so the controller can ssh in later"
+  need useradd
+  warn "creating system user '$ORCA_USER' (home $ORCA_HOME_DIR, no sudo, no extra blanket access)"
+  useradd \
+    --system \
+    --create-home \
+    --home-dir "$ORCA_HOME_DIR" \
+    --shell /bin/bash \
+    "$ORCA_USER"
+  # Best-effort group adds. Skip silently if the group doesn't exist on this host.
+  for grp in docker systemd-journal; do
+    if getent group "$grp" >/dev/null 2>&1; then
+      usermod -aG "$grp" "$ORCA_USER" || warn "could not add $ORCA_USER to $grp"
+    fi
+  done
+  # Linger so the user-systemd session survives without an interactive login.
+  if command -v loginctl >/dev/null 2>&1; then
+    loginctl enable-linger "$ORCA_USER" || warn "loginctl enable-linger failed (user-systemd may not run on boot)"
+  fi
+  install_orca_ssh_key
+}
+
+install_orca_ssh_key() {
+  # orca gets its OWN authorized_keys — never inherits root's keys.
+  _ssh_dir="$ORCA_HOME_DIR/.ssh"
+  _auth="$_ssh_dir/authorized_keys"
+  mkdir -p "$_ssh_dir"
+  printf '%s\n' "$ADMIN_PUBKEY" > "$_auth"
+  chmod 700 "$_ssh_dir"
+  chmod 600 "$_auth"
+  chown -R "$ORCA_USER:$ORCA_USER" "$_ssh_dir"
+}
+
+# When we end up running as root, set install paths under orca's home.
+if [ "$(id -u)" = 0 ]; then
+  warn "running as root — installing for service user '$ORCA_USER' instead"
+  ensure_orca_user
+  INSTALL_DIR="${INSTALL_DIR:-$ORCA_HOME_DIR/.local/bin}"
+  ORCA_HOME_TARGET="$ORCA_HOME_DIR/.orca"
+  RUN_AS_ORCA=1
+else
+  INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
+  ORCA_HOME_TARGET="${ORCA_HOME:-$HOME/.orca}"
+  RUN_AS_ORCA=0
+fi
 
 # ── detect target triple ────────────────────────────────────────────────────
 detect_target() {
@@ -92,11 +194,6 @@ detect_target() {
       echo "${arch}-apple-darwin"
       ;;
     Linux)
-      # musl detection: alpine first, then ldd reports musl, then a positive
-      # glibc check via `getconf GNU_LIBC_VERSION` (works on every glibc
-      # system, no globbing footguns). Default to gnu when uncertain — musl
-      # binaries can run on glibc hosts but gnu binaries crash on alpine,
-      # so the failure mode is asymmetric: prefer gnu.
       libc=gnu
       if [ -f /etc/alpine-release ]; then
         libc=musl
@@ -117,92 +214,91 @@ if [ -z "$TARGET" ]; then
   TARGET="$(detect_target)"
 fi
 
-# ── resolve version ─────────────────────────────────────────────────────────
-# Channel marker matches the `orca update` Channel enum: 'stable' or 'rc'.
+# ── resolve version + source bytes ──────────────────────────────────────────
 CHANNEL=stable
 [ "$PRERELEASE" = "1" ] && CHANNEL=rc
 
-if [ -z "$VERSION" ]; then
-  if [ "$CHANNEL" = "rc" ]; then
-    # Newest prerelease — /releases is ordered newest-first; pick the first
-    # tag_name containing "-rc." (stable tags never do).
-    VERSION="$(gh_api "https://api.github.com/repos/${REPO}/releases?per_page=30" \
-      | grep '"tag_name":' \
-      | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/' \
-      | grep -m1 -- '-rc\.')"
-    [ -n "$VERSION" ] || die "no prerelease found for ${REPO}"
-  else
-    # Latest stable — use the API (private repos 404 on unauthenticated /releases/latest).
-    VERSION="$(gh_api "https://api.github.com/repos/${REPO}/releases/latest" \
-      | grep '"tag_name":' \
-      | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
-    [ -n "$VERSION" ] || die "could not resolve latest stable (try --version or --prerelease)"
-  fi
-else
-  # Explicit --version: infer channel from tag shape so the marker reflects
-  # what the user actually installed.
-  case "$VERSION" in
-    *-rc.*) CHANNEL=rc ;;
-    *) [ "$PRERELEASE" = "1" ] || CHANNEL=stable ;;
-  esac
-fi
-
-ASSET="orca-${TARGET}"
-ASSET_SUM="${ASSET}.sha256"
-
-echo "→ installing orca ${VERSION} (${TARGET}) to ${INSTALL_DIR}"
-
-# ── resolve asset download URLs via GitHub API ───────────────────────────────
-# Private repos 404 on unauthenticated /releases/download/ URLs; the API
-# asset endpoint honours the Bearer token and follows the redirect correctly
-# when combined with -L and Accept: application/octet-stream.
-RELEASE_JSON="$(gh_api "https://api.github.com/repos/${REPO}/releases/tags/${VERSION}")"
-
-asset_url() {
-  # GitHub's release-asset JSON serializes "url" BEFORE "name" inside each
-  # asset object, then later includes the uploader's "url" inside a nested
-  # "uploader" object. Walking forward from "name" grabs the uploader's URL.
-  # Walk backward instead: remember the most recent "url" line and print it
-  # when we see the matching "name" line.
-  echo "$RELEASE_JSON" \
-    | awk -v target="$1" '
-        /"url":/ { last_url = $0 }
-        $0 ~ "\"name\": *\"" target "\"" {
-          sub(/^[^"]*"url"[[:space:]]*:[[:space:]]*"/, "", last_url)
-          sub(/".*/, "", last_url)
-          print last_url
-          exit
-        }
-      '
-}
-
-URL_BIN="$(asset_url "${ASSET}")"
-URL_SUM="$(asset_url "${ASSET_SUM}")"
-
-[ -n "$URL_BIN" ] || die "asset '${ASSET}' not found in release ${VERSION} (wrong target or version?)"
-[ -n "$URL_SUM" ] || die "asset '${ASSET_SUM}' not found in release ${VERSION}"
-
-# ── download + verify ────────────────────────────────────────────────────────
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-# -L (inside gh_asset) follows the redirect from the API asset URL to the S3
-# pre-signed URL; Accept: application/octet-stream tells GitHub to stream raw bytes.
-gh_asset "$URL_BIN" "${TMP}/orca" \
-  || die "download failed: $URL_BIN  (is the target/version correct?)"
-gh_asset "$URL_SUM" "${TMP}/orca.sha256" \
-  || die "checksum download failed: $URL_SUM"
-
-EXPECTED="$(awk '{print $1}' "${TMP}/orca.sha256")"
-if command -v sha256sum >/dev/null 2>&1; then
-  ACTUAL="$(sha256sum "${TMP}/orca" | awk '{print $1}')"
-elif command -v shasum >/dev/null 2>&1; then
-  ACTUAL="$(shasum -a 256 "${TMP}/orca" | awk '{print $1}')"
+if [ -n "$FROM_FILE" ]; then
+  # ── push mode: bytes already on disk, no GitHub roundtrip ─────────────────
+  [ -f "$FROM_FILE" ] || die "--from-file: not found: $FROM_FILE"
+  cp "$FROM_FILE" "${TMP}/orca"
+  if [ "$SKIP_SHA" != "1" ]; then
+    [ -f "${FROM_FILE}.sha256" ] || die "expected ${FROM_FILE}.sha256 next to --from-file (or pass --skip-sha)"
+    cp "${FROM_FILE}.sha256" "${TMP}/orca.sha256"
+  fi
+  # Version is informational only in push mode. If caller didn't pass --version,
+  # we can't infer it without running the binary first — fall back to "unknown".
+  VERSION="${VERSION:-unknown}"
+  echo "→ installing orca ${VERSION} (${TARGET}, from-file) to ${INSTALL_DIR}"
 else
-  die "no sha256 tool available (need sha256sum or shasum)"
+  # ── pull mode: fetch from GitHub releases ─────────────────────────────────
+  [ -n "$GITHUB_TOKEN" ] || die "GITHUB_TOKEN is required for download mode (export GITHUB_TOKEN, or use --from-file)"
+  [ -n "$HTTP_TOOL" ] || die "no http tool found (need curl or wget) — install one, or use --from-file"
+
+  if [ -z "$VERSION" ]; then
+    if [ "$CHANNEL" = "rc" ]; then
+      VERSION="$(http_get_json "https://api.github.com/repos/${REPO}/releases?per_page=30" \
+        | grep '"tag_name":' \
+        | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/' \
+        | grep -m1 -- '-rc\.')"
+      [ -n "$VERSION" ] || die "no prerelease found for ${REPO}"
+    else
+      VERSION="$(http_get_json "https://api.github.com/repos/${REPO}/releases/latest" \
+        | grep '"tag_name":' \
+        | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
+      [ -n "$VERSION" ] || die "could not resolve latest stable (try --version or --prerelease)"
+    fi
+  else
+    case "$VERSION" in
+      *-rc.*) CHANNEL=rc ;;
+      *) [ "$PRERELEASE" = "1" ] || CHANNEL=stable ;;
+    esac
+  fi
+
+  ASSET="orca-${TARGET}"
+  ASSET_SUM="${ASSET}.sha256"
+
+  echo "→ installing orca ${VERSION} (${TARGET}) to ${INSTALL_DIR}"
+
+  RELEASE_JSON="$(http_get_json "https://api.github.com/repos/${REPO}/releases/tags/${VERSION}")"
+  asset_url() {
+    echo "$RELEASE_JSON" \
+      | awk -v target="$1" '
+          /"url":/ { last_url = $0 }
+          $0 ~ "\"name\": *\"" target "\"" {
+            sub(/^[^"]*"url"[[:space:]]*:[[:space:]]*"/, "", last_url)
+            sub(/".*/, "", last_url)
+            print last_url
+            exit
+          }
+        '
+  }
+  URL_BIN="$(asset_url "${ASSET}")"
+  URL_SUM="$(asset_url "${ASSET_SUM}")"
+  [ -n "$URL_BIN" ] || die "asset '${ASSET}' not found in release ${VERSION}"
+  [ -n "$URL_SUM" ] || die "asset '${ASSET_SUM}' not found in release ${VERSION}"
+
+  http_get_asset "$URL_BIN" "${TMP}/orca" \
+    || die "download failed: $URL_BIN"
+  http_get_asset "$URL_SUM" "${TMP}/orca.sha256" \
+    || die "checksum download failed: $URL_SUM"
 fi
 
-[ "$EXPECTED" = "$ACTUAL" ] || die "checksum mismatch: expected $EXPECTED got $ACTUAL"
+# ── verify ──────────────────────────────────────────────────────────────────
+if [ "$SKIP_SHA" != "1" ]; then
+  EXPECTED="$(awk '{print $1}' "${TMP}/orca.sha256")"
+  if command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL="$(sha256sum "${TMP}/orca" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    ACTUAL="$(shasum -a 256 "${TMP}/orca" | awk '{print $1}')"
+  else
+    die "no sha256 tool available (need sha256sum or shasum)"
+  fi
+  [ "$EXPECTED" = "$ACTUAL" ] || die "checksum mismatch: expected $EXPECTED got $ACTUAL"
+fi
 
 # ── install ─────────────────────────────────────────────────────────────────
 mkdir -p "$INSTALL_DIR"
@@ -213,12 +309,21 @@ if [ "$(uname -s)" = "Darwin" ]; then
   xattr -d com.apple.quarantine "${INSTALL_DIR}/orca" 2>/dev/null || true
 fi
 
-# ── channel marker ──────────────────────────────────────────────────────────
-# Future `orca update` reads this to know which channel to pull from. Users
-# can switch later via the app; this just sets the initial pin.
-ORCA_HOME="${ORCA_HOME:-$HOME/.orca}"
-mkdir -p "$ORCA_HOME"
-printf '%s\n' "$CHANNEL" > "${ORCA_HOME}/channel"
+mkdir -p "$ORCA_HOME_TARGET"
+printf '%s\n' "$CHANNEL" > "${ORCA_HOME_TARGET}/channel"
+
+# Hand the tree over to the orca user when running as root.
+if [ "$RUN_AS_ORCA" = "1" ]; then
+  chown -R "$ORCA_USER:$ORCA_USER" "$ORCA_HOME_DIR/.local" "$ORCA_HOME_TARGET"
+  echo "✓ installed: ${INSTALL_DIR}/orca  (channel: ${CHANNEL}, user: ${ORCA_USER})"
+  echo "→ bootstrapping daemon as ${ORCA_USER}"
+  if command -v runuser >/dev/null 2>&1; then
+    runuser -u "$ORCA_USER" -- "${INSTALL_DIR}/orca" daemon install || warn "daemon install failed — run it manually as $ORCA_USER"
+  else
+    su - "$ORCA_USER" -c "${INSTALL_DIR}/orca daemon install" || warn "daemon install failed — run it manually as $ORCA_USER"
+  fi
+  exit 0
+fi
 
 echo "✓ installed: ${INSTALL_DIR}/orca  (channel: ${CHANNEL})"
 case ":$PATH:" in
