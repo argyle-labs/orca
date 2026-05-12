@@ -80,53 +80,34 @@ impl LifecycleService for ServerLifecycle {
             );
         }
 
-        // Agents dir
-        let agents_dir = cfg.agents_dir();
-        let agent_files: Vec<_> = if agents_dir.exists() {
-            std::fs::read_dir(&agents_dir)?
-                .flatten()
-                .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
-                .collect()
-        } else {
+        // Agents — served via the orca-local MCP. Embedded baseline is compiled
+        // in at build time; frontmatter is enforced by build.rs, so a runtime
+        // check is just a count + sanity ping. Any profile-level overrides are
+        // listed too.
+        let embedded = crate::agents::list_embedded_agents();
+        push(
+            &mut entries,
+            "agents",
+            "ok",
+            format!("{} embedded agents available via MCP", embedded.len()),
+        );
+        for profile_dir in crate::mcp::agent_resolve::agent_search_dirs(cfg) {
+            if !profile_dir.exists() {
+                continue;
+            }
+            let count = std::fs::read_dir(&profile_dir)
+                .map(|rd| {
+                    rd.flatten()
+                        .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
+                        .count()
+                })
+                .unwrap_or(0);
             push(
                 &mut entries,
                 "agents",
-                "error",
-                format!("agents dir missing: {}", agents_dir.display()),
+                "ok",
+                format!("{count} profile overrides at {}", profile_dir.display()),
             );
-            vec![]
-        };
-        for entry in &agent_files {
-            let path = entry.path();
-            let stem = path
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            let content = std::fs::read_to_string(&path).unwrap_or_default();
-            let missing: Vec<&str> = [
-                (!content.contains("name:")).then_some("name"),
-                (!content.contains("description:")).then_some("description"),
-                (!content.contains("tools:")).then_some("tools"),
-            ]
-            .into_iter()
-            .flatten()
-            .collect();
-            if missing.is_empty() {
-                push(
-                    &mut entries,
-                    "agent",
-                    "ok",
-                    format!("{stem}.md frontmatter present"),
-                );
-            } else {
-                push(
-                    &mut entries,
-                    "agent",
-                    "error",
-                    format!("{stem}.md missing: {}", missing.join(", ")),
-                );
-            }
         }
 
         // Logs dir

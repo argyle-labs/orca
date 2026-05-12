@@ -118,7 +118,7 @@ impl Session {
     }
 
     pub fn set_agent(&mut self, agent: &str) {
-        if let Some(prompt) = crate::agents::load_agent_prompt(agent, &self.config.agents_dir()) {
+        if let Some(prompt) = crate::mcp::agent_resolve::load_agent_prompt(agent, &self.config) {
             self.system_prompt = prompt;
         }
         self.active_agent = agent.to_string();

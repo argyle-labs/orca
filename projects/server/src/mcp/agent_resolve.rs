@@ -1,24 +1,25 @@
 //! Profile-aware agent prompt resolution.
 //!
 //! Search order:
-//!   1. Active profile's `agents/` dir (per-user, mesh-syncable)
-//!   2. `Config::agents_dir()` (dev override — currently `~/.claude/agents`)
-//!   3. Embedded baseline (compiled into the binary)
+//!   1. Active profile's `agents/` dir (per-user, mesh-syncable override)
+//!   2. Embedded baseline (compiled into the binary)
 //!
-//! Profile lookup failures (DB unavailable, no active profile) degrade
-//! gracefully to the existing two-tier path — never block agent loading.
+//! Agents are served to Claude Code via the orca-local MCP server
+//! (list_agents / get_agent / run_agent) — there is no `~/.claude/agents`
+//! filesystem fallback. Profile lookup failures (DB unavailable, no active
+//! profile) degrade gracefully to the embedded baseline.
 
 use orca_utils::config::{Config, LOCAL_USER};
 use std::path::PathBuf;
 
 /// Compute the prioritized list of agent search dirs for the current user.
-/// Always includes `Config::agents_dir()` as the dev-override fallback.
+/// Returns the active profile's override dir if present; otherwise empty
+/// (callers always append the embedded baseline as last resort).
 pub fn agent_search_dirs(config: &Config) -> Vec<PathBuf> {
-    let mut dirs = Vec::with_capacity(2);
+    let mut dirs = Vec::with_capacity(1);
     if let Some(profile_dir) = active_profile_agents_dir(config) {
         dirs.push(profile_dir);
     }
-    dirs.push(config.agents_dir());
     dirs
 }
 

@@ -19,8 +19,7 @@ impl Session {
             };
         }
 
-        let agent_prompt = match crate::agents::load_agent_prompt(agent, &self.config.agents_dir())
-        {
+        let agent_prompt = match crate::mcp::agent_resolve::load_agent_prompt(agent, &self.config) {
             Some(prompt) => prompt,
             None => {
                 return ToolResult {
