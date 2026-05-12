@@ -24,10 +24,15 @@ pub enum DaemonAction {
     Park,
     /// Reclaim the port after a dev session (SIGUSR2)
     Reclaim,
-    /// Install and enable as a system service (launchd on macOS, systemd on Linux)
+    /// Install and enable as a system service (launchd on macOS, systemd/openrc/unraid on Linux)
     Install {
         #[arg(short, long, default_value = "12000")]
         port: u16,
+        /// Install as a SYSTEM service running as this user (requires root).
+        /// Required on OpenRC and Unraid; optional on systemd (otherwise installs
+        /// a per-user service into the current user's systemd --user manager).
+        #[arg(long)]
+        service_user: Option<String>,
     },
     /// Disable and remove the system service
     Uninstall,
@@ -41,7 +46,7 @@ pub fn cmd_daemon(action: DaemonAction) -> Result<()> {
         DaemonAction::Stop => stop(),
         DaemonAction::Park => park(),
         DaemonAction::Reclaim => reclaim(),
-        DaemonAction::Install { port } => install(port),
+        DaemonAction::Install { port, service_user } => install(port, service_user),
         DaemonAction::Uninstall => uninstall(),
     }
 }
@@ -165,21 +170,67 @@ fn pid_alive(pid: u32) -> bool {
 
 // ── Install / Uninstall ───────────────────────────────────────────────────────
 
-fn install(port: u16) -> Result<()> {
+fn install(port: u16, service_user: Option<String>) -> Result<()> {
     let binary = resolve_binary()?;
-    ensure_pki()?;
-    install_service(&binary, port)
+    match service_user {
+        None => {
+            // User-mode install — current behavior, runs in the caller's $HOME.
+            ensure_pki_for_home(&std::env::var("HOME")?)?;
+            install_service(&binary, port)
+        }
+        Some(user) => {
+            // System-mode install — requires root, runs as `user` at boot.
+            #[cfg(unix)]
+            if !is_root() {
+                anyhow::bail!("--service-user requires running as root");
+            }
+            let home = home_dir_of(&user)?;
+            ensure_pki_for_home(&home)?;
+            // chown the PKI tree to the service user so the daemon can read it.
+            let pki_dir = std::path::PathBuf::from(&home)
+                .join(APP_STATE_DIR)
+                .join(orca_utils::config::APP_PKI_DIR);
+            chown_recursive(&pki_dir, &user)?;
+            install_system_service(&binary, port, &user, &home)
+        }
+    }
 }
 
-// PKI bundle is required for the plugin-host to start. `pki::init` is
-// idempotent, so we run it unconditionally on `daemon install` to avoid the
-// first-boot warning where the daemon comes up without the plugin-host.
-fn ensure_pki() -> Result<()> {
-    let home = std::env::var("HOME")?;
+fn ensure_pki_for_home(home: &str) -> Result<()> {
     let pki_dir = std::path::PathBuf::from(home)
         .join(APP_STATE_DIR)
         .join(orca_utils::config::APP_PKI_DIR);
     orca_sdk::pki::init(&pki_dir)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn is_root() -> bool {
+    // SAFETY: getuid is always safe; it has no preconditions and cannot fail.
+    unsafe { libc::getuid() == 0 }
+}
+
+fn home_dir_of(user: &str) -> Result<String> {
+    let out = Command::new("getent").args(["passwd", user]).output()?;
+    if !out.status.success() {
+        anyhow::bail!("getent passwd {user} failed — user does not exist?");
+    }
+    let line = String::from_utf8_lossy(&out.stdout);
+    line.trim()
+        .split(':')
+        .nth(5)
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("could not parse home dir for {user} from getent"))
+}
+
+fn chown_recursive(path: &std::path::Path, user: &str) -> Result<()> {
+    let status = Command::new("chown")
+        .args(["-R", user])
+        .arg(path)
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("chown -R {user} {} failed", path.display());
+    }
     Ok(())
 }
 
@@ -331,6 +382,191 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     }
     println!("{} {APP_NAME} daemon enabled and started", "✓".green());
     Ok(())
+}
+
+// ── System-mode install (root) — picks systemd / openrc / unraid by init ──
+
+#[cfg(target_os = "linux")]
+fn detect_linux_init() -> LinuxInit {
+    use std::path::Path;
+    let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+    if os_release.contains("ID=\"unraid-os\"") || os_release.contains("ID=unraid-os") {
+        return LinuxInit::Unraid;
+    }
+    if Path::new("/run/systemd/system").exists() {
+        return LinuxInit::Systemd;
+    }
+    if Path::new("/run/openrc").exists() || Path::new("/sbin/openrc").exists() {
+        return LinuxInit::Openrc;
+    }
+    LinuxInit::Unknown
+}
+
+#[cfg(target_os = "linux")]
+enum LinuxInit {
+    Systemd,
+    Openrc,
+    Unraid,
+    Unknown,
+}
+
+#[cfg(target_os = "linux")]
+fn install_system_service(binary: &str, port: u16, user: &str, home: &str) -> Result<()> {
+    match detect_linux_init() {
+        LinuxInit::Systemd => install_systemd_system(binary, port, user, home),
+        LinuxInit::Openrc => install_openrc(binary, port, user, home),
+        LinuxInit::Unraid => install_unraid(binary, port, user, home),
+        LinuxInit::Unknown => anyhow::bail!(
+            "could not detect init system (not systemd, openrc, or unraid) — \
+             write a service unit manually and run `{binary} daemon start --port {port}` as {user}"
+        ),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn install_systemd_system(binary: &str, port: u16, user: &str, home: &str) -> Result<()> {
+    let path = format!("/etc/systemd/system/{APP_SYSTEMD_SERVICE}.service");
+    let unit = format!(
+        "[Unit]\nDescription=Orca AI daemon\nAfter=network.target\n\n\
+         [Service]\nType=simple\nUser={user}\n\
+         Environment=HOME={home}\nExecStart={binary} daemon start --port {port}\n\
+         Restart=on-failure\nRestartSec=5\n\n\
+         [Install]\nWantedBy=multi-user.target\n"
+    );
+    std::fs::write(&path, &unit)?;
+    println!("{} wrote {}", "✓".green(), path);
+
+    let _ = Command::new("systemctl").arg("daemon-reload").status();
+    let status = Command::new("systemctl")
+        .args(["enable", "--now", APP_SYSTEMD_SERVICE])
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("systemctl enable --now {APP_SYSTEMD_SERVICE} failed");
+    }
+    println!(
+        "{} {APP_NAME} system daemon enabled and started",
+        "✓".green()
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn install_openrc(binary: &str, port: u16, user: &str, home: &str) -> Result<()> {
+    let path = format!("/etc/init.d/{APP_SYSTEMD_SERVICE}");
+    // OpenRC init script. supervise-daemon handles restart-on-crash without
+    // requiring start-stop-daemon/pidfile bookkeeping. `command_user` drops
+    // privs to the orca user; `command_background=true` would conflict with
+    // supervise-daemon, so we omit it.
+    let script = format!(
+        "#!/sbin/openrc-run\n\
+         name=\"{APP_NAME}\"\n\
+         description=\"Orca AI daemon\"\n\
+         command=\"{binary}\"\n\
+         command_args=\"daemon start --port {port}\"\n\
+         command_user=\"{user}\"\n\
+         supervisor=supervise-daemon\n\
+         pidfile=\"/run/{APP_NAME}.pid\"\n\
+         export HOME=\"{home}\"\n\
+         depend() {{\n    need net\n}}\n"
+    );
+    std::fs::write(&path, &script)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+    println!("{} wrote {}", "✓".green(), path);
+
+    let status = Command::new("rc-update")
+        .args(["add", APP_SYSTEMD_SERVICE, "default"])
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("rc-update add {APP_SYSTEMD_SERVICE} default failed");
+    }
+    let status = Command::new("rc-service")
+        .args([APP_SYSTEMD_SERVICE, "start"])
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("rc-service {APP_SYSTEMD_SERVICE} start failed");
+    }
+    println!("{} {APP_NAME} (openrc) enabled and started", "✓".green());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn install_unraid(binary: &str, port: u16, user: &str, home: &str) -> Result<()> {
+    // Unraid wipes most of `/` on reboot — only `/boot` is persistent. So we
+    // install both:
+    //   1. /etc/rc.d/rc.orca         — runtime init script for the current boot
+    //   2. /boot/config/plugins/orca/orca.go  — persistent startup hook
+    // and append a call from /boot/config/go so it survives reboots.
+    let rc_path = format!("/etc/rc.d/rc.{APP_NAME}");
+    let rc_script = format!(
+        "#!/bin/sh\n\
+         # Orca daemon (Unraid). Generated by `orca daemon install`.\n\
+         BIN={binary}\n\
+         USER={user}\n\
+         HOME={home}\n\
+         export HOME\n\
+         case \"$1\" in\n\
+           start) runuser -u $USER -- $BIN daemon start --port {port} >>/var/log/orca.log 2>&1 &\n\
+                  echo $! > /var/run/orca.pid ;;\n\
+           stop)  [ -f /var/run/orca.pid ] && kill $(cat /var/run/orca.pid) ; rm -f /var/run/orca.pid ;;\n\
+           restart) $0 stop; sleep 1; $0 start ;;\n\
+           *) echo \"usage: $0 {{start|stop|restart}}\"; exit 1 ;;\n\
+         esac\n"
+    );
+    std::fs::write(&rc_path, &rc_script)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&rc_path, std::fs::Permissions::from_mode(0o755))?;
+    println!("{} wrote {}", "✓".green(), rc_path);
+
+    // Persistent copy on the boot USB.
+    let persist_dir = "/boot/config/plugins/orca";
+    std::fs::create_dir_all(persist_dir)?;
+    let persist_path = format!("{persist_dir}/rc.{APP_NAME}");
+    std::fs::copy(&rc_path, &persist_path)?;
+    println!("{} wrote {}", "✓".green(), persist_path);
+
+    // Hook into /boot/config/go so the script is re-installed + started on every boot.
+    let go_path = "/boot/config/go";
+    let marker = "# --- orca daemon (managed by `orca daemon install`) ---";
+    let hook = format!(
+        "\n{marker}\n\
+         cp -f {persist_path} {rc_path}\n\
+         chmod +x {rc_path}\n\
+         {rc_path} start\n\
+         # --- end orca daemon ---\n"
+    );
+    let mut existing = std::fs::read_to_string(go_path).unwrap_or_default();
+    if !existing.contains(marker) {
+        existing.push_str(&hook);
+        std::fs::write(go_path, &existing)?;
+        println!("{} appended startup hook to {}", "✓".green(), go_path);
+    } else {
+        println!(
+            "{} {} already has orca hook (skipped)",
+            "✓".green(),
+            go_path
+        );
+    }
+
+    // Start now.
+    let status = Command::new(&rc_path).arg("start").status()?;
+    if !status.success() {
+        anyhow::bail!("{rc_path} start failed");
+    }
+    println!("{} {APP_NAME} (unraid) installed and started", "✓".green());
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn install_system_service(_binary: &str, _port: u16, _user: &str, _home: &str) -> Result<()> {
+    anyhow::bail!(
+        "--service-user is not yet supported on macOS (use the per-user LaunchAgent path)"
+    )
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn install_system_service(_binary: &str, _port: u16, _user: &str, _home: &str) -> Result<()> {
+    anyhow::bail!("--service-user is not supported on this OS")
 }
 
 #[cfg(target_os = "linux")]
