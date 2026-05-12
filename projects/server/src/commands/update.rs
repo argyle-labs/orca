@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use orca_utils::config::{APP_NAME, APP_REPO_API_URL};
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TARGET: &str = env!("ORCA_BUILD_TARGET");
@@ -17,10 +17,23 @@ pub enum Channel {
 impl Channel {
     pub fn parse(s: &str) -> Self {
         match s {
-            "rc" => Self::Rc,
+            // "prerelease" was the original install.sh value before the
+            // vocabulary was harmonized with the enum (2026-05-11). Keep
+            // accepting it so existing installations don't silently
+            // downgrade to stable on next `orca update`.
+            "rc" | "prerelease" => Self::Rc,
             "beta" => Self::Beta,
             "alpha" => Self::Alpha,
             _ => Self::Stable,
+        }
+    }
+
+    pub fn as_marker(&self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Rc => "rc",
+            Self::Beta => "beta",
+            Self::Alpha => "alpha",
         }
     }
 
@@ -36,6 +49,57 @@ impl Channel {
             Self::Alpha => true,
         }
     }
+}
+
+/// Path to the channel marker file (`$ORCA_HOME/channel`, default `~/.orca/channel`).
+/// Returns None only if both `ORCA_HOME` and `HOME` are unset (CI sandboxes).
+fn channel_marker_path() -> Option<PathBuf> {
+    let dir = std::env::var_os("ORCA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".orca")))?;
+    Some(dir.join("channel"))
+}
+
+/// Read the channel marker written by `install.sh` (or a prior `orca update`).
+/// Returns None if the file doesn't exist or can't be read; callers fall back to Stable.
+pub fn read_channel_marker() -> Option<Channel> {
+    let path = channel_marker_path()?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(Channel::parse(trimmed))
+}
+
+/// Write the channel marker. Best-effort: errors are returned but callers
+/// typically log-and-continue (marker drift is recoverable on next install).
+pub fn write_channel_marker(ch: &Channel) -> Result<()> {
+    let path = channel_marker_path().context("no ORCA_HOME or HOME set")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create_dir_all {}", parent.display()))?;
+    }
+    let content = format!("{}\n", ch.as_marker());
+    if Path::new(&path).exists()
+        && std::fs::read_to_string(&path).ok().as_deref() == Some(content.as_str())
+    {
+        return Ok(()); // already up to date — no-op
+    }
+    std::fs::write(&path, content).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+/// Resolve the channel to use for an `orca update` invocation:
+/// 1. Non-empty explicit input → parse that.
+/// 2. Empty input → read the channel marker.
+/// 3. No marker → Stable.
+pub fn resolve_channel(explicit: &str) -> Channel {
+    let explicit = explicit.trim();
+    if !explicit.is_empty() {
+        return Channel::parse(explicit);
+    }
+    read_channel_marker().unwrap_or(Channel::Stable)
 }
 
 #[derive(Debug)]
@@ -196,15 +260,14 @@ pub async fn apply_update(info: &UpdateInfo) -> Result<()> {
     Ok(())
 }
 
-pub async fn cmd_update(channel: Channel) -> Result<()> {
-    let channel_label = match &channel {
-        Channel::Stable => "stable".to_string(),
-        Channel::Rc => "rc".to_string(),
-        Channel::Beta => "beta".to_string(),
-        Channel::Alpha => "alpha".to_string(),
-    };
+/// CLI entry: `orca update [--channel rc|stable|...]`. Empty channel reads the
+/// install marker; on a successful apply, the marker is rewritten so future
+/// invocations stay on the resolved channel.
+pub async fn cmd_update(channel_arg: &str) -> Result<()> {
+    let channel = resolve_channel(channel_arg);
     println!(
-        "[orca] current version: v{CURRENT_VERSION} ({BUILD_TARGET}, channel={channel_label})"
+        "[orca] current version: v{CURRENT_VERSION} ({BUILD_TARGET}, channel={})",
+        channel.as_marker()
     );
     println!("[orca] checking for updates...");
 
@@ -216,19 +279,27 @@ pub async fn cmd_update(channel: Channel) -> Result<()> {
         }
     }
 
+    if let Err(e) = write_channel_marker(&channel) {
+        eprintln!("[orca] warning: could not update channel marker: {e}");
+    }
+
     Ok(())
 }
 
-/// Non-blocking startup update check (stable only) — prints a notice, does not download.
+/// Non-blocking startup update check — prints a notice, does not download.
+/// Channel comes from the install marker (`~/.orca/channel`), falling back to
+/// Stable if absent. This lets RC installs see RC update notices.
 pub async fn startup_update_check() {
     if std::env::var("GITHUB_TOKEN").is_err() {
         return;
     }
-    match check_for_update(&Channel::Stable).await {
+    let channel = read_channel_marker().unwrap_or(Channel::Stable);
+    match check_for_update(&channel).await {
         Ok(Some(info)) => {
             println!(
-                "[orca] update available: v{} → run 'orca update' to upgrade",
-                info.version
+                "[orca] update available: v{} on '{}' → run 'orca update' to upgrade",
+                info.version,
+                channel.as_marker()
             );
         }
         Ok(None) => {}
@@ -319,6 +390,91 @@ mod tests {
         assert_eq!(Channel::parse(""), Channel::Stable);
         assert_eq!(Channel::parse("nightly"), Channel::Stable);
         assert_eq!(Channel::parse("STABLE"), Channel::Stable); // case-sensitive
+    }
+
+    #[test]
+    fn channel_parses_legacy_prerelease_as_rc() {
+        // Installs from before the install.sh vocab harmonization wrote
+        // "prerelease" — must not silently degrade to Stable.
+        assert_eq!(Channel::parse("prerelease"), Channel::Rc);
+    }
+
+    #[test]
+    fn channel_as_marker_round_trips() {
+        for ch in [Channel::Stable, Channel::Rc, Channel::Beta, Channel::Alpha] {
+            assert_eq!(Channel::parse(ch.as_marker()), ch);
+        }
+    }
+
+    // ── Channel marker file I/O ─────────────────────────────────────────────
+
+    fn isolated_orca_home(scenario: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // SAFETY: tests in this module run serially via the shared lock below.
+        unsafe {
+            std::env::set_var("ORCA_HOME", dir.path());
+            std::env::set_var("ORCA_TEST_SCENARIO", scenario);
+        }
+        dir
+    }
+
+    // set_var on multiple threads is unsound; serialize marker tests.
+    fn marker_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn read_channel_marker_returns_none_when_missing() {
+        let _g = marker_lock();
+        let _dir = isolated_orca_home("missing");
+        assert!(read_channel_marker().is_none());
+    }
+
+    #[test]
+    fn write_then_read_channel_marker_round_trips() {
+        let _g = marker_lock();
+        let _dir = isolated_orca_home("write");
+        write_channel_marker(&Channel::Rc).unwrap();
+        assert_eq!(read_channel_marker(), Some(Channel::Rc));
+        write_channel_marker(&Channel::Stable).unwrap();
+        assert_eq!(read_channel_marker(), Some(Channel::Stable));
+    }
+
+    #[test]
+    fn read_channel_marker_accepts_legacy_prerelease() {
+        let _g = marker_lock();
+        let dir = isolated_orca_home("legacy");
+        std::fs::write(dir.path().join("channel"), "prerelease\n").unwrap();
+        assert_eq!(read_channel_marker(), Some(Channel::Rc));
+    }
+
+    #[test]
+    fn resolve_channel_explicit_wins_over_marker() {
+        let _g = marker_lock();
+        let _dir = isolated_orca_home("explicit");
+        write_channel_marker(&Channel::Stable).unwrap();
+        // explicit "rc" must override marker=stable
+        assert_eq!(resolve_channel("rc"), Channel::Rc);
+    }
+
+    #[test]
+    fn resolve_channel_empty_reads_marker() {
+        let _g = marker_lock();
+        let _dir = isolated_orca_home("empty");
+        write_channel_marker(&Channel::Rc).unwrap();
+        assert_eq!(resolve_channel(""), Channel::Rc);
+        // whitespace counts as empty
+        assert_eq!(resolve_channel("  "), Channel::Rc);
+    }
+
+    #[test]
+    fn resolve_channel_empty_falls_back_to_stable() {
+        let _g = marker_lock();
+        let _dir = isolated_orca_home("fallback");
+        // no marker written
+        assert_eq!(resolve_channel(""), Channel::Stable);
     }
 
     // ── Channel::accepts ──────────────────────────────────────────────────────
