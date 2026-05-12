@@ -471,7 +471,7 @@ fn is_newer_full(a: &str, b: &str) -> bool {
     };
     let pre_num = |s: &str| -> u64 {
         s.split('.')
-            .last()
+            .next_back()
             .and_then(|p| p.parse().ok())
             .unwrap_or(0)
     };
