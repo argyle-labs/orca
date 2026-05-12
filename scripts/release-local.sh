@@ -1,96 +1,32 @@
 #!/usr/bin/env bash
-# Local equivalent of .github/workflows/release.yml — used when GitHub Actions
-# minutes are exhausted. Builds the full target matrix (mac + linux gnu/musl,
-# arm + x86) using cargo-zigbuild for linux cross-compiles, then pushes
-# artifacts to GitHub releases via `gh`.
+# Local release orchestrator. All logic lives in scripts/release-lib.sh —
+# this file is just the CLI surface and rollback state machine.
 #
 # Usage:
 #   scripts/release-local.sh rc <patch|minor|major>   — cut + publish RC
 #   scripts/release-local.sh promote                  — promote latest RC to stable
 #
-# Mirrors the workflow's version math, tag scheme, changelog format, and
-# RC-then-stable two-step. Only difference: no gates, since you're the human.
+# Knobs (env):
+#   RELEASE_PARALLEL_TARGETS   max targets built in parallel (default: cores/4)
+#   RELEASE_CARGO_JOBS         cargo -j per target build   (default: cores/parallel)
+#   RELEASE_TARGETS            override target list (space-separated)
+#   RELEASE_FEATURES           cargo features (default: ui; empty = headless)
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=./release-lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/release-lib.sh"
 cd "$REPO_ROOT"
 
-# Mirror the matrix in .github/workflows/release.yml. Linux targets always
-# cross-compile via `cargo zigbuild` (works from any host). The macOS target
-# only builds when the host is itself macOS — we don't ship osxcross.
-HOST_TARGET="$(rustc -vV | awk '/^host:/ {print $2}')"
-LINUX_TARGETS=(
-  x86_64-unknown-linux-gnu
-  x86_64-unknown-linux-musl
-  aarch64-unknown-linux-gnu
-  aarch64-unknown-linux-musl
-)
-case "$(uname -s)" in
-  Darwin) MAC_TARGETS=(aarch64-apple-darwin) ;;
-  *)      MAC_TARGETS=() ;;
-esac
-ALL_TARGETS=("${MAC_TARGETS[@]}" "${LINUX_TARGETS[@]}")
-SERVER_TOML="projects/server/Cargo.toml"
+# Resolve target list once. RELEASE_TARGETS env overrides defaults.
+if [ -n "${RELEASE_TARGETS:-}" ]; then
+  # shellcheck disable=SC2206
+  TARGETS=( $RELEASE_TARGETS )
+else
+  mapfile_to_array TARGETS default_targets
+fi
 
-die() { echo "error: $*" >&2; exit 1; }
-log() { echo "→ $*"; }
-
-require_clean_tree() {
-  if ! git diff --quiet || ! git diff --cached --quiet; then
-    die "working tree has uncommitted changes — commit or stash first"
-  fi
-}
-
-sync_with_origin() {
-  # Fetch + auto-reconcile main with origin/main so the user doesn't have to
-  # manage divergence manually. Behind → pull --rebase. Ahead → leave (push
-  # will send the commits). Diverged → rebase; fail loudly only on conflict.
-  local branch local remote base
-  branch=$(git rev-parse --abbrev-ref HEAD)
-  [ "$branch" = "main" ] || die "must be on 'main' to release (current: $branch)"
-  git fetch --quiet origin main
-  local=$(git rev-parse HEAD)
-  remote=$(git rev-parse origin/main)
-  base=$(git merge-base HEAD origin/main)
-
-  if [ "$local" = "$remote" ]; then
-    return 0
-  elif [ "$local" = "$base" ]; then
-    log "local behind origin — rebasing"
-    git pull --rebase --autostash origin main
-  elif [ "$remote" = "$base" ]; then
-    log "local has $(git rev-list --count origin/main..HEAD) unpushed commit(s) — will push with release"
-  else
-    log "local diverged from origin — attempting rebase"
-    git pull --rebase --autostash origin main || die "rebase failed — resolve conflicts and re-run"
-  fi
-}
-
-drop_stale_local_tag() {
-  # If we computed a tag that already exists locally but not on the remote,
-  # it's a leftover from an earlier failed run. Delete + recompute caller-side.
-  local tag="$1"
-  if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null 2>&1; then
-    if ! git ls-remote --tags --exit-code origin "refs/tags/${tag}" >/dev/null 2>&1; then
-      log "dropping stale local tag ${tag} (not on remote — leftover from prior run)"
-      git tag -d "$tag" >/dev/null
-    fi
-  fi
-}
-
-require_tools() {
-  command -v gh             >/dev/null || die "gh CLI not installed"
-  command -v cargo          >/dev/null || die "cargo not installed"
-  command -v cargo-zigbuild >/dev/null || die "cargo-zigbuild not installed (cargo install cargo-zigbuild + brew install zig)"
-  command -v zig            >/dev/null || die "zig not installed (brew install zig)"
-  gh auth status >/dev/null 2>&1 || die "gh not authenticated (run: gh auth login)"
-  for t in "${ALL_TARGETS[@]}"; do
-    rustup target list --installed | grep -qx "$t" || die "rust target missing: $t (rustup target add $t)"
-  done
-}
-
-# Rollback state — set as cmd_rc/cmd_promote progress, consumed by trap on ERR.
+# ── rollback state ──────────────────────────────────────────────────────────
 RB_TAG=""
 RB_COMMIT=0
 RB_CARGO=0
@@ -101,8 +37,8 @@ rollback() {
   trap - ERR EXIT
   set +e
   if [ "$RB_PUSHED" -eq 1 ]; then
-    log "rollback: tag + commit already pushed to origin — leaving state intact"
-    log "         (delete the remote tag + GitHub release manually if needed)"
+    log "rollback: tag + commit already pushed — leaving state intact"
+    log "         (delete remote tag + GitHub release manually if needed)"
     exit "$code"
   fi
   log "rollback: undoing partial release state"
@@ -114,195 +50,40 @@ rollback() {
     log "  reverting release commit (git reset --hard HEAD~1)"
     git reset --hard HEAD~1 >/dev/null
   elif [ "$RB_CARGO" -eq 1 ]; then
-    log "  reverting ${SERVER_TOML} + Cargo.lock"
-    git checkout -- "$SERVER_TOML" Cargo.lock 2>/dev/null || true
+    log "  reverting Cargo.toml + Cargo.lock"
+    git checkout -- projects/server/Cargo.toml Cargo.lock 2>/dev/null || true
   fi
   exit "$code"
 }
 
-current_cargo_version() {
-  grep '^version' "$SERVER_TOML" | head -1 | sed 's/version = "\(.*\)"/\1/'
-}
+# ── commands ────────────────────────────────────────────────────────────────
 
-write_cargo_version() {
-  local new="$1" current
-  current=$(current_cargo_version)
-  # macOS sed needs '' after -i
-  sed -i '' "0,/^version = \"${current}\"/s//version = \"${new}\"/" "$SERVER_TOML"
-  cargo update -p orca --precise "$new" 2>/dev/null || cargo update -p orca || true
-}
-
-# Shared release-cut step used by both `rc` and `promote`. Bumps Cargo.toml,
-# refreshes Cargo.lock, then builds every target. Must be called INSIDE the
-# rollback-trap region — sets RB_CARGO=1 so a build failure restores the toml.
-#
-# The version MUST be written before building: CARGO_PKG_VERSION is baked into
-# the binary at compile time, so a build done against the old toml produces an
-# artifact that mis-reports its version. Keeping rc + promote on this single
-# function guarantees both surfaces stay correct from one fix.
-bump_and_build() {
-  local new="$1"
-  log "bumping ${SERVER_TOML} → ${new}"
-  write_cargo_version "$new"
+# Wraps bump_and_build so RB_CARGO flips immediately. Pure orchestration.
+bump_and_build_with_rollback() {
   RB_CARGO=1
-  build_orca_binary
-}
-
-compute_rc() {
-  # In: $1 = patch|minor|major
-  # Out: prints "STABLE_VERSION RC_VERSION PREVIOUS_STABLE"
-  local bump="$1"
-  git fetch --tags --quiet
-
-  local latest_stable
-  latest_stable=$(git tag -l 'v[0-9]*' \
-    | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } \
-    | sort -V | tail -1)
-  latest_stable=${latest_stable:-v0.0.0}
-
-  local major minor patch
-  IFS='.' read -r major minor patch <<< "${latest_stable#v}"
-  case "$bump" in
-    major) major=$((major+1)); minor=0; patch=0 ;;
-    minor) minor=$((minor+1)); patch=0 ;;
-    patch) patch=$((patch+1)) ;;
-    *) die "bump must be patch|minor|major" ;;
-  esac
-  local next_stable="${major}.${minor}.${patch}"
-
-  local latest_rc n
-  latest_rc=$(git tag -l "v${next_stable}-rc.*" | sort -V | tail -1)
-  if [ -z "$latest_rc" ]; then
-    n=1
-  else
-    n=${latest_rc##*rc.}; n=$((n+1))
-  fi
-  echo "$next_stable" "${next_stable}-rc.${n}" "$latest_stable"
-}
-
-run_checks() {
-  log "cargo fmt --check"
-  cargo fmt --all -- --check
-  log "cargo clippy"
-  RUSTFLAGS="-D warnings" cargo clippy --all-targets -- -D warnings
-  log "SDK isolation"
-  if cargo tree -p orca-sdk 2>&1 | grep -E "orca-server|orca-commands|orca-conversation|orca-agents|orca-llm|orca-scanner|rust-embed"; then
-    die "server-only crate found in orca-sdk dependency tree"
-  fi
-  log "cargo test (workspace)"
-  if command -v cargo-nextest >/dev/null 2>&1; then
-    cargo nextest run --workspace --release --no-fail-fast
-  else
-    cargo test --workspace --release --no-fail-fast
-  fi
-  log "doctests"
-  cargo test --doc --workspace --release --no-fail-fast
-}
-
-build_orca_binary() {
-  log "building frontend (shared across all targets)"
-  ( cd projects/frontend && npm ci && npm run build )
-
-  mkdir -p dist-release
-  rm -f dist-release/orca-* dist-release/*.sha256
-
-  for t in "${ALL_TARGETS[@]}"; do
-    local asset="orca-${t}"
-    log "building ${t}"
-    if [ "$t" = "$HOST_TARGET" ]; then
-      cargo build --release --features ui --target "$t" --manifest-path "$SERVER_TOML"
-    else
-      cargo zigbuild --release --features ui --target "$t" --manifest-path "$SERVER_TOML"
-    fi
-    cp "target/${t}/release/orca" "dist-release/${asset}"
-    ( cd dist-release && shasum -a 256 "$asset" > "${asset}.sha256" )
-  done
-
-  ls -lh dist-release/
-}
-
-release_assets() {
-  # Print every asset path (binary + sha256) for `gh release create`.
-  for t in "${ALL_TARGETS[@]}"; do
-    echo "dist-release/orca-${t}"
-    echo "dist-release/orca-${t}.sha256"
-  done
-}
-
-generate_changelog() {
-  # $1 = previous stable tag, $2 = new tag, $3 = "rc"|"stable", $4 = optional notes
-  # SIGPIPE from `head` closing early kills `git log | grep | head` pipes under
-  # pipefail. Disable for this function — changelog is best-effort anyway.
-  set +o pipefail
-  local prev="$1" new="$2" kind="$3" notes="${4:-}"
-  local range commits
-  if [ "$prev" = "v0.0.0" ]; then range="HEAD"; else range="${prev}..HEAD"; fi
-  commits=$(git log "$range" --pretty=format:"%s" | grep -v '^chore: release v' | head -100)
-
-  local repo
-  repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-
-  section() {
-    local title="$1"; shift
-    local items=""
-    for prefix in "$@"; do
-      items="$items$(echo "$commits" | grep -i "^${prefix}[:(]" | sed 's/^/- /' || true)"$'\n'
-    done
-    [ -n "$(echo "$items" | tr -d '[:space:]')" ] && printf "### %s\n%s\n" "$title" "$items"
-    return 0  # empty section is fine — don't trip errexit in caller
-  }
-
-  {
-    [ -n "$notes" ] && printf "%s\n\n---\n\n" "$notes"
-    if [ "$kind" = "rc" ]; then
-      printf "> **Pre-release** \`rc\` — pending stable promotion.\n\n"
-    else
-      printf "> Promoted from RC. Binaries are identical.\n\n"
-    fi
-    printf "## What's Changed\n\n"
-    section 'Features'    feat feature
-    section 'Bug Fixes'   fix bug
-    section 'Performance' perf
-    section 'Refactoring' refactor refact
-    section 'Build / CI'  build ci chore
-    section 'Docs'        docs
-
-    printf "\n## Installation\n\n\`\`\`sh\n"
-    for t in "${ALL_TARGETS[@]}"; do
-      printf "# %s\ncurl -Lo orca https://github.com/%s/releases/download/%s/orca-%s\n\n" "$t" "$repo" "$new" "$t"
-    done
-    printf "chmod +x orca && mv orca ~/.local/bin/orca\n# macOS only:\nxattr -d com.apple.quarantine ~/.local/bin/orca 2>/dev/null || true\n\`\`\`\n\n"
-    printf "**Full diff:** [%s → %s](https://github.com/%s/compare/%s...%s)\n" "$prev" "$new" "$repo" "$prev" "$new"
-    printf "\n_Built locally on %s — targets: %s._\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${ALL_TARGETS[*]}"
-  } > /tmp/orca-changelog.md
-  set -o pipefail
+  bump_and_build "$1" "${TARGETS[@]}"
 }
 
 cmd_rc() {
   local bump="${1:-}"; [ -n "$bump" ] || die "usage: release-local.sh rc <patch|minor|major>"
-  require_tools
+  require_release_tools "${TARGETS[@]}"
   require_clean_tree
   sync_with_origin
 
-  read -r STABLE RC PREV < <(compute_rc "$bump")
-  # Recompute after dropping any stale local tag for this RC, in case a prior
-  # run tagged but never pushed.
+  read -r STABLE RC PREV < <(compute_rc_version "$bump")
   drop_stale_local_tag "v${RC}"
-  read -r STABLE RC PREV < <(compute_rc "$bump")
+  read -r STABLE RC PREV < <(compute_rc_version "$bump")
   log "previous stable : $PREV"
   log "next stable     : v$STABLE"
   log "next rc         : v$RC"
 
-  run_checks
+  run_release_checks
 
-  # From here on, any failure must roll back. bump_and_build writes the new
-  # version into Cargo.toml BEFORE compiling so CARGO_PKG_VERSION matches the
-  # tag we publish. Shared with cmd_promote — fix once, fixed both.
   trap rollback ERR
-  bump_and_build "$RC"
+  bump_and_build_with_rollback "$RC"
 
   log "commit + tag + push"
-  git add "$SERVER_TOML"
+  git add projects/server/Cargo.toml
   git check-ignore -q Cargo.lock || git add Cargo.lock
   if ! git diff --cached --quiet; then
     git commit -m "chore: release v${RC}"
@@ -313,25 +94,25 @@ cmd_rc() {
   git push origin HEAD --tags
   RB_PUSHED=1
 
-  generate_changelog "$PREV" "v${RC}" "rc"
+  generate_changelog "$PREV" "v${RC}" "rc" "" "${TARGETS[@]}"
 
   log "creating GitHub pre-release v${RC}"
+  # shellcheck disable=SC2046
   gh release create "v${RC}" \
     --title "orca v${RC}" \
     --notes-file /tmp/orca-changelog.md \
     --prerelease \
-    $(release_assets)
+    "${REPO_ROOT}/scripts/install.sh" \
+    $(release_asset_paths "${TARGETS[@]}")
 
   log "done — review the release, then run: scripts/release-local.sh promote"
 }
 
 cmd_promote() {
-  require_tools
-  # Don't require a fully clean tree — the rc build regenerates frontend
-  # client/types files that are never committed. Just check Cargo.toml is
-  # clean so the version bump applies cleanly.
-  if ! git diff --quiet -- "$SERVER_TOML" || ! git diff --cached --quiet -- "$SERVER_TOML"; then
-    die "$SERVER_TOML has uncommitted changes — commit or revert first"
+  require_release_tools "${TARGETS[@]}"
+  if ! git diff --quiet -- projects/server/Cargo.toml \
+     || ! git diff --cached --quiet -- projects/server/Cargo.toml; then
+    die "projects/server/Cargo.toml has uncommitted changes — commit or revert first"
   fi
   sync_with_origin
 
@@ -343,9 +124,8 @@ cmd_promote() {
   stable_version=${rc_version%-rc.*}
   stable_tag="v${stable_version}"
 
-  if git rev-parse -q --verify "refs/tags/${stable_tag}" >/dev/null; then
-    die "stable tag ${stable_tag} already exists"
-  fi
+  git rev-parse -q --verify "refs/tags/${stable_tag}" >/dev/null \
+    && die "stable tag ${stable_tag} already exists"
 
   prev=$(git tag -l 'v[0-9]*' \
     | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } \
@@ -354,15 +134,11 @@ cmd_promote() {
 
   log "promoting ${latest_rc} → ${stable_tag}"
 
-  # Mirror cmd_rc exactly: bump the version, then rebuild every target so the
-  # stable binary reports the stable version (the RC artifacts have the RC
-  # version baked into CARGO_PKG_VERSION — uploading them as "stable" would
-  # mis-report). Same shared bump_and_build path means one bug fix covers both.
   trap rollback ERR
-  bump_and_build "$stable_version"
+  bump_and_build_with_rollback "$stable_version"
 
   log "commit + tag + push"
-  git add "$SERVER_TOML"
+  git add projects/server/Cargo.toml
   git check-ignore -q Cargo.lock || git add Cargo.lock
   if ! git diff --cached --quiet; then
     git commit -m "chore: release ${stable_tag}"
@@ -373,15 +149,15 @@ cmd_promote() {
   git push origin HEAD --tags
   RB_PUSHED=1
 
-  generate_changelog "$prev" "$stable_tag" "stable"
+  generate_changelog "$prev" "$stable_tag" "stable" "" "${TARGETS[@]}"
 
   log "creating GitHub release ${stable_tag}"
-  # List assets explicitly — globs match overlapping sets (orca-* also catches
-  # *.sha256), which produces duplicate uploads and a 404 from gh.
+  # shellcheck disable=SC2046
   gh release create "$stable_tag" \
     --title "orca ${stable_tag}" \
     --notes-file /tmp/orca-changelog.md \
-    $(release_assets)
+    "${REPO_ROOT}/scripts/install.sh" \
+    $(release_asset_paths "${TARGETS[@]}")
 
   log "marking ${latest_rc} as superseded"
   local repo; repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)

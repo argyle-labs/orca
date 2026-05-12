@@ -81,84 +81,37 @@ jobs:
             exit 1
           fi
 
-  # ── Rust: build (matrix per target) ──────────────────────────────────────
-  build-rust:
-    name: Build Rust ${{ matrix.target }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-latest
-            target: aarch64-apple-darwin
-          - runner: macos-latest
-            target: x86_64-apple-darwin
-          - runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - runner: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            musl: true
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            musl: true
-    runs-on: ${{ matrix.runner }}
+  # ── Compute version once (needed before build so binaries embed the
+  #    correct CARGO_PKG_VERSION). Shared logic lives in
+  #    scripts/release-lib.sh via the compute-version composite action.
+  version:
+    name: Compute version
+    needs: lint-rust
+    runs-on: ubuntu-latest
+    outputs:
+      stable_version:  ${{ steps.v.outputs.stable-version }}
+      stable_tag:      ${{ steps.v.outputs.stable-tag }}
+      rc_version:      ${{ steps.v.outputs.rc-version }}
+      rc_tag:          ${{ steps.v.outputs.rc-tag }}
+      previous_stable: ${{ steps.v.outputs.previous-stable }}
     steps:
       - uses: actions/checkout@v5
-
-      - name: Free disk space (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
-                      /usr/share/swift
-          sudo docker image prune -af || true
-          df -h
-
-      - name: Install musl tools
-        if: matrix.musl
-        run: sudo apt-get install -y musl-tools
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      # rust-toolchain.toml pins a specific channel; install the target
-      # via rustup so it lands in the active toolchain (not stable).
-      - name: Add cross-compile target
-        run: rustup target add ${{ matrix.target }}
-
-      - uses: rui314/setup-mold@v1
-        if: runner.os == 'Linux'
-
-      - uses: Swatinem/rust-cache@v2
+        with: { fetch-depth: 0 }
+      - id: v
+        uses: ./.github/actions/compute-version
         with:
-          shared-key: release-rust-${{ matrix.target }}
-          cache-on-failure: true
+          bump: ${{ inputs.bump }}
 
-      - name: Build orca (release)
-        run: cargo build --release --target ${{ matrix.target }} --manifest-path projects/server/Cargo.toml
-
-      - name: Compile workspace test binaries (no run)
-        run: cargo test --workspace --no-run --release --target ${{ matrix.target }}
-
-      - name: Stage release binaries + checksums
-        run: |
-          set -euo pipefail
-          if command -v sha256sum >/dev/null 2>&1; then
-            SUM="sha256sum"
-          else
-            SUM="shasum -a 256"
-          fi
-          ASSET="orca-${{ matrix.target }}"
-          cp "target/${{ matrix.target }}/release/orca" "$ASSET"
-          $SUM "$ASSET" > "${ASSET}.sha256"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: orca-${{ matrix.target }}
-          path: |
-            orca-${{ matrix.target }}
-            orca-${{ matrix.target }}.sha256
-          retention-days: 7
+  # ── Rust: build (matrix per target via reusable workflow) ────────────────
+  # The matrix definition lives in .github/workflows/_build-orca-matrix.yml
+  # and is reused for BOTH the RC build (here) and the stable rebuild on
+  # promotion. One matrix, one definition — same shared lib path.
+  build-rust:
+    name: Build Rust
+    needs: version
+    uses: ./.github/workflows/_build-orca-matrix.yml
+    with:
+      version: ${{ needs.version.outputs.rc_version }}
 
   # ── Rust: test ──────────────────────────────────────────────────────────
   # Single ubuntu-latest job. The per-target build matrix above produces
@@ -422,78 +375,19 @@ jobs:
       - name: Assert built artifact exists
         run: test -f projects/frontend/dist/index.html
 
-  # ── Compute next RC + stable versions ────────────────────────────────────
-  version:
-    name: Compute version
+  # ── Publish RC (manual approval) ─────────────────────────────────────────
+  # Version math + build are upstream; publish waits on every test job so a
+  # failed test blocks the gate. (`version` job is defined at top of file.)
+  publish-rc:
+    name: Publish RC (gate)
     needs:
-      - lint-rust
+      - version
+      - build-rust
       - test-rust
       - test-sdk-ts
       - test-sdk-go
       - test-sdk-kotlin
       - test-frontend
-    runs-on: ubuntu-latest
-    outputs:
-      stable_version: ${{ steps.bump.outputs.stable_version }}
-      stable_tag:     ${{ steps.bump.outputs.stable_tag }}
-      rc_version:     ${{ steps.bump.outputs.rc_version }}
-      rc_tag:         ${{ steps.bump.outputs.rc_tag }}
-      previous_stable: ${{ steps.bump.outputs.previous_stable }}
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Compute version
-        id: bump
-        run: |
-          set -euo pipefail
-          git fetch --tags --quiet
-
-          BUMP="${{ inputs.bump }}"
-
-          # Find latest stable tag (vX.Y.Z, no suffix).
-          # `grep || true` so a fresh repo with no tags doesn't trip pipefail.
-          LATEST_STABLE=$(git tag -l 'v[0-9]*' \
-            | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } \
-            | sort -V | tail -1)
-          LATEST_STABLE=${LATEST_STABLE:-v0.0.0}
-
-          IFS='.' read -r MAJOR MINOR PATCH <<< "${LATEST_STABLE#v}"
-          case "$BUMP" in
-            major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
-            minor) MINOR=$((MINOR+1)); PATCH=0 ;;
-            patch) PATCH=$((PATCH+1)) ;;
-          esac
-          NEXT_STABLE="${MAJOR}.${MINOR}.${PATCH}"
-
-          # Auto-increment RC number for this stable target.
-          LATEST_RC=$(git tag -l "v${NEXT_STABLE}-rc.*" | sort -V | tail -1)
-          if [ -z "$LATEST_RC" ]; then
-            N=1
-          else
-            N=${LATEST_RC##*rc.}
-            N=$((N+1))
-          fi
-
-          RC_VERSION="${NEXT_STABLE}-rc.${N}"
-
-          echo "Latest stable : $LATEST_STABLE"
-          echo "Next stable   : v${NEXT_STABLE}"
-          echo "Next RC       : v${RC_VERSION}"
-
-          {
-            echo "stable_version=$NEXT_STABLE"
-            echo "stable_tag=v${NEXT_STABLE}"
-            echo "rc_version=$RC_VERSION"
-            echo "rc_tag=v${RC_VERSION}"
-            echo "previous_stable=$LATEST_STABLE"
-          } >> "$GITHUB_OUTPUT"
-
-  # ── Publish RC (manual approval) ─────────────────────────────────────────
-  publish-rc:
-    name: Publish RC (gate)
-    needs: version
     runs-on: ubuntu-latest
     environment:
       name: release-rc
@@ -523,13 +417,15 @@ jobs:
       - name: Merge checksums
         run: cat artifacts/*.sha256 > artifacts/checksums.sha256
 
-      - name: Write RC version to Cargo.toml
+      # Re-apply the version bump on the publish runner so the commit/tag
+      # carry it. The actual binaries already had it baked in via the
+      # build-orca-target composite (single source: scripts/release-lib.sh).
+      - name: Bump Cargo.toml to RC version
+        shell: bash
         run: |
-          NEW="${{ needs.version.outputs.rc_version }}"
-          TOML=projects/server/Cargo.toml
-          CURRENT=$(grep '^version' "$TOML" | head -1 | sed 's/version = "\(.*\)"/\1/')
-          sed -i "0,/^version = \"${CURRENT}\"/s//version = \"${NEW}\"/" "$TOML"
-          cargo update -p orca --precise "$NEW" 2>/dev/null || cargo update -p orca || true
+          set -euo pipefail
+          source scripts/release-lib.sh
+          write_cargo_version "${{ needs.version.outputs.rc_version }}"
 
       - name: Commit and tag RC
         id: tag
@@ -542,69 +438,46 @@ jobs:
           git push origin HEAD --tags
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Generate RC changelog
-        run: |
-          PREV="${{ needs.version.outputs.previous_stable }}"
-          NEW="${{ needs.version.outputs.rc_tag }}"
-
-          [ "$PREV" = "v0.0.0" ] && RANGE="HEAD" || RANGE="${PREV}..HEAD"
-          COMMITS=$(git log "$RANGE" --pretty=format:"%s" \
-            | grep -v '^chore: release v' | head -100)
-
-          section() {
-            local title="$1"; shift
-            local items=""
-            for prefix in "$@"; do
-              items="$items$(echo "$COMMITS" | grep -i "^${prefix}[:(]" | sed 's/^/- /' || true)"$'\n'
-            done
-            [ -n "$(echo "$items" | tr -d '[:space:]')" ] && printf "### %s\n%s\n" "$title" "$items"
-          }
-
-          EXTRA="${{ inputs.notes }}"
-          HEADER=""
-          [ -n "$EXTRA" ] && HEADER="${EXTRA}\n\n---\n\n"
-          HEADER="${HEADER}> **Pre-release** \`rc\` — pending stable promotion approval.\n\n"
-
-          BODY="${HEADER}## What's Changed\n\n"
-          BODY="${BODY}$(section 'Features'    feat feature)"
-          BODY="${BODY}$(section 'Bug Fixes'   fix bug)"
-          BODY="${BODY}$(section 'Performance' perf)"
-          BODY="${BODY}$(section 'Refactoring' refactor refact)"
-          BODY="${BODY}$(section 'Build / CI'  build ci chore)"
-          BODY="${BODY}$(section 'Docs'        docs)"
-
-          COUNT=$(printf "%b" "$BODY" | grep -c '^- ' || true)
-          if [ "${COUNT:-0}" -eq 0 ]; then
-            BODY="${HEADER}## What's Changed\n\n$(echo "$COMMITS" | head -50 | sed 's/^/- /')\n\n"
-          fi
-
-          REPO="${{ github.repository }}"
-          BODY="${BODY}\n## Installation\n\n"
-          BODY="${BODY}One-liner — auto-detects OS/arch, downloads the matching binary, verifies sha256:\n\n"
-          BODY="${BODY}\`\`\`sh\ncurl -fsSL https://github.com/${REPO}/releases/download/${NEW}/install.sh | sh -s -- --version ${NEW} --prerelease\n\`\`\`\n\n"
-          BODY="${BODY}Override target or install dir:\n\n"
-          BODY="${BODY}\`\`\`sh\ncurl -fsSL https://github.com/${REPO}/releases/download/${NEW}/install.sh \\\\\n  | sh -s -- --version ${NEW} --target x86_64-unknown-linux-musl --dir /usr/local/bin\n\`\`\`\n\n"
-          BODY="${BODY}Supported targets: \`aarch64-apple-darwin\`, \`x86_64-apple-darwin\`, \`x86_64-unknown-linux-gnu\`, \`x86_64-unknown-linux-musl\`, \`aarch64-unknown-linux-gnu\`, \`aarch64-unknown-linux-musl\`.\n\n"
-          BODY="${BODY}**Full diff:** [$PREV → $NEW](https://github.com/${REPO}/compare/${PREV}...${NEW})"
-
-          printf "%b" "$BODY" > /tmp/changelog.md
+      - uses: ./.github/actions/generate-changelog
+        id: changelog
+        with:
+          previous-stable: ${{ needs.version.outputs.previous_stable }}
+          new-tag:         ${{ needs.version.outputs.rc_tag }}
+          kind:            rc
+          extra-notes:     ${{ inputs.notes }}
+          targets: >-
+            aarch64-apple-darwin x86_64-apple-darwin
+            x86_64-unknown-linux-gnu x86_64-unknown-linux-musl
+            aarch64-unknown-linux-gnu aarch64-unknown-linux-musl
 
       - name: Create RC release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.version.outputs.rc_tag }}
           name: orca ${{ needs.version.outputs.rc_tag }}
-          body_path: /tmp/changelog.md
+          body_path: ${{ steps.changelog.outputs.body-path }}
           prerelease: true
           files: |
             artifacts/orca-*
             artifacts/checksums.sha256
             scripts/install.sh
 
+  # ── Rebuild for stable (after RC ships, before promote-gate publishes) ──
+  # cargo bakes CARGO_PKG_VERSION at compile time, so the stable binary must
+  # be compiled with the stable version in Cargo.toml. Same reusable matrix
+  # as the RC build, just with a different version input.
+  build-rust-stable:
+    name: Build Rust (stable)
+    needs: [version, publish-rc]
+    uses: ./.github/workflows/_build-orca-matrix.yml
+    with:
+      version: ${{ needs.version.outputs.stable_version }}
+      artifact-suffix: -stable
+
   # ── Promote to stable (manual approval) ──────────────────────────────────
   publish-stable:
     name: Publish stable (gate)
-    needs: [version, publish-rc]
+    needs: [version, publish-rc, build-rust-stable]
     runs-on: ubuntu-latest
     environment:
       name: release-stable
@@ -618,87 +491,51 @@ jobs:
       - name: Pull RC commit
         run: git fetch origin && git checkout ${{ needs.publish-rc.outputs.commit }}
 
-      - name: Download RC artifacts
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p artifacts
-          gh release download "${{ needs.version.outputs.rc_tag }}" \
-            --dir artifacts \
-            --pattern "orca-*" \
-            --pattern "checksums.sha256"
-          ls -lh artifacts/
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: 'orca-*-stable'
+          path: artifacts
+          merge-multiple: true
 
-      - name: Write stable version to Cargo.toml
+      - name: Merge checksums
+        run: cat artifacts/*.sha256 > artifacts/checksums.sha256
+
+      - name: Bump Cargo.toml to stable version
+        shell: bash
         run: |
-          NEW="${{ needs.version.outputs.stable_version }}"
-          TOML=projects/server/Cargo.toml
-          CURRENT=$(grep '^version' "$TOML" | head -1 | sed 's/version = "\(.*\)"/\1/')
-          sed -i "0,/^version = \"${CURRENT}\"/s//version = \"${NEW}\"/" "$TOML"
+          set -euo pipefail
+          source scripts/release-lib.sh
+          write_cargo_version "${{ needs.version.outputs.stable_version }}"
 
       - name: Commit and tag stable
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -B main
-          git add projects/server/Cargo.toml
+          git add projects/server/Cargo.toml Cargo.lock
           git diff --cached --quiet || git commit -m "chore: release ${{ needs.version.outputs.stable_tag }}"
           git tag -a "${{ needs.version.outputs.stable_tag }}" \
             -m "orca ${{ needs.version.outputs.stable_tag }} (promoted from ${{ needs.version.outputs.rc_tag }})"
           git push origin HEAD:main --tags
 
-      - name: Generate stable changelog
-        run: |
-          STABLE="${{ needs.version.outputs.stable_tag }}"
-          RC="${{ needs.version.outputs.rc_tag }}"
-          PREV="${{ needs.version.outputs.previous_stable }}"
-
-          [ "$PREV" = "v0.0.0" ] && RANGE="HEAD" || RANGE="${PREV}..HEAD"
-          COMMITS=$(git log "$RANGE" --pretty=format:"%s" | head -100)
-
-          section() {
-            local title="$1"; shift
-            local items=""
-            for prefix in "$@"; do
-              items="$items$(echo "$COMMITS" | grep -i "^${prefix}[:(]" | sed 's/^/- /' || true)"$'\n'
-            done
-            [ -n "$(echo "$items" | tr -d '[:space:]')" ] && printf "### %s\n%s\n" "$title" "$items"
-          }
-
-          EXTRA="${{ inputs.notes }}"
-          HEADER=""; [ -n "$EXTRA" ] && HEADER="${EXTRA}\n\n---\n\n"
-          HEADER="${HEADER}> Promoted from \`${RC}\`. Binaries are identical.\n\n"
-
-          BODY="${HEADER}## What's Changed\n\n"
-          BODY="${BODY}$(section 'Features'    feat feature)"
-          BODY="${BODY}$(section 'Bug Fixes'   fix bug)"
-          BODY="${BODY}$(section 'Performance' perf)"
-          BODY="${BODY}$(section 'Refactoring' refactor refact)"
-          BODY="${BODY}$(section 'Build / CI'  build ci chore)"
-          BODY="${BODY}$(section 'Docs'        docs)"
-
-          COUNT=$(printf "%b" "$BODY" | grep -c '^- ' || true)
-          if [ "${COUNT:-0}" -eq 0 ]; then
-            BODY="${HEADER}## What's Changed\n\n$(echo "$COMMITS" | head -50 | sed 's/^/- /')\n\n"
-          fi
-
-          REPO="${{ github.repository }}"
-          BODY="${BODY}\n## Installation\n\n"
-          BODY="${BODY}One-liner — auto-detects OS/arch, downloads the matching binary, verifies sha256:\n\n"
-          BODY="${BODY}\`\`\`sh\ncurl -fsSL https://github.com/${REPO}/releases/latest/download/install.sh | sh\n\`\`\`\n\n"
-          BODY="${BODY}Pin a version or override target / install dir:\n\n"
-          BODY="${BODY}\`\`\`sh\ncurl -fsSL https://github.com/${REPO}/releases/download/${STABLE}/install.sh \\\\\n  | sh -s -- --version ${STABLE} --target x86_64-unknown-linux-musl --dir /usr/local/bin\n\`\`\`\n\n"
-          BODY="${BODY}Supported targets: \`aarch64-apple-darwin\`, \`x86_64-apple-darwin\`, \`x86_64-unknown-linux-gnu\`, \`x86_64-unknown-linux-musl\`, \`aarch64-unknown-linux-gnu\`, \`aarch64-unknown-linux-musl\`.\n\n"
-          BODY="${BODY}**Full diff:** [$PREV → $STABLE](https://github.com/${REPO}/compare/${PREV}...${STABLE})"
-
-          printf "%b" "$BODY" > /tmp/changelog.md
+      - uses: ./.github/actions/generate-changelog
+        id: changelog
+        with:
+          previous-stable: ${{ needs.version.outputs.previous_stable }}
+          new-tag:         ${{ needs.version.outputs.stable_tag }}
+          kind:            stable
+          extra-notes:     ${{ inputs.notes }}
+          targets: >-
+            aarch64-apple-darwin x86_64-apple-darwin
+            x86_64-unknown-linux-gnu x86_64-unknown-linux-musl
+            aarch64-unknown-linux-gnu aarch64-unknown-linux-musl
 
       - name: Create stable release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.version.outputs.stable_tag }}
           name: orca ${{ needs.version.outputs.stable_tag }}
-          body_path: /tmp/changelog.md
+          body_path: ${{ steps.changelog.outputs.body-path }}
           prerelease: false
           files: |
             artifacts/orca-*

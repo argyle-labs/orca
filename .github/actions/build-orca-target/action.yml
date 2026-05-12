@@ -1,0 +1,69 @@
+name: Build orca target
+description: >
+  Writes the release version into Cargo.toml, builds the frontend once, then
+  builds a single orca target by calling scripts/release-lib.sh. The same
+  library is used by scripts/release-local.sh, so a bug fixed in one place
+  fixes both. CARGO_PKG_VERSION is baked at compile time — the version bump
+  MUST precede the build, which is exactly what bump_and_build enforces.
+
+inputs:
+  version:
+    description: Version string to write into Cargo.toml (e.g. 0.0.4-rc.1).
+    required: true
+  target:
+    description: Rust target triple to build.
+    required: true
+  features:
+    description: Cargo features (default ui = embedded frontend; empty = headless).
+    required: false
+    default: 'ui'
+
+outputs:
+  asset-path:
+    description: Path to the built binary asset.
+    value: ${{ steps.build.outputs.asset-path }}
+  checksum-path:
+    description: Path to the asset's sha256 file.
+    value: ${{ steps.build.outputs.checksum-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node (for frontend build)
+      uses: actions/setup-node@v5
+      with:
+        node-version: '24'
+        cache: 'npm'
+        cache-dependency-path: projects/frontend/package-lock.json
+
+    - name: Build target
+      id: build
+      shell: bash
+      env:
+        RELEASE_FEATURES: ${{ inputs.features }}
+        # One target per runner → full cores for cargo's internal parallelism.
+        RELEASE_PARALLEL_TARGETS: '1'
+        # CI doesn't ship perf-tuned binaries any differently from dev.
+        # Disable incremental (ballooning cache size, no benefit on a clean
+        # runner) and silence rustc's progress output to keep logs cheap.
+        CARGO_INCREMENTAL: '0'
+        CARGO_TERM_PROGRESS_WHEN: never
+        # rustc network-stable target dir under the workspace root so the
+        # Swatinem cache picks up everything in one shot.
+        CARGO_NET_RETRY: '5'
+      run: |
+        set -euo pipefail
+        source scripts/release-lib.sh
+
+        # Single shared codepath. Local + CI agree on:
+        #   1. write_cargo_version  (version into Cargo.toml + Cargo.lock)
+        #   2. build_frontend       (npm ci + npm run build)
+        #   3. build_one_target     (cargo zigbuild or cargo build → dist-release/)
+        write_cargo_version "${{ inputs.version }}"
+        build_frontend
+        build_one_target "${{ inputs.target }}" "$(release_cargo_jobs 1)"
+
+        asset="dist-release/orca-${{ inputs.target }}"
+        echo "asset-path=${asset}" >> "$GITHUB_OUTPUT"
+        echo "checksum-path=${asset}.sha256" >> "$GITHUB_OUTPUT"
+        ls -lh dist-release/

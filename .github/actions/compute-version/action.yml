@@ -1,0 +1,48 @@
+name: Compute release version
+description: >
+  Wraps scripts/release-lib.sh compute_rc_version. Single source of truth for
+  the version math used by both the local release script and the GitHub
+  workflow.
+
+inputs:
+  bump:
+    description: patch | minor | major
+    required: true
+
+outputs:
+  stable-version:
+    description: Next stable version, e.g. 0.0.4 (no v prefix).
+    value: ${{ steps.compute.outputs.stable-version }}
+  stable-tag:
+    description: Next stable tag, e.g. v0.0.4.
+    value: ${{ steps.compute.outputs.stable-tag }}
+  rc-version:
+    description: Next RC version, e.g. 0.0.4-rc.1 (no v prefix).
+    value: ${{ steps.compute.outputs.rc-version }}
+  rc-tag:
+    description: Next RC tag, e.g. v0.0.4-rc.1.
+    value: ${{ steps.compute.outputs.rc-tag }}
+  previous-stable:
+    description: Previous stable tag (e.g. v0.0.3), or v0.0.0 on a fresh repo.
+    value: ${{ steps.compute.outputs.previous-stable }}
+
+runs:
+  using: composite
+  steps:
+    - name: Compute
+      id: compute
+      shell: bash
+      run: |
+        set -euo pipefail
+        source scripts/release-lib.sh
+        read -r STABLE RC PREV < <(compute_rc_version "${{ inputs.bump }}")
+        {
+          echo "stable-version=$STABLE"
+          echo "stable-tag=v$STABLE"
+          echo "rc-version=$RC"
+          echo "rc-tag=v$RC"
+          echo "previous-stable=$PREV"
+        } >> "$GITHUB_OUTPUT"
+        echo "→ next stable: v$STABLE"
+        echo "→ next rc:     v$RC"
+        echo "→ previous:    $PREV"
