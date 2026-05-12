@@ -27,6 +27,7 @@ pub mod orca_db;
 pub mod orca_lifecycle;
 pub mod orca_pki;
 pub mod orca_profile;
+pub mod orca_secrets;
 pub mod plugin_runtime;
 pub mod plugins;
 pub mod proxmox;
@@ -145,6 +146,13 @@ declare_tools! {
     auth_logout => orca_auth::AuthLogout [d:"auth", v:"logout"],
     auth_login  => orca_auth::AuthLogin  [d:"auth", v:"login"],
 
+    // ── Secrets (host-level named secret store with pluggable backends) ─────
+    secret_list     => orca_secrets::SecretList     [d:"secret", v:"list"],
+    secret_get      => orca_secrets::SecretGet      [d:"secret", v:"get"],
+    secret_set      => orca_secrets::SecretSet      [d:"secret", v:"set"],
+    secret_delete   => orca_secrets::SecretDelete   [d:"secret", v:"delete"],
+    secret_backends => orca_secrets::SecretBackends [d:"secret", v:"backends"],
+
     // ── orca.db admin ───────────────────────────────────────────────────────
     db_status   => orca_db::DbStatus   [d:"db", v:"status"],
     db_migrate  => orca_db::DbMigrate  [d:"db", v:"migrate"],
@@ -171,8 +179,10 @@ declare_tools! {
     system_install      => orca_lifecycle::SystemInstall      [d:"system", v:"install"],
     system_uninstall    => orca_lifecycle::SystemUninstall    [d:"system", v:"uninstall"],
     system_doctor       => orca_lifecycle::SystemDoctor       [d:"system", v:"doctor"],
-    system_update_check => orca_lifecycle::SystemUpdateCheck  [d:"system", v:"update-check"],
-    system_update_apply => orca_lifecycle::SystemUpdateApply  [d:"system", v:"update-apply"],
+    system_update_check  => orca_lifecycle::SystemUpdateCheck  [d:"system", v:"update-check"],
+    system_update_apply  => orca_lifecycle::SystemUpdateApply  [d:"system", v:"update-apply"],
+    system_update_pin    => orca_lifecycle::SystemUpdatePin    [d:"system", v:"update-pin"],
+    system_update_unpin  => orca_lifecycle::SystemUpdateUnpin  [d:"system", v:"update-unpin"],
     projects_list       => orca_lifecycle::ProjectsList       [d:"projects", v:"list"],
     spec_dump           => orca_lifecycle::SpecDump           [d:"spec", v:"dump"],
     system_runtime_spec => orca_lifecycle::SystemRuntimeSpec  [d:"system", v:"runtime-spec"],

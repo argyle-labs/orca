@@ -43,6 +43,21 @@ pub struct UpdateCheckReport {
     pub up_to_date: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asset_url: Option<String>,
+    /// Set when an update is available but blocked by a version pin.
+    /// The user must run `orca update --unpin` to proceed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_to: Option<String>,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct UpdatePinReport {
+    /// The active pin after this operation, or None if the pin was cleared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_to: Option<String>,
+    /// True if this was an unpin operation.
+    pub cleared: bool,
 }
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
@@ -103,6 +118,17 @@ pub struct SystemUpdateArgs {
 fn default_channel() -> String {
     "stable".into()
 }
+
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SystemUpdatePinArgs {
+    /// Version to pin to, e.g. "v0.0.4-rc.1". A leading `v` is optional.
+    pub version: String,
+}
+
+empty_args!(SystemUpdateUnpinArgs);
 
 // ── Tool defs ───────────────────────────────────────────────────────────────
 
@@ -177,6 +203,22 @@ impl OrcaToolDef for SpecDump {
     type Output = SpecDumpReport;
 }
 
+pub struct SystemUpdatePin;
+impl OrcaToolDef for SystemUpdatePin {
+    const NAME: &'static str = "system.update-pin";
+    const DESCRIPTION: &'static str = "[MUTATES STATE] Pin orca to a specific version. Future `orca update` runs will not upgrade past this version.";
+    type Args = SystemUpdatePinArgs;
+    type Output = UpdatePinReport;
+}
+
+pub struct SystemUpdateUnpin;
+impl OrcaToolDef for SystemUpdateUnpin {
+    const NAME: &'static str = "system.update-unpin";
+    const DESCRIPTION: &'static str = "[MUTATES STATE] Clear the version pin. `orca update` will resume upgrading to the latest on the configured channel.";
+    type Args = SystemUpdateUnpinArgs;
+    type Output = UpdatePinReport;
+}
+
 #[cfg(feature = "native")]
 mod native {
     use super::*;
@@ -236,6 +278,18 @@ mod native {
     impl OrcaTool for SystemRuntimeSpec {
         async fn run(_a: SystemRuntimeSpecArgs, ctx: &ToolCtx) -> Result<RuntimeSpecReport> {
             svc(ctx)?.runtime_spec().await
+        }
+    }
+    #[async_trait]
+    impl OrcaTool for SystemUpdatePin {
+        async fn run(a: SystemUpdatePinArgs, ctx: &ToolCtx) -> Result<UpdatePinReport> {
+            svc(ctx)?.update_pin(&a.version).await
+        }
+    }
+    #[async_trait]
+    impl OrcaTool for SystemUpdateUnpin {
+        async fn run(_a: SystemUpdateUnpinArgs, ctx: &ToolCtx) -> Result<UpdatePinReport> {
+            svc(ctx)?.update_unpin().await
         }
     }
 }

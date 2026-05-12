@@ -10,6 +10,7 @@
 #   --target  <triple>  ORCA_TARGET        e.g. x86_64-unknown-linux-musl (default: auto-detect)
 #   --dir     <path>    ORCA_INSTALL_DIR   install directory (default: ~/.local/bin)
 #   --rc, --prerelease  ORCA_PRERELEASE=1  install newest pre-release (RC); pins channel=rc
+#   GITHUB_TOKEN        required — releases are private (export before running or pipe inline)
 #
 # Channel marker is written to $ORCA_HOME/channel ($ORCA_HOME defaults to ~/.orca).
 # Valid marker values: 'stable' or 'rc' (matches the `orca update` channel enum).
@@ -27,6 +28,7 @@ VERSION="${ORCA_VERSION:-}"
 TARGET="${ORCA_TARGET:-}"
 INSTALL_DIR="${ORCA_INSTALL_DIR:-$HOME/.local/bin}"
 PRERELEASE="${ORCA_PRERELEASE:-0}"
+GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -34,7 +36,7 @@ while [ $# -gt 0 ]; do
     --target)      TARGET="$2"; shift 2 ;;
     --dir)         INSTALL_DIR="$2"; shift 2 ;;
     --rc|--prerelease) PRERELEASE=1; shift ;;
-    -h|--help)     sed -n '2,19p' "$0"; exit 0 ;;
+    -h|--help)     sed -n '2,22p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
@@ -42,10 +44,22 @@ done
 die() { echo "install.sh: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
 
+[ -n "$GITHUB_TOKEN" ] || die "GITHUB_TOKEN is required (releases are private) — export GITHUB_TOKEN before running"
+
 need curl
 need chmod
 need mv
 need mkdir
+
+# Authenticated GitHub API helper. Usage: gh_api <url> [extra curl flags...]
+gh_api() {
+  _url="$1"; shift
+  curl -fsSL \
+    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \   # current stable as of 2026-05; check https://docs.github.com/en/rest/about-the-rest-api/api-versions
+    "$@" "$_url"
+}
 
 # ── detect target triple ────────────────────────────────────────────────────
 detect_target() {
@@ -91,16 +105,16 @@ if [ -z "$VERSION" ]; then
   if [ "$CHANNEL" = "rc" ]; then
     # Newest prerelease — /releases is ordered newest-first; pick the first
     # tag_name containing "-rc." (stable tags never do).
-    VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=30" \
+    VERSION="$(gh_api "https://api.github.com/repos/${REPO}/releases?per_page=30" \
       | grep '"tag_name":' \
       | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/' \
       | grep -m1 -- '-rc\.')"
     [ -n "$VERSION" ] || die "no prerelease found for ${REPO}"
   else
-    # Latest stable — GitHub /releases/latest redirects to the stable tag.
-    VERSION="$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
-      "https://github.com/${REPO}/releases/latest" \
-      | sed -E 's#.*/tag/##')"
+    # Latest stable — use the API (private repos 404 on unauthenticated /releases/latest).
+    VERSION="$(gh_api "https://api.github.com/repos/${REPO}/releases/latest" \
+      | grep '"tag_name":' \
+      | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
     [ -n "$VERSION" ] || die "could not resolve latest stable (try --version or --prerelease)"
   fi
 else
@@ -113,19 +127,39 @@ else
 fi
 
 ASSET="orca-${TARGET}"
-BASE="https://github.com/${REPO}/releases/download/${VERSION}"
-URL_BIN="${BASE}/${ASSET}"
-URL_SUM="${BASE}/${ASSET}.sha256"
+ASSET_SUM="${ASSET}.sha256"
 
 echo "→ installing orca ${VERSION} (${TARGET}) to ${INSTALL_DIR}"
 
-# ── download + verify ───────────────────────────────────────────────────────
+# ── resolve asset download URLs via GitHub API ───────────────────────────────
+# Private repos 404 on unauthenticated /releases/download/ URLs; the API
+# asset endpoint honours the Bearer token and follows the redirect correctly
+# when combined with -L and Accept: application/octet-stream.
+RELEASE_JSON="$(gh_api "https://api.github.com/repos/${REPO}/releases/tags/${VERSION}")"
+
+asset_url() {
+  echo "$RELEASE_JSON" \
+    | grep -A1 "\"name\": *\"${1}\"" \
+    | grep '"url":' \
+    | sed -E 's/.*"url": *"([^"]+)".*/\1/' \
+    | head -1
+}
+
+URL_BIN="$(asset_url "${ASSET}")"
+URL_SUM="$(asset_url "${ASSET_SUM}")"
+
+[ -n "$URL_BIN" ] || die "asset '${ASSET}' not found in release ${VERSION} (wrong target or version?)"
+[ -n "$URL_SUM" ] || die "asset '${ASSET_SUM}' not found in release ${VERSION}"
+
+# ── download + verify ────────────────────────────────────────────────────────
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-curl -fsSL --proto '=https' -o "${TMP}/orca"     "$URL_BIN" \
+# -L follows the redirect from the API asset URL to the S3 pre-signed URL.
+# Accept: application/octet-stream tells GitHub to stream the raw binary.
+gh_api "$URL_BIN" -L -H "Accept: application/octet-stream" -o "${TMP}/orca" \
   || die "download failed: $URL_BIN  (is the target/version correct?)"
-curl -fsSL --proto '=https' -o "${TMP}/orca.sha256" "$URL_SUM" \
+gh_api "$URL_SUM" -L -H "Accept: application/octet-stream" -o "${TMP}/orca.sha256" \
   || die "checksum download failed: $URL_SUM"
 
 EXPECTED="$(awk '{print $1}' "${TMP}/orca.sha256")"

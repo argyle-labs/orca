@@ -150,6 +150,13 @@ cmd_promote() {
   RB_PUSHED=1
 
   generate_changelog "$prev" "$stable_tag" "stable" "" "${TARGETS[@]}"
+  prepend_changelog "$stable_tag"
+
+  # Include CHANGELOG.md in the release commit if it changed
+  if ! git diff --quiet -- CHANGELOG.md || ! git diff --cached --quiet -- CHANGELOG.md; then
+    git add CHANGELOG.md
+    git commit --amend --no-edit
+  fi
 
   log "creating GitHub release ${stable_tag}"
   # shellcheck disable=SC2046
