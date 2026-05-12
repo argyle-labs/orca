@@ -22,20 +22,23 @@ init:
 doctor:
 	bash scripts/setup.sh --check
 
+# Resolve the host triple once. Both `build` and `deploy` use it so they
+# agree on where scripts/build-host.sh wrote the binary.
+HOST_TARGET := $(shell rustc -vV | awk '/^host:/ {print $$2}')
+
 # Build frontend + release binary (single self-contained binary with embedded assets).
 # OpenAPI→TS codegen is gone — the frontend now talks to orca exclusively through
 # the WASM OrcaClient, so there's no `gen.ts` step. Spec sync is a separate
 # `make sync` target — running it here put unrelated network IO on the critical
 # path and re-ran on every build.
+# Shells out to scripts/build-host.sh so the local build path uses the same
+# compile codepath as the release pipeline (scripts/release-lib.sh).
 build:
-	cd projects/frontend && npm ci && npm run build
-	cargo build --release --features ui --manifest-path projects/server/Cargo.toml
-	@echo "built → target/release/orca"
+	bash scripts/build-host.sh
 
 # Headless build — no embedded web UI. Smaller binary; serves API + MCP only.
 build-headless:
-	cargo build --release --manifest-path projects/server/Cargo.toml
-	@echo "built (headless) → target/release/orca"
+	bash scripts/build-host.sh --headless
 
 # Refresh synced specs from upstream repos. Independent of build.
 sync:
@@ -58,13 +61,15 @@ kill-dev:
 	@sleep 1
 	@echo "→ dev processes cleared"
 
-# Build release binary and deploy to current system (~/.local/bin/orca)
+# Build release binary and deploy to current system (~/.local/bin/orca).
+# Uses target/$(HOST_TARGET)/release/orca — same path the release pipeline
+# uses, so `make build` and `make release` share a warm cargo cache.
 deploy: build
-	@if cmp -s target/release/orca $(INSTALL_PATH); then \
+	@if cmp -s target/$(HOST_TARGET)/release/orca $(INSTALL_PATH); then \
 	  echo "binary unchanged — skipping copy and codesign"; \
 	else \
 	  $(MAKE) kill-dev; \
-	  cp target/release/orca $(INSTALL_PATH); \
+	  cp target/$(HOST_TARGET)/release/orca $(INSTALL_PATH); \
 	  codesign --force --sign - $(INSTALL_PATH); \
 	  echo "deployed → $(INSTALL_PATH)"; \
 	fi

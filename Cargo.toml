@@ -4,7 +4,7 @@ edition = "2024"
 # Bump this when cutting a release; the runtime binary reports its actual
 # build state (incl. -dev suffix for non-tagged commits) via build.rs →
 # ORCA_VERSION, not this value.
-version = "0.0.3-rc.3"
+version = "0.0.3-rc.5"
 
 # Single source of truth for shared external crate versions. Every member
 # crate that uses one of these MUST declare it as `dep = { workspace = true }`
@@ -106,11 +106,69 @@ default-members = [
 resolver = "2"
 
 [profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
+# opt-level = 2 vs 3: ~2-3% slower at runtime for I/O-bound server code,
+# but ~10-15% faster to compile. Worth it for CI minutes. Bump to 3 only
+# if a profiler shows a hot loop that benefits.
+opt-level = 2
+# Thin LTO instead of fat: parallelizable across codegen units, ~3-5% runtime
+# cost vs fat for a server binary, but build wall-time drops by 5-10×. Fat
+# LTO was burning GitHub minutes for negligible perf gain on I/O-bound code.
+lto = "thin"
+# 16 parallel rustc codegen tasks. Without this, cargo serializes the final
+# codegen on a single core regardless of -j. Trade: binary ~10% larger.
+codegen-units = 16
 panic = "abort"
+# `strip = true` strips DWARF debug symbols for smaller binaries / clean
+# backtraces. It does NOT strip log events — `tracing::debug!` / `trace!`
+# remain compiled in, gated only at runtime by ORCA_LOG (see main.rs).
 strip = true
+
+# Same profile used by `make build`, `make deploy`, RC builds, and stable
+# builds — one cache, one set of target/<t>/release/ artifacts, every path
+# benefits from any other path's warm cache.
+
+# ── Hot-path crate overrides (release) ──────────────────────────────────────
+# Bump the crates every request touches to -O3. Workspace default stays at -O2
+# so we don't pay for it on cold/startup code (clap, utoipa, ratatui, etc.).
+# Cost: ~10-25s additional CI time per target. Win: ~3-8% lower request
+# latency for the I/O-bound server path.
+
+# Tokio polling loop — touched on every await point. Aggressive inlining of
+# `select!` arms, waker code, and `JoinHandle::poll` collapses many small fns
+# into the calling task. Single biggest runtime win.
+[profile.release.package.tokio]
+opt-level = 3
+
+# rustls TLS state machine — every TLS frame in/out. (Bulk crypto sits in
+# `ring` below; this is the framing/handshake/record layer.)
+[profile.release.package.rustls]
+opt-level = 3
+
+# Ring — AES/ChaCha/SHA/curve primitives. Most of the work is hand-tuned asm,
+# but the Rust glue around it benefits from -O3 and the crate is small so the
+# extra build time is negligible.
+[profile.release.package.ring]
+opt-level = 3
+
+# Axum + tower — per-request middleware. Layered futures are exactly the kind
+# of "many tiny generic types composed together" code that needs aggressive
+# inlining to collapse to efficient machine code.
+[profile.release.package.axum]
+opt-level = 3
+[profile.release.package.tower]
+opt-level = 3
+
+# Hyper + h2 — wire-protocol parsing/serialization. Hot for every request.
+[profile.release.package.hyper]
+opt-level = 3
+[profile.release.package.h2]
+opt-level = 3
+
+# serde_json — every request body in, every response body out. Inlining
+# Serializer/Deserializer trait calls into call sites is where the speedup
+# comes from at -O3.
+[profile.release.package.serde_json]
+opt-level = 3
 
 [profile.dev]
 opt-level = 0
@@ -119,29 +177,29 @@ opt-level = 0
 # incremental build even after sccache has them cached, because the proc-macro
 # binary still re-executes on each compile that uses it.
 [profile.dev.package.syn]
-opt-level = 3
+opt-level = 2
 [profile.dev.package.proc-macro2]
-opt-level = 3
+opt-level = 2
 [profile.dev.package.quote]
-opt-level = 3
+opt-level = 2
 [profile.dev.package.serde_derive]
-opt-level = 3
+opt-level = 2
 [profile.dev.package.utoipa-gen]
-opt-level = 3
+opt-level = 2
 [profile.dev.package.clap_derive]
-opt-level = 3
+opt-level = 2
 [profile.dev.package.async-trait]
-opt-level = 3
+opt-level = 2
 
 # Heavy pure-Rust deps: compile once (cached by sccache), run fast in tests.
 # opt-level=1 = single optimization pass — much better runtime than 0 with
 # only marginally slower compile; the extra time is paid once and cached.
 [profile.dev.package.tokio]
-opt-level = 1
+opt-level = 3
 [profile.dev.package.rustls]
 opt-level = 1
 [profile.dev.package.ring]
-opt-level = 3
+opt-level = 2
 [profile.dev.package.regex-automata]
 opt-level = 1
 [profile.dev.package.regex-syntax]
