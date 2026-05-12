@@ -12,7 +12,9 @@ use orca_utils::config::Config;
 use std::sync::Arc;
 
 use crate::commands::install::{InstallReport, cmd_install_report, cmd_uninstall_report};
-use crate::commands::update::{Channel, apply_update, check_for_update};
+use crate::commands::update::{
+    apply_update, check_for_update, resolve_channel, write_channel_marker,
+};
 
 fn convert_install(rep: InstallReport) -> LifecycleReport {
     LifecycleReport {
@@ -180,10 +182,10 @@ impl LifecycleService for ServerLifecycle {
     }
 
     async fn update_check(&self, channel: &str) -> Result<UpdateCheckReport> {
-        let ch = Channel::parse(channel);
+        let ch = resolve_channel(channel);
         let info = check_for_update(&ch).await?;
         Ok(UpdateCheckReport {
-            channel: channel.into(),
+            channel: ch.as_marker().into(),
             up_to_date: info.is_none(),
             latest: info.as_ref().map(|i| i.version.clone()),
             asset_url: info.as_ref().map(|i| i.asset_url.clone()),
@@ -191,7 +193,8 @@ impl LifecycleService for ServerLifecycle {
     }
 
     async fn update_apply(&self, channel: &str) -> Result<LifecycleReport> {
-        let ch = Channel::parse(channel);
+        let ch = resolve_channel(channel);
+        let resolved = ch.as_marker();
         let mut report = LifecycleReport {
             done: vec![],
             skipped: vec![],
@@ -200,11 +203,19 @@ impl LifecycleService for ServerLifecycle {
         match check_for_update(&ch).await? {
             None => report
                 .skipped
-                .push(format!("already up to date on '{channel}'")),
+                .push(format!("already up to date on '{resolved}'")),
             Some(info) => match apply_update(&info).await {
                 Ok(()) => report.done.push(format!("updated to {}", info.version)),
                 Err(e) => report.errors.push(format!("apply failed: {e}")),
             },
+        }
+        // Persist the resolved channel so future invocations (CLI no-args,
+        // startup_update_check) stay on the same channel even if the caller
+        // passed it explicitly this time.
+        if let Err(e) = write_channel_marker(&ch) {
+            report
+                .errors
+                .push(format!("channel marker write failed: {e}"));
         }
         Ok(report)
     }

@@ -19,3 +19,12 @@ rusqlite   = { workspace = true }
 getrandom  = "0.3"
 dirs       = { workspace = true }
 toml       = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+# `cargo run --release --example db_bench` to run the perf microbench. See
+# the file header for baseline-vs-current measurement methodology.
+[[example]]
+name = "db_bench"
+path = "examples/db_bench.rs"

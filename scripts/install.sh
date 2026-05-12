@@ -6,12 +6,13 @@
 #   curl -fsSL https://github.com/scottdkey/orca/releases/latest/download/install.sh | sh
 #
 # Flags / env overrides:
-#   --version <tag>     ORCA_VERSION       e.g. v0.0.3-rc.4 (default: latest stable)
+#   --version <tag>     ORCA_VERSION       e.g. v0.0.4-rc.1 (default: latest stable)
 #   --target  <triple>  ORCA_TARGET        e.g. x86_64-unknown-linux-musl (default: auto-detect)
 #   --dir     <path>    ORCA_INSTALL_DIR   install directory (default: ~/.local/bin)
-#   --prerelease        ORCA_PRERELEASE=1  install newest prerelease (RC); pins channel=prerelease
+#   --rc, --prerelease  ORCA_PRERELEASE=1  install newest pre-release (RC); pins channel=rc
 #
 # Channel marker is written to $ORCA_HOME/channel ($ORCA_HOME defaults to ~/.orca).
+# Valid marker values: 'stable' or 'rc' (matches the `orca update` channel enum).
 # The running app reads this to know which channel to pull future updates from.
 #
 # Examples:
@@ -32,8 +33,8 @@ while [ $# -gt 0 ]; do
     --version)     VERSION="$2"; shift 2 ;;
     --target)      TARGET="$2"; shift 2 ;;
     --dir)         INSTALL_DIR="$2"; shift 2 ;;
-    --prerelease)  PRERELEASE=1; shift ;;
-    -h|--help)     sed -n '2,18p' "$0"; exit 0 ;;
+    --rc|--prerelease) PRERELEASE=1; shift ;;
+    -h|--help)     sed -n '2,19p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
@@ -82,11 +83,12 @@ if [ -z "$TARGET" ]; then
 fi
 
 # ── resolve version ─────────────────────────────────────────────────────────
+# Channel marker matches the `orca update` Channel enum: 'stable' or 'rc'.
 CHANNEL=stable
-[ "$PRERELEASE" = "1" ] && CHANNEL=prerelease
+[ "$PRERELEASE" = "1" ] && CHANNEL=rc
 
 if [ -z "$VERSION" ]; then
-  if [ "$CHANNEL" = "prerelease" ]; then
+  if [ "$CHANNEL" = "rc" ]; then
     # Newest prerelease — /releases is ordered newest-first; pick the first
     # tag_name containing "-rc." (stable tags never do).
     VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=30" \
@@ -105,7 +107,7 @@ else
   # Explicit --version: infer channel from tag shape so the marker reflects
   # what the user actually installed.
   case "$VERSION" in
-    *-rc.*) CHANNEL=prerelease ;;
+    *-rc.*) CHANNEL=rc ;;
     *) [ "$PRERELEASE" = "1" ] || CHANNEL=stable ;;
   esac
 fi
