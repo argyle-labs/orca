@@ -88,7 +88,8 @@ cmd_rc() {
   log "release build complete"
 
   log "commit + tag + push"
-  git add Cargo.toml Cargo.lock
+  git add Cargo.toml
+  git check-ignore -q Cargo.lock || git add Cargo.lock
   if ! git diff --cached --quiet; then
     git commit -m "chore: release v${RC}"
     RB_COMMIT=1
@@ -142,7 +143,8 @@ cmd_promote() {
   bump_and_build_with_rollback "$stable_version"
 
   log "commit + tag + push"
-  git add Cargo.toml Cargo.lock
+  git add Cargo.toml
+  git check-ignore -q Cargo.lock || git add Cargo.lock
   if ! git diff --cached --quiet; then
     git commit -m "chore: release ${stable_tag}"
     RB_COMMIT=1
