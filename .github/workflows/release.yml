@@ -88,8 +88,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-latest
             target: aarch64-apple-darwin
+          - runner: macos-latest
+            target: x86_64-apple-darwin
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
           - runner: ubuntu-latest
@@ -577,9 +579,12 @@ jobs:
           fi
 
           REPO="${{ github.repository }}"
-          BODY="${BODY}\n## Installation\n\n\`\`\`sh\n"
-          BODY="${BODY}# Apple Silicon\ncurl -Lo orca https://github.com/${REPO}/releases/download/${NEW}/orca-aarch64-apple-darwin\n\n"
-          BODY="${BODY}chmod +x orca && mv orca ~/.local/bin/orca\nxattr -d com.apple.quarantine ~/.local/bin/orca\n\`\`\`\n\n"
+          BODY="${BODY}\n## Installation\n\n"
+          BODY="${BODY}One-liner — auto-detects OS/arch, downloads the matching binary, verifies sha256:\n\n"
+          BODY="${BODY}\`\`\`sh\ncurl -fsSL https://github.com/${REPO}/releases/download/${NEW}/install.sh | sh -s -- --version ${NEW} --prerelease\n\`\`\`\n\n"
+          BODY="${BODY}Override target or install dir:\n\n"
+          BODY="${BODY}\`\`\`sh\ncurl -fsSL https://github.com/${REPO}/releases/download/${NEW}/install.sh \\\\\n  | sh -s -- --version ${NEW} --target x86_64-unknown-linux-musl --dir /usr/local/bin\n\`\`\`\n\n"
+          BODY="${BODY}Supported targets: \`aarch64-apple-darwin\`, \`x86_64-apple-darwin\`, \`x86_64-unknown-linux-gnu\`, \`x86_64-unknown-linux-musl\`, \`aarch64-unknown-linux-gnu\`, \`aarch64-unknown-linux-musl\`.\n\n"
           BODY="${BODY}**Full diff:** [$PREV → $NEW](https://github.com/${REPO}/compare/${PREV}...${NEW})"
 
           printf "%b" "$BODY" > /tmp/changelog.md
@@ -594,6 +599,7 @@ jobs:
           files: |
             artifacts/orca-*
             artifacts/checksums.sha256
+            scripts/install.sh
 
   # ── Promote to stable (manual approval) ──────────────────────────────────
   publish-stable:
@@ -677,7 +683,12 @@ jobs:
           fi
 
           REPO="${{ github.repository }}"
-          BODY="${BODY}\n## Installation\n\n\`\`\`sh\n# Apple Silicon\ncurl -Lo orca https://github.com/${REPO}/releases/download/${STABLE}/orca-aarch64-apple-darwin\n\nchmod +x orca && mv orca ~/.local/bin/orca\nxattr -d com.apple.quarantine ~/.local/bin/orca\n\`\`\`\n\n"
+          BODY="${BODY}\n## Installation\n\n"
+          BODY="${BODY}One-liner — auto-detects OS/arch, downloads the matching binary, verifies sha256:\n\n"
+          BODY="${BODY}\`\`\`sh\ncurl -fsSL https://github.com/${REPO}/releases/latest/download/install.sh | sh\n\`\`\`\n\n"
+          BODY="${BODY}Pin a version or override target / install dir:\n\n"
+          BODY="${BODY}\`\`\`sh\ncurl -fsSL https://github.com/${REPO}/releases/download/${STABLE}/install.sh \\\\\n  | sh -s -- --version ${STABLE} --target x86_64-unknown-linux-musl --dir /usr/local/bin\n\`\`\`\n\n"
+          BODY="${BODY}Supported targets: \`aarch64-apple-darwin\`, \`x86_64-apple-darwin\`, \`x86_64-unknown-linux-gnu\`, \`x86_64-unknown-linux-musl\`, \`aarch64-unknown-linux-gnu\`, \`aarch64-unknown-linux-musl\`.\n\n"
           BODY="${BODY}**Full diff:** [$PREV → $STABLE](https://github.com/${REPO}/compare/${PREV}...${STABLE})"
 
           printf "%b" "$BODY" > /tmp/changelog.md
@@ -692,6 +703,7 @@ jobs:
           files: |
             artifacts/orca-*
             artifacts/checksums.sha256
+            scripts/install.sh
 
       - name: Mark RC as superseded
         env:
