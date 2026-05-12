@@ -28,4 +28,5 @@ pub mod log_cmd;
 pub mod markdown;
 pub mod mcp;
 pub mod plugin_host;
+pub mod pod;
 pub mod serve;

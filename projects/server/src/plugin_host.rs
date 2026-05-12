@@ -261,8 +261,7 @@ async fn run(pki_dir: &Path, port: u16, plugin_registry: PluginRegistry) -> Resu
 /// Returns the listener, acceptor, and the actual bound address (useful when
 /// `port == 0` lets the OS pick an ephemeral port).
 pub async fn bind(pki_dir: &Path, port: u16) -> Result<(TcpListener, TlsAcceptor, SocketAddr)> {
-    let server_bundle = pki::load_server(pki_dir).context("load server TLS bundle")?;
-    let acceptor = build_acceptor(&server_bundle)?;
+    let acceptor = build_acceptor(pki_dir)?;
 
     let addr = format!("0.0.0.0:{port}");
     let listener = TcpListener::bind(&addr)
@@ -299,6 +298,20 @@ pub async fn serve(
                                     return;
                                 }
                             };
+                            let sni = tls
+                                .get_ref()
+                                .1
+                                .server_name()
+                                .map(str::to_string)
+                                .unwrap_or_default();
+                            if sni == pki::POD_SERVER_SAN {
+                                if let Err(e) =
+                                    crate::pod::handle_pod_connection(tls, peer_cn).await
+                                {
+                                    warn!("[plugin-host] {peer} pod connection error: {e:#}");
+                                }
+                                return;
+                            }
                             if let Err(e) = handle_connection(tls, registry, plugins, peer_cn).await
                             {
                                 warn!("[plugin-host] {peer} connection error: {e:#}");
@@ -313,18 +326,69 @@ pub async fn serve(
     }
 }
 
-fn build_acceptor(bundle: &pki::NodeBundle) -> Result<TlsAcceptor> {
-    let (cert_chain, private_key) = pki::parse_cert_and_key(&bundle.cert_pem, &bundle.key_pem)?;
-    let ca_root_store = Arc::new(pki::ca_root_store(&bundle.ca_cert_pem)?);
+/// Build the mTLS acceptor. Always serves the plugin CA's server cert under
+/// SNI `core.orca.local` (and as the default when no SNI is presented). If a
+/// mesh CA exists (i.e. `orca pod init` has run), additionally serves a
+/// mesh-CA-signed cert under SNI `pod.orca.local` and trusts the mesh CA for
+/// inbound client certs. Trust anchors are the union of both CAs so the
+/// connection dispatcher can identify which surface the caller wants by SNI.
+fn build_acceptor(pki_dir: &Path) -> Result<TlsAcceptor> {
+    use rustls::crypto::CryptoProvider;
+    use rustls::server::ResolvesServerCertUsingSni;
+    use rustls::sign::CertifiedKey;
 
-    let client_cert_verifier = WebPkiClientVerifier::builder(ca_root_store)
+    let plugin_bundle = pki::load_server(pki_dir).context("load plugin server TLS bundle")?;
+    let (plugin_chain, plugin_key) =
+        pki::parse_cert_and_key(&plugin_bundle.cert_pem, &plugin_bundle.key_pem)?;
+    let plugin_signing = CryptoProvider::get_default()
+        .context("no rustls CryptoProvider installed")?
+        .key_provider
+        .load_private_key(plugin_key)
+        .context("load plugin private key")?;
+    let plugin_ck = Arc::new(CertifiedKey::new(plugin_chain, plugin_signing));
+
+    // Trust store starts with the plugin CA, optionally extended with the mesh CA.
+    let mut roots = pki::ca_root_store(&plugin_bundle.ca_cert_pem)?;
+    let mut resolver = ResolvesServerCertUsingSni::new();
+    resolver
+        .add("core.orca.local", (*plugin_ck).clone())
+        .map_err(|e| anyhow::anyhow!("SNI resolver add core: {e}"))?;
+
+    if pki::mesh_ca_cert_path(pki_dir).exists() {
+        let mesh_bundle = pki::load_mesh_server(pki_dir).context("load mesh server TLS bundle")?;
+        let (mesh_chain, mesh_key) =
+            pki::parse_cert_and_key(&mesh_bundle.cert_pem, &mesh_bundle.key_pem)?;
+        let mesh_signing = CryptoProvider::get_default()
+            .context("no rustls CryptoProvider installed")?
+            .key_provider
+            .load_private_key(mesh_key)
+            .context("load mesh private key")?;
+        let mesh_ck = CertifiedKey::new(mesh_chain, mesh_signing);
+        resolver
+            .add(pki::POD_SERVER_SAN, mesh_ck)
+            .map_err(|e| anyhow::anyhow!("SNI resolver add pod: {e}"))?;
+
+        // Trust the mesh CA for inbound client certs as well.
+        use rustls_pemfile::certs;
+        for der in certs(&mut mesh_bundle.ca_cert_pem.as_bytes()) {
+            roots.add(der.context("parsing mesh CA cert")?)?;
+        }
+        info!("[plugin-host] mesh CA detected — pod SNI surface active");
+    }
+
+    // Pod SNI needs to accept connections from un-joined hosts during bootstrap
+    // (the `pod/join` flow — joiner has no cert yet). Plugin SNI still rejects
+    // unauthenticated clients. We use `allow_unauthenticated()` here and then
+    // gate per-method inside the pod listener: `pod/join` permits no-cert,
+    // every other pod/* method requires a valid peer cert.
+    let client_cert_verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+        .allow_unauthenticated()
         .build()
         .context("build client cert verifier")?;
 
     let server_config = ServerConfig::builder()
         .with_client_cert_verifier(client_cert_verifier)
-        .with_single_cert(cert_chain, private_key)
-        .context("build server TLS config")?;
+        .with_cert_resolver(Arc::new(resolver));
 
     Ok(TlsAcceptor::from(Arc::new(server_config)))
 }

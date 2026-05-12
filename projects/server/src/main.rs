@@ -108,6 +108,12 @@ enum Command {
         unpin: bool,
     },
 
+    /// Pod / mesh networking — bootstrap, ping, peer management.
+    Pod {
+        #[command(subcommand)]
+        action: PodAction,
+    },
+
     /// Claude Code hook handlers (session-start, bash-guard, pii-scan, etc.)
     Hook {
         #[command(subcommand)]
@@ -119,6 +125,18 @@ enum Command {
     /// `orca-tools-def::cli` registry routes it to the right tool.
     #[command(external_subcommand)]
     Op(Vec<String>),
+}
+
+#[derive(Subcommand)]
+enum PodAction {
+    /// Founder bootstrap. Creates the mesh CA + this host's pod cert. Idempotent.
+    Init,
+    /// Send a `pod/ping` to a peer over mTLS (SNI=pod.orca.local) and print the result.
+    Ping {
+        /// Hostname or IP of the peer. Must be running orca with `pod init` already done
+        /// and sharing the same mesh CA (manual copy in v1).
+        host: String,
+    },
 }
 
 #[tokio::main]
@@ -232,6 +250,35 @@ async fn main() -> Result<()> {
                 cmd::update::cmd_update(channel.as_deref().unwrap_or("")).await
             }
         }
+        Some(Command::Pod { action }) => match action {
+            PodAction::Init => {
+                let pki = orca::pod::pki_dir();
+                let host = std::process::Command::new("hostname")
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "unknown".to_string());
+                orca_sdk::pki::init_mesh_ca(&pki, &host)?;
+                println!("✓ mesh CA initialized at {}", pki.join("mesh").display());
+                println!("  founder host CN: peer.{host}");
+                println!(
+                    "  next: copy {}/mesh/{{ca.cert,ca.key}}.pem to peer hosts (v1)",
+                    pki.display()
+                );
+                println!("        then `orca pod init` there to mint their pod certs");
+                Ok(())
+            }
+            PodAction::Ping { host } => {
+                let result = orca::pod::ping(&host).await?;
+                println!("✓ {host} responded:");
+                println!("  peer_id: {}", result.peer_id);
+                println!("  hostname: {}", result.hostname);
+                println!("  version: {}", result.version);
+                Ok(())
+            }
+        },
         Some(Command::Spec { action }) => match action {
             SpecAction::Dump => {
                 let spec = openapi_spec_json();
