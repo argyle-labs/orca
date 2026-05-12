@@ -168,7 +168,10 @@ require_release_tools() {
   gh auth status >/dev/null 2>&1 || die "gh not authenticated (run: gh auth login)"
   local t
   for t in "$@"; do
-    rustup target list --installed | grep -qx "$t" || die "rust target missing: $t (rustup target add $t)"
+    if ! rustup target list --installed | grep -qx "$t"; then
+      log "rust target $t not installed — running: rustup target add $t"
+      rustup target add "$t" || die "failed to install rust target: $t"
+    fi
   done
 }
 
