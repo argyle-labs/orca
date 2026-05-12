@@ -269,23 +269,28 @@ cargo_build_target() {
   local features_args=()
   [ -n "$RELEASE_FEATURES" ] && features_args=(--features "$RELEASE_FEATURES")
 
+  # Each target gets its own --target-dir so parallel builds don't contend on
+  # target/.cargo-lock. All targets write to target-release/<triple>/ and
+  # stage_target_asset reads from there.
+  local target_dir="${REPO_ROOT}/target-release/${target}"
+
   log "building ${target} (profile=${RELEASE_PROFILE}, cargo -j${jobs}${RELEASE_FEATURES:+, features=$RELEASE_FEATURES})"
 
-  # Apple targets: always use the native Apple clang toolchain (cargo build, not
-  # zigbuild). zigbuild routes C compilation through zig which breaks SQLCipher's
-  # cc-rs build on Apple silicon. For the cross-arch case (aarch64 host →
-  # x86_64 target), Apple's clang handles -arch x86_64 natively.
-  # Pin MACOSX_DEPLOYMENT_TARGET to 11.0 so macOS beta versions don't leak in.
+  # Apple targets: native Apple clang (not zigbuild — zigbuild routes C through
+  # zig which breaks SQLCipher's cc-rs on Apple silicon). Pin deployment target
+  # to 11.0 so macOS beta host versions don't leak into -mmacosx-version-min.
   case "$target" in
     *-apple-darwin)
       MACOSX_DEPLOYMENT_TARGET=11.0 cargo build \
         --profile "$RELEASE_PROFILE" --jobs "$jobs" "${features_args[@]}" \
-        --target "$target" --manifest-path "$SERVER_TOML"
+        --target "$target" --target-dir "$target_dir" \
+        --manifest-path "$SERVER_TOML"
       ;;
     *)
       # Linux and other non-Apple targets: zigbuild for cross-compilation.
       cargo zigbuild --profile "$RELEASE_PROFILE" --jobs "$jobs" "${features_args[@]}" \
-        --target "$target" --manifest-path "$SERVER_TOML"
+        --target "$target" --target-dir "$target_dir" \
+        --manifest-path "$SERVER_TOML"
       ;;
   esac
 }
@@ -294,9 +299,10 @@ cargo_build_target() {
 # called on the release path — `make build` skips this.
 stage_target_asset() {
   local target="$1" asset="orca-${target}"
+  local target_dir="${REPO_ROOT}/target-release/${target}"
   cd "$REPO_ROOT"
   mkdir -p "$DIST_DIR"
-  cp "target/${target}/${RELEASE_PROFILE}/orca" "${DIST_DIR}/${asset}"
+  cp "${target_dir}/${target}/${RELEASE_PROFILE}/orca" "${DIST_DIR}/${asset}"
   ( cd "$DIST_DIR" && shasum -a 256 "$asset" > "${asset}.sha256" )
 }
 

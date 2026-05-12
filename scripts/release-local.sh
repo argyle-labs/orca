@@ -51,7 +51,7 @@ rollback() {
     git reset --hard HEAD~1 >/dev/null
   elif [ "$RB_CARGO" -eq 1 ]; then
     log "  reverting Cargo.toml + Cargo.lock"
-    git checkout -- projects/server/Cargo.toml Cargo.lock 2>/dev/null || true
+    git checkout -- Cargo.toml Cargo.lock 2>/dev/null || true
   fi
   exit "$code"
 }
@@ -77,14 +77,18 @@ cmd_rc() {
   log "next stable     : v$STABLE"
   log "next rc         : v$RC"
 
-  run_release_checks
-
+  # Bump version before checks so all compilation targets the release version.
   trap rollback ERR
-  bump_and_build_with_rollback "$RC"
+  RB_CARGO=1
+  write_cargo_version "$RC"
+
+  run_release_checks
+  build_frontend
+  build_orca_targets "${TARGETS[@]}"
+  log "release build complete"
 
   log "commit + tag + push"
-  git add projects/server/Cargo.toml
-  git check-ignore -q Cargo.lock || git add Cargo.lock
+  git add Cargo.toml Cargo.lock
   if ! git diff --cached --quiet; then
     git commit -m "chore: release v${RC}"
     RB_COMMIT=1
@@ -138,8 +142,7 @@ cmd_promote() {
   bump_and_build_with_rollback "$stable_version"
 
   log "commit + tag + push"
-  git add projects/server/Cargo.toml
-  git check-ignore -q Cargo.lock || git add Cargo.lock
+  git add Cargo.toml Cargo.lock
   if ! git diff --cached --quiet; then
     git commit -m "chore: release ${stable_tag}"
     RB_COMMIT=1
