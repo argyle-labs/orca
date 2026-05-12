@@ -51,14 +51,29 @@ need chmod
 need mv
 need mkdir
 
-# Authenticated GitHub API helper. Usage: gh_api <url> [extra curl flags...]
+# Authenticated GitHub API helper — returns JSON. Usage: gh_api <url> [extra curl flags...]
+# Pinned API version: 2022-11-28 (current stable as of 2026-05; see
+# https://docs.github.com/en/rest/about-the-rest-api/api-versions).
 gh_api() {
   _url="$1"; shift
   curl -fsSL \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
     -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \   # current stable as of 2026-05; check https://docs.github.com/en/rest/about-the-rest-api/api-versions
+    -H "X-GitHub-Api-Version: 2022-11-28" \
     "$@" "$_url"
+}
+
+# Authenticated GitHub asset download — returns raw bytes. Usage: gh_asset <url> <output-file>
+# Separate from gh_api so we send ONE Accept header (octet-stream). GitHub
+# routes on the first Accept header it sees — mixing them with gh_api was the
+# original source of "the .sha256 file is full of JSON" bugs.
+gh_asset() {
+  _url="$1"; _out="$2"
+  curl -fsSL \
+    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+    -H "Accept: application/octet-stream" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    -o "$_out" "$_url"
 }
 
 # ── detect target triple ────────────────────────────────────────────────────
@@ -77,13 +92,19 @@ detect_target() {
       echo "${arch}-apple-darwin"
       ;;
     Linux)
-      # musl detection: alpine + anything where ldd reports musl, or no glibc present.
+      # musl detection: alpine first, then ldd reports musl, then a positive
+      # glibc check via `getconf GNU_LIBC_VERSION` (works on every glibc
+      # system, no globbing footguns). Default to gnu when uncertain — musl
+      # binaries can run on glibc hosts but gnu binaries crash on alpine,
+      # so the failure mode is asymmetric: prefer gnu.
       libc=gnu
       if [ -f /etc/alpine-release ]; then
         libc=musl
       elif command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; then
         libc=musl
-      elif ! ls /lib*/libc.so.6 /lib/*/libc.so.6 >/dev/null 2>&1; then
+      elif command -v getconf >/dev/null 2>&1 \
+           && ! getconf GNU_LIBC_VERSION >/dev/null 2>&1 \
+           && ! ldd --version 2>&1 | grep -qi 'glibc\|gnu'; then
         libc=musl
       fi
       echo "${arch}-unknown-linux-${libc}"
@@ -138,11 +159,21 @@ echo "→ installing orca ${VERSION} (${TARGET}) to ${INSTALL_DIR}"
 RELEASE_JSON="$(gh_api "https://api.github.com/repos/${REPO}/releases/tags/${VERSION}")"
 
 asset_url() {
+  # GitHub's release-asset JSON serializes "url" BEFORE "name" inside each
+  # asset object, then later includes the uploader's "url" inside a nested
+  # "uploader" object. Walking forward from "name" grabs the uploader's URL.
+  # Walk backward instead: remember the most recent "url" line and print it
+  # when we see the matching "name" line.
   echo "$RELEASE_JSON" \
-    | grep -A1 "\"name\": *\"${1}\"" \
-    | grep '"url":' \
-    | sed -E 's/.*"url": *"([^"]+)".*/\1/' \
-    | head -1
+    | awk -v target="$1" '
+        /"url":/ { last_url = $0 }
+        $0 ~ "\"name\": *\"" target "\"" {
+          sub(/^[^"]*"url"[[:space:]]*:[[:space:]]*"/, "", last_url)
+          sub(/".*/, "", last_url)
+          print last_url
+          exit
+        }
+      '
 }
 
 URL_BIN="$(asset_url "${ASSET}")"
@@ -155,11 +186,11 @@ URL_SUM="$(asset_url "${ASSET_SUM}")"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-# -L follows the redirect from the API asset URL to the S3 pre-signed URL.
-# Accept: application/octet-stream tells GitHub to stream the raw binary.
-gh_api "$URL_BIN" -L -H "Accept: application/octet-stream" -o "${TMP}/orca" \
+# -L (inside gh_asset) follows the redirect from the API asset URL to the S3
+# pre-signed URL; Accept: application/octet-stream tells GitHub to stream raw bytes.
+gh_asset "$URL_BIN" "${TMP}/orca" \
   || die "download failed: $URL_BIN  (is the target/version correct?)"
-gh_api "$URL_SUM" -L -H "Accept: application/octet-stream" -o "${TMP}/orca.sha256" \
+gh_asset "$URL_SUM" "${TMP}/orca.sha256" \
   || die "checksum download failed: $URL_SUM"
 
 EXPECTED="$(awk '{print $1}' "${TMP}/orca.sha256")"
