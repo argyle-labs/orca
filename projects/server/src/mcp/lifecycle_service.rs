@@ -5,16 +5,29 @@ use anyhow::Result;
 use async_trait::async_trait;
 use orca_tools_def::orca_lifecycle::{
     DoctorEntry, DoctorReport, LifecycleReport, ProjectsListReport, RuntimeSpecReport,
-    SpecDumpReport, UpdateCheckReport,
+    SpecDumpReport, UpdateCheckReport, UpdatePinReport,
 };
 use orca_tools_def::services::lifecycle::LifecycleService;
+use orca_tools_def::services::secrets::SecretsService;
 use orca_utils::config::Config;
 use std::sync::Arc;
 
 use crate::commands::install::{InstallReport, cmd_install_report, cmd_uninstall_report};
 use crate::commands::update::{
-    apply_update, check_for_update, resolve_channel, write_channel_marker,
+    apply_update, check_for_update, clear_version_pin, cmd_update_pin, read_version_pin,
+    resolve_channel, resolve_pin_veto, write_channel_marker,
 };
+
+/// Resolve the GitHub bearer token: prefer the `github_token` secret managed
+/// by `SecretsService`; fall back to `GITHUB_TOKEN` env var for bootstrap.
+async fn resolve_github_token(secrets: &Arc<dyn SecretsService>) -> Option<String> {
+    if let Ok((_backend, v)) = secrets.get("github_token").await
+        && !v.is_empty()
+    {
+        return Some(v);
+    }
+    std::env::var("GITHUB_TOKEN").ok().filter(|v| !v.is_empty())
+}
 
 fn convert_install(rep: InstallReport) -> LifecycleReport {
     LifecycleReport {
@@ -26,6 +39,7 @@ fn convert_install(rep: InstallReport) -> LifecycleReport {
 
 pub struct ServerLifecycle {
     pub config: Arc<Config>,
+    pub secrets: Arc<dyn SecretsService>,
 }
 
 #[async_trait]
@@ -183,12 +197,19 @@ impl LifecycleService for ServerLifecycle {
 
     async fn update_check(&self, channel: &str) -> Result<UpdateCheckReport> {
         let ch = resolve_channel(channel);
-        let info = check_for_update(&ch).await?;
+        let token = resolve_github_token(&self.secrets).await.ok_or_else(|| {
+            anyhow::anyhow!(
+                "no github token — set secret 'github_token' (`orca secret set github_token --value ...`) or export GITHUB_TOKEN"
+            )
+        })?;
+        let info = check_for_update(&ch, &token).await?;
+        let pinned_to = info.as_ref().and_then(resolve_pin_veto);
         Ok(UpdateCheckReport {
             channel: ch.as_marker().into(),
             up_to_date: info.is_none(),
             latest: info.as_ref().map(|i| i.version.clone()),
             asset_url: info.as_ref().map(|i| i.asset_url.clone()),
+            pinned_to,
         })
     }
 
@@ -200,14 +221,32 @@ impl LifecycleService for ServerLifecycle {
             skipped: vec![],
             errors: vec![],
         };
-        match check_for_update(&ch).await? {
+        let token = match resolve_github_token(&self.secrets).await {
+            Some(t) => t,
+            None => {
+                report.errors.push(
+                    "no github token — set secret 'github_token' or export GITHUB_TOKEN".into(),
+                );
+                return Ok(report);
+            }
+        };
+        match check_for_update(&ch, &token).await? {
             None => report
                 .skipped
                 .push(format!("already up to date on '{resolved}'")),
-            Some(info) => match apply_update(&info).await {
-                Ok(()) => report.done.push(format!("updated to {}", info.version)),
-                Err(e) => report.errors.push(format!("apply failed: {e}")),
-            },
+            Some(info) => {
+                if let Some(pin) = resolve_pin_veto(&info) {
+                    report.skipped.push(format!(
+                        "pinned to {pin}; available v{} — run `orca update --unpin` to upgrade",
+                        info.version
+                    ));
+                } else {
+                    match apply_update(&info, &token).await {
+                        Ok(()) => report.done.push(format!("updated to {}", info.version)),
+                        Err(e) => report.errors.push(format!("apply failed: {e}")),
+                    }
+                }
+            }
         }
         // Persist the resolved channel so future invocations (CLI no-args,
         // startup_update_check) stay on the same channel even if the caller
@@ -218,6 +257,22 @@ impl LifecycleService for ServerLifecycle {
                 .push(format!("channel marker write failed: {e}"));
         }
         Ok(report)
+    }
+
+    async fn update_pin(&self, version: &str) -> Result<UpdatePinReport> {
+        let pinned = cmd_update_pin(version)?;
+        Ok(UpdatePinReport {
+            pinned_to: Some(pinned),
+            cleared: false,
+        })
+    }
+
+    async fn update_unpin(&self) -> Result<UpdatePinReport> {
+        clear_version_pin()?;
+        Ok(UpdatePinReport {
+            pinned_to: read_version_pin(),
+            cleared: true,
+        })
     }
 
     async fn projects_list(&self) -> Result<ProjectsListReport> {

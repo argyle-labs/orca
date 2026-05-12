@@ -25,6 +25,7 @@ pub mod profile_creds;
 pub mod profiles;
 pub mod proxmox;
 pub mod schema_databases;
+pub mod secrets;
 pub mod settings;
 pub mod startup;
 pub mod tool_mappings;
@@ -547,6 +548,19 @@ static MIGRATIONS: &[Migration] = &[
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         );",
         down: Some("DROP TABLE IF EXISTS homeassistant_endpoints;"),
+    },
+    Migration {
+        version: 24,
+        description: "add secrets — host-level secret metadata with pluggable backends (inline values live in settings under 'secrets.' prefix)",
+        up: "CREATE TABLE IF NOT EXISTS secrets (
+            name        TEXT PRIMARY KEY,
+            backend     TEXT NOT NULL,
+            ref_path    TEXT NOT NULL DEFAULT '',
+            description TEXT,
+            created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );",
+        down: Some("DROP TABLE IF EXISTS secrets;"),
     },
 ];
 

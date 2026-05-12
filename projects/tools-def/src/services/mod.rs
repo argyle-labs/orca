@@ -32,6 +32,8 @@ pub mod plugins;
 #[cfg(feature = "native")]
 pub mod profile;
 #[cfg(feature = "native")]
+pub mod secrets;
+#[cfg(feature = "native")]
 pub mod spec_registry;
 #[cfg(feature = "native")]
 pub mod system;

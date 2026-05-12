@@ -19,6 +19,7 @@ pub mod pki_service;
 pub mod plugin_runtime_service;
 pub mod plugins_service;
 pub mod profile_service;
+pub mod secrets_service;
 pub mod spec_registry_service;
 mod spec_tools;
 mod specs;
@@ -97,9 +98,13 @@ pub fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
             config: ctx.config.clone(),
         });
     ctx.register_service(profile_svc);
+    let secrets_svc: Arc<dyn orca_tools_def::services::secrets::SecretsService> =
+        Arc::new(crate::mcp::secrets_service::DbSecretsService::new());
+    ctx.register_service(secrets_svc.clone());
     let lifecycle_svc: Arc<dyn orca_tools_def::services::lifecycle::LifecycleService> =
         Arc::new(crate::mcp::lifecycle_service::ServerLifecycle {
             config: ctx.config.clone(),
+            secrets: secrets_svc,
         });
     ctx.register_service(lifecycle_svc);
     {

@@ -416,3 +416,40 @@ generate_changelog() {
   } > /tmp/orca-changelog.md
   set -o pipefail
 }
+
+# Prepend the current /tmp/orca-changelog.md into CHANGELOG.md under a
+# Keep-A-Changelog heading. RC releases are intentionally excluded (their
+# per-RC notes live in the GitHub release body only); stable promotions get
+# a full entry. Pass --include-rc to override.
+#
+# Args: $1=tag (e.g. "v0.0.4") [$2=--include-rc]
+prepend_changelog() {
+  local tag="$1" include_rc=0
+  [ "${2:-}" = "--include-rc" ] && include_rc=1
+
+  # Skip RC tags unless explicitly asked
+  if echo "$tag" | grep -qE '\-(rc|beta|alpha)\.' && [ "$include_rc" = "0" ]; then
+    return 0
+  fi
+
+  [ -f /tmp/orca-changelog.md ] || { log "WARN: /tmp/orca-changelog.md missing, skipping CHANGELOG update"; return 0; }
+
+  local date; date=$(date -u '+%Y-%m-%d')
+  local dest="${REPO_ROOT}/CHANGELOG.md"
+  local tmp; tmp=$(mktemp)
+
+  # Write the new entry header + body into tmp
+  {
+    printf "## [%s] — %s\n\n" "$tag" "$date"
+    cat /tmp/orca-changelog.md
+    printf "\n---\n\n"
+  } > "$tmp"
+
+  # Prepend to existing CHANGELOG.md (create if absent)
+  if [ -f "$dest" ]; then
+    cat "$dest" >> "$tmp"
+  fi
+  mv "$tmp" "$dest"
+
+  log "CHANGELOG.md updated for $tag"
+}

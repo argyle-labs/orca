@@ -5,6 +5,61 @@ use std::path::{Path, PathBuf};
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TARGET: &str = env!("ORCA_BUILD_TARGET");
+// Current stable as of 2026-05 — check https://docs.github.com/en/rest/about-the-rest-api/api-versions
+const GITHUB_API_VERSION: &str = "2022-11-28";
+
+// ── Version pin ───────────────────────────────────────────────────────────────
+
+fn pin_path() -> Option<PathBuf> {
+    let dir = std::env::var_os("ORCA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".orca")))?;
+    Some(dir.join("version-pin"))
+}
+
+/// Read the version pin from `$ORCA_HOME/version-pin`. Returns None if absent.
+pub fn read_version_pin() -> Option<String> {
+    let path = pin_path()?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let trimmed = raw.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+/// Write a version pin. The version is stored as-is (caller may include `v` prefix).
+pub fn write_version_pin(version: &str) -> Result<()> {
+    let path = pin_path().context("no ORCA_HOME or HOME set")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create_dir_all {}", parent.display()))?;
+    }
+    std::fs::write(&path, format!("{version}\n"))
+        .with_context(|| format!("write {}", path.display()))
+}
+
+/// Remove the version pin. No-op if not set.
+pub fn clear_version_pin() -> Result<()> {
+    let path = pin_path().context("no ORCA_HOME or HOME set")?;
+    if path.exists() {
+        std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Returns `Some(pinned_version)` if `info`'s version is newer than the pin
+/// and therefore should be blocked. Returns None if there is no pin or the
+/// available version is within the pin.
+pub fn resolve_pin_veto(info: &UpdateInfo) -> Option<String> {
+    let pin = read_version_pin()?;
+    if is_newer_full(&info.version, &pin) {
+        Some(pin)
+    } else {
+        None
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Channel {
@@ -124,12 +179,12 @@ struct Asset {
 /// Check GitHub for a newer release on the given channel.
 /// Stable channel: skips any pre-release tags.
 /// Rc/beta/alpha: also accepts pre-releases of that tier and below.
-/// Requires GITHUB_TOKEN env var for private repo access.
-pub async fn check_for_update(channel: &Channel) -> Result<Option<UpdateInfo>> {
-    let token = match std::env::var("GITHUB_TOKEN") {
-        Ok(t) if !t.is_empty() => t,
-        _ => bail!("GITHUB_TOKEN not set — cannot check for updates"),
-    };
+/// Caller supplies the GitHub bearer token (resolved via the secrets service
+/// or env fallback — see `lifecycle_service::resolve_github_token`).
+pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<UpdateInfo>> {
+    if token.is_empty() {
+        bail!("no github token available — set secret 'github_token' or export GITHUB_TOKEN");
+    }
 
     let client = orca_utils::http::Client::new();
     let user_agent = format!("{APP_NAME}/{CURRENT_VERSION}");
@@ -137,9 +192,9 @@ pub async fn check_for_update(channel: &Channel) -> Result<Option<UpdateInfo>> {
     let github_req = |url: String| {
         client
             .get(url)
-            .bearer(&token)
+            .bearer(token)
             .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
             .header("User-Agent", &user_agent)
     };
 
@@ -206,14 +261,17 @@ pub async fn check_for_update(channel: &Channel) -> Result<Option<UpdateInfo>> {
     }))
 }
 
-/// Download the new binary, verify its checksum, and atomically replace the current binary.
-pub async fn apply_update(info: &UpdateInfo) -> Result<()> {
-    let token = std::env::var("GITHUB_TOKEN").context("GITHUB_TOKEN not set")?;
+/// Download the new binary, verify its checksum, and atomically replace the
+/// current binary. Token must be the same one used for `check_for_update`.
+pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
+    if token.is_empty() {
+        bail!("no github token available for binary download");
+    }
     let client = orca_utils::http::Client::new();
 
     // Download the checksum file first
     let expected_hash = if !info.checksum_url.is_empty() {
-        let cs_bytes = download_asset(&client, &info.checksum_url, &token).await?;
+        let cs_bytes = download_asset(&client, &info.checksum_url, token).await?;
         let cs_str = String::from_utf8_lossy(&cs_bytes);
         // Format: "<hash>  <filename>"
         cs_str.split_whitespace().next().map(|s| s.to_string())
@@ -223,7 +281,7 @@ pub async fn apply_update(info: &UpdateInfo) -> Result<()> {
 
     // Download the binary
     println!("[orca] downloading v{}...", info.version);
-    let binary = download_asset(&client, &info.asset_url, &token).await?;
+    let binary = download_asset(&client, &info.asset_url, token).await?;
 
     // Verify checksum
     if let Some(expected) = expected_hash {
@@ -260,22 +318,47 @@ pub async fn apply_update(info: &UpdateInfo) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the GitHub token: prefer the `github_token` secret in orca.db (the
+/// canonical post-2026-05-11 location); fall back to `GITHUB_TOKEN` env var
+/// for bootstrap + CI flows. Returns an empty string if neither is set —
+/// callers should report an actionable error themselves.
+pub fn resolve_github_token() -> String {
+    // Best-effort DB read — if the DB isn't available yet (e.g. early startup
+    // before init), we silently fall through to the env var.
+    if let Ok(conn) = db::open_default()
+        && let Ok(Some(_)) = db::secrets::get(&conn, "github_token")
+        && let Ok(Some(v)) = db::secrets::read_inline_value(&conn, "github_token")
+        && !v.is_empty()
+    {
+        return v;
+    }
+    std::env::var("GITHUB_TOKEN").unwrap_or_default()
+}
+
 /// CLI entry: `orca update [--channel rc|stable|...]`. Empty channel reads the
 /// install marker; on a successful apply, the marker is rewritten so future
 /// invocations stay on the resolved channel.
 pub async fn cmd_update(channel_arg: &str) -> Result<()> {
     let channel = resolve_channel(channel_arg);
+    let token = resolve_github_token();
     println!(
         "[orca] current version: v{CURRENT_VERSION} ({BUILD_TARGET}, channel={})",
         channel.as_marker()
     );
     println!("[orca] checking for updates...");
 
-    match check_for_update(&channel).await? {
+    match check_for_update(&channel, &token).await? {
         None => println!("[orca] already up to date"),
         Some(info) => {
-            println!("[orca] new version available: v{}", info.version);
-            apply_update(&info).await?;
+            if let Some(pin) = resolve_pin_veto(&info) {
+                println!(
+                    "[orca] pinned to {pin}; available v{} — run `orca update --unpin` to upgrade",
+                    info.version
+                );
+            } else {
+                println!("[orca] new version available: v{}", info.version);
+                apply_update(&info, &token).await?;
+            }
         }
     }
 
@@ -286,21 +369,52 @@ pub async fn cmd_update(channel_arg: &str) -> Result<()> {
     Ok(())
 }
 
+/// Set a version pin. The pin prevents `orca update` from upgrading past
+/// the specified version. Use `cmd_update_unpin` to clear.
+pub fn cmd_update_pin(version: &str) -> Result<String> {
+    let version = version.trim();
+    if version.is_empty() {
+        anyhow::bail!("version must not be empty");
+    }
+    // Normalise to have a leading 'v'
+    let normalised = if version.starts_with('v') {
+        version.to_string()
+    } else {
+        format!("v{version}")
+    };
+    write_version_pin(&normalised)?;
+    Ok(normalised)
+}
+
+/// Clear the version pin. No-op if not set.
+pub fn cmd_update_unpin() -> Result<()> {
+    clear_version_pin()
+}
+
 /// Non-blocking startup update check — prints a notice, does not download.
 /// Channel comes from the install marker (`~/.orca/channel`), falling back to
 /// Stable if absent. This lets RC installs see RC update notices.
 pub async fn startup_update_check() {
-    if std::env::var("GITHUB_TOKEN").is_err() {
+    let token = resolve_github_token();
+    if token.is_empty() {
         return;
     }
     let channel = read_channel_marker().unwrap_or(Channel::Stable);
-    match check_for_update(&channel).await {
+    match check_for_update(&channel, &token).await {
         Ok(Some(info)) => {
-            println!(
-                "[orca] update available: v{} on '{}' → run 'orca update' to upgrade",
-                info.version,
-                channel.as_marker()
-            );
+            if let Some(pin) = resolve_pin_veto(&info) {
+                println!(
+                    "[orca] update available: v{} on '{}' (pinned to {pin} — run `orca update --unpin` to upgrade)",
+                    info.version,
+                    channel.as_marker()
+                );
+            } else {
+                println!(
+                    "[orca] update available: v{} on '{}' → run 'orca update' to upgrade",
+                    info.version,
+                    channel.as_marker()
+                );
+            }
         }
         Ok(None) => {}
         Err(_) => {}
@@ -308,6 +422,64 @@ pub async fn startup_update_check() {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+/// Full semver comparison that handles pre-release suffixes (rc/beta/alpha).
+/// Returns true if `a` is strictly newer than `b`.
+/// Pre-release ordering within same core: alpha < beta < rc < stable.
+fn is_newer_full(a: &str, b: &str) -> bool {
+    let a = a.trim_start_matches('v');
+    let b = b.trim_start_matches('v');
+
+    fn split_pre(s: &str) -> (&str, &str) {
+        match s.find('-') {
+            Some(idx) => (&s[..idx], &s[idx + 1..]),
+            None => (s, ""),
+        }
+    }
+
+    let (a_core, a_pre) = split_pre(a);
+    let (b_core, b_pre) = split_pre(b);
+
+    let parse_core = |s: &str| -> (u64, u64, u64) {
+        let mut p = s.split('.').map(|x| x.parse::<u64>().unwrap_or(0));
+        (
+            p.next().unwrap_or(0),
+            p.next().unwrap_or(0),
+            p.next().unwrap_or(0),
+        )
+    };
+
+    let (ac, bc) = (parse_core(a_core), parse_core(b_core));
+    if ac != bc {
+        return ac > bc;
+    }
+
+    let pre_kind = |s: &str| -> u64 {
+        if s.is_empty() {
+            4
+        }
+        // stable > rc > beta > alpha
+        else if s.starts_with("rc") {
+            3
+        } else if s.starts_with("beta") {
+            2
+        } else if s.starts_with("alpha") {
+            1
+        } else {
+            0
+        }
+    };
+    let pre_num = |s: &str| -> u64 {
+        s.split('.')
+            .last()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(0)
+    };
+
+    let (ak, an) = (pre_kind(a_pre), pre_num(a_pre));
+    let (bk, bn) = (pre_kind(b_pre), pre_num(b_pre));
+    (ak, an) > (bk, bn)
+}
 
 fn semver_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     let parse = |s: &str| -> (u64, u64, u64) {
@@ -342,7 +514,7 @@ async fn download_asset(
         .get(url)
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/octet-stream")
-        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
         .header("User-Agent", format!("{APP_NAME}/{CURRENT_VERSION}"))
         .send_bytes()
         .await
@@ -549,6 +721,109 @@ mod tests {
         // The function doesn't strip 'v' itself — callers already strip it via
         // trim_start_matches('v'). Verify it handles plain version strings.
         assert!(is_newer("1.2.0", "1.1.9"));
+    }
+
+    // ── is_newer_full ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_newer_full_stable_vs_stable() {
+        assert!(is_newer_full("1.0.1", "1.0.0"));
+        assert!(!is_newer_full("1.0.0", "1.0.0"));
+        assert!(!is_newer_full("1.0.0", "1.0.1"));
+    }
+
+    #[test]
+    fn is_newer_full_stable_beats_rc() {
+        assert!(is_newer_full("0.0.4", "0.0.4-rc.3"));
+        assert!(!is_newer_full("0.0.4-rc.3", "0.0.4"));
+    }
+
+    #[test]
+    fn is_newer_full_rc_ordering() {
+        assert!(is_newer_full("0.0.4-rc.3", "0.0.4-rc.1"));
+        assert!(is_newer_full("0.0.4-rc.2", "0.0.4-rc.1"));
+        assert!(!is_newer_full("0.0.4-rc.1", "0.0.4-rc.1"));
+    }
+
+    #[test]
+    fn is_newer_full_rc_beats_beta() {
+        assert!(is_newer_full("0.0.4-rc.1", "0.0.4-beta.9"));
+        assert!(!is_newer_full("0.0.4-beta.9", "0.0.4-rc.1"));
+    }
+
+    #[test]
+    fn is_newer_full_v_prefix_stripped() {
+        assert!(is_newer_full("v0.0.4-rc.3", "v0.0.4-rc.1"));
+        assert!(!is_newer_full("v0.0.4-rc.1", "v0.0.4-rc.1"));
+    }
+
+    // ── version pin I/O ───────────────────────────────────────────────────────
+
+    #[test]
+    fn read_version_pin_returns_none_when_absent() {
+        let _g = marker_lock();
+        let _dir = isolated_orca_home("pin_absent");
+        assert!(read_version_pin().is_none());
+    }
+
+    #[test]
+    fn write_then_read_version_pin_round_trips() {
+        let _g = marker_lock();
+        let _dir = isolated_orca_home("pin_write");
+        write_version_pin("v0.0.4-rc.1").unwrap();
+        assert_eq!(read_version_pin(), Some("v0.0.4-rc.1".to_string()));
+    }
+
+    #[test]
+    fn clear_version_pin_removes_file() {
+        let _g = marker_lock();
+        let _dir = isolated_orca_home("pin_clear");
+        write_version_pin("v0.0.4-rc.1").unwrap();
+        clear_version_pin().unwrap();
+        assert!(read_version_pin().is_none());
+    }
+
+    #[test]
+    fn resolve_pin_veto_blocks_newer_version() {
+        let _g = marker_lock();
+        let _dir = isolated_orca_home("pin_veto");
+        write_version_pin("v0.0.4-rc.1").unwrap();
+        let info = UpdateInfo {
+            version: "0.0.4-rc.3".to_string(),
+            asset_url: String::new(),
+            checksum_url: String::new(),
+        };
+        assert_eq!(resolve_pin_veto(&info), Some("v0.0.4-rc.1".to_string()));
+    }
+
+    #[test]
+    fn resolve_pin_veto_passes_within_pin() {
+        let _g = marker_lock();
+        let _dir = isolated_orca_home("pin_pass");
+        write_version_pin("v0.0.4-rc.3").unwrap();
+        let info = UpdateInfo {
+            version: "0.0.4-rc.1".to_string(),
+            asset_url: String::new(),
+            checksum_url: String::new(),
+        };
+        assert!(resolve_pin_veto(&info).is_none());
+    }
+
+    #[test]
+    fn cmd_update_pin_normalises_version() {
+        let _g = marker_lock();
+        let _dir = isolated_orca_home("pin_cmd");
+        let pinned = cmd_update_pin("0.0.4-rc.1").unwrap();
+        assert_eq!(pinned, "v0.0.4-rc.1");
+        assert_eq!(read_version_pin(), Some("v0.0.4-rc.1".to_string()));
+    }
+
+    #[test]
+    fn cmd_update_pin_preserves_v_prefix() {
+        let _g = marker_lock();
+        let _dir = isolated_orca_home("pin_cmd_v");
+        let pinned = cmd_update_pin("v0.0.4-rc.1").unwrap();
+        assert_eq!(pinned, "v0.0.4-rc.1");
     }
 
     // ── sha2_digest ───────────────────────────────────────────────────────────
