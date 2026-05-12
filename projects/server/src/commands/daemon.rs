@@ -242,6 +242,16 @@ fn uninstall() -> Result<()> {
 }
 
 fn resolve_binary() -> Result<String> {
+    // current_exe is the highest-confidence source: it's literally the
+    // running binary's path, regardless of $HOME, PATH, or whether we were
+    // invoked as a different user than the install owner. This is the case
+    // that breaks `which` + `$HOME/.local/bin/orca` fallbacks when install.sh
+    // (running as root) invokes `orca daemon install --service-user orca`.
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(s) = exe.to_str()
+    {
+        return Ok(s.to_string());
+    }
     if let Some(s) = orca_utils::state::read()?
         && !s.binary.is_empty()
     {

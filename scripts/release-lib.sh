@@ -405,6 +405,69 @@ release_asset_paths() {
   done
 }
 
+# ── rc cleanup ──────────────────────────────────────────────────────────────
+#
+# Delete every published RC release + matching git tag for a given stable
+# version. Used after `promote` so the GitHub releases page doesn't
+# accumulate dead `v0.0.3-rc.1 ... rc.N` entries forever.
+#
+# Args: $1 = stable version string WITHOUT the leading `v` (e.g. "0.0.3").
+#       $2 = optional "--dry-run" — print actions but make no changes.
+#
+# Idempotent: missing releases/tags are skipped silently.
+cleanup_rcs() {
+  local stable="$1"; local dry="${2:-}"
+  [ -n "$stable" ] || die "cleanup_rcs: stable version required (e.g. 0.0.3)"
+  cd "$REPO_ROOT"
+
+  local repo; repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+  local pattern="v${stable}-rc."
+  log "cleaning up RC releases matching ${pattern}* on ${repo}"
+
+  # Releases: ask GH for everything, filter by prefix locally. Avoids the
+  # 30-item default `gh release list` page in case of long RC trains.
+  local rc_tags
+  rc_tags=$(gh release list --repo "$repo" --limit 200 --json tagName \
+    --jq ".[] | .tagName | select(startswith(\"${pattern}\"))" || true)
+
+  if [ -z "$rc_tags" ]; then
+    log "no RC releases for v${stable} — nothing to clean"
+  else
+    local tag
+    while IFS= read -r tag; do
+      [ -z "$tag" ] && continue
+      if [ "$dry" = "--dry-run" ]; then
+        log "  [dry-run] would delete release + remote tag ${tag}"
+      else
+        log "  deleting release + remote tag ${tag}"
+        # --cleanup-tag also removes the matching remote git tag in one call.
+        gh release delete "$tag" --repo "$repo" --cleanup-tag --yes || \
+          log "    warn: gh release delete ${tag} failed (skipping)"
+      fi
+    done <<EOF
+$rc_tags
+EOF
+  fi
+
+  # Local tags (separate from remote tags — `gh release delete --cleanup-tag`
+  # only touches the remote). Walk every local tag matching the prefix.
+  local local_tags
+  local_tags=$(git tag -l "${pattern}*")
+  if [ -n "$local_tags" ]; then
+    while IFS= read -r tag; do
+      [ -z "$tag" ] && continue
+      if [ "$dry" = "--dry-run" ]; then
+        log "  [dry-run] would delete local tag ${tag}"
+      else
+        log "  deleting local tag ${tag}"
+        git tag -d "$tag" >/dev/null || true
+      fi
+    done <<EOF
+$local_tags
+EOF
+  fi
+}
+
 # ── shared bump-then-build (the function the version bug lived in) ──────────
 
 # Bump Cargo.toml to $1, refresh Cargo.lock, build frontend, build every

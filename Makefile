@@ -211,6 +211,17 @@ endif
 rc promote:
 	@: # handled by the release target above
 
+# Delete every published RC release + matching git tag for a given stable.
+# Run automatically by `make release promote` already; this target is the
+# manual entry point (e.g. cleaning up a botched RC train without promoting).
+#
+# Usage:
+#   make cleanup-rcs VER=0.0.3           # delete v0.0.3-rc.* releases + tags
+#   make cleanup-rcs VER=0.0.3 DRY=1     # preview only
+cleanup-rcs:
+	@if [ -z "$(VER)" ]; then echo "usage: make cleanup-rcs VER=<x.y.z> [DRY=1]"; exit 1; fi
+	bash scripts/release-local.sh cleanup-rcs $(VER) $(if $(DRY),--dry-run,)
+
 RUST_VERSION := $(shell cat rust-toolchain.toml | grep channel | sed 's/.*"\(.*\)"/\1/')
 NODE_VERSION := $(shell cat .nvmrc | tr -d '[:space:]')
 
