@@ -88,13 +88,14 @@ detect_cores() {
 #   - Default: min(num_targets, cores / 4) — leaves cores for cargo's internal
 #     parallelism within each target. Floor of 1.
 release_parallel_targets() {
-  local num_targets="$1" cores parallel
+  local num_targets="$1"
+  local parallel
   if [ -n "${RELEASE_PARALLEL_TARGETS:-}" ]; then
     parallel="$RELEASE_PARALLEL_TARGETS"
   else
-    cores=$(detect_cores)
-    parallel=$(( cores / 4 ))
-    [ "$parallel" -lt 1 ] && parallel=1
+    # Default to 1: parallel cargo builds fight over the package cache and
+    # artifact directory locks. Set RELEASE_PARALLEL_TARGETS to override.
+    parallel=1
   fi
   [ "$parallel" -gt "$num_targets" ] && parallel="$num_targets"
   echo "$parallel"
@@ -182,18 +183,18 @@ current_cargo_version() {
 }
 
 write_cargo_version() {
-  local new="$1" current workspace_toml
-  workspace_toml="${REPO_ROOT}/Cargo.toml"
-  current=$(current_cargo_version)
-  # Version is declared once in the workspace root Cargo.toml; all crates
-  # inherit it via `version.workspace = true`.
+  local new="$1"
+  local workspace_toml="${REPO_ROOT}/Cargo.toml"
+  # Replace the first `version = "..."` line in the workspace root.
+  # Don't match on the old value — avoids regex-escaping pre-release strings.
   if [ "$(uname -s)" = "Darwin" ]; then
-    sed -i '' "0,/^version = \"${current}\"/s//version = \"${new}\"/" "$workspace_toml"
+    sed -i '' 's/^version = ".*"/version = "'"$new"'"/' "$workspace_toml"
   else
-    sed -i "0,/^version = \"${current}\"/s//version = \"${new}\"/" "$workspace_toml"
+    sed -i 's/^version = ".*"/version = "'"$new"'"/' "$workspace_toml"
   fi
-  ( cd "$REPO_ROOT" && cargo update -p orca --precise "$new" 2>/dev/null \
-                       || cargo update -p orca 2>/dev/null || true )
+  log "workspace version → $new ($(grep '^version' "$workspace_toml" | head -1))"
+  # Regenerate Cargo.lock from the updated Cargo.toml.
+  ( cd "$REPO_ROOT" && cargo update -p orca 2>/dev/null || true )
 }
 
 # Compute next RC version from latest stable tag.
