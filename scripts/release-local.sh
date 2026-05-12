@@ -132,6 +132,22 @@ write_cargo_version() {
   cargo update -p orca --precise "$new" 2>/dev/null || cargo update -p orca || true
 }
 
+# Shared release-cut step used by both `rc` and `promote`. Bumps Cargo.toml,
+# refreshes Cargo.lock, then builds every target. Must be called INSIDE the
+# rollback-trap region — sets RB_CARGO=1 so a build failure restores the toml.
+#
+# The version MUST be written before building: CARGO_PKG_VERSION is baked into
+# the binary at compile time, so a build done against the old toml produces an
+# artifact that mis-reports its version. Keeping rc + promote on this single
+# function guarantees both surfaces stay correct from one fix.
+bump_and_build() {
+  local new="$1"
+  log "bumping ${SERVER_TOML} → ${new}"
+  write_cargo_version "$new"
+  RB_CARGO=1
+  build_orca_binary
+}
+
 compute_rc() {
   # In: $1 = patch|minor|major
   # Out: prints "STABLE_VERSION RC_VERSION PREVIOUS_STABLE"
@@ -278,15 +294,12 @@ cmd_rc() {
   log "next rc         : v$RC"
 
   run_checks
-  build_orca_binary
 
-  # From here on, any failure must roll back. Anything before this point only
-  # reads state (or drops a stale local-only tag, which is already idempotent).
+  # From here on, any failure must roll back. bump_and_build writes the new
+  # version into Cargo.toml BEFORE compiling so CARGO_PKG_VERSION matches the
+  # tag we publish. Shared with cmd_promote — fix once, fixed both.
   trap rollback ERR
-
-  log "bumping ${SERVER_TOML} → ${RC}"
-  write_cargo_version "$RC"
-  RB_CARGO=1
+  bump_and_build "$RC"
 
   log "commit + tag + push"
   git add "$SERVER_TOML"
@@ -341,16 +354,12 @@ cmd_promote() {
 
   log "promoting ${latest_rc} → ${stable_tag}"
 
-  log "downloading RC artifacts"
-  rm -rf dist-release && mkdir -p dist-release
-  gh release download "$latest_rc" --dir dist-release --pattern "orca-*" --pattern "*.sha256"
-  ls -lh dist-release/
-
+  # Mirror cmd_rc exactly: bump the version, then rebuild every target so the
+  # stable binary reports the stable version (the RC artifacts have the RC
+  # version baked into CARGO_PKG_VERSION — uploading them as "stable" would
+  # mis-report). Same shared bump_and_build path means one bug fix covers both.
   trap rollback ERR
-
-  log "bumping ${SERVER_TOML} → ${stable_version}"
-  write_cargo_version "$stable_version"
-  RB_CARGO=1
+  bump_and_build "$stable_version"
 
   log "commit + tag + push"
   git add "$SERVER_TOML"
