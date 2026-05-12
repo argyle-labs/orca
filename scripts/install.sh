@@ -333,31 +333,17 @@ fi
 mkdir -p "$ORCA_HOME_TARGET"
 printf '%s\n' "$CHANNEL" > "${ORCA_HOME_TARGET}/channel"
 
-# Hand the tree over to the orca user when running as root.
+# Hand the tree over to the orca user when running as root, then run
+# `orca daemon install --service-user orca` AS ROOT (not via runuser): the
+# binary itself detects the init system (systemd / openrc / unraid) and
+# writes the appropriate system-level unit. PKI dir is created + chowned
+# by daemon install.
 if [ "$RUN_AS_ORCA" = "1" ]; then
   chown -R "$ORCA_USER" "$ORCA_HOME_DIR/.local" "$ORCA_HOME_TARGET"
   echo "✓ installed: ${INSTALL_DIR}/orca  (channel: ${CHANNEL}, user: ${ORCA_USER})"
-
-  # `orca daemon install` today only knows systemd (Linux) and launchd (macOS).
-  # On Slackware/Unraid/OpenRC/etc. it will fail to spawn systemctl. Probe
-  # before invoking so we give a clear next-step instead of a cryptic IO error.
-  if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
-    echo "→ bootstrapping daemon as ${ORCA_USER}"
-    # Re-export PATH explicitly — `runuser -u` doesn't run a login shell so the
-    # inherited PATH may not include /usr/bin where systemctl lives.
-    _ORCA_PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
-    if command -v runuser >/dev/null 2>&1; then
-      runuser -u "$ORCA_USER" -- env PATH="$_ORCA_PATH" "${INSTALL_DIR}/orca" daemon install \
-        || warn "daemon install failed — run it manually as $ORCA_USER"
-    else
-      su - "$ORCA_USER" -c "PATH='$_ORCA_PATH' '${INSTALL_DIR}/orca' daemon install" \
-        || warn "daemon install failed — run it manually as $ORCA_USER"
-    fi
-  else
-    warn "no systemd detected — skipping 'orca daemon install'"
-    warn "  binary is at ${INSTALL_DIR}/orca; you'll need an OS-native service"
-    warn "  unit (OpenRC, rc.d, supervised, etc.) to autostart on boot."
-  fi
+  echo "→ bootstrapping daemon as ${ORCA_USER} via system service"
+  "${INSTALL_DIR}/orca" daemon install --service-user "$ORCA_USER" \
+    || warn "daemon install failed — re-run: ${INSTALL_DIR}/orca daemon install --service-user $ORCA_USER"
   exit 0
 fi
 

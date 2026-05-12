@@ -180,7 +180,6 @@ fn install(port: u16, service_user: Option<String>) -> Result<()> {
         }
         Some(user) => {
             // System-mode install — requires root, runs as `user` at boot.
-            #[cfg(unix)]
             if !is_root() {
                 anyhow::bail!("--service-user requires running as root");
             }
@@ -204,10 +203,14 @@ fn ensure_pki_for_home(home: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
 fn is_root() -> bool {
-    // SAFETY: getuid is always safe; it has no preconditions and cannot fail.
-    unsafe { libc::getuid() == 0 }
+    // Avoid pulling in libc just for this — `id -u` is on every Unix host.
+    Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+        .unwrap_or(false)
 }
 
 fn home_dir_of(user: &str) -> Result<String> {
