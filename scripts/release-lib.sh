@@ -26,10 +26,12 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVER_TOML="${REPO_ROOT}/projects/server/Cargo.toml"
 DIST_DIR="${REPO_ROOT}/dist-release"
 
-# Default cargo features for release builds. Local + CI both build with the
-# embedded frontend so the binary is self-contained. Override with
-# RELEASE_FEATURES="" for a headless build.
-: "${RELEASE_FEATURES:=ui}"
+# Extra cargo features for release builds. The `ui` feature is on by default
+# (see projects/server/Cargo.toml `[features] default = ["ui"]`) so the
+# embedded frontend ships in every release without explicit opt-in. Use this
+# knob to add other optional features (e.g. `pdf`, `php-ast`). For a true
+# headless build, pass `--no-default-features` directly via cargo.
+: "${RELEASE_FEATURES:=}"
 
 # Cargo profile. Defaults to `release` (fat LTO, codegen-units=1 — slow build,
 # fast binary; required for shipped releases). `make build` overrides to
@@ -270,9 +272,10 @@ cargo_build_target() {
   cd "$REPO_ROOT"
 
   local features_args=()
-  [ -n "$RELEASE_FEATURES" ] && features_args=(--features "$RELEASE_FEATURES")
+  [ -n "${RELEASE_NO_DEFAULT_FEATURES:-}" ] && features_args+=(--no-default-features)
+  [ -n "$RELEASE_FEATURES" ] && features_args+=(--features "$RELEASE_FEATURES")
 
-  log "building ${target} (profile=${RELEASE_PROFILE}, cargo -j${jobs}${RELEASE_FEATURES:+, features=$RELEASE_FEATURES})"
+  log "building ${target} (profile=${RELEASE_PROFILE}, cargo -j${jobs}${RELEASE_NO_DEFAULT_FEATURES:+, no-default-features}${RELEASE_FEATURES:+, features=$RELEASE_FEATURES})"
 
   # Apple targets: native Apple clang (not zigbuild — zigbuild routes C through
   # zig which breaks SQLCipher's cc-rs on Apple silicon). Pin deployment target
@@ -308,6 +311,51 @@ stage_target_asset() {
 build_one_target() {
   cargo_build_target "$1" "$2"
   stage_target_asset "$1"
+}
+
+# ── install (single source for Make + CI smoke installs) ────────────────────
+#
+# Copy a built orca binary into a destination path as a real file.
+#
+# Rules — same on every runner (local make, GH Actions, Gitea Actions):
+#   1. If the dest is a symlink, remove it first. cp -f would otherwise follow
+#      the link and overwrite the build artifact in place — the exact drift
+#      that caused mystery "stale binary" bugs.
+#   2. Skip the copy + codesign if the bytes already match (idempotent).
+#   3. On macOS, ad-hoc codesign so Gatekeeper accepts launchd execs.
+#   4. Never call `daemon install` from here — composing that is the caller's
+#      job (Make does it, CI doesn't).
+#
+# Args:
+#   $1 = source binary path  (e.g. target/<triple>/release/orca)
+#   $2 = destination path    (e.g. ~/.local/bin/orca)
+install_orca_binary() {
+  local src="$1"
+  local dest="$2"
+  [ -n "$src" ]  || die "install_orca_binary: source path required"
+  [ -n "$dest" ] || die "install_orca_binary: destination path required"
+  [ -f "$src" ]  || die "install_orca_binary: source not found: $src"
+
+  mkdir -p "$(dirname "$dest")"
+
+  if [ -L "$dest" ]; then
+    log "removing stale symlink at ${dest}"
+    rm -f "$dest"
+  fi
+
+  if [ -f "$dest" ] && cmp -s "$src" "$dest"; then
+    log "binary unchanged → ${dest}"
+    return 0
+  fi
+
+  cp "$src" "$dest"
+  chmod +x "$dest"
+
+  if [ "$(uname -s)" = "Darwin" ]; then
+    codesign --force --sign - "$dest" 2>/dev/null || true
+  fi
+
+  log "installed → ${dest}"
 }
 
 # Build many targets in parallel chunks. Local-only — CI uses matrix instead.

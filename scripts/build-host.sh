@@ -16,18 +16,28 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/release-lib.sh"
 cd "$REPO_ROOT"
 
+HEADLESS=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --headless) RELEASE_FEATURES=""; shift ;;
+    --headless) HEADLESS=1; shift ;;
     *) die "unknown flag: $1" ;;
   esac
 done
 
+# Headless: strip default features (which include `ui`) and skip the frontend
+# npm build. The `ui` feature being on-by-default in Cargo.toml means a plain
+# build always embeds the frontend; headless must opt out explicitly.
+if [ "$HEADLESS" = "1" ]; then
+  export RELEASE_NO_DEFAULT_FEATURES=1
+  RELEASE_FEATURES=""
+fi
+
 target=$(host_target)
 jobs=$(release_cargo_jobs 1)
 
-# Frontend only needs building when the `ui` feature is enabled.
-[ -n "$RELEASE_FEATURES" ] && build_frontend
+# Frontend build is needed whenever the embedded UI ships in the binary —
+# i.e. anytime we're NOT building headless.
+[ "$HEADLESS" = "1" ] || build_frontend
 
 cargo_build_target "$target" "$jobs"
 

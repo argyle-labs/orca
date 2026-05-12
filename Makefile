@@ -62,28 +62,26 @@ kill-dev:
 	@echo "→ dev processes cleared"
 
 # Build release binary and deploy to current system (~/.local/bin/orca).
-# Uses target/$(HOST_TARGET)/release/orca — same path the release pipeline
-# uses, so `make build` and `make release` share a warm cargo cache.
+# Install logic (symlink strip, idempotent copy, codesign) lives in
+# scripts/release-lib.sh::install_orca_binary so Make and CI runners agree.
 deploy: build
-	@if cmp -s target/$(HOST_TARGET)/release/orca $(INSTALL_PATH); then \
-	  echo "binary unchanged — skipping copy and codesign"; \
-	else \
-	  $(MAKE) kill-dev; \
-	  cp target/$(HOST_TARGET)/release/orca $(INSTALL_PATH); \
-	  codesign --force --sign - $(INSTALL_PATH); \
-	  echo "deployed → $(INSTALL_PATH)"; \
-	fi
+	@$(MAKE) kill-dev
+	bash scripts/install-binary.sh target/$(HOST_TARGET)/release/orca $(INSTALL_PATH)
 	$(INSTALL_PATH) daemon install
 	@echo "daemon installed"
 
-# Build debug binary and install to ~/.local/bin/brain (dev workflow, no frontend embed)
+# Build debug binary and install to $(INSTALL_PATH). `make dev` runs
+# target/debug/orca directly — this target is for the rare case you want the
+# system-installed binary to be the debug build.
 install-dev:
-	cargo build --manifest-path projects/server/Cargo.toml 2>&1 && cp target/debug/orca $(INSTALL_PATH) && echo "installed → $(INSTALL_PATH)"
+	cargo build --manifest-path projects/server/Cargo.toml
+	bash scripts/install-binary.sh target/debug/orca $(INSTALL_PATH)
 
-# Watch for changes and rebuild+install on save (requires cargo-watch)
-# Install with: cargo install cargo-watch
+# Watch for changes and rebuild+install on save (requires cargo-watch).
+# Install cargo-watch with: cargo install cargo-watch
 watch:
-	cargo watch -C projects/server -x 'build' -s 'cp target/debug/orca $(INSTALL_PATH) && echo "→ reloaded"'
+	cargo watch -C projects/server -x 'build' \
+	  -s 'bash $(CURDIR)/scripts/install-binary.sh $(CURDIR)/target/debug/orca $(INSTALL_PATH)'
 
 # Just check for compile errors without linking
 check:

@@ -562,6 +562,12 @@ static MIGRATIONS: &[Migration] = &[
         );",
         down: Some("DROP TABLE IF EXISTS secrets;"),
     },
+    Migration {
+        version: 25,
+        description: "seed ui.enabled setting — toggle for serving the embedded web UI (default on)",
+        up: "INSERT OR IGNORE INTO settings (key, value) VALUES ('ui.enabled', 'true');",
+        down: Some("DELETE FROM settings WHERE key = 'ui.enabled';"),
+    },
 ];
 
 /// Return the currently applied migration version (0 = baseline, no migrations run).
