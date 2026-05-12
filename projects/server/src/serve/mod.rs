@@ -284,17 +284,45 @@ fn resolve_daemon_binary() -> String {
         .to_string()
 }
 
-// Embedded web UI — only present when built with `--features ui`.
-// Headless builds (Meerkat, workers, native app backends) omit this entirely.
+// Embedded web UI — compiled in by default (the `ui` Cargo feature). True
+// headless builds disable it with `--no-default-features`. Independently, the
+// `ui.enabled` DB setting toggles serving at runtime (default true, read once
+// at daemon startup — flip + restart to change).
 #[cfg(feature = "ui")]
 #[derive(rust_embed::RustEmbed)]
 #[folder = "../frontend/dist/"]
 struct Assets;
 
 #[cfg(feature = "ui")]
+static UI_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+#[cfg(feature = "ui")]
+fn ui_enabled(db_path: &std::path::Path) -> bool {
+    *UI_ENABLED.get_or_init(|| {
+        let enabled = db::open(db_path)
+            .ok()
+            .and_then(|c| db::settings::get(&c, "ui.enabled").ok().flatten())
+            .map(|v| v != "false")
+            .unwrap_or(true);
+        tracing::info!("ui.enabled = {enabled}");
+        enabled
+    })
+}
+
+#[cfg(feature = "ui")]
 async fn static_handler(uri: axum::http::Uri) -> axum::response::Response {
     use axum::body::Body;
     use axum::http::{Response, header};
+
+    if !UI_ENABLED.get().copied().unwrap_or(true) {
+        return Response::builder()
+            .status(404)
+            .header("content-type", "text/plain")
+            .body(Body::from(
+                "web UI disabled — set settings.ui.enabled = 'true' and restart",
+            ))
+            .expect("hardcoded response is valid");
+    }
 
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
@@ -327,7 +355,9 @@ async fn static_handler(_uri: axum::http::Uri) -> axum::response::Response {
     axum::http::Response::builder()
         .status(404)
         .header("content-type", "text/plain")
-        .body(Body::from("no web UI — build orca with --features ui"))
+        .body(Body::from(
+            "headless build — rebuild without --no-default-features to embed the UI",
+        ))
         .expect("hardcoded response is valid")
 }
 
@@ -482,6 +512,11 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
 
     // Ensures reqwest (rustls-no-provider) has a crypto provider; idempotent.
     crate::llm::ensure_crypto_provider();
+
+    // Resolve the UI toggle once at boot so the static handler doesn't touch
+    // the DB per-request. Flip `settings.ui.enabled` + restart to change.
+    #[cfg(feature = "ui")]
+    let _ = ui_enabled(&db_path);
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

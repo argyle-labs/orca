@@ -117,7 +117,7 @@ echo ""
 # the whole process group.
 ORCA_LOG=info,orca=debug,hyper=warn,mio=warn,h2=warn,reqwest=warn,rustls=warn,tower_http=warn cargo watch -q -c -C projects/server \
   -w src -w Cargo.toml \
-  -x 'build --features ui' \
+  -x 'build' \
   -s 'while true; do ORCA_LOG=info,orca=debug,hyper=warn,mio=warn,h2=warn,reqwest=warn,rustls=warn,tower_http=warn ../../target/debug/orca serve --dev; echo "  [server exited — respawning in 1s]"; sleep 1; done' 2>&1 | \
   sed 's/^/[server]   /' &
 _SERVER_PID=$!

@@ -14,9 +14,19 @@ inputs:
     description: Rust target triple to build.
     required: true
   features:
-    description: Cargo features (default ui = embedded frontend; empty = headless).
+    description: >
+      Extra cargo features to enable. The `ui` feature (embedded frontend) is
+      on by default via Cargo.toml `[features] default = ["ui"]`, so you only
+      need to set this for additional features like `pdf` or `php-ast`.
     required: false
-    default: 'ui'
+    default: ''
+  no-default-features:
+    description: >
+      Set to '1' to pass `--no-default-features` to cargo (true headless build:
+      no embedded UI, no frontend npm step). Mirrors `make build-headless` /
+      `scripts/build-host.sh --headless`.
+    required: false
+    default: ''
 
 outputs:
   asset-path:
@@ -41,6 +51,7 @@ runs:
       shell: bash
       env:
         RELEASE_FEATURES: ${{ inputs.features }}
+        RELEASE_NO_DEFAULT_FEATURES: ${{ inputs.no-default-features }}
         # One target per runner → full cores for cargo's internal parallelism.
         RELEASE_PARALLEL_TARGETS: '1'
         # CI doesn't ship perf-tuned binaries any differently from dev.
@@ -57,10 +68,14 @@ runs:
 
         # Single shared codepath. Local + CI agree on:
         #   1. write_cargo_version  (version into Cargo.toml + Cargo.lock)
-        #   2. build_frontend       (npm ci + npm run build)
+        #   2. build_frontend       (npm ci + npm run build) — skipped when headless
         #   3. build_one_target     (cargo zigbuild or cargo build → dist-release/)
         write_cargo_version "${{ inputs.version }}"
-        build_frontend
+        if [ -z "${RELEASE_NO_DEFAULT_FEATURES:-}" ]; then
+          build_frontend
+        else
+          log "headless build — skipping frontend"
+        fi
         build_one_target "${{ inputs.target }}" "$(release_cargo_jobs 1)"
 
         asset="dist-release/orca-${{ inputs.target }}"

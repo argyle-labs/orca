@@ -12,9 +12,11 @@ name = "orca"
 path = "src/main.rs"
 
 [features]
+default = ["ui"]
+
 # Embed the compiled frontend (projects/frontend/dist/) into the binary.
-# Off by default — headless builds (Meerkat, workers, native app backends) never set this.
-# Only the CLI release artifact enables it via `--features ui`.
+# On by default. Disable with `--no-default-features` for a true headless build.
+# Runtime serving is additionally gated by the `ui.enabled` DB setting.
 ui = ["dep:mime_guess"]
 
 # Enable the /api/pdf endpoint — markdown → PDF rendering via typst.

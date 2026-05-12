@@ -10,7 +10,10 @@
 #   RELEASE_PARALLEL_TARGETS   max targets built in parallel (default: cores/4)
 #   RELEASE_CARGO_JOBS         cargo -j per target build   (default: cores/parallel)
 #   RELEASE_TARGETS            override target list (space-separated)
-#   RELEASE_FEATURES           cargo features (default: ui; empty = headless)
+#   RELEASE_FEATURES                extra cargo features (ui is on by default
+#                                   via Cargo.toml — only set this for additional
+#                                   features like `pdf` or `php-ast`)
+#   RELEASE_NO_DEFAULT_FEATURES=1   build headless (no embedded UI)
 
 set -euo pipefail
 

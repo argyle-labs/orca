@@ -251,6 +251,24 @@ fn step_install_binary(home: &Path, report: &mut InstallReport) {
         return;
     }
 
+    // If a previous install left a symlink (e.g. pointing at target/release/orca),
+    // remove it before copying. fs::copy would otherwise follow the link and
+    // overwrite the build artifact in place, which is exactly the drift we're
+    // trying to prevent — the installed binary must be a real file.
+    if is_symlink(&dest) {
+        if let Err(e) = std::fs::remove_file(&dest) {
+            report.err(format!(
+                "binary: cannot replace symlink at {}: {e}",
+                dest.display()
+            ));
+            return;
+        }
+        report.ok(format!(
+            "binary: removed stale symlink at {}",
+            dest.display()
+        ));
+    }
+
     match std::fs::copy(&src, &dest) {
         Ok(_) => {
             set_executable(&dest);
