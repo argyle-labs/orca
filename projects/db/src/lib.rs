@@ -599,6 +599,41 @@ static MIGRATIONS: &[Migration] = &[
         up: "INSERT OR IGNORE INTO settings (key, value) VALUES ('ui.enabled', 'true');",
         down: Some("DELETE FROM settings WHERE key = 'ui.enabled';"),
     },
+    Migration {
+        version: 26,
+        description: "add pod mesh tables — invites, peers, trust, self-secure flag",
+        up: "CREATE TABLE IF NOT EXISTS pod_invites (
+            token_hash   TEXT PRIMARY KEY,
+            expires_at   INTEGER NOT NULL,
+            used_at      INTEGER,
+            created_at   INTEGER NOT NULL,
+            issued_by_cn TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS pod_peers (
+            peer_id       TEXT PRIMARY KEY,
+            peer_hostname TEXT NOT NULL,
+            ca_cert_pem   TEXT NOT NULL,
+            first_seen_at INTEGER NOT NULL,
+            last_seen_at  INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS pod_trust (
+            peer_id      TEXT PRIMARY KEY REFERENCES pod_peers(peer_id) ON DELETE CASCADE,
+            local_secure INTEGER NOT NULL DEFAULT 0,
+            peer_secure  INTEGER NOT NULL DEFAULT 0,
+            set_at       INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS pod_self (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            self_secure INTEGER NOT NULL DEFAULT 0,
+            set_at      INTEGER NOT NULL
+        );",
+        down: Some(
+            "DROP TABLE IF EXISTS pod_trust;
+             DROP TABLE IF EXISTS pod_peers;
+             DROP TABLE IF EXISTS pod_invites;
+             DROP TABLE IF EXISTS pod_self;",
+        ),
+    },
 ];
 
 /// Return the currently applied migration version (0 = baseline, no migrations run).

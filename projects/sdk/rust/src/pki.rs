@@ -58,7 +58,158 @@ pub struct NodeBundle {
     pub ca_cert_pem: String,
 }
 
-// ── File paths ────────────────────────────────────────────────────────────────
+// ── Pod / mesh-CA file paths ─────────────────────────────────────────────────
+//
+// Pod material lives in a separate subtree from plugin material so the two
+// trust contexts can never accidentally cross-contaminate, even when both
+// listen on the same port via SNI:
+//
+//   <pki_dir>/mesh/ca.cert.pem         — pod CA cert (replicated to every peer)
+//   <pki_dir>/mesh/ca.key.pem          — pod CA private key (ONLY on secure hosts)
+//   <pki_dir>/mesh/server/node.{cert,key}.pem — this host's pod-server cert (SAN=pod.orca.local)
+//   <pki_dir>/mesh/client/node.{cert,key}.pem — this host's pod-client cert (used outbound to peers)
+//
+// Server cert SAN: `pod.orca.local` (the SNI the client sends to reach this surface).
+// Client cert CN:  `peer.<hostname>` so server-side handlers can identify the caller.
+
+pub fn mesh_dir(pki_dir: &Path) -> PathBuf {
+    pki_dir.join("mesh")
+}
+pub fn mesh_ca_cert_path(pki_dir: &Path) -> PathBuf {
+    mesh_dir(pki_dir).join("ca.cert.pem")
+}
+pub fn mesh_ca_key_path(pki_dir: &Path) -> PathBuf {
+    mesh_dir(pki_dir).join("ca.key.pem")
+}
+pub fn mesh_server_cert_path(pki_dir: &Path) -> PathBuf {
+    mesh_dir(pki_dir).join("server/node.cert.pem")
+}
+pub fn mesh_server_key_path(pki_dir: &Path) -> PathBuf {
+    mesh_dir(pki_dir).join("server/node.key.pem")
+}
+pub fn mesh_client_cert_path(pki_dir: &Path) -> PathBuf {
+    mesh_dir(pki_dir).join("client/node.cert.pem")
+}
+pub fn mesh_client_key_path(pki_dir: &Path) -> PathBuf {
+    mesh_dir(pki_dir).join("client/node.key.pem")
+}
+
+pub const POD_SERVER_SAN: &str = "pod.orca.local";
+
+// ── Pod / mesh-CA init + issuance ────────────────────────────────────────────
+
+/// Founder bootstrap. Creates a fresh mesh CA + this host's pod server cert +
+/// this host's pod client cert. Idempotent: re-running with an existing CA is
+/// a no-op (returns Ok without regenerating).
+///
+/// `host_cn` is the CN baked into both the server and client certs — typically
+/// the host's `gethostname()`. Used by peers to identify the caller.
+pub fn init_mesh_ca(pki_dir: &Path, host_cn: &str) -> Result<()> {
+    if mesh_ca_cert_path(pki_dir).exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(mesh_dir(pki_dir))
+        .with_context(|| format!("create mesh dir {}", mesh_dir(pki_dir).display()))?;
+
+    let ca_key = KeyPair::generate()?;
+    let mut ca_params = CertificateParams::new(Vec::<String>::new())?;
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    {
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, "orca-mesh-ca");
+        dn.push(DnType::OrganizationName, "orca");
+        ca_params.distinguished_name = dn;
+    }
+    let ca_cert = ca_params.self_signed(&ca_key)?;
+    write_pem(mesh_ca_cert_path(pki_dir), &ca_cert.pem())?;
+    write_pem(mesh_ca_key_path(pki_dir), &ca_key.serialize_pem())?;
+
+    let issuer = Issuer::new(ca_params, ca_key);
+    issue_mesh_server_cert(pki_dir, &issuer)?;
+    issue_mesh_client_cert(pki_dir, &issuer, host_cn)?;
+    Ok(())
+}
+
+/// Re-issue this host's mesh server cert from the mesh CA. Used by `pod init`
+/// and by the join flow once the peer cert lands.
+fn issue_mesh_server_cert(pki_dir: &Path, issuer: &Issuer<'_, KeyPair>) -> Result<()> {
+    let key = KeyPair::generate()?;
+    let mut params = CertificateParams::new(vec![POD_SERVER_SAN.to_string()])?;
+    params.is_ca = IsCa::NoCa;
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    {
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, "orca-pod-server");
+        dn.push(DnType::OrganizationName, "orca");
+        dn.push(DnType::OrganizationalUnitName, "pod-server");
+        params.distinguished_name = dn;
+    }
+    let cert = params.signed_by(&key, issuer)?;
+    let server_dir = mesh_dir(pki_dir).join("server");
+    std::fs::create_dir_all(&server_dir)?;
+    write_pem(mesh_server_cert_path(pki_dir), &cert.pem())?;
+    write_pem(mesh_server_key_path(pki_dir), &key.serialize_pem())?;
+    Ok(())
+}
+
+/// Issue this host's mesh client cert from the mesh CA. `host_cn` becomes the
+/// Subject CN so server-side handlers can identify the caller.
+fn issue_mesh_client_cert(
+    pki_dir: &Path,
+    issuer: &Issuer<'_, KeyPair>,
+    host_cn: &str,
+) -> Result<()> {
+    let key = KeyPair::generate()?;
+    let mut params = CertificateParams::new(vec![format!("peer.{host_cn}.pod.orca.local")])?;
+    params.is_ca = IsCa::NoCa;
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    {
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, format!("peer.{host_cn}"));
+        dn.push(DnType::OrganizationName, "orca");
+        dn.push(DnType::OrganizationalUnitName, "pod-client");
+        params.distinguished_name = dn;
+    }
+    let cert = params.signed_by(&key, issuer)?;
+    let client_dir = mesh_dir(pki_dir).join("client");
+    std::fs::create_dir_all(&client_dir)?;
+    write_pem(mesh_client_cert_path(pki_dir), &cert.pem())?;
+    write_pem(mesh_client_key_path(pki_dir), &key.serialize_pem())?;
+    Ok(())
+}
+
+/// Load this host's pod server bundle (cert + key + mesh CA cert).
+pub fn load_mesh_server(pki_dir: &Path) -> Result<NodeBundle> {
+    Ok(NodeBundle {
+        cert_pem: std::fs::read_to_string(mesh_server_cert_path(pki_dir))
+            .context("mesh server cert not found — run `orca pod init`")?,
+        key_pem: std::fs::read_to_string(mesh_server_key_path(pki_dir))
+            .context("mesh server key not found — run `orca pod init`")?,
+        ca_cert_pem: std::fs::read_to_string(mesh_ca_cert_path(pki_dir))
+            .context("mesh CA cert not found — run `orca pod init`")?,
+    })
+}
+
+/// Load this host's pod client bundle (used to dial peers).
+pub fn load_mesh_client(pki_dir: &Path) -> Result<NodeBundle> {
+    Ok(NodeBundle {
+        cert_pem: std::fs::read_to_string(mesh_client_cert_path(pki_dir))
+            .context("mesh client cert not found — run `orca pod init`")?,
+        key_pem: std::fs::read_to_string(mesh_client_key_path(pki_dir))
+            .context("mesh client key not found — run `orca pod init`")?,
+        ca_cert_pem: std::fs::read_to_string(mesh_ca_cert_path(pki_dir))
+            .context("mesh CA cert not found — run `orca pod init`")?,
+    })
+}
+
+/// True if this host has the mesh CA private key — i.e. can sign new peer
+/// certs. v1: only the founder. v2: every secure host after CA replication.
+pub fn has_mesh_ca_key(pki_dir: &Path) -> bool {
+    mesh_ca_key_path(pki_dir).exists()
+}
+
+// ── File paths (plugin / legacy) ─────────────────────────────────────────────
 
 pub fn ca_cert_path(pki_dir: &Path) -> PathBuf {
     pki_dir.join("ca.cert.pem")
