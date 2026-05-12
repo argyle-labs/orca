@@ -297,9 +297,14 @@ struct Assets;
 static UI_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 #[cfg(feature = "ui")]
-fn ui_enabled(db_path: &std::path::Path) -> bool {
+fn ui_enabled() -> bool {
     *UI_ENABLED.get_or_init(|| {
-        let enabled = db::open(db_path)
+        // Resolve through `db::open_default()` so we honour the same task-
+        // local / env-var / encrypted-default resolution path as every other
+        // handler. Doing this lazily on first request (not in build_router)
+        // avoids forcing the production encrypted-open codepath on tests
+        // that supplied an unencrypted DB via task-local.
+        let enabled = db::open_default()
             .ok()
             .and_then(|c| db::settings::get(&c, "ui.enabled").ok().flatten())
             .map(|v| v != "false")
@@ -314,7 +319,7 @@ async fn static_handler(uri: axum::http::Uri) -> axum::response::Response {
     use axum::body::Body;
     use axum::http::{Response, header};
 
-    if !UI_ENABLED.get().copied().unwrap_or(true) {
+    if !ui_enabled() {
         return Response::builder()
             .status(404)
             .header("content-type", "text/plain")
@@ -512,11 +517,6 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
 
     // Ensures reqwest (rustls-no-provider) has a crypto provider; idempotent.
     crate::llm::ensure_crypto_provider();
-
-    // Resolve the UI toggle once at boot so the static handler doesn't touch
-    // the DB per-request. Flip `settings.ui.enabled` + restart to change.
-    #[cfg(feature = "ui")]
-    let _ = ui_enabled(&db_path);
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

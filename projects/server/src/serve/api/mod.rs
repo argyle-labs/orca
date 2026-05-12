@@ -32,7 +32,7 @@ where
 {
     match f() {
         Ok(val) => Json(val).into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")),
     }
 }
 
@@ -43,7 +43,7 @@ where
 {
     match f() {
         Ok(()) => Json(OkResponse { ok: true }).into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")),
     }
 }
 
@@ -55,7 +55,7 @@ where
     match f() {
         Ok(true) => Json(OkResponse { ok: true }).into_response(),
         Ok(false) => err(StatusCode::NOT_FOUND, &format!("{kind} '{name}' not found")),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")),
     }
 }
 
