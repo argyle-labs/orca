@@ -7,7 +7,6 @@
 
 # Rust
 target/
-target-release/
 Cargo.lock
 
 # Node / JS
