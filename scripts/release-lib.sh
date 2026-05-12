@@ -178,16 +178,19 @@ require_release_tools() {
 # ── version manipulation ────────────────────────────────────────────────────
 
 current_cargo_version() {
-  grep '^version' "$SERVER_TOML" | head -1 | sed 's/version = "\(.*\)"/\1/'
+  grep '^version' "${REPO_ROOT}/Cargo.toml" | head -1 | sed 's/version = "\(.*\)"/\1/'
 }
 
 write_cargo_version() {
-  local new="$1" current
+  local new="$1" current workspace_toml
+  workspace_toml="${REPO_ROOT}/Cargo.toml"
   current=$(current_cargo_version)
+  # Version is declared once in the workspace root Cargo.toml; all crates
+  # inherit it via `version.workspace = true`.
   if [ "$(uname -s)" = "Darwin" ]; then
-    sed -i '' "0,/^version = \"${current}\"/s//version = \"${new}\"/" "$SERVER_TOML"
+    sed -i '' "0,/^version = \"${current}\"/s//version = \"${new}\"/" "$workspace_toml"
   else
-    sed -i "0,/^version = \"${current}\"/s//version = \"${new}\"/" "$SERVER_TOML"
+    sed -i "0,/^version = \"${current}\"/s//version = \"${new}\"/" "$workspace_toml"
   fi
   ( cd "$REPO_ROOT" && cargo update -p orca --precise "$new" 2>/dev/null \
                        || cargo update -p orca 2>/dev/null || true )
@@ -266,22 +269,25 @@ cargo_build_target() {
   local features_args=()
   [ -n "$RELEASE_FEATURES" ] && features_args=(--features "$RELEASE_FEATURES")
 
-  # Pin the macOS deployment target to 11.0 for all Apple builds.
-  # Without this, the current OS version (e.g. 26.4 on macOS beta) leaks into
-  # MACOSX_DEPLOYMENT_TARGET and cargo-zigbuild passes an invalid -mmacosx-version-min.
-  local extra_env=()
-  case "$target" in
-    *-apple-darwin) extra_env=(env MACOSX_DEPLOYMENT_TARGET=11.0) ;;
-  esac
-
   log "building ${target} (profile=${RELEASE_PROFILE}, cargo -j${jobs}${RELEASE_FEATURES:+, features=$RELEASE_FEATURES})"
-  if [ "$target" = "$(host_target)" ]; then
-    "${extra_env[@]}" cargo build --profile "$RELEASE_PROFILE" --jobs "$jobs" "${features_args[@]}" \
-      --target "$target" --manifest-path "$SERVER_TOML"
-  else
-    "${extra_env[@]}" cargo zigbuild --profile "$RELEASE_PROFILE" --jobs "$jobs" "${features_args[@]}" \
-      --target "$target" --manifest-path "$SERVER_TOML"
-  fi
+
+  # Apple targets: always use the native Apple clang toolchain (cargo build, not
+  # zigbuild). zigbuild routes C compilation through zig which breaks SQLCipher's
+  # cc-rs build on Apple silicon. For the cross-arch case (aarch64 host →
+  # x86_64 target), Apple's clang handles -arch x86_64 natively.
+  # Pin MACOSX_DEPLOYMENT_TARGET to 11.0 so macOS beta versions don't leak in.
+  case "$target" in
+    *-apple-darwin)
+      MACOSX_DEPLOYMENT_TARGET=11.0 cargo build \
+        --profile "$RELEASE_PROFILE" --jobs "$jobs" "${features_args[@]}" \
+        --target "$target" --manifest-path "$SERVER_TOML"
+      ;;
+    *)
+      # Linux and other non-Apple targets: zigbuild for cross-compilation.
+      cargo zigbuild --profile "$RELEASE_PROFILE" --jobs "$jobs" "${features_args[@]}" \
+        --target "$target" --manifest-path "$SERVER_TOML"
+      ;;
+  esac
 }
 
 # Copy the compiled binary into dist-release/ and write its sha256. Only
