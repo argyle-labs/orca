@@ -217,14 +217,20 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
             .context("failed to parse releases JSON")?
     };
 
-    // Find the best matching release for this channel
+    // Find the best matching release for this channel. Use full semver
+    // ordering (handles -rc/-beta/-alpha suffixes) so an rc.15 tag doesn't
+    // get out-ranked by a stale stable v0.0.2.
     let release = releases
         .into_iter()
         .filter(|r| channel.accepts(&r.tag_name))
         .max_by(|a, b| {
-            let va = a.tag_name.trim_start_matches('v');
-            let vb = b.tag_name.trim_start_matches('v');
-            semver_cmp(va, vb)
+            if is_newer_full(&a.tag_name, &b.tag_name) {
+                std::cmp::Ordering::Greater
+            } else if is_newer_full(&b.tag_name, &a.tag_name) {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
         });
 
     let release = match release {
@@ -233,7 +239,7 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
     };
 
     let latest = release.tag_name.trim_start_matches('v');
-    if !is_newer(latest, CURRENT_VERSION) {
+    if !is_newer_full(latest, CURRENT_VERSION) {
         return Ok(None);
     }
 
