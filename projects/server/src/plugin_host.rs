@@ -351,7 +351,6 @@ pub async fn serve(
 /// connection dispatcher can identify which surface the caller wants by SNI.
 fn build_acceptor(pki_dir: &Path) -> Result<TlsAcceptor> {
     use rustls::crypto::CryptoProvider;
-    use rustls::server::ResolvesServerCertUsingSni;
     use rustls::sign::CertifiedKey;
 
     let plugin_bundle = pki::load_server(pki_dir).context("load plugin server TLS bundle")?;
@@ -366,49 +365,34 @@ fn build_acceptor(pki_dir: &Path) -> Result<TlsAcceptor> {
 
     // Trust store starts with the plugin CA, optionally extended with the mesh CA.
     let mut roots = pki::ca_root_store(&plugin_bundle.ca_cert_pem)?;
-    let mut resolver = ResolvesServerCertUsingSni::new();
-    resolver
-        .add("core.orca.local", (*plugin_ck).clone())
-        .map_err(|e| anyhow::anyhow!("SNI resolver add core: {e}"))?;
 
     if pki::mesh_ca_cert_path(pki_dir).exists() {
-        let mesh_bundle = pki::load_mesh_server(pki_dir).context("load mesh server TLS bundle")?;
-        let (mesh_chain, mesh_key) =
-            pki::parse_cert_and_key(&mesh_bundle.cert_pem, &mesh_bundle.key_pem)?;
-        let mesh_signing = CryptoProvider::get_default()
-            .context("no rustls CryptoProvider installed")?
-            .key_provider
-            .load_private_key(mesh_key)
-            .context("load mesh private key")?;
-        let mesh_ck = CertifiedKey::new(mesh_chain, mesh_signing);
-        resolver
-            .add(pki::POD_SERVER_SAN, mesh_ck)
-            .map_err(|e| anyhow::anyhow!("SNI resolver add pod: {e}"))?;
-
-        // Trust the mesh CA for inbound client certs as well.
+        let cur_ca = std::fs::read_to_string(pki::mesh_ca_cert_path(pki_dir))
+            .context("read current mesh CA cert")?;
+        let prev_ca = std::fs::read_to_string(pki::mesh_ca_previous_cert_path(pki_dir)).ok();
         use rustls_pemfile::certs;
-        for der in certs(&mut mesh_bundle.ca_cert_pem.as_bytes()) {
-            roots.add(der.context("parsing mesh CA cert")?)?;
+        for der in certs(&mut cur_ca.as_bytes()) {
+            roots.add(der.context("parsing current mesh CA cert")?)?;
         }
-        info!("[plugin-host] mesh CA detected — pod SNI surface active");
+        if let Some(p) = &prev_ca {
+            for der in certs(&mut p.as_bytes()) {
+                roots.add(der.context("parsing previous mesh CA cert")?)?;
+            }
+            info!("[plugin-host] mesh CA two-slot overlap active (previous CA still trusted)");
+        } else {
+            info!("[plugin-host] mesh CA detected — pod SNI surface active");
+        }
     }
 
-    // Bootstrap SNI: self-signed cert backed by this host's bootstrap Ed25519
-    // key. Joiners pin its SPKI fingerprint (advertised via mDNS) so we don't
-    // need any CA chain on this surface. Always available — bootstrap is how
-    // a fresh orca joins its first pod.
-    let (bs_cert_pem, bs_key_pem) =
-        pki::load_or_init_bootstrap_cert(pki_dir).context("load bootstrap TLS cert")?;
-    let (bs_chain, bs_key) = pki::parse_cert_and_key(&bs_cert_pem, &bs_key_pem)?;
-    let bs_signing = CryptoProvider::get_default()
-        .context("no rustls CryptoProvider installed")?
-        .key_provider
-        .load_private_key(bs_key)
-        .context("load bootstrap private key")?;
-    let bs_ck = CertifiedKey::new(bs_chain, bs_signing);
-    resolver
-        .add(pki::POD_BOOTSTRAP_SAN, bs_ck)
-        .map_err(|e| anyhow::anyhow!("SNI resolver add bootstrap: {e}"))?;
+    // Eagerly create the bootstrap cert+key so its file is on disk; the
+    // resolver still reads from disk per-handshake. (Bootstrap rarely
+    // rotates but the read path is the same for uniformity.)
+    pki::load_or_init_bootstrap_cert(pki_dir).context("init bootstrap TLS cert")?;
+
+    let resolver = Arc::new(HotReloadResolver {
+        pki_dir: pki_dir.to_path_buf(),
+        plugin_ck,
+    });
 
     // The bootstrap SNI accepts no client cert; everything else now requires
     // a valid cert. The connection dispatcher (above) bypasses cert extraction
@@ -421,9 +405,69 @@ fn build_acceptor(pki_dir: &Path) -> Result<TlsAcceptor> {
 
     let server_config = ServerConfig::builder()
         .with_client_cert_verifier(client_cert_verifier)
-        .with_cert_resolver(Arc::new(resolver));
+        .with_cert_resolver(resolver);
 
     Ok(TlsAcceptor::from(Arc::new(server_config)))
+}
+
+/// Hot-reload TLS cert resolver. For the pod + bootstrap SNIs we read cert+key
+/// PEM from disk on every handshake — this is how seamless leaf-cert rotation
+/// works: `pki::atomic_write_pem` does a tmp-write + rename(2), so a reader
+/// either sees the old or the new file but never a half-written one. Cost is
+/// microseconds per handshake (Ed25519 parse is trivial); benefit is zero
+/// in-process cache to invalidate when rotation fires.
+///
+/// The legacy plugin SNI (`core.orca.local`) keeps the cached path — plugin
+/// PKI is a separate trust system from the pod mesh and doesn't yet have a
+/// rotation story. It gets re-read on daemon restart.
+#[derive(Debug)]
+struct HotReloadResolver {
+    pki_dir: std::path::PathBuf,
+    plugin_ck: Arc<rustls::sign::CertifiedKey>,
+}
+
+impl rustls::server::ResolvesServerCert for HotReloadResolver {
+    fn resolve(
+        &self,
+        client_hello: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        let sni = client_hello.server_name()?;
+        match sni {
+            "core.orca.local" => Some(self.plugin_ck.clone()),
+            s if s == pki::POD_SERVER_SAN => self.load_pod_server_ck().ok().map(Arc::new),
+            s if s == pki::POD_BOOTSTRAP_SAN => self.load_bootstrap_ck().ok().map(Arc::new),
+            _ => None,
+        }
+    }
+}
+
+impl HotReloadResolver {
+    fn load_pod_server_ck(&self) -> Result<rustls::sign::CertifiedKey> {
+        let cert_pem = std::fs::read_to_string(pki::mesh_server_cert_path(&self.pki_dir))
+            .context("read mesh server cert")?;
+        let key_pem = std::fs::read_to_string(pki::mesh_server_key_path(&self.pki_dir))
+            .context("read mesh server key")?;
+        Self::build_ck(&cert_pem, &key_pem)
+    }
+
+    fn load_bootstrap_ck(&self) -> Result<rustls::sign::CertifiedKey> {
+        let cert_pem = std::fs::read_to_string(pki::bootstrap_cert_path(&self.pki_dir))
+            .context("read bootstrap cert")?;
+        let key_pem = std::fs::read_to_string(pki::bootstrap_key_path(&self.pki_dir))
+            .context("read bootstrap key")?;
+        Self::build_ck(&cert_pem, &key_pem)
+    }
+
+    fn build_ck(cert_pem: &str, key_pem: &str) -> Result<rustls::sign::CertifiedKey> {
+        use rustls::crypto::CryptoProvider;
+        let (chain, key) = pki::parse_cert_and_key(cert_pem, key_pem)?;
+        let signing = CryptoProvider::get_default()
+            .context("no rustls CryptoProvider installed")?
+            .key_provider
+            .load_private_key(key)
+            .context("load private key")?;
+        Ok(rustls::sign::CertifiedKey::new(chain, signing))
+    }
 }
 
 /// Pull the Subject CN out of the leaf cert presented by the peer during

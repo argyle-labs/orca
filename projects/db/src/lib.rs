@@ -741,10 +741,11 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         );
 
         CREATE TABLE IF NOT EXISTS pod_self (
-            id          INTEGER PRIMARY KEY CHECK (id = 1),
-            self_secure INTEGER NOT NULL DEFAULT 0,
-            pod_id      TEXT,
-            set_at      INTEGER NOT NULL
+            id                       INTEGER PRIMARY KEY CHECK (id = 1),
+            self_secure              INTEGER NOT NULL DEFAULT 0,
+            pod_id                   TEXT,
+            ca_previous_expires_at   INTEGER,
+            set_at                   INTEGER NOT NULL
         );
         ",
     )?;

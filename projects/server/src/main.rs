@@ -161,6 +161,15 @@ enum PodAction {
         #[arg(value_parser = ["on", "off", "show"], default_value = "show")]
         state: String,
     },
+    /// Show days-remaining + rotation status for every cert on this host.
+    CertStatus,
+    /// Rotate the mesh CA. Both old (`previous`) and new (`current`) CAs are
+    /// trusted during the overlap window; existing peer certs stay valid
+    /// until they auto-rotate or the overlap expires.
+    CaRotate {
+        #[arg(long, default_value_t = 14)]
+        overlap_days: i64,
+    },
     /// Leave the pod. Notifies peers, wipes mesh PKI + pod tables.
     /// Use `--wipe-secrets` to also truncate the secrets table; `--wipe-all`
     /// for a near-fresh-install state (also wipes plugin_data, oauth tokens,
@@ -339,6 +348,8 @@ async fn main() -> Result<()> {
                 };
                 cmd::pod::cmd_pod_self_secure(action)
             }
+            PodAction::CertStatus => cmd::pod::cmd_pod_cert_status(),
+            PodAction::CaRotate { overlap_days } => cmd::pod::cmd_pod_ca_rotate(overlap_days).await,
             PodAction::Leave {
                 wipe_secrets,
                 wipe_all,

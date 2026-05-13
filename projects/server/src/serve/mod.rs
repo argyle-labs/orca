@@ -287,6 +287,9 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
 
     let _ = crate::pod::scheduler::spawn();
     info!("[pod] auto-offer scheduler armed");
+
+    let _ = crate::pod::cert_rotation::spawn();
+    info!("[pod] cert-rotation scheduler armed (daily)");
 }
 
 fn pid_alive(pid: u32) -> bool {

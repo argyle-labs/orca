@@ -314,6 +314,115 @@ pub enum SelfSecureAction {
     Show,
 }
 
+// ── pod cert-status ──────────────────────────────────────────────────────────
+
+pub fn cmd_pod_cert_status() -> Result<()> {
+    let pki_d = pki_dir();
+    if !pki::mesh_ca_cert_path(&pki_d).exists() {
+        println!("(not a pod member — no mesh certs to report)");
+        return Ok(());
+    }
+    let ca_pem = std::fs::read_to_string(pki::mesh_ca_cert_path(&pki_d))?;
+    let server_pem = std::fs::read_to_string(pki::mesh_server_cert_path(&pki_d)).ok();
+    let client_pem = std::fs::read_to_string(pki::mesh_client_cert_path(&pki_d)).ok();
+    let bootstrap_pem = std::fs::read_to_string(pki::bootstrap_cert_path(&pki_d)).ok();
+
+    println!("{:<22} {:>14}  {}", "cert", "days remaining", "rotation");
+    print_cert_row("mesh CA", &ca_pem, pki::PEER_REFRESH_THRESHOLD_DAYS * 6);
+    if let Some(p) = server_pem {
+        print_cert_row("mesh server", &p, pki::PEER_REFRESH_THRESHOLD_DAYS);
+    }
+    if let Some(p) = client_pem {
+        print_cert_row("mesh client", &p, pki::PEER_REFRESH_THRESHOLD_DAYS);
+    }
+    if let Some(p) = bootstrap_pem {
+        // Bootstrap is long-lived; no auto-rotation. Show ample threshold.
+        print_cert_row("bootstrap TLS", &p, 30);
+    }
+    println!(
+        "\nLeaf certs auto-rotate when days remaining ≤ {} (daily check).",
+        pki::PEER_REFRESH_THRESHOLD_DAYS
+    );
+    Ok(())
+}
+
+fn print_cert_row(label: &str, pem: &str, threshold_days: i64) {
+    match pki::cert_days_remaining(pem) {
+        Ok(days) => {
+            let status = if days <= 0 {
+                "EXPIRED"
+            } else if days <= threshold_days {
+                "due"
+            } else {
+                "ok"
+            };
+            println!("{label:<22} {days:>14}  {status}");
+        }
+        Err(e) => println!("{label:<22} {:>14}  parse-error: {e}", "?"),
+    }
+}
+
+// ── pod ca-rotate ────────────────────────────────────────────────────────────
+
+pub async fn cmd_pod_ca_rotate(overlap_days: i64) -> Result<()> {
+    anyhow::ensure!(
+        overlap_days >= 1 && overlap_days <= 90,
+        "overlap-days must be between 1 and 90"
+    );
+    let pki_d = pki_dir();
+    anyhow::ensure!(
+        pki::has_mesh_ca_key(&pki_d),
+        "this host does not have the mesh CA key — cannot rotate"
+    );
+
+    // Rotate: current → previous, generate fresh current.
+    pki::rotate_mesh_ca(&pki_d)?;
+    let expires_at = now_secs() + overlap_days * 86_400;
+
+    let conn = db::open_default()?;
+    pdb::set_ca_previous_expires_at(&conn, Some(expires_at))?;
+
+    // Reissue our own peer certs immediately under the new CA so we present
+    // current-CA-signed material to peers as soon as possible.
+    let host = local_hostname();
+    pki::reissue_mesh_server_cert(&pki_d)?;
+    pki::reissue_mesh_client_cert(&pki_d, &host)?;
+
+    println!("✓ rotated mesh CA");
+    println!(
+        "  previous CA stays trusted until {} ({}d overlap)",
+        chrono::DateTime::<chrono::Utc>::from_timestamp(expires_at, 0)
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_else(|| expires_at.to_string()),
+        overlap_days
+    );
+
+    // Replicate to every mutual-secure peer that has the CA key.
+    let cur_cert = std::fs::read_to_string(pki::mesh_ca_cert_path(&pki_d))?;
+    let cur_key = std::fs::read_to_string(pki::mesh_ca_key_path(&pki_d))?;
+    let prev_cert = std::fs::read_to_string(pki::mesh_ca_previous_cert_path(&pki_d))?;
+    let prev_key = std::fs::read_to_string(pki::mesh_ca_previous_key_path(&pki_d))?;
+    let peers = pdb::list_peers(&conn)?;
+    for p in peers {
+        if p.departed_at.is_some() || !p.local_secure || !p.peer_secure {
+            continue;
+        }
+        let params = serde_json::json!({
+            "current_cert_pem": cur_cert,
+            "current_key_pem": cur_key,
+            "previous_cert_pem": prev_cert,
+            "previous_key_pem": prev_key,
+            "previous_expires_at": expires_at,
+        });
+        match call_pod_method(&p.peer_addr, p.peer_port, "pod/push-ca-state", params).await {
+            Ok(_) => println!("  ✓ replicated CA state to {}", p.peer_id),
+            Err(e) => println!("  ! could not replicate to {} ({e})", p.peer_id),
+        }
+    }
+    println!("Peer leaf certs auto-refresh on their next rotation tick (≤7d threshold).");
+    Ok(())
+}
+
 // ── pod leave ────────────────────────────────────────────────────────────────
 
 pub async fn cmd_pod_leave(wipe_secrets: bool, wipe_all: bool) -> Result<()> {

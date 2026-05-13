@@ -512,6 +512,30 @@ pub fn get_pod_id(conn: &Connection) -> Result<Option<String>> {
     Ok(row.flatten())
 }
 
+pub fn get_ca_previous_expires_at(conn: &Connection) -> Result<Option<i64>> {
+    let row: Option<Option<i64>> = conn
+        .query_row(
+            "SELECT ca_previous_expires_at FROM pod_self WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(row.flatten())
+}
+
+pub fn set_ca_previous_expires_at(conn: &Connection, expires_at: Option<i64>) -> Result<()> {
+    let now = now_secs();
+    conn.execute(
+        "INSERT INTO pod_self (id, self_secure, ca_previous_expires_at, set_at)
+         VALUES (1, 0, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+             ca_previous_expires_at = excluded.ca_previous_expires_at,
+             set_at = excluded.set_at",
+        params![expires_at, now],
+    )?;
+    Ok(())
+}
+
 pub fn set_pod_id(conn: &Connection, pod_id: &str) -> Result<()> {
     let now = now_secs();
     conn.execute(
