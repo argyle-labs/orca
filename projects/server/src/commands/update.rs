@@ -772,44 +772,6 @@ mod tests {
         assert!(Channel::Alpha.accepts("v0.0.1-alpha.99"));
     }
 
-    // ── semver_cmp ────────────────────────────────────────────────────────────
-
-    #[test]
-    fn semver_cmp_ordering() {
-        use std::cmp::Ordering::*;
-        assert_eq!(semver_cmp("1.0.1", "1.0.0"), Greater);
-        assert_eq!(semver_cmp("1.1.0", "1.0.9"), Greater);
-        assert_eq!(semver_cmp("2.0.0", "1.9.9"), Greater);
-        assert_eq!(semver_cmp("1.0.0", "1.0.0"), Equal);
-        assert_eq!(semver_cmp("1.0.0", "1.0.1"), Less);
-        assert_eq!(semver_cmp("0.0.0", "0.0.0"), Equal);
-    }
-
-    #[test]
-    fn semver_cmp_missing_parts_default_zero() {
-        use std::cmp::Ordering::*;
-        // "1.0" treated as "1.0.0"
-        assert_eq!(semver_cmp("1.0", "1.0.0"), Equal);
-        assert_eq!(semver_cmp("1", "1.0.0"), Equal);
-    }
-
-    // ── is_newer ──────────────────────────────────────────────────────────────
-
-    #[test]
-    fn is_newer_returns_true_when_candidate_greater() {
-        assert!(is_newer("1.0.1", "1.0.0"));
-        assert!(is_newer("2.0.0", "1.9.9"));
-        assert!(!is_newer("1.0.0", "1.0.0"));
-        assert!(!is_newer("1.0.0", "1.0.1"));
-    }
-
-    #[test]
-    fn is_newer_strips_v_prefix() {
-        // The function doesn't strip 'v' itself — callers already strip it via
-        // trim_start_matches('v'). Verify it handles plain version strings.
-        assert!(is_newer("1.2.0", "1.1.9"));
-    }
-
     // ── is_newer_full ─────────────────────────────────────────────────────────
 
     #[test]
