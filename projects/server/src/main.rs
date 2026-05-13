@@ -132,10 +132,34 @@ enum PodAction {
     /// Founder bootstrap. Creates the mesh CA + this host's pod cert. Idempotent.
     Init,
     /// Send a `pod/ping` to a peer over mTLS (SNI=pod.orca.local) and print the result.
-    Ping {
-        /// Hostname or IP of the peer. Must be running orca with `pod init` already done
-        /// and sharing the same mesh CA (manual copy in v1).
-        host: String,
+    Ping { host: String },
+    /// Mint a single-use invite token bound to this host's mesh CA.
+    Invite {
+        /// Time-to-live in seconds (default 600 = 10 min).
+        #[arg(long, default_value_t = 600)]
+        ttl: i64,
+    },
+    /// Redeem an invite blob (ORCA_POD_INVITE …) — generates local CSRs,
+    /// receives signed certs from the inviting host, installs them.
+    Join {
+        /// The base64 blob printed by `orca pod invite` on the inviter.
+        blob: String,
+    },
+    /// List known peers and their trust state.
+    List,
+    /// Mark a peer as locally trusted (or untrust). Triggers CA-key
+    /// replication when both sides have flagged each other secure.
+    Trust {
+        /// Peer ID (e.g. `peer.thor`).
+        peer_id: String,
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
+    /// Toggle whether THIS host stores secrets locally. Default off on
+    /// non-founder hosts; founder pod-init flips it on automatically.
+    SelfSecure {
+        #[arg(value_parser = ["on", "off", "show"], default_value = "show")]
+        state: String,
     },
 }
 
@@ -261,13 +285,13 @@ async fn main() -> Result<()> {
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| "unknown".to_string());
                 orca_sdk::pki::init_mesh_ca(&pki, &host)?;
+                // Founder is the canonical secure host — admit invites + store secrets.
+                let conn = db::open_default()?;
+                orca::pod::db::set_self_secure(&conn, true)?;
                 println!("✓ mesh CA initialized at {}", pki.join("mesh").display());
                 println!("  founder host CN: peer.{host}");
-                println!(
-                    "  next: copy {}/mesh/{{ca.cert,ca.key}}.pem to peer hosts (v1)",
-                    pki.display()
-                );
-                println!("        then `orca pod init` there to mint their pod certs");
+                println!("  self_secure: true (secrets storage enabled)");
+                println!("  next: `orca pod invite` and run `orca pod join` on the joiner");
                 Ok(())
             }
             PodAction::Ping { host } => {
@@ -277,6 +301,21 @@ async fn main() -> Result<()> {
                 println!("  hostname: {}", result.hostname);
                 println!("  version: {}", result.version);
                 Ok(())
+            }
+            PodAction::Invite { ttl } => cmd::pod::cmd_pod_invite(ttl),
+            PodAction::Join { blob } => cmd::pod::cmd_pod_join(&blob).await,
+            PodAction::List => cmd::pod::cmd_pod_list(),
+            PodAction::Trust { peer_id, state } => {
+                cmd::pod::cmd_pod_trust(&peer_id, state == "on").await
+            }
+            PodAction::SelfSecure { state } => {
+                use cmd::pod::SelfSecureAction;
+                let action = match state.as_str() {
+                    "on" => SelfSecureAction::On,
+                    "off" => SelfSecureAction::Off,
+                    _ => SelfSecureAction::Show,
+                };
+                cmd::pod::cmd_pod_self_secure(action)
             }
         },
         Some(Command::Spec { action }) => match action {

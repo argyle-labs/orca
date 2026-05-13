@@ -289,15 +289,10 @@ pub async fn serve(
                 tokio::spawn(async move {
                     match acceptor.accept(tcp).await {
                         Ok(tls) => {
-                            let peer_cn = match extract_peer_cn(&tls) {
-                                Ok(cn) => cn,
-                                Err(e) => {
-                                    warn!(
-                                        "[plugin-host] {peer} peer cert CN extract failed: {e:#}"
-                                    );
-                                    return;
-                                }
-                            };
+                            // Cert is optional on the pod surface (pod/join is
+                            // the bootstrap path that issues the first cert).
+                            // Plugin surface still requires it.
+                            let peer_cn_opt = extract_peer_cn(&tls).ok();
                             let sni = tls
                                 .get_ref()
                                 .1
@@ -306,12 +301,19 @@ pub async fn serve(
                                 .unwrap_or_default();
                             if sni == pki::POD_SERVER_SAN {
                                 if let Err(e) =
-                                    crate::pod::handle_pod_connection(tls, peer_cn).await
+                                    crate::pod::handle_pod_connection(tls, peer_cn_opt).await
                                 {
                                     warn!("[plugin-host] {peer} pod connection error: {e:#}");
                                 }
                                 return;
                             }
+                            let peer_cn = match peer_cn_opt {
+                                Some(cn) => cn,
+                                None => {
+                                    warn!("[plugin-host] {peer} plugin connection lacks peer cert");
+                                    return;
+                                }
+                            };
                             if let Err(e) = handle_connection(tls, registry, plugins, peer_cn).await
                             {
                                 warn!("[plugin-host] {peer} connection error: {e:#}");

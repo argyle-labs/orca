@@ -14,6 +14,7 @@
 //!
 //! v2 will add `pod/join`, `pod/list`, and the trust-promotion methods.
 
+pub mod db;
 mod listener;
 
 pub use listener::handle_pod_connection;

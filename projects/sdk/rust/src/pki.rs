@@ -209,6 +209,151 @@ pub fn has_mesh_ca_key(pki_dir: &Path) -> bool {
     mesh_ca_key_path(pki_dir).exists()
 }
 
+// ── CSR-based peer enrollment ────────────────────────────────────────────────
+
+/// Role of the cert being requested by a joining peer. Determines SAN / OU /
+/// EKU after the founder enforces naming policy.
+#[derive(Debug, Clone, Copy)]
+pub enum PeerRole {
+    /// Outbound client cert — used by the peer to dial other hosts.
+    Client,
+    /// Inbound server cert — bound to SNI `pod.orca.local`.
+    Server,
+}
+
+/// Joiner side. Generate a fresh keypair locally, build a CSR for the given
+/// role, and return `(csr_pem, key_pem)`. The private key never leaves this
+/// host; only `csr_pem` is sent to the inviting peer.
+pub fn build_peer_csr(peer_cn: &str, role: PeerRole) -> Result<(String, String)> {
+    let key = KeyPair::generate()?;
+    let san = match role {
+        PeerRole::Client => format!("peer.{peer_cn}.pod.orca.local"),
+        PeerRole::Server => POD_SERVER_SAN.to_string(),
+    };
+    let mut params = CertificateParams::new(vec![san])?;
+    params.is_ca = IsCa::NoCa;
+    params.extended_key_usages = vec![match role {
+        PeerRole::Client => ExtendedKeyUsagePurpose::ClientAuth,
+        PeerRole::Server => ExtendedKeyUsagePurpose::ServerAuth,
+    }];
+    let mut dn = DistinguishedName::new();
+    dn.push(
+        DnType::CommonName,
+        match role {
+            PeerRole::Client => format!("peer.{peer_cn}"),
+            PeerRole::Server => "orca-pod-server".to_string(),
+        },
+    );
+    dn.push(DnType::OrganizationName, "orca");
+    dn.push(
+        DnType::OrganizationalUnitName,
+        match role {
+            PeerRole::Client => "pod-client",
+            PeerRole::Server => "pod-server",
+        },
+    );
+    params.distinguished_name = dn;
+
+    let csr = params.serialize_request(&key)?;
+    Ok((csr.pem()?, key.serialize_pem()))
+}
+
+/// Founder side. Parse a CSR from a joining peer, enforce naming policy
+/// (overrides whatever the joiner put in the CSR — joiner can't lie about
+/// its CN), and sign with the mesh CA. Returns the signed cert PEM and the
+/// mesh CA cert PEM (so the joiner can build its trust store).
+pub fn sign_peer_csr(
+    pki_dir: &Path,
+    csr_pem: &str,
+    peer_cn: &str,
+    role: PeerRole,
+) -> Result<(String, String)> {
+    use rcgen::CertificateSigningRequestParams;
+
+    anyhow::ensure!(
+        has_mesh_ca_key(pki_dir),
+        "this host does not have the mesh CA private key — cannot sign peer CSRs"
+    );
+
+    let ca_cert_pem =
+        std::fs::read_to_string(mesh_ca_cert_path(pki_dir)).context("read mesh CA cert")?;
+    let ca_key_pem =
+        std::fs::read_to_string(mesh_ca_key_path(pki_dir)).context("read mesh CA key")?;
+    let ca_key = KeyPair::from_pem(&ca_key_pem)?;
+    let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key)?;
+
+    let mut csr =
+        CertificateSigningRequestParams::from_pem(csr_pem).context("parse / verify peer CSR")?;
+
+    // Enforce naming policy: rewrite SAN, DN, EKU regardless of what the
+    // joiner asked for. Joiner-controlled fields are not trusted.
+    let san = match role {
+        PeerRole::Client => format!("peer.{peer_cn}.pod.orca.local"),
+        PeerRole::Server => POD_SERVER_SAN.to_string(),
+    };
+    csr.params.subject_alt_names.clear();
+    csr.params = {
+        let mut p = CertificateParams::new(vec![san])?;
+        p.is_ca = IsCa::NoCa;
+        p.extended_key_usages = vec![match role {
+            PeerRole::Client => ExtendedKeyUsagePurpose::ClientAuth,
+            PeerRole::Server => ExtendedKeyUsagePurpose::ServerAuth,
+        }];
+        let mut dn = DistinguishedName::new();
+        dn.push(
+            DnType::CommonName,
+            match role {
+                PeerRole::Client => format!("peer.{peer_cn}"),
+                PeerRole::Server => "orca-pod-server".to_string(),
+            },
+        );
+        dn.push(DnType::OrganizationName, "orca");
+        dn.push(
+            DnType::OrganizationalUnitName,
+            match role {
+                PeerRole::Client => "pod-client",
+                PeerRole::Server => "pod-server",
+            },
+        );
+        p.distinguished_name = dn;
+        p
+    };
+
+    let cert = csr.signed_by(&issuer)?;
+    Ok((cert.pem(), ca_cert_pem))
+}
+
+// ── CA-key replication ───────────────────────────────────────────────────────
+
+/// Export the mesh CA cert+key as PEM strings, for transfer to a peer that's
+/// just become mutually trusted. Caller is responsible for moving these over
+/// an already-authenticated mTLS channel and never persisting them in transit.
+pub fn export_mesh_ca_keypair(pki_dir: &Path) -> Result<(String, String)> {
+    let cert =
+        std::fs::read_to_string(mesh_ca_cert_path(pki_dir)).context("export: read mesh CA cert")?;
+    let key = std::fs::read_to_string(mesh_ca_key_path(pki_dir))
+        .context("export: read mesh CA key — this host is not founder-equivalent")?;
+    Ok((cert, key))
+}
+
+/// Import a mesh CA keypair received from a trusted peer. Verifies the cert
+/// PEM matches what we already have on disk (so a malicious peer can't
+/// substitute a different CA), then writes the key. Idempotent if the key
+/// already exists with matching content.
+pub fn import_mesh_ca_keypair(pki_dir: &Path, cert_pem: &str, key_pem: &str) -> Result<()> {
+    let existing_cert = std::fs::read_to_string(mesh_ca_cert_path(pki_dir))
+        .context("import: read local mesh CA cert (run `orca pod join` first)")?;
+    anyhow::ensure!(
+        existing_cert.trim() == cert_pem.trim(),
+        "imported CA cert does not match local mesh CA — refusing to install foreign key"
+    );
+    // Sanity: verify the imported key actually signs against this cert.
+    let key = KeyPair::from_pem(key_pem).context("imported CA key is not valid PEM")?;
+    Issuer::from_ca_cert_pem(cert_pem, key).context("imported key does not match CA cert")?;
+    write_pem(mesh_ca_key_path(pki_dir), key_pem)?;
+    Ok(())
+}
+
 // ── File paths (plugin / legacy) ─────────────────────────────────────────────
 
 pub fn ca_cert_path(pki_dir: &Path) -> PathBuf {

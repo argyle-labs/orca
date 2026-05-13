@@ -597,12 +597,16 @@ async fn download_asset(
     url: &str,
     token: &str,
 ) -> Result<Vec<u8>> {
+    // Release binaries are ~30 MiB; the default 8 MiB http cap rejects them.
+    const MAX_ASSET_BYTES: usize = 128 * 1024 * 1024;
     let resp = client
         .get(url)
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/octet-stream")
         .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
         .header("User-Agent", format!("{APP_NAME}/{CURRENT_VERSION}"))
+        .max_body(MAX_ASSET_BYTES)
+        .timeout(std::time::Duration::from_secs(300))
         .send_bytes()
         .await
         .context("download failed")?;
