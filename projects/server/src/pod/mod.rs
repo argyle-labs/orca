@@ -10,7 +10,7 @@
 //!
 //! v1 methods:
 //!   - `pod/ping`  → returns `{peer_id, version, hostname}` so two hosts can
-//!                   confirm the SNI multiplex + mTLS chain end-to-end.
+//!     confirm the SNI multiplex + mTLS chain end-to-end.
 //!
 //! v2 will add `pod/join`, `pod/list`, and the trust-promotion methods.
 
