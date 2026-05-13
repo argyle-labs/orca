@@ -592,30 +592,6 @@ fn is_newer_full(a: &str, b: &str) -> bool {
     (ak, an) > (bk, bn)
 }
 
-fn semver_cmp(a: &str, b: &str) -> std::cmp::Ordering {
-    let parse = |s: &str| -> (u64, u64, u64) {
-        let mut parts = s.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
-        (
-            parts.next().unwrap_or(0),
-            parts.next().unwrap_or(0),
-            parts.next().unwrap_or(0),
-        )
-    };
-    parse(a).cmp(&parse(b))
-}
-
-fn is_newer(candidate: &str, current: &str) -> bool {
-    let parse = |s: &str| -> (u64, u64, u64) {
-        let mut parts = s.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
-        (
-            parts.next().unwrap_or(0),
-            parts.next().unwrap_or(0),
-            parts.next().unwrap_or(0),
-        )
-    };
-    parse(candidate) > parse(current)
-}
-
 async fn download_asset(
     client: &orca_utils::http::Client,
     url: &str,
