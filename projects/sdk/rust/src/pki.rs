@@ -1505,7 +1505,7 @@ mod tests {
         init_mesh_ca(pki, "thor").unwrap();
         let ca_pem = std::fs::read_to_string(mesh_ca_cert_path(pki)).unwrap();
         let days = cert_days_remaining(&ca_pem).unwrap();
-        assert!(days >= 363 && days <= 365, "got {days}d");
+        assert!((363..=365).contains(&days), "got {days}d");
     }
 
     #[test]
