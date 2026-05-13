@@ -46,6 +46,7 @@ pub struct DiscoveryRow {
     pub last_seen_at: i64,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn upsert_discovery(
     conn: &Connection,
     pubkey_fp: &str,

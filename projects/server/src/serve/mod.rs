@@ -285,10 +285,10 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
         Err(e) => tracing::warn!("[pod] cannot build mDNS advertisement: {e:#}"),
     }
 
-    let _ = crate::pod::scheduler::spawn();
+    std::mem::drop(crate::pod::scheduler::spawn());
     info!("[pod] auto-offer scheduler armed");
 
-    let _ = crate::pod::cert_rotation::spawn();
+    std::mem::drop(crate::pod::cert_rotation::spawn());
     info!("[pod] cert-rotation scheduler armed (daily)");
 }
 
