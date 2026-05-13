@@ -322,6 +322,11 @@ if [ "$SKIP_SHA" != "1" ]; then
 fi
 
 # ── install ─────────────────────────────────────────────────────────────────
+# Kill stale runtime processes (mcp-serve, daemon) holding the old binary's
+# inode open. Uses the EXISTING binary's `system kill-stale` so the patterns
+# stay single-source in projects/server/src/commands/system.rs.
+[ -x "${INSTALL_DIR}/orca" ] && "${INSTALL_DIR}/orca" system kill-stale 2>/dev/null || true
+
 mkdir -p "$INSTALL_DIR"
 chmod +x "${TMP}/orca"
 mv "${TMP}/orca" "${INSTALL_DIR}/orca"

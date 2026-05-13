@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use orca::commands::{self as cmd, DaemonAction, HookAction, SpecAction};
+use orca::commands::{self as cmd, DaemonAction, HookAction, SpecAction, SystemAction};
 use orca::context::ProjectContext;
 use orca::conversation::session::Session;
 use orca::llm::{ClaudeBackend, Message, ModelBackend, stdout_sink};
@@ -118,6 +118,13 @@ enum Command {
     Hook {
         #[command(subcommand)]
         action: HookAction,
+    },
+
+    /// Host-level lifecycle helpers (kill stale processes, etc.) shared by
+    /// Makefile, install.sh, and deploy-host.sh so behavior stays single-source.
+    System {
+        #[command(subcommand)]
+        action: SystemAction,
     },
 
     /// Passthrough for `OrcaOp`-migrated domains — dispatched via inventory.
@@ -272,6 +279,7 @@ async fn main() -> Result<()> {
         },
         Some(Command::Dev { port }) => cmd_dev(port, &config).await,
         Some(Command::Hook { action }) => cmd::cmd_hook(action),
+        Some(Command::System { action }) => cmd::cmd_system(action),
         Some(Command::Op(argv)) => dispatch_op(argv, config).await,
         Some(Command::Update {
             channel,
