@@ -107,29 +107,50 @@ daemon-uninstall:
 
 # Database migrations
 # Usage:
-#   make migrate        — apply all pending migrations
-#   make migrate up     — apply one migration step up
-#   make migrate down   — revert one migration step down
-#   make migrate status — show current schema version
+#   make migration                — apply all pending migrations
+#   make migration up             — apply one migration step up
+#   make migration down           — revert one migration step down
+#   make migration status         — show current schema version
+#   make migration <slug>         — scaffold up/down files with a UTC timestamp
 #
-# $(MAKECMDGOALS) contains all targets from the command line.
-# When the user runs "make migrate up", both 'migrate' and 'up' are goals;
-# 'migrate' reads UP_OR_DOWN and dispatches accordingly, 'up'/'down' are no-ops.
-UP_OR_DOWN := $(filter up down status,$(MAKECMDGOALS))
+# Migration files live in projects/db/migrations/ and are embedded into the
+# binary at compile time via include_dir!. Filenames are
+# `<YYYYMMDDHHMMSS>__<slug>.{up,down}.sql`. The timestamp is also the version
+# stored in the `schema_migrations` table — never edit a committed file.
+#
+# Make passes every word on the command line as a separate goal, so for
+# `make migration foo` both 'migration' and 'foo' are goals. We catch known
+# verbs (up/down/status); anything else after 'migration' is treated as a
+# slug and dispatched to the scaffold path.
+MIGRATIONS_DIR := projects/db/migrations
+MIGRATION_VERBS := up down status
+MIGRATION_GOAL := $(filter-out migration,$(MAKECMDGOALS))
+MIGRATION_SUB  := $(filter $(MIGRATION_VERBS),$(MIGRATION_GOAL))
+MIGRATION_SLUG := $(filter-out $(MIGRATION_VERBS),$(MIGRATION_GOAL))
 
-migrate:
-ifeq ($(UP_OR_DOWN),up)
-	$(INSTALL_PATH) db up
-else ifeq ($(UP_OR_DOWN),down)
-	$(INSTALL_PATH) db down
-else ifeq ($(UP_OR_DOWN),status)
-	$(INSTALL_PATH) db status
+migration:
+ifeq ($(MIGRATION_SUB),up)
+	@$(INSTALL_PATH) db up
+else ifeq ($(MIGRATION_SUB),down)
+	@$(INSTALL_PATH) db down
+else ifeq ($(MIGRATION_SUB),status)
+	@$(INSTALL_PATH) db status
+else ifneq ($(MIGRATION_SLUG),)
+	@ts=$$(date -u +"%Y%m%d%H%M%S"); \
+	  slug="$(MIGRATION_SLUG)"; \
+	  base="$(MIGRATIONS_DIR)/$${ts}__$${slug}"; \
+	  mkdir -p "$(MIGRATIONS_DIR)"; \
+	  : > "$${base}.up.sql"; \
+	  : > "$${base}.down.sql"; \
+	  echo "✓ created $${base}.up.sql"; \
+	  echo "✓ created $${base}.down.sql"
 else
-	$(INSTALL_PATH) db migrate
+	@$(INSTALL_PATH) db migrate
 endif
 
-up down status:
-	@: # handled by the migrate target above
+# No-op stubs so `make migration <slug>` doesn't trip on the unknown goal.
+$(MIGRATION_VERBS) $(MIGRATION_SLUG):
+	@: # handled by the migration target above
 
 clean:
 	cargo clean --manifest-path projects/server/Cargo.toml

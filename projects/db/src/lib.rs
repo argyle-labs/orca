@@ -277,42 +277,148 @@ pub enum MigrateDirection {
     Down,
 }
 
+/// One discovered migration on disk — a pair of `.up.sql` / `.down.sql` files
+/// in `projects/db/migrations/`, embedded into the binary via `include_dir!`.
+///
+/// File naming: `<14-digit-YYYYMMDDHHMMSS>__<slug>.up.sql` (+ `.down.sql`).
+/// Slugs are descriptive; the timestamp is the canonical ordering key and
+/// the value stored in `schema_migrations.version`.
+#[derive(Debug, Clone)]
 struct Migration {
-    version: u32,
-    description: &'static str,
-    up: &'static str,
-    /// `None` means the migration cannot be reversed (e.g. SQLite DROP COLUMN unavailable).
-    down: Option<&'static str>,
+    version: i64,
+    slug: String,
+    up: String,
+    down: Option<String>,
 }
 
-/// All schema migrations in version order.
+static MIGRATION_DIR: include_dir::Dir<'_> =
+    include_dir::include_dir!("$CARGO_MANIFEST_DIR/migrations");
+
+/// Walk the embedded `migrations/` directory and produce sorted Migration
+/// entries. Cheap — called once per process via `discover_migrations()`.
+fn discover_migrations_inner() -> Vec<Migration> {
+    use std::collections::HashMap;
+    // Group files by `<version>__<slug>` stem; each may contribute .up.sql
+    // and/or .down.sql.
+    let mut groups: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    for f in MIGRATION_DIR.files() {
+        let name = f.path().file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let (stem, kind) = if let Some(s) = name.strip_suffix(".up.sql") {
+            (s.to_string(), "up")
+        } else if let Some(s) = name.strip_suffix(".down.sql") {
+            (s.to_string(), "down")
+        } else {
+            continue;
+        };
+        let body = f.contents_utf8().map(|s| s.to_string()).unwrap_or_default();
+        let entry = groups.entry(stem).or_insert((None, None));
+        match kind {
+            "up" => entry.0 = Some(body),
+            "down" => entry.1 = Some(body),
+            _ => {}
+        }
+    }
+
+    let mut out: Vec<Migration> = groups
+        .into_iter()
+        .filter_map(|(stem, (up, down))| {
+            // Stem format: `<14-digit-ts>__<slug>`. The version is the
+            // numeric timestamp; the slug is everything after `__`.
+            let (ts, slug) = stem.split_once("__")?;
+            let version: i64 = ts.parse().ok()?;
+            Some(Migration {
+                version,
+                slug: slug.to_string(),
+                up: up?,
+                down,
+            })
+        })
+        .collect();
+    out.sort_by_key(|m| m.version);
+    out
+}
+
+fn discover_migrations() -> &'static [Migration] {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Vec<Migration>> = OnceLock::new();
+    CACHE.get_or_init(discover_migrations_inner)
+}
+
+/// Ensure the `schema_migrations` tracking table exists, and bootstrap from
+/// the legacy `PRAGMA user_version` scheme on first run.
 ///
-/// Rules:
-/// - Never modify an existing entry — add new entries at the end.
-/// - `up` must be idempotent-safe: use `IF NOT EXISTS`, `IF EXISTS`, or handle
-///   `duplicate column` errors in `run_pending_migrations`.
-/// - `down` is `None` when rollback is impossible (SQLite < 3.35 has no DROP COLUMN).
-static MIGRATIONS: &[Migration] = &[
-    // Migrations 1..26 squashed into apply_schema baseline (2026-05-12).
-    // New migrations append from version=1 onward as schema evolves
-    // post-squash. apply_schema remains the source of truth for fresh DBs.
-];
-
-/// Return the currently applied migration version (0 = baseline, no migrations run).
-pub fn schema_version(conn: &Connection) -> Result<u32> {
-    Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
+/// Pre-2026-05-13 the runner stored the highest applied version in
+/// `user_version` (a u32). The squash baseline left existing DBs at v26.
+/// On first encounter with this code, we create `schema_migrations` and
+/// (if user_version > 0) seed a marker row at version 0 representing
+/// "everything in apply_schema is already applied" — that way newly added
+/// timestamp-versioned migrations all run, and we never re-attempt v1..v26.
+fn ensure_migrations_table(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+            version    INTEGER PRIMARY KEY,
+            slug       TEXT NOT NULL,
+            applied_at INTEGER NOT NULL
+        );",
+    )?;
+    // One-time bootstrap from legacy user_version. user_version=0 on fresh
+    // DBs (no bootstrap row needed); >0 means we're upgrading from the
+    // squash-baseline regime and have to stamp the table to skip v1..v26.
+    let already_seeded: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 0)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    let legacy: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap_or(0);
+    if !already_seeded && legacy > 0 {
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO schema_migrations (version, slug, applied_at) VALUES (0, ?1, ?2)",
+            rusqlite::params![format!("baseline_user_version_{legacy}"), now],
+        )?;
+        // Zero out the legacy pragma so we don't re-bootstrap on next open.
+        conn.execute_batch("PRAGMA user_version = 0;")?;
+    }
+    Ok(())
 }
 
-/// Total number of migrations defined (applied + pending combined).
+/// Highest applied migration version, or 0 if none have been applied.
+pub fn schema_version(conn: &Connection) -> Result<i64> {
+    ensure_migrations_table(conn)?;
+    let v: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(v)
+}
+
+/// Total number of migrations defined on disk (applied + pending combined).
 pub fn migration_count() -> usize {
-    MIGRATIONS.len()
+    discover_migrations().len()
 }
 
-/// Run pending up-migrations automatically after `apply_schema`.
-///
-/// Handles the "duplicate column" case for `ALTER TABLE ADD COLUMN` migrations so
-/// existing databases that were mutated by the pre-migration `let _` hack continue
-/// to work.
+/// Number of migrations recorded as applied (excludes the synthetic
+/// baseline row at version=0).
+pub fn applied_count(conn: &Connection) -> Result<u32> {
+    ensure_migrations_table(conn)?;
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version > 0",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(n.max(0) as u32)
+}
+
+/// Run pending up-migrations automatically after `apply_schema`. Idempotent.
 fn run_pending_migrations(conn: &Connection) -> Result<()> {
     migrate(conn, MigrateDirection::Up, usize::MAX)?;
     Ok(())
@@ -320,64 +426,92 @@ fn run_pending_migrations(conn: &Connection) -> Result<()> {
 
 /// Apply or revert migrations.
 ///
-/// - `Up` with `steps = usize::MAX` runs all pending migrations (idiomatic for startup).
+/// - `Up` with `steps = usize::MAX` runs all pending migrations (startup default).
 /// - `Up` with `steps = 1` applies the next pending migration.
 /// - `Down` with `steps = 1` reverts the most recently applied migration.
 ///
-/// Returns the new `user_version` after all steps are applied.
-pub fn migrate(conn: &Connection, direction: MigrateDirection, steps: usize) -> Result<u32> {
-    let current = schema_version(conn)?;
+/// Returns the new schema version.
+pub fn migrate(conn: &Connection, direction: MigrateDirection, steps: usize) -> Result<i64> {
+    ensure_migrations_table(conn)?;
+
+    let applied: std::collections::HashSet<i64> = {
+        let mut stmt = conn.prepare("SELECT version FROM schema_migrations")?;
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    let all = discover_migrations();
 
     match direction {
         MigrateDirection::Up => {
-            let pending: Vec<&Migration> = MIGRATIONS
+            let pending: Vec<&Migration> = all
                 .iter()
-                .filter(|m| m.version > current)
+                .filter(|m| !applied.contains(&m.version))
                 .take(steps)
                 .collect();
 
             if pending.is_empty() {
-                tracing::debug!("nothing to migrate (schema at v{current})");
+                tracing::debug!("nothing to migrate");
             }
 
             for m in pending {
-                if let Err(e) = conn.execute_batch(m.up) {
+                if let Err(e) = conn.execute_batch(&m.up) {
                     let msg = e.to_string().to_lowercase();
                     if msg.contains("duplicate column") || msg.contains("already exists") {
                         // Column/table already present — idempotent, mark as done.
                     } else {
-                        return Err(anyhow::anyhow!("migration v{} failed: {e}", m.version));
+                        return Err(anyhow::anyhow!(
+                            "migration {} ({}) failed: {e}",
+                            m.version,
+                            m.slug
+                        ));
                     }
                 }
-                conn.execute_batch(&format!("PRAGMA user_version = {};", m.version))?;
-                eprintln!("  ↑  v{}: {}", m.version, m.description);
+                let now = chrono::Utc::now().timestamp();
+                conn.execute(
+                    "INSERT INTO schema_migrations (version, slug, applied_at) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![m.version, m.slug, now],
+                )?;
+                eprintln!("  ↑  {} {}", m.version, m.slug);
             }
         }
 
         MigrateDirection::Down => {
-            let to_rollback: Vec<&Migration> = MIGRATIONS
-                .iter()
-                .filter(|m| m.version <= current)
-                .rev()
-                .take(steps)
-                .collect();
+            // Roll back the most-recently-applied versions first. Skip the
+            // synthetic baseline row at version=0 — it represents the
+            // pre-migration-system schema and isn't reversible.
+            let mut applied_sorted: Vec<i64> = applied.iter().copied().filter(|v| *v > 0).collect();
+            applied_sorted.sort_unstable();
+            applied_sorted.reverse();
 
-            if to_rollback.is_empty() {
-                tracing::debug!("nothing to roll back (schema at v{current})");
-            }
-
-            for m in to_rollback {
-                match m.down {
+            for v in applied_sorted.into_iter().take(steps) {
+                let m = match all.iter().find(|m| m.version == v) {
+                    Some(m) => m,
+                    None => {
+                        eprintln!("  ~  {v}: no on-disk migration found — clearing tracking row");
+                        conn.execute(
+                            "DELETE FROM schema_migrations WHERE version = ?1",
+                            rusqlite::params![v],
+                        )?;
+                        continue;
+                    }
+                };
+                match &m.down {
                     Some(sql) => {
                         conn.execute_batch(sql)?;
-                        eprintln!("  ↓  v{}: {}", m.version, m.description);
+                        eprintln!("  ↓  {} {}", m.version, m.slug);
                     }
                     None => {
-                        eprintln!("  ~  v{}: no down migration — {}", m.version, m.description);
+                        eprintln!(
+                            "  ~  {} {}: no down migration — clearing tracking row only",
+                            m.version, m.slug
+                        );
                     }
                 }
-                let new_version = m.version.saturating_sub(1);
-                conn.execute_batch(&format!("PRAGMA user_version = {};", new_version))?;
+                conn.execute(
+                    "DELETE FROM schema_migrations WHERE version = ?1",
+                    rusqlite::params![m.version],
+                )?;
             }
         }
     }
@@ -969,26 +1103,18 @@ mod registry_tests {
     #[test]
     fn migrations_run_to_latest() {
         let conn = test_conn();
-        let v = schema_version(&conn).unwrap();
-        assert_eq!(
-            v as usize,
-            MIGRATIONS.len(),
-            "schema version should match migration count"
-        );
-    }
-
-    #[test]
-    fn migration_count_matches_array() {
-        // Post-squash baseline is 0; new migrations grow the array.
-        assert_eq!(migration_count(), MIGRATIONS.len());
+        // After test_conn opens, every on-disk migration should be recorded.
+        assert_eq!(applied_count(&conn).unwrap() as usize, migration_count());
     }
 
     #[test]
     fn migrate_up_idempotent_already_at_latest() {
         let conn = test_conn();
         let v_before = schema_version(&conn).unwrap();
+        let applied_before = applied_count(&conn).unwrap();
         migrate(&conn, MigrateDirection::Up, usize::MAX).unwrap();
         assert_eq!(schema_version(&conn).unwrap(), v_before);
+        assert_eq!(applied_count(&conn).unwrap(), applied_before);
     }
 
     // ── Learning progress ─────────────────────────────────────────────────────

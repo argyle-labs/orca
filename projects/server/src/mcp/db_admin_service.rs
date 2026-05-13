@@ -14,9 +14,11 @@ impl ServerDbAdmin {
         label: &str,
     ) -> Result<DbMigrateReport> {
         let conn = db::open_default()?;
+        let before_applied = db::applied_count(&conn)?;
         let before = db::schema_version(&conn)?;
         let after = db::migrate(&conn, direction, steps)?;
-        let applied = after.abs_diff(before);
+        let after_applied = db::applied_count(&conn)?;
+        let applied = after_applied.abs_diff(before_applied);
         Ok(DbMigrateReport {
             before,
             after,
@@ -32,10 +34,11 @@ impl DbAdminService for ServerDbAdmin {
         let conn = db::open_default()?;
         let current = db::schema_version(&conn)?;
         let total = db::migration_count() as u32;
+        let applied = db::applied_count(&conn)?;
         Ok(DbStatusReport {
             current,
             total,
-            pending: total.saturating_sub(current),
+            pending: total.saturating_sub(applied),
         })
     }
 
