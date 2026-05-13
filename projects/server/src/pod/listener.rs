@@ -1,3 +1,7 @@
+// JSON-RPC envelopes are inherently opaque at the wire boundary; mirroring
+// the allow in projects/sdk/rust/src/jsonrpc.rs.
+#![allow(clippy::disallowed_types)]
+
 //! Server-side handler for SNI=pod.orca.local connections.
 //!
 //! Per-method auth gate: pod/join is the only method allowed without a peer
