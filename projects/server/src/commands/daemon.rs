@@ -541,25 +541,36 @@ fn install_unraid(binary: &str, port: u16, user: &str, home: &str) -> Result<()>
     // Hook into /boot/config/go so the script is re-installed + started on every boot.
     let go_path = "/boot/config/go";
     let marker = "# --- orca daemon (managed by `orca daemon install`) ---";
+    // Unraid wipes /etc/passwd on reboot, so the orca user has to be
+    // re-created before the daemon can start (runuser -u orca fails otherwise).
     let hook = format!(
         "\n{marker}\n\
+         id {user} >/dev/null 2>&1 || useradd -r -m -d {home} -s /bin/bash {user} || true\n\
          cp -f {persist_path} {rc_path}\n\
          chmod +x {rc_path}\n\
          {rc_path} start\n\
          # --- end orca daemon ---\n"
     );
-    let mut existing = std::fs::read_to_string(go_path).unwrap_or_default();
-    if !existing.contains(marker) {
-        existing.push_str(&hook);
-        std::fs::write(go_path, &existing)?;
-        println!("{} appended startup hook to {}", "✓".green(), go_path);
+    let end_marker = "# --- end orca daemon ---";
+    let existing = std::fs::read_to_string(go_path).unwrap_or_default();
+    // Replace any existing managed block (re-install handles upgrades like
+    // the 2026-05-12 useradd fix); otherwise append.
+    let updated = if let (Some(start), Some(end_rel)) = (
+        existing.find(marker),
+        existing[existing.find(marker).unwrap_or(0)..].find(end_marker),
+    ) {
+        let end = existing.find(marker).unwrap() + end_rel + end_marker.len();
+        let mut buf = String::with_capacity(existing.len() + hook.len());
+        buf.push_str(&existing[..start]);
+        buf.push_str(hook.trim_start_matches('\n'));
+        buf.push_str(&existing[end..]);
+        println!("{} refreshed startup hook in {}", "✓".green(), go_path);
+        buf
     } else {
-        println!(
-            "{} {} already has orca hook (skipped)",
-            "✓".green(),
-            go_path
-        );
-    }
+        println!("{} appended startup hook to {}", "✓".green(), go_path);
+        existing + &hook
+    };
+    std::fs::write(go_path, &updated)?;
 
     // Start now.
     let status = Command::new(&rc_path).arg("start").status()?;

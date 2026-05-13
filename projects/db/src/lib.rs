@@ -293,347 +293,9 @@ struct Migration {
 ///   `duplicate column` errors in `run_pending_migrations`.
 /// - `down` is `None` when rollback is impossible (SQLite < 3.35 has no DROP COLUMN).
 static MIGRATIONS: &[Migration] = &[
-    Migration {
-        version: 1,
-        description: "add url column to docker_runtimes",
-        up: "ALTER TABLE docker_runtimes ADD COLUMN url TEXT;",
-        down: None,
-    },
-    Migration {
-        version: 2,
-        description: "rename orca_tool column to orca_tool in mcp_tool_mappings",
-        up: "ALTER TABLE mcp_tool_mappings RENAME COLUMN orca_tool TO orca_tool;",
-        down: None,
-    },
-    Migration {
-        version: 3,
-        description: "add command_map to plugins for universal command routing",
-        up: "ALTER TABLE plugins ADD COLUMN command_map TEXT NOT NULL DEFAULT '{}';",
-        down: None,
-    },
-    Migration {
-        version: 4,
-        description: "add plugin_credentials table — Orca-managed secrets per plugin",
-        up: "CREATE TABLE IF NOT EXISTS plugin_credentials (
-            plugin_id  TEXT NOT NULL,
-            key        TEXT NOT NULL,
-            value      TEXT NOT NULL,
-            synced_at  TEXT,
-            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-            PRIMARY KEY (plugin_id, key)
-        );",
-        down: Some("DROP TABLE IF EXISTS plugin_credentials;"),
-    },
-    Migration {
-        version: 5,
-        description: "add mcp_token_env to plugins — env var name carrying Bearer token for HTTP/SSE transport",
-        up: "ALTER TABLE plugins ADD COLUMN mcp_token_env TEXT;",
-        down: None,
-    },
-    Migration {
-        version: 6,
-        description: "add driver column to schema_databases (mysql/postgres/sqlite)",
-        up: "ALTER TABLE schema_databases ADD COLUMN driver TEXT NOT NULL DEFAULT 'mysql';",
-        down: None,
-    },
-    Migration {
-        version: 7,
-        description: "add oauth_tokens table — service access/refresh tokens with expiry",
-        up: "CREATE TABLE IF NOT EXISTS oauth_tokens (
-            service       TEXT PRIMARY KEY,
-            access_token  TEXT NOT NULL,
-            refresh_token TEXT,
-            expires_at    TEXT,
-            updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        );",
-        down: Some("DROP TABLE IF EXISTS oauth_tokens;"),
-    },
-    Migration {
-        version: 8,
-        description: "add mode + nav_links to plugins — plugins declare which mode they belong to and what nav links they contribute",
-        up: "ALTER TABLE plugins ADD COLUMN mode TEXT NOT NULL DEFAULT 'orca'; \
-             ALTER TABLE plugins ADD COLUMN nav_links TEXT NOT NULL DEFAULT '[]';",
-        down: None,
-    },
-    Migration {
-        version: 9,
-        description: "add plugin_data table — generic KV store for plugin-owned data in Orca",
-        up: "CREATE TABLE IF NOT EXISTS plugin_data (
-            plugin_id  TEXT NOT NULL,
-            key        TEXT NOT NULL,
-            value      TEXT NOT NULL,
-            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-            PRIMARY KEY (plugin_id, key)
-        );",
-        down: Some("DROP TABLE IF EXISTS plugin_data;"),
-    },
-    Migration {
-        version: 10,
-        description: "add search_tools to plugins — MCP tool names this plugin exposes for unified orca search",
-        up: "ALTER TABLE plugins ADD COLUMN search_tools TEXT NOT NULL DEFAULT '[]';",
-        down: None,
-    },
-    Migration {
-        version: 11,
-        description: "add specs_dir to plugins — filesystem path where plugin-owned spec files live",
-        up: "ALTER TABLE plugins ADD COLUMN specs_dir TEXT;",
-        down: None,
-    },
-    Migration {
-        version: 12,
-        description: "add llm_providers — registered local LLM backends (LM Studio, Ollama, …)",
-        up: "CREATE TABLE IF NOT EXISTS llm_providers (
-            name       TEXT PRIMARY KEY,
-            url        TEXT NOT NULL,
-            kind       TEXT NOT NULL DEFAULT 'lmstudio',
-            enabled    INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        );",
-        down: Some("DROP TABLE IF EXISTS llm_providers;"),
-    },
-    Migration {
-        version: 13,
-        description: "add plugin_deps — tracks which plugins were auto-installed as dependencies of another",
-        up: "CREATE TABLE IF NOT EXISTS plugin_deps (
-            parent_id  TEXT NOT NULL,
-            dep_id     TEXT NOT NULL,
-            PRIMARY KEY (parent_id, dep_id)
-        );",
-        down: Some("DROP TABLE IF EXISTS plugin_deps;"),
-    },
-    Migration {
-        version: 14,
-        description: "add mcp_url to plugins — HTTP/SSE endpoint used instead of stdio when present (deploy mode)",
-        up: "ALTER TABLE plugins ADD COLUMN mcp_url TEXT;",
-        down: None,
-    },
-    Migration {
-        version: 15,
-        description: "add doc_roots table — user-configurable documentation path registry",
-        up: "CREATE TABLE IF NOT EXISTS doc_roots (
-            name        TEXT PRIMARY KEY,
-            path        TEXT NOT NULL,
-            description TEXT,
-            enabled     INTEGER NOT NULL DEFAULT 1,
-            created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        );
-        INSERT OR IGNORE INTO doc_roots (name, path, description) VALUES
-            ('rebuy',    '~/code/rebuy',    'Rebuy monorepo'),
-            ('orca',     '~/code/orca',     'Orca codebase'),
-            ('bardbase', '~/code/bardbase', 'Bardbase'),
-            ('homepage', '~/code/homepage', 'Homepage'),
-            ('meerkat',  '~/code/meerkat',  'Meerkat');",
-        down: Some("DROP TABLE IF EXISTS doc_roots;"),
-    },
-    Migration {
-        version: 16,
-        description: "add doc_ignore_patterns table — global list of directory names excluded from all doc roots",
-        up: "CREATE TABLE IF NOT EXISTS doc_ignore_patterns (
-            pattern    TEXT PRIMARY KEY,
-            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        );
-        INSERT OR IGNORE INTO doc_ignore_patterns (pattern) VALUES
-            ('.git'), ('node_modules'), ('target'), ('.next'), ('dist'),
-            ('build'), ('vendor'), ('.trash'), ('logs'), ('memory'),
-            ('plugins'), ('.turbo'), ('coverage'), ('out'), ('.cache');",
-        down: Some("DROP TABLE IF EXISTS doc_ignore_patterns;"),
-    },
-    Migration {
-        version: 17,
-        description: "add settings table — generic key/value store for user-configurable flags",
-        up: "CREATE TABLE IF NOT EXISTS settings (
-            key        TEXT PRIMARY KEY,
-            value      TEXT NOT NULL,
-            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        );
-        INSERT OR IGNORE INTO settings (key, value) VALUES ('fs.allow_unrestricted', 'false');",
-        down: Some("DROP TABLE IF EXISTS settings;"),
-    },
-    Migration {
-        version: 18,
-        description: "add plugin_types — per-plugin TypedValue type registry declared via orca/types.declare",
-        up: "CREATE TABLE IF NOT EXISTS plugin_types (
-            plugin_id      TEXT NOT NULL,
-            type_name      TEXT NOT NULL,
-            fq_type_id     TEXT NOT NULL UNIQUE,
-            schema_version TEXT NOT NULL,
-            schema_json    TEXT NOT NULL,
-            sensitivity    TEXT NOT NULL DEFAULT 'general'
-                           CHECK (sensitivity IN ('general','sensitive')),
-            declared_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-            PRIMARY KEY (plugin_id, type_name)
-        );
-        CREATE INDEX IF NOT EXISTS idx_plugin_types_fq ON plugin_types(fq_type_id);",
-        down: Some("DROP TABLE IF EXISTS plugin_types;"),
-    },
-    Migration {
-        version: 19,
-        description: "add profiles, profile_shares, user_active_profile, profile_credentials — multi-profile + sharing",
-        up: "CREATE TABLE IF NOT EXISTS profiles (
-            id              TEXT PRIMARY KEY,
-            name            TEXT NOT NULL,
-            owner_user_id   TEXT NOT NULL,
-            description     TEXT,
-            created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-            updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-            UNIQUE (owner_user_id, name)
-        );
-        CREATE INDEX IF NOT EXISTS idx_profiles_owner ON profiles(owner_user_id);
-
-        CREATE TABLE IF NOT EXISTS profile_shares (
-            profile_id  TEXT NOT NULL,
-            user_id     TEXT NOT NULL,
-            role        TEXT NOT NULL CHECK (role IN ('viewer','collaborator')),
-            shared_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-            PRIMARY KEY (profile_id, user_id),
-            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS idx_profile_shares_user ON profile_shares(user_id);
-
-        CREATE TABLE IF NOT EXISTS user_active_profile (
-            user_id     TEXT PRIMARY KEY,
-            profile_id  TEXT NOT NULL,
-            updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS profile_credentials (
-            profile_id  TEXT NOT NULL,
-            key         TEXT NOT NULL,
-            value       TEXT NOT NULL,
-            updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-            PRIMARY KEY (profile_id, key),
-            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
-        );",
-        down: Some(
-            "DROP TABLE IF EXISTS profile_credentials;
-                    DROP TABLE IF EXISTS user_active_profile;
-                    DROP TABLE IF EXISTS profile_shares;
-                    DROP TABLE IF EXISTS profiles;",
-        ),
-    },
-    Migration {
-        version: 20,
-        description: "add plugin_tools — per-plugin tool registry declared via orca/tools.declare",
-        up: "CREATE TABLE IF NOT EXISTS plugin_tools (
-            plugin_id        TEXT NOT NULL,
-            name             TEXT NOT NULL,
-            fq_name          TEXT NOT NULL UNIQUE,
-            description      TEXT NOT NULL,
-            input_schema     TEXT NOT NULL,
-            sensitivity      TEXT NOT NULL DEFAULT 'general'
-                             CHECK (sensitivity IN ('general','sensitive')),
-            declared_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-            PRIMARY KEY (plugin_id, name)
-        );
-        CREATE INDEX IF NOT EXISTS idx_plugin_tools_fq ON plugin_tools(fq_name);",
-        down: Some("DROP TABLE IF EXISTS plugin_tools;"),
-    },
-    Migration {
-        version: 21,
-        description: "add plugin_installs — per-system version channel + lock for meerkat-managed plugins",
-        // system_id is the orca node identity (pod mesh). Until that lands,
-        // single-system installs use 'local' (mirroring orca_utils::config::LOCAL_USER).
-        // channel constrains version selection: 'latest' tracks stable, 'latest-rc'
-        // tracks pre-release, 'locked' pins to locked_version exactly.
-        // desired_version is the last resolved version for the channel; the
-        // file-sync layer reconciles installed_version on disk to match.
-        up: "CREATE TABLE IF NOT EXISTS plugin_installs (
-            system_id         TEXT NOT NULL,
-            plugin_id         TEXT NOT NULL,
-            channel           TEXT NOT NULL DEFAULT 'latest'
-                              CHECK (channel IN ('latest','latest-rc','locked')),
-            locked_version    TEXT,
-            desired_version   TEXT,
-            installed_version TEXT,
-            installed_at      TEXT,
-            updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-            PRIMARY KEY (system_id, plugin_id),
-            CHECK (channel != 'locked' OR locked_version IS NOT NULL)
-        );
-        CREATE INDEX IF NOT EXISTS idx_plugin_installs_plugin ON plugin_installs(plugin_id);",
-        down: Some("DROP TABLE IF EXISTS plugin_installs;"),
-    },
-    Migration {
-        version: 22,
-        description: "add proxmox_endpoints — registered Proxmox VE clusters with API-token auth",
-        up: "CREATE TABLE IF NOT EXISTS proxmox_endpoints (
-            name         TEXT PRIMARY KEY,
-            base_url     TEXT NOT NULL,
-            token_id     TEXT NOT NULL,
-            token_secret TEXT NOT NULL,
-            insecure     INTEGER NOT NULL DEFAULT 0,
-            enabled      INTEGER NOT NULL DEFAULT 1,
-            created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        );",
-        down: Some("DROP TABLE IF EXISTS proxmox_endpoints;"),
-    },
-    Migration {
-        version: 23,
-        description: "add homeassistant_endpoints — registered Home Assistant instances with bearer-token auth",
-        up: "CREATE TABLE IF NOT EXISTS homeassistant_endpoints (
-            name       TEXT PRIMARY KEY,
-            base_url   TEXT NOT NULL,
-            token      TEXT NOT NULL,
-            enabled    INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        );",
-        down: Some("DROP TABLE IF EXISTS homeassistant_endpoints;"),
-    },
-    Migration {
-        version: 24,
-        description: "add secrets — host-level secret metadata with pluggable backends (inline values live in settings under 'secrets.' prefix)",
-        up: "CREATE TABLE IF NOT EXISTS secrets (
-            name        TEXT PRIMARY KEY,
-            backend     TEXT NOT NULL,
-            ref_path    TEXT NOT NULL DEFAULT '',
-            description TEXT,
-            created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-            updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        );",
-        down: Some("DROP TABLE IF EXISTS secrets;"),
-    },
-    Migration {
-        version: 25,
-        description: "seed ui.enabled setting — toggle for serving the embedded web UI (default on)",
-        up: "INSERT OR IGNORE INTO settings (key, value) VALUES ('ui.enabled', 'true');",
-        down: Some("DELETE FROM settings WHERE key = 'ui.enabled';"),
-    },
-    Migration {
-        version: 26,
-        description: "add pod mesh tables — invites, peers, trust, self-secure flag",
-        up: "CREATE TABLE IF NOT EXISTS pod_invites (
-            token_hash   TEXT PRIMARY KEY,
-            expires_at   INTEGER NOT NULL,
-            used_at      INTEGER,
-            created_at   INTEGER NOT NULL,
-            issued_by_cn TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS pod_peers (
-            peer_id       TEXT PRIMARY KEY,
-            peer_hostname TEXT NOT NULL,
-            ca_cert_pem   TEXT NOT NULL,
-            first_seen_at INTEGER NOT NULL,
-            last_seen_at  INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS pod_trust (
-            peer_id      TEXT PRIMARY KEY REFERENCES pod_peers(peer_id) ON DELETE CASCADE,
-            local_secure INTEGER NOT NULL DEFAULT 0,
-            peer_secure  INTEGER NOT NULL DEFAULT 0,
-            set_at       INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS pod_self (
-            id          INTEGER PRIMARY KEY CHECK (id = 1),
-            self_secure INTEGER NOT NULL DEFAULT 0,
-            set_at      INTEGER NOT NULL
-        );",
-        down: Some(
-            "DROP TABLE IF EXISTS pod_trust;
-             DROP TABLE IF EXISTS pod_peers;
-             DROP TABLE IF EXISTS pod_invites;
-             DROP TABLE IF EXISTS pod_self;",
-        ),
-    },
+    // Migrations 1..26 squashed into apply_schema baseline (2026-05-12).
+    // New migrations append from version=1 onward as schema evolves
+    // post-squash. apply_schema remains the source of truth for fresh DBs.
 ];
 
 /// Return the currently applied migration version (0 = baseline, no migrations run).
@@ -726,6 +388,9 @@ pub fn migrate(conn: &Connection, direction: MigrateDirection, steps: usize) -> 
 // ── Schema ───────────────────────────────────────────────────────────────────
 
 fn apply_schema(conn: &Connection) -> Result<()> {
+    // Consolidated v1 baseline (2026-05-12 squash) — folds the legacy
+    // migrations 1..26 into a single CREATE-IF-NOT-EXISTS bundle. Future
+    // schema changes are appended to MIGRATIONS as version=1 onward.
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS learning_progress (
@@ -742,7 +407,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             agent       TEXT,
             content     TEXT,
             important   INTEGER NOT NULL DEFAULT 0,
-            tags        TEXT    -- JSON array e.g. '[\"bug\",\"fix\"]'
+            tags        TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_se_session   ON session_events(session);
         CREATE INDEX IF NOT EXISTS idx_se_project   ON session_events(project);
@@ -774,7 +439,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         );
 
         CREATE TABLE IF NOT EXISTS mcp_tool_mappings (
-            orca_tool      TEXT PRIMARY KEY,
+            orca_tool       TEXT PRIMARY KEY,
             mcp_name        TEXT NOT NULL REFERENCES mcp_servers(name) ON DELETE CASCADE,
             external_tool   TEXT NOT NULL,
             match_type      TEXT NOT NULL DEFAULT 'explicit',
@@ -795,6 +460,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             database     TEXT NOT NULL DEFAULT '',
             container    TEXT,
             domains_file TEXT,
+            driver       TEXT NOT NULL DEFAULT 'mysql',
             enabled      INTEGER NOT NULL DEFAULT 1,
             created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         );
@@ -843,9 +509,25 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             mcp_command       TEXT,
             mcp_args          TEXT NOT NULL DEFAULT '[]',
             mcp_env           TEXT NOT NULL DEFAULT '{}',
+            mcp_url           TEXT,
+            mcp_token_env     TEXT,
             context_injection TEXT NOT NULL DEFAULT 'minimal',
+            command_map       TEXT NOT NULL DEFAULT '{}',
+            mode              TEXT NOT NULL DEFAULT 'orca',
+            nav_links         TEXT NOT NULL DEFAULT '[]',
+            search_tools      TEXT NOT NULL DEFAULT '[]',
+            specs_dir         TEXT,
             enabled           INTEGER NOT NULL DEFAULT 1,
             created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS plugin_credentials (
+            plugin_id  TEXT NOT NULL,
+            key        TEXT NOT NULL,
+            value      TEXT NOT NULL,
+            synced_at  TEXT,
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            PRIMARY KEY (plugin_id, key)
         );
 
         CREATE TABLE IF NOT EXISTS plugin_data (
@@ -854,6 +536,12 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             value      TEXT NOT NULL,
             updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
             PRIMARY KEY (plugin_id, key)
+        );
+
+        CREATE TABLE IF NOT EXISTS plugin_deps (
+            parent_id  TEXT NOT NULL,
+            dep_id     TEXT NOT NULL,
+            PRIMARY KEY (parent_id, dep_id)
         );
 
         CREATE TABLE IF NOT EXISTS plugin_types (
@@ -896,6 +584,129 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             CHECK (channel != 'locked' OR locked_version IS NOT NULL)
         );
         CREATE INDEX IF NOT EXISTS idx_plugin_installs_plugin ON plugin_installs(plugin_id);
+
+        CREATE TABLE IF NOT EXISTS oauth_tokens (
+            service       TEXT PRIMARY KEY,
+            access_token  TEXT NOT NULL,
+            refresh_token TEXT,
+            expires_at    TEXT,
+            updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS llm_providers (
+            name       TEXT PRIMARY KEY,
+            url        TEXT NOT NULL,
+            kind       TEXT NOT NULL DEFAULT 'lmstudio',
+            enabled    INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS doc_roots (
+            name        TEXT PRIMARY KEY,
+            path        TEXT NOT NULL,
+            description TEXT,
+            enabled     INTEGER NOT NULL DEFAULT 1,
+            created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        INSERT OR IGNORE INTO doc_roots (name, path, description) VALUES
+            ('rebuy',    '~/code/rebuy',    'Rebuy monorepo'),
+            ('orca',     '~/code/orca',     'Orca codebase'),
+            ('bardbase', '~/code/bardbase', 'Bardbase'),
+            ('homepage', '~/code/homepage', 'Homepage'),
+            ('meerkat',  '~/code/meerkat',  'Meerkat');
+
+        CREATE TABLE IF NOT EXISTS doc_ignore_patterns (
+            pattern    TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        INSERT OR IGNORE INTO doc_ignore_patterns (pattern) VALUES
+            ('.git'), ('node_modules'), ('target'), ('.next'), ('dist'),
+            ('build'), ('vendor'), ('.trash'), ('logs'), ('memory'),
+            ('plugins'), ('.turbo'), ('coverage'), ('out'), ('.cache');
+
+        CREATE TABLE IF NOT EXISTS settings (
+            key        TEXT PRIMARY KEY,
+            value      TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        INSERT OR IGNORE INTO settings (key, value) VALUES
+            ('fs.allow_unrestricted', 'false'),
+            ('ui.enabled',            'true');
+
+        CREATE TABLE IF NOT EXISTS profiles (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            owner_user_id   TEXT NOT NULL,
+            description     TEXT,
+            created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            UNIQUE (owner_user_id, name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_profiles_owner ON profiles(owner_user_id);
+
+        CREATE TABLE IF NOT EXISTS profile_shares (
+            profile_id  TEXT NOT NULL,
+            user_id     TEXT NOT NULL,
+            role        TEXT NOT NULL CHECK (role IN ('viewer','collaborator')),
+            shared_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            PRIMARY KEY (profile_id, user_id),
+            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_profile_shares_user ON profile_shares(user_id);
+
+        CREATE TABLE IF NOT EXISTS user_active_profile (
+            user_id     TEXT PRIMARY KEY,
+            profile_id  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS profile_credentials (
+            profile_id  TEXT NOT NULL,
+            key         TEXT NOT NULL,
+            value       TEXT NOT NULL,
+            updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            PRIMARY KEY (profile_id, key),
+            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS secrets (
+            name        TEXT PRIMARY KEY,
+            backend     TEXT NOT NULL,
+            ref_path    TEXT NOT NULL DEFAULT '',
+            description TEXT,
+            created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS pod_invites (
+            token_hash   TEXT PRIMARY KEY,
+            expires_at   INTEGER NOT NULL,
+            used_at      INTEGER,
+            created_at   INTEGER NOT NULL,
+            issued_by_cn TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS pod_peers (
+            peer_id       TEXT PRIMARY KEY,
+            peer_hostname TEXT NOT NULL,
+            ca_cert_pem   TEXT NOT NULL,
+            first_seen_at INTEGER NOT NULL,
+            last_seen_at  INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS pod_trust (
+            peer_id      TEXT PRIMARY KEY REFERENCES pod_peers(peer_id) ON DELETE CASCADE,
+            local_secure INTEGER NOT NULL DEFAULT 0,
+            peer_secure  INTEGER NOT NULL DEFAULT 0,
+            set_at       INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS pod_self (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            self_secure INTEGER NOT NULL DEFAULT 0,
+            set_at      INTEGER NOT NULL
+        );
         ",
     )?;
     Ok(())
@@ -1127,8 +938,9 @@ mod registry_tests {
     }
 
     #[test]
-    fn migration_count_is_nonzero() {
-        assert!(migration_count() > 0);
+    fn migration_count_matches_array() {
+        // Post-squash baseline is 0; new migrations grow the array.
+        assert_eq!(migration_count(), MIGRATIONS.len());
     }
 
     #[test]

@@ -110,6 +110,7 @@ impl Client {
             body: None,
             insecure: false,
             timeout: DEFAULT_TIMEOUT,
+            max_body: None,
         }
     }
 
@@ -140,6 +141,7 @@ pub struct RequestBuilder {
     body: Option<Body>,
     insecure: bool,
     timeout: Duration,
+    max_body: Option<usize>,
 }
 
 enum Body {
@@ -192,6 +194,12 @@ impl RequestBuilder {
         self.timeout = t;
         self
     }
+    /// Override the default 8 MiB response cap. Use for legitimate large
+    /// payloads (binary releases, container images, backup archives).
+    pub fn max_body(mut self, n: usize) -> Self {
+        self.max_body = Some(n);
+        self
+    }
 
     /// Send and collect the body as raw bytes. Use for binary downloads
     /// (release assets, checksums, archives). Status / headers / size cap
@@ -225,7 +233,7 @@ impl RequestBuilder {
         let status = resp.status().as_u16();
         let headers = flatten_headers(resp.headers());
         let bytes = resp.bytes().await?.to_vec();
-        if bytes.len() > MAX_RESPONSE_BYTES {
+        if bytes.len() > self.max_body.unwrap_or(MAX_RESPONSE_BYTES) {
             return Err(HttpError::ResponseTooLarge);
         }
         if !(200..300).contains(&status) {
@@ -280,7 +288,7 @@ impl RequestBuilder {
         let headers = flatten_headers(resp.headers());
 
         let bytes = resp.bytes().await?;
-        if bytes.len() > MAX_RESPONSE_BYTES {
+        if bytes.len() > self.max_body.unwrap_or(MAX_RESPONSE_BYTES) {
             return Err(HttpError::ResponseTooLarge);
         }
         let body = ResponseBody::from_bytes(&bytes);

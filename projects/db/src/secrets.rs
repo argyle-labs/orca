@@ -64,6 +64,26 @@ pub fn get(conn: &Connection, name: &str) -> Result<Option<SecretRecord>> {
     }
 }
 
+/// Pod-mesh storage gate. Refuses secret writes when this host has joined a
+/// pod but is not flagged secure (pod_self.self_secure = 0). Hosts that
+/// have never run `orca pod init` or `pod join` (no pod_self row) bypass
+/// the gate so non-pod workflows still work.
+fn ensure_self_secure(conn: &Connection) -> Result<()> {
+    use rusqlite::OptionalExtension;
+    let v: Option<i64> = conn
+        .query_row("SELECT self_secure FROM pod_self WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    match v {
+        None => Ok(()), // host hasn't joined a pod — no gating
+        Some(1) => Ok(()),
+        Some(_) => anyhow::bail!(
+            "secrets storage disabled on this host — run `orca pod self-secure on` to enable"
+        ),
+    }
+}
+
 /// Upsert a metadata row. Returns true if the row was created, false on update.
 pub fn upsert(
     conn: &Connection,
@@ -72,6 +92,7 @@ pub fn upsert(
     ref_path: &str,
     description: Option<&str>,
 ) -> Result<bool> {
+    ensure_self_secure(conn)?;
     let existed = conn
         .query_row(
             "SELECT 1 FROM secrets WHERE name = ?1",
@@ -123,6 +144,7 @@ pub fn read_inline_value(conn: &Connection, name: &str) -> Result<Option<String>
 /// Store the inline value for `name`. The metadata row should already exist
 /// (caller `upsert`s first).
 pub fn write_inline_value(conn: &Connection, name: &str, value: &str) -> Result<()> {
+    ensure_self_secure(conn)?;
     settings::secret_set(conn, name, value)
 }
 

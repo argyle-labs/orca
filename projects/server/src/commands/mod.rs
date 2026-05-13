@@ -35,6 +35,7 @@ pub mod install;
 pub mod mcp_cmd;
 pub mod oauth;
 pub mod plugin_cmd;
+pub mod pod;
 pub mod spec;
 pub mod update;
 
