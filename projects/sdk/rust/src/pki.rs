@@ -24,9 +24,18 @@ use std::path::{Path, PathBuf};
 // internally so we don't pick a hash separately.
 //
 // Validity windows are pinned explicitly so a future rcgen-default change
-// can't silently shorten/lengthen them under us.
-const CA_VALIDITY_YEARS: i64 = 10;
-const PEER_VALIDITY_YEARS: i64 = 2;
+// can't silently shorten/lengthen them under us. Short windows + auto-rotation
+// (see super::cert_rotation in the server crate) are the security posture:
+// a stolen leaf cert is useful for at most PEER_VALIDITY_DAYS.
+pub const CA_VALIDITY_DAYS: i64 = 365;
+pub const PEER_VALIDITY_DAYS: i64 = 30;
+/// Refresh peer certs this many days before expiry. Wide enough to absorb
+/// a few missed rotations if the daemon was down.
+pub const PEER_REFRESH_THRESHOLD_DAYS: i64 = 7;
+/// Bootstrap TLS cert sits on the host's long-lived identity key (mDNS-pinned
+/// by every peer), so rotation = re-pair. Keep it long; it's not a leaf in
+/// the same sense as the peer certs.
+pub const BOOTSTRAP_CERT_VALIDITY_DAYS: i64 = 3650;
 
 /// Build a fresh Ed25519 keypair. Single chokepoint so the algorithm choice
 /// is visible in one place.
@@ -34,12 +43,13 @@ fn gen_keypair() -> Result<KeyPair> {
     KeyPair::generate_for(&PKCS_ED25519).context("generate Ed25519 keypair")
 }
 
-/// Apply `(now, now + years)` to a `CertificateParams`. rcgen's defaults are
-/// implementation-defined; we set both explicitly.
-fn set_validity(params: &mut CertificateParams, years: i64) {
+/// Apply `(now-5min, now + days)` to a `CertificateParams`. The 5-minute
+/// backdate absorbs reasonable clock skew across the mesh so a freshly-
+/// rotated cert isn't rejected by a peer whose clock is slightly ahead.
+fn set_validity_days(params: &mut CertificateParams, days: i64) {
     let now = time::OffsetDateTime::now_utc();
-    params.not_before = now;
-    params.not_after = now + time::Duration::days(years * 365);
+    params.not_before = now - time::Duration::minutes(5);
+    params.not_after = now + time::Duration::days(days);
 }
 
 /// Capability class encoded in the plugin cert's Subject OU field.
@@ -121,6 +131,22 @@ pub fn mesh_client_key_path(pki_dir: &Path) -> PathBuf {
     mesh_dir(pki_dir).join("client/node.key.pem")
 }
 
+// Two-slot CA rotation. During an overlap window after `pod ca-rotate`, both
+// the current CA (`ca.cert.pem`) and the previous CA (`ca.previous.cert.pem`)
+// are in the trust store, so certs signed by EITHER are accepted. New certs
+// (auto-rotation refreshes, new joiners) are issued under the current CA.
+// `pod_self.ca_previous_expires_at` is the deadline at which the previous
+// slot is dropped from disk + trust.
+pub fn mesh_ca_previous_cert_path(pki_dir: &Path) -> PathBuf {
+    mesh_dir(pki_dir).join("ca.previous.cert.pem")
+}
+pub fn mesh_ca_previous_key_path(pki_dir: &Path) -> PathBuf {
+    mesh_dir(pki_dir).join("ca.previous.key.pem")
+}
+pub fn has_mesh_ca_previous(pki_dir: &Path) -> bool {
+    mesh_ca_previous_cert_path(pki_dir).exists()
+}
+
 pub const POD_SERVER_SAN: &str = "pod.orca.local";
 
 // ── Pod / mesh-CA init + issuance ────────────────────────────────────────────
@@ -142,7 +168,7 @@ pub fn init_mesh_ca(pki_dir: &Path, host_cn: &str) -> Result<()> {
     let mut ca_params = CertificateParams::new(Vec::<String>::new())?;
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    set_validity(&mut ca_params, CA_VALIDITY_YEARS);
+    set_validity_days(&mut ca_params, CA_VALIDITY_DAYS);
     {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, "orca-mesh-ca");
@@ -166,7 +192,7 @@ fn issue_mesh_server_cert(pki_dir: &Path, issuer: &Issuer<'_, KeyPair>) -> Resul
     let mut params = CertificateParams::new(vec![POD_SERVER_SAN.to_string()])?;
     params.is_ca = IsCa::NoCa;
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-    set_validity(&mut params, PEER_VALIDITY_YEARS);
+    set_validity_days(&mut params, PEER_VALIDITY_DAYS);
     {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, "orca-pod-server");
@@ -193,7 +219,7 @@ fn issue_mesh_client_cert(
     let mut params = CertificateParams::new(vec![format!("peer.{host_cn}.pod.orca.local")])?;
     params.is_ca = IsCa::NoCa;
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
-    set_validity(&mut params, PEER_VALIDITY_YEARS);
+    set_validity_days(&mut params, PEER_VALIDITY_DAYS);
     {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, format!("peer.{host_cn}"));
@@ -329,7 +355,7 @@ pub fn sign_peer_csr(
             PeerRole::Client => ExtendedKeyUsagePurpose::ClientAuth,
             PeerRole::Server => ExtendedKeyUsagePurpose::ServerAuth,
         }];
-        set_validity(&mut p, PEER_VALIDITY_YEARS);
+        set_validity_days(&mut p, PEER_VALIDITY_DAYS);
         let mut dn = DistinguishedName::new();
         dn.push(
             DnType::CommonName,
@@ -385,6 +411,262 @@ pub fn import_mesh_ca_keypair(pki_dir: &Path, cert_pem: &str, key_pem: &str) -> 
     Ok(())
 }
 
+// ── Cert rotation primitives ─────────────────────────────────────────────────
+//
+// Short cert lifetimes (PEER_VALIDITY_DAYS = 30) require seamless rotation.
+// The two pieces that make rotation safe:
+//
+//   * `atomic_write_pem` — write-to-tmp + rename(2). Readers (TLS resolver,
+//     outbound dial path) either see the old file or the new file, never a
+//     half-written one.
+//   * `should_rotate(cert_pem, threshold_days)` — parses the cert, returns
+//     true when `not_after - now < threshold_days`. The rotation task in
+//     server::pod::cert_rotation polls every cert and reissues when this
+//     fires.
+//
+// The TLS resolver in plugin_host reads certs from disk on every handshake,
+// so an atomic file swap is enough — no in-process cache to invalidate.
+
+/// Days remaining until `cert_pem` expires. Negative for already-expired.
+pub fn cert_days_remaining(cert_pem: &str) -> Result<i64> {
+    use rustls_pemfile::certs;
+    let mut reader = cert_pem.as_bytes();
+    let der = certs(&mut reader)
+        .next()
+        .context("no certificate in PEM")?
+        .context("parse cert DER")?;
+    let (_, parsed) =
+        x509_parser::parse_x509_certificate(der.as_ref()).context("parse cert for not_after")?;
+    let not_after_secs = parsed.validity().not_after.timestamp();
+    let now_secs = time::OffsetDateTime::now_utc().unix_timestamp();
+    Ok((not_after_secs - now_secs) / 86_400)
+}
+
+/// True iff the cert is within `threshold_days` of expiring (or already past).
+pub fn should_rotate(cert_pem: &str, threshold_days: i64) -> Result<bool> {
+    Ok(cert_days_remaining(cert_pem)? <= threshold_days)
+}
+
+/// Atomic file write: writes to `<path>.tmp`, fsyncs, renames over `<path>`.
+/// Readers of `path` see either the old content or the new content; rename
+/// is atomic at the namespace-entry level on POSIX. Restricts key files to
+/// 0o600 to match `write_pem`.
+pub fn atomic_write_pem(path: &Path, contents: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create parent {}", parent.display()))?;
+    }
+    let tmp = path.with_extension("pem.tmp");
+    {
+        use std::io::Write;
+        let mut f =
+            std::fs::File::create(&tmp).with_context(|| format!("open tmp {}", tmp.display()))?;
+        f.write_all(contents.as_bytes())?;
+        f.sync_all()?;
+    }
+    #[cfg(unix)]
+    if path.to_string_lossy().contains(".key.") {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    Ok(())
+}
+
+/// Re-issue this host's mesh server cert against the local mesh CA. Requires
+/// `has_mesh_ca_key`. New keypair, new SAN/CN/EKU material (identical to
+/// init-time issuance). Atomic on disk.
+pub fn reissue_mesh_server_cert(pki_dir: &Path) -> Result<()> {
+    anyhow::ensure!(
+        has_mesh_ca_key(pki_dir),
+        "reissue: this host does not have the mesh CA private key"
+    );
+    let ca_cert_pem = std::fs::read_to_string(mesh_ca_cert_path(pki_dir))?;
+    let ca_key_pem = std::fs::read_to_string(mesh_ca_key_path(pki_dir))?;
+    let ca_key = KeyPair::from_pem(&ca_key_pem)?;
+    let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key)?;
+
+    let key = gen_keypair()?;
+    let mut params = CertificateParams::new(vec![POD_SERVER_SAN.to_string()])?;
+    params.is_ca = IsCa::NoCa;
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    set_validity_days(&mut params, PEER_VALIDITY_DAYS);
+    {
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, "orca-pod-server");
+        dn.push(DnType::OrganizationName, "orca");
+        dn.push(DnType::OrganizationalUnitName, "pod-server");
+        params.distinguished_name = dn;
+    }
+    let cert = params.signed_by(&key, &issuer)?;
+    atomic_write_pem(&mesh_server_cert_path(pki_dir), &cert.pem())?;
+    atomic_write_pem(&mesh_server_key_path(pki_dir), &key.serialize_pem())?;
+    Ok(())
+}
+
+/// Re-issue this host's mesh client cert against the local mesh CA. Same
+/// preconditions as `reissue_mesh_server_cert`.
+pub fn reissue_mesh_client_cert(pki_dir: &Path, host_cn: &str) -> Result<()> {
+    anyhow::ensure!(
+        has_mesh_ca_key(pki_dir),
+        "reissue: this host does not have the mesh CA private key"
+    );
+    let ca_cert_pem = std::fs::read_to_string(mesh_ca_cert_path(pki_dir))?;
+    let ca_key_pem = std::fs::read_to_string(mesh_ca_key_path(pki_dir))?;
+    let ca_key = KeyPair::from_pem(&ca_key_pem)?;
+    let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key)?;
+
+    let key = gen_keypair()?;
+    let mut params = CertificateParams::new(vec![format!("peer.{host_cn}.pod.orca.local")])?;
+    params.is_ca = IsCa::NoCa;
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    set_validity_days(&mut params, PEER_VALIDITY_DAYS);
+    {
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, format!("peer.{host_cn}"));
+        dn.push(DnType::OrganizationName, "orca");
+        dn.push(DnType::OrganizationalUnitName, "pod-client");
+        params.distinguished_name = dn;
+    }
+    let cert = params.signed_by(&key, &issuer)?;
+    atomic_write_pem(&mesh_client_cert_path(pki_dir), &cert.pem())?;
+    atomic_write_pem(&mesh_client_key_path(pki_dir), &key.serialize_pem())?;
+    Ok(())
+}
+
+// ── CA rotation (two-slot with overlap) ──────────────────────────────────────
+
+/// Rotate the mesh CA. Existing `ca.cert.pem`/`ca.key.pem` move into the
+/// `previous` slot; a new CA keypair is generated and written to the
+/// `current` slot. Existing peer certs (signed by the now-previous CA) keep
+/// validating until the previous slot is dropped via `drop_mesh_ca_previous`.
+///
+/// Requires `has_mesh_ca_key` — only secure hosts can rotate. Caller is
+/// responsible for replicating both slots to mutual-secure peers and
+/// recording the overlap expiry in DB.
+pub fn rotate_mesh_ca(pki_dir: &Path) -> Result<()> {
+    anyhow::ensure!(
+        has_mesh_ca_key(pki_dir),
+        "ca-rotate: this host does not have the mesh CA private key"
+    );
+    let cur_cert = mesh_ca_cert_path(pki_dir);
+    let cur_key = mesh_ca_key_path(pki_dir);
+    let prev_cert = mesh_ca_previous_cert_path(pki_dir);
+    let prev_key = mesh_ca_previous_key_path(pki_dir);
+
+    // Slide current → previous (overwrites any older previous slot).
+    let cur_cert_pem = std::fs::read_to_string(&cur_cert).context("read current CA cert")?;
+    let cur_key_pem = std::fs::read_to_string(&cur_key).context("read current CA key")?;
+    atomic_write_pem(&prev_cert, &cur_cert_pem)?;
+    atomic_write_pem(&prev_key, &cur_key_pem)?;
+
+    // Generate fresh current.
+    let new_key = gen_keypair()?;
+    let mut params = CertificateParams::new(Vec::<String>::new())?;
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    set_validity_days(&mut params, CA_VALIDITY_DAYS);
+    {
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, "orca-mesh-ca");
+        dn.push(DnType::OrganizationName, "orca");
+        params.distinguished_name = dn;
+    }
+    let new_cert = params.self_signed(&new_key)?;
+    atomic_write_pem(&cur_cert, &new_cert.pem())?;
+    atomic_write_pem(&cur_key, &new_key.serialize_pem())?;
+    Ok(())
+}
+
+/// Drop the previous CA slot. Called once the overlap window expires.
+/// Idempotent: missing files are not an error.
+pub fn drop_mesh_ca_previous(pki_dir: &Path) -> Result<()> {
+    for p in [
+        mesh_ca_previous_cert_path(pki_dir),
+        mesh_ca_previous_key_path(pki_dir),
+    ] {
+        if p.exists() {
+            std::fs::remove_file(&p).with_context(|| format!("remove {}", p.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Install both CA slots from a peer (CA replication that's two-slot-aware).
+/// `previous_*` may be None when the source pod has never rotated. Both
+/// slots are verified before write (cert+key match).
+pub fn import_mesh_ca_state(
+    pki_dir: &Path,
+    current_cert_pem: &str,
+    current_key_pem: &str,
+    previous_cert_pem: Option<&str>,
+    previous_key_pem: Option<&str>,
+) -> Result<()> {
+    // Verify current.
+    let cur_key =
+        KeyPair::from_pem(current_key_pem).context("imported current CA key is not valid PEM")?;
+    Issuer::from_ca_cert_pem(current_cert_pem, cur_key)
+        .context("imported current key does not match current cert")?;
+    // Verify previous if present.
+    if let (Some(c), Some(k)) = (previous_cert_pem, previous_key_pem) {
+        let prev_key = KeyPair::from_pem(k).context("imported previous CA key is not valid PEM")?;
+        Issuer::from_ca_cert_pem(c, prev_key)
+            .context("imported previous key does not match previous cert")?;
+    }
+
+    atomic_write_pem(&mesh_ca_cert_path(pki_dir), current_cert_pem)?;
+    atomic_write_pem(&mesh_ca_key_path(pki_dir), current_key_pem)?;
+    if let (Some(c), Some(k)) = (previous_cert_pem, previous_key_pem) {
+        atomic_write_pem(&mesh_ca_previous_cert_path(pki_dir), c)?;
+        atomic_write_pem(&mesh_ca_previous_key_path(pki_dir), k)?;
+    }
+    Ok(())
+}
+
+/// Build a `RootCertStore` containing every CA cert PEM in the iterator.
+/// Used by the pod trust path to span the overlap window where both
+/// current and previous CAs validate inbound certs.
+pub fn ca_root_store_multi<'a, I: IntoIterator<Item = &'a str>>(
+    ca_pems: I,
+) -> Result<rustls::RootCertStore> {
+    use rustls_pemfile::certs;
+    let mut store = rustls::RootCertStore::empty();
+    for pem in ca_pems {
+        for der in certs(&mut pem.as_bytes()) {
+            store.add(der.context("parse CA cert")?)?;
+        }
+    }
+    Ok(store)
+}
+
+/// Joiner side of a refresh: build fresh CSRs for both roles, return as
+/// `(client_csr_pem, client_key_pem, server_csr_pem, server_key_pem)`. The
+/// pod/refresh-cert handler on a peer with the mesh CA key signs them and
+/// returns the certs.
+pub fn build_refresh_csrs(host_cn: &str) -> Result<(String, String, String, String)> {
+    let (csr_client, key_client) = build_peer_csr(host_cn, PeerRole::Client)?;
+    let (csr_server, key_server) = build_peer_csr(host_cn, PeerRole::Server)?;
+    Ok((csr_client, key_client, csr_server, key_server))
+}
+
+/// Atomically install refreshed certs received from a peer. Caller passes
+/// the certs from the pod/refresh-cert response plus the locally-generated
+/// keys (from `build_refresh_csrs`).
+pub fn install_refreshed_peer_certs(
+    pki_dir: &Path,
+    client_cert_pem: &str,
+    client_key_pem: &str,
+    server_cert_pem: &str,
+    server_key_pem: &str,
+) -> Result<()> {
+    atomic_write_pem(&mesh_client_cert_path(pki_dir), client_cert_pem)?;
+    atomic_write_pem(&mesh_client_key_path(pki_dir), client_key_pem)?;
+    atomic_write_pem(&mesh_server_cert_path(pki_dir), server_cert_pem)?;
+    atomic_write_pem(&mesh_server_key_path(pki_dir), server_key_pem)?;
+    Ok(())
+}
+
 // ── File paths (plugin / legacy) ─────────────────────────────────────────────
 
 pub fn ca_cert_path(pki_dir: &Path) -> PathBuf {
@@ -423,7 +705,7 @@ pub fn init(pki_dir: &Path) -> Result<()> {
     let mut ca_params = CertificateParams::new(Vec::<String>::new())?;
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    set_validity(&mut ca_params, CA_VALIDITY_YEARS);
+    set_validity_days(&mut ca_params, CA_VALIDITY_DAYS);
     {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, "orca-ca");
@@ -446,7 +728,7 @@ pub fn init(pki_dir: &Path) -> Result<()> {
     let mut server_params = CertificateParams::new(vec!["core.orca.local".to_string()])?;
     server_params.is_ca = IsCa::NoCa;
     server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-    set_validity(&mut server_params, PEER_VALIDITY_YEARS);
+    set_validity_days(&mut server_params, PEER_VALIDITY_DAYS);
     {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, "orca-core");
@@ -480,7 +762,7 @@ pub fn issue(pki_dir: &Path, plugin_id: &str, capability: Capability) -> Result<
     let mut params = CertificateParams::new(vec![dns_san])?;
     params.is_ca = IsCa::NoCa;
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
-    set_validity(&mut params, PEER_VALIDITY_YEARS);
+    set_validity_days(&mut params, PEER_VALIDITY_DAYS);
     {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, plugin_id);
@@ -684,7 +966,6 @@ pub fn bootstrap_pubkey_fingerprint(verifying: &ed25519_dalek::VerifyingKey) -> 
 // ── Bootstrap TLS cert (self-signed, backed by the bootstrap key) ────────────
 
 pub const POD_BOOTSTRAP_SAN: &str = "pod-bootstrap.orca.local";
-const BOOTSTRAP_CERT_VALIDITY_YEARS: i64 = 10;
 
 pub fn bootstrap_cert_path(pki_dir: &Path) -> PathBuf {
     pki_dir.join("bootstrap.cert.pem")
@@ -714,7 +995,7 @@ pub fn load_or_init_bootstrap_cert(pki_dir: &Path) -> Result<(String, String)> {
     let mut params = CertificateParams::new(vec![POD_BOOTSTRAP_SAN.to_string()])?;
     params.is_ca = IsCa::NoCa;
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-    set_validity(&mut params, BOOTSTRAP_CERT_VALIDITY_YEARS);
+    set_validity_days(&mut params, BOOTSTRAP_CERT_VALIDITY_DAYS);
     {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, "orca-pod-bootstrap");
@@ -1194,6 +1475,142 @@ mod tests {
         env.payload.push('x');
         let r: Result<(String, _)> = verify_envelope(&env);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn peer_cert_validity_is_30d_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = dir.path();
+        init_mesh_ca(pki, "thor").unwrap();
+        let server_pem = std::fs::read_to_string(mesh_server_cert_path(pki)).unwrap();
+        let days = cert_days_remaining(&server_pem).unwrap();
+        // Just-issued; allow some slack for clock granularity but it should
+        // be near PEER_VALIDITY_DAYS, not anywhere close to 365 or 2*365.
+        assert!(
+            days <= PEER_VALIDITY_DAYS,
+            "got {days}d, expected <= {}",
+            PEER_VALIDITY_DAYS
+        );
+        assert!(
+            days >= PEER_VALIDITY_DAYS - 2,
+            "got {days}d, expected >= {}",
+            PEER_VALIDITY_DAYS - 2
+        );
+    }
+
+    #[test]
+    fn ca_cert_validity_is_one_year() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = dir.path();
+        init_mesh_ca(pki, "thor").unwrap();
+        let ca_pem = std::fs::read_to_string(mesh_ca_cert_path(pki)).unwrap();
+        let days = cert_days_remaining(&ca_pem).unwrap();
+        assert!(days >= 363 && days <= 365, "got {days}d");
+    }
+
+    #[test]
+    fn should_rotate_fires_inside_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = dir.path();
+        init_mesh_ca(pki, "thor").unwrap();
+        let server_pem = std::fs::read_to_string(mesh_server_cert_path(pki)).unwrap();
+        // Just-issued 30d cert; threshold 7d → should NOT rotate.
+        assert!(!should_rotate(&server_pem, 7).unwrap());
+        // Threshold 60d (bigger than the cert's lifetime) → SHOULD rotate.
+        assert!(should_rotate(&server_pem, 60).unwrap());
+    }
+
+    #[test]
+    fn reissue_swaps_cert_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = dir.path();
+        init_mesh_ca(pki, "thor").unwrap();
+        let before = std::fs::read_to_string(mesh_server_cert_path(pki)).unwrap();
+        // Wait long enough that not_before differs (clock resolution).
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        reissue_mesh_server_cert(pki).unwrap();
+        let after = std::fs::read_to_string(mesh_server_cert_path(pki)).unwrap();
+        assert_ne!(before, after, "reissue must produce a different cert");
+        // New cert still validates (chain intact).
+        let (chain, _) = parse_cert_and_key(
+            &after,
+            &std::fs::read_to_string(mesh_server_key_path(pki)).unwrap(),
+        )
+        .unwrap();
+        assert!(!chain.is_empty());
+    }
+
+    #[test]
+    fn atomic_write_replaces_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("foo.cert.pem");
+        atomic_write_pem(&p, "v1").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "v1");
+        atomic_write_pem(&p, "v2").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "v2");
+        // tmp file is cleaned up.
+        assert!(!p.with_extension("pem.tmp").exists());
+    }
+
+    #[test]
+    fn ca_rotate_moves_current_to_previous() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = dir.path();
+        init_mesh_ca(pki, "thor").unwrap();
+        let before_cur_cert = std::fs::read_to_string(mesh_ca_cert_path(pki)).unwrap();
+        let before_cur_key = std::fs::read_to_string(mesh_ca_key_path(pki)).unwrap();
+
+        rotate_mesh_ca(pki).unwrap();
+        assert!(has_mesh_ca_previous(pki));
+        let prev_cert = std::fs::read_to_string(mesh_ca_previous_cert_path(pki)).unwrap();
+        let prev_key = std::fs::read_to_string(mesh_ca_previous_key_path(pki)).unwrap();
+        assert_eq!(prev_cert, before_cur_cert);
+        assert_eq!(prev_key, before_cur_key);
+
+        let new_cur = std::fs::read_to_string(mesh_ca_cert_path(pki)).unwrap();
+        assert_ne!(new_cur, before_cur_cert, "current CA must be fresh");
+    }
+
+    #[test]
+    fn drop_previous_is_idempotent_and_clears_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = dir.path();
+        init_mesh_ca(pki, "thor").unwrap();
+        rotate_mesh_ca(pki).unwrap();
+        assert!(has_mesh_ca_previous(pki));
+        drop_mesh_ca_previous(pki).unwrap();
+        assert!(!has_mesh_ca_previous(pki));
+        // Second call: no-op, no error.
+        drop_mesh_ca_previous(pki).unwrap();
+    }
+
+    #[test]
+    fn root_store_spans_two_cas() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = dir.path();
+        init_mesh_ca(pki, "thor").unwrap();
+        let old_ca = std::fs::read_to_string(mesh_ca_cert_path(pki)).unwrap();
+        rotate_mesh_ca(pki).unwrap();
+        let new_ca = std::fs::read_to_string(mesh_ca_cert_path(pki)).unwrap();
+        let store = ca_root_store_multi([new_ca.as_str(), old_ca.as_str()]).unwrap();
+        assert_eq!(store.len(), 2, "trust store should hold both CAs");
+    }
+
+    #[test]
+    fn import_state_round_trips_both_slots() {
+        let src_dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(src_dir.path(), "thor").unwrap();
+        rotate_mesh_ca(src_dir.path()).unwrap();
+        let cur_c = std::fs::read_to_string(mesh_ca_cert_path(src_dir.path())).unwrap();
+        let cur_k = std::fs::read_to_string(mesh_ca_key_path(src_dir.path())).unwrap();
+        let prv_c = std::fs::read_to_string(mesh_ca_previous_cert_path(src_dir.path())).unwrap();
+        let prv_k = std::fs::read_to_string(mesh_ca_previous_key_path(src_dir.path())).unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(mesh_dir(dst.path())).unwrap();
+        import_mesh_ca_state(dst.path(), &cur_c, &cur_k, Some(&prv_c), Some(&prv_k)).unwrap();
+        assert!(has_mesh_ca_key(dst.path()));
+        assert!(has_mesh_ca_previous(dst.path()));
     }
 
     #[test]

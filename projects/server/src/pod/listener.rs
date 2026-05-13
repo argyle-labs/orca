@@ -12,7 +12,7 @@
 use anyhow::{Context, Result};
 use orca_sdk::framing::{read_frame, write_frame};
 use orca_sdk::jsonrpc::{ErrorObject, Message, Request, Response};
-use orca_sdk::pki;
+use orca_sdk::pki::{self, PeerRole};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_rustls::server::TlsStream;
@@ -24,6 +24,8 @@ const POD_NOTIFY_TRUST_METHOD: &str = "pod/notify-trust";
 const POD_HAS_CA_KEY_METHOD: &str = "pod/has-ca-key";
 const POD_PUSH_CA_KEY_METHOD: &str = "pod/push-ca-key";
 const POD_PEER_LEAVING_METHOD: &str = "pod/peer-leaving";
+const POD_REFRESH_CERT_METHOD: &str = "pod/refresh-cert";
+const POD_PUSH_CA_STATE_METHOD: &str = "pod/push-ca-state";
 
 #[derive(Debug, Deserialize)]
 struct NotifyTrustParams {
@@ -39,6 +41,30 @@ struct HasCaKeyResult {
 struct PushCaKeyParams {
     cert_pem: String,
     key_pem: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RefreshCertParams {
+    joiner_hostname: String,
+    csr_client_pem: String,
+    csr_server_pem: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RefreshCertResult {
+    client_cert_pem: String,
+    server_cert_pem: String,
+    ca_cert_pem: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PushCaStateParams {
+    current_cert_pem: String,
+    current_key_pem: String,
+    previous_cert_pem: Option<String>,
+    previous_key_pem: Option<String>,
+    /// Unix timestamp at which the previous slot should be dropped.
+    previous_expires_at: Option<i64>,
 }
 
 pub async fn handle_pod_connection(
@@ -114,6 +140,14 @@ async fn dispatch(request: Request, peer_cn: &str) -> Response {
             Ok(()) => Response::ok(id, Value::Null),
             Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
         },
+        POD_REFRESH_CERT_METHOD => match handle_refresh_cert(peer_cn, request) {
+            Ok(r) => value_response(id, &r),
+            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+        },
+        POD_PUSH_CA_STATE_METHOD => match handle_push_ca_state(peer_cn, request) {
+            Ok(()) => Response::ok(id, Value::Null),
+            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+        },
         other => Response::err(
             id,
             ErrorObject::method_not_found(&format!("pod method '{other}' not supported")),
@@ -151,6 +185,75 @@ fn handle_peer_leaving(peer_cn: &str) -> Result<()> {
     let conn = db::open_default()?;
     pdb::mark_peer_departed(&conn, peer_cn)?;
     Ok(())
+}
+
+fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {
+    let params: PushCaStateParams = match request.params {
+        Some(v) => serde_json::from_value(v).context("parse pod/push-ca-state params")?,
+        None => anyhow::bail!("pod/push-ca-state requires params"),
+    };
+    let conn = db::open_default()?;
+    let t = pdb::get_trust(&conn, peer_cn)?;
+    if !pdb::is_mutual_secure(t) {
+        anyhow::bail!(
+            "pod/push-ca-state refused: peer {peer_cn} is not mutually secure with this host"
+        );
+    }
+    pki::import_mesh_ca_state(
+        &pki_dir(),
+        &params.current_cert_pem,
+        &params.current_key_pem,
+        params.previous_cert_pem.as_deref(),
+        params.previous_key_pem.as_deref(),
+    )?;
+    if let Some(exp) = params.previous_expires_at {
+        pdb::set_ca_previous_expires_at(&conn, Some(exp))?;
+    }
+    Ok(())
+}
+
+/// Sign refreshed CSRs for a peer that doesn't hold the mesh CA key itself
+/// (non-secure joiner that needs rotation before its 30-day cert expires).
+/// Requires the requesting peer to be a known, non-departed pod member —
+/// the mTLS handshake already authenticated the CN, and the departed-peer
+/// gate above blocks departed CNs from reaching this method.
+fn handle_refresh_cert(peer_cn: &str, request: Request) -> Result<RefreshCertResult> {
+    anyhow::ensure!(
+        pki::has_mesh_ca_key(&pki_dir()),
+        "this host does not have the mesh CA key — cannot refresh peer certs"
+    );
+    let params: RefreshCertParams = match request.params {
+        Some(v) => serde_json::from_value(v).context("parse pod/refresh-cert params")?,
+        None => anyhow::bail!("pod/refresh-cert requires params"),
+    };
+
+    // Enforce that the joiner hostname matches the authenticated CN. The
+    // CN is `peer.<hostname>`; if a peer tries to refresh under a different
+    // hostname we refuse — that would let one peer impersonate another.
+    let expected_cn = format!("peer.{}", params.joiner_hostname);
+    anyhow::ensure!(
+        peer_cn == expected_cn,
+        "refresh refused: cert CN ({peer_cn}) does not match joiner_hostname ({expected_cn})"
+    );
+
+    let pki_d = pki_dir();
+    let (client_cert_pem, ca_cert_pem) = pki::sign_peer_csr(
+        &pki_d,
+        &params.csr_client_pem,
+        &params.joiner_hostname,
+        PeerRole::Client,
+    )?;
+    let (server_cert_pem, _) = pki::sign_peer_csr(
+        &pki_d,
+        &params.csr_server_pem,
+        &params.joiner_hostname,
+        PeerRole::Server,
+    )?;
+    Ok(RefreshCertResult {
+        client_cert_pem,
+        server_cert_pem,
+        ca_cert_pem,
+    })
 }
 
 fn value_response<T: Serialize>(id: Value, v: &T) -> Response {

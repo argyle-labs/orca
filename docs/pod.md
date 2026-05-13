@@ -19,6 +19,8 @@ leave, and the security model.
 | Promote a peer to mutually-trusted | `orca pod trust <peer-id> on` |
 | Enable secrets storage on this host | `orca pod self-secure on` |
 | Verify a peer end-to-end | `orca pod ping <host>` |
+| Show cert expiry / rotation status | `orca pod cert-status` |
+| Rotate the mesh CA (with overlap) | `orca pod ca-rotate [--overlap-days 14]` |
 | Leave the pod (keep local data) | `orca pod leave` |
 | Leave + wipe stored secrets | `orca pod leave --wipe-secrets` |
 | Leave + factory-reset (everything but binary + bootstrap identity) | `orca pod leave --wipe-all` |
@@ -159,9 +161,9 @@ to peers as the *same* identity (their `pod_peers` row will exist as
 | Identity | Algorithm | Lifetime | Purpose |
 |---|---|---|---|
 | Bootstrap key | Ed25519 | host-lifetime | Pre-pod identity; backs `pod-bootstrap.orca.local` TLS cert and signs offer/confirm envelopes |
-| Mesh CA | Ed25519, 10y validity | pod-lifetime | Signs all pod member certs |
-| Peer client cert | Ed25519, 2y validity | per-host | Authenticates outbound mTLS dials |
-| Peer server cert | Ed25519, 2y validity | per-host | Authenticates inbound `pod.orca.local` SNI |
+| Mesh CA | Ed25519, **1y** validity | per-rotation (manual: `pod ca-rotate`) | Signs all pod member certs |
+| Peer client cert | Ed25519, **30d** validity | auto-rotated daily when <7d remaining | Authenticates outbound mTLS dials |
+| Peer server cert | Ed25519, **30d** validity | auto-rotated daily when <7d remaining | Authenticates inbound `pod.orca.local` SNI |
 
 All certs are Ed25519 — modern, fast, constant-time, side-channel-resistant
 by construction. SHA-512 is built into the signature; SHA-256 is used for
@@ -208,6 +210,62 @@ Reaching mutual-trust with a peer:
   unclaimed orca on its LAN.
 * Is the prerequisite for any federation primitive that handles
   sensitive material across hosts.
+
+## Cert rotation
+
+Both leaf certs (peer client/server) and the mesh CA rotate. The mechanisms
+are different.
+
+### Leaf certs (auto, seamless)
+
+Peer certs are issued for **30 days**. A daily scheduler checks every cert
+on disk; if any has less than **7 days** remaining, it's reissued:
+
+* **Secure peers** (`has_mesh_ca_key`): self-sign locally. No network.
+* **Non-secure peers**: dial any mutually-trusted peer with the CA key,
+  call `pod/refresh-cert` with fresh CSRs, install the returned certs.
+
+The TLS resolver reads cert+key from disk on every handshake, so rotation
+is seamless — `atomic_write_pem` does a tmp-write + `rename(2)`, which
+means readers see either the old file or the new file but never a
+half-written one. In-flight connections finish on whatever cert they
+started with; new connections pick up the fresh cert immediately. **Zero
+connections dropped.**
+
+5-minute `not_before` backdate on every issued cert absorbs reasonable
+clock skew across the mesh.
+
+### Mesh CA (manual, with overlap)
+
+```
+orca pod ca-rotate [--overlap-days 14]
+```
+
+This is a more deliberate operation. It:
+
+1. Slides the current CA into the **previous** slot
+   (`mesh/ca.previous.{cert,key}.pem`).
+2. Generates a fresh CA and writes it to the **current** slot.
+3. Re-issues this host's own peer certs under the new CA immediately.
+4. Replicates both slots + the overlap deadline to every mutually-secure
+   peer via `pod/push-ca-state`.
+
+During the overlap window, both CAs are in every peer's trust store — old
+peer certs (signed by what's now `previous`) and new peer certs (signed
+by `current`) all validate. Peer leaf certs auto-refresh under the new CA
+on their normal rotation schedule. When the deadline expires, the daemon
+drops the previous slot from disk and trust automatically (see
+`pod_self.ca_previous_expires_at`).
+
+### What you can verify
+
+```
+orca pod cert-status
+```
+
+Shows days-remaining for the CA, mesh server, mesh client, and bootstrap
+TLS certs, with rotation status (ok / due / EXPIRED). Run on every host
+in the pod after a rotation event to confirm everyone caught up.
 
 ## Troubleshooting
 
