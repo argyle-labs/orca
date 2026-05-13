@@ -11,11 +11,12 @@ use crate::OrcaToolDef;
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DbStatusReport {
-    /// Currently applied schema version.
-    pub current: u32,
+    /// Highest applied migration version (YYYYMMDDHHMMSS timestamp, or 0 if
+    /// only the apply_schema baseline has run).
+    pub current: i64,
     /// Total migrations compiled into this orca binary.
     pub total: u32,
-    /// Pending migrations: `total - current`.
+    /// Pending migration count (total - applied).
     pub pending: u32,
 }
 
@@ -23,8 +24,9 @@ pub struct DbStatusReport {
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DbMigrateReport {
-    pub before: u32,
-    pub after: u32,
+    pub before: i64,
+    pub after: i64,
+    /// Number of migrations applied (or rolled back) in this call.
     pub applied: u32,
     pub direction: String,
 }
