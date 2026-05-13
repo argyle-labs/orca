@@ -37,6 +37,7 @@ pub mod oauth;
 pub mod plugin_cmd;
 pub mod pod;
 pub mod spec;
+pub mod system;
 pub mod update;
 
 pub use daemon::{DaemonAction, cmd_daemon};
@@ -49,4 +50,5 @@ pub use oauth::{
 };
 pub use plugin_cmd::{install_plugin, remove_plugin};
 pub use spec::{SpecAction, cmd_spec};
+pub use system::{SystemAction, cmd_system};
 pub use update::startup_update_check;

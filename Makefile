@@ -57,7 +57,7 @@ kill-dev:
 	@pkill -f 'op run --env-file .env.orca.tpl' 2>/dev/null || true
 	@pkill -f 'scripts/dev.sh' 2>/dev/null || true
 	@pkill -f 'orca serve --dev' 2>/dev/null || true
-	@pkill -f 'orca daemon start' 2>/dev/null || true
+	@[ -x $(INSTALL_PATH) ] && $(INSTALL_PATH) system kill-stale 2>/dev/null || true
 	@sleep 1
 	@echo "→ dev processes cleared"
 
