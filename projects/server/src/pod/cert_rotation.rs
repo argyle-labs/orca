@@ -55,18 +55,16 @@ async fn tick() -> Result<()> {
     // unconditionally (independent of whether leaf rotation is needed) so a
     // host that's been online through a rotation eventually shrinks back
     // to a single trust anchor without a daemon restart.
-    if pki::has_mesh_ca_previous(&pki_d) {
-        if let Ok(conn) = db::open_default() {
-            if let Ok(Some(expires_at)) = pdb::get_ca_previous_expires_at(&conn) {
-                if now_secs() > expires_at {
-                    if let Err(e) = pki::drop_mesh_ca_previous(&pki_d) {
-                        warn!("[cert-rotation] could not drop previous CA: {e:#}");
-                    } else {
-                        let _ = pdb::set_ca_previous_expires_at(&conn, None);
-                        info!("[cert-rotation] dropped previous CA (overlap expired)");
-                    }
-                }
-            }
+    if pki::has_mesh_ca_previous(&pki_d)
+        && let Ok(conn) = db::open_default()
+        && let Ok(Some(expires_at)) = pdb::get_ca_previous_expires_at(&conn)
+        && now_secs() > expires_at
+    {
+        if let Err(e) = pki::drop_mesh_ca_previous(&pki_d) {
+            warn!("[cert-rotation] could not drop previous CA: {e:#}");
+        } else {
+            let _ = pdb::set_ca_previous_expires_at(&conn, None);
+            info!("[cert-rotation] dropped previous CA (overlap expired)");
         }
     }
 

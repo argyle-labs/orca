@@ -85,7 +85,7 @@ impl Advertisement {
             Some(props),
         )
         .context("build mDNS ServiceInfo")
-        .and_then(|info| Ok(info.enable_addr_auto()))
+        .map(|info| info.enable_addr_auto())
     }
 }
 

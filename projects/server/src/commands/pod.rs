@@ -29,8 +29,8 @@ pub fn cmd_pod_discover() -> Result<()> {
         return Ok(());
     }
     println!(
-        "{:<32} {:<16} {:<22} {:<10} {}",
-        "pubkey_fp", "hostname", "addr:port", "state", "can_invite"
+        "{:<32} {:<16} {:<22} {:<10} can_invite",
+        "pubkey_fp", "hostname", "addr:port", "state"
     );
     for r in rows {
         println!(
@@ -200,8 +200,8 @@ pub fn cmd_pod_list() -> Result<()> {
         return Ok(());
     }
     println!(
-        "{:<28} {:<16} {:<22} {:<8} {:<8} {}",
-        "peer_id", "hostname", "addr:port", "local", "peer", "status"
+        "{:<28} {:<16} {:<22} {:<8} {:<8} status",
+        "peer_id", "hostname", "addr:port", "local", "peer"
     );
     for p in peers {
         let status = if p.departed_at.is_some() {
@@ -327,7 +327,7 @@ pub fn cmd_pod_cert_status() -> Result<()> {
     let client_pem = std::fs::read_to_string(pki::mesh_client_cert_path(&pki_d)).ok();
     let bootstrap_pem = std::fs::read_to_string(pki::bootstrap_cert_path(&pki_d)).ok();
 
-    println!("{:<22} {:>14}  {}", "cert", "days remaining", "rotation");
+    println!("{:<22} {:>14}  rotation", "cert", "days remaining");
     print_cert_row("mesh CA", &ca_pem, pki::PEER_REFRESH_THRESHOLD_DAYS * 6);
     if let Some(p) = server_pem {
         print_cert_row("mesh server", &p, pki::PEER_REFRESH_THRESHOLD_DAYS);
@@ -366,7 +366,7 @@ fn print_cert_row(label: &str, pem: &str, threshold_days: i64) {
 
 pub async fn cmd_pod_ca_rotate(overlap_days: i64) -> Result<()> {
     anyhow::ensure!(
-        overlap_days >= 1 && overlap_days <= 90,
+        (1..=90).contains(&overlap_days),
         "overlap-days must be between 1 and 90"
     );
     let pki_d = pki_dir();
