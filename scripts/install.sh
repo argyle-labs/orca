@@ -340,6 +340,14 @@ printf '%s\n' "$CHANNEL" > "${ORCA_HOME_TARGET}/channel"
 # by daemon install.
 if [ "$RUN_AS_ORCA" = "1" ]; then
   chown -R "$ORCA_USER" "$ORCA_HOME_DIR/.local" "$ORCA_HOME_TARGET"
+  # System-wide symlink so any user on the box can invoke `orca` from PATH.
+  # The binary itself reads $HOME/.orca for state, so non-orca users get
+  # their own (empty) state; daemon/state operations still need
+  # `sudo -u $ORCA_USER orca …`.
+  if [ -d /usr/local/bin ] && [ ! -e /usr/local/bin/orca ]; then
+    ln -sf "${INSTALL_DIR}/orca" /usr/local/bin/orca \
+      && echo "✓ symlinked /usr/local/bin/orca → ${INSTALL_DIR}/orca"
+  fi
   echo "✓ installed: ${INSTALL_DIR}/orca  (channel: ${CHANNEL}, user: ${ORCA_USER})"
   echo "→ bootstrapping daemon as ${ORCA_USER} via system service"
   "${INSTALL_DIR}/orca" daemon install --service-user "$ORCA_USER" \
