@@ -64,6 +64,11 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
         crate::plugin_host::PluginRegistry::new(),
     );
 
+    // Pod mesh: mDNS responder + auto-offer scheduler. Both are best-effort:
+    // failures are logged and do not abort the daemon (a host without pod
+    // material can still serve plugins and the HTTP API).
+    spawn_pod_runtime(&pki_dir).await;
+
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -106,6 +111,9 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         orca_utils::config::APP_PLUGIN_PORT,
         crate::plugin_host::PluginRegistry::new(),
     );
+
+    // Pod mesh: mDNS responder + auto-offer scheduler (best-effort).
+    spawn_pod_runtime(&pki_dir).await;
 
     let mut sigterm = signal(SignalKind::terminate())?;
 
@@ -255,6 +263,30 @@ async fn scalar_handler(
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .body(Body::from(html))
         .expect("hardcoded headers are valid")
+}
+
+/// Best-effort startup of the pod-mesh runtime: mDNS responder + auto-offer
+/// scheduler. Returns even if the bootstrap key can't be generated (e.g.
+/// PKI dir unwritable) — pod features are simply unavailable for this run.
+async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
+    match crate::pod::mdns::build_advertisement(
+        pki_dir.to_path_buf(),
+        orca_utils::config::APP_PLUGIN_PORT,
+    ) {
+        Ok(ad) => match crate::pod::mdns::Mdns::start(ad) {
+            Ok(handle) => {
+                info!("[pod] mDNS responder + discoverer up");
+                // Leak the handle for daemon lifetime — the discovery task
+                // owns the daemon clone and rebroadcast happens on republish.
+                std::mem::forget(handle);
+            }
+            Err(e) => tracing::warn!("[pod] mDNS start failed: {e:#}"),
+        },
+        Err(e) => tracing::warn!("[pod] cannot build mDNS advertisement: {e:#}"),
+    }
+
+    let _ = crate::pod::scheduler::spawn();
+    info!("[pod] auto-offer scheduler armed");
 }
 
 fn pid_alive(pid: u32) -> bool {

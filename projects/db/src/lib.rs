@@ -679,20 +679,58 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         );
 
-        CREATE TABLE IF NOT EXISTS pod_invites (
-            token_hash   TEXT PRIMARY KEY,
-            expires_at   INTEGER NOT NULL,
-            used_at      INTEGER,
-            created_at   INTEGER NOT NULL,
-            issued_by_cn TEXT NOT NULL
+        -- pod_discovery: mDNS / manual-probe seen peers, keyed by ed25519
+        -- bootstrap pubkey fingerprint (stable across restarts and IP changes).
+        -- state = 'unclaimed' (no mesh CA) or 'pod:<pod_id>' (member of a pod).
+        -- can_invite = 1 iff that peer advertises it has the mesh CA private key
+        -- AND has self_secure=true. Auto-offer scheduler only targets state=unclaimed.
+        CREATE TABLE IF NOT EXISTS pod_discovery (
+            pubkey_fp     TEXT PRIMARY KEY,
+            peer_id       TEXT,
+            hostname      TEXT NOT NULL,
+            addr          TEXT NOT NULL,
+            port          INTEGER NOT NULL,
+            state         TEXT NOT NULL,
+            can_invite    INTEGER NOT NULL DEFAULT 0,
+            first_seen_at INTEGER NOT NULL,
+            last_seen_at  INTEGER NOT NULL
         );
 
+        -- pod_pending_offers: outstanding pairing offers in either direction.
+        -- direction='out' rows are offers WE pushed (inviter side); 'in' rows
+        -- are offers WE received and are waiting for the user to `pod accept`
+        -- with the matching code. code_hash is sha256(code) so the raw code
+        -- only lives in human memory + the wire blob.
+        CREATE TABLE IF NOT EXISTS pod_pending_offers (
+            offer_id        TEXT PRIMARY KEY,
+            direction       TEXT NOT NULL CHECK (direction IN ('in','out')),
+            peer_pubkey_fp  TEXT NOT NULL,
+            peer_hostname   TEXT NOT NULL,
+            peer_addr       TEXT NOT NULL,
+            peer_port       INTEGER NOT NULL,
+            code_hash       TEXT NOT NULL,
+            mesh_ca_cert_pem TEXT,
+            inviter_peer_id TEXT,
+            pod_id          TEXT,
+            expires_at      INTEGER NOT NULL,
+            created_at      INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pod_pending_offers_fp
+            ON pod_pending_offers (peer_pubkey_fp, direction);
+
+        -- pod_peers: paired members of the pod. port is the address of the
+        -- peer's pod surface; departed_at marks a peer that ran `pod leave`
+        -- and is no longer trusted until re-paired.
         CREATE TABLE IF NOT EXISTS pod_peers (
             peer_id       TEXT PRIMARY KEY,
             peer_hostname TEXT NOT NULL,
+            peer_addr     TEXT NOT NULL DEFAULT '',
+            peer_port     INTEGER NOT NULL DEFAULT 12002,
+            pubkey_fp     TEXT,
             ca_cert_pem   TEXT NOT NULL,
             first_seen_at INTEGER NOT NULL,
-            last_seen_at  INTEGER NOT NULL
+            last_seen_at  INTEGER NOT NULL,
+            departed_at   INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS pod_trust (
@@ -705,6 +743,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS pod_self (
             id          INTEGER PRIMARY KEY CHECK (id = 1),
             self_secure INTEGER NOT NULL DEFAULT 0,
+            pod_id      TEXT,
             set_at      INTEGER NOT NULL
         );
         ",

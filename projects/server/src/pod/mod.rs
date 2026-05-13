@@ -14,9 +14,13 @@
 //!
 //! v2 will add `pod/join`, `pod/list`, and the trust-promotion methods.
 
+mod bootstrap;
 pub mod db;
 mod listener;
+pub mod mdns;
+pub mod scheduler;
 
+pub use bootstrap::handle_pod_bootstrap_connection;
 pub use listener::handle_pod_connection;
 
 use anyhow::{Context, Result};

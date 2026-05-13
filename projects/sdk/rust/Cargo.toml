@@ -32,6 +32,15 @@ tokio-rustls     = { workspace = true }
 # Cert generation (pem + x509-parser required for from_ca_cert_pem)
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 
+# Bootstrap signing key for the pod pre-join channel. See pki::bootstrap_*.
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+# rcgen exposes cert validity windows as `time::OffsetDateTime`. We set them
+# explicitly (CA 10y, peer 2y) rather than relying on rcgen defaults.
+time = { version = "0.3", default-features = false, features = ["std"] }
+base64 = "0.22"
+
 # Direct cert parsing: needed to read the peer's CN out of the leaf cert
 # during the mTLS handshake so the plugin host can bind plugin_id → cert.
 x509-parser = "0.18"

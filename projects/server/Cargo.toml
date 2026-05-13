@@ -74,6 +74,13 @@ sha2   = { workspace = true }
 rand   = { workspace = true }
 base64 = "0.22"
 
+# Bootstrap signing for pod offer / join-confirm frames.
+ed25519-dalek = { workspace = true }
+
+# mDNS for pod peer discovery on the LAN. Pure-Rust, no avahi/bonjour dep.
+# We bridge its flume::Receiver<ServiceEvent> into a tokio task at startup.
+mdns-sd = "0.19"
+
 # Text width measurement (TUI from merged conversation)
 unicode-width = "0.2"
 
