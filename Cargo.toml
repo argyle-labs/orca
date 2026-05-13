@@ -56,6 +56,10 @@ jsonschema = { version = "0.46", default-features = false }
 # Hashing & RNG
 sha2 = "0.11"
 rand = "0.10"
+# Per-host bootstrap signing key for the pre-join channel (pod/offer +
+# pod/join-confirm). Independent of mesh PKI: this key is the orca's
+# "I am this host" anchor before any CA exists. PKCS8 PEM on disk.
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
 
 # REPL/TUI
 rustyline = "18"

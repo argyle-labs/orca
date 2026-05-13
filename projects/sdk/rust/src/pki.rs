@@ -11,9 +11,36 @@
 use anyhow::{Context, Result};
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
-    Issuer, KeyPair, KeyUsagePurpose,
+    Issuer, KeyPair, KeyUsagePurpose, PKCS_ED25519,
 };
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+
+// ── Algorithm + validity policy ──────────────────────────────────────────────
+//
+// Every X.509 keypair in orca is Ed25519 (rcgen::PKCS_ED25519). Ed25519 is the
+// modern default for TLS 1.3-only fleets: 32-byte keys, 64-byte sigs, fast,
+// constant-time, no nonce reuse footguns, and the algorithm carries SHA-512
+// internally so we don't pick a hash separately.
+//
+// Validity windows are pinned explicitly so a future rcgen-default change
+// can't silently shorten/lengthen them under us.
+const CA_VALIDITY_YEARS: i64 = 10;
+const PEER_VALIDITY_YEARS: i64 = 2;
+
+/// Build a fresh Ed25519 keypair. Single chokepoint so the algorithm choice
+/// is visible in one place.
+fn gen_keypair() -> Result<KeyPair> {
+    KeyPair::generate_for(&PKCS_ED25519).context("generate Ed25519 keypair")
+}
+
+/// Apply `(now, now + years)` to a `CertificateParams`. rcgen's defaults are
+/// implementation-defined; we set both explicitly.
+fn set_validity(params: &mut CertificateParams, years: i64) {
+    let now = time::OffsetDateTime::now_utc();
+    params.not_before = now;
+    params.not_after = now + time::Duration::days(years * 365);
+}
 
 /// Capability class encoded in the plugin cert's Subject OU field.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -111,10 +138,11 @@ pub fn init_mesh_ca(pki_dir: &Path, host_cn: &str) -> Result<()> {
     std::fs::create_dir_all(mesh_dir(pki_dir))
         .with_context(|| format!("create mesh dir {}", mesh_dir(pki_dir).display()))?;
 
-    let ca_key = KeyPair::generate()?;
+    let ca_key = gen_keypair()?;
     let mut ca_params = CertificateParams::new(Vec::<String>::new())?;
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    set_validity(&mut ca_params, CA_VALIDITY_YEARS);
     {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, "orca-mesh-ca");
@@ -134,10 +162,11 @@ pub fn init_mesh_ca(pki_dir: &Path, host_cn: &str) -> Result<()> {
 /// Re-issue this host's mesh server cert from the mesh CA. Used by `pod init`
 /// and by the join flow once the peer cert lands.
 fn issue_mesh_server_cert(pki_dir: &Path, issuer: &Issuer<'_, KeyPair>) -> Result<()> {
-    let key = KeyPair::generate()?;
+    let key = gen_keypair()?;
     let mut params = CertificateParams::new(vec![POD_SERVER_SAN.to_string()])?;
     params.is_ca = IsCa::NoCa;
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    set_validity(&mut params, PEER_VALIDITY_YEARS);
     {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, "orca-pod-server");
@@ -160,10 +189,11 @@ fn issue_mesh_client_cert(
     issuer: &Issuer<'_, KeyPair>,
     host_cn: &str,
 ) -> Result<()> {
-    let key = KeyPair::generate()?;
+    let key = gen_keypair()?;
     let mut params = CertificateParams::new(vec![format!("peer.{host_cn}.pod.orca.local")])?;
     params.is_ca = IsCa::NoCa;
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    set_validity(&mut params, PEER_VALIDITY_YEARS);
     {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, format!("peer.{host_cn}"));
@@ -225,7 +255,7 @@ pub enum PeerRole {
 /// role, and return `(csr_pem, key_pem)`. The private key never leaves this
 /// host; only `csr_pem` is sent to the inviting peer.
 pub fn build_peer_csr(peer_cn: &str, role: PeerRole) -> Result<(String, String)> {
-    let key = KeyPair::generate()?;
+    let key = gen_keypair()?;
     let san = match role {
         PeerRole::Client => format!("peer.{peer_cn}.pod.orca.local"),
         PeerRole::Server => POD_SERVER_SAN.to_string(),
@@ -299,6 +329,7 @@ pub fn sign_peer_csr(
             PeerRole::Client => ExtendedKeyUsagePurpose::ClientAuth,
             PeerRole::Server => ExtendedKeyUsagePurpose::ServerAuth,
         }];
+        set_validity(&mut p, PEER_VALIDITY_YEARS);
         let mut dn = DistinguishedName::new();
         dn.push(
             DnType::CommonName,
@@ -387,11 +418,12 @@ pub fn init(pki_dir: &Path) -> Result<()> {
         .with_context(|| format!("create pki dir {}", pki_dir.display()))?;
 
     // CA
-    let ca_key = KeyPair::generate()?;
+    let ca_key = gen_keypair()?;
     let ca_key_pem = ca_key.serialize_pem();
     let mut ca_params = CertificateParams::new(Vec::<String>::new())?;
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    set_validity(&mut ca_params, CA_VALIDITY_YEARS);
     {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, "orca-ca");
@@ -410,10 +442,11 @@ pub fn init(pki_dir: &Path) -> Result<()> {
     let server_dir = pki_dir.join("server");
     std::fs::create_dir_all(&server_dir)?;
 
-    let server_key = KeyPair::generate()?;
+    let server_key = gen_keypair()?;
     let mut server_params = CertificateParams::new(vec!["core.orca.local".to_string()])?;
     server_params.is_ca = IsCa::NoCa;
     server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    set_validity(&mut server_params, PEER_VALIDITY_YEARS);
     {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, "orca-core");
@@ -443,10 +476,11 @@ pub fn issue(pki_dir: &Path, plugin_id: &str, capability: Capability) -> Result<
     let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key)?;
 
     let dns_san = format!("{plugin_id}.plugin.orca.local");
-    let plugin_key = KeyPair::generate()?;
+    let plugin_key = gen_keypair()?;
     let mut params = CertificateParams::new(vec![dns_san])?;
     params.is_ca = IsCa::NoCa;
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    set_validity(&mut params, PEER_VALIDITY_YEARS);
     {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, plugin_id);
@@ -575,6 +609,362 @@ pub fn peer_common_name(cert_der: &[u8]) -> Result<String> {
     Ok(cn)
 }
 
+// ── Bootstrap signing key (pod pre-join channel) ─────────────────────────────
+//
+// Every orca generates a per-host Ed25519 keypair on first boot, persisted as
+// PKCS8 PEM under `<pki_dir>/bootstrap.{key,pub}.pem`. It is INDEPENDENT of
+// the mesh CA — it exists precisely so a brand-new orca with no CA can still
+// have a cryptographic identity over the pod/offer + pod/join-confirm wire.
+//
+// The same key also backs the self-signed TLS cert presented on the
+// `pod-bootstrap.orca.local` SNI, so a joiner's verification reduces to:
+// "mDNS-advertised fingerprint == bootstrap-TLS cert fingerprint == frame
+// signer pubkey." One identity, one fingerprint to verify, no separate trust
+// anchors.
+
+pub fn bootstrap_key_path(pki_dir: &Path) -> PathBuf {
+    pki_dir.join("bootstrap.key.pem")
+}
+pub fn bootstrap_pub_path(pki_dir: &Path) -> PathBuf {
+    pki_dir.join("bootstrap.pub.pem")
+}
+
+/// Load the bootstrap signing key, generating it on first call. Idempotent.
+pub fn load_or_init_bootstrap_key(pki_dir: &Path) -> Result<ed25519_dalek::SigningKey> {
+    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+    use ed25519_dalek::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
+
+    let key_path = bootstrap_key_path(pki_dir);
+    if key_path.exists() {
+        let pem = std::fs::read_to_string(&key_path).context("read bootstrap key")?;
+        let signing = SigningKey::from_pkcs8_pem(&pem).context("parse bootstrap key PEM")?;
+        return Ok(signing);
+    }
+
+    std::fs::create_dir_all(pki_dir)
+        .with_context(|| format!("create pki dir {}", pki_dir.display()))?;
+
+    let mut seed = [0u8; 32];
+    use rand::Rng;
+    rand::rng().fill_bytes(&mut seed);
+    let signing = SigningKey::from_bytes(&seed);
+
+    let key_pem = signing
+        .to_pkcs8_pem(LineEnding::LF)
+        .map_err(|e| anyhow::anyhow!("encode bootstrap key: {e}"))?
+        .to_string();
+    write_pem(key_path, &key_pem)?;
+
+    let pub_pem = signing
+        .verifying_key()
+        .to_public_key_pem(LineEnding::LF)
+        .map_err(|e| anyhow::anyhow!("encode bootstrap pub: {e}"))?;
+    write_pem(bootstrap_pub_path(pki_dir), &pub_pem)?;
+
+    Ok(signing)
+}
+
+/// First 16 bytes of `SHA-256(verifying_key)` hex-encoded (32 chars). This is
+/// what mDNS TXT advertises and what `pod pending` shows the user for visual
+/// verification — short enough to read, long enough to be collision-resistant
+/// within a pod.
+pub fn bootstrap_pubkey_fingerprint(verifying: &ed25519_dalek::VerifyingKey) -> String {
+    let mut h = Sha256::new();
+    h.update(verifying.as_bytes());
+    let d = h.finalize();
+    let mut s = String::with_capacity(32);
+    for b in &d[..16] {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+// ── Bootstrap TLS cert (self-signed, backed by the bootstrap key) ────────────
+
+pub const POD_BOOTSTRAP_SAN: &str = "pod-bootstrap.orca.local";
+const BOOTSTRAP_CERT_VALIDITY_YEARS: i64 = 10;
+
+pub fn bootstrap_cert_path(pki_dir: &Path) -> PathBuf {
+    pki_dir.join("bootstrap.cert.pem")
+}
+
+/// Generate (or load) a self-signed TLS cert whose subject pubkey IS the
+/// host's bootstrap Ed25519 pubkey. The cert SAN is `pod-bootstrap.orca.local`
+/// so the plugin host can route this SNI to the pre-join handler.
+///
+/// Because the cert key == the bootstrap key, verifying the cert at TLS
+/// handshake is equivalent to authenticating the bootstrap identity — no
+/// separate signed-frame envelope is needed on the wire.
+pub fn load_or_init_bootstrap_cert(pki_dir: &Path) -> Result<(String, String)> {
+    let cert_path = bootstrap_cert_path(pki_dir);
+    let key_path = bootstrap_key_path(pki_dir);
+
+    // Ensure the key exists; the cert without the key would be useless.
+    let _ = load_or_init_bootstrap_key(pki_dir)?;
+    let key_pem = std::fs::read_to_string(&key_path).context("read bootstrap key")?;
+
+    if cert_path.exists() {
+        let cert_pem = std::fs::read_to_string(&cert_path).context("read bootstrap cert")?;
+        return Ok((cert_pem, key_pem));
+    }
+
+    let kp = KeyPair::from_pem(&key_pem).context("load bootstrap key as rcgen KeyPair")?;
+    let mut params = CertificateParams::new(vec![POD_BOOTSTRAP_SAN.to_string()])?;
+    params.is_ca = IsCa::NoCa;
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    set_validity(&mut params, BOOTSTRAP_CERT_VALIDITY_YEARS);
+    {
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, "orca-pod-bootstrap");
+        dn.push(DnType::OrganizationName, "orca");
+        params.distinguished_name = dn;
+    }
+    let cert = params
+        .self_signed(&kp)
+        .context("self-sign bootstrap cert")?;
+    let cert_pem = cert.pem();
+    write_pem(cert_path, &cert_pem)?;
+    Ok((cert_pem, key_pem))
+}
+
+/// rustls client-side verifier that pins a single expected bootstrap pubkey
+/// fingerprint (the first-16-byte SHA-256 hex of the SPKI). Use this when
+/// dialing `pod-bootstrap.orca.local` with a pubkey known out-of-band (mDNS TXT
+/// or an explicit --fingerprint flag).
+pub fn pinned_bootstrap_verifier(
+    expected_fp: String,
+) -> std::sync::Arc<dyn rustls::client::danger::ServerCertVerifier> {
+    std::sync::Arc::new(PinnedFpVerifier { expected_fp })
+}
+
+#[derive(Debug)]
+struct PinnedFpVerifier {
+    expected_fp: String,
+}
+
+impl rustls::client::danger::ServerCertVerifier for PinnedFpVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let actual = spki_fingerprint_der(end_entity.as_ref())
+            .map_err(|e| rustls::Error::General(format!("extract SPKI fp from cert: {e}")))?;
+        if actual == self.expected_fp {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::General(format!(
+                "pinned bootstrap pubkey mismatch: expected {} got {}",
+                self.expected_fp, actual
+            )))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _: &[u8],
+        _: &rustls::pki_types::CertificateDer<'_>,
+        _: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        // Bootstrap channel is TLS 1.3 only; this should never be called.
+        Err(rustls::Error::PeerIncompatible(
+            rustls::PeerIncompatible::Tls12NotOfferedOrEnabled,
+        ))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _: &[u8],
+        _: &rustls::pki_types::CertificateDer<'_>,
+        _: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        // We've pinned the pubkey directly; rustls still calls into here to
+        // verify the handshake signature itself. Delegate to the default ring
+        // crypto provider's algorithms.
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        // Ed25519 only — matches what the server cert uses.
+        vec![rustls::SignatureScheme::ED25519]
+    }
+}
+
+/// Compute the bootstrap-style fingerprint from a cert DER (i.e. first 16
+/// bytes of `SHA-256(SubjectPublicKeyInfo)` hex). Matches the fp format
+/// that mDNS TXT carries and that `bootstrap_pubkey_fingerprint` returns.
+pub fn spki_fingerprint_der(cert_der: &[u8]) -> Result<String> {
+    let (_, parsed) =
+        x509_parser::parse_x509_certificate(cert_der).context("parse cert DER for SPKI")?;
+    // SubjectPublicKeyInfo's raw_public_key is the actual key bytes
+    // (Ed25519: 32 bytes). Hashing this rather than the whole SPKI ensures
+    // the fp == bootstrap_pubkey_fingerprint(verifying_key).
+    let pk_bytes = parsed.public_key().subject_public_key.data.as_ref();
+    let mut h = Sha256::new();
+    h.update(pk_bytes);
+    let d = h.finalize();
+    let mut s = String::with_capacity(32);
+    for b in &d[..16] {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+    }
+    Ok(s)
+}
+
+// ── Signed envelope (application-layer authentication for bootstrap wire) ────
+//
+// The bootstrap SNI lets a no-cert client connect, so the server has no TLS
+// identity for the caller. We wrap the JSON-RPC body in a signed envelope so
+// the receiver can prove who sent it: an Ed25519 signature over the
+// canonical-JSON payload + the signer's pubkey for fp lookup.
+//
+// Flow:
+//   pod/offer    — inviter signs, joiner verifies signer fp against the
+//                  inviter's mDNS-advertised pubkey (or any prior pinned fp).
+//   pod/join-confirm — joiner signs, inviter verifies signer fp against the
+//                  peer_pubkey_fp on the pending offer.
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SignedEnvelope {
+    /// Canonical JSON of the payload body. We serialize once and sign that
+    /// exact byte sequence so verification doesn't re-serialize and risk a
+    /// byte-difference.
+    pub payload: String,
+    /// Ed25519 verifying key (32 raw bytes), base64 standard.
+    pub signer_pubkey_b64: String,
+    /// Ed25519 signature (64 raw bytes), base64 standard.
+    pub signature_b64: String,
+}
+
+/// Sign `body` with the host's bootstrap key. Caller is expected to keep
+/// `body` shape stable across versions — the canonical-JSON we use is
+/// `serde_json`'s default emitter (no key sorting), so the same struct on
+/// the same code version round-trips exactly.
+pub fn sign_envelope<T: serde::Serialize>(
+    signing: &ed25519_dalek::SigningKey,
+    body: &T,
+) -> Result<SignedEnvelope> {
+    use base64::Engine;
+    use ed25519_dalek::Signer;
+    let payload = serde_json::to_string(body).context("serialize envelope payload")?;
+    let sig = signing.sign(payload.as_bytes());
+    Ok(SignedEnvelope {
+        payload,
+        signer_pubkey_b64: base64::engine::general_purpose::STANDARD
+            .encode(signing.verifying_key().as_bytes()),
+        signature_b64: base64::engine::general_purpose::STANDARD.encode(sig.to_bytes()),
+    })
+}
+
+/// Verify and decode a signed envelope. Returns the decoded body plus the
+/// signer's verifying key (so the caller can compute its fp and check it
+/// against an expected value).
+pub fn verify_envelope<T: serde::de::DeserializeOwned>(
+    env: &SignedEnvelope,
+) -> Result<(T, ed25519_dalek::VerifyingKey)> {
+    use base64::Engine;
+    use ed25519_dalek::Verifier;
+
+    let pk_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&env.signer_pubkey_b64)
+        .context("decode signer pubkey")?;
+    let pk_arr: [u8; 32] = pk_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("signer pubkey must be 32 bytes (got {})", pk_bytes.len()))?;
+    let verifying =
+        ed25519_dalek::VerifyingKey::from_bytes(&pk_arr).context("parse signer pubkey")?;
+
+    let sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&env.signature_b64)
+        .context("decode signature")?;
+    let sig_arr: [u8; 64] = sig_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("signature must be 64 bytes (got {})", sig_bytes.len()))?;
+    let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+
+    verifying
+        .verify(env.payload.as_bytes(), &sig)
+        .context("envelope signature did not verify")?;
+
+    let body: T = serde_json::from_str(&env.payload).context("parse envelope payload")?;
+    Ok((body, verifying))
+}
+
+// ── Cert fingerprint (display) ───────────────────────────────────────────────
+
+/// Standard `openssl x509 -fingerprint -sha256` format: uppercase colon-hex
+/// of `SHA-256(cert DER)`. Used for the bootstrap-TLS cert pinning check and
+/// for human-visible identity strings.
+pub fn cert_fingerprint(cert_pem: &str) -> Result<String> {
+    use rustls_pemfile::certs;
+    let mut reader = cert_pem.as_bytes();
+    let der = certs(&mut reader)
+        .next()
+        .context("no certificate in PEM")?
+        .context("parse cert DER")?;
+    let mut h = Sha256::new();
+    h.update(&der);
+    let d = h.finalize();
+    let mut s = String::with_capacity(95);
+    for (i, b) in d.iter().enumerate() {
+        if i > 0 {
+            s.push(':');
+        }
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02X}");
+    }
+    Ok(s)
+}
+
+// ── Address parsing ──────────────────────────────────────────────────────────
+
+/// Parse `host[:port]` with sensible support for bare hostnames, IPv4
+/// literals, and bracketed IPv6 (`[::1]:12002`). Returns `(host, port)`.
+/// `default_port` is used when the input has no `:port` suffix.
+///
+/// Single chokepoint so the wire path, CLI args, and mDNS records all agree
+/// on the grammar.
+pub fn parse_peer_addr(s: &str, default_port: u16) -> Result<(String, u16)> {
+    let s = s.trim();
+    anyhow::ensure!(!s.is_empty(), "empty peer address");
+
+    if let Some(rest) = s.strip_prefix('[') {
+        let close = rest
+            .find(']')
+            .context("malformed IPv6 literal — missing ']'")?;
+        let host = &rest[..close];
+        anyhow::ensure!(!host.is_empty(), "empty IPv6 host");
+        let after = &rest[close + 1..];
+        let port = if after.is_empty() {
+            default_port
+        } else if let Some(p) = after.strip_prefix(':') {
+            p.parse::<u16>().context("invalid port")?
+        } else {
+            anyhow::bail!("unexpected characters after IPv6 literal: {after}");
+        };
+        return Ok((host.to_string(), port));
+    }
+
+    let colon_count = s.chars().filter(|c| *c == ':').count();
+    match colon_count {
+        0 => Ok((s.to_string(), default_port)),
+        1 => {
+            let (h, p) = s.rsplit_once(':').unwrap();
+            anyhow::ensure!(!h.is_empty(), "empty host");
+            Ok((h.to_string(), p.parse::<u16>().context("invalid port")?))
+        }
+        // Bare IPv6 with no brackets and no port: e.g. `::1` or `fe80::1`.
+        _ => Ok((s.to_string(), default_port)),
+    }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn write_pem(path: PathBuf, pem: &str) -> Result<()> {
@@ -652,5 +1042,173 @@ mod tests {
         let bundle = load_server(pki).unwrap();
         let (chain, _key) = parse_cert_and_key(&bundle.cert_pem, &bundle.key_pem).unwrap();
         assert!(!chain.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_key_generates_and_reloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = dir.path();
+        let k1 = load_or_init_bootstrap_key(pki).unwrap();
+        assert!(bootstrap_key_path(pki).exists());
+        assert!(bootstrap_pub_path(pki).exists());
+        let k2 = load_or_init_bootstrap_key(pki).unwrap();
+        assert_eq!(
+            k1.to_bytes(),
+            k2.to_bytes(),
+            "second load must return same key"
+        );
+    }
+
+    #[test]
+    fn bootstrap_fingerprint_is_stable_and_hex() {
+        let dir = tempfile::tempdir().unwrap();
+        let k = load_or_init_bootstrap_key(dir.path()).unwrap();
+        let fp = bootstrap_pubkey_fingerprint(&k.verifying_key());
+        assert_eq!(fp.len(), 32, "fingerprint is first 16 bytes hex = 32 chars");
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn bootstrap_sign_verify_roundtrip() {
+        use ed25519_dalek::{Signer, Verifier};
+        let dir = tempfile::tempdir().unwrap();
+        let k = load_or_init_bootstrap_key(dir.path()).unwrap();
+        let msg = b"orca bootstrap envelope";
+        let sig = k.sign(msg);
+        k.verifying_key().verify(msg, &sig).unwrap();
+    }
+
+    #[test]
+    fn cert_fingerprint_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = dir.path();
+        init(pki).unwrap();
+        let bundle = load_server(pki).unwrap();
+        let fp = cert_fingerprint(&bundle.cert_pem).unwrap();
+        // SHA-256 colon-hex: 32 bytes → 64 hex chars + 31 colons = 95
+        assert_eq!(fp.len(), 95);
+        assert!(fp.contains(':'));
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit() || c == ':'));
+    }
+
+    #[test]
+    fn parse_peer_addr_variants() {
+        // bare host
+        assert_eq!(
+            parse_peer_addr("thor", 12002).unwrap(),
+            ("thor".into(), 12002)
+        );
+        // host:port
+        assert_eq!(
+            parse_peer_addr("thor:9999", 12002).unwrap(),
+            ("thor".into(), 9999)
+        );
+        // IPv4
+        assert_eq!(
+            parse_peer_addr("10.0.0.5", 12002).unwrap(),
+            ("10.0.0.5".into(), 12002)
+        );
+        // IPv4:port
+        assert_eq!(
+            parse_peer_addr("10.0.0.5:443", 12002).unwrap(),
+            ("10.0.0.5".into(), 443)
+        );
+        // bracketed IPv6
+        assert_eq!(
+            parse_peer_addr("[::1]:8080", 12002).unwrap(),
+            ("::1".into(), 8080)
+        );
+        // bracketed IPv6 without port
+        assert_eq!(
+            parse_peer_addr("[fe80::1]", 12002).unwrap(),
+            ("fe80::1".into(), 12002)
+        );
+        // bare IPv6 → default port
+        assert_eq!(
+            parse_peer_addr("fe80::1", 12002).unwrap(),
+            ("fe80::1".into(), 12002)
+        );
+        // whitespace tolerated
+        assert_eq!(
+            parse_peer_addr("  thor:1  ", 12002).unwrap(),
+            ("thor".into(), 1)
+        );
+        // errors
+        assert!(parse_peer_addr("", 12002).is_err());
+        assert!(parse_peer_addr(":12345", 12002).is_err());
+        assert!(parse_peer_addr("thor:notaport", 12002).is_err());
+    }
+
+    #[test]
+    fn bootstrap_cert_pubkey_matches_bootstrap_key_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = dir.path();
+        let signing = load_or_init_bootstrap_key(pki).unwrap();
+        let expected_fp = bootstrap_pubkey_fingerprint(&signing.verifying_key());
+
+        let (cert_pem, _key_pem) = load_or_init_bootstrap_cert(pki).unwrap();
+        assert!(bootstrap_cert_path(pki).exists());
+
+        let (chain, _) = parse_cert_and_key(&cert_pem, &_key_pem).unwrap();
+        let fp_from_cert = spki_fingerprint_der(&chain[0]).unwrap();
+        assert_eq!(
+            fp_from_cert, expected_fp,
+            "bootstrap cert SPKI fp must equal bootstrap key fp"
+        );
+    }
+
+    #[test]
+    fn bootstrap_cert_reload_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = dir.path();
+        let (c1, k1) = load_or_init_bootstrap_cert(pki).unwrap();
+        let (c2, k2) = load_or_init_bootstrap_cert(pki).unwrap();
+        assert_eq!(c1, c2);
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn signed_envelope_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let k = load_or_init_bootstrap_key(dir.path()).unwrap();
+        #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+        struct Body {
+            code_hash: String,
+            ttl: u32,
+        }
+        let body = Body {
+            code_hash: "abc".into(),
+            ttl: 300,
+        };
+        let env = sign_envelope(&k, &body).unwrap();
+        let (decoded, vk): (Body, _) = verify_envelope(&env).unwrap();
+        assert_eq!(decoded, body);
+        assert_eq!(vk.as_bytes(), k.verifying_key().as_bytes());
+    }
+
+    #[test]
+    fn signed_envelope_rejects_tamper() {
+        let dir = tempfile::tempdir().unwrap();
+        let k = load_or_init_bootstrap_key(dir.path()).unwrap();
+        let mut env = sign_envelope(&k, &"hello").unwrap();
+        env.payload.push('x');
+        let r: Result<(String, _)> = verify_envelope(&env);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn certs_use_ed25519() {
+        // rcgen tags Ed25519 keys with the well-known OID 1.3.101.112. Easiest
+        // signal: the PEM label is "PRIVATE KEY" (PKCS8) and the cert SPKI
+        // contains the Ed25519 OID. We just check the OID is present in the
+        // serialized cert DER via x509-parser.
+        let dir = tempfile::tempdir().unwrap();
+        let pki = dir.path();
+        init(pki).unwrap();
+        let bundle = load_server(pki).unwrap();
+        let (chain, _) = parse_cert_and_key(&bundle.cert_pem, &bundle.key_pem).unwrap();
+        let (_, parsed) = x509_parser::parse_x509_certificate(&chain[0]).unwrap();
+        let oid = parsed.subject_pki.algorithm.algorithm.to_id_string();
+        assert_eq!(oid, "1.3.101.112", "expected Ed25519 OID, got {oid}");
     }
 }

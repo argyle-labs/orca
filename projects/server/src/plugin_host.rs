@@ -289,31 +289,46 @@ pub async fn serve(
                 tokio::spawn(async move {
                     match acceptor.accept(tcp).await {
                         Ok(tls) => {
-                            // Cert is optional on the pod surface (pod/join is
-                            // the bootstrap path that issues the first cert).
-                            // Plugin surface still requires it.
-                            let peer_cn_opt = extract_peer_cn(&tls).ok();
                             let sni = tls
                                 .get_ref()
                                 .1
                                 .server_name()
                                 .map(str::to_string)
                                 .unwrap_or_default();
+
+                            // Bootstrap SNI: pre-join channel. No client cert
+                            // ever — the whole point is that the joiner has
+                            // no cert yet. Trust is established at the next
+                            // layer via pinned pubkey + pairing code.
+                            if sni == pki::POD_BOOTSTRAP_SAN {
+                                if let Err(e) =
+                                    crate::pod::handle_pod_bootstrap_connection(tls).await
+                                {
+                                    warn!("[plugin-host] {peer} bootstrap connection error: {e:#}");
+                                }
+                                return;
+                            }
+
+                            // Every other surface requires a verified client cert.
+                            let peer_cn = match extract_peer_cn(&tls).ok() {
+                                Some(cn) => cn,
+                                None => {
+                                    warn!(
+                                        "[plugin-host] {peer} connection lacks peer cert (sni={sni})"
+                                    );
+                                    return;
+                                }
+                            };
+
                             if sni == pki::POD_SERVER_SAN {
                                 if let Err(e) =
-                                    crate::pod::handle_pod_connection(tls, peer_cn_opt).await
+                                    crate::pod::handle_pod_connection(tls, peer_cn).await
                                 {
                                     warn!("[plugin-host] {peer} pod connection error: {e:#}");
                                 }
                                 return;
                             }
-                            let peer_cn = match peer_cn_opt {
-                                Some(cn) => cn,
-                                None => {
-                                    warn!("[plugin-host] {peer} plugin connection lacks peer cert");
-                                    return;
-                                }
-                            };
+
                             if let Err(e) = handle_connection(tls, registry, plugins, peer_cn).await
                             {
                                 warn!("[plugin-host] {peer} connection error: {e:#}");
@@ -378,11 +393,27 @@ fn build_acceptor(pki_dir: &Path) -> Result<TlsAcceptor> {
         info!("[plugin-host] mesh CA detected — pod SNI surface active");
     }
 
-    // Pod SNI needs to accept connections from un-joined hosts during bootstrap
-    // (the `pod/join` flow — joiner has no cert yet). Plugin SNI still rejects
-    // unauthenticated clients. We use `allow_unauthenticated()` here and then
-    // gate per-method inside the pod listener: `pod/join` permits no-cert,
-    // every other pod/* method requires a valid peer cert.
+    // Bootstrap SNI: self-signed cert backed by this host's bootstrap Ed25519
+    // key. Joiners pin its SPKI fingerprint (advertised via mDNS) so we don't
+    // need any CA chain on this surface. Always available — bootstrap is how
+    // a fresh orca joins its first pod.
+    let (bs_cert_pem, bs_key_pem) =
+        pki::load_or_init_bootstrap_cert(pki_dir).context("load bootstrap TLS cert")?;
+    let (bs_chain, bs_key) = pki::parse_cert_and_key(&bs_cert_pem, &bs_key_pem)?;
+    let bs_signing = CryptoProvider::get_default()
+        .context("no rustls CryptoProvider installed")?
+        .key_provider
+        .load_private_key(bs_key)
+        .context("load bootstrap private key")?;
+    let bs_ck = CertifiedKey::new(bs_chain, bs_signing);
+    resolver
+        .add(pki::POD_BOOTSTRAP_SAN, bs_ck)
+        .map_err(|e| anyhow::anyhow!("SNI resolver add bootstrap: {e}"))?;
+
+    // The bootstrap SNI accepts no client cert; everything else now requires
+    // a valid cert. The connection dispatcher (above) bypasses cert extraction
+    // entirely for POD_BOOTSTRAP_SAN, so we can use `allow_unauthenticated()`
+    // at the TLS layer and rely on the SNI-routing branch to gate trust.
     let client_cert_verifier = WebPkiClientVerifier::builder(Arc::new(roots))
         .allow_unauthenticated()
         .build()

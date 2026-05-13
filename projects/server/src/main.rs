@@ -133,18 +133,18 @@ enum PodAction {
     Init,
     /// Send a `pod/ping` to a peer over mTLS (SNI=pod.orca.local) and print the result.
     Ping { host: String },
-    /// Mint a single-use invite token bound to this host's mesh CA.
-    Invite {
-        /// Time-to-live in seconds (default 600 = 10 min).
-        #[arg(long, default_value_t = 600)]
-        ttl: i64,
-    },
-    /// Redeem an invite blob (ORCA_POD_INVITE …) — generates local CSRs,
-    /// receives signed certs from the inviting host, installs them.
-    Join {
-        /// The base64 blob printed by `orca pod invite` on the inviter.
-        blob: String,
-    },
+    /// Show orcas seen on the network (mDNS-discovered).
+    Discover,
+    /// Show pending pod-membership offers awaiting `pod accept`.
+    Pending,
+    /// Accept an inbound offer by pairing code (printed on the inviter's CLI).
+    Accept { code: String },
+    /// Manual fallback when mDNS doesn't see the inviter — point at a
+    /// specific addr `host[:port]`.
+    Connect { addr: String },
+    /// Manually push an offer to a known address (inviter side, when
+    /// mDNS doesn't see the joiner).
+    Offer { addr: String },
     /// List known peers and their trust state.
     List,
     /// Mark a peer as locally trusted (or untrust). Triggers CA-key
@@ -156,10 +156,20 @@ enum PodAction {
         state: String,
     },
     /// Toggle whether THIS host stores secrets locally. Default off on
-    /// non-founder hosts; founder pod-init flips it on automatically.
+    /// fresh joiners; `pod init` flips it on automatically.
     SelfSecure {
         #[arg(value_parser = ["on", "off", "show"], default_value = "show")]
         state: String,
+    },
+    /// Leave the pod. Notifies peers, wipes mesh PKI + pod tables.
+    /// Use `--wipe-secrets` to also truncate the secrets table; `--wipe-all`
+    /// for a near-fresh-install state (also wipes plugin_data, oauth tokens,
+    /// profile credentials). Bootstrap identity (host pubkey) is preserved.
+    Leave {
+        #[arg(long)]
+        wipe_secrets: bool,
+        #[arg(long)]
+        wipe_all: bool,
     },
 }
 
@@ -285,13 +295,22 @@ async fn main() -> Result<()> {
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| "unknown".to_string());
                 orca_sdk::pki::init_mesh_ca(&pki, &host)?;
-                // Founder is the canonical secure host — admit invites + store secrets.
+                // Ensure the bootstrap identity (Ed25519 key + self-signed
+                // cert) is present from the moment this host is poddable.
+                orca_sdk::pki::load_or_init_bootstrap_cert(&pki)?;
                 let conn = db::open_default()?;
                 orca::pod::db::set_self_secure(&conn, true)?;
+                let pod_id = format!("pod-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+                orca::pod::db::set_pod_id(&conn, &pod_id)?;
                 println!("✓ mesh CA initialized at {}", pki.join("mesh").display());
+                println!("  pod id: {pod_id}");
                 println!("  founder host CN: peer.{host}");
                 println!("  self_secure: true (secrets storage enabled)");
-                println!("  next: `orca pod invite` and run `orca pod join` on the joiner");
+                println!(
+                    "  next: start the daemon. Auto-offers will flow to any \
+                     unclaimed orca on the LAN; user accepts on the joiner with \
+                     `orca pod accept <code>` (the code is printed in the daemon log here)."
+                );
                 Ok(())
             }
             PodAction::Ping { host } => {
@@ -302,8 +321,11 @@ async fn main() -> Result<()> {
                 println!("  version: {}", result.version);
                 Ok(())
             }
-            PodAction::Invite { ttl } => cmd::pod::cmd_pod_invite(ttl),
-            PodAction::Join { blob } => cmd::pod::cmd_pod_join(&blob).await,
+            PodAction::Discover => cmd::pod::cmd_pod_discover(),
+            PodAction::Pending => cmd::pod::cmd_pod_pending(),
+            PodAction::Accept { code } => cmd::pod::cmd_pod_accept(&code).await,
+            PodAction::Connect { addr } => cmd::pod::cmd_pod_connect(&addr).await,
+            PodAction::Offer { addr } => cmd::pod::cmd_pod_offer(&addr).await,
             PodAction::List => cmd::pod::cmd_pod_list(),
             PodAction::Trust { peer_id, state } => {
                 cmd::pod::cmd_pod_trust(&peer_id, state == "on").await
@@ -317,6 +339,10 @@ async fn main() -> Result<()> {
                 };
                 cmd::pod::cmd_pod_self_secure(action)
             }
+            PodAction::Leave {
+                wipe_secrets,
+                wipe_all,
+            } => cmd::pod::cmd_pod_leave(wipe_secrets, wipe_all).await,
         },
         Some(Command::Spec { action }) => match action {
             SpecAction::Dump => {

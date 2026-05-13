@@ -4,15 +4,15 @@
 
 //! Server-side handler for SNI=pod.orca.local connections.
 //!
-//! Per-method auth gate: pod/join is the only method allowed without a peer
-//! cert (it's the bootstrap path that issues the cert). Every other method
-//! requires the connection to have presented a valid mesh-CA-signed client
-//! cert at the TLS handshake.
+//! Every method on this surface requires a verified mesh-CA-signed client
+//! cert (the plugin host's TLS layer rejects connections without one). The
+//! pre-join methods (pod/offer, pod/join-confirm) live on a separate SNI
+//! (pod-bootstrap.orca.local) — see super::bootstrap.
 
 use anyhow::{Context, Result};
 use orca_sdk::framing::{read_frame, write_frame};
 use orca_sdk::jsonrpc::{ErrorObject, Message, Request, Response};
-use orca_sdk::pki::{self, PeerRole};
+use orca_sdk::pki;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_rustls::server::TlsStream;
@@ -20,27 +20,10 @@ use tracing::warn;
 
 use super::{POD_PING_METHOD, PodPingResult, db as pdb, pki_dir};
 
-const POD_JOIN_METHOD: &str = "pod/join";
 const POD_NOTIFY_TRUST_METHOD: &str = "pod/notify-trust";
 const POD_HAS_CA_KEY_METHOD: &str = "pod/has-ca-key";
 const POD_PUSH_CA_KEY_METHOD: &str = "pod/push-ca-key";
-
-/// Pod-join request body. `joiner_hostname` becomes the CN of both certs;
-/// the founder enforces naming regardless of what the CSRs claim.
-#[derive(Debug, Deserialize)]
-struct PodJoinParams {
-    token: String,
-    joiner_hostname: String,
-    csr_client_pem: String,
-    csr_server_pem: String,
-}
-
-#[derive(Debug, Serialize)]
-struct PodJoinResult {
-    client_cert_pem: String,
-    server_cert_pem: String,
-    ca_cert_pem: String,
-}
+const POD_PEER_LEAVING_METHOD: &str = "pod/peer-leaving";
 
 #[derive(Debug, Deserialize)]
 struct NotifyTrustParams {
@@ -60,7 +43,7 @@ struct PushCaKeyParams {
 
 pub async fn handle_pod_connection(
     mut tls: TlsStream<tokio::net::TcpStream>,
-    peer_cn: Option<String>,
+    peer_cn: String,
 ) -> Result<()> {
     let frame_bytes = read_frame(&mut tls).await.context("read pod frame")?;
     let msg: Message =
@@ -68,7 +51,7 @@ pub async fn handle_pod_connection(
     let request = match msg {
         Message::Request(r) => r,
         Message::Response(_) | Message::Notification(_) => {
-            warn!("[pod] {peer_cn:?} sent non-request frame; closing");
+            warn!("[pod] {peer_cn} sent non-request frame; closing");
             return Ok(());
         }
     };
@@ -82,99 +65,60 @@ pub async fn handle_pod_connection(
     Ok(())
 }
 
-async fn dispatch(request: Request, peer_cn: &Option<String>) -> Response {
+async fn dispatch(request: Request, peer_cn: &str) -> Response {
     let method = request.method.clone();
     let id = request.id.clone();
 
-    // Auth gate: pod/join is the only method that accepts a no-cert
-    // connection. Every other method requires a verified peer cert.
-    if method != POD_JOIN_METHOD && peer_cn.is_none() {
-        return Response::err(
-            id,
-            ErrorObject::method_not_found(&format!(
-                "pod method '{method}' requires a mesh client certificate"
-            )),
-        );
+    // Departed peers are rejected at the gate — they need to re-pair before
+    // we'll talk to them again. pod/peer-leaving is the one exception: a
+    // peer that's already departed can re-send leaving without harm.
+    if method != POD_PEER_LEAVING_METHOD {
+        match db::open_default() {
+            Ok(conn) => {
+                if let Ok(true) = pdb::is_peer_departed(&conn, peer_cn) {
+                    return Response::err(
+                        id,
+                        ErrorObject::method_not_found(&format!(
+                            "peer {peer_cn} has departed this pod; re-pair to re-establish trust"
+                        )),
+                    );
+                }
+            }
+            Err(_) => { /* DB unavailable — fall through to method handlers, which will fail with a clearer error */
+            }
+        }
     }
 
     match method.as_str() {
         POD_PING_METHOD => {
             let result = PodPingResult {
-                peer_id: peer_cn.clone().unwrap_or_else(|| "anonymous".into()),
+                peer_id: peer_cn.to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 hostname: gethostname_string(),
             };
             value_response(id, &result)
         }
-        POD_JOIN_METHOD => match handle_join(request).await {
-            Ok(r) => value_response(id, &r),
+        POD_NOTIFY_TRUST_METHOD => match handle_notify_trust(peer_cn, request) {
+            Ok(()) => Response::ok(id, Value::Null),
             Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
         },
-        POD_NOTIFY_TRUST_METHOD => {
-            let cn = peer_cn.clone().unwrap_or_default();
-            match handle_notify_trust(&cn, request) {
-                Ok(()) => Response::ok(id, Value::Null),
-                Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
-            }
-        }
         POD_HAS_CA_KEY_METHOD => {
             let has = pki::has_mesh_ca_key(&pki_dir());
             value_response(id, &HasCaKeyResult { has_key: has })
         }
-        POD_PUSH_CA_KEY_METHOD => {
-            let cn = peer_cn.clone().unwrap_or_default();
-            match handle_push_ca_key(&cn, request) {
-                Ok(()) => Response::ok(id, Value::Null),
-                Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
-            }
-        }
+        POD_PUSH_CA_KEY_METHOD => match handle_push_ca_key(peer_cn, request) {
+            Ok(()) => Response::ok(id, Value::Null),
+            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+        },
+        POD_PEER_LEAVING_METHOD => match handle_peer_leaving(peer_cn) {
+            Ok(()) => Response::ok(id, Value::Null),
+            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+        },
         other => Response::err(
             id,
             ErrorObject::method_not_found(&format!("pod method '{other}' not supported")),
         ),
     }
-}
-
-async fn handle_join(request: Request) -> Result<PodJoinResult> {
-    let params: PodJoinParams = match request.params {
-        Some(v) => serde_json::from_value(v).context("parse pod/join params")?,
-        None => anyhow::bail!("pod/join requires params"),
-    };
-
-    let conn = db::open_default().context("open orca.db")?;
-    let token_hash = pdb::hash_token(&params.token);
-    if !pdb::redeem_invite(&conn, &token_hash)? {
-        anyhow::bail!("invite token invalid, expired, or already used");
-    }
-
-    let pki = pki_dir();
-    let ca_cert_pem =
-        std::fs::read_to_string(pki::mesh_ca_cert_path(&pki)).context("read mesh CA cert")?;
-    let (client_cert_pem, _) = pki::sign_peer_csr(
-        &pki,
-        &params.csr_client_pem,
-        &params.joiner_hostname,
-        PeerRole::Client,
-    )?;
-    let (server_cert_pem, _) = pki::sign_peer_csr(
-        &pki,
-        &params.csr_server_pem,
-        &params.joiner_hostname,
-        PeerRole::Server,
-    )?;
-
-    pdb::upsert_peer(
-        &conn,
-        &format!("peer.{}", params.joiner_hostname),
-        &params.joiner_hostname,
-        &ca_cert_pem,
-    )?;
-
-    Ok(PodJoinResult {
-        client_cert_pem,
-        server_cert_pem,
-        ca_cert_pem,
-    })
 }
 
 fn handle_notify_trust(peer_cn: &str, request: Request) -> Result<()> {
@@ -200,6 +144,12 @@ fn handle_push_ca_key(peer_cn: &str, request: Request) -> Result<()> {
         );
     }
     pki::import_mesh_ca_keypair(&pki_dir(), &params.cert_pem, &params.key_pem)?;
+    Ok(())
+}
+
+fn handle_peer_leaving(peer_cn: &str) -> Result<()> {
+    let conn = db::open_default()?;
+    pdb::mark_peer_departed(&conn, peer_cn)?;
     Ok(())
 }
 
