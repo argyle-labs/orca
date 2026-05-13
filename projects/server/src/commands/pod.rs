@@ -1,3 +1,7 @@
+// JSON-RPC envelopes are inherently opaque at the wire boundary; mirroring
+// the allow in projects/sdk/rust/src/jsonrpc.rs.
+#![allow(clippy::disallowed_types)]
+
 //! CLI handlers for `orca pod {invite,join,list,trust,self-secure}`.
 //!
 //! Init + ping live in main.rs / pod::ping; everything DB-touching or
