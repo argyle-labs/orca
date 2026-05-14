@@ -17,6 +17,16 @@ pub struct EmptyArgs {}
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodPeerAddressDto {
+    pub kind: String,
+    pub value: String,
+    pub source: String,
+    pub last_seen_at: i64,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodPeerDto {
     pub peer_id: String,
     pub hostname: String,
@@ -27,6 +37,10 @@ pub struct PodPeerDto {
     pub peer_secure: bool,
     /// "active" | "departed".
     pub status: String,
+    /// Multi-channel addresses (LAN v4/v6, Tailscale, FQDN, …). May be empty
+    /// for peers paired before slice 4 of the host-addressing plan landed.
+    #[serde(default)]
+    pub addresses: Vec<PodPeerAddressDto>,
 }
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
@@ -51,6 +65,17 @@ mod native {
     use orca_db as db;
     use orca_utils::tool::{OrcaTool, ToolCtx};
 
+    impl From<db::host_addressing::PodPeerAddress> for PodPeerAddressDto {
+        fn from(a: db::host_addressing::PodPeerAddress) -> Self {
+            Self {
+                kind: a.kind,
+                value: a.value,
+                source: a.source,
+                last_seen_at: a.last_seen_at,
+            }
+        }
+    }
+
     impl From<db::pod::PeerSummary> for PodPeerDto {
         fn from(p: db::pod::PeerSummary) -> Self {
             Self {
@@ -62,6 +87,7 @@ mod native {
                 local_secure: p.local_secure,
                 peer_secure: p.peer_secure,
                 status: p.status,
+                addresses: p.addresses.into_iter().map(Into::into).collect(),
             }
         }
     }

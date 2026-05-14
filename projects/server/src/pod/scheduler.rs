@@ -144,6 +144,7 @@ async fn push_offer(
         pod_id: &'a str,
         code_hash: String,
         expires_at: i64,
+        inviter_display_name: &'a str,
     }
     let body = OfferBody {
         inviter_peer_id: &inviter_peer_id,
@@ -154,6 +155,7 @@ async fn push_offer(
         pod_id,
         code_hash: pdb::hash_code(code),
         expires_at: now_secs() + OFFER_TTL_SECS,
+        inviter_display_name: &inviter_hostname,
     };
     let env = pki::sign_envelope(&signing, &body)?;
 

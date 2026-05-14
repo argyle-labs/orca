@@ -18,6 +18,7 @@ pub mod docker;
 pub mod docs;
 pub mod engine;
 pub mod homeassistant;
+pub mod host;
 pub mod infra;
 pub mod json_any;
 pub mod meta;
@@ -190,6 +191,11 @@ declare_tools! {
 
     // ── Pod / mesh ──────────────────────────────────────────────────────────
     pod_list => pod::PodList [d:"pod", v:"list"],
+
+    // ── Host addressing ─────────────────────────────────────────────────────
+    host_info    => host::HostInfo    [d:"host", v:"info"],
+    host_set     => host::HostSet     [d:"host", v:"set"],
+    host_refresh => host::HostRefresh [d:"host", v:"refresh"],
 
     // ── Engine registry (bespoke colored rendering kept in engine.rs) ──────
     engine_list      => engine::EngineList    [d:"engine", v:"list",    cli: manual],

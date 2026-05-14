@@ -40,6 +40,10 @@ const POD_JOIN_CONFIRM_METHOD: &str = "pod/join-confirm";
 #[derive(Debug, Serialize, Deserialize)]
 struct OfferBody {
     inviter_peer_id: String,
+    /// On the wire this is the inviter's stable identity label (today =
+    /// `machine_id_short`). Kept named `inviter_hostname` for wire compat
+    /// with rc.≤24 daemons; new field `inviter_display_name` carries the
+    /// human-readable hostname.
     inviter_hostname: String,
     inviter_addr: String,
     inviter_port: u16,
@@ -47,6 +51,10 @@ struct OfferBody {
     pod_id: String,
     code_hash: String,
     expires_at: i64,
+    /// Human-readable hostname (slice 7). Optional + serde(default) so an
+    /// rc.25 daemon can parse an rc.24 OfferBody that omits the field.
+    #[serde(default)]
+    inviter_display_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,9 +69,17 @@ struct OfferAck {
 #[derive(Debug, Serialize, Deserialize)]
 struct JoinConfirmBody {
     code: String,
+    /// Cert CN material — stable `machine_id_short` of the joiner. The
+    /// name `joiner_hostname` is kept for wire compat with rc.≤24
+    /// daemons (which conflated CN with hostname); new field
+    /// `joiner_display_name` carries the human label.
     joiner_hostname: String,
     csr_client_pem: String,
     csr_server_pem: String,
+    /// Human-readable hostname (slice 7). Optional + serde(default) for
+    /// rc.24 wire compat.
+    #[serde(default)]
+    joiner_display_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -200,10 +216,17 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
     )?;
 
     let joiner_peer_id = format!("peer.{}", body.joiner_hostname);
+    // Prefer the explicit display name if the joiner sent one (rc.25+);
+    // fall back to the CN-shaped `joiner_hostname` for rc.≤24 compat so
+    // existing peers don't go nameless mid-rollout.
+    let peer_label = body
+        .joiner_display_name
+        .as_deref()
+        .unwrap_or(&body.joiner_hostname);
     pdb::upsert_peer(
         &conn,
         &joiner_peer_id,
-        &body.joiner_hostname,
+        peer_label,
         &offer.peer_addr,
         offer.peer_port,
         Some(&signer_fp),

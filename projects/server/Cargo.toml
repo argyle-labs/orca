@@ -81,6 +81,10 @@ ed25519-dalek = { workspace = true }
 # We bridge its flume::Receiver<ServiceEvent> into a tokio task at startup.
 mdns-sd = "0.19"
 
+# Enumerate local network interfaces for host addressing autodetect
+# (host_identity::detect_all). Pure Rust, cross-platform.
+if-addrs = "0.14"
+
 # Text width measurement (TUI from merged conversation)
 unicode-width = "0.2"
 

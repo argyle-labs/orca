@@ -5,6 +5,7 @@
 //! mTLS/bootstrap state machine. This module exists so non-server crates
 //! can read the list of paired peers without taking a server dep.
 
+use crate::host_addressing::{self, PodPeerAddress};
 use anyhow::Result;
 use rusqlite::Connection;
 
@@ -18,6 +19,10 @@ pub struct PeerSummary {
     pub local_secure: bool,
     pub peer_secure: bool,
     pub status: String,
+    /// Multi-channel addresses learned for this peer (LAN v4/v6, Tailscale,
+    /// FQDN, etc.). Empty if no rows in `pod_peer_addresses` for this peer.
+    #[serde(default)]
+    pub addresses: Vec<PodPeerAddress>,
 }
 
 pub fn list_peers(conn: &Connection) -> Result<Vec<PeerSummary>> {
@@ -29,7 +34,7 @@ pub fn list_peers(conn: &Connection) -> Result<Vec<PeerSummary>> {
          LEFT JOIN pod_trust t ON t.peer_id = p.peer_id
          ORDER BY p.last_seen_at DESC",
     )?;
-    let rows = stmt
+    let mut rows = stmt
         .query_map([], |r| {
             let departed_at: Option<i64> = r.get(5)?;
             let status = if departed_at.is_some() {
@@ -47,8 +52,16 @@ pub fn list_peers(conn: &Connection) -> Result<Vec<PeerSummary>> {
                 local_secure: r.get::<_, i64>(6)? != 0,
                 peer_secure: r.get::<_, i64>(7)? != 0,
                 status,
+                addresses: Vec::new(),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    // Attach per-peer addresses. Done as a follow-up query (rather than a
+    // JOIN in the main SELECT) because each peer has 0..N rows in
+    // `pod_peer_addresses` — flattening would force a dedup pass on the
+    // peer scalars. Peer counts are small (handful per pod), so N+1 is fine.
+    for peer in &mut rows {
+        peer.addresses = host_addressing::list_peer_addresses(conn, &peer.peer_id)?;
+    }
     Ok(rows)
 }
