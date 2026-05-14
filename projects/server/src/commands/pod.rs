@@ -90,9 +90,14 @@ pub async fn cmd_pod_accept(code: &str) -> Result<()> {
 
     // Cert CN = stable machine_id (not the display hostname, which on macOS
     // mutates on mDNS conflicts and would force a re-issue on every flap).
-    let hostname = crate::host_identity::machine_id_short().to_string();
-    let (csr_client_pem, client_key_pem) = pki::build_peer_csr(&hostname, PeerRole::Client)?;
-    let (csr_server_pem, server_key_pem) = pki::build_peer_csr(&hostname, PeerRole::Server)?;
+    // `peer_cn` is the CN material that goes into the CSR + wire
+    // `joiner_hostname`; `display_name` is the human label that lands in
+    // `pod_peers.peer_hostname` on the inviter side via the new
+    // `joiner_display_name` wire field.
+    let peer_cn = crate::host_identity::machine_id_short().to_string();
+    let display_name = crate::host_identity::display_hostname().to_string();
+    let (csr_client_pem, client_key_pem) = pki::build_peer_csr(&peer_cn, PeerRole::Client)?;
+    let (csr_server_pem, server_key_pem) = pki::build_peer_csr(&peer_cn, PeerRole::Server)?;
 
     // Dial inviter's bootstrap SNI, pinned to the fp stored on the offer row.
     let signing = pki::load_or_init_bootstrap_key(&pki_d)?;
@@ -102,12 +107,14 @@ pub async fn cmd_pod_accept(code: &str) -> Result<()> {
         joiner_hostname: &'a str,
         csr_client_pem: &'a str,
         csr_server_pem: &'a str,
+        joiner_display_name: &'a str,
     }
     let body = ConfirmBody {
         code,
-        joiner_hostname: &hostname,
+        joiner_hostname: &peer_cn,
         csr_client_pem: &csr_client_pem,
         csr_server_pem: &csr_server_pem,
+        joiner_display_name: &display_name,
     };
     let env = pki::sign_envelope(&signing, &body)?;
 

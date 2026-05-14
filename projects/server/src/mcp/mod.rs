@@ -101,6 +101,11 @@ pub fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
     let secrets_svc: Arc<dyn orca_tools_def::services::secrets::SecretsService> =
         Arc::new(crate::mcp::secrets_service::DbSecretsService::new());
     ctx.register_service(secrets_svc.clone());
+    // Host-addressing refresh hook: host.refresh tool calls into this to
+    // trigger a fresh detect + persist before reading host_addressing rows.
+    let host_refresh: Arc<dyn orca_tools_def::host::HostRefreshHook + Send + Sync> =
+        Arc::new(crate::host_identity::ServerHostRefreshHook);
+    ctx.register_service(host_refresh);
     let lifecycle_svc: Arc<dyn orca_tools_def::services::lifecycle::LifecycleService> =
         Arc::new(crate::mcp::lifecycle_service::ServerLifecycle {
             config: ctx.config.clone(),

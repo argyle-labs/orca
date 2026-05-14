@@ -21,6 +21,8 @@
 //! during development rather than silently using a fallback.
 
 use anyhow::{Context, Result};
+use db::host_addressing::{self, HostAddressingRow};
+use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -45,6 +47,12 @@ pub fn hostname() -> &'static str {
         .get()
         .expect("host_identity::init() must run before hostname()")
         .as_str()
+}
+
+/// Alias of [`hostname`] using the slice-7 vocabulary (`display_hostname`
+/// distinguishes the human label from the `machine_id` identity key).
+pub fn display_hostname() -> &'static str {
+    hostname()
 }
 
 /// Stable per-machine UUID. Panics if `init` has not run.
@@ -105,6 +113,193 @@ fn load_or_generate_machine_id(app_dir: &Path) -> Result<String> {
     std::fs::write(&path, format!("{id}\n"))
         .with_context(|| format!("write {}", path.display()))?;
     Ok(id)
+}
+
+// ── Multi-channel addressing detection (slice 2) ─────────────────────────────
+
+const KEY_DISPLAY_NAME: &str = "display_name";
+const KEY_FQDN: &str = "fqdn";
+const KEY_LAN_V4: &str = "lan_v4";
+const KEY_LAN_V6: &str = "lan_v6";
+const KEY_TAILSCALE_V4: &str = "tailscale_v4";
+const KEY_TAILSCALE_V6: &str = "tailscale_v6";
+
+const SOURCE_MANUAL: &str = "manual";
+const SOURCE_AUTODETECT: &str = "autodetect";
+
+/// Names commonly applied to virtual/container interfaces we want to skip
+/// when picking LAN addresses. Substring match.
+const VIRTUAL_IFACE_MARKERS: &[&str] = &["docker", "br-", "veth", "tailscale", "utun"];
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn make_row(key: &str, value: String, source: &str) -> HostAddressingRow {
+    HostAddressingRow {
+        key: key.to_string(),
+        value,
+        source: source.to_string(),
+        detected_at: now_secs(),
+    }
+}
+
+/// Detect every addressing channel for this host. Pure (no DB writes).
+/// Settings-sourced rows (display_name when overridden, fqdn) are marked
+/// `manual`; everything else is `autodetect`. Tailscale is skipped silently
+/// if the `tailscale` binary is missing or exits non-zero.
+pub fn detect_all(conn: &Connection) -> Vec<HostAddressingRow> {
+    let mut out = Vec::new();
+
+    // display_name: setting wins; OS hostname fallback.
+    let (display_value, display_source) = match db::settings::get(conn, "host.display_name") {
+        Ok(Some(v)) if !v.trim().is_empty() => (v, SOURCE_MANUAL),
+        _ => (hostname().to_string(), SOURCE_AUTODETECT),
+    };
+    out.push(make_row(KEY_DISPLAY_NAME, display_value, display_source));
+
+    // fqdn: manual-only at this slice (Caddy autodetect = slice 4b).
+    if let Ok(Some(v)) = db::settings::get(conn, "host.fqdn") {
+        let v = v.trim().to_string();
+        if !v.is_empty() {
+            out.push(make_row(KEY_FQDN, v, SOURCE_MANUAL));
+        }
+    }
+
+    // LAN: enumerate interfaces, skip loopback + virtual.
+    if let Ok(ifs) = if_addrs::get_if_addrs() {
+        let mut v4: Option<String> = None;
+        let mut v6: Option<String> = None;
+        for iface in ifs {
+            if iface.is_loopback() {
+                continue;
+            }
+            let name_lower = iface.name.to_lowercase();
+            if VIRTUAL_IFACE_MARKERS.iter().any(|m| name_lower.contains(m)) {
+                continue;
+            }
+            match iface.ip() {
+                std::net::IpAddr::V4(ip) => {
+                    if v4.is_none() {
+                        v4 = Some(ip.to_string());
+                    }
+                }
+                std::net::IpAddr::V6(ip) => {
+                    if v6.is_none() && !ip.is_loopback() {
+                        v6 = Some(ip.to_string());
+                    }
+                }
+            }
+        }
+        if let Some(v) = v4 {
+            out.push(make_row(KEY_LAN_V4, v, SOURCE_AUTODETECT));
+        }
+        if let Some(v) = v6 {
+            out.push(make_row(KEY_LAN_V6, v, SOURCE_AUTODETECT));
+        }
+    }
+
+    // Tailscale: ask `tailscale status --self --json`. Missing binary or
+    // nonzero exit = silently skip (host isn't on Tailscale).
+    if let Some((v4, v6)) = detect_tailscale_ips() {
+        if let Some(v) = v4 {
+            out.push(make_row(KEY_TAILSCALE_V4, v, SOURCE_AUTODETECT));
+        }
+        if let Some(v) = v6 {
+            out.push(make_row(KEY_TAILSCALE_V6, v, SOURCE_AUTODETECT));
+        }
+    }
+
+    out
+}
+
+/// Minimal subset of `tailscale status --self --json` we actually consume.
+/// The real schema has many more fields; serde will ignore them by default.
+#[derive(serde::Deserialize)]
+struct TailscaleStatus {
+    #[serde(rename = "Self")]
+    self_: TailscaleSelf,
+}
+
+#[derive(serde::Deserialize)]
+struct TailscaleSelf {
+    #[serde(rename = "TailscaleIPs", default)]
+    tailscale_ips: Vec<String>,
+}
+
+fn detect_tailscale_ips() -> Option<(Option<String>, Option<String>)> {
+    let out = std::process::Command::new("tailscale")
+        .args(["status", "--self", "--json"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let parsed: TailscaleStatus = serde_json::from_slice(&out.stdout).ok()?;
+    let mut v4: Option<String> = None;
+    let mut v6: Option<String> = None;
+    for ip in parsed.self_.tailscale_ips {
+        if ip.contains(':') {
+            if v6.is_none() {
+                v6 = Some(ip);
+            }
+        } else if v4.is_none() {
+            v4 = Some(ip);
+        }
+    }
+    Some((v4, v6))
+}
+
+/// Refresh autodetected rows + persist manual rows (from settings). Clears
+/// any stale `autodetect` rows first so a removed interface drops out.
+/// `manual` rows are upserted in-place (no clear sweep — settings are the
+/// source of truth and may not include every channel).
+///
+/// Idempotent: safe to call repeatedly. The scheduler invokes this on a
+/// 5-minute tick; `host.refresh` triggers it on demand.
+pub fn refresh_and_persist(conn: &Connection) -> Result<()> {
+    let rows = detect_all(conn);
+    host_addressing::clear_host_addressing_by_source(conn, SOURCE_AUTODETECT)?;
+    for r in rows {
+        host_addressing::upsert_host_addressing(conn, &r.key, &r.value, &r.source)?;
+    }
+    Ok(())
+}
+
+/// Adapter implementing the wasm-safe `HostRefreshHook` trait from
+/// `orca-tools-def` so `host.refresh` can drive the real detect path
+/// without that crate depending on the server's process-level statics.
+pub struct ServerHostRefreshHook;
+impl orca_tools_def::host::HostRefreshHook for ServerHostRefreshHook {
+    fn refresh(&self, conn: &db::Conn) -> Result<()> {
+        refresh_and_persist(conn)
+    }
+}
+
+/// Spawn a background task that calls [`refresh_and_persist`] at daemon
+/// startup and every 5 minutes thereafter. Errors are logged at `debug`
+/// (transient autodetect failures aren't actionable for the operator).
+pub fn spawn_refresh_task() -> tokio::task::JoinHandle<()> {
+    use std::time::Duration;
+    const TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
+    tokio::spawn(async move {
+        loop {
+            match db::open_default() {
+                Ok(conn) => {
+                    if let Err(e) = refresh_and_persist(&conn) {
+                        tracing::debug!("[host-addressing] refresh failed: {e:#}");
+                    } else {
+                        tracing::debug!("[host-addressing] refreshed");
+                    }
+                }
+                Err(e) => tracing::debug!("[host-addressing] db open failed: {e:#}"),
+            }
+            tokio::time::sleep(TICK_INTERVAL).await;
+        }
+    })
 }
 
 #[cfg(test)]

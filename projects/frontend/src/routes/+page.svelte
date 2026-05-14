@@ -23,6 +23,7 @@
     /** pod-row only */
     secure?: { local: boolean; peer: boolean } | null;
     status?: string | null;
+    addresses?: { kind: string; value: string }[] | null;
   }
 
   let instances = $state<Instance[]>([]);
@@ -72,6 +73,7 @@
         lastChecked: Date.now(),
         secure: { local: p.local_secure, peer: p.peer_secure },
         status: p.status,
+        addresses: (p.addresses ?? []).map((a) => ({ kind: a.kind, value: a.value })),
       }));
       instances = local ? [local, ...podRows] : podRows;
     } catch (e) {
@@ -155,6 +157,13 @@
               <code>local:{inst.secure?.local ? 'on' : 'off'}</code>
               <code>peer:{inst.secure?.peer ? 'on' : 'off'}</code>
             </dd>
+            {#if inst.addresses && inst.addresses.length > 0}
+              <dt>addrs</dt><dd class="addrs">
+                {#each inst.addresses as a (a.kind + ':' + a.value)}
+                  <code title={a.kind}>{a.kind}={a.value}</code>
+                {/each}
+              </dd>
+            {/if}
           {/if}
           <dt>checked</dt><dd>{relTime(inst.lastChecked)}</dd>
         </dl>
@@ -249,6 +258,12 @@
     border-radius: 3px;
     padding: 1px 5px;
     font-size: var(--text-xs);
+  }
+
+  .addrs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
   }
 
   .err { color: var(--color-error); font-size: var(--text-xs); font-family: var(--font-mono); }

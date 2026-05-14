@@ -11,6 +11,7 @@
 pub mod docker_runtimes;
 pub mod docs;
 pub mod home_assistant;
+pub mod host_addressing;
 pub mod llm;
 pub mod mcp_servers;
 pub mod oauth;
@@ -34,6 +35,10 @@ pub mod tool_mappings;
 use anyhow::{Context, Result};
 use orca_utils::config::{APP_DB_FILE, APP_STATE_DIR};
 use rusqlite::Connection;
+
+// Re-export so downstream native crates can name `db::Connection` without
+// taking a direct rusqlite dep.
+pub use rusqlite::Connection as Conn;
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Mutex;

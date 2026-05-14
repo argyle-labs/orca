@@ -290,6 +290,9 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
 
     std::mem::drop(crate::pod::cert_rotation::spawn());
     info!("[pod] cert-rotation scheduler armed (daily)");
+
+    std::mem::drop(crate::host_identity::spawn_refresh_task());
+    info!("[host-addressing] refresh task armed (5m)");
 }
 
 fn pid_alive(pid: u32) -> bool {
