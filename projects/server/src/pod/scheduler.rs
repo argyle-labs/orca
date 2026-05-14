@@ -131,8 +131,8 @@ async fn push_offer(
     let mesh_ca_cert_pem =
         std::fs::read_to_string(pki::mesh_ca_cert_path(&pki_d)).context("read mesh CA cert")?;
 
-    let inviter_hostname = hostname_or_unknown();
-    let inviter_peer_id = format!("peer.{inviter_hostname}");
+    let inviter_hostname = crate::host_identity::hostname().to_string();
+    let inviter_peer_id = format!("peer.{}", crate::host_identity::machine_id_short());
 
     #[derive(serde::Serialize)]
     struct OfferBody<'a> {
@@ -192,16 +192,6 @@ async fn push_offer(
         anyhow::bail!("joiner rejected offer: {}", err.message);
     }
     Ok(())
-}
-
-fn hostname_or_unknown() -> String {
-    std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn now_secs() -> i64 {

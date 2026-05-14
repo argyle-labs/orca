@@ -36,8 +36,10 @@ pub struct Advertisement {
 
 impl Advertisement {
     /// Build from the current host state. `pod_id` is None when this orca
-    /// hasn't joined any pod yet.
+    /// hasn't joined any pod yet. `machine_id` is the stable opaque per-host
+    /// identity used for `peer_id`; `hostname` is a display label only.
     pub fn from_local(
+        machine_id_short: &str,
         hostname: &str,
         pubkey_fp: &str,
         pod_id: Option<&str>,
@@ -46,8 +48,8 @@ impl Advertisement {
     ) -> Self {
         Self {
             peer_id: match pod_id {
-                Some(_) => format!("peer.{hostname}"),
-                None => format!("unclaimed.{hostname}"),
+                Some(_) => format!("peer.{machine_id_short}"),
+                None => format!("unclaimed.{machine_id_short}"),
             },
             state: match pod_id {
                 Some(id) => format!("pod:{id}"),
@@ -222,7 +224,7 @@ pub fn build_advertisement(pki_dir: PathBuf, port: u16) -> Result<Advertisement>
     let signing = pki::load_or_init_bootstrap_key(&pki_dir)?;
     let pubkey_fp = pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
 
-    let hostname = hostname_or_unknown();
+    let hostname = crate::host_identity::hostname().to_string();
     let can_invite = pki::has_mesh_ca_key(&pki_dir);
     // pod_id + self_secure from DB; failures non-fatal (we just advertise unclaimed).
     let (pod_id, self_secure) = match db::open_default() {
@@ -234,6 +236,7 @@ pub fn build_advertisement(pki_dir: PathBuf, port: u16) -> Result<Advertisement>
     };
     let can_invite = can_invite && self_secure;
     Ok(Advertisement::from_local(
+        crate::host_identity::machine_id_short(),
         &hostname,
         &pubkey_fp,
         pod_id.as_deref(),
@@ -265,14 +268,4 @@ fn addr_score(ip: &std::net::IpAddr) -> u8 {
 
 fn pick_best_addr<I: IntoIterator<Item = std::net::IpAddr>>(addrs: I) -> Option<std::net::IpAddr> {
     addrs.into_iter().min_by_key(addr_score)
-}
-
-fn hostname_or_unknown() -> String {
-    std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
 }

@@ -88,7 +88,9 @@ pub async fn cmd_pod_accept(code: &str) -> Result<()> {
         .context("offer has no mesh CA cert")?;
     std::fs::write(pki::mesh_ca_cert_path(&pki_d), ca_pem.as_bytes())?;
 
-    let hostname = local_hostname();
+    // Cert CN = stable machine_id (not the display hostname, which on macOS
+    // mutates on mDNS conflicts and would force a re-issue on every flap).
+    let hostname = crate::host_identity::machine_id_short().to_string();
     let (csr_client_pem, client_key_pem) = pki::build_peer_csr(&hostname, PeerRole::Client)?;
     let (csr_server_pem, server_key_pem) = pki::build_peer_csr(&hostname, PeerRole::Server)?;
 
@@ -384,7 +386,8 @@ pub async fn cmd_pod_ca_rotate(overlap_days: i64) -> Result<()> {
 
     // Reissue our own peer certs immediately under the new CA so we present
     // current-CA-signed material to peers as soon as possible.
-    let host = local_hostname();
+    // CN is the stable machine_id (see pod accept).
+    let host = crate::host_identity::machine_id_short().to_string();
     pki::reissue_mesh_server_cert(&pki_d)?;
     pki::reissue_mesh_client_cert(&pki_d, &host)?;
 
@@ -480,16 +483,6 @@ pub async fn cmd_pod_leave(wipe_secrets: bool, wipe_all: bool) -> Result<()> {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
-
-fn local_hostname() -> String {
-    std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
-}
 
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
