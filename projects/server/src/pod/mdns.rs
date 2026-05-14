@@ -186,10 +186,7 @@ fn handle_event(event: ServiceEvent, our_instance: &str) {
         .trim_end_matches(".local.")
         .trim_end_matches('.')
         .to_string();
-    let addr = info
-        .get_addresses()
-        .iter()
-        .next()
+    let addr = pick_best_addr(info.get_addresses().iter().map(|s| s.to_ip_addr()))
         .map(|ip| ip.to_string())
         .unwrap_or_else(|| hostname.clone());
 
@@ -243,6 +240,31 @@ pub fn build_advertisement(pki_dir: PathBuf, port: u16) -> Result<Advertisement>
         can_invite,
         port,
     ))
+}
+
+/// Rank addresses so the auto-offer scheduler dials a routable one.
+/// Lower score = better. Prefer routable IPv4, then routable IPv6, then
+/// link-local IPv4, then link-local IPv6 (last resort — won't route between
+/// hosts without scope id).
+fn addr_score(ip: &std::net::IpAddr) -> u8 {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            if v4.is_link_local() || v4.is_loopback() {
+                2
+            } else {
+                0
+            }
+        }
+        std::net::IpAddr::V6(v6) => {
+            let seg = v6.segments();
+            let link_local = (seg[0] & 0xffc0) == 0xfe80;
+            if link_local || v6.is_loopback() { 3 } else { 1 }
+        }
+    }
+}
+
+fn pick_best_addr<I: IntoIterator<Item = std::net::IpAddr>>(addrs: I) -> Option<std::net::IpAddr> {
+    addrs.into_iter().min_by_key(|ip| addr_score(ip))
 }
 
 fn hostname_or_unknown() -> String {

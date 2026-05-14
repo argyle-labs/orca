@@ -77,6 +77,7 @@ struct JoinConfirmResult {
 
 pub async fn handle_pod_bootstrap_connection(
     mut tls: TlsStream<tokio::net::TcpStream>,
+    peer: std::net::SocketAddr,
 ) -> Result<()> {
     let frame_bytes = read_frame(&mut tls).await.context("read bootstrap frame")?;
     let msg: Message =
@@ -89,7 +90,7 @@ pub async fn handle_pod_bootstrap_connection(
         }
     };
 
-    let response = dispatch(request).await;
+    let response = dispatch(request, peer).await;
     let envelope = serde_json::to_vec(&response).context("serialize bootstrap response")?;
     write_frame(&mut tls, &envelope)
         .await
@@ -97,7 +98,7 @@ pub async fn handle_pod_bootstrap_connection(
     Ok(())
 }
 
-async fn dispatch(request: Request) -> Response {
+async fn dispatch(request: Request, peer: std::net::SocketAddr) -> Response {
     let id = request.id.clone();
     let method = request.method.as_str();
 
@@ -120,7 +121,7 @@ async fn dispatch(request: Request) -> Response {
     };
 
     match method {
-        POD_OFFER_METHOD => match handle_offer(&env) {
+        POD_OFFER_METHOD => match handle_offer(&env, peer) {
             Ok(ack) => value_response(id, &ack),
             Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
         },
@@ -135,7 +136,7 @@ async fn dispatch(request: Request) -> Response {
     }
 }
 
-fn handle_offer(env: &SignedEnvelope) -> Result<OfferAck> {
+fn handle_offer(env: &SignedEnvelope, peer: std::net::SocketAddr) -> Result<OfferAck> {
     let (body, signer_vk) = pki::verify_envelope::<OfferBody>(env)?;
     let signer_fp = pki::bootstrap_pubkey_fingerprint(&signer_vk);
 
@@ -145,13 +146,23 @@ fn handle_offer(env: &SignedEnvelope) -> Result<OfferAck> {
     if ttl <= 0 {
         anyhow::bail!("offer already expired");
     }
+    // The inviter intentionally does not embed its own routable address in the
+    // signed body (it may not know which of its interfaces is reachable from
+    // here). Fall back to the TLS source IP, which is by definition reachable.
+    let inviter_addr_owned: String;
+    let inviter_addr: &str = if body.inviter_addr.is_empty() {
+        inviter_addr_owned = peer.ip().to_string();
+        &inviter_addr_owned
+    } else {
+        &body.inviter_addr
+    };
     pdb::insert_pending_offer(
         &conn,
         &offer_id,
         "in",
         &signer_fp,
         &body.inviter_hostname,
-        &body.inviter_addr,
+        inviter_addr,
         body.inviter_port,
         &body.code_hash,
         Some(&body.mesh_ca_cert_pem),
@@ -161,7 +172,7 @@ fn handle_offer(env: &SignedEnvelope) -> Result<OfferAck> {
     )?;
     info!(
         "[pod-bootstrap] received offer from {} ({}@{}:{}); run `orca pod pending` to view",
-        body.inviter_peer_id, signer_fp, body.inviter_addr, body.inviter_port
+        body.inviter_peer_id, signer_fp, inviter_addr, body.inviter_port
     );
     Ok(OfferAck { code_hint: None })
 }
