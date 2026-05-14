@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::OrcaToolDef;
+use crate::orca_tool;
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
@@ -18,26 +18,11 @@ pub struct HealthOutput {
     pub ok: bool,
 }
 
-pub struct ApiHealth;
-impl OrcaToolDef for ApiHealth {
-    const NAME: &'static str = "api.health";
-    const DESCRIPTION: &'static str =
-        "Liveness probe — returns {ok: true} when the server is alive.";
-    type Args = HealthArgs;
-    type Output = HealthOutput;
-}
-
-#[cfg(feature = "native")]
-mod native {
-    use super::*;
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use orca_utils::tool::{OrcaTool, ToolCtx};
-
-    #[async_trait]
-    impl OrcaTool for ApiHealth {
-        async fn run(_args: HealthArgs, _ctx: &ToolCtx) -> Result<HealthOutput> {
-            Ok(HealthOutput { ok: true })
-        }
-    }
+/// Liveness probe — returns {ok: true} when the server is alive.
+#[orca_tool(domain = "system", verb = "health")]
+async fn health(
+    _args: HealthArgs,
+    _ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<HealthOutput> {
+    Ok(HealthOutput { ok: true })
 }

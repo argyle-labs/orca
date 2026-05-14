@@ -1204,6 +1204,46 @@ pub fn cert_fingerprint(cert_pem: &str) -> Result<String> {
     Ok(s)
 }
 
+/// Structured snapshot of one PEM-encoded cert. CN comes from the subject's
+/// commonName; falls back to the empty string when absent.
+#[derive(Debug, Clone)]
+pub struct CertSummary {
+    pub cn: String,
+    pub fingerprint: String,
+    pub issued_at: i64,
+    pub expires_at: i64,
+    pub days_remaining: i64,
+}
+
+pub fn cert_summary(cert_pem: &str) -> Result<CertSummary> {
+    use rustls_pemfile::certs;
+    let mut reader = cert_pem.as_bytes();
+    let der = certs(&mut reader)
+        .next()
+        .context("no certificate in PEM")?
+        .context("parse cert DER")?;
+    let (_, parsed) = x509_parser::parse_x509_certificate(der.as_ref()).context("parse cert")?;
+    let cn = parsed
+        .subject()
+        .iter_common_name()
+        .next()
+        .and_then(|c| c.as_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let issued_at = parsed.validity().not_before.timestamp();
+    let expires_at = parsed.validity().not_after.timestamp();
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let days_remaining = (expires_at - now) / 86_400;
+    let fingerprint = cert_fingerprint(cert_pem)?;
+    Ok(CertSummary {
+        cn,
+        fingerprint,
+        issued_at,
+        expires_at,
+        days_remaining,
+    })
+}
+
 // ── Address parsing ──────────────────────────────────────────────────────────
 
 /// Parse `host[:port]` with sensible support for bare hostnames, IPv4

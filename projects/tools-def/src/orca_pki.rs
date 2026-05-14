@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::OrcaToolDef;
+use crate::orca_tool;
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
@@ -66,59 +66,38 @@ fn default_capability() -> String {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PkiListArgs {}
 
-pub struct PkiCaInit;
-impl OrcaToolDef for PkiCaInit {
-    const NAME: &'static str = "pki.ca-init";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Initialize the orca CA and server cert. Safe to re-run; skips if CA exists.";
-    type Args = PkiCaInitArgs;
-    type Output = PkiInitReport;
-}
-
-pub struct PkiCertIssue;
-impl OrcaToolDef for PkiCertIssue {
-    const NAME: &'static str = "pki.cert-issue";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Issue a cert for a plugin.";
-    type Args = PkiCertIssueArgs;
-    type Output = PkiCertReport;
-}
-
-pub struct PkiList;
-impl OrcaToolDef for PkiList {
-    const NAME: &'static str = "pki.list";
-    const DESCRIPTION: &'static str = "List all issued plugin certs.";
-    type Args = PkiListArgs;
-    type Output = PkiListReport;
-}
-
 #[cfg(feature = "native")]
-mod native {
-    use super::*;
-    use crate::services::pki::PkiService;
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use orca_utils::tool::{OrcaTool, ToolCtx};
-    use std::sync::Arc;
+fn pki_svc(
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<std::sync::Arc<dyn crate::services::pki::PkiService>> {
+    ctx.service::<std::sync::Arc<dyn crate::services::pki::PkiService>>()
+}
 
-    fn svc(ctx: &ToolCtx) -> Result<Arc<dyn PkiService>> {
-        ctx.service::<Arc<dyn PkiService>>()
-    }
+/// [MUTATES STATE] Initialize the orca CA and server cert. Safe to re-run; skips if CA exists.
+#[orca_tool(domain = "pki", verb = "ca-init")]
+async fn pki_ca_init(
+    _args: PkiCaInitArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<PkiInitReport> {
+    pki_svc(ctx)?.ca_init().await
+}
 
-    #[async_trait]
-    impl OrcaTool for PkiCaInit {
-        async fn run(_a: PkiCaInitArgs, ctx: &ToolCtx) -> Result<PkiInitReport> {
-            svc(ctx)?.ca_init().await
-        }
-    }
-    #[async_trait]
-    impl OrcaTool for PkiCertIssue {
-        async fn run(a: PkiCertIssueArgs, ctx: &ToolCtx) -> Result<PkiCertReport> {
-            svc(ctx)?.cert_issue(&a.plugin_id, &a.capability).await
-        }
-    }
-    #[async_trait]
-    impl OrcaTool for PkiList {
-        async fn run(_a: PkiListArgs, ctx: &ToolCtx) -> Result<PkiListReport> {
-            svc(ctx)?.list().await
-        }
-    }
+/// [MUTATES STATE] Issue a cert for a plugin.
+#[orca_tool(domain = "pki", verb = "cert-issue")]
+async fn pki_cert_issue(
+    args: PkiCertIssueArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<PkiCertReport> {
+    pki_svc(ctx)?
+        .cert_issue(&args.plugin_id, &args.capability)
+        .await
+}
+
+/// List all issued plugin certs.
+#[orca_tool(domain = "pki", verb = "list")]
+async fn pki_list(
+    _args: PkiListArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<PkiListReport> {
+    pki_svc(ctx)?.list().await
 }

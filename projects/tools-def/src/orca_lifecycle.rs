@@ -4,7 +4,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::OrcaToolDef;
+use crate::orca_tool;
 
 // ── Shared outputs ──────────────────────────────────────────────────────────
 
@@ -130,166 +130,101 @@ pub struct SystemUpdatePinArgs {
 
 empty_args!(SystemUpdateUnpinArgs);
 
-// ── Tool defs ───────────────────────────────────────────────────────────────
-
-pub struct SystemInstall;
-impl OrcaToolDef for SystemInstall {
-    const NAME: &'static str = "system.install";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Install orca: wire symlinks, register MCP server, install binary.";
-    type Args = SystemInstallArgs;
-    type Output = LifecycleReport;
-}
-
-pub struct SystemUninstall;
-impl OrcaToolDef for SystemUninstall {
-    const NAME: &'static str = "system.uninstall";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Remove binary, MCP registration, and CLAUDE.md symlinks.";
-    type Args = SystemUninstallArgs;
-    type Output = LifecycleReport;
-}
-
-pub struct SystemDoctor;
-impl OrcaToolDef for SystemDoctor {
-    const NAME: &'static str = "system.doctor";
-    const DESCRIPTION: &'static str = "Validate agent files, symlinks, config, tool availability — returns ok/warn/error entries.";
-    type Args = SystemDoctorArgs;
-    type Output = DoctorReport;
-}
-
-pub struct SystemUpdateCheck;
-impl OrcaToolDef for SystemUpdateCheck {
-    const NAME: &'static str = "system.update-check";
-    const DESCRIPTION: &'static str =
-        "Probe GitHub releases for a newer version on `channel`. Does not apply anything.";
-    type Args = SystemUpdateArgs;
-    type Output = UpdateCheckReport;
-}
-
-pub struct SystemUpdateApply;
-impl OrcaToolDef for SystemUpdateApply {
-    const NAME: &'static str = "system.update-apply";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Download + install the latest binary on `channel`. No-op if up to date.";
-    type Args = SystemUpdateArgs;
-    type Output = LifecycleReport;
-}
-
-pub struct ProjectsList;
-impl OrcaToolDef for ProjectsList {
-    const NAME: &'static str = "projects.list";
-    const DESCRIPTION: &'static str =
-        "List projects (memory directories under the orca vault root).";
-    type Args = ProjectsListArgs;
-    type Output = ProjectsListReport;
-}
-
-pub struct SystemRuntimeSpec;
-impl OrcaToolDef for SystemRuntimeSpec {
-    const NAME: &'static str = "system.runtime-spec";
-    const DESCRIPTION: &'static str = "Report this binary's runtime composition: whether the web UI is embedded, build target triple. \
-         Used by installers to decide whether to fetch a JS runtime alongside the binary.";
-    type Args = SystemRuntimeSpecArgs;
-    type Output = RuntimeSpecReport;
-}
-
-pub struct SpecDump;
-impl OrcaToolDef for SpecDump {
-    const NAME: &'static str = "spec.dump";
-    const DESCRIPTION: &'static str = "Dump orca's own OpenAPI JSON document. Used by build pipelines that don't \
-         want to spin up the HTTP server.";
-    type Args = SpecDumpArgs;
-    type Output = SpecDumpReport;
-}
-
-pub struct SystemUpdatePin;
-impl OrcaToolDef for SystemUpdatePin {
-    const NAME: &'static str = "system.update-pin";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Pin orca to a specific version. Future `orca update` runs will not upgrade past this version.";
-    type Args = SystemUpdatePinArgs;
-    type Output = UpdatePinReport;
-}
-
-pub struct SystemUpdateUnpin;
-impl OrcaToolDef for SystemUpdateUnpin {
-    const NAME: &'static str = "system.update-unpin";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Clear the version pin. `orca update` will resume upgrading to the latest on the configured channel.";
-    type Args = SystemUpdateUnpinArgs;
-    type Output = UpdatePinReport;
-}
+// ── Tools ───────────────────────────────────────────────────────────────────
 
 #[cfg(feature = "native")]
-mod native {
-    use super::*;
-    use crate::services::lifecycle::LifecycleService;
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use orca_utils::tool::{OrcaTool, ToolCtx};
-    use std::sync::Arc;
+fn svc(
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<std::sync::Arc<dyn crate::services::lifecycle::LifecycleService>> {
+    ctx.service::<std::sync::Arc<dyn crate::services::lifecycle::LifecycleService>>()
+}
 
-    fn svc(ctx: &ToolCtx) -> Result<Arc<dyn LifecycleService>> {
-        ctx.service::<Arc<dyn LifecycleService>>()
-    }
+/// [MUTATES STATE] Install orca: wire symlinks, register MCP server, install binary.
+#[orca_tool(domain = "system", verb = "install")]
+async fn system_install(
+    _args: SystemInstallArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<LifecycleReport> {
+    svc(ctx)?.install().await
+}
 
-    #[async_trait]
-    impl OrcaTool for SystemInstall {
-        async fn run(_a: SystemInstallArgs, ctx: &ToolCtx) -> Result<LifecycleReport> {
-            svc(ctx)?.install().await
-        }
-    }
-    #[async_trait]
-    impl OrcaTool for SystemUninstall {
-        async fn run(_a: SystemUninstallArgs, ctx: &ToolCtx) -> Result<LifecycleReport> {
-            svc(ctx)?.uninstall().await
-        }
-    }
-    #[async_trait]
-    impl OrcaTool for SystemDoctor {
-        async fn run(_a: SystemDoctorArgs, ctx: &ToolCtx) -> Result<DoctorReport> {
-            svc(ctx)?.doctor().await
-        }
-    }
-    #[async_trait]
-    impl OrcaTool for SystemUpdateCheck {
-        async fn run(a: SystemUpdateArgs, ctx: &ToolCtx) -> Result<UpdateCheckReport> {
-            svc(ctx)?.update_check(&a.channel).await
-        }
-    }
-    #[async_trait]
-    impl OrcaTool for SystemUpdateApply {
-        async fn run(a: SystemUpdateArgs, ctx: &ToolCtx) -> Result<LifecycleReport> {
-            svc(ctx)?.update_apply(&a.channel).await
-        }
-    }
-    #[async_trait]
-    impl OrcaTool for ProjectsList {
-        async fn run(_a: ProjectsListArgs, ctx: &ToolCtx) -> Result<ProjectsListReport> {
-            svc(ctx)?.projects_list().await
-        }
-    }
-    #[async_trait]
-    impl OrcaTool for SpecDump {
-        async fn run(_a: SpecDumpArgs, ctx: &ToolCtx) -> Result<SpecDumpReport> {
-            svc(ctx)?.spec_dump().await
-        }
-    }
-    #[async_trait]
-    impl OrcaTool for SystemRuntimeSpec {
-        async fn run(_a: SystemRuntimeSpecArgs, ctx: &ToolCtx) -> Result<RuntimeSpecReport> {
-            svc(ctx)?.runtime_spec().await
-        }
-    }
-    #[async_trait]
-    impl OrcaTool for SystemUpdatePin {
-        async fn run(a: SystemUpdatePinArgs, ctx: &ToolCtx) -> Result<UpdatePinReport> {
-            svc(ctx)?.update_pin(&a.version).await
-        }
-    }
-    #[async_trait]
-    impl OrcaTool for SystemUpdateUnpin {
-        async fn run(_a: SystemUpdateUnpinArgs, ctx: &ToolCtx) -> Result<UpdatePinReport> {
-            svc(ctx)?.update_unpin().await
-        }
-    }
+/// [MUTATES STATE] Remove binary, MCP registration, and CLAUDE.md symlinks.
+#[orca_tool(domain = "system", verb = "uninstall")]
+async fn system_uninstall(
+    _args: SystemUninstallArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<LifecycleReport> {
+    svc(ctx)?.uninstall().await
+}
+
+/// Validate agent files, symlinks, config, tool availability — returns ok/warn/error entries.
+#[orca_tool(domain = "system", verb = "doctor")]
+async fn system_doctor(
+    _args: SystemDoctorArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<DoctorReport> {
+    svc(ctx)?.doctor().await
+}
+
+/// Probe GitHub releases for a newer version on `channel`. Does not apply anything.
+#[orca_tool(domain = "system", verb = "update-check")]
+async fn system_update_check(
+    args: SystemUpdateArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<UpdateCheckReport> {
+    svc(ctx)?.update_check(&args.channel).await
+}
+
+/// [MUTATES STATE] Download + install the latest binary on `channel`. No-op if up to date.
+#[orca_tool(domain = "system", verb = "update-apply")]
+async fn system_update_apply(
+    args: SystemUpdateArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<LifecycleReport> {
+    svc(ctx)?.update_apply(&args.channel).await
+}
+
+/// [MUTATES STATE] Pin orca to a specific version. Future `orca update` runs will not upgrade past this version.
+#[orca_tool(domain = "system", verb = "update-pin")]
+async fn system_update_pin(
+    args: SystemUpdatePinArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<UpdatePinReport> {
+    svc(ctx)?.update_pin(&args.version).await
+}
+
+/// [MUTATES STATE] Clear the version pin. `orca update` will resume upgrading to the latest on the configured channel.
+#[orca_tool(domain = "system", verb = "update-unpin")]
+async fn system_update_unpin(
+    _args: SystemUpdateUnpinArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<UpdatePinReport> {
+    svc(ctx)?.update_unpin().await
+}
+
+/// List projects (memory directories under the orca vault root).
+#[orca_tool(domain = "projects", verb = "list")]
+async fn projects_list(
+    _args: ProjectsListArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ProjectsListReport> {
+    svc(ctx)?.projects_list().await
+}
+
+/// Dump orca's own OpenAPI JSON document. Used by build pipelines that don't want to spin up the HTTP server.
+#[orca_tool(domain = "spec", verb = "dump")]
+async fn spec_dump(
+    _args: SpecDumpArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<SpecDumpReport> {
+    svc(ctx)?.spec_dump().await
+}
+
+/// Report this binary's runtime composition: whether the web UI is embedded, build target triple. Used by installers to decide whether to fetch a JS runtime alongside the binary.
+#[orca_tool(domain = "system", verb = "runtime-spec")]
+async fn system_runtime_spec(
+    _args: SystemRuntimeSpecArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<RuntimeSpecReport> {
+    svc(ctx)?.runtime_spec().await
 }

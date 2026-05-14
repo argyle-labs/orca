@@ -10,9 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::OrcaToolDef;
-
-// ── get_plugin_data ─────────────────────────────────────────────────────────
+use crate::orca_tool;
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
@@ -33,27 +31,14 @@ pub struct GetPluginDataOutput {
     pub value: Value,
 }
 
-pub struct GetPluginData;
-impl OrcaToolDef for GetPluginData {
-    const NAME: &'static str = "get_plugin_data";
-    const DESCRIPTION: &'static str =
-        "Read a single key from a plugin's encrypted KV store in orca.db.";
-    type Args = GetPluginDataArgs;
-    type Output = GetPluginDataOutput;
-}
-
-// ── set_plugin_data ─────────────────────────────────────────────────────────
-
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SetPluginDataArgs {
     pub plugin: String,
     pub key: String,
     /// Arbitrary JSON value — the host serializes it to TEXT at the storage edge.
     #[cfg_attr(feature = "wasm", tsify(type = "unknown"))]
-    #[cfg_attr(feature = "cli", arg(skip))]
     pub value: Value,
 }
 
@@ -64,45 +49,29 @@ pub struct SetPluginDataOutput {
     pub ok: bool,
 }
 
-pub struct SetPluginData;
-impl OrcaToolDef for SetPluginData {
-    const NAME: &'static str = "set_plugin_data";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Upsert a single key in a plugin's encrypted KV store in orca.db.";
-    type Args = SetPluginDataArgs;
-    type Output = SetPluginDataOutput;
+#[cfg(feature = "native")]
+fn pr(
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<std::sync::Arc<dyn crate::services::plugin_runtime::PluginRuntimeService>> {
+    ctx.service::<std::sync::Arc<dyn crate::services::plugin_runtime::PluginRuntimeService>>()
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Native run impls
-// ═══════════════════════════════════════════════════════════════════════════
+/// Read a single key from a plugin's encrypted KV store in orca.db.
+#[orca_tool(domain = "plugin-data", verb = "get")]
+async fn get_plugin_data(
+    args: GetPluginDataArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<GetPluginDataOutput> {
+    let value = pr(ctx)?.get(&args.plugin, &args.key).await?;
+    Ok(GetPluginDataOutput { value })
+}
 
-#[cfg(feature = "native")]
-mod native {
-    use super::*;
-    use crate::services::plugin_runtime as svc;
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use orca_utils::tool::{OrcaTool, ToolCtx};
-    use std::sync::Arc;
-
-    fn pr(ctx: &ToolCtx) -> Result<Arc<dyn svc::PluginRuntimeService>> {
-        ctx.service::<Arc<dyn svc::PluginRuntimeService>>()
-    }
-
-    #[async_trait]
-    impl OrcaTool for GetPluginData {
-        async fn run(args: GetPluginDataArgs, ctx: &ToolCtx) -> Result<GetPluginDataOutput> {
-            let value = pr(ctx)?.get(&args.plugin, &args.key).await?;
-            Ok(GetPluginDataOutput { value })
-        }
-    }
-
-    #[async_trait]
-    impl OrcaTool for SetPluginData {
-        async fn run(args: SetPluginDataArgs, ctx: &ToolCtx) -> Result<SetPluginDataOutput> {
-            pr(ctx)?.set(&args.plugin, &args.key, &args.value).await?;
-            Ok(SetPluginDataOutput { ok: true })
-        }
-    }
+/// [MUTATES STATE] Upsert a single key in a plugin's encrypted KV store in orca.db.
+#[orca_tool(domain = "plugin-data", verb = "set", cli = skip)]
+async fn set_plugin_data(
+    args: SetPluginDataArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<SetPluginDataOutput> {
+    pr(ctx)?.set(&args.plugin, &args.key, &args.value).await?;
+    Ok(SetPluginDataOutput { ok: true })
 }

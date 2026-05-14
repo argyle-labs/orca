@@ -4,7 +4,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::OrcaToolDef;
+use crate::orca_tool;
 
 // ── Shared row shapes ───────────────────────────────────────────────────────
 
@@ -66,27 +66,14 @@ pub struct DockerLogProject {
     pub services: Vec<DockerServiceRow>,
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Tool args/outputs
-// ═══════════════════════════════════════════════════════════════════════════
+// ── Args / Outputs ──────────────────────────────────────────────────────────
 
-// get_docker_engine
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetDockerEngineArgs {}
 
-pub struct GetDockerEngine;
-impl OrcaToolDef for GetDockerEngine {
-    const NAME: &'static str = "get_docker_engine";
-    const DESCRIPTION: &'static str =
-        "Probe the local docker engine (colima | desktop | none) and whether it is running.";
-    type Args = GetDockerEngineArgs;
-    type Output = DockerEngineStatus;
-}
-
-// start_docker_engine
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -100,16 +87,6 @@ pub struct StartDockerEngineOutput {
     pub output: String,
 }
 
-pub struct StartDockerEngine;
-impl OrcaToolDef for StartDockerEngine {
-    const NAME: &'static str = "start_docker_engine";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Start the local docker engine. Returns the start-command output.";
-    type Args = StartDockerEngineArgs;
-    type Output = StartDockerEngineOutput;
-}
-
-// get_docker_services
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -119,16 +96,6 @@ pub struct GetDockerServicesArgs {
     pub path: String,
 }
 
-pub struct GetDockerServices;
-impl OrcaToolDef for GetDockerServices {
-    const NAME: &'static str = "get_docker_services";
-    const DESCRIPTION: &'static str = "List the compose services under `path` with state/health/ports plus the resolved \
-         compose-file path.";
-    type Args = GetDockerServicesArgs;
-    type Output = DockerServicesView;
-}
-
-// run_docker_action
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -144,16 +111,6 @@ pub struct RunDockerActionArgs {
     pub tail: Option<u32>,
 }
 
-pub struct RunDockerAction;
-impl OrcaToolDef for RunDockerAction {
-    const NAME: &'static str = "run_docker_action";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Run a docker-compose lifecycle action against the compose project at \
-         `project_path`.";
-    type Args = RunDockerActionArgs;
-    type Output = DockerActionResult;
-}
-
-// get_logs
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -176,16 +133,6 @@ pub struct GetLogsOutput {
     pub output: String,
 }
 
-pub struct GetLogs;
-impl OrcaToolDef for GetLogs {
-    const NAME: &'static str = "get_logs";
-    const DESCRIPTION: &'static str =
-        "Read docker-compose logs from the project at `project` (optionally scoped to a service).";
-    type Args = GetLogsArgs;
-    type Output = GetLogsOutput;
-}
-
-// get_log_services
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -199,87 +146,82 @@ pub struct GetLogServicesOutput {
     pub projects: Vec<DockerLogProject>,
 }
 
-pub struct GetLogServices;
-impl OrcaToolDef for GetLogServices {
-    const NAME: &'static str = "get_log_services";
-    const DESCRIPTION: &'static str = "List every docker-compose project under the rebuy root with its service states. \
-         Powers the cross-project logs panel.";
-    type Args = GetLogServicesArgs;
-    type Output = GetLogServicesOutput;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Native run impls
-// ═══════════════════════════════════════════════════════════════════════════
+// ── Native dispatch ─────────────────────────────────────────────────────────
 
 #[cfg(feature = "native")]
-mod native {
-    use super::*;
-    use crate::services::docker::DockerService;
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use orca_utils::tool::{OrcaTool, ToolCtx};
-    use std::sync::Arc;
+fn docker_svc(
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<std::sync::Arc<dyn crate::services::docker::DockerService>> {
+    ctx.service::<std::sync::Arc<dyn crate::services::docker::DockerService>>()
+}
 
-    fn svc(ctx: &ToolCtx) -> Result<Arc<dyn DockerService>> {
-        ctx.service::<Arc<dyn DockerService>>()
-    }
+/// Probe the local docker engine (colima | desktop | none) and whether it is running.
+#[orca_tool(domain = "docker", verb = "engine")]
+async fn get_docker_engine(
+    _args: GetDockerEngineArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<DockerEngineStatus> {
+    docker_svc(ctx)?.engine_status().await
+}
 
-    #[async_trait]
-    impl OrcaTool for GetDockerEngine {
-        async fn run(_args: GetDockerEngineArgs, ctx: &ToolCtx) -> Result<DockerEngineStatus> {
-            svc(ctx)?.engine_status().await
-        }
-    }
+/// [MUTATES STATE] Start the local docker engine. Returns the start-command output.
+#[orca_tool(domain = "docker", verb = "engine-start")]
+async fn start_docker_engine(
+    _args: StartDockerEngineArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<StartDockerEngineOutput> {
+    let output = docker_svc(ctx)?.engine_start().await?;
+    Ok(StartDockerEngineOutput { output })
+}
 
-    #[async_trait]
-    impl OrcaTool for StartDockerEngine {
-        async fn run(
-            _args: StartDockerEngineArgs,
-            ctx: &ToolCtx,
-        ) -> Result<StartDockerEngineOutput> {
-            let output = svc(ctx)?.engine_start().await?;
-            Ok(StartDockerEngineOutput { output })
-        }
-    }
+/// List the compose services under `path` with state/health/ports plus the
+/// resolved compose-file path.
+#[orca_tool(domain = "docker", verb = "services")]
+async fn get_docker_services(
+    args: GetDockerServicesArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<DockerServicesView> {
+    docker_svc(ctx)?.services(&args.path).await
+}
 
-    #[async_trait]
-    impl OrcaTool for GetDockerServices {
-        async fn run(args: GetDockerServicesArgs, ctx: &ToolCtx) -> Result<DockerServicesView> {
-            svc(ctx)?.services(&args.path).await
-        }
-    }
+/// [MUTATES STATE] Run a docker-compose lifecycle action against the compose
+/// project at `project_path`.
+#[orca_tool(domain = "docker", verb = "action")]
+async fn run_docker_action(
+    args: RunDockerActionArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<DockerActionResult> {
+    docker_svc(ctx)?
+        .action(
+            &args.project_path,
+            &args.action,
+            args.service.as_deref(),
+            args.tail,
+        )
+        .await
+}
 
-    #[async_trait]
-    impl OrcaTool for RunDockerAction {
-        async fn run(args: RunDockerActionArgs, ctx: &ToolCtx) -> Result<DockerActionResult> {
-            svc(ctx)?
-                .action(
-                    &args.project_path,
-                    &args.action,
-                    args.service.as_deref(),
-                    args.tail,
-                )
-                .await
-        }
-    }
+/// Read docker-compose logs from the project at `project` (optionally scoped
+/// to a service).
+#[orca_tool(domain = "docker", verb = "logs")]
+async fn get_logs(
+    args: GetLogsArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<GetLogsOutput> {
+    let tail = args.tail.unwrap_or(200);
+    let output = docker_svc(ctx)?
+        .logs(&args.project, args.service.as_deref(), tail)
+        .await?;
+    Ok(GetLogsOutput { output })
+}
 
-    #[async_trait]
-    impl OrcaTool for GetLogs {
-        async fn run(args: GetLogsArgs, ctx: &ToolCtx) -> Result<GetLogsOutput> {
-            let tail = args.tail.unwrap_or(200);
-            let output = svc(ctx)?
-                .logs(&args.project, args.service.as_deref(), tail)
-                .await?;
-            Ok(GetLogsOutput { output })
-        }
-    }
-
-    #[async_trait]
-    impl OrcaTool for GetLogServices {
-        async fn run(_args: GetLogServicesArgs, ctx: &ToolCtx) -> Result<GetLogServicesOutput> {
-            let projects = svc(ctx)?.log_services().await?;
-            Ok(GetLogServicesOutput { projects })
-        }
-    }
+/// List every docker-compose project under the rebuy root with its service
+/// states. Powers the cross-project logs panel.
+#[orca_tool(domain = "docker", verb = "log-services")]
+async fn get_log_services(
+    _args: GetLogServicesArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<GetLogServicesOutput> {
+    let projects = docker_svc(ctx)?.log_services().await?;
+    Ok(GetLogServicesOutput { projects })
 }

@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::OrcaToolDef;
+use crate::orca_tool;
 
 // ── Shared shapes ───────────────────────────────────────────────────────────
 
@@ -69,27 +69,12 @@ pub struct SystemActionResult {
     pub errors: Vec<String>,
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Tool args/outputs
-// ═══════════════════════════════════════════════════════════════════════════
-
-// system_status
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SystemStatusArgs {}
 
-pub struct SystemStatus;
-impl OrcaToolDef for SystemStatus {
-    const NAME: &'static str = "system_status";
-    const DESCRIPTION: &'static str = "Snapshot of orca's installation: binary, ~/.claude/CLAUDE.md, vault dir, agents \
-         symlink, PKI init, MCP registration.";
-    type Args = SystemStatusArgs;
-    type Output = SystemStatusReport;
-}
-
-// system_action
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -99,43 +84,27 @@ pub struct SystemActionArgs {
     pub action: String,
 }
 
-pub struct SystemAction;
-impl OrcaToolDef for SystemAction {
-    const NAME: &'static str = "system_action";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Run orca's install or uninstall flow. Returns the per-step report.";
-    type Args = SystemActionArgs;
-    type Output = SystemActionResult;
+#[cfg(feature = "native")]
+fn svc(
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<std::sync::Arc<dyn crate::services::system::SystemService>> {
+    ctx.service::<std::sync::Arc<dyn crate::services::system::SystemService>>()
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Native run impls
-// ═══════════════════════════════════════════════════════════════════════════
+/// Snapshot of orca's installation: binary, ~/.claude/CLAUDE.md, vault dir, agents symlink, PKI init, MCP registration.
+#[orca_tool(domain = "system", verb = "status")]
+async fn system_status(
+    _args: SystemStatusArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<SystemStatusReport> {
+    svc(ctx)?.status().await
+}
 
-#[cfg(feature = "native")]
-mod native {
-    use super::*;
-    use crate::services::system::SystemService;
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use orca_utils::tool::{OrcaTool, ToolCtx};
-    use std::sync::Arc;
-
-    fn svc(ctx: &ToolCtx) -> Result<Arc<dyn SystemService>> {
-        ctx.service::<Arc<dyn SystemService>>()
-    }
-
-    #[async_trait]
-    impl OrcaTool for SystemStatus {
-        async fn run(_args: SystemStatusArgs, ctx: &ToolCtx) -> Result<SystemStatusReport> {
-            svc(ctx)?.status().await
-        }
-    }
-
-    #[async_trait]
-    impl OrcaTool for SystemAction {
-        async fn run(args: SystemActionArgs, ctx: &ToolCtx) -> Result<SystemActionResult> {
-            svc(ctx)?.action(&args.action).await
-        }
-    }
+/// [MUTATES STATE] Run orca's install or uninstall flow. Returns the per-step report.
+#[orca_tool(domain = "system", verb = "action")]
+async fn system_action(
+    args: SystemActionArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<SystemActionResult> {
+    svc(ctx)?.action(&args.action).await
 }

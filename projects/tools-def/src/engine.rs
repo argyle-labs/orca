@@ -1,13 +1,9 @@
 //! Engine domain — LLM backend registry (LM Studio, Ollama).
-//!
-//! Single source of truth: Args + unit structs + `OrcaToolDef` impls are
-//! always-compiled (wasm-safe). The `OrcaTool::run` impls below are gated on
-//! the `native` feature so wasm builds skip the db/utils deps entirely.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::OrcaToolDef;
+use crate::orca_tool;
 
 // ── Args ────────────────────────────────────────────────────────────────────
 
@@ -69,45 +65,119 @@ pub struct EngineOpResult {
     pub message: String,
 }
 
-// ── Tool unit structs + OrcaToolDef impls ───────────────────────────────────
+// ── Native helpers ──────────────────────────────────────────────────────────
 
-pub struct EngineList;
-impl OrcaToolDef for EngineList {
-    const NAME: &'static str = "engine.list";
-    const DESCRIPTION: &'static str = "List registered LLM backends (LM Studio, Ollama).";
-    type Args = EmptyArgs;
-    type Output = ProviderList;
+#[cfg(feature = "native")]
+impl From<orca_db::llm::Provider> for ProviderDto {
+    fn from(p: orca_db::llm::Provider) -> Self {
+        Self {
+            name: p.name,
+            url: p.url,
+            kind: p.kind,
+            enabled: p.enabled,
+            created_at: p.created_at,
+        }
+    }
 }
-pub struct EngineAdd;
-impl OrcaToolDef for EngineAdd {
-    const NAME: &'static str = "engine.add";
-    const DESCRIPTION: &'static str =
-        "Register a new LLM backend. Kind auto-inferred from URL if not supplied.";
-    type Args = AddArgs;
-    type Output = EngineOpResult;
+
+#[cfg(feature = "native")]
+fn infer_kind(url: &str, supplied: &str) -> anyhow::Result<String> {
+    let kind = if supplied.is_empty() {
+        if url.contains(":11434") {
+            "ollama"
+        } else {
+            "lmstudio"
+        }
+        .to_string()
+    } else {
+        supplied.to_string()
+    };
+    match kind.as_str() {
+        "ollama" | "lmstudio" => Ok(kind),
+        other => anyhow::bail!("unknown backend kind '{other}' (want: ollama|lmstudio)"),
+    }
 }
-pub struct EngineRemove;
-impl OrcaToolDef for EngineRemove {
-    const NAME: &'static str = "engine.remove";
-    const DESCRIPTION: &'static str = "Remove a registered LLM backend.";
-    type Args = NameArgs;
-    type Output = EngineOpResult;
+
+// ── Tools ───────────────────────────────────────────────────────────────────
+
+/// List registered LLM backends (LM Studio, Ollama).
+#[orca_tool(domain = "engine", verb = "list", cli = manual)]
+async fn engine_list(
+    _args: EmptyArgs,
+    _ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ProviderList> {
+    let conn = orca_db::open_default()?;
+    Ok(ProviderList(
+        orca_db::llm::list(&conn)?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    ))
 }
-pub struct EngineEnable;
-impl OrcaToolDef for EngineEnable {
-    const NAME: &'static str = "engine.enable";
-    const DESCRIPTION: &'static str = "Enable a backend for model discovery.";
-    type Args = NameArgs;
-    type Output = EngineOpResult;
+
+/// Register a new LLM backend. Kind auto-inferred from URL if not supplied.
+#[orca_tool(domain = "engine", verb = "add", cli = manual)]
+async fn engine_add(
+    args: AddArgs,
+    _ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<EngineOpResult> {
+    let conn = orca_db::open_default()?;
+    let kind = infer_kind(&args.url, &args.kind)?;
+    orca_db::llm::upsert(&conn, &args.name, &args.url, &kind)?;
+    Ok(EngineOpResult {
+        message: format!("registered {kind} {} ({})", args.name, args.url),
+    })
 }
-pub struct EngineDisable;
-impl OrcaToolDef for EngineDisable {
-    const NAME: &'static str = "engine.disable";
-    const DESCRIPTION: &'static str = "Disable a backend without removing it.";
-    type Args = NameArgs;
-    type Output = EngineOpResult;
+
+/// Remove a registered LLM backend.
+#[orca_tool(domain = "engine", verb = "remove", cli = manual)]
+async fn engine_remove(
+    args: NameArgs,
+    _ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<EngineOpResult> {
+    let conn = orca_db::open_default()?;
+    if orca_db::llm::remove(&conn, &args.name)? {
+        Ok(EngineOpResult {
+            message: format!("removed {}", args.name),
+        })
+    } else {
+        anyhow::bail!("no backend named '{}'", args.name)
+    }
 }
-// ── CLI registration — picked up by `orca-tools-def::cli::ops()` ────────────
+
+/// Enable a backend for model discovery.
+#[orca_tool(domain = "engine", verb = "enable", cli = manual)]
+async fn engine_enable(
+    args: NameArgs,
+    _ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<EngineOpResult> {
+    let conn = orca_db::open_default()?;
+    if orca_db::llm::set_enabled(&conn, &args.name, true)? {
+        Ok(EngineOpResult {
+            message: format!("{} enabled", args.name),
+        })
+    } else {
+        anyhow::bail!("no backend named '{}'", args.name)
+    }
+}
+
+/// Disable a backend without removing it.
+#[orca_tool(domain = "engine", verb = "disable", cli = manual)]
+async fn engine_disable(
+    args: NameArgs,
+    _ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<EngineOpResult> {
+    let conn = orca_db::open_default()?;
+    if orca_db::llm::set_enabled(&conn, &args.name, false)? {
+        Ok(EngineOpResult {
+            message: format!("{} disabled", args.name),
+        })
+    } else {
+        anyhow::bail!("no backend named '{}'", args.name)
+    }
+}
+
+// ── CLI registration — bespoke colored rendering ────────────────────────────
 #[cfg(feature = "cli")]
 mod cli_register {
     use super::*;
@@ -168,109 +238,5 @@ mod cli_register {
         verb: "disable",
         summary: "Disable a backend without removing it",
         render: |out| { println!("{}", out.message); }
-    }
-}
-
-// ── Native run impls ────────────────────────────────────────────────────────
-
-#[cfg(feature = "native")]
-mod native {
-    use super::*;
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use orca_db as db;
-    use orca_utils::tool::{OrcaTool, ToolCtx};
-
-    impl From<db::llm::Provider> for ProviderDto {
-        fn from(p: db::llm::Provider) -> Self {
-            Self {
-                name: p.name,
-                url: p.url,
-                kind: p.kind,
-                enabled: p.enabled,
-                created_at: p.created_at,
-            }
-        }
-    }
-
-    fn infer_kind(url: &str, supplied: &str) -> Result<String> {
-        let kind = if supplied.is_empty() {
-            if url.contains(":11434") {
-                "ollama"
-            } else {
-                "lmstudio"
-            }
-            .to_string()
-        } else {
-            supplied.to_string()
-        };
-        match kind.as_str() {
-            "ollama" | "lmstudio" => Ok(kind),
-            other => anyhow::bail!("unknown backend kind '{other}' (want: ollama|lmstudio)"),
-        }
-    }
-
-    #[async_trait]
-    impl OrcaTool for EngineList {
-        async fn run(_args: EmptyArgs, _ctx: &ToolCtx) -> Result<ProviderList> {
-            let conn = db::open_default()?;
-            Ok(ProviderList(
-                db::llm::list(&conn)?.into_iter().map(Into::into).collect(),
-            ))
-        }
-    }
-
-    #[async_trait]
-    impl OrcaTool for EngineAdd {
-        async fn run(args: AddArgs, _ctx: &ToolCtx) -> Result<EngineOpResult> {
-            let conn = db::open_default()?;
-            let kind = infer_kind(&args.url, &args.kind)?;
-            db::llm::upsert(&conn, &args.name, &args.url, &kind)?;
-            Ok(EngineOpResult {
-                message: format!("registered {kind} {} ({})", args.name, args.url),
-            })
-        }
-    }
-
-    #[async_trait]
-    impl OrcaTool for EngineRemove {
-        async fn run(args: NameArgs, _ctx: &ToolCtx) -> Result<EngineOpResult> {
-            let conn = db::open_default()?;
-            if db::llm::remove(&conn, &args.name)? {
-                Ok(EngineOpResult {
-                    message: format!("removed {}", args.name),
-                })
-            } else {
-                anyhow::bail!("no backend named '{}'", args.name)
-            }
-        }
-    }
-
-    #[async_trait]
-    impl OrcaTool for EngineEnable {
-        async fn run(args: NameArgs, _ctx: &ToolCtx) -> Result<EngineOpResult> {
-            let conn = db::open_default()?;
-            if db::llm::set_enabled(&conn, &args.name, true)? {
-                Ok(EngineOpResult {
-                    message: format!("{} enabled", args.name),
-                })
-            } else {
-                anyhow::bail!("no backend named '{}'", args.name)
-            }
-        }
-    }
-
-    #[async_trait]
-    impl OrcaTool for EngineDisable {
-        async fn run(args: NameArgs, _ctx: &ToolCtx) -> Result<EngineOpResult> {
-            let conn = db::open_default()?;
-            if db::llm::set_enabled(&conn, &args.name, false)? {
-                Ok(EngineOpResult {
-                    message: format!("{} disabled", args.name),
-                })
-            } else {
-                anyhow::bail!("no backend named '{}'", args.name)
-            }
-        }
     }
 }

@@ -1,7 +1,7 @@
 //! WASM client surface — only compiled with `feature = "wasm"`.
 //!
 //! Exposes an `OrcaClient` JS class whose methods are emitted by the
-//! `declare_tools!` macro in `lib.rs`. Each method POSTs to
+//! `#[orca_tool]` proc-macro alongside each tool's definition. Each method POSTs to
 //! `<base_url>/api/tools/<NAME>` with the args JSON-serialized as the body
 //! and returns the parsed response as a `JsValue` (objects, not Maps).
 
