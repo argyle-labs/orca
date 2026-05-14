@@ -56,8 +56,10 @@ pub fn register_schema(
     schema_json: &str,
     sensitive_fields: &[&str],
 ) -> Result<()> {
-    // Validate inputs parse as JSON.
-    serde_json::from_str::<serde_json::Value>(schema_json)
+    // Validate input parses as JSON without materializing the tree — schema
+    // shape is genuinely free-form (varies per plugin), and we re-serialize
+    // the raw string into the DB unchanged.
+    serde_json::from_str::<serde::de::IgnoredAny>(schema_json)
         .with_context(|| format!("schema_json for noun {noun} is not valid JSON"))?;
     let sensitive = serde_json::to_string(sensitive_fields)?;
     conn.execute(
@@ -168,7 +170,7 @@ pub fn set(
              — route via mesh once peer dispatch lands (§3.3)"
         );
     }
-    serde_json::from_str::<serde_json::Value>(payload_json)
+    serde_json::from_str::<serde::de::IgnoredAny>(payload_json)
         .with_context(|| format!("payload for {noun}/{name} is not valid JSON"))?;
 
     let row_id = format!("{noun}:{name}@{host_owner}");
@@ -202,7 +204,7 @@ pub fn apply_replica(
     payload_json: &str,
     updated_by: &str,
 ) -> Result<()> {
-    serde_json::from_str::<serde_json::Value>(payload_json)
+    serde_json::from_str::<serde::de::IgnoredAny>(payload_json)
         .with_context(|| format!("replica payload for {noun}/{name} is not valid JSON"))?;
     let row_id = format!("{noun}:{name}@{host_owner}");
     conn.execute(
@@ -320,6 +322,9 @@ mod tests {
         assert_eq!(r.name, "plex");
         assert_eq!(r.host_owner, "thor");
         assert!(!r.is_replica);
+        // Test-only: parse stored JSON to index into a field. Value is the
+        // right tool here — we're asserting on a runtime-shaped tree.
+        #[allow(clippy::disallowed_types)]
         let v: serde_json::Value = serde_json::from_str(&r.json).unwrap();
         assert_eq!(v["runtime"], "lxc:110");
     }

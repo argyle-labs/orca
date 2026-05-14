@@ -4,7 +4,7 @@
 //!   - `config.list`   — enumerate rows (optionally filtered by noun/host).
 //!   - `config.get`    — fetch one row by noun+name.
 //!   - `config.set`    — upsert a row owned by the local host (cross-host
-//!                       writes will route via mesh once §3.3 lands).
+//!     writes will route via mesh once §3.3 lands).
 //!   - `config.delete` — remove a row owned by the local host.
 //!
 //! Each `config_row` carries a `host_owner`. Only the owning host may
