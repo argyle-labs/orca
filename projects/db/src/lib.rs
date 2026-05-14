@@ -10,6 +10,7 @@
 
 pub mod config_store;
 pub mod docker_runtimes;
+pub mod scheduler_runs;
 pub mod docs;
 pub mod home_assistant;
 pub mod host_addressing;
@@ -921,6 +922,20 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             sensitive_fields TEXT NOT NULL DEFAULT '[]',
             registered_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         );
+
+        -- Scheduler run history — one row per periodic-loop tick.
+        -- See docs/planned/orca-v1-scope.md §3.4.
+        CREATE TABLE IF NOT EXISTS scheduler_runs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_name    TEXT NOT NULL,
+            started_at  TEXT NOT NULL,
+            finished_at TEXT NOT NULL,
+            ok          INTEGER NOT NULL,
+            error       TEXT,
+            duration_ms INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_scheduler_runs_job_started
+            ON scheduler_runs(job_name, started_at DESC);
         ",
     )?;
     Ok(())

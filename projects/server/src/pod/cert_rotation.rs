@@ -27,25 +27,25 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::{db as pdb, pki_dir};
+use crate::periodic;
 
 /// Once per day. Cheap (one cert parse + a comparison), and a stale cert
 /// check on this cadence covers a 7-day refresh threshold comfortably.
 const TICK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub fn spawn() -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        // Small initial delay so we don't slam the daemon on every restart.
-        tokio::time::sleep(Duration::from_secs(60)).await;
-        loop {
-            if let Err(e) = tick().await {
-                debug!("[cert-rotation] tick: {e:#}");
-            }
-            tokio::time::sleep(TICK_INTERVAL).await;
-        }
-    })
+    periodic::spawn(
+        periodic::PeriodicSpec {
+            name: "pod.cert_rotation.run",
+            // Small initial delay so we don't slam the daemon on every restart.
+            initial_delay: Duration::from_secs(60),
+            interval: TICK_INTERVAL,
+        },
+        periodic::boxed(tick),
+    )
 }
 
 async fn tick() -> Result<()> {

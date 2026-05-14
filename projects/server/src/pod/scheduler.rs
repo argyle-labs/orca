@@ -26,9 +26,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::{db as pdb, pki_dir};
+use crate::periodic;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(15);
 pub const OFFER_TTL_SECS: i64 = 600;
@@ -37,14 +38,14 @@ const PAIRING_CODE_LEN: usize = 6;
 /// Spawn the scheduler. Returns immediately; the task runs until the process
 /// exits.
 pub fn spawn() -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            if let Err(e) = tick().await {
-                debug!("[pod-scheduler] tick: {e:#}");
-            }
-            tokio::time::sleep(TICK_INTERVAL).await;
-        }
-    })
+    periodic::spawn(
+        periodic::PeriodicSpec {
+            name: "pod.scheduler.run",
+            initial_delay: Duration::ZERO,
+            interval: TICK_INTERVAL,
+        },
+        periodic::boxed(tick),
+    )
 }
 
 async fn tick() -> Result<()> {

@@ -101,6 +101,7 @@ colored   = { workspace = true }
 dirs           = { workspace = true }
 uuid           = { workspace = true }
 chrono         = { workspace = true }
+cron           = { workspace = true }
 glob           = { workspace = true }
 regex          = { workspace = true }
 pulldown-cmark = { workspace = true }

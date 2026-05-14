@@ -285,21 +285,19 @@ impl orca_tools_def::host::HostRefreshHook for ServerHostRefreshHook {
 pub fn spawn_refresh_task() -> tokio::task::JoinHandle<()> {
     use std::time::Duration;
     const TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
-    tokio::spawn(async move {
-        loop {
-            match db::open_default() {
-                Ok(conn) => {
-                    if let Err(e) = refresh_and_persist(&conn) {
-                        tracing::debug!("[host-addressing] refresh failed: {e:#}");
-                    } else {
-                        tracing::debug!("[host-addressing] refreshed");
-                    }
-                }
-                Err(e) => tracing::debug!("[host-addressing] db open failed: {e:#}"),
-            }
-            tokio::time::sleep(TICK_INTERVAL).await;
-        }
-    })
+    crate::periodic::spawn(
+        crate::periodic::PeriodicSpec {
+            name: "host.identity.refresh.run",
+            initial_delay: Duration::ZERO,
+            interval: TICK_INTERVAL,
+        },
+        crate::periodic::boxed(|| async move {
+            let conn = db::open_default()?;
+            refresh_and_persist(&conn)?;
+            tracing::debug!("[host-addressing] refreshed");
+            Ok(())
+        }),
+    )
 }
 
 #[cfg(test)]

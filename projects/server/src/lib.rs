@@ -26,6 +26,8 @@ pub use crate::conversation::tui;
 
 pub mod host_identity;
 pub mod log_cmd;
+pub mod periodic;
+pub mod scheduler;
 pub mod markdown;
 pub mod mcp;
 pub mod plugin_host;

@@ -63,6 +63,7 @@ pub mod plugin_runtime;
 pub mod plugins;
 pub mod pod;
 pub mod proxmox;
+pub mod schedule;
 pub mod services;
 pub mod spec_registry;
 pub mod system;
