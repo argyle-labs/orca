@@ -4,7 +4,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::OrcaToolDef;
+use crate::orca_tool;
 
 // ── Typed entities ──────────────────────────────────────────────────────────
 
@@ -59,7 +59,7 @@ pub struct DocSearchHit {
     pub matches: Vec<DocSearchMatch>,
 }
 
-// ── list_roots ──────────────────────────────────────────────────────────────
+// ── Args / Outputs ──────────────────────────────────────────────────────────
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
@@ -73,17 +73,6 @@ pub struct ListRootsArgs {}
 pub struct ListRootsOutput {
     pub roots: Vec<DocRootEntry>,
 }
-
-pub struct ListRoots;
-impl OrcaToolDef for ListRoots {
-    const NAME: &'static str = "list_roots";
-    const DESCRIPTION: &'static str =
-        "List available documentation roots (rebuy, orca) with file counts and paths.";
-    type Args = ListRootsArgs;
-    type Output = ListRootsOutput;
-}
-
-// ── get_tree ────────────────────────────────────────────────────────────────
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
@@ -105,17 +94,6 @@ pub struct GetTreeOutput {
     pub path: Option<String>,
     pub nodes: Vec<DocTreeNode>,
 }
-
-pub struct GetTree;
-impl OrcaToolDef for GetTree {
-    const NAME: &'static str = "get_tree";
-    const DESCRIPTION: &'static str = "Get the compacted documentation tree for a root, optionally \
-         scoped to a subpath. Returns a typed tree of .md files.";
-    type Args = GetTreeArgs;
-    type Output = GetTreeOutput;
-}
-
-// ── get_full_tree ───────────────────────────────────────────────────────────
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
@@ -142,17 +120,6 @@ pub struct GetFullTreeOutput {
     pub roots: Vec<DocRootTreeEntry>,
 }
 
-pub struct GetFullTree;
-impl OrcaToolDef for GetFullTree {
-    const NAME: &'static str = "get_full_tree";
-    const DESCRIPTION: &'static str = "Multi-root documentation tree — every registered root in one call. When `raw` is \
-         true, returns the uncompacted filesystem layout.";
-    type Args = GetFullTreeArgs;
-    type Output = GetFullTreeOutput;
-}
-
-// ── read_doc ────────────────────────────────────────────────────────────────
-
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -175,17 +142,6 @@ pub struct ReadDocOutput {
     pub path: String,
     pub content: String,
 }
-
-pub struct ReadDoc;
-impl OrcaToolDef for ReadDoc {
-    const NAME: &'static str = "read_doc";
-    const DESCRIPTION: &'static str = "Read a documentation file by root and relative path \
-         (e.g. root=rebuy, path=admin-api/README).";
-    type Args = ReadDocArgs;
-    type Output = ReadDocOutput;
-}
-
-// ── search_docs ─────────────────────────────────────────────────────────────
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
@@ -213,17 +169,6 @@ pub struct SearchDocsOutput {
     pub enhanced_summary: Option<String>,
 }
 
-pub struct SearchDocs;
-impl OrcaToolDef for SearchDocs {
-    const NAME: &'static str = "search_docs";
-    const DESCRIPTION: &'static str =
-        "Search documentation files for a keyword across one or all roots.";
-    type Args = SearchDocsArgs;
-    type Output = SearchDocsOutput;
-}
-
-// ── list_commands ───────────────────────────────────────────────────────────
-
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -237,137 +182,141 @@ pub struct ListCommandsOutput {
     pub commands: Vec<String>,
 }
 
-pub struct ListCommands;
-impl OrcaToolDef for ListCommands {
-    const NAME: &'static str = "list_commands";
-    const DESCRIPTION: &'static str =
-        "List all Claude slash commands and skills from the orca vault.";
-    type Args = ListCommandsArgs;
-    type Output = ListCommandsOutput;
+// ── Native dispatch ─────────────────────────────────────────────────────────
+
+#[cfg(feature = "native")]
+fn docs_svc(
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<std::sync::Arc<dyn crate::services::docs::DocsService>> {
+    ctx.service::<std::sync::Arc<dyn crate::services::docs::DocsService>>()
 }
 
 #[cfg(feature = "native")]
-mod native {
-    use super::*;
-    use crate::services::docs as svc_docs;
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use orca_utils::tool::{OrcaTool, ToolCtx};
-    use std::sync::Arc;
-
-    fn svc(ctx: &ToolCtx) -> Result<Arc<dyn svc_docs::DocsService>> {
-        ctx.service::<Arc<dyn svc_docs::DocsService>>()
+fn data_to_node(d: crate::services::docs::DocTreeNodeData) -> DocTreeNode {
+    DocTreeNode {
+        name: d.name,
+        path: d.path,
+        kind: match d.kind {
+            crate::services::docs::DocNodeKind::File => DocNodeKind::File,
+            crate::services::docs::DocNodeKind::Dir => DocNodeKind::Dir,
+        },
+        order: d.order,
+        children: d
+            .children
+            .map(|cs| cs.into_iter().map(data_to_node).collect()),
     }
+}
 
-    fn data_to_node(d: svc_docs::DocTreeNodeData) -> DocTreeNode {
-        DocTreeNode {
-            name: d.name,
-            path: d.path,
-            kind: match d.kind {
-                svc_docs::DocNodeKind::File => DocNodeKind::File,
-                svc_docs::DocNodeKind::Dir => DocNodeKind::Dir,
-            },
-            order: d.order,
-            children: d
-                .children
-                .map(|cs| cs.into_iter().map(data_to_node).collect()),
-        }
-    }
+/// List available documentation roots (rebuy, orca) with file counts and paths.
+#[orca_tool(domain = "docs", verb = "list-roots")]
+async fn list_roots(
+    _args: ListRootsArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ListRootsOutput> {
+    let roots = docs_svc(ctx)?
+        .list_roots()
+        .await?
+        .into_iter()
+        .map(|r| DocRootEntry {
+            name: r.name,
+            path: r.path,
+            exists: r.exists,
+            doc_count: r.doc_count as u32,
+        })
+        .collect();
+    Ok(ListRootsOutput { roots })
+}
 
-    #[async_trait]
-    impl OrcaTool for ListRoots {
-        async fn run(_args: ListRootsArgs, ctx: &ToolCtx) -> Result<ListRootsOutput> {
-            let roots = svc(ctx)?
-                .list_roots()
-                .await?
+/// Get the compacted documentation tree for a root, optionally scoped to a
+/// subpath. Returns a typed tree of .md files.
+#[orca_tool(domain = "docs", verb = "tree")]
+async fn get_tree(
+    args: GetTreeArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<GetTreeOutput> {
+    let data = docs_svc(ctx)?
+        .get_tree(&args.root, args.path.as_deref())
+        .await?;
+    Ok(GetTreeOutput {
+        root: args.root,
+        path: args.path,
+        nodes: data.into_iter().map(data_to_node).collect(),
+    })
+}
+
+/// Multi-root documentation tree — every registered root in one call. When
+/// `raw` is true, returns the uncompacted filesystem layout.
+#[orca_tool(domain = "docs", verb = "full-tree")]
+async fn get_full_tree(
+    args: GetFullTreeArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<GetFullTreeOutput> {
+    let raw = args.raw.unwrap_or(false);
+    let data = docs_svc(ctx)?.get_full_tree(raw).await?;
+    let roots = data
+        .into_iter()
+        .map(|r| DocRootTreeEntry {
+            root: r.root,
+            nodes: r.nodes.into_iter().map(data_to_node).collect(),
+        })
+        .collect();
+    Ok(GetFullTreeOutput { roots })
+}
+
+/// Read a documentation file by root and relative path (e.g. root=rebuy,
+/// path=admin-api/README).
+#[orca_tool(domain = "docs", verb = "read")]
+async fn read_doc(
+    args: ReadDocArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ReadDocOutput> {
+    let llm = args.format.as_deref() == Some("llm");
+    let content = docs_svc(ctx)?.read_doc(&args.root, &args.path, llm).await?;
+    Ok(ReadDocOutput {
+        root: args.root,
+        path: args.path,
+        content,
+    })
+}
+
+/// Search documentation files for a keyword across one or all roots.
+#[orca_tool(domain = "docs", verb = "search")]
+async fn search_docs(
+    args: SearchDocsArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<SearchDocsOutput> {
+    let filter = args.root.as_deref().unwrap_or("all");
+    let llm = args.format.as_deref() == Some("llm");
+    let data = docs_svc(ctx)?.search_docs(&args.query, filter, llm).await?;
+    let hits = data
+        .hits
+        .into_iter()
+        .map(|h| DocSearchHit {
+            root: h.root,
+            path: h.path,
+            matches: h
+                .matches
                 .into_iter()
-                .map(|r| DocRootEntry {
-                    name: r.name,
-                    path: r.path,
-                    exists: r.exists,
-                    doc_count: r.doc_count as u32,
+                .map(|m| DocSearchMatch {
+                    line: m.line,
+                    text: m.text,
                 })
-                .collect();
-            Ok(ListRootsOutput { roots })
-        }
-    }
+                .collect(),
+        })
+        .collect();
+    Ok(SearchDocsOutput {
+        query: args.query,
+        hits,
+        enhanced_summary: data.enhanced_summary,
+    })
+}
 
-    #[async_trait]
-    impl OrcaTool for GetTree {
-        async fn run(args: GetTreeArgs, ctx: &ToolCtx) -> Result<GetTreeOutput> {
-            let data = svc(ctx)?.get_tree(&args.root, args.path.as_deref()).await?;
-            Ok(GetTreeOutput {
-                root: args.root,
-                path: args.path,
-                nodes: data.into_iter().map(data_to_node).collect(),
-            })
-        }
-    }
-
-    #[async_trait]
-    impl OrcaTool for GetFullTree {
-        async fn run(args: GetFullTreeArgs, ctx: &ToolCtx) -> Result<GetFullTreeOutput> {
-            let raw = args.raw.unwrap_or(false);
-            let data = svc(ctx)?.get_full_tree(raw).await?;
-            let roots = data
-                .into_iter()
-                .map(|r| DocRootTreeEntry {
-                    root: r.root,
-                    nodes: r.nodes.into_iter().map(data_to_node).collect(),
-                })
-                .collect();
-            Ok(GetFullTreeOutput { roots })
-        }
-    }
-
-    #[async_trait]
-    impl OrcaTool for ReadDoc {
-        async fn run(args: ReadDocArgs, ctx: &ToolCtx) -> Result<ReadDocOutput> {
-            let llm = args.format.as_deref() == Some("llm");
-            let content = svc(ctx)?.read_doc(&args.root, &args.path, llm).await?;
-            Ok(ReadDocOutput {
-                root: args.root,
-                path: args.path,
-                content,
-            })
-        }
-    }
-
-    #[async_trait]
-    impl OrcaTool for SearchDocs {
-        async fn run(args: SearchDocsArgs, ctx: &ToolCtx) -> Result<SearchDocsOutput> {
-            let filter = args.root.as_deref().unwrap_or("all");
-            let llm = args.format.as_deref() == Some("llm");
-            let data = svc(ctx)?.search_docs(&args.query, filter, llm).await?;
-            let hits = data
-                .hits
-                .into_iter()
-                .map(|h| DocSearchHit {
-                    root: h.root,
-                    path: h.path,
-                    matches: h
-                        .matches
-                        .into_iter()
-                        .map(|m| DocSearchMatch {
-                            line: m.line,
-                            text: m.text,
-                        })
-                        .collect(),
-                })
-                .collect();
-            Ok(SearchDocsOutput {
-                query: args.query,
-                hits,
-                enhanced_summary: data.enhanced_summary,
-            })
-        }
-    }
-
-    #[async_trait]
-    impl OrcaTool for ListCommands {
-        async fn run(_args: ListCommandsArgs, ctx: &ToolCtx) -> Result<ListCommandsOutput> {
-            let commands = svc(ctx)?.list_commands().await?;
-            Ok(ListCommandsOutput { commands })
-        }
-    }
+/// List all Claude slash commands and skills from the orca vault.
+#[orca_tool(domain = "docs", verb = "list-commands")]
+async fn list_commands(
+    _args: ListCommandsArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ListCommandsOutput> {
+    let commands = docs_svc(ctx)?.list_commands().await?;
+    Ok(ListCommandsOutput { commands })
 }

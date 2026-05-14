@@ -1,7 +1,7 @@
 //! Proxmox tool defs + native impls.
 #![allow(clippy::disallowed_types)] // Proxmox API shapes are upstream-defined; JsonAny outputs are intentional
 
-use crate::OrcaToolDef;
+use crate::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -13,13 +13,6 @@ pub struct ProxmoxListNodesArgs {
     /// Name of a Proxmox endpoint registered via add_proxmox_endpoint
     pub endpoint: String,
 }
-pub struct ProxmoxListNodes;
-impl OrcaToolDef for ProxmoxListNodes {
-    const NAME: &'static str = "proxmox_list_nodes";
-    const DESCRIPTION: &'static str = "List Proxmox VE cluster nodes for a registered endpoint.";
-    type Args = ProxmoxListNodesArgs;
-    type Output = crate::JsonAny;
-}
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
@@ -30,13 +23,6 @@ pub struct ProxmoxListVmsArgs {
     /// Node name (e.g. "pve1")
     pub node: String,
 }
-pub struct ProxmoxListVms;
-impl OrcaToolDef for ProxmoxListVms {
-    const NAME: &'static str = "proxmox_list_vms";
-    const DESCRIPTION: &'static str = "List QEMU VMs on a Proxmox node.";
-    type Args = ProxmoxListVmsArgs;
-    type Output = crate::JsonAny;
-}
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
@@ -46,13 +32,6 @@ pub struct ProxmoxListContainersArgs {
     pub endpoint: String,
     /// Node name (e.g. "pve1")
     pub node: String,
-}
-pub struct ProxmoxListContainers;
-impl OrcaToolDef for ProxmoxListContainers {
-    const NAME: &'static str = "proxmox_list_containers";
-    const DESCRIPTION: &'static str = "List LXC containers on a Proxmox node.";
-    type Args = ProxmoxListContainersArgs;
-    type Output = crate::JsonAny;
 }
 
 /// Result of a Proxmox lifecycle action.
@@ -79,14 +58,6 @@ pub struct ProxmoxVmActionArgs {
     /// One of: start | stop | shutdown | reboot
     pub action: String,
 }
-pub struct ProxmoxVmAction;
-impl OrcaToolDef for ProxmoxVmAction {
-    const NAME: &'static str = "proxmox_vm_action";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Run a lifecycle action on a Proxmox VM (start/stop/shutdown/reboot).";
-    type Args = ProxmoxVmActionArgs;
-    type Output = ProxmoxActionResult;
-}
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
@@ -99,25 +70,13 @@ pub struct ProxmoxContainerActionArgs {
     /// One of: start | stop | shutdown | reboot
     pub action: String,
 }
-pub struct ProxmoxContainerAction;
-impl OrcaToolDef for ProxmoxContainerAction {
-    const NAME: &'static str = "proxmox_container_action";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Run a lifecycle action on a Proxmox LXC container.";
-    type Args = ProxmoxContainerActionArgs;
-    type Output = ProxmoxActionResult;
-}
 
 #[cfg(feature = "native")]
-mod native {
+mod native_support {
     use super::*;
     use anyhow::{Context, Result};
-    use async_trait::async_trait;
     use orca_db as db;
-    use orca_integrations::proxmox::{
-        Client, Config, ProxmoxAction, ProxmoxActionResult as IntResult,
-    };
-    use orca_utils::tool::{OrcaTool, ToolCtx};
+    use orca_integrations::proxmox::{Client, Config, ProxmoxActionResult as IntResult};
 
     impl From<IntResult> for ProxmoxActionResult {
         fn from(r: IntResult) -> Self {
@@ -131,7 +90,7 @@ mod native {
         }
     }
 
-    fn make_client(name: &str) -> Result<Client> {
+    pub(super) fn make_client(name: &str) -> Result<Client> {
         let conn = db::open_default()?;
         let row = db::proxmox::get(&conn, name)?.with_context(|| {
             format!("proxmox endpoint '{name}' not registered (use add_proxmox_endpoint)")
@@ -142,52 +101,62 @@ mod native {
         let cfg = Config::new(row.base_url, row.token_id, row.token_secret).insecure(row.insecure);
         Ok(Client::new(cfg))
     }
+}
 
-    #[async_trait]
-    impl OrcaTool for ProxmoxListNodes {
-        async fn run(args: ProxmoxListNodesArgs, _: &ToolCtx) -> Result<crate::JsonAny> {
-            let client = make_client(&args.endpoint)?;
-            Ok(client.nodes().await?.into())
-        }
-    }
+/// List Proxmox VE cluster nodes for a registered endpoint.
+#[orca_tool(domain = "proxmox", verb = "nodes")]
+async fn proxmox_list_nodes(
+    args: ProxmoxListNodesArgs,
+    _ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<crate::JsonAny> {
+    let client = native_support::make_client(&args.endpoint)?;
+    Ok(client.nodes().await?.into())
+}
 
-    #[async_trait]
-    impl OrcaTool for ProxmoxListVms {
-        async fn run(args: ProxmoxListVmsArgs, _: &ToolCtx) -> Result<crate::JsonAny> {
-            let client = make_client(&args.endpoint)?;
-            Ok(client.vms(&args.node).await?.into())
-        }
-    }
+/// List QEMU VMs on a Proxmox node.
+#[orca_tool(domain = "proxmox", verb = "vms")]
+async fn proxmox_list_vms(
+    args: ProxmoxListVmsArgs,
+    _ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<crate::JsonAny> {
+    let client = native_support::make_client(&args.endpoint)?;
+    Ok(client.vms(&args.node).await?.into())
+}
 
-    #[async_trait]
-    impl OrcaTool for ProxmoxListContainers {
-        async fn run(args: ProxmoxListContainersArgs, _: &ToolCtx) -> Result<crate::JsonAny> {
-            let client = make_client(&args.endpoint)?;
-            Ok(client.containers(&args.node).await?.into())
-        }
-    }
+/// List LXC containers on a Proxmox node.
+#[orca_tool(domain = "proxmox", verb = "containers")]
+async fn proxmox_list_containers(
+    args: ProxmoxListContainersArgs,
+    _ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<crate::JsonAny> {
+    let client = native_support::make_client(&args.endpoint)?;
+    Ok(client.containers(&args.node).await?.into())
+}
 
-    #[async_trait]
-    impl OrcaTool for ProxmoxVmAction {
-        async fn run(args: ProxmoxVmActionArgs, _: &ToolCtx) -> Result<ProxmoxActionResult> {
-            let client = make_client(&args.endpoint)?;
-            let action: ProxmoxAction = args.action.parse()?;
-            Ok(client
-                .vm_action(&args.node, args.vmid, action)
-                .await?
-                .into())
-        }
-    }
+/// [MUTATES STATE] Run a lifecycle action on a Proxmox VM (start/stop/shutdown/reboot).
+#[orca_tool(domain = "proxmox", verb = "vm-action")]
+async fn proxmox_vm_action(
+    args: ProxmoxVmActionArgs,
+    _ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ProxmoxActionResult> {
+    let client = native_support::make_client(&args.endpoint)?;
+    let action: orca_integrations::proxmox::ProxmoxAction = args.action.parse()?;
+    Ok(client
+        .vm_action(&args.node, args.vmid, action)
+        .await?
+        .into())
+}
 
-    #[async_trait]
-    impl OrcaTool for ProxmoxContainerAction {
-        async fn run(args: ProxmoxContainerActionArgs, _: &ToolCtx) -> Result<ProxmoxActionResult> {
-            let client = make_client(&args.endpoint)?;
-            let action: ProxmoxAction = args.action.parse()?;
-            Ok(client
-                .container_action(&args.node, args.vmid, action)
-                .await?
-                .into())
-        }
-    }
+/// [MUTATES STATE] Run a lifecycle action on a Proxmox LXC container.
+#[orca_tool(domain = "proxmox", verb = "container-action")]
+async fn proxmox_container_action(
+    args: ProxmoxContainerActionArgs,
+    _ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ProxmoxActionResult> {
+    let client = native_support::make_client(&args.endpoint)?;
+    let action: orca_integrations::proxmox::ProxmoxAction = args.action.parse()?;
+    Ok(client
+        .container_action(&args.node, args.vmid, action)
+        .await?
+        .into())
 }

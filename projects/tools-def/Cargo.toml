@@ -38,15 +38,19 @@ wasm = [
 cli = [
     "native",
     "dep:clap",
-    "dep:inventory",
     "dep:colored",
 ]
 
 [dependencies]
-orca-tool-trait = { path = "../tool-trait" }
-schemars        = { workspace = true }
-serde           = { workspace = true }
-serde_json      = { workspace = true }
+orca-tool-trait  = { path = "../tool-trait" }
+orca-tools-macro = { path = "../tools-macro" }
+schemars         = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+
+# Inventory powers the `ORCA_TOOLS` registration slice that `#[orca_tool]`
+# submits into. Required on every build flavor (wasm32 link is a no-op stub).
+inventory       = { workspace = true }
 
 # Native-only deps.
 orca-utils        = { path = "../utils",        optional = true }
@@ -58,7 +62,6 @@ tokio             = { workspace = true,         optional = true }
 
 # CLI-only deps.
 clap              = { workspace = true,         optional = true }
-inventory         = { workspace = true,         optional = true }
 colored           = { workspace = true,         optional = true }
 
 # Wasm-only deps (declared locally — not used elsewhere in the workspace).

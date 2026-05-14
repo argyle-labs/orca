@@ -365,6 +365,44 @@ pub fn upsert_peer(
     Ok(())
 }
 
+/// Self-heal upsert: ensure a `pod_peers` row exists for `peer_cn` so trust
+/// inserts don't trip the FK on `pod_trust.peer_id`. Only inserts when no row
+/// is present — existing rows are left untouched so an admin-set hostname or
+/// pubkey_fp isn't overwritten by a notify dial.
+///
+/// Used by `handle_notify_trust` (and other CN-keyed handlers) to repair
+/// legacy joiners that landed with `peer_id="unknown"` in rc.≤24 — the mTLS
+/// CN is the trustworthy identifier, so we materialize a stub row keyed by
+/// it on first contact.
+pub fn ensure_peer_stub(
+    conn: &Connection,
+    peer_cn: &str,
+    peer_addr: &str,
+    peer_port: u16,
+) -> Result<()> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM pod_peers WHERE peer_id = ?",
+            params![peer_cn],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if exists {
+        return Ok(());
+    }
+    let now = now_secs();
+    conn.execute(
+        "INSERT INTO pod_peers
+             (peer_id, peer_hostname, peer_addr, peer_port, pubkey_fp, ca_cert_pem,
+              first_seen_at, last_seen_at, departed_at)
+         VALUES (?, ?, ?, ?, NULL, '', ?, ?, NULL)
+         ON CONFLICT(peer_id) DO NOTHING",
+        params![peer_cn, peer_cn, peer_addr, peer_port as i64, now, now],
+    )?;
+    Ok(())
+}
+
 pub fn list_peers(conn: &Connection) -> Result<Vec<PeerRow>> {
     let mut stmt = conn.prepare(
         "SELECT p.peer_id, p.peer_hostname, p.peer_addr, p.peer_port, p.pubkey_fp,

@@ -8,6 +8,7 @@
 //! the bottom of this file, and a migration entry in `MIGRATIONS` if the table was added
 //! to an already-deployed database.
 
+pub mod config_store;
 pub mod docker_runtimes;
 pub mod docs;
 pub mod home_assistant;
@@ -886,6 +887,39 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             pod_id                   TEXT,
             ca_previous_expires_at   INTEGER,
             set_at                   INTEGER NOT NULL
+        );
+
+        -- Config store: typed, host-owned rows that drive the scheduler,
+        -- services, backups, NFS watches, chown sweeps, etc.
+        -- See docs/planned/orca-v1-scope.md §3.1.
+        CREATE TABLE IF NOT EXISTS config_rows (
+            id          TEXT PRIMARY KEY,
+            host_owner  TEXT NOT NULL,
+            noun        TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            json        TEXT NOT NULL,
+            is_replica  INTEGER NOT NULL DEFAULT 0,
+            updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            updated_by  TEXT NOT NULL DEFAULT 'local',
+            UNIQUE (noun, name, host_owner)
+        );
+        CREATE INDEX IF NOT EXISTS idx_config_rows_noun  ON config_rows(noun);
+        CREATE INDEX IF NOT EXISTS idx_config_rows_owner ON config_rows(host_owner);
+
+        CREATE TABLE IF NOT EXISTS config_history (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            row_id      TEXT NOT NULL,
+            prior_json  TEXT NOT NULL,
+            changed_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            changed_by  TEXT NOT NULL DEFAULT 'local'
+        );
+        CREATE INDEX IF NOT EXISTS idx_config_history_row ON config_history(row_id);
+
+        CREATE TABLE IF NOT EXISTS config_schemas (
+            noun             TEXT PRIMARY KEY,
+            schema_json      TEXT NOT NULL,
+            sensitive_fields TEXT NOT NULL DEFAULT '[]',
+            registered_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         );
         ",
     )?;

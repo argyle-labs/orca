@@ -8,7 +8,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::OrcaToolDef;
+use crate::orca_tool;
 
 // ── Shared types ────────────────────────────────────────────────────────────
 
@@ -49,15 +49,6 @@ pub struct SecretListReport {
     pub secrets: Vec<SecretEntry>,
 }
 
-pub struct SecretList;
-impl OrcaToolDef for SecretList {
-    const NAME: &'static str = "secret.list";
-    const DESCRIPTION: &'static str =
-        "List configured secrets (names + backends + metadata). Never returns values.";
-    type Args = SecretListArgs;
-    type Output = SecretListReport;
-}
-
 // ── secret.get ──────────────────────────────────────────────────────────────
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
@@ -75,15 +66,6 @@ pub struct SecretGetReport {
     pub name: String,
     pub backend: String,
     pub value: String,
-}
-
-pub struct SecretGet;
-impl OrcaToolDef for SecretGet {
-    const NAME: &'static str = "secret.get";
-    const DESCRIPTION: &'static str =
-        "[SENSITIVE] Fetch a secret value by name. Resolves via the configured backend.";
-    type Args = SecretGetArgs;
-    type Output = SecretGetReport;
 }
 
 // ── secret.set ──────────────────────────────────────────────────────────────
@@ -124,15 +106,6 @@ pub struct SecretMutationReport {
     pub created: bool,
 }
 
-pub struct SecretSet;
-impl OrcaToolDef for SecretSet {
-    const NAME: &'static str = "secret.set";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Create or update a secret. For 'inline' backend, `value` is required; \
-         for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field').";
-    type Args = SecretSetArgs;
-    type Output = SecretMutationReport;
-}
-
 // ── secret.delete ───────────────────────────────────────────────────────────
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
@@ -151,15 +124,6 @@ pub struct SecretDeleteReport {
     pub removed: bool,
 }
 
-pub struct SecretDelete;
-impl OrcaToolDef for SecretDelete {
-    const NAME: &'static str = "secret.delete";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Remove a secret. The inline value is zeroed; for external backends \
-         only the orca registration is removed (the upstream vault is untouched).";
-    type Args = SecretDeleteArgs;
-    type Output = SecretDeleteReport;
-}
-
 // ── secret.backends ─────────────────────────────────────────────────────────
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
@@ -175,73 +139,69 @@ pub struct SecretBackendsReport {
     pub backends: Vec<BackendInfo>,
 }
 
-pub struct SecretBackends;
-impl OrcaToolDef for SecretBackends {
-    const NAME: &'static str = "secret.backends";
-    const DESCRIPTION: &'static str =
-        "List backend kinds available on this host (lets the UI render a backend picker).";
-    type Args = SecretBackendsArgs;
-    type Output = SecretBackendsReport;
-}
-
 // ── Native dispatch ─────────────────────────────────────────────────────────
 
 #[cfg(feature = "native")]
-mod native {
-    use super::*;
-    use crate::services::secrets::SecretsService;
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use orca_utils::tool::{OrcaTool, ToolCtx};
-    use std::sync::Arc;
+fn secrets_svc(
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<std::sync::Arc<dyn crate::services::secrets::SecretsService>> {
+    ctx.service::<std::sync::Arc<dyn crate::services::secrets::SecretsService>>()
+}
 
-    fn svc(ctx: &ToolCtx) -> Result<Arc<dyn SecretsService>> {
-        ctx.service::<Arc<dyn SecretsService>>()
-    }
+/// List configured secrets (names + backends + metadata). Never returns values.
+#[orca_tool(domain = "secret", verb = "list")]
+async fn secret_list(
+    _args: SecretListArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<SecretListReport> {
+    let secrets = secrets_svc(ctx)?.list().await?;
+    Ok(SecretListReport { secrets })
+}
 
-    #[async_trait]
-    impl OrcaTool for SecretList {
-        async fn run(_a: SecretListArgs, ctx: &ToolCtx) -> Result<SecretListReport> {
-            let secrets = svc(ctx)?.list().await?;
-            Ok(SecretListReport { secrets })
-        }
-    }
+/// [SENSITIVE] Fetch a secret value by name. Resolves via the configured backend.
+#[orca_tool(domain = "secret", verb = "get")]
+async fn secret_get(
+    args: SecretGetArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<SecretGetReport> {
+    let (backend, value) = secrets_svc(ctx)?.get(&args.name).await?;
+    Ok(SecretGetReport {
+        name: args.name,
+        backend,
+        value,
+    })
+}
 
-    #[async_trait]
-    impl OrcaTool for SecretGet {
-        async fn run(a: SecretGetArgs, ctx: &ToolCtx) -> Result<SecretGetReport> {
-            let (backend, value) = svc(ctx)?.get(&a.name).await?;
-            Ok(SecretGetReport {
-                name: a.name,
-                backend,
-                value,
-            })
-        }
-    }
+/// [MUTATES STATE] Create or update a secret. For 'inline' backend, `value` is required;
+/// for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field').
+#[orca_tool(domain = "secret", verb = "set")]
+async fn secret_set(
+    args: SecretSetArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<SecretMutationReport> {
+    secrets_svc(ctx)?.set(args).await
+}
 
-    #[async_trait]
-    impl OrcaTool for SecretSet {
-        async fn run(a: SecretSetArgs, ctx: &ToolCtx) -> Result<SecretMutationReport> {
-            svc(ctx)?.set(a).await
-        }
-    }
+/// [MUTATES STATE] Remove a secret. The inline value is zeroed; for external backends
+/// only the orca registration is removed (the upstream vault is untouched).
+#[orca_tool(domain = "secret", verb = "delete")]
+async fn secret_delete(
+    args: SecretDeleteArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<SecretDeleteReport> {
+    let removed = secrets_svc(ctx)?.delete(&args.name).await?;
+    Ok(SecretDeleteReport {
+        name: args.name,
+        removed,
+    })
+}
 
-    #[async_trait]
-    impl OrcaTool for SecretDelete {
-        async fn run(a: SecretDeleteArgs, ctx: &ToolCtx) -> Result<SecretDeleteReport> {
-            let removed = svc(ctx)?.delete(&a.name).await?;
-            Ok(SecretDeleteReport {
-                name: a.name,
-                removed,
-            })
-        }
-    }
-
-    #[async_trait]
-    impl OrcaTool for SecretBackends {
-        async fn run(_a: SecretBackendsArgs, ctx: &ToolCtx) -> Result<SecretBackendsReport> {
-            let backends = svc(ctx)?.backends().await;
-            Ok(SecretBackendsReport { backends })
-        }
-    }
+/// List backend kinds available on this host (lets the UI render a backend picker).
+#[orca_tool(domain = "secret", verb = "backends")]
+async fn secret_backends(
+    _args: SecretBackendsArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<SecretBackendsReport> {
+    let backends = secrets_svc(ctx)?.backends().await;
+    Ok(SecretBackendsReport { backends })
 }

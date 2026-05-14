@@ -322,7 +322,7 @@ pub async fn serve(
 
                             if sni == pki::POD_SERVER_SAN {
                                 if let Err(e) =
-                                    crate::pod::handle_pod_connection(tls, peer_cn).await
+                                    crate::pod::handle_pod_connection(tls, peer_cn, peer).await
                                 {
                                     warn!("[plugin-host] {peer} pod connection error: {e:#}");
                                 }

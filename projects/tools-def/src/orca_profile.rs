@@ -6,7 +6,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::OrcaToolDef;
+use crate::orca_tool;
 
 // ── Shared rows ─────────────────────────────────────────────────────────────
 
@@ -138,140 +138,96 @@ pub struct ProfileUnshareArgs {
     pub user: String,
 }
 
-// ── Tool defs ───────────────────────────────────────────────────────────────
-
-pub struct ProfileList;
-impl OrcaToolDef for ProfileList {
-    const NAME: &'static str = "profile.list";
-    const DESCRIPTION: &'static str =
-        "List all profiles the current user can access (owned + shared).";
-    type Args = ProfileListArgs;
-    type Output = ProfileListReport;
-}
-pub struct ProfileShow;
-impl OrcaToolDef for ProfileShow {
-    const NAME: &'static str = "profile.show";
-    const DESCRIPTION: &'static str = "Show details of a profile (defaults to the active one).";
-    type Args = ProfileShowArgs;
-    type Output = ProfileDetail;
-}
-pub struct ProfileCurrent;
-impl OrcaToolDef for ProfileCurrent {
-    const NAME: &'static str = "profile.current";
-    const DESCRIPTION: &'static str = "Show the currently active profile (or None).";
-    type Args = ProfileCurrentArgs;
-    type Output = ProfileCurrentReport;
-}
-pub struct ProfileCreate;
-impl OrcaToolDef for ProfileCreate {
-    const NAME: &'static str = "profile.create";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Create a new profile owned by the current user.";
-    type Args = ProfileCreateArgs;
-    type Output = ProfileDetail;
-}
-pub struct ProfileDelete;
-impl OrcaToolDef for ProfileDelete {
-    const NAME: &'static str = "profile.delete";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Delete a profile (owner only).";
-    type Args = ProfileSpecArgs;
-    type Output = ProfileMutationResult;
-}
-pub struct ProfileUse;
-impl OrcaToolDef for ProfileUse {
-    const NAME: &'static str = "profile.use";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Set the active profile for the current user.";
-    type Args = ProfileSpecArgs;
-    type Output = ProfileMutationResult;
-}
-pub struct ProfileShare;
-impl OrcaToolDef for ProfileShare {
-    const NAME: &'static str = "profile.share";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Share a profile with another user.";
-    type Args = ProfileShareArgs;
-    type Output = ProfileMutationResult;
-}
-pub struct ProfileUnshare;
-impl OrcaToolDef for ProfileUnshare {
-    const NAME: &'static str = "profile.unshare";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Remove a share from a profile.";
-    type Args = ProfileUnshareArgs;
-    type Output = ProfileMutationResult;
-}
-pub struct ProfileShares;
-impl OrcaToolDef for ProfileShares {
-    const NAME: &'static str = "profile.shares";
-    const DESCRIPTION: &'static str = "List sharees on a profile (owner only).";
-    type Args = ProfileSpecArgs;
-    type Output = ProfileSharesReport;
-}
+// ── Native dispatch ─────────────────────────────────────────────────────────
 
 #[cfg(feature = "native")]
-mod native {
-    use super::*;
-    use crate::services::profile::ProfileService;
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use orca_utils::tool::{OrcaTool, ToolCtx};
-    use std::sync::Arc;
+fn profile_svc(
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<std::sync::Arc<dyn crate::services::profile::ProfileService>> {
+    ctx.service::<std::sync::Arc<dyn crate::services::profile::ProfileService>>()
+}
 
-    fn svc(ctx: &ToolCtx) -> Result<Arc<dyn ProfileService>> {
-        ctx.service::<Arc<dyn ProfileService>>()
-    }
+/// List all profiles the current user can access (owned + shared).
+#[orca_tool(domain = "profile", verb = "list")]
+async fn profile_list(
+    _args: ProfileListArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ProfileListReport> {
+    profile_svc(ctx)?.list().await
+}
 
-    #[async_trait]
-    impl OrcaTool for ProfileList {
-        async fn run(_a: ProfileListArgs, ctx: &ToolCtx) -> Result<ProfileListReport> {
-            svc(ctx)?.list().await
-        }
-    }
-    #[async_trait]
-    impl OrcaTool for ProfileShow {
-        async fn run(a: ProfileShowArgs, ctx: &ToolCtx) -> Result<ProfileDetail> {
-            svc(ctx)?.show(a.spec.as_deref()).await
-        }
-    }
-    #[async_trait]
-    impl OrcaTool for ProfileCurrent {
-        async fn run(_a: ProfileCurrentArgs, ctx: &ToolCtx) -> Result<ProfileCurrentReport> {
-            svc(ctx)?.current().await
-        }
-    }
-    #[async_trait]
-    impl OrcaTool for ProfileCreate {
-        async fn run(a: ProfileCreateArgs, ctx: &ToolCtx) -> Result<ProfileDetail> {
-            svc(ctx)?.create(&a.name, a.description.as_deref()).await
-        }
-    }
-    #[async_trait]
-    impl OrcaTool for ProfileDelete {
-        async fn run(a: ProfileSpecArgs, ctx: &ToolCtx) -> Result<ProfileMutationResult> {
-            svc(ctx)?.delete(&a.spec).await
-        }
-    }
-    #[async_trait]
-    impl OrcaTool for ProfileUse {
-        async fn run(a: ProfileSpecArgs, ctx: &ToolCtx) -> Result<ProfileMutationResult> {
-            svc(ctx)?.use_profile(&a.spec).await
-        }
-    }
-    #[async_trait]
-    impl OrcaTool for ProfileShare {
-        async fn run(a: ProfileShareArgs, ctx: &ToolCtx) -> Result<ProfileMutationResult> {
-            svc(ctx)?.share(&a.spec, &a.user, &a.role).await
-        }
-    }
-    #[async_trait]
-    impl OrcaTool for ProfileUnshare {
-        async fn run(a: ProfileUnshareArgs, ctx: &ToolCtx) -> Result<ProfileMutationResult> {
-            svc(ctx)?.unshare(&a.spec, &a.user).await
-        }
-    }
-    #[async_trait]
-    impl OrcaTool for ProfileShares {
-        async fn run(a: ProfileSpecArgs, ctx: &ToolCtx) -> Result<ProfileSharesReport> {
-            svc(ctx)?.shares(&a.spec).await
-        }
-    }
+/// Show details of a profile (defaults to the active one).
+#[orca_tool(domain = "profile", verb = "show")]
+async fn profile_show(
+    args: ProfileShowArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ProfileDetail> {
+    profile_svc(ctx)?.show(args.spec.as_deref()).await
+}
+
+/// Show the currently active profile (or None).
+#[orca_tool(domain = "profile", verb = "current")]
+async fn profile_current(
+    _args: ProfileCurrentArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ProfileCurrentReport> {
+    profile_svc(ctx)?.current().await
+}
+
+/// [MUTATES STATE] Create a new profile owned by the current user.
+#[orca_tool(domain = "profile", verb = "create")]
+async fn profile_create(
+    args: ProfileCreateArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ProfileDetail> {
+    profile_svc(ctx)?
+        .create(&args.name, args.description.as_deref())
+        .await
+}
+
+/// [MUTATES STATE] Delete a profile (owner only).
+#[orca_tool(domain = "profile", verb = "delete")]
+async fn profile_delete(
+    args: ProfileSpecArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ProfileMutationResult> {
+    profile_svc(ctx)?.delete(&args.spec).await
+}
+
+/// [MUTATES STATE] Set the active profile for the current user.
+#[orca_tool(domain = "profile", verb = "use")]
+async fn profile_use(
+    args: ProfileSpecArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ProfileMutationResult> {
+    profile_svc(ctx)?.use_profile(&args.spec).await
+}
+
+/// [MUTATES STATE] Share a profile with another user.
+#[orca_tool(domain = "profile", verb = "share")]
+async fn profile_share(
+    args: ProfileShareArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ProfileMutationResult> {
+    profile_svc(ctx)?
+        .share(&args.spec, &args.user, &args.role)
+        .await
+}
+
+/// [MUTATES STATE] Remove a share from a profile.
+#[orca_tool(domain = "profile", verb = "unshare")]
+async fn profile_unshare(
+    args: ProfileUnshareArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ProfileMutationResult> {
+    profile_svc(ctx)?.unshare(&args.spec, &args.user).await
+}
+
+/// List sharees on a profile (owner only).
+#[orca_tool(domain = "profile", verb = "shares")]
+async fn profile_shares(
+    args: ProfileSpecArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ProfileSharesReport> {
+    profile_svc(ctx)?.shares(&args.spec).await
 }

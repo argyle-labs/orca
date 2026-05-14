@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 #[allow(clippy::disallowed_types)]
 use serde_json::Value;
 
-use crate::OrcaToolDef;
+use crate::orca_tool;
 
 // ── Shared row shapes ───────────────────────────────────────────────────────
 
@@ -193,15 +193,6 @@ pub struct ListSpecsOutput {
     pub specs: Vec<SpecMetaRow>,
 }
 
-pub struct ListSpecs;
-impl OrcaToolDef for ListSpecs {
-    const NAME: &'static str = "list_specs";
-    const DESCRIPTION: &'static str = "List every registered OpenAPI / GraphQL spec — filesystem-resident, DB-backed, and \
-         plugin-declared — with per-source metadata.";
-    type Args = ListSpecsArgs;
-    type Output = ListSpecsOutput;
-}
-
 // list_db_specs
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
@@ -216,15 +207,6 @@ pub struct ListDbSpecsOutput {
     pub specs: Vec<DbSpecRow>,
 }
 
-pub struct ListDbSpecs;
-impl OrcaToolDef for ListDbSpecs {
-    const NAME: &'static str = "list_db_specs";
-    const DESCRIPTION: &'static str =
-        "List URL-registered + MCP-synced specs from orca.db (the DB-backed slice only).";
-    type Args = ListDbSpecsArgs;
-    type Output = ListDbSpecsOutput;
-}
-
 // register_spec
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
@@ -235,15 +217,6 @@ pub struct RegisterSpecArgs {
     pub url: String,
 }
 
-pub struct RegisterSpec;
-impl OrcaToolDef for RegisterSpec {
-    const NAME: &'static str = "register_spec";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Fetch a JSON OpenAPI spec from `url` and persist it under `name` \
-         in orca.db.";
-    type Args = RegisterSpecArgs;
-    type Output = RegisterSpecResult;
-}
-
 // refresh_spec
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
@@ -251,15 +224,6 @@ impl OrcaToolDef for RegisterSpec {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RefreshSpecArgs {
     pub name: String,
-}
-
-pub struct RefreshSpec;
-impl OrcaToolDef for RefreshSpec {
-    const NAME: &'static str = "refresh_spec";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Re-fetch a previously-registered spec from its stored URL and \
-         update orca.db.";
-    type Args = RefreshSpecArgs;
-    type Output = RegisterSpecResult;
 }
 
 // unregister_spec
@@ -278,15 +242,6 @@ pub struct UnregisterSpecOutput {
     pub removed: bool,
 }
 
-pub struct UnregisterSpec;
-impl OrcaToolDef for UnregisterSpec {
-    const NAME: &'static str = "unregister_spec";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Remove a spec from orca.db. Returns `removed: true` when a row \
-         was deleted.";
-    type Args = UnregisterSpecArgs;
-    type Output = UnregisterSpecOutput;
-}
-
 // sync_mcp_specs
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
@@ -296,15 +251,6 @@ pub struct SyncMcpSpecsArgs {
     pub server: String,
 }
 
-pub struct SyncMcpSpecs;
-impl OrcaToolDef for SyncMcpSpecs {
-    const NAME: &'static str = "sync_mcp_specs";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Connect to `server` (an MCP server), call its `{prefix}_spec_list` \
-         and `{prefix}_spec_schema` tools, and upsert every advertised repo into orca.db.";
-    type Args = SyncMcpSpecsArgs;
-    type Output = SyncMcpSpecsResult;
-}
-
 // get_spec_graphql_info
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
@@ -312,15 +258,6 @@ impl OrcaToolDef for SyncMcpSpecs {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetSpecGraphqlInfoArgs {
     pub repo: String,
-}
-
-pub struct GetSpecGraphqlInfo;
-impl OrcaToolDef for GetSpecGraphqlInfo {
-    const NAME: &'static str = "get_spec_graphql_info";
-    const DESCRIPTION: &'static str =
-        "Parse the local `<repo>.graphql` SDL into a structured types/queries/mutations view.";
-    type Args = GetSpecGraphqlInfoArgs;
-    type Output = GraphQlInfoData;
 }
 
 // proxy_graphql — variables is opaque (GraphQL variable maps are free-form per operation).
@@ -352,97 +289,97 @@ mod proxy_graphql_args_mod {
 
 pub use proxy_graphql_args_mod::ProxyGraphqlArgs;
 
-pub struct ProxyGraphql;
-impl OrcaToolDef for ProxyGraphql {
-    const NAME: &'static str = "proxy_graphql";
-    const DESCRIPTION: &'static str = "Proxy a GraphQL request to a Shopify shop using the configured shop+token. \
-         Returns the raw upstream JSON body.";
-    type Args = ProxyGraphqlArgs;
-    type Output = GraphqlProxyResult;
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
-// Native run impls
+// Native dispatch
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(feature = "native")]
-mod native {
-    use super::*;
-    use crate::services::spec_registry::SpecRegistryService;
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use orca_utils::tool::{OrcaTool, ToolCtx};
-    use std::sync::Arc;
+fn svc(
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<std::sync::Arc<dyn crate::services::spec_registry::SpecRegistryService>> {
+    ctx.service::<std::sync::Arc<dyn crate::services::spec_registry::SpecRegistryService>>()
+}
 
-    fn svc(ctx: &ToolCtx) -> Result<Arc<dyn SpecRegistryService>> {
-        ctx.service::<Arc<dyn SpecRegistryService>>()
-    }
+/// List every registered OpenAPI / GraphQL spec — filesystem-resident, DB-backed, and plugin-declared — with per-source metadata.
+#[orca_tool(domain = "spec", verb = "list")]
+async fn list_specs(
+    _args: ListSpecsArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ListSpecsOutput> {
+    let specs = svc(ctx)?.list_specs().await?;
+    Ok(ListSpecsOutput { specs })
+}
 
-    #[async_trait]
-    impl OrcaTool for ListSpecs {
-        async fn run(_args: ListSpecsArgs, ctx: &ToolCtx) -> Result<ListSpecsOutput> {
-            let specs = svc(ctx)?.list_specs().await?;
-            Ok(ListSpecsOutput { specs })
-        }
-    }
+/// List URL-registered + MCP-synced specs from orca.db (the DB-backed slice only).
+#[orca_tool(domain = "spec", verb = "list-db")]
+async fn list_db_specs(
+    _args: ListDbSpecsArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ListDbSpecsOutput> {
+    let specs = svc(ctx)?.list_db_specs().await?;
+    Ok(ListDbSpecsOutput { specs })
+}
 
-    #[async_trait]
-    impl OrcaTool for ListDbSpecs {
-        async fn run(_args: ListDbSpecsArgs, ctx: &ToolCtx) -> Result<ListDbSpecsOutput> {
-            let specs = svc(ctx)?.list_db_specs().await?;
-            Ok(ListDbSpecsOutput { specs })
-        }
-    }
+/// [MUTATES STATE] Fetch a JSON OpenAPI spec from `url` and persist it under `name` in orca.db.
+#[orca_tool(domain = "spec", verb = "register")]
+async fn register_spec(
+    args: RegisterSpecArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<RegisterSpecResult> {
+    svc(ctx)?.register_spec(&args.name, &args.url).await
+}
 
-    #[async_trait]
-    impl OrcaTool for RegisterSpec {
-        async fn run(args: RegisterSpecArgs, ctx: &ToolCtx) -> Result<RegisterSpecResult> {
-            svc(ctx)?.register_spec(&args.name, &args.url).await
-        }
-    }
+/// [MUTATES STATE] Re-fetch a previously-registered spec from its stored URL and update orca.db.
+#[orca_tool(domain = "spec", verb = "refresh")]
+async fn refresh_spec(
+    args: RefreshSpecArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<RegisterSpecResult> {
+    svc(ctx)?.refresh_spec(&args.name).await
+}
 
-    #[async_trait]
-    impl OrcaTool for RefreshSpec {
-        async fn run(args: RefreshSpecArgs, ctx: &ToolCtx) -> Result<RegisterSpecResult> {
-            svc(ctx)?.refresh_spec(&args.name).await
-        }
-    }
+/// [MUTATES STATE] Remove a spec from orca.db. Returns `removed: true` when a row was deleted.
+#[orca_tool(domain = "spec", verb = "unregister")]
+async fn unregister_spec(
+    args: UnregisterSpecArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<UnregisterSpecOutput> {
+    let removed = svc(ctx)?.unregister_spec(&args.name).await?;
+    Ok(UnregisterSpecOutput { removed })
+}
 
-    #[async_trait]
-    impl OrcaTool for UnregisterSpec {
-        async fn run(args: UnregisterSpecArgs, ctx: &ToolCtx) -> Result<UnregisterSpecOutput> {
-            let removed = svc(ctx)?.unregister_spec(&args.name).await?;
-            Ok(UnregisterSpecOutput { removed })
-        }
-    }
+/// [MUTATES STATE] Connect to `server` (an MCP server), call its `{prefix}_spec_list` and `{prefix}_spec_schema` tools, and upsert every advertised repo into orca.db.
+#[orca_tool(domain = "spec", verb = "sync-mcp")]
+async fn sync_mcp_specs(
+    args: SyncMcpSpecsArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<SyncMcpSpecsResult> {
+    svc(ctx)?.sync_mcp_specs(&args.server).await
+}
 
-    #[async_trait]
-    impl OrcaTool for SyncMcpSpecs {
-        async fn run(args: SyncMcpSpecsArgs, ctx: &ToolCtx) -> Result<SyncMcpSpecsResult> {
-            svc(ctx)?.sync_mcp_specs(&args.server).await
-        }
-    }
+/// Parse the local `<repo>.graphql` SDL into a structured types/queries/mutations view.
+#[orca_tool(domain = "spec", verb = "graphql-info")]
+async fn get_spec_graphql_info(
+    args: GetSpecGraphqlInfoArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<GraphQlInfoData> {
+    svc(ctx)?.graphql_info(&args.repo).await
+}
 
-    #[async_trait]
-    impl OrcaTool for GetSpecGraphqlInfo {
-        async fn run(args: GetSpecGraphqlInfoArgs, ctx: &ToolCtx) -> Result<GraphQlInfoData> {
-            svc(ctx)?.graphql_info(&args.repo).await
-        }
-    }
-
-    #[async_trait]
-    impl OrcaTool for ProxyGraphql {
-        async fn run(args: ProxyGraphqlArgs, ctx: &ToolCtx) -> Result<GraphqlProxyResult> {
-            svc(ctx)?
-                .proxy_graphql(
-                    &args.repo,
-                    &args.shop,
-                    &args.token,
-                    &args.query,
-                    args.variables,
-                    args.operation_name.as_deref(),
-                )
-                .await
-        }
-    }
+/// Proxy a GraphQL request to a Shopify shop using the configured shop+token. Returns the raw upstream JSON body.
+#[orca_tool(domain = "spec", verb = "proxy-graphql", cli = skip)]
+async fn proxy_graphql(
+    args: ProxyGraphqlArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<GraphqlProxyResult> {
+    svc(ctx)?
+        .proxy_graphql(
+            &args.repo,
+            &args.shop,
+            &args.token,
+            &args.query,
+            args.variables,
+            args.operation_name.as_deref(),
+        )
+        .await
 }

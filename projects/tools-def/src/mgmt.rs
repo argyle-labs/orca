@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::OrcaToolDef;
+use crate::orca_tool;
 // Value is used only in MCP-federation inner modules where all Value uses are
 // legitimate opaque blobs (MCP protocol-level). The allow on each mod block
 // covers derive expansions; this import-level allow covers the import itself.
@@ -15,7 +15,7 @@ use crate::OrcaToolDef;
 use serde_json::Value;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MCP servers + tool mappings
+// MCP servers + tool mappings — shared row shapes
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
@@ -68,15 +68,6 @@ pub struct ListMcpServersOutput {
     pub servers: Vec<McpServerEntry>,
 }
 
-pub struct ListMcpServers;
-impl OrcaToolDef for ListMcpServers {
-    const NAME: &'static str = "list_mcp_servers";
-    const DESCRIPTION: &'static str = "List all MCP servers registered in orca.db (orca's own \
-         managed registry). Does not include ~/.claude.json servers managed by Claude Code directly.";
-    type Args = ListMcpServersArgs;
-    type Output = ListMcpServersOutput;
-}
-
 // ── add_mcp_server ──────────────────────────────────────────────────────────
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
@@ -101,15 +92,6 @@ pub struct McpServerMutationResult {
     pub changed: bool,
 }
 
-pub struct AddMcpServer;
-impl OrcaToolDef for AddMcpServer {
-    const NAME: &'static str = "add_mcp_server";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Add or update an MCP server in orca.db. \
-         Use when registering a new MCP server for orca to federate.";
-    type Args = AddMcpServerArgs;
-    type Output = McpServerMutationResult;
-}
-
 // ── remove_mcp_server ───────────────────────────────────────────────────────
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
@@ -118,14 +100,6 @@ impl OrcaToolDef for AddMcpServer {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RemoveMcpServerArgs {
     pub name: String,
-}
-
-pub struct RemoveMcpServer;
-impl OrcaToolDef for RemoveMcpServer {
-    const NAME: &'static str = "remove_mcp_server";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Remove an MCP server from orca.db by name.";
-    type Args = RemoveMcpServerArgs;
-    type Output = McpServerMutationResult;
 }
 
 // ── map_tool / unmap_tool ───────────────────────────────────────────────────
@@ -149,15 +123,6 @@ pub struct MapToolResult {
     pub external_tool: String,
 }
 
-pub struct MapTool;
-impl OrcaToolDef for MapTool {
-    const NAME: &'static str = "map_tool";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Map an orca tool name to a specific tool on a registered MCP server.";
-    type Args = MapToolArgs;
-    type Output = MapToolResult;
-}
-
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -172,14 +137,6 @@ pub struct UnmapToolArgs {
 pub struct UnmapToolResult {
     pub orca_tool: String,
     pub changed: bool,
-}
-
-pub struct UnmapTool;
-impl OrcaToolDef for UnmapTool {
-    const NAME: &'static str = "unmap_tool";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Remove a tool mapping from orca.db.";
-    type Args = UnmapToolArgs;
-    type Output = UnmapToolResult;
 }
 
 // ── sync_tools ──────────────────────────────────────────────────────────────
@@ -204,15 +161,6 @@ pub struct SyncToolsOutput {
     pub results: Vec<SyncToolsServerEntry>,
 }
 
-pub struct SyncTools;
-impl OrcaToolDef for SyncTools {
-    const NAME: &'static str = "sync_tools";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Auto-discover and map tools from registered \
-         MCP servers. Provide name or set all=true.";
-    type Args = SyncToolsArgs;
-    type Output = SyncToolsOutput;
-}
-
 // ── list_tool_mappings ──────────────────────────────────────────────────────
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
@@ -230,15 +178,6 @@ pub struct ListToolMappingsArgs {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListToolMappingsOutput {
     pub mappings: Vec<MappingEntry>,
-}
-
-pub struct ListToolMappings;
-impl OrcaToolDef for ListToolMappings {
-    const NAME: &'static str = "list_tool_mappings";
-    const DESCRIPTION: &'static str =
-        "List all tool mappings in orca.db, optionally filtered by server name.";
-    type Args = ListToolMappingsArgs;
-    type Output = ListToolMappingsOutput;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -278,15 +217,6 @@ pub struct ListSchemasOutput {
     pub schemas: Vec<SchemaDbEntry>,
 }
 
-pub struct ListSchemas;
-impl OrcaToolDef for ListSchemas {
-    const NAME: &'static str = "list_schemas";
-    const DESCRIPTION: &'static str =
-        "List all MySQL/MariaDB schema databases registered in orca.db.";
-    type Args = ListSchemasArgs;
-    type Output = ListSchemasOutput;
-}
-
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -315,30 +245,12 @@ pub struct SchemaMutationResult {
     pub changed: bool,
 }
 
-pub struct AddSchema;
-impl OrcaToolDef for AddSchema {
-    const NAME: &'static str = "add_schema";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Add or update a schema database in orca.db. \
-         Use container OR host/port, not both.";
-    type Args = AddSchemaArgs;
-    type Output = SchemaMutationResult;
-}
-
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RemoveSchemaArgs {
     pub name: String,
-}
-
-pub struct RemoveSchema;
-impl OrcaToolDef for RemoveSchema {
-    const NAME: &'static str = "remove_schema";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Remove a schema database from orca.db by name.";
-    type Args = RemoveSchemaArgs;
-    type Output = SchemaMutationResult;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -373,14 +285,6 @@ pub struct ListDockerRuntimesOutput {
     pub runtimes: Vec<DockerRuntimeEntry>,
 }
 
-pub struct ListDockerRuntimes;
-impl OrcaToolDef for ListDockerRuntimes {
-    const NAME: &'static str = "list_docker_runtimes";
-    const DESCRIPTION: &'static str = "List all Docker runtimes registered in orca.db.";
-    type Args = ListDockerRuntimesArgs;
-    type Output = ListDockerRuntimesOutput;
-}
-
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -404,30 +308,12 @@ pub struct DockerRuntimeMutationResult {
     pub changed: bool,
 }
 
-pub struct AddDockerRuntime;
-impl OrcaToolDef for AddDockerRuntime {
-    const NAME: &'static str = "add_docker_runtime";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Register a Docker runtime in orca.db. \
-         Provide socketPath, host, or url.";
-    type Args = AddDockerRuntimeArgs;
-    type Output = DockerRuntimeMutationResult;
-}
-
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RemoveDockerRuntimeArgs {
     pub name: String,
-}
-
-pub struct RemoveDockerRuntime;
-impl OrcaToolDef for RemoveDockerRuntime {
-    const NAME: &'static str = "remove_docker_runtime";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Remove a Docker runtime from orca.db by name.";
-    type Args = RemoveDockerRuntimeArgs;
-    type Output = DockerRuntimeMutationResult;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -458,14 +344,6 @@ pub struct ListDocRootsOutput {
     pub roots: Vec<DocRootRegEntry>,
 }
 
-pub struct ListDocRoots;
-impl OrcaToolDef for ListDocRoots {
-    const NAME: &'static str = "list_doc_roots";
-    const DESCRIPTION: &'static str = "List all documentation roots registered in orca.db.";
-    type Args = ListDocRootsArgs;
-    type Output = ListDocRootsOutput;
-}
-
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -485,30 +363,12 @@ pub struct DocRootMutationResult {
     pub changed: bool,
 }
 
-pub struct AddDocRoot;
-impl OrcaToolDef for AddDocRoot {
-    const NAME: &'static str = "add_doc_root";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Register a documentation root directory in orca.db.";
-    type Args = AddDocRootArgs;
-    type Output = DocRootMutationResult;
-}
-
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RemoveDocRootArgs {
     pub name: String,
-}
-
-pub struct RemoveDocRoot;
-impl OrcaToolDef for RemoveDocRoot {
-    const NAME: &'static str = "remove_doc_root";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Remove a documentation root from orca.db by name.";
-    type Args = RemoveDocRootArgs;
-    type Output = DocRootMutationResult;
 }
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
@@ -522,15 +382,6 @@ pub struct ListDocIgnorePatternsArgs {}
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListDocIgnorePatternsOutput {
     pub patterns: Vec<String>,
-}
-
-pub struct ListDocIgnorePatterns;
-impl OrcaToolDef for ListDocIgnorePatterns {
-    const NAME: &'static str = "list_doc_ignore_patterns";
-    const DESCRIPTION: &'static str =
-        "List directory names excluded from all doc roots (e.g. node_modules, .git).";
-    type Args = ListDocIgnorePatternsArgs;
-    type Output = ListDocIgnorePatternsOutput;
 }
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
@@ -547,24 +398,6 @@ pub struct DocIgnorePatternArgs {
 pub struct DocIgnorePatternMutationResult {
     pub pattern: String,
     pub changed: bool,
-}
-
-pub struct AddDocIgnorePattern;
-impl OrcaToolDef for AddDocIgnorePattern {
-    const NAME: &'static str = "add_doc_ignore_pattern";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Add a directory name to the global doc ignore list.";
-    type Args = DocIgnorePatternArgs;
-    type Output = DocIgnorePatternMutationResult;
-}
-
-pub struct RemoveDocIgnorePattern;
-impl OrcaToolDef for RemoveDocIgnorePattern {
-    const NAME: &'static str = "remove_doc_ignore_pattern";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Remove a directory name from the global doc ignore list.";
-    type Args = DocIgnorePatternArgs;
-    type Output = DocIgnorePatternMutationResult;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -596,15 +429,6 @@ pub struct ListProxmoxEndpointsOutput {
     pub endpoints: Vec<ProxmoxEndpointEntry>,
 }
 
-pub struct ListProxmoxEndpoints;
-impl OrcaToolDef for ListProxmoxEndpoints {
-    const NAME: &'static str = "list_proxmox_endpoints";
-    const DESCRIPTION: &'static str =
-        "List all Proxmox VE endpoints registered in orca.db (token secrets are redacted).";
-    type Args = ListProxmoxEndpointsArgs;
-    type Output = ListProxmoxEndpointsOutput;
-}
-
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -627,30 +451,12 @@ pub struct ProxmoxMutationResult {
     pub changed: bool,
 }
 
-pub struct AddProxmoxEndpoint;
-impl OrcaToolDef for AddProxmoxEndpoint {
-    const NAME: &'static str = "add_proxmox_endpoint";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Register or update a Proxmox VE endpoint in \
-         orca.db. Auth uses an API token (PVEAPIToken header).";
-    type Args = AddProxmoxEndpointArgs;
-    type Output = ProxmoxMutationResult;
-}
-
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RemoveProxmoxEndpointArgs {
     pub name: String,
-}
-
-pub struct RemoveProxmoxEndpoint;
-impl OrcaToolDef for RemoveProxmoxEndpoint {
-    const NAME: &'static str = "remove_proxmox_endpoint";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Remove a Proxmox VE endpoint from orca.db by name.";
-    type Args = RemoveProxmoxEndpointArgs;
-    type Output = ProxmoxMutationResult;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -680,15 +486,6 @@ pub struct ListHomeAssistantEndpointsOutput {
     pub endpoints: Vec<HaEndpointEntry>,
 }
 
-pub struct ListHomeAssistantEndpoints;
-impl OrcaToolDef for ListHomeAssistantEndpoints {
-    const NAME: &'static str = "list_home_assistant_endpoints";
-    const DESCRIPTION: &'static str =
-        "List all Home Assistant endpoints registered in orca.db (tokens are redacted).";
-    type Args = ListHomeAssistantEndpointsArgs;
-    type Output = ListHomeAssistantEndpointsOutput;
-}
-
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -708,30 +505,12 @@ pub struct HaMutationResult {
     pub changed: bool,
 }
 
-pub struct AddHomeAssistantEndpoint;
-impl OrcaToolDef for AddHomeAssistantEndpoint {
-    const NAME: &'static str = "add_home_assistant_endpoint";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Register or update a Home Assistant endpoint \
-         in orca.db. Auth uses a long-lived access token (Bearer header).";
-    type Args = AddHomeAssistantEndpointArgs;
-    type Output = HaMutationResult;
-}
-
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RemoveHomeAssistantEndpointArgs {
     pub name: String,
-}
-
-pub struct RemoveHomeAssistantEndpoint;
-impl OrcaToolDef for RemoveHomeAssistantEndpoint {
-    const NAME: &'static str = "remove_home_assistant_endpoint";
-    const DESCRIPTION: &'static str =
-        "[MUTATES STATE] Remove a Home Assistant endpoint from orca.db by name.";
-    type Args = RemoveHomeAssistantEndpointArgs;
-    type Output = HaMutationResult;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -840,24 +619,6 @@ pub use mcp_fed::{
     RunMcpToolOutput,
 };
 
-pub struct ListMcpTools;
-impl OrcaToolDef for ListMcpTools {
-    const NAME: &'static str = "list_mcp_tools";
-    const DESCRIPTION: &'static str =
-        "List every tool advertised by every registered MCP server (connects on demand).";
-    type Args = ListMcpToolsArgs;
-    type Output = ListMcpToolsOutput;
-}
-
-pub struct RunMcpTool;
-impl OrcaToolDef for RunMcpTool {
-    const NAME: &'static str = "run_mcp_tool";
-    const DESCRIPTION: &'static str = "[MUTATES STATE] Invoke a tool on a registered MCP server. \
-         Returns the typed `tools/call` envelope (`{ content, isError, structuredContent? }`).";
-    type Args = RunMcpToolArgs;
-    type Output = RunMcpToolOutput;
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Schema view — get_schema / get_schema_domains
 // ═══════════════════════════════════════════════════════════════════════════
@@ -944,15 +705,6 @@ pub struct GetSchemaOutput {
     pub errors: Option<Vec<String>>,
 }
 
-pub struct GetSchema;
-impl OrcaToolDef for GetSchema {
-    const NAME: &'static str = "get_schema";
-    const DESCRIPTION: &'static str = "Return the multi-tab schema view across every configured \
-         database. Result is `{ tabs, showTabs, errors? }`.";
-    type Args = GetSchemaArgs;
-    type Output = GetSchemaOutput;
-}
-
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -966,522 +718,567 @@ pub struct GetSchemaDomainsOutput {
     pub domains: Vec<SchemaDomain>,
 }
 
-pub struct GetSchemaDomains;
-impl OrcaToolDef for GetSchemaDomains {
-    const NAME: &'static str = "get_schema_domains";
-    const DESCRIPTION: &'static str = "Return the flattened list of domain definitions across every \
-         configured database.";
-    type Args = GetSchemaDomainsArgs;
-    type Output = GetSchemaDomainsOutput;
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
-// Native run impls
+// Native dispatch helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(feature = "native")]
-mod native {
-    use super::*;
-    use crate::services::mgmt as svc;
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use orca_utils::tool::{OrcaTool, ToolCtx};
-    use std::sync::Arc;
+use crate::services::mgmt as svc;
 
-    fn mcp(ctx: &ToolCtx) -> Result<Arc<dyn svc::McpRegistryService>> {
-        ctx.service::<Arc<dyn svc::McpRegistryService>>()
-    }
-    fn sch(ctx: &ToolCtx) -> Result<Arc<dyn svc::SchemaDbService>> {
-        ctx.service::<Arc<dyn svc::SchemaDbService>>()
-    }
-    fn drt(ctx: &ToolCtx) -> Result<Arc<dyn svc::DockerRuntimeService>> {
-        ctx.service::<Arc<dyn svc::DockerRuntimeService>>()
-    }
-    fn doc(ctx: &ToolCtx) -> Result<Arc<dyn svc::DocRootService>> {
-        ctx.service::<Arc<dyn svc::DocRootService>>()
-    }
-    fn pmx(ctx: &ToolCtx) -> Result<Arc<dyn svc::ProxmoxEndpointService>> {
-        ctx.service::<Arc<dyn svc::ProxmoxEndpointService>>()
-    }
-    fn ha(ctx: &ToolCtx) -> Result<Arc<dyn svc::HaEndpointService>> {
-        ctx.service::<Arc<dyn svc::HaEndpointService>>()
-    }
+#[cfg(feature = "native")]
+fn mcp(
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<std::sync::Arc<dyn svc::McpRegistryService>> {
+    ctx.service::<std::sync::Arc<dyn svc::McpRegistryService>>()
+}
+#[cfg(feature = "native")]
+fn sch(
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<std::sync::Arc<dyn svc::SchemaDbService>> {
+    ctx.service::<std::sync::Arc<dyn svc::SchemaDbService>>()
+}
+#[cfg(feature = "native")]
+fn drt(
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<std::sync::Arc<dyn svc::DockerRuntimeService>> {
+    ctx.service::<std::sync::Arc<dyn svc::DockerRuntimeService>>()
+}
+#[cfg(feature = "native")]
+fn doc(ctx: &orca_utils::tool::ToolCtx) -> anyhow::Result<std::sync::Arc<dyn svc::DocRootService>> {
+    ctx.service::<std::sync::Arc<dyn svc::DocRootService>>()
+}
+#[cfg(feature = "native")]
+fn pmx(
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<std::sync::Arc<dyn svc::ProxmoxEndpointService>> {
+    ctx.service::<std::sync::Arc<dyn svc::ProxmoxEndpointService>>()
+}
+#[cfg(feature = "native")]
+fn ha(
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<std::sync::Arc<dyn svc::HaEndpointService>> {
+    ctx.service::<std::sync::Arc<dyn svc::HaEndpointService>>()
+}
 
-    // ── MCP servers + mappings ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// MCP federation tools
+// ═══════════════════════════════════════════════════════════════════════════
 
-    #[async_trait]
-    impl OrcaTool for ListMcpServers {
-        async fn run(_args: ListMcpServersArgs, ctx: &ToolCtx) -> Result<ListMcpServersOutput> {
-            let servers = mcp(ctx)?
-                .list_servers()
-                .await?
-                .into_iter()
-                .map(|s| McpServerEntry {
-                    name: s.name,
-                    command: s.command,
-                    args: s.args,
-                    env: s.env,
-                    enabled: s.enabled,
-                })
-                .collect();
-            Ok(ListMcpServersOutput { servers })
-        }
-    }
+/// List every tool advertised by every registered MCP server (connects on demand).
+#[orca_tool(domain = "mcp-federation", verb = "list-tools")]
+async fn list_mcp_tools(
+    _args: ListMcpToolsArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ListMcpToolsOutput> {
+    let tools = mcp(ctx)?
+        .list_tools()
+        .await?
+        .into_iter()
+        .map(|t| McpToolEntry {
+            server: t.server,
+            name: t.name,
+            description: t.description,
+            input_schema: t.input_schema,
+        })
+        .collect();
+    Ok(ListMcpToolsOutput { tools })
+}
 
-    #[async_trait]
-    impl OrcaTool for AddMcpServer {
-        async fn run(args: AddMcpServerArgs, ctx: &ToolCtx) -> Result<McpServerMutationResult> {
-            mcp(ctx)?
-                .upsert_server(svc::McpServerInput {
-                    name: args.name.clone(),
-                    command: args.command,
-                    args: args.args.unwrap_or_default(),
-                    env: args.env.unwrap_or_default(),
-                })
-                .await?;
-            Ok(McpServerMutationResult {
-                name: args.name,
-                changed: true,
-            })
-        }
-    }
+/// [MUTATES STATE] Invoke a tool on a registered MCP server. Returns the typed `tools/call` envelope (`{ content, isError, structuredContent? }`).
+#[orca_tool(domain = "mcp-federation", verb = "run", cli = skip)]
+async fn run_mcp_tool(
+    args: RunMcpToolArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<RunMcpToolOutput> {
+    let arguments = match args.args {
+        Some(m) => serde_json::Value::Object(m),
+        None => serde_json::json!({}),
+    };
+    mcp(ctx)?
+        .run_tool(&args.server, &args.tool, arguments)
+        .await
+}
 
-    #[async_trait]
-    impl OrcaTool for RemoveMcpServer {
-        async fn run(args: RemoveMcpServerArgs, ctx: &ToolCtx) -> Result<McpServerMutationResult> {
-            let changed = mcp(ctx)?.remove_server(&args.name).await?;
-            Ok(McpServerMutationResult {
-                name: args.name,
-                changed,
-            })
-        }
-    }
+// ═══════════════════════════════════════════════════════════════════════════
+// Schema view tools
+// ═══════════════════════════════════════════════════════════════════════════
 
-    #[async_trait]
-    impl OrcaTool for MapTool {
-        async fn run(args: MapToolArgs, ctx: &ToolCtx) -> Result<MapToolResult> {
-            mcp(ctx)?
-                .map_tool(&args.name, &args.orca_tool, &args.external_tool)
-                .await?;
-            Ok(MapToolResult {
-                orca_tool: args.orca_tool,
-                mcp_name: args.name,
-                external_tool: args.external_tool,
-            })
-        }
-    }
+/// Return the multi-tab schema view across every configured database. Result is `{ tabs, showTabs, errors? }`.
+#[orca_tool(domain = "schema-view", verb = "get")]
+async fn get_schema(
+    _args: GetSchemaArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<GetSchemaOutput> {
+    sch(ctx)?.schema().await
+}
 
-    #[async_trait]
-    impl OrcaTool for UnmapTool {
-        async fn run(args: UnmapToolArgs, ctx: &ToolCtx) -> Result<UnmapToolResult> {
-            let changed = mcp(ctx)?.unmap_tool(&args.orca_tool).await?;
-            Ok(UnmapToolResult {
-                orca_tool: args.orca_tool,
-                changed,
-            })
-        }
-    }
+/// Return the flattened list of domain definitions across every configured database.
+#[orca_tool(domain = "schema-view", verb = "list-domains")]
+async fn get_schema_domains(
+    _args: GetSchemaDomainsArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<GetSchemaDomainsOutput> {
+    Ok(GetSchemaDomainsOutput {
+        domains: sch(ctx)?.schema_domains().await?,
+    })
+}
 
-    #[async_trait]
-    impl OrcaTool for SyncTools {
-        async fn run(args: SyncToolsArgs, ctx: &ToolCtx) -> Result<SyncToolsOutput> {
-            let threshold = args.threshold.unwrap_or(0.8);
-            let results = mcp(ctx)?
-                .sync_tools(args.all.unwrap_or(false), args.name.as_deref(), threshold)
-                .await?
-                .into_iter()
-                .map(|r| SyncToolsServerEntry {
-                    server: r.server,
-                    added: r.added,
-                    skipped: r.skipped,
-                    error: r.error,
-                })
-                .collect();
-            Ok(SyncToolsOutput { results })
-        }
-    }
+// ═══════════════════════════════════════════════════════════════════════════
+// MCP servers + tool mappings
+// ═══════════════════════════════════════════════════════════════════════════
 
-    #[async_trait]
-    impl OrcaTool for ListMcpTools {
-        async fn run(_args: ListMcpToolsArgs, ctx: &ToolCtx) -> Result<ListMcpToolsOutput> {
-            let tools = mcp(ctx)?
-                .list_tools()
-                .await?
-                .into_iter()
-                .map(|t| McpToolEntry {
-                    server: t.server,
-                    name: t.name,
-                    description: t.description,
-                    input_schema: t.input_schema,
-                })
-                .collect();
-            Ok(ListMcpToolsOutput { tools })
-        }
-    }
+/// List all MCP servers registered in orca.db (orca's own managed registry). Does not include ~/.claude.json servers managed by Claude Code directly.
+#[orca_tool(domain = "mcp", verb = "list")]
+async fn list_mcp_servers(
+    _args: ListMcpServersArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ListMcpServersOutput> {
+    let servers = mcp(ctx)?
+        .list_servers()
+        .await?
+        .into_iter()
+        .map(|s| McpServerEntry {
+            name: s.name,
+            command: s.command,
+            args: s.args,
+            env: s.env,
+            enabled: s.enabled,
+        })
+        .collect();
+    Ok(ListMcpServersOutput { servers })
+}
 
-    #[async_trait]
-    impl OrcaTool for RunMcpTool {
-        async fn run(args: RunMcpToolArgs, ctx: &ToolCtx) -> Result<RunMcpToolOutput> {
-            let arguments = match args.args {
-                Some(m) => serde_json::Value::Object(m),
-                None => serde_json::json!({}),
-            };
-            mcp(ctx)?
-                .run_tool(&args.server, &args.tool, arguments)
-                .await
-        }
-    }
+/// [MUTATES STATE] Add or update an MCP server in orca.db. Use when registering a new MCP server for orca to federate.
+#[orca_tool(domain = "mcp", verb = "add")]
+async fn add_mcp_server(
+    args: AddMcpServerArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<McpServerMutationResult> {
+    mcp(ctx)?
+        .upsert_server(svc::McpServerInput {
+            name: args.name.clone(),
+            command: args.command,
+            args: args.args.unwrap_or_default(),
+            env: args.env.unwrap_or_default(),
+        })
+        .await?;
+    Ok(McpServerMutationResult {
+        name: args.name,
+        changed: true,
+    })
+}
 
-    #[async_trait]
-    impl OrcaTool for GetSchema {
-        async fn run(_args: GetSchemaArgs, ctx: &ToolCtx) -> Result<GetSchemaOutput> {
-            sch(ctx)?.schema().await
-        }
-    }
+/// [MUTATES STATE] Remove an MCP server from orca.db by name.
+#[orca_tool(domain = "mcp", verb = "remove")]
+async fn remove_mcp_server(
+    args: RemoveMcpServerArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<McpServerMutationResult> {
+    let changed = mcp(ctx)?.remove_server(&args.name).await?;
+    Ok(McpServerMutationResult {
+        name: args.name,
+        changed,
+    })
+}
 
-    #[async_trait]
-    impl OrcaTool for GetSchemaDomains {
-        async fn run(_args: GetSchemaDomainsArgs, ctx: &ToolCtx) -> Result<GetSchemaDomainsOutput> {
-            Ok(GetSchemaDomainsOutput {
-                domains: sch(ctx)?.schema_domains().await?,
-            })
-        }
-    }
+/// [MUTATES STATE] Map an orca tool name to a specific tool on a registered MCP server.
+#[orca_tool(domain = "mcp", verb = "map")]
+async fn map_tool(
+    args: MapToolArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<MapToolResult> {
+    mcp(ctx)?
+        .map_tool(&args.name, &args.orca_tool, &args.external_tool)
+        .await?;
+    Ok(MapToolResult {
+        orca_tool: args.orca_tool,
+        mcp_name: args.name,
+        external_tool: args.external_tool,
+    })
+}
 
-    #[async_trait]
-    impl OrcaTool for ListToolMappings {
-        async fn run(args: ListToolMappingsArgs, ctx: &ToolCtx) -> Result<ListToolMappingsOutput> {
-            let mappings = mcp(ctx)?
-                .list_mappings(args.name.as_deref())
-                .await?
-                .into_iter()
-                .map(|m| MappingEntry {
-                    orca_tool: m.orca_tool,
-                    mcp_name: m.mcp_name,
-                    external_tool: m.external_tool,
-                    match_type: m.match_type,
-                    confidence: m.confidence,
-                    enabled: m.enabled,
-                })
-                .collect();
-            Ok(ListToolMappingsOutput { mappings })
-        }
-    }
+/// [MUTATES STATE] Remove a tool mapping from orca.db.
+#[orca_tool(domain = "mcp", verb = "unmap")]
+async fn unmap_tool(
+    args: UnmapToolArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<UnmapToolResult> {
+    let changed = mcp(ctx)?.unmap_tool(&args.orca_tool).await?;
+    Ok(UnmapToolResult {
+        orca_tool: args.orca_tool,
+        changed,
+    })
+}
 
-    // ── Schemas ────────────────────────────────────────────────────────────
+/// [MUTATES STATE] Auto-discover and map tools from registered MCP servers. Provide name or set all=true.
+#[orca_tool(domain = "mcp", verb = "sync")]
+async fn sync_tools(
+    args: SyncToolsArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<SyncToolsOutput> {
+    let threshold = args.threshold.unwrap_or(0.8);
+    let results = mcp(ctx)?
+        .sync_tools(args.all.unwrap_or(false), args.name.as_deref(), threshold)
+        .await?
+        .into_iter()
+        .map(|r| SyncToolsServerEntry {
+            server: r.server,
+            added: r.added,
+            skipped: r.skipped,
+            error: r.error,
+        })
+        .collect();
+    Ok(SyncToolsOutput { results })
+}
 
-    #[async_trait]
-    impl OrcaTool for ListSchemas {
-        async fn run(_args: ListSchemasArgs, ctx: &ToolCtx) -> Result<ListSchemasOutput> {
-            let schemas = sch(ctx)?
-                .list()
-                .await?
-                .into_iter()
-                .map(|d| SchemaDbEntry {
-                    name: d.name,
-                    driver: d.driver,
-                    host: d.host,
-                    port: d.port,
-                    user: d.user,
-                    database: d.database,
-                    container: d.container,
-                    domains_file: d.domains_file,
-                    enabled: d.enabled,
-                })
-                .collect();
-            Ok(ListSchemasOutput { schemas })
-        }
-    }
+/// List all tool mappings in orca.db, optionally filtered by server name.
+#[orca_tool(domain = "mcp", verb = "list-mappings")]
+async fn list_tool_mappings(
+    args: ListToolMappingsArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ListToolMappingsOutput> {
+    let mappings = mcp(ctx)?
+        .list_mappings(args.name.as_deref())
+        .await?
+        .into_iter()
+        .map(|m| MappingEntry {
+            orca_tool: m.orca_tool,
+            mcp_name: m.mcp_name,
+            external_tool: m.external_tool,
+            match_type: m.match_type,
+            confidence: m.confidence,
+            enabled: m.enabled,
+        })
+        .collect();
+    Ok(ListToolMappingsOutput { mappings })
+}
 
-    #[async_trait]
-    impl OrcaTool for AddSchema {
-        async fn run(args: AddSchemaArgs, ctx: &ToolCtx) -> Result<SchemaMutationResult> {
-            sch(ctx)?
-                .upsert(svc::SchemaDbInput {
-                    name: args.name.clone(),
-                    database: args.database,
-                    user: args.user,
-                    password: args.password,
-                    container: args.container,
-                    host: args.host,
-                    port: args.port,
-                    domains_file: args.domains_file,
-                })
-                .await?;
-            Ok(SchemaMutationResult {
-                name: args.name,
-                changed: true,
-            })
-        }
-    }
+// ═══════════════════════════════════════════════════════════════════════════
+// Schema databases
+// ═══════════════════════════════════════════════════════════════════════════
 
-    #[async_trait]
-    impl OrcaTool for RemoveSchema {
-        async fn run(args: RemoveSchemaArgs, ctx: &ToolCtx) -> Result<SchemaMutationResult> {
-            let changed = sch(ctx)?.remove(&args.name).await?;
-            Ok(SchemaMutationResult {
-                name: args.name,
-                changed,
-            })
-        }
-    }
+/// List all MySQL/MariaDB schema databases registered in orca.db.
+#[orca_tool(domain = "schema", verb = "list")]
+async fn list_schemas(
+    _args: ListSchemasArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ListSchemasOutput> {
+    let schemas = sch(ctx)?
+        .list()
+        .await?
+        .into_iter()
+        .map(|d| SchemaDbEntry {
+            name: d.name,
+            driver: d.driver,
+            host: d.host,
+            port: d.port,
+            user: d.user,
+            database: d.database,
+            container: d.container,
+            domains_file: d.domains_file,
+            enabled: d.enabled,
+        })
+        .collect();
+    Ok(ListSchemasOutput { schemas })
+}
 
-    // ── Docker runtimes ────────────────────────────────────────────────────
+/// [MUTATES STATE] Add or update a schema database in orca.db. Use container OR host/port, not both.
+#[orca_tool(domain = "schema", verb = "add")]
+async fn add_schema(
+    args: AddSchemaArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<SchemaMutationResult> {
+    sch(ctx)?
+        .upsert(svc::SchemaDbInput {
+            name: args.name.clone(),
+            database: args.database,
+            user: args.user,
+            password: args.password,
+            container: args.container,
+            host: args.host,
+            port: args.port,
+            domains_file: args.domains_file,
+        })
+        .await?;
+    Ok(SchemaMutationResult {
+        name: args.name,
+        changed: true,
+    })
+}
 
-    #[async_trait]
-    impl OrcaTool for ListDockerRuntimes {
-        async fn run(
-            _args: ListDockerRuntimesArgs,
-            ctx: &ToolCtx,
-        ) -> Result<ListDockerRuntimesOutput> {
-            let runtimes = drt(ctx)?
-                .list()
-                .await?
-                .into_iter()
-                .map(|r| DockerRuntimeEntry {
-                    name: r.name,
-                    socket_path: r.socket_path,
-                    host: r.host,
-                    url: r.url,
-                    enabled: r.enabled,
-                })
-                .collect();
-            Ok(ListDockerRuntimesOutput { runtimes })
-        }
-    }
+/// [MUTATES STATE] Remove a schema database from orca.db by name.
+#[orca_tool(domain = "schema", verb = "remove")]
+async fn remove_schema(
+    args: RemoveSchemaArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<SchemaMutationResult> {
+    let changed = sch(ctx)?.remove(&args.name).await?;
+    Ok(SchemaMutationResult {
+        name: args.name,
+        changed,
+    })
+}
 
-    #[async_trait]
-    impl OrcaTool for AddDockerRuntime {
-        async fn run(
-            args: AddDockerRuntimeArgs,
-            ctx: &ToolCtx,
-        ) -> Result<DockerRuntimeMutationResult> {
-            drt(ctx)?
-                .upsert(svc::DockerRuntimeInput {
-                    name: args.name.clone(),
-                    socket_path: args.socket_path,
-                    host: args.host,
-                    url: args.url,
-                })
-                .await?;
-            Ok(DockerRuntimeMutationResult {
-                name: args.name,
-                changed: true,
-            })
-        }
-    }
+// ═══════════════════════════════════════════════════════════════════════════
+// Docker runtimes
+// ═══════════════════════════════════════════════════════════════════════════
 
-    #[async_trait]
-    impl OrcaTool for RemoveDockerRuntime {
-        async fn run(
-            args: RemoveDockerRuntimeArgs,
-            ctx: &ToolCtx,
-        ) -> Result<DockerRuntimeMutationResult> {
-            let changed = drt(ctx)?.remove(&args.name).await?;
-            Ok(DockerRuntimeMutationResult {
-                name: args.name,
-                changed,
-            })
-        }
-    }
+/// List all Docker runtimes registered in orca.db.
+#[orca_tool(domain = "docker-runtime", verb = "list")]
+async fn list_docker_runtimes(
+    _args: ListDockerRuntimesArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ListDockerRuntimesOutput> {
+    let runtimes = drt(ctx)?
+        .list()
+        .await?
+        .into_iter()
+        .map(|r| DockerRuntimeEntry {
+            name: r.name,
+            socket_path: r.socket_path,
+            host: r.host,
+            url: r.url,
+            enabled: r.enabled,
+        })
+        .collect();
+    Ok(ListDockerRuntimesOutput { runtimes })
+}
 
-    // ── Doc roots + ignore patterns ────────────────────────────────────────
+/// [MUTATES STATE] Register a Docker runtime in orca.db. Provide socketPath, host, or url.
+#[orca_tool(domain = "docker-runtime", verb = "add")]
+async fn add_docker_runtime(
+    args: AddDockerRuntimeArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<DockerRuntimeMutationResult> {
+    drt(ctx)?
+        .upsert(svc::DockerRuntimeInput {
+            name: args.name.clone(),
+            socket_path: args.socket_path,
+            host: args.host,
+            url: args.url,
+        })
+        .await?;
+    Ok(DockerRuntimeMutationResult {
+        name: args.name,
+        changed: true,
+    })
+}
 
-    #[async_trait]
-    impl OrcaTool for ListDocRoots {
-        async fn run(_args: ListDocRootsArgs, ctx: &ToolCtx) -> Result<ListDocRootsOutput> {
-            let roots = doc(ctx)?
-                .list_roots()
-                .await?
-                .into_iter()
-                .map(|r| DocRootRegEntry {
-                    name: r.name,
-                    path: r.path,
-                    description: r.description,
-                    enabled: r.enabled,
-                })
-                .collect();
-            Ok(ListDocRootsOutput { roots })
-        }
-    }
+/// [MUTATES STATE] Remove a Docker runtime from orca.db by name.
+#[orca_tool(domain = "docker-runtime", verb = "remove")]
+async fn remove_docker_runtime(
+    args: RemoveDockerRuntimeArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<DockerRuntimeMutationResult> {
+    let changed = drt(ctx)?.remove(&args.name).await?;
+    Ok(DockerRuntimeMutationResult {
+        name: args.name,
+        changed,
+    })
+}
 
-    #[async_trait]
-    impl OrcaTool for AddDocRoot {
-        async fn run(args: AddDocRootArgs, ctx: &ToolCtx) -> Result<DocRootMutationResult> {
-            doc(ctx)?
-                .upsert_root(svc::DocRootInput {
-                    name: args.name.clone(),
-                    path: args.path,
-                    description: args.description,
-                })
-                .await?;
-            Ok(DocRootMutationResult {
-                name: args.name,
-                changed: true,
-            })
-        }
-    }
+// ═══════════════════════════════════════════════════════════════════════════
+// Doc roots + ignore patterns
+// ═══════════════════════════════════════════════════════════════════════════
 
-    #[async_trait]
-    impl OrcaTool for RemoveDocRoot {
-        async fn run(args: RemoveDocRootArgs, ctx: &ToolCtx) -> Result<DocRootMutationResult> {
-            let changed = doc(ctx)?.remove_root(&args.name).await?;
-            Ok(DocRootMutationResult {
-                name: args.name,
-                changed,
-            })
-        }
-    }
+/// List all documentation roots registered in orca.db.
+#[orca_tool(domain = "doc-root", verb = "list")]
+async fn list_doc_roots(
+    _args: ListDocRootsArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ListDocRootsOutput> {
+    let roots = doc(ctx)?
+        .list_roots()
+        .await?
+        .into_iter()
+        .map(|r| DocRootRegEntry {
+            name: r.name,
+            path: r.path,
+            description: r.description,
+            enabled: r.enabled,
+        })
+        .collect();
+    Ok(ListDocRootsOutput { roots })
+}
 
-    #[async_trait]
-    impl OrcaTool for ListDocIgnorePatterns {
-        async fn run(
-            _args: ListDocIgnorePatternsArgs,
-            ctx: &ToolCtx,
-        ) -> Result<ListDocIgnorePatternsOutput> {
-            let patterns = doc(ctx)?.list_ignore_patterns().await?;
-            Ok(ListDocIgnorePatternsOutput { patterns })
-        }
-    }
+/// [MUTATES STATE] Register a documentation root directory in orca.db.
+#[orca_tool(domain = "doc-root", verb = "add")]
+async fn add_doc_root(
+    args: AddDocRootArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<DocRootMutationResult> {
+    doc(ctx)?
+        .upsert_root(svc::DocRootInput {
+            name: args.name.clone(),
+            path: args.path,
+            description: args.description,
+        })
+        .await?;
+    Ok(DocRootMutationResult {
+        name: args.name,
+        changed: true,
+    })
+}
 
-    #[async_trait]
-    impl OrcaTool for AddDocIgnorePattern {
-        async fn run(
-            args: DocIgnorePatternArgs,
-            ctx: &ToolCtx,
-        ) -> Result<DocIgnorePatternMutationResult> {
-            let changed = doc(ctx)?.add_ignore_pattern(&args.pattern).await?;
-            Ok(DocIgnorePatternMutationResult {
-                pattern: args.pattern,
-                changed,
-            })
-        }
-    }
+/// [MUTATES STATE] Remove a documentation root from orca.db by name.
+#[orca_tool(domain = "doc-root", verb = "remove")]
+async fn remove_doc_root(
+    args: RemoveDocRootArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<DocRootMutationResult> {
+    let changed = doc(ctx)?.remove_root(&args.name).await?;
+    Ok(DocRootMutationResult {
+        name: args.name,
+        changed,
+    })
+}
 
-    #[async_trait]
-    impl OrcaTool for RemoveDocIgnorePattern {
-        async fn run(
-            args: DocIgnorePatternArgs,
-            ctx: &ToolCtx,
-        ) -> Result<DocIgnorePatternMutationResult> {
-            let changed = doc(ctx)?.remove_ignore_pattern(&args.pattern).await?;
-            Ok(DocIgnorePatternMutationResult {
-                pattern: args.pattern,
-                changed,
-            })
-        }
-    }
+/// List directory names excluded from all doc roots (e.g. node_modules, .git).
+#[orca_tool(domain = "doc-pattern", verb = "list")]
+async fn list_doc_ignore_patterns(
+    _args: ListDocIgnorePatternsArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ListDocIgnorePatternsOutput> {
+    let patterns = doc(ctx)?.list_ignore_patterns().await?;
+    Ok(ListDocIgnorePatternsOutput { patterns })
+}
 
-    // ── Proxmox endpoints ──────────────────────────────────────────────────
+/// [MUTATES STATE] Add a directory name to the global doc ignore list.
+#[orca_tool(domain = "doc-pattern", verb = "add")]
+async fn add_doc_ignore_pattern(
+    args: DocIgnorePatternArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<DocIgnorePatternMutationResult> {
+    let changed = doc(ctx)?.add_ignore_pattern(&args.pattern).await?;
+    Ok(DocIgnorePatternMutationResult {
+        pattern: args.pattern,
+        changed,
+    })
+}
 
-    #[async_trait]
-    impl OrcaTool for ListProxmoxEndpoints {
-        async fn run(
-            _args: ListProxmoxEndpointsArgs,
-            ctx: &ToolCtx,
-        ) -> Result<ListProxmoxEndpointsOutput> {
-            let endpoints = pmx(ctx)?
-                .list()
-                .await?
-                .into_iter()
-                .map(|r| ProxmoxEndpointEntry {
-                    name: r.name,
-                    base_url: r.base_url,
-                    token_id: r.token_id,
-                    insecure: r.insecure,
-                    enabled: r.enabled,
-                })
-                .collect();
-            Ok(ListProxmoxEndpointsOutput { endpoints })
-        }
-    }
+/// [MUTATES STATE] Remove a directory name from the global doc ignore list.
+#[orca_tool(domain = "doc-pattern", verb = "remove")]
+async fn remove_doc_ignore_pattern(
+    args: DocIgnorePatternArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<DocIgnorePatternMutationResult> {
+    let changed = doc(ctx)?.remove_ignore_pattern(&args.pattern).await?;
+    Ok(DocIgnorePatternMutationResult {
+        pattern: args.pattern,
+        changed,
+    })
+}
 
-    #[async_trait]
-    impl OrcaTool for AddProxmoxEndpoint {
-        async fn run(args: AddProxmoxEndpointArgs, ctx: &ToolCtx) -> Result<ProxmoxMutationResult> {
-            pmx(ctx)?
-                .upsert(svc::ProxmoxEndpointInput {
-                    name: args.name.clone(),
-                    base_url: args.base_url,
-                    token_id: args.token_id,
-                    token_secret: args.token_secret,
-                    insecure: args.insecure.unwrap_or(false),
-                })
-                .await?;
-            Ok(ProxmoxMutationResult {
-                name: args.name,
-                changed: true,
-            })
-        }
-    }
+// ═══════════════════════════════════════════════════════════════════════════
+// Proxmox endpoints
+// ═══════════════════════════════════════════════════════════════════════════
 
-    #[async_trait]
-    impl OrcaTool for RemoveProxmoxEndpoint {
-        async fn run(
-            args: RemoveProxmoxEndpointArgs,
-            ctx: &ToolCtx,
-        ) -> Result<ProxmoxMutationResult> {
-            let changed = pmx(ctx)?.remove(&args.name).await?;
-            Ok(ProxmoxMutationResult {
-                name: args.name,
-                changed,
-            })
-        }
-    }
+/// List all Proxmox VE endpoints registered in orca.db (token secrets are redacted).
+#[orca_tool(domain = "proxmox-endpoint", verb = "list")]
+async fn list_proxmox_endpoints(
+    _args: ListProxmoxEndpointsArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ListProxmoxEndpointsOutput> {
+    let endpoints = pmx(ctx)?
+        .list()
+        .await?
+        .into_iter()
+        .map(|r| ProxmoxEndpointEntry {
+            name: r.name,
+            base_url: r.base_url,
+            token_id: r.token_id,
+            insecure: r.insecure,
+            enabled: r.enabled,
+        })
+        .collect();
+    Ok(ListProxmoxEndpointsOutput { endpoints })
+}
 
-    // ── Home Assistant endpoints ───────────────────────────────────────────
+/// [MUTATES STATE] Register or update a Proxmox VE endpoint in orca.db. Auth uses an API token (PVEAPIToken header).
+#[orca_tool(domain = "proxmox-endpoint", verb = "add")]
+async fn add_proxmox_endpoint(
+    args: AddProxmoxEndpointArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ProxmoxMutationResult> {
+    pmx(ctx)?
+        .upsert(svc::ProxmoxEndpointInput {
+            name: args.name.clone(),
+            base_url: args.base_url,
+            token_id: args.token_id,
+            token_secret: args.token_secret,
+            insecure: args.insecure.unwrap_or(false),
+        })
+        .await?;
+    Ok(ProxmoxMutationResult {
+        name: args.name,
+        changed: true,
+    })
+}
 
-    #[async_trait]
-    impl OrcaTool for ListHomeAssistantEndpoints {
-        async fn run(
-            _args: ListHomeAssistantEndpointsArgs,
-            ctx: &ToolCtx,
-        ) -> Result<ListHomeAssistantEndpointsOutput> {
-            let endpoints = ha(ctx)?
-                .list()
-                .await?
-                .into_iter()
-                .map(|r| HaEndpointEntry {
-                    name: r.name,
-                    base_url: r.base_url,
-                    enabled: r.enabled,
-                })
-                .collect();
-            Ok(ListHomeAssistantEndpointsOutput { endpoints })
-        }
-    }
+/// [MUTATES STATE] Remove a Proxmox VE endpoint from orca.db by name.
+#[orca_tool(domain = "proxmox-endpoint", verb = "remove")]
+async fn remove_proxmox_endpoint(
+    args: RemoveProxmoxEndpointArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ProxmoxMutationResult> {
+    let changed = pmx(ctx)?.remove(&args.name).await?;
+    Ok(ProxmoxMutationResult {
+        name: args.name,
+        changed,
+    })
+}
 
-    #[async_trait]
-    impl OrcaTool for AddHomeAssistantEndpoint {
-        async fn run(
-            args: AddHomeAssistantEndpointArgs,
-            ctx: &ToolCtx,
-        ) -> Result<HaMutationResult> {
-            ha(ctx)?
-                .upsert(svc::HaEndpointInput {
-                    name: args.name.clone(),
-                    base_url: args.base_url,
-                    token: args.token,
-                })
-                .await?;
-            Ok(HaMutationResult {
-                name: args.name,
-                changed: true,
-            })
-        }
-    }
+// ═══════════════════════════════════════════════════════════════════════════
+// Home Assistant endpoints
+// ═══════════════════════════════════════════════════════════════════════════
 
-    #[async_trait]
-    impl OrcaTool for RemoveHomeAssistantEndpoint {
-        async fn run(
-            args: RemoveHomeAssistantEndpointArgs,
-            ctx: &ToolCtx,
-        ) -> Result<HaMutationResult> {
-            let changed = ha(ctx)?.remove(&args.name).await?;
-            Ok(HaMutationResult {
-                name: args.name,
-                changed,
-            })
-        }
-    }
+/// List all Home Assistant endpoints registered in orca.db (tokens are redacted).
+#[orca_tool(domain = "ha-endpoint", verb = "list")]
+async fn list_home_assistant_endpoints(
+    _args: ListHomeAssistantEndpointsArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ListHomeAssistantEndpointsOutput> {
+    let endpoints = ha(ctx)?
+        .list()
+        .await?
+        .into_iter()
+        .map(|r| HaEndpointEntry {
+            name: r.name,
+            base_url: r.base_url,
+            enabled: r.enabled,
+        })
+        .collect();
+    Ok(ListHomeAssistantEndpointsOutput { endpoints })
+}
+
+/// [MUTATES STATE] Register or update a Home Assistant endpoint in orca.db. Auth uses a long-lived access token (Bearer header).
+#[orca_tool(domain = "ha-endpoint", verb = "add")]
+async fn add_home_assistant_endpoint(
+    args: AddHomeAssistantEndpointArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<HaMutationResult> {
+    ha(ctx)?
+        .upsert(svc::HaEndpointInput {
+            name: args.name.clone(),
+            base_url: args.base_url,
+            token: args.token,
+        })
+        .await?;
+    Ok(HaMutationResult {
+        name: args.name,
+        changed: true,
+    })
+}
+
+/// [MUTATES STATE] Remove a Home Assistant endpoint from orca.db by name.
+#[orca_tool(domain = "ha-endpoint", verb = "remove")]
+async fn remove_home_assistant_endpoint(
+    args: RemoveHomeAssistantEndpointArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<HaMutationResult> {
+    let changed = ha(ctx)?.remove(&args.name).await?;
+    Ok(HaMutationResult {
+        name: args.name,
+        changed,
+    })
 }

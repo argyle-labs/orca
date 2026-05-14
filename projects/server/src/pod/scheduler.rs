@@ -31,7 +31,7 @@ use tracing::{debug, info, warn};
 use super::{db as pdb, pki_dir};
 
 const TICK_INTERVAL: Duration = Duration::from_secs(15);
-const OFFER_TTL_SECS: i64 = 600;
+pub const OFFER_TTL_SECS: i64 = 600;
 const PAIRING_CODE_LEN: usize = 6;
 
 /// Spawn the scheduler. Returns immediately; the task runs until the process
@@ -105,7 +105,7 @@ async fn tick() -> Result<()> {
     Ok(())
 }
 
-fn mint_pairing_code() -> String {
+pub fn mint_pairing_code() -> String {
     // Crockford base32 alphabet minus I/L/O/U to avoid visual confusion.
     const ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTVWXYZ23456789";
     let mut s = String::with_capacity(PAIRING_CODE_LEN);
@@ -118,7 +118,14 @@ fn mint_pairing_code() -> String {
     s
 }
 
-async fn push_offer(
+/// Push a pod-membership offer to a joiner over its bootstrap surface. Mints
+/// no DB state — callers (the scheduler and the `pod.offer` tool) must have
+/// already inserted the outbound `pod_pending_offers` row keyed by
+/// `joiner_pubkey_fp` so the joiner's confirm dial can be reconciled.
+///
+/// `code` is the raw pairing code shown on both sides. The joiner sees it on
+/// the inviter's daemon log + on its own `pod pending` row.
+pub async fn push_offer(
     _joiner_hostname: &str,
     joiner_addr: &str,
     joiner_port: u16,

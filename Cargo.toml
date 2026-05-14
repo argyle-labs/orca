@@ -91,6 +91,7 @@ members = [
     "projects/tool-trait",
     "projects/tools",
     "projects/tools-def",
+    "projects/tools-macro",
     "projects/utils",
     "projects/integrations",
 ]
@@ -104,6 +105,7 @@ default-members = [
     "projects/tool-trait",
     "projects/tools",
     "projects/tools-def",
+    "projects/tools-macro",
     "projects/utils",
     "projects/integrations",
 ]

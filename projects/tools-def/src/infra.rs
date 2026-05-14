@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::OrcaToolDef;
+use crate::orca_tool;
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
@@ -25,8 +25,6 @@ pub struct ProjectServices {
     pub services: Vec<ServiceState>,
 }
 
-// ── list_services ───────────────────────────────────────────────────────────
-
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -39,17 +37,6 @@ pub struct ListServicesArgs {}
 pub struct ListServicesOutput {
     pub projects: Vec<ProjectServices>,
 }
-
-pub struct ListServices;
-impl OrcaToolDef for ListServices {
-    const NAME: &'static str = "list_services";
-    const DESCRIPTION: &'static str = "List all running docker compose services across all rebuy \
-         projects. Returns project name, path, and per-service state/health/ports.";
-    type Args = ListServicesArgs;
-    type Output = ListServicesOutput;
-}
-
-// ── get_service_logs ────────────────────────────────────────────────────────
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
@@ -74,17 +61,6 @@ pub struct GetServiceLogsOutput {
     pub output: String,
 }
 
-pub struct GetServiceLogs;
-impl OrcaToolDef for GetServiceLogs {
-    const NAME: &'static str = "get_service_logs";
-    const DESCRIPTION: &'static str = "Fetch docker compose logs for a running rebuy service. \
-         Specify the project path and service name.";
-    type Args = GetServiceLogsArgs;
-    type Output = GetServiceLogsOutput;
-}
-
-// ── run_tests ───────────────────────────────────────────────────────────────
-
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -107,82 +83,75 @@ pub struct RunTestsOutput {
     pub duration_ms: u64,
 }
 
-pub struct RunTests;
-impl OrcaToolDef for RunTests {
-    const NAME: &'static str = "run_tests";
-    const DESCRIPTION: &'static str = "Run the orca project test suite. Returns test output with \
-         pass/fail counts. Suites: rust (cargo test), frontend (vitest), e2e (playwright), all.";
-    type Args = RunTestsArgs;
-    type Output = RunTestsOutput;
+#[cfg(feature = "native")]
+fn infra_svc(
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<std::sync::Arc<dyn crate::services::infra::InfraService>> {
+    ctx.service::<std::sync::Arc<dyn crate::services::infra::InfraService>>()
 }
 
-#[cfg(feature = "native")]
-mod native {
-    use super::*;
-    use crate::services::infra as svc_infra;
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use orca_utils::tool::{OrcaTool, ToolCtx};
-    use std::sync::Arc;
-
-    fn svc(ctx: &ToolCtx) -> Result<Arc<dyn svc_infra::InfraService>> {
-        ctx.service::<Arc<dyn svc_infra::InfraService>>()
-    }
-
-    #[async_trait]
-    impl OrcaTool for ListServices {
-        async fn run(_args: ListServicesArgs, ctx: &ToolCtx) -> Result<ListServicesOutput> {
-            let projects = svc(ctx)?
-                .list_services()
-                .await?
+/// List all running docker compose services across all rebuy projects. Returns
+/// project name, path, and per-service state/health/ports.
+#[orca_tool(domain = "infra", verb = "services")]
+async fn list_services(
+    _args: ListServicesArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<ListServicesOutput> {
+    let projects = infra_svc(ctx)?
+        .list_services()
+        .await?
+        .into_iter()
+        .map(|p| ProjectServices {
+            project: p.project,
+            path: p.path,
+            services: p
+                .services
                 .into_iter()
-                .map(|p| ProjectServices {
-                    project: p.project,
-                    path: p.path,
-                    services: p
-                        .services
-                        .into_iter()
-                        .map(|s| ServiceState {
-                            name: s.name,
-                            state: s.state,
-                            health: s.health,
-                            ports: s.ports,
-                        })
-                        .collect(),
+                .map(|s| ServiceState {
+                    name: s.name,
+                    state: s.state,
+                    health: s.health,
+                    ports: s.ports,
                 })
-                .collect();
-            Ok(ListServicesOutput { projects })
-        }
-    }
+                .collect(),
+        })
+        .collect();
+    Ok(ListServicesOutput { projects })
+}
 
-    #[async_trait]
-    impl OrcaTool for GetServiceLogs {
-        async fn run(args: GetServiceLogsArgs, ctx: &ToolCtx) -> Result<GetServiceLogsOutput> {
-            let tail = args.tail.unwrap_or(200);
-            let output = svc(ctx)?
-                .service_logs(&args.project, &args.service, tail)
-                .await?;
-            Ok(GetServiceLogsOutput {
-                project: args.project,
-                service: args.service,
-                output,
-            })
-        }
-    }
+/// Fetch docker compose logs for a running rebuy service. Specify the project
+/// path and service name.
+#[orca_tool(domain = "infra", verb = "service-logs")]
+async fn get_service_logs(
+    args: GetServiceLogsArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<GetServiceLogsOutput> {
+    let tail = args.tail.unwrap_or(200);
+    let output = infra_svc(ctx)?
+        .service_logs(&args.project, &args.service, tail)
+        .await?;
+    Ok(GetServiceLogsOutput {
+        project: args.project,
+        service: args.service,
+        output,
+    })
+}
 
-    #[async_trait]
-    impl OrcaTool for RunTests {
-        async fn run(args: RunTestsArgs, ctx: &ToolCtx) -> Result<RunTestsOutput> {
-            let suite = args.suite.as_deref().unwrap_or("rust");
-            let r = svc(ctx)?.run_tests(suite).await?;
-            Ok(RunTestsOutput {
-                suite: r.suite,
-                output: r.output,
-                exit_code: r.exit_code,
-                passed: r.passed,
-                failed: r.failed,
-                duration_ms: r.duration_ms,
-            })
-        }
-    }
+/// Run the orca project test suite. Returns test output with pass/fail counts.
+/// Suites: rust (cargo test), frontend (vitest), e2e (playwright), all.
+#[orca_tool(domain = "infra", verb = "run-tests")]
+async fn run_tests(
+    args: RunTestsArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<RunTestsOutput> {
+    let suite = args.suite.as_deref().unwrap_or("rust");
+    let r = infra_svc(ctx)?.run_tests(suite).await?;
+    Ok(RunTestsOutput {
+        suite: r.suite,
+        output: r.output,
+        exit_code: r.exit_code,
+        passed: r.passed,
+        failed: r.failed,
+        duration_ms: r.duration_ms,
+    })
 }

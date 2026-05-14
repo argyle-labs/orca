@@ -70,6 +70,7 @@ struct PushCaStateParams {
 pub async fn handle_pod_connection(
     mut tls: TlsStream<tokio::net::TcpStream>,
     peer_cn: String,
+    peer_addr: std::net::SocketAddr,
 ) -> Result<()> {
     let frame_bytes = read_frame(&mut tls).await.context("read pod frame")?;
     let msg: Message =
@@ -82,7 +83,7 @@ pub async fn handle_pod_connection(
         }
     };
 
-    let response = dispatch(request, &peer_cn).await;
+    let response = dispatch(request, &peer_cn, peer_addr).await;
 
     let envelope = serde_json::to_vec(&response).context("serialize pod response")?;
     write_frame(&mut tls, &envelope)
@@ -91,7 +92,7 @@ pub async fn handle_pod_connection(
     Ok(())
 }
 
-async fn dispatch(request: Request, peer_cn: &str) -> Response {
+async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAddr) -> Response {
     let method = request.method.clone();
     let id = request.id.clone();
 
@@ -124,7 +125,7 @@ async fn dispatch(request: Request, peer_cn: &str) -> Response {
             };
             value_response(id, &result)
         }
-        POD_NOTIFY_TRUST_METHOD => match handle_notify_trust(peer_cn, request) {
+        POD_NOTIFY_TRUST_METHOD => match handle_notify_trust(peer_cn, peer_addr, request) {
             Ok(()) => Response::ok(id, Value::Null),
             Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
         },
@@ -155,12 +156,26 @@ async fn dispatch(request: Request, peer_cn: &str) -> Response {
     }
 }
 
-fn handle_notify_trust(peer_cn: &str, request: Request) -> Result<()> {
+fn handle_notify_trust(
+    peer_cn: &str,
+    peer_addr: std::net::SocketAddr,
+    request: Request,
+) -> Result<()> {
     let params: NotifyTrustParams = match request.params {
         Some(v) => serde_json::from_value(v).context("parse pod/notify-trust params")?,
         None => anyhow::bail!("pod/notify-trust requires params"),
     };
     let conn = db::open_default()?;
+    // Self-heal: the mTLS layer validated this CN against the mesh CA, so we
+    // can trust it. If no pod_peers row exists yet (legacy rc.≤24 joiner that
+    // landed as peer_id="unknown", or CN/peer_id drift), materialize a stub
+    // keyed by the CN so the FK on pod_trust.peer_id is satisfied.
+    pdb::ensure_peer_stub(
+        &conn,
+        peer_cn,
+        &peer_addr.ip().to_string(),
+        peer_addr.port(),
+    )?;
     pdb::set_trust(&conn, peer_cn, None, Some(params.trust))?;
     Ok(())
 }
