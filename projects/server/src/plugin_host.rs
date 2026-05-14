@@ -363,27 +363,6 @@ fn build_acceptor(pki_dir: &Path) -> Result<TlsAcceptor> {
         .context("load plugin private key")?;
     let plugin_ck = Arc::new(CertifiedKey::new(plugin_chain, plugin_signing));
 
-    // Trust store starts with the plugin CA, optionally extended with the mesh CA.
-    let mut roots = pki::ca_root_store(&plugin_bundle.ca_cert_pem)?;
-
-    if pki::mesh_ca_cert_path(pki_dir).exists() {
-        let cur_ca = std::fs::read_to_string(pki::mesh_ca_cert_path(pki_dir))
-            .context("read current mesh CA cert")?;
-        let prev_ca = std::fs::read_to_string(pki::mesh_ca_previous_cert_path(pki_dir)).ok();
-        use rustls_pemfile::certs;
-        for der in certs(&mut cur_ca.as_bytes()) {
-            roots.add(der.context("parsing current mesh CA cert")?)?;
-        }
-        if let Some(p) = &prev_ca {
-            for der in certs(&mut p.as_bytes()) {
-                roots.add(der.context("parsing previous mesh CA cert")?)?;
-            }
-            info!("[plugin-host] mesh CA two-slot overlap active (previous CA still trusted)");
-        } else {
-            info!("[plugin-host] mesh CA detected — pod SNI surface active");
-        }
-    }
-
     // Eagerly create the bootstrap cert+key so its file is on disk; the
     // resolver still reads from disk per-handshake. (Bootstrap rarely
     // rotates but the read path is the same for uniformity.)
@@ -394,14 +373,16 @@ fn build_acceptor(pki_dir: &Path) -> Result<TlsAcceptor> {
         plugin_ck,
     });
 
-    // The bootstrap SNI accepts no client cert; everything else now requires
-    // a valid cert. The connection dispatcher (above) bypasses cert extraction
-    // entirely for POD_BOOTSTRAP_SAN, so we can use `allow_unauthenticated()`
-    // at the TLS layer and rely on the SNI-routing branch to gate trust.
-    let client_cert_verifier = WebPkiClientVerifier::builder(Arc::new(roots))
-        .allow_unauthenticated()
-        .build()
-        .context("build client cert verifier")?;
+    // Client cert verifier hot-reloads roots when the mesh CA file changes on
+    // disk. Without this, `pod accept` writes a new mesh CA but the daemon
+    // keeps using the snapshot taken at startup → inbound mTLS rejects every
+    // peer signed by the new CA with `UnknownCA` until the daemon restarts.
+    // The bootstrap SNI is dispatched before TLS client-auth runs, so we keep
+    // `allow_unauthenticated()` at the TLS layer.
+    let client_cert_verifier = Arc::new(HotReloadClientVerifier::new(
+        pki_dir,
+        plugin_bundle.ca_cert_pem.clone(),
+    )?);
 
     let server_config = ServerConfig::builder()
         .with_client_cert_verifier(client_cert_verifier)
@@ -467,6 +448,144 @@ impl HotReloadResolver {
             .load_private_key(key)
             .context("load private key")?;
         Ok(rustls::sign::CertifiedKey::new(chain, signing))
+    }
+}
+
+/// Client-cert verifier that watches the mesh CA file's mtime and rebuilds
+/// its inner `WebPkiClientVerifier` whenever it changes. `pod accept` writes
+/// a fresh `mesh/ca.cert.pem` on the joiner; without this the daemon's
+/// startup snapshot of trust roots stays stale and rejects the inviter's
+/// client cert with `UnknownCA` until the next restart.
+#[derive(Debug)]
+struct HotReloadClientVerifier {
+    pki_dir: std::path::PathBuf,
+    plugin_ca_pem: String,
+    state: StdMutex<VerifierState>,
+}
+
+#[derive(Debug)]
+struct VerifierState {
+    inner: Arc<dyn rustls::server::danger::ClientCertVerifier>,
+    mesh_mtime: Option<std::time::SystemTime>,
+    prev_mtime: Option<std::time::SystemTime>,
+}
+
+impl HotReloadClientVerifier {
+    fn new(pki_dir: &Path, plugin_ca_pem: String) -> Result<Self> {
+        let inner = Self::build(pki_dir, &plugin_ca_pem)?;
+        let mesh_mtime = std::fs::metadata(pki::mesh_ca_cert_path(pki_dir))
+            .and_then(|m| m.modified())
+            .ok();
+        let prev_mtime = std::fs::metadata(pki::mesh_ca_previous_cert_path(pki_dir))
+            .and_then(|m| m.modified())
+            .ok();
+        if mesh_mtime.is_some() {
+            info!("[plugin-host] mesh CA detected — pod SNI surface active");
+        }
+        Ok(Self {
+            pki_dir: pki_dir.to_path_buf(),
+            plugin_ca_pem,
+            state: StdMutex::new(VerifierState {
+                inner,
+                mesh_mtime,
+                prev_mtime,
+            }),
+        })
+    }
+
+    fn build(
+        pki_dir: &Path,
+        plugin_ca_pem: &str,
+    ) -> Result<Arc<dyn rustls::server::danger::ClientCertVerifier>> {
+        let mut roots = pki::ca_root_store(plugin_ca_pem)?;
+        let mesh = pki::mesh_ca_cert_path(pki_dir);
+        if mesh.exists() {
+            let cur_ca = std::fs::read_to_string(&mesh).context("read current mesh CA cert")?;
+            use rustls_pemfile::certs;
+            for der in certs(&mut cur_ca.as_bytes()) {
+                roots.add(der.context("parsing current mesh CA cert")?)?;
+            }
+            if let Ok(prev) = std::fs::read_to_string(pki::mesh_ca_previous_cert_path(pki_dir)) {
+                for der in certs(&mut prev.as_bytes()) {
+                    roots.add(der.context("parsing previous mesh CA cert")?)?;
+                }
+            }
+        }
+        let v = WebPkiClientVerifier::builder(Arc::new(roots))
+            .allow_unauthenticated()
+            .build()
+            .context("build client cert verifier")?;
+        Ok(v)
+    }
+
+    fn current(&self) -> Arc<dyn rustls::server::danger::ClientCertVerifier> {
+        let mesh_mtime = std::fs::metadata(pki::mesh_ca_cert_path(&self.pki_dir))
+            .and_then(|m| m.modified())
+            .ok();
+        let prev_mtime = std::fs::metadata(pki::mesh_ca_previous_cert_path(&self.pki_dir))
+            .and_then(|m| m.modified())
+            .ok();
+        let mut state = self.state.lock().unwrap();
+        if state.mesh_mtime != mesh_mtime || state.prev_mtime != prev_mtime {
+            match Self::build(&self.pki_dir, &self.plugin_ca_pem) {
+                Ok(v) => {
+                    state.inner = v;
+                    state.mesh_mtime = mesh_mtime;
+                    state.prev_mtime = prev_mtime;
+                    info!("[plugin-host] reloaded client cert verifier (mesh CA changed on disk)");
+                }
+                Err(e) => {
+                    warn!("[plugin-host] CA reload failed: {e}; using cached verifier")
+                }
+            }
+        }
+        state.inner.clone()
+    }
+}
+
+impl rustls::server::danger::ClientCertVerifier for HotReloadClientVerifier {
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+        self.current()
+            .verify_client_cert(end_entity, intermediates, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.current().verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.current().verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.current().supported_verify_schemes()
+    }
+
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        false
     }
 }
 
