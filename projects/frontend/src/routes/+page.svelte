@@ -4,22 +4,25 @@
   import StatusDot from '$lib/components/StatusDot.svelte';
 
   /**
-   * v1: shows the local instance only — derived from the orca backend this
-   * UI is talking to. Federation/remote-orca discovery isn't wired yet; this
-   * page is the natural home for it once pods land. Each instance row
-   * polls `api.health` on its own cadence.
+   * Local row is derived from this orca instance via api.health +
+   * system_runtime_spec. Remote rows are paired pod peers (mesh members)
+   * pulled from `pod.list`; their health/version is unknown from this side
+   * until the pod surface exposes per-peer stats.
    */
   interface Instance {
     id: string;
     label: string;
     origin: string;
-    role: 'local';
+    role: 'local' | 'pod';
     version: string | null;
     target: string | null;
     frontend: string | null;
     health: 'up' | 'down' | 'unknown';
     error: string | null;
     lastChecked: number | null;
+    /** pod-row only */
+    secure?: { local: boolean; peer: boolean } | null;
+    status?: string | null;
   }
 
   let instances = $state<Instance[]>([]);
@@ -31,7 +34,7 @@
     return window.location.origin;
   }
 
-  async function refresh(inst: Instance) {
+  async function refreshLocal(inst: Instance) {
     try {
       const [health, spec] = await Promise.all([
         callTool('health', {}),
@@ -48,9 +51,40 @@
       inst.error = e instanceof Error ? e.message : String(e);
     } finally {
       inst.lastChecked = Date.now();
-      // Trigger reactivity — replace the array reference.
       instances = [...instances];
     }
+  }
+
+  async function refreshPodPeers() {
+    try {
+      const peers = await callTool('pod_list', {});
+      const local = instances.find((i) => i.role === 'local');
+      const podRows: Instance[] = (peers ?? []).map((p) => ({
+        id: `pod:${p.peer_id}`,
+        label: p.hostname || p.peer_id,
+        origin: `${p.addr}:${p.port}`,
+        role: 'pod',
+        version: null,
+        target: null,
+        frontend: null,
+        health: p.status === 'active' ? 'unknown' : 'down',
+        error: null,
+        lastChecked: Date.now(),
+        secure: { local: p.local_secure, peer: p.peer_secure },
+        status: p.status,
+      }));
+      instances = local ? [local, ...podRows] : podRows;
+    } catch (e) {
+      // Pod surface may not be initialized (no `orca pod init` run).
+      // Don't blow away the local row — just leave remotes empty.
+      console.warn('pod.list failed:', e);
+    }
+  }
+
+  function refresh(inst: Instance) {
+    if (inst.role === 'local') return refreshLocal(inst);
+    // pod rows: refreshed by refreshPodPeers (which rebuilds them).
+    return refreshPodPeers();
   }
 
   onMount(() => {
@@ -68,8 +102,13 @@
         lastChecked: null,
       },
     ];
-    instances.forEach(refresh);
-    pollHandle = setInterval(() => instances.forEach(refresh), POLL_MS);
+    refreshLocal(instances[0]);
+    refreshPodPeers();
+    pollHandle = setInterval(() => {
+      const local = instances.find((i) => i.role === 'local');
+      if (local) refreshLocal(local);
+      refreshPodPeers();
+    }, POLL_MS);
   });
 
   onDestroy(() => {
@@ -106,9 +145,17 @@
 
         <dl class="meta">
           <dt>origin</dt><dd><code>{inst.origin || '—'}</code></dd>
-          <dt>version</dt><dd><code>{inst.version ?? '—'}</code></dd>
-          <dt>target</dt><dd><code>{inst.target ?? '—'}</code></dd>
-          <dt>frontend</dt><dd><code>{inst.frontend ?? '—'}</code></dd>
+          {#if inst.role === 'local'}
+            <dt>version</dt><dd><code>{inst.version ?? '—'}</code></dd>
+            <dt>target</dt><dd><code>{inst.target ?? '—'}</code></dd>
+            <dt>frontend</dt><dd><code>{inst.frontend ?? '—'}</code></dd>
+          {:else}
+            <dt>status</dt><dd><code>{inst.status ?? '—'}</code></dd>
+            <dt>trust</dt><dd>
+              <code>local:{inst.secure?.local ? 'on' : 'off'}</code>
+              <code>peer:{inst.secure?.peer ? 'on' : 'off'}</code>
+            </dd>
+          {/if}
           <dt>checked</dt><dd>{relTime(inst.lastChecked)}</dd>
         </dl>
 
@@ -119,10 +166,12 @@
     {/each}
   </div>
 
-  <p class="hint">
-    Remote orca instances (pods) aren't discovered yet. When federation lands
-    they'll appear here automatically.
-  </p>
+  {#if instances.filter((i) => i.role === 'pod').length === 0}
+    <p class="hint">
+      No paired pod peers yet. Run <code>orca pod init</code> to become a founder,
+      or <code>orca pod accept &lt;code&gt;</code> on a joiner to pair with an existing pod.
+    </p>
+  {/if}
 </section>
 
 <style>
