@@ -38,20 +38,34 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 colored = "3"
 
 # HTTP & TLS
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls-no-provider", "form", "query"] }
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-no-provider",
+    "form",
+    "query",
+] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+] }
 rustls-pki-types = "1"
 rustls-pemfile = "2"
 
 # DB
-rusqlite = { version = "0.39", features = ["bundled-sqlcipher-vendored-openssl"] }
+rusqlite = { version = "0.39", features = [
+    "bundled-sqlcipher-vendored-openssl",
+] }
+
+# Cron expression parser for the in-process scheduler. Pure parser; the
+# loop driver lives in `projects/server/src/scheduler.rs`.
+cron = "0.16.0"
 
 # Web framework / API
 axum = { version = "0.8", features = ["macros", "ws"] }
 utoipa = { version = "5", features = ["axum_extras"] }
 schemars = { version = "1", features = ["derive"] }
-jsonschema = { version = "0.46", default-features = false }
+jsonschema = { version = "0.46.5", default-features = false }
 
 # Hashing & RNG
 sha2 = "0.11"
