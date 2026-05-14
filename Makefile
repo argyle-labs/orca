@@ -148,9 +148,18 @@ else
 	@$(INSTALL_PATH) db migrate
 endif
 
-# No-op stubs so `make migration <slug>` doesn't trip on the unknown goal.
-$(MIGRATION_VERBS) $(MIGRATION_SLUG):
+# No-op stubs so `make migration <verb-or-slug>` doesn't trip on the
+# extra goal. The slug stub is gated: without the guard it would absorb
+# ANY second goal (e.g. `make deploy` made MIGRATION_SLUG=deploy and
+# overrode the real `deploy:` target). The guard ensures the slug stub
+# is only created when `migration` is one of the goals.
+$(MIGRATION_VERBS):
 	@: # handled by the migration target above
+
+ifneq ($(filter migration,$(MAKECMDGOALS)),)
+$(MIGRATION_SLUG):
+	@: # scaffold handled by the migration target above
+endif
 
 clean:
 	cargo clean --manifest-path projects/server/Cargo.toml
