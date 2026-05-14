@@ -10,7 +10,6 @@
 
 pub mod config_store;
 pub mod docker_runtimes;
-pub mod scheduler_runs;
 pub mod docs;
 pub mod home_assistant;
 pub mod host_addressing;
@@ -28,6 +27,7 @@ pub mod pod;
 pub mod profile_creds;
 pub mod profiles;
 pub mod proxmox;
+pub mod scheduler_runs;
 pub mod schema_databases;
 pub mod secrets;
 pub mod settings;
