@@ -227,9 +227,9 @@ fn handle_refresh_cert(peer_cn: &str, request: Request) -> Result<RefreshCertRes
         None => anyhow::bail!("pod/refresh-cert requires params"),
     };
 
-    // Enforce that the joiner hostname matches the authenticated CN. The
-    // CN is `peer.<hostname>`; if a peer tries to refresh under a different
-    // hostname we refuse — that would let one peer impersonate another.
+    // Enforce that the joiner identifier matches the authenticated CN. CN is
+    // `peer.<machine_id_short>`; the param is named `joiner_hostname` for wire
+    // compat but now carries the stable machine_id, not the OS hostname.
     let expected_cn = format!("peer.{}", params.joiner_hostname);
     anyhow::ensure!(
         peer_cn == expected_cn,
