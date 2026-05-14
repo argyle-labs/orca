@@ -11,6 +11,7 @@
 pub mod docker_runtimes;
 pub mod docs;
 pub mod home_assistant;
+pub mod host_addressing;
 pub mod llm;
 pub mod mcp_servers;
 pub mod oauth;
