@@ -264,7 +264,7 @@ fn addr_score(ip: &std::net::IpAddr) -> u8 {
 }
 
 fn pick_best_addr<I: IntoIterator<Item = std::net::IpAddr>>(addrs: I) -> Option<std::net::IpAddr> {
-    addrs.into_iter().min_by_key(|ip| addr_score(ip))
+    addrs.into_iter().min_by_key(|ip| addr_score)
 }
 
 fn hostname_or_unknown() -> String {
