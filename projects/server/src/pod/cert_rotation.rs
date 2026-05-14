@@ -82,7 +82,8 @@ async fn tick() -> Result<()> {
     }
 
     if pki::has_mesh_ca_key(&pki_d) {
-        let host = hostname_or_unknown();
+        // Cert CN must be stable across hostname flaps — use machine_id.
+        let host = crate::host_identity::machine_id_short().to_string();
         if need_server {
             pki::reissue_mesh_server_cert(&pki_d).context("self-sign mesh server cert")?;
             info!("[cert-rotation] self-reissued mesh server cert");
@@ -112,7 +113,7 @@ async fn refresh_via_peer() -> Result<()> {
     // Most-recently-seen first to maximize success likelihood.
     candidates.sort_by_key(|p| std::cmp::Reverse(p.last_seen_at));
 
-    let host = hostname_or_unknown();
+    let host = crate::host_identity::machine_id_short().to_string();
     let (csr_client, key_client, csr_server, key_server) = pki::build_refresh_csrs(&host)?;
 
     for p in candidates {
@@ -201,14 +202,4 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
-}
-
-fn hostname_or_unknown() -> String {
-    std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
 }

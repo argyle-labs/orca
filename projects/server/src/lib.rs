@@ -24,6 +24,7 @@ pub use crate::conversation::agent_backend;
 pub use crate::conversation::context;
 pub use crate::conversation::tui;
 
+pub mod host_identity;
 pub mod log_cmd;
 pub mod markdown;
 pub mod mcp;

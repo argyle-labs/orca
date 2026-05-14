@@ -120,7 +120,7 @@ async fn dispatch(request: Request, peer_cn: &str) -> Response {
             let result = PodPingResult {
                 peer_id: peer_cn.to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
-                hostname: gethostname_string(),
+                hostname: crate::host_identity::hostname().to_string(),
             };
             value_response(id, &result)
         }
@@ -261,14 +261,4 @@ fn value_response<T: Serialize>(id: Value, v: &T) -> Response {
         Ok(val) => Response::ok(id, val),
         Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
     }
-}
-
-fn gethostname_string() -> String {
-    std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
 }

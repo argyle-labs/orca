@@ -239,6 +239,10 @@ async fn main() -> Result<()> {
     }
 
     let mut config = Config::load()?;
+    // Capture hostname + load/generate machine_id once at startup so all
+    // downstream code (mDNS, pod scheduler, cert rotation) sees a stable
+    // identity regardless of OS hostname churn.
+    orca::host_identity::init(&config.app_dir)?;
     // Run TOML → DB migrations and auto-registration of detected runtimes.
     db::startup::init(&config);
     // Load API key from encrypted DB when not set via environment variable.
@@ -304,13 +308,8 @@ async fn main() -> Result<()> {
         Some(Command::Pod { action }) => match action {
             PodAction::Init => {
                 let pki = orca::pod::pki_dir();
-                let host = std::process::Command::new("hostname")
-                    .output()
-                    .ok()
-                    .and_then(|o| String::from_utf8(o.stdout).ok())
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "unknown".to_string());
+                // CN = stable machine_id (display hostname is held separately).
+                let host = orca::host_identity::machine_id_short().to_string();
                 orca_sdk::pki::init_mesh_ca(&pki, &host)?;
                 // Ensure the bootstrap identity (Ed25519 key + self-signed
                 // cert) is present from the moment this host is poddable.
