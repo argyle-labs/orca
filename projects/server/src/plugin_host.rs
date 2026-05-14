@@ -302,7 +302,7 @@ pub async fn serve(
                             // layer via pinned pubkey + pairing code.
                             if sni == pki::POD_BOOTSTRAP_SAN {
                                 if let Err(e) =
-                                    crate::pod::handle_pod_bootstrap_connection(tls).await
+                                    crate::pod::handle_pod_bootstrap_connection(tls, peer).await
                                 {
                                     warn!("[plugin-host] {peer} bootstrap connection error: {e:#}");
                                 }

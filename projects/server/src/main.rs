@@ -317,7 +317,7 @@ async fn main() -> Result<()> {
                 orca_sdk::pki::load_or_init_bootstrap_cert(&pki)?;
                 let conn = db::open_default()?;
                 orca::pod::db::set_self_secure(&conn, true)?;
-                let pod_id = format!("pod-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+                let pod_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
                 orca::pod::db::set_pod_id(&conn, &pod_id)?;
                 println!("✓ mesh CA initialized at {}", pki.join("mesh").display());
                 println!("  pod id: {pod_id}");

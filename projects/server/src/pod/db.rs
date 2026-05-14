@@ -58,6 +58,22 @@ pub fn upsert_discovery(
     can_invite: bool,
 ) -> Result<()> {
     let now = now_secs();
+    // Evict stale rows for the same hostname carrying a different fp. A peer
+    // that regenerates its bootstrap key (daemon reinstall, key rotation,
+    // factory reset) advertises a new fp; the old row would otherwise live on
+    // forever and the scheduler would keep dialing it and hitting
+    // `pinned bootstrap pubkey mismatch`.
+    conn.execute(
+        "DELETE FROM pod_discovery WHERE hostname = ? AND pubkey_fp <> ?",
+        params![hostname, pubkey_fp],
+    )?;
+    // Also drop any stale outbound offers pinned to the evicted fp so the
+    // scheduler stops retrying them.
+    conn.execute(
+        "DELETE FROM pod_pending_offers
+         WHERE direction = 'out' AND peer_hostname = ? AND peer_pubkey_fp <> ?",
+        params![hostname, pubkey_fp],
+    )?;
     conn.execute(
         "INSERT INTO pod_discovery
              (pubkey_fp, peer_id, hostname, addr, port, state, can_invite, first_seen_at, last_seen_at)
