@@ -30,6 +30,7 @@ pub mod orca_profile;
 pub mod orca_secrets;
 pub mod plugin_runtime;
 pub mod plugins;
+pub mod pod;
 pub mod proxmox;
 pub mod services;
 pub mod spec_registry;
@@ -186,6 +187,9 @@ declare_tools! {
     projects_list       => orca_lifecycle::ProjectsList       [d:"projects", v:"list"],
     spec_dump           => orca_lifecycle::SpecDump           [d:"spec", v:"dump"],
     system_runtime_spec => orca_lifecycle::SystemRuntimeSpec  [d:"system", v:"runtime-spec"],
+
+    // ── Pod / mesh ──────────────────────────────────────────────────────────
+    pod_list => pod::PodList [d:"pod", v:"list"],
 
     // ── Engine registry (bespoke colored rendering kept in engine.rs) ──────
     engine_list      => engine::EngineList    [d:"engine", v:"list",    cli: manual],
