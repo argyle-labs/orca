@@ -71,8 +71,14 @@ async fn run_one(name: &'static str, tick: &TickFn) {
 
     // Record run history. Failures here should not break the loop —
     // observability is best-effort.
-    if let Err(e) = record_run(name, &started_iso, &finished_iso, ok, error.as_deref(), duration_ms)
-    {
+    if let Err(e) = record_run(
+        name,
+        &started_iso,
+        &finished_iso,
+        ok,
+        error.as_deref(),
+        duration_ms,
+    ) {
         debug!("[{name}] record_run: {e:#}");
     }
 }

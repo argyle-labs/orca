@@ -35,7 +35,14 @@ pub fn record(
     conn.execute(
         "INSERT INTO scheduler_runs (job_name, started_at, finished_at, ok, error, duration_ms)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![job_name, started_at, finished_at, ok as i64, error, duration_ms],
+        params![
+            job_name,
+            started_at,
+            finished_at,
+            ok as i64,
+            error,
+            duration_ms
+        ],
     )?;
     // Trim — keep the newest RETAIN_PER_JOB rows per job.
     conn.execute(
@@ -111,7 +118,16 @@ mod tests {
     #[test]
     fn record_and_last() {
         let conn = test_conn();
-        record(&conn, "x.run", "2026-05-14T00:00:00Z", "2026-05-14T00:00:01Z", true, None, 1000).unwrap();
+        record(
+            &conn,
+            "x.run",
+            "2026-05-14T00:00:00Z",
+            "2026-05-14T00:00:01Z",
+            true,
+            None,
+            1000,
+        )
+        .unwrap();
         let r = last(&conn, "x.run").unwrap().unwrap();
         assert!(r.ok);
         assert_eq!(r.duration_ms, 1000);
@@ -135,7 +151,16 @@ mod tests {
     fn retention_trims_oldest() {
         let conn = test_conn();
         for i in 0..(RETAIN_PER_JOB + 5) {
-            record(&conn, "noisy", &format!("{i}"), &format!("{i}"), true, None, 0).unwrap();
+            record(
+                &conn,
+                "noisy",
+                &format!("{i}"),
+                &format!("{i}"),
+                true,
+                None,
+                0,
+            )
+            .unwrap();
         }
         let n: i64 = conn
             .query_row(
