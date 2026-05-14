@@ -171,8 +171,8 @@ fn handle_offer(env: &SignedEnvelope, peer: std::net::SocketAddr) -> Result<Offe
         ttl,
     )?;
     info!(
-        "[pod-bootstrap] received offer from {} ({}@{}:{}); run `orca pod pending` to view",
-        body.inviter_peer_id, signer_fp, inviter_addr, body.inviter_port
+        "[pod-bootstrap] received offer from {} ({}, {}@{}:{}); run `orca pod pending` to view",
+        body.inviter_hostname, body.inviter_peer_id, signer_fp, inviter_addr, body.inviter_port
     );
     Ok(OfferAck { code_hint: None })
 }

@@ -320,7 +320,10 @@ async fn main() -> Result<()> {
                 orca::pod::db::set_pod_id(&conn, &pod_id)?;
                 println!("✓ mesh CA initialized at {}", pki.join("mesh").display());
                 println!("  pod id: {pod_id}");
-                println!("  founder host CN: peer.{host}");
+                println!(
+                    "  founder peer id: peer.{host}  (machine_id; display: {})",
+                    orca::host_identity::hostname()
+                );
                 println!("  self_secure: true (secrets storage enabled)");
                 println!(
                     "  next: start the daemon. Auto-offers will flow to any \

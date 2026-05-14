@@ -61,8 +61,8 @@ pub fn cmd_pod_pending() -> Result<()> {
         let id = r.inviter_peer_id.as_deref().unwrap_or("?");
         let pod = r.pod_id.as_deref().unwrap_or("?");
         println!(
-            "  • from {id} (pod {pod}) at {}:{} (fp {})",
-            r.peer_addr, r.peer_port, r.peer_pubkey_fp
+            "  • from {} ({id}, pod {pod}) at {}:{} (fp {})",
+            r.peer_hostname, r.peer_addr, r.peer_port, r.peer_pubkey_fp
         );
         println!(
             "    expires in {}s — run `orca pod accept <code>` once you have the 6-char pairing code from the inviter",
@@ -156,8 +156,8 @@ pub async fn cmd_pod_accept(code: &str) -> Result<()> {
     pdb::delete_pending_offer(&conn, &offer.offer_id)?;
 
     println!(
-        "✓ joined pod {} via {} ({}:{})",
-        r.pod_id, r.inviter_peer_id, offer.peer_addr, offer.peer_port
+        "✓ joined pod {} via {} ({}, {}:{})",
+        r.pod_id, offer.peer_hostname, r.inviter_peer_id, offer.peer_addr, offer.peer_port
     );
     println!(
         "  self_secure is OFF — run `orca pod self-secure on` to enable secrets writes on this host."

@@ -3,7 +3,9 @@
 //! Service type: `_orca._tcp.local.`
 //!
 //! TXT properties advertised by every orca:
-//!   peer_id       — our pod CN (`peer.<hostname>`) or `unclaimed.<hostname>` pre-pod
+//!   peer_id       — our pod CN (`peer.<machine_id_short>`) or `unclaimed.<machine_id_short>` pre-pod
+//!                   (machine_id is the stable opaque per-host UUID — NOT the OS hostname,
+//!                   which is mutable on macOS mDNS conflicts and DHCP renames)
 //!   state         — `unclaimed` | `pod:<pod_id>`
 //!   can_invite    — `1` iff we have mesh CA key AND self_secure=true
 //!   pubkey_fp     — first-16-byte SHA-256 hex of our bootstrap ed25519 pubkey
