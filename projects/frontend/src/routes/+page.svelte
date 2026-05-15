@@ -68,7 +68,7 @@
         version: null,
         target: null,
         frontend: null,
-        health: p.status === 'active' ? 'unknown' : 'down',
+        health: p.status === 'active' ? 'up' : 'down',
         error: null,
         lastChecked: Date.now(),
         secure: { local: p.local_secure, peer: p.peer_secure },

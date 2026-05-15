@@ -405,11 +405,14 @@ pub fn ensure_peer_stub(
 
 pub fn list_peers(conn: &Connection) -> Result<Vec<PeerRow>> {
     let mut stmt = conn.prepare(
-        "SELECT p.peer_id, p.peer_hostname, p.peer_addr, p.peer_port, p.pubkey_fp,
+        "SELECT p.peer_id,
+                COALESCE(d.hostname, p.peer_hostname) AS peer_hostname,
+                p.peer_addr, p.peer_port, p.pubkey_fp,
                 p.first_seen_at, p.last_seen_at, p.departed_at,
                 COALESCE(t.local_secure, 0), COALESCE(t.peer_secure, 0)
          FROM pod_peers p
          LEFT JOIN pod_trust t ON t.peer_id = p.peer_id
+         LEFT JOIN pod_discovery d ON d.addr = p.peer_addr
          ORDER BY p.last_seen_at DESC",
     )?;
     let rows = stmt.query_map([], |r| {
