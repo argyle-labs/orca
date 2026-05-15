@@ -205,10 +205,10 @@ pub fn write_dev_source(url: &str) -> Result<()> {
 }
 
 pub fn clear_dev_source() -> Result<()> {
-    if let Some(path) = dev_source_path() {
-        if path.exists() {
-            std::fs::remove_file(&path)?;
-        }
+    if let Some(path) = dev_source_path()
+        && path.exists()
+    {
+        std::fs::remove_file(&path)?;
     }
     Ok(())
 }
@@ -448,18 +448,18 @@ pub fn resolve_github_token() -> String {
 /// server instead. `--channel` overrides this (lets you escape back to GitHub).
 pub async fn cmd_update(channel_arg: &str) -> Result<()> {
     // Dev-source takes priority when no explicit channel is given.
-    if channel_arg.trim().is_empty() {
-        if let Some(src) = read_dev_source() {
-            println!("[orca] current version: v{CURRENT_VERSION} ({BUILD_TARGET}, channel=dev)");
-            println!("[orca] checking dev source {src}...");
-            match check_for_update_dev(&src).await? {
-                None => println!("[orca] already up to date"),
-                Some(_) => {
-                    apply_update_dev(&src).await?;
-                }
+    if channel_arg.trim().is_empty()
+        && let Some(src) = read_dev_source()
+    {
+        println!("[orca] current version: v{CURRENT_VERSION} ({BUILD_TARGET}, channel=dev)");
+        println!("[orca] checking dev source {src}...");
+        match check_for_update_dev(&src).await? {
+            None => println!("[orca] already up to date"),
+            Some(_) => {
+                apply_update_dev(&src).await?;
             }
-            return Ok(());
         }
+        return Ok(());
     }
 
     let channel = resolve_channel(channel_arg);
