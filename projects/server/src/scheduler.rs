@@ -30,6 +30,11 @@
 //! after a long downtime, the next due tick fires once and only once.
 //! A configurable replay policy is a follow-up.
 
+// Scheduler args are intentionally opaque: each scheduled tool has its own
+// typed Args struct. The schedule row routes a payload to the canonical
+// tool, where validation happens against that tool's input schema.
+#![allow(clippy::disallowed_types)]
+
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
