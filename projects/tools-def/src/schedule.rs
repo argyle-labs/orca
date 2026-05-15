@@ -98,20 +98,26 @@ pub struct ScheduleRunOutput {
 // ── Native support ───────────────────────────────────────────────────────────
 
 #[cfg(feature = "native")]
+// Scheduler args are intentionally opaque: each scheduled tool has its own
+// typed Args struct. The schedule row routes a payload to the canonical
+// tool, where validation happens. JsonAny is the established passthrough
+// for this case (see `json_any.rs`).
+#[allow(clippy::disallowed_types)]
 mod native_support {
     use std::str::FromStr;
 
     use chrono::{SecondsFormat, Utc};
     use cron::Schedule;
     use serde::Deserialize;
-    use serde_json::Value;
 
-    #[derive(Debug, Clone, Deserialize)]
+    use crate::JsonAny;
+
+    #[derive(Deserialize)]
     pub(super) struct ScheduleRow {
         pub job: String,
         pub cron: String,
         #[serde(default)]
-        pub args: Option<Value>,
+        pub args: Option<JsonAny>,
     }
 
     pub(super) fn next_run(cron_expr: &str) -> Option<String> {
@@ -214,7 +220,10 @@ async fn schedule_run(
                 "schedule.run requires daemon mode (registry-in-ctx not available from CLI)"
             )
         })?;
-    let args_value = parsed.args.unwrap_or_else(|| serde_json::json!({}));
+    let args_value = parsed
+        .args
+        .map(|j| j.0)
+        .unwrap_or_else(|| serde_json::json!({}));
     let t0 = std::time::Instant::now();
     let outcome = registry.dispatch(&parsed.job, args_value, ctx).await;
     let duration_ms = t0.elapsed().as_millis() as i64;
