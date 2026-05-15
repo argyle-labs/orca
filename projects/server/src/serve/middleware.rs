@@ -250,12 +250,27 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
         return next.run(req).await;
     }
 
-    if let Some(token) = extract_bearer(&req)
-        && let Some(ident) = try_token_auth(token)
-    {
-        let mut req = req;
-        req.extensions_mut().insert(ident);
-        return next.run(req).await;
+    if let Some(token) = extract_bearer(&req) {
+        // Fast path: process-local loopback token minted at boot. Constant
+        // string compare (no DB hit) for the high-volume in-process callers.
+        if let Some(lb) = crate::loopback_token::get()
+            && lb == token
+        {
+            let mut req = req;
+            req.extensions_mut().insert(AuthIdentity {
+                kind: AuthKind::Token {
+                    id: "tok_loopback".into(),
+                    name: "loopback".into(),
+                },
+                role: "admin".into(),
+            });
+            return next.run(req).await;
+        }
+        if let Some(ident) = try_token_auth(token) {
+            let mut req = req;
+            req.extensions_mut().insert(ident);
+            return next.run(req).await;
+        }
     }
 
     // Bootstrap fallback — only the very first token_create call from loopback.

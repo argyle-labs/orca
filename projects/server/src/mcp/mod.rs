@@ -395,10 +395,15 @@ async fn call_plugin_tool(fq_name: &str, args: &Value) -> Result<Value> {
     let body = json!({ "arguments": args.clone() });
     // Loopback HTTPS to the same-process daemon: self-signed core-CA cert,
     // accept invalid so we don't have to thread the CA root through here.
+    let token = crate::loopback_token::get()
+        .map(|s| s.to_string())
+        .or_else(crate::loopback_token::read_from_disk)
+        .context("loopback token unavailable — is the daemon running?")?;
     let resp = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .build()?
         .post(&url)
+        .bearer_auth(token)
         .json(&body)
         .timeout(PLUGIN_TOOL_CALL_TIMEOUT)
         .send()

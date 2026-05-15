@@ -34,6 +34,9 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     };
 
     let tls = load_rest_tls(&pki_dir).await?;
+    if let Err(e) = crate::loopback_token::install_at_startup() {
+        tracing::warn!("loopback token install failed: {e:#}");
+    }
     info!("[orca] binding {} (https)...", addr);
 
     // Register as the active dev process so the parked daemon won't auto-reclaim.
@@ -96,7 +99,7 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
 
     info!("[orca] listening on https://localhost:{port}");
     axum_server::bind_rustls(addr, tls)
-        .serve(app.into_make_service())
+        .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .await?;
     Ok(())
 }
@@ -157,6 +160,9 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         // Simple dev-binary serve loop: bind, serve, exit on SIGTERM.
         // Production daemon will reclaim port when we exit.
         let tls = load_rest_tls(&pki_dir).await?;
+        if let Err(e) = crate::loopback_token::install_at_startup() {
+            tracing::warn!("loopback token install failed: {e:#}");
+        }
         info!("[orca] dev binary listening on https://localhost:{port}");
 
         // Best-effort plugin host (may fail if production daemon still owns the port)
@@ -170,7 +176,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         let handle = axum_server::Handle::new();
         let serve = axum_server::bind_rustls(addr, tls)
             .handle(handle.clone())
-            .serve(app.into_make_service());
+            .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>());
         tokio::select! {
             result = serve => result?,
             _ = sigterm.recv() => { handle.graceful_shutdown(Some(Duration::from_secs(1))); }
@@ -260,6 +266,9 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
 
     loop {
         let tls = load_rest_tls(&pki_dir).await?;
+        if let Err(e) = crate::loopback_token::install_at_startup() {
+            tracing::warn!("loopback token install failed: {e:#}");
+        }
         info!("[orca] daemon listening on https://localhost:{port}");
         if let Err(e) = orca_utils::state::set_mode(DaemonMode::Daemon) {
             tracing::warn!("failed to set daemon mode: {e}");
@@ -272,7 +281,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         let handle = axum_server::Handle::new();
         let serve = axum_server::bind_rustls(addr, tls)
             .handle(handle.clone())
-            .serve(app.clone().into_make_service());
+            .serve(app.clone().into_make_service_with_connect_info::<std::net::SocketAddr>());
 
         let parked = tokio::select! {
             result = serve => { result?; false }

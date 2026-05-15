@@ -16,6 +16,7 @@ impl InfraService for ServerInfra {
     async fn list_services(&self) -> Result<Vec<InfraProject>> {
         let resp = loopback_client()?
             .get("https://127.0.0.1:12000/api/logs/services")
+            .bearer_auth(loopback_token()?)
             .send()
             .await?
             .json::<serde_json::Value>()
@@ -58,6 +59,7 @@ impl InfraService for ServerInfra {
         let tail_str = tail.to_string();
         let resp = loopback_client()?
             .get("https://127.0.0.1:12000/api/logs")
+            .bearer_auth(loopback_token()?)
             .query(&[
                 ("project", project),
                 ("service", service),
@@ -92,4 +94,11 @@ fn loopback_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .build()?)
+}
+
+fn loopback_token() -> Result<String> {
+    crate::loopback_token::get()
+        .map(|s| s.to_string())
+        .or_else(crate::loopback_token::read_from_disk)
+        .ok_or_else(|| anyhow::anyhow!("loopback token unavailable — is the daemon running?"))
 }
