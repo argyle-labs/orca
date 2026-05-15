@@ -420,8 +420,16 @@ impl PodService for ServerPod {
                 Ok(r) => results.push(PodDevSyncPeerResult {
                     peer_id: "local".into(),
                     hostname: "localhost".into(),
-                    status: if r.already_up_to_date { "skipped".into() } else { "synced".into() },
-                    detail: if r.already_up_to_date { None } else { Some(r.detail) },
+                    status: if r.already_up_to_date {
+                        "skipped".into()
+                    } else {
+                        "synced".into()
+                    },
+                    detail: if r.already_up_to_date {
+                        None
+                    } else {
+                        Some(r.detail)
+                    },
                 }),
                 Err(e) => results.push(PodDevSyncPeerResult {
                     peer_id: "local".into(),

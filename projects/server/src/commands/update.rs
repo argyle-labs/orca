@@ -573,7 +573,10 @@ pub fn cmd_dev_enable() -> Result<DevEnableResult> {
         let daemon_state = orca_utils::state::read()?;
         let daemon_parked = daemon_state
             .as_ref()
-            .map(|s| s.mode == orca_utils::state::DaemonMode::Parked || s.mode == orca_utils::state::DaemonMode::Dev)
+            .map(|s| {
+                s.mode == orca_utils::state::DaemonMode::Parked
+                    || s.mode == orca_utils::state::DaemonMode::Dev
+            })
             .unwrap_or(false);
         return Ok(DevEnableResult {
             repo_path: repo.to_string_lossy().into(),
@@ -587,7 +590,12 @@ pub fn cmd_dev_enable() -> Result<DevEnableResult> {
             std::fs::create_dir_all(parent)?;
         }
         let status = Command::new("git")
-            .args(["clone", "--depth=1", APP_REPO_URL, repo.to_str().unwrap_or(".")])
+            .args([
+                "clone",
+                "--depth=1",
+                APP_REPO_URL,
+                repo.to_str().unwrap_or("."),
+            ])
             .status()?;
         anyhow::ensure!(status.success(), "git clone failed");
         true
@@ -649,7 +657,9 @@ pub fn cmd_dev_disable() -> Result<DevDisableResult> {
         && pid_alive(pid)
     {
         // Kill the entire process group (cargo watch spawns child processes)
-        let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+        let _ = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
         clear_dev_pid();
         true
     } else {
@@ -660,13 +670,11 @@ pub fn cmd_dev_disable() -> Result<DevDisableResult> {
     // Signal daemon to reclaim — it auto-reclaims when active_pid dies, but
     // an explicit SIGUSR2 is faster
     let daemon_reclaimed = match orca_utils::state::read()? {
-        Some(s) if s.mode != orca_utils::state::DaemonMode::Daemon => {
-            Command::new("kill")
-                .args(["-USR2", &s.daemon_pid.to_string()])
-                .status()
-                .map(|st| st.success())
-                .unwrap_or(false)
-        }
+        Some(s) if s.mode != orca_utils::state::DaemonMode::Daemon => Command::new("kill")
+            .args(["-USR2", &s.daemon_pid.to_string()])
+            .status()
+            .map(|st| st.success())
+            .unwrap_or(false),
         _ => false,
     };
 
