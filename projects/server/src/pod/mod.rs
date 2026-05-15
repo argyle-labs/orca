@@ -39,12 +39,26 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
 pub const POD_PING_METHOD: &str = "pod/ping";
+pub const POD_DEV_SYNC_METHOD: &str = "pod/dev-sync";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PodPingResult {
     pub peer_id: String,
     pub version: String,
     pub hostname: String,
+}
+
+/// Result of `pod/dev-sync`. `status` is one of:
+/// - `"synced"` — `git pull` completed; cargo-watch will rebuild.
+/// - `"skipped"` — peer is not in dev mode (intentional no-op).
+/// - `"error"`  — pull failed; `detail` carries the message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PodDevSyncResult {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commits_pulled: Option<u32>,
 }
 
 /// Resolve the PKI dir for this host using the same logic as the rest of
@@ -59,6 +73,39 @@ pub fn pki_dir() -> PathBuf {
 /// always uses the canonical SNI so the server's resolver returns the
 /// mesh-CA-signed cert.
 pub async fn ping(host: &str) -> Result<PodPingResult> {
+    call_typed(host, POD_PING_METHOD, None::<()>, Duration::from_secs(5)).await
+}
+
+/// Dial `host` over the existing pod mTLS channel and ask it to git-pull its
+/// dev checkout. `host` is a bare hostname or IP; SNI is fixed to
+/// `pod.orca.local`. Identity is proven by the mesh-CA-signed client cert —
+/// no bearer tokens involved, so this is the canonical peer↔peer auth path.
+pub async fn dev_sync(host: &str) -> Result<PodDevSyncResult> {
+    // git pull + cargo-watch detect can run long on a slow LAN; allow more
+    // headroom than `pod/ping`.
+    call_typed(
+        host,
+        POD_DEV_SYNC_METHOD,
+        None::<()>,
+        Duration::from_secs(45),
+    )
+    .await
+}
+
+/// Generic mTLS JSON-RPC roundtrip to a peer over the pod channel. One-shot:
+/// connect → write one request → read one response → return. No pooling yet;
+/// adopters call this directly per peer. Keeping the connection short-lived
+/// matches how `pod/ping` worked previously and avoids leaking sockets.
+async fn call_typed<P, R>(
+    host: &str,
+    method: &str,
+    params: Option<P>,
+    timeout: Duration,
+) -> Result<R>
+where
+    P: Serialize,
+    R: for<'de> Deserialize<'de>,
+{
     let pki = pki_dir();
     let bundle =
         pki::load_mesh_client(&pki).context("load mesh client bundle (run `orca pod init`)")?;
@@ -83,28 +130,31 @@ pub async fn ping(host: &str) -> Result<PodPingResult> {
         .await
         .context("TLS handshake (is the peer's mesh CA the same as ours?)")?;
 
-    let req = Request::new(1, POD_PING_METHOD, None);
-    let envelope = serde_json::to_vec(&req).context("serialize ping request")?;
+    let params_value = match params {
+        Some(p) => Some(serde_json::to_value(p).context("serialize request params")?),
+        None => None,
+    };
+    let req = Request::new(1, method, params_value);
+    let envelope = serde_json::to_vec(&req).context("serialize request")?;
     write_frame(&mut tls, &envelope)
         .await
-        .context("write ping frame")?;
+        .context("write request frame")?;
 
-    let raw = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut tls))
+    let raw = tokio::time::timeout(timeout, read_frame(&mut tls))
         .await
-        .context("ping read timed out")?
-        .context("read ping response")?;
+        .with_context(|| format!("{method} read timed out"))?
+        .context("read response")?;
     let msg: Message =
-        serde_json::from_slice(&raw).context("parse ping response as JSON-RPC Message")?;
+        serde_json::from_slice(&raw).context("parse response as JSON-RPC Message")?;
     let resp: Response = match msg {
         Message::Response(r) => r,
         Message::Request(_) | Message::Notification(_) => {
-            anyhow::bail!("unexpected message type in response to pod/ping")
+            anyhow::bail!("unexpected message type in response to {method}")
         }
     };
     if let Some(err) = resp.error {
         anyhow::bail!("peer returned error: {}", err.message);
     }
     let result = resp.result.context("peer response had no result")?;
-    let parsed: PodPingResult = serde_json::from_value(result).context("parse pod/ping result")?;
-    Ok(parsed)
+    serde_json::from_value(result).with_context(|| format!("parse {method} result"))
 }

@@ -14,13 +14,33 @@ use crate::OrcaToolDef;
 #[wasm_bindgen]
 pub struct OrcaClient {
     base_url: String,
+    /// Bearer token attached to every request when present. Set by the JS
+    /// layer after the user pastes one into the token-entry UI. We hold it
+    /// here (not in localStorage) so each `OrcaClient` instance has an
+    /// explicit identity — the host page is responsible for persistence.
+    bearer_token: Option<String>,
 }
 
 #[wasm_bindgen]
 impl OrcaClient {
     #[wasm_bindgen(constructor)]
     pub fn new(base_url: String) -> OrcaClient {
-        OrcaClient { base_url }
+        OrcaClient {
+            base_url,
+            bearer_token: None,
+        }
+    }
+
+    /// Set or clear the bearer token. Pass an empty string to clear.
+    #[wasm_bindgen(js_name = setBearerToken)]
+    pub fn set_bearer_token(&mut self, token: String) {
+        self.bearer_token = if token.is_empty() { None } else { Some(token) };
+    }
+
+    /// True if a bearer token is currently set.
+    #[wasm_bindgen(js_name = hasBearerToken)]
+    pub fn has_bearer_token(&self) -> bool {
+        self.bearer_token.is_some()
     }
 }
 
@@ -65,6 +85,11 @@ impl OrcaClient {
         headers
             .set("content-type", "application/json")
             .map_err(|e| jsval_to_err("set header", &e))?;
+        if let Some(token) = &self.bearer_token {
+            headers
+                .set("authorization", &format!("Bearer {token}"))
+                .map_err(|e| jsval_to_err("set auth header", &e))?;
+        }
         opts.set_headers(&headers);
 
         let request = web_sys::Request::new_with_str_and_init(&url, &opts)

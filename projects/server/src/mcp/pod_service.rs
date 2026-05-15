@@ -347,9 +347,10 @@ impl PodService for ServerPod {
         let peers = pdb::list_peers(&conn)?;
         drop(conn);
 
-        // For each active peer, call POST /api/system/dev-sync over plain HTTP.
-        // Peers not in dev mode return a 409/skipped response — we surface that
-        // as status="skipped" rather than an error.
+        // Peer dev-sync now rides the existing pod mTLS channel (`:12002`,
+        // SNI=pod.orca.local). Identity is proven by the mesh-CA-signed client
+        // cert — no bearer tokens, no plaintext HTTP, no cert-distribution
+        // problem. Peers not in dev mode reply with status="skipped".
         let mut results: Vec<PodDevSyncPeerResult> = Vec::new();
 
         let handles: Vec<_> = peers
@@ -357,63 +358,16 @@ impl PodService for ServerPod {
             .filter(|p| p.departed_at.is_none())
             .map(|peer| {
                 let addr = peer.peer_addr.clone();
-                // peer_port is the plugin/mTLS port (default 12002); the web
-                // API sits 2 below it (default 12000). TODO: store web_port in
-                // pod_peers so this works for non-default configurations.
-                let web_port = peer.peer_port.saturating_sub(2);
                 let peer_id = peer.peer_id.clone();
                 let hostname = peer.peer_hostname.clone();
                 tokio::spawn(async move {
-                    let url = format!("https://{addr}:{web_port}/api/system/dev-sync");
-                    // Each peer's :12000 serves its own core-CA cert; until
-                    // mTLS peer auth lands (slice 7) we accept invalid certs
-                    // so the dev-sync helper keeps working.
-                    let client = match reqwest::Client::builder()
-                        .danger_accept_invalid_certs(true)
-                        .build()
-                    {
-                        Ok(c) => c,
-                        Err(e) => {
-                            return PodDevSyncPeerResult {
-                                peer_id,
-                                hostname,
-                                status: "error".into(),
-                                detail: Some(format!("client build: {e}")),
-                            };
-                        }
-                    };
-                    match client
-                        .post(&url)
-                        .timeout(std::time::Duration::from_secs(30))
-                        .send()
-                        .await
-                    {
-                        Ok(resp) => {
-                            let status_code = resp.status();
-                            if status_code == reqwest::StatusCode::CONFLICT {
-                                PodDevSyncPeerResult {
-                                    peer_id,
-                                    hostname,
-                                    status: "skipped".into(),
-                                    detail: Some("not in dev mode".into()),
-                                }
-                            } else if status_code.is_success() {
-                                PodDevSyncPeerResult {
-                                    peer_id,
-                                    hostname,
-                                    status: "synced".into(),
-                                    detail: None,
-                                }
-                            } else {
-                                let body = resp.text().await.unwrap_or_default();
-                                PodDevSyncPeerResult {
-                                    peer_id,
-                                    hostname,
-                                    status: "error".into(),
-                                    detail: Some(format!("HTTP {status_code}: {body}")),
-                                }
-                            }
-                        }
+                    match crate::pod::dev_sync(&addr).await {
+                        Ok(r) => PodDevSyncPeerResult {
+                            peer_id,
+                            hostname,
+                            status: r.status,
+                            detail: r.detail,
+                        },
                         Err(e) => PodDevSyncPeerResult {
                             peer_id,
                             hostname,

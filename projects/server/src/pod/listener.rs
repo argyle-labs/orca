@@ -18,7 +18,9 @@ use serde_json::Value;
 use tokio_rustls::server::TlsStream;
 use tracing::warn;
 
-use super::{POD_PING_METHOD, PodPingResult, db as pdb, pki_dir};
+use super::{
+    POD_DEV_SYNC_METHOD, POD_PING_METHOD, PodDevSyncResult, PodPingResult, db as pdb, pki_dir,
+};
 
 const POD_NOTIFY_TRUST_METHOD: &str = "pod/notify-trust";
 const POD_HAS_CA_KEY_METHOD: &str = "pod/has-ca-key";
@@ -125,6 +127,10 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
             };
             value_response(id, &result)
         }
+        POD_DEV_SYNC_METHOD => match handle_dev_sync().await {
+            Ok(r) => value_response(id, &r),
+            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+        },
         POD_NOTIFY_TRUST_METHOD => match handle_notify_trust(peer_cn, peer_addr, request) {
             Ok(()) => Response::ok(id, Value::Null),
             Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
@@ -200,6 +206,47 @@ fn handle_peer_leaving(peer_cn: &str) -> Result<()> {
     let conn = db::open_default()?;
     pdb::mark_peer_departed(&conn, peer_cn)?;
     Ok(())
+}
+
+/// Handle `pod/dev-sync`: if this host is in dev mode, run `cmd_dev_sync`
+/// (git pull of the dev checkout). Cargo-watch picks up the new commits and
+/// rebuilds. Skipped silently when the host isn't running a dev binary —
+/// dev_sync is a no-op on production-only peers, not an error.
+async fn handle_dev_sync() -> Result<PodDevSyncResult> {
+    use crate::commands::update::cmd_dev_sync;
+    use orca_utils::state::DaemonMode;
+
+    let in_dev_mode = orca_utils::state::read()
+        .ok()
+        .flatten()
+        .map(|s| matches!(s.mode, DaemonMode::Dev | DaemonMode::Parked))
+        .unwrap_or(false);
+
+    if !in_dev_mode {
+        return Ok(PodDevSyncResult {
+            status: "skipped".into(),
+            detail: Some("peer not in dev mode".into()),
+            commits_pulled: None,
+        });
+    }
+
+    match tokio::task::spawn_blocking(cmd_dev_sync).await {
+        Ok(Ok(r)) => Ok(PodDevSyncResult {
+            status: "synced".into(),
+            detail: Some(r.detail),
+            commits_pulled: Some(r.commits_pulled),
+        }),
+        Ok(Err(e)) => Ok(PodDevSyncResult {
+            status: "error".into(),
+            detail: Some(e.to_string()),
+            commits_pulled: None,
+        }),
+        Err(e) => Ok(PodDevSyncResult {
+            status: "error".into(),
+            detail: Some(format!("join error: {e}")),
+            commits_pulled: None,
+        }),
+    }
 }
 
 fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {

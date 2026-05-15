@@ -21,6 +21,7 @@
   import ThemeMenu from '$lib/components/ThemeMenu.svelte';
   import Sidebar from '$lib/components/Sidebar.svelte';
   import CommandPalette from '$lib/components/CommandPalette.svelte';
+  import TokenGate from '$lib/components/TokenGate.svelte';
 
   let { children } = $props();
 
@@ -114,6 +115,7 @@
 
 <CommandPalette />
 <Notification />
+<TokenGate />
 
 <style>
   .app {
