@@ -12,9 +12,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::Router;
 use axum::routing::get;
+use axum_server::tls_rustls::RustlsConfig;
 use orca_utils::state::{DaemonMode, DaemonState};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
@@ -32,11 +33,8 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
         format!("0.0.0.0:{port}").parse()?
     };
 
-    info!("[orca] binding {}...", addr);
-    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-        anyhow::anyhow!("failed to bind {addr}: {e} — is port {port} already in use?")
-    })?;
-    info!("[orca] listening on http://localhost:{port}");
+    let tls = load_rest_tls(&pki_dir).await?;
+    info!("[orca] binding {} (https)...", addr);
 
     // Register as the active dev process so the parked daemon won't auto-reclaim.
     // Use ORCA_DEV_PARENT_PID (the shell script PID) so the registration stays
@@ -96,7 +94,10 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     spawn_pod_runtime(&pki_dir).await;
     spawn_scheduler_runtime();
 
-    axum::serve(listener, app).await?;
+    info!("[orca] listening on https://localhost:{port}");
+    axum_server::bind_rustls(addr, tls)
+        .serve(app.into_make_service())
+        .await?;
     Ok(())
 }
 
@@ -155,10 +156,8 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
 
         // Simple dev-binary serve loop: bind, serve, exit on SIGTERM.
         // Production daemon will reclaim port when we exit.
-        let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-            anyhow::anyhow!("failed to bind {addr}: {e} — is port {port} already in use?")
-        })?;
-        info!("[orca] dev binary listening on http://localhost:{port}");
+        let tls = load_rest_tls(&pki_dir).await?;
+        info!("[orca] dev binary listening on https://localhost:{port}");
 
         // Best-effort plugin host (may fail if production daemon still owns the port)
         crate::plugin_host::start(
@@ -168,9 +167,13 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         );
 
         let mut sigterm = signal(SignalKind::terminate())?;
+        let handle = axum_server::Handle::new();
+        let serve = axum_server::bind_rustls(addr, tls)
+            .handle(handle.clone())
+            .serve(app.into_make_service());
         tokio::select! {
-            result = axum::serve(listener, app) => result?,
-            _ = sigterm.recv() => {}
+            result = serve => result?,
+            _ = sigterm.recv() => { handle.graceful_shutdown(Some(Duration::from_secs(1))); }
         }
         return Ok(());
     }
@@ -256,10 +259,8 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     }
 
     loop {
-        let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-            anyhow::anyhow!("failed to bind {addr}: {e} — is port {port} already in use?")
-        })?;
-        info!("[orca] daemon listening on http://localhost:{port}");
+        let tls = load_rest_tls(&pki_dir).await?;
+        info!("[orca] daemon listening on https://localhost:{port}");
         if let Err(e) = orca_utils::state::set_mode(DaemonMode::Daemon) {
             tracing::warn!("failed to set daemon mode: {e}");
         }
@@ -268,17 +269,27 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         }
 
         let mut sigusr1 = signal(SignalKind::user_defined1())?;
+        let handle = axum_server::Handle::new();
+        let serve = axum_server::bind_rustls(addr, tls)
+            .handle(handle.clone())
+            .serve(app.clone().into_make_service());
 
         let parked = tokio::select! {
-            result = axum::serve(listener, app.clone()) => { result?; false }
-            _ = sigusr1.recv() => true,
+            result = serve => { result?; false }
+            _ = sigusr1.recv() => {
+                // Park: drop the listener so the port is released for the dev binary.
+                handle.shutdown();
+                true
+            }
             _ = sigterm.recv() => {
                 info!("[orca] daemon shutting down");
+                handle.graceful_shutdown(Some(Duration::from_secs(1)));
                 let _ = orca_utils::state::clear();
                 return Ok(());
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("[orca] daemon shutting down");
+                handle.graceful_shutdown(Some(Duration::from_secs(1)));
                 let _ = orca_utils::state::clear();
                 return Ok(());
             }
@@ -332,6 +343,21 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
 
     let _ = orca_utils::state::clear();
     Ok(())
+}
+
+/// Load the REST API's TLS config from the local core CA's server cert.
+/// Cert SAN is `core.orca.local` (no public domain baked in) — clients
+/// either pin the core CA out-of-band, or a fronting proxy like Caddy
+/// terminates a public cert and dials this listener over the local CA.
+async fn load_rest_tls(pki_dir: &std::path::Path) -> Result<RustlsConfig> {
+    let bundle = orca_sdk::pki::load_server(pki_dir)
+        .context("load REST TLS bundle — run `orca install` (pki init) first")?;
+    RustlsConfig::from_pem(
+        bundle.cert_pem.into_bytes(),
+        bundle.key_pem.into_bytes(),
+    )
+    .await
+    .context("build rustls config from core server cert + key")
 }
 
 /// Serve the Scalar API reference viewer.

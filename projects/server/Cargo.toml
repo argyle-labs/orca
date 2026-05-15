@@ -108,6 +108,8 @@ pulldown-cmark = { workspace = true }
 
 # Web server
 axum = { workspace = true }
+# rustls-no-provider matches the workspace ring-only stance; main.rs installs the process default.
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
 # Dev proxy only connects to ws://localhost — no TLS needed here.
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
 tower-http = { version = "0.6", features = ["cors"] }

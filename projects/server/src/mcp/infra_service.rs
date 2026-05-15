@@ -14,7 +14,9 @@ pub struct ServerInfra;
 #[async_trait]
 impl InfraService for ServerInfra {
     async fn list_services(&self) -> Result<Vec<InfraProject>> {
-        let resp = reqwest::get("http://127.0.0.1:12000/api/logs/services")
+        let resp = loopback_client()?
+            .get("https://127.0.0.1:12000/api/logs/services")
+            .send()
             .await?
             .json::<serde_json::Value>()
             .await?;
@@ -54,8 +56,8 @@ impl InfraService for ServerInfra {
 
     async fn service_logs(&self, project: &str, service: &str, tail: u64) -> Result<String> {
         let tail_str = tail.to_string();
-        let resp = reqwest::Client::new()
-            .get("http://127.0.0.1:12000/api/logs")
+        let resp = loopback_client()?
+            .get("https://127.0.0.1:12000/api/logs")
             .query(&[
                 ("project", project),
                 ("service", service),
@@ -79,4 +81,15 @@ impl InfraService for ServerInfra {
             duration_ms: r.duration_ms,
         })
     }
+}
+
+/// reqwest client for in-process loopback calls back into this daemon's REST
+/// API. The daemon serves a self-signed core-CA cert on `:12000`; for
+/// localhost-only calls we accept invalid certs rather than threading the
+/// CA root through every call site. Cross-host traffic uses its own client
+/// configured with the real trust store.
+fn loopback_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()?)
 }

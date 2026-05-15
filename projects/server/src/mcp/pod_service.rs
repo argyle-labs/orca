@@ -364,8 +364,25 @@ impl PodService for ServerPod {
                 let peer_id = peer.peer_id.clone();
                 let hostname = peer.peer_hostname.clone();
                 tokio::spawn(async move {
-                    let url = format!("http://{addr}:{web_port}/api/system/dev-sync");
-                    match reqwest::Client::new()
+                    let url = format!("https://{addr}:{web_port}/api/system/dev-sync");
+                    // Each peer's :12000 serves its own core-CA cert; until
+                    // mTLS peer auth lands (slice 7) we accept invalid certs
+                    // so the dev-sync helper keeps working.
+                    let client = match reqwest::Client::builder()
+                        .danger_accept_invalid_certs(true)
+                        .build()
+                    {
+                        Ok(c) => c,
+                        Err(e) => {
+                            return PodDevSyncPeerResult {
+                                peer_id,
+                                hostname,
+                                status: "error".into(),
+                                detail: Some(format!("client build: {e}")),
+                            };
+                        }
+                    };
+                    match client
                         .post(&url)
                         .timeout(std::time::Duration::from_secs(30))
                         .send()

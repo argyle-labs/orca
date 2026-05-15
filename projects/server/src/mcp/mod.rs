@@ -369,7 +369,7 @@ pub async fn serve(config: &Config) -> Result<()> {
 // declarations are read from orca.db (cheap, no IPC); calls are forwarded to
 // the daemon's HTTP endpoint, which dispatches via the registry.
 
-const PLUGIN_TOOL_HTTP: &str = "http://127.0.0.1:12000";
+const PLUGIN_TOOL_HTTP: &str = "https://127.0.0.1:12000";
 const PLUGIN_TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(35);
 
 fn load_plugin_tool_rows() -> Vec<db::plugin_tools::PluginToolRow> {
@@ -393,7 +393,11 @@ async fn call_plugin_tool(fq_name: &str, args: &Value) -> Result<Value> {
     use anyhow::Context;
     let url = format!("{PLUGIN_TOOL_HTTP}/api/plugin-tools/{fq_name}/call");
     let body = json!({ "arguments": args.clone() });
-    let resp = reqwest::Client::new()
+    // Loopback HTTPS to the same-process daemon: self-signed core-CA cert,
+    // accept invalid so we don't have to thread the CA root through here.
+    let resp = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()?
         .post(&url)
         .json(&body)
         .timeout(PLUGIN_TOOL_CALL_TIMEOUT)
