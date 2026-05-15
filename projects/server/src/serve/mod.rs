@@ -34,8 +34,7 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
 
     // If we're a cargo-watch dev rebuild, the production daemon may have reclaimed the
     // port after our previous run exited. Re-park it before we try to bind.
-    if dev
-        && std::env::var("ORCA_DEV_PARENT_PID").is_ok()
+    if std::env::var("ORCA_DEV_PARENT_PID").is_ok()
         && let Ok(Some(s)) = orca_utils::state::read()
         && matches!(s.mode, DaemonMode::Daemon)
     {
