@@ -1,6 +1,5 @@
 .PHONY: build install install-hooks deploy dev run watch clean check release rc promote audit lint format format-check test daemon-install daemon-uninstall kill-dev migrate up down init doctor \
-  ci release-build release-build-host release-frontend release-sdk-ts release-sdk-kotlin release-checksums release-stage release-publish release-clean \
-  dev-linux dev-watch dev-serve
+  ci release-build release-build-host release-frontend release-sdk-ts release-sdk-kotlin release-checksums release-stage release-publish release-clean
 
 INSTALL_PATH := $(HOME)/.local/bin/orca
 ENV_TPL      := .env.orca.tpl
@@ -90,8 +89,10 @@ check:
 
 # Dev mode — Rust API :12000 + Vite :12001 + hot reload, secrets injected from 1Password
 # Secrets live in the account set by OP_ACCOUNT (.env.local overrides .zshrc default)
+SERVE_BINARY ?=
+
 dev:
-	$(OP_RUN) bash scripts/dev.sh
+	$(OP_RUN) bash scripts/dev.sh $(if $(SERVE_BINARY),--serve-binary,)
 
 # Run the installed binary with secrets from 1Password
 run:
@@ -243,31 +244,12 @@ rc promote:
 	@: # handled by the release target above
 
 # ── Dev fleet hot-reload ───────────────────────────────────────────────────────
-# Cross-compile for linux x86_64 and serve it for fleet auto-update.
-# No git ops, no version bump, no GitHub release.
+# Pass SERVE_BINARY=1 to also cross-compile for linux x86_64 and serve the
+# binary on :12009. Fleet peers auto-update within 10s of each build.
 #
-#   make dev-linux           — one-shot cross-compile
-#   make dev-watch           — rebuild on source change (requires cargo-watch)
-#   make dev-serve           — serve the built binary (requires `orca dev-serve` in PATH)
-#   make dev-watch dev-serve — rebuild + serve (run in two terminals)
+#   make dev SERVE_BINARY=1
 #
-# On each fleet peer (one-time): orca update --source http://<mint-ip>:12009
-# Peers then auto-update within 10s of each successful build.
-
-DEV_LINUX_TARGET := x86_64-unknown-linux-gnu
-DEV_BINARY       := target/$(DEV_LINUX_TARGET)/release/orca
-DEV_SERVE_PORT   ?= 12009
-
-dev-linux:
-	cargo build --release --target $(DEV_LINUX_TARGET)
-	@echo "[dev] built $(DEV_BINARY) ($$(du -h $(DEV_BINARY) | cut -f1))"
-
-dev-watch:
-	@command -v cargo-watch >/dev/null 2>&1 || { echo "install cargo-watch: cargo install cargo-watch"; exit 1; }
-	cargo watch -x 'build --release --target $(DEV_LINUX_TARGET)'
-
-dev-serve:
-	orca dev-serve --binary $(DEV_BINARY) --port $(DEV_SERVE_PORT)
+# One-time on each peer: orca update --source http://<mint-ip>:12009
 
 # Delete every published RC release + matching git tag for a given stable.
 # Run automatically by `make release promote` already; this target is the

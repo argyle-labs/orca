@@ -1,15 +1,31 @@
 #!/usr/bin/env bash
 # Dev mode: Rust + Vite on :12000 (Rust proxies non-API to Vite at :12001).
 # Invoked via: op run --env-file .env.orca.tpl -- bash scripts/dev.sh
+#
+# Flags:
+#   --serve-binary   Also cross-compile for linux x86_64 and serve the binary
+#                    on :12009 for fleet hot-reload. Peers running
+#                    `orca update --source http://<ip>:12009` auto-update
+#                    within 10s of each build.
 
 set -uo pipefail
 set -m  # job control: each background job gets its own pgid (so we can signal whole trees)
+
+SERVE_BINARY=0
+for arg in "$@"; do
+  case "$arg" in
+    --serve-binary) SERVE_BINARY=1 ;;
+    *) echo "unknown flag: $arg"; exit 1 ;;
+  esac
+done
 
 ORCA="$HOME/.local/bin/orca"
 _CLEANUP_DONE=0
 _DAEMON_WAS_LOADED=0  # set by stop_system_daemon() if we need to restart on cleanup
 _SERVER_PID=
 _FRONTEND_PID=
+_BINARY_WATCH_PID=
+_BINARY_SERVE_PID=
 
 # ── System daemon control (cross-platform) ────────────────────────────────────
 OS_KIND=""
@@ -64,7 +80,7 @@ cleanup() {
   # by job-spec, which kills the whole pgid regardless of which PID we saw.
   local jobs
   jobs=$(jobs -p)
-  for jspec in %1 %2 %3 %4; do
+  for jspec in %1 %2 %3 %4 %5 %6; do
     kill -TERM "$jspec" 2>/dev/null || true
   done
   # Also fall back to direct PIDs in case set -m didn't take or jobs are gone.
@@ -73,7 +89,7 @@ cleanup() {
     kill -TERM -- "-$pid"    2>/dev/null || true
   done
   sleep 0.4
-  for jspec in %1 %2 %3 %4; do
+  for jspec in %1 %2 %3 %4 %5 %6; do
     kill -KILL "$jspec" 2>/dev/null || true
   done
   for pid in $jobs; do
@@ -115,14 +131,44 @@ echo ""
 # command on file changes — without this loop, a server panic leaves the
 # backend dead until the next save. Loop exits when the script's trap kills
 # the whole process group.
-ORCA_LOG=info,orca=debug,hyper=warn,mio=warn,h2=warn,reqwest=warn,rustls=warn,tower_http=warn cargo watch -q -c -C projects/server \
-  -w src -w Cargo.toml \
-  -x 'build' \
-  -s 'while true; do ORCA_LOG=info,orca=debug,hyper=warn,mio=warn,h2=warn,reqwest=warn,rustls=warn,tower_http=warn ../../target/debug/orca serve --dev; echo "  [server exited — respawning in 1s]"; sleep 1; done' 2>&1 | \
-  sed 's/^/[server]   /' &
+DEV_LINUX_TARGET=x86_64-unknown-linux-gnu
+DEV_BINARY=target/${DEV_LINUX_TARGET}/release/orca
+DEV_LOG=trace,hyper=warn,mio=warn,h2=warn,reqwest=warn,rustls=warn,tower_http=warn,tungstenite=warn
+DEV_SERVER_CMD='while true; do ORCA_LOG='"$DEV_LOG"' ../../target/debug/orca serve --dev; echo "  [server exited — respawning in 1s]"; sleep 1; done'
+
+if [[ $SERVE_BINARY -eq 1 ]]; then
+  # Linux release build runs as a background -s step after the debug build so
+  # both share one cargo-watch process and avoid fighting over the Cargo lock.
+  DEV_LINUX_BUILD_CMD="cargo build --release --target ${DEV_LINUX_TARGET} 2>&1 | sed 's/^/[linux]    /' &"
+  ORCA_LOG=$DEV_LOG cargo watch -C projects/server \
+    -w src -w Cargo.toml \
+    -x build \
+    -s "$DEV_LINUX_BUILD_CMD" \
+    -s "$DEV_SERVER_CMD" 2>&1 | sed 's/^/[server]   /' &
+else
+  ORCA_LOG=$DEV_LOG cargo watch -C projects/server \
+    -w src -w Cargo.toml \
+    -x build \
+    -s "$DEV_SERVER_CMD" 2>&1 | sed 's/^/[server]   /' &
+fi
 _SERVER_PID=$!
 
 (cd projects/frontend && npm run dev 2>&1 | sed 's/^/[frontend] /') &
 _FRONTEND_PID=$!
+
+if [[ $SERVE_BINARY -eq 1 ]]; then
+  echo "  binary   →  http://0.0.0.0:12009  (linux x86_64 fleet hot-reload)"
+  echo "              on each peer: orca update --source http://<mint-ip>:12009"
+  echo ""
+  # Retry loop: the first run may use a stale debug binary that predates dev-serve.
+  # Cargo watch will rebuild and the loop retries until it works.
+  (while true; do
+     until [[ -f target/debug/orca ]]; do sleep 1; done
+     target/debug/orca dev-serve --binary "$DEV_BINARY" --port 12009 2>&1 | sed 's/^/[serve]    /'
+     echo "  [serve exited — retrying in 3s]"
+     sleep 3
+   done) &
+  _BINARY_SERVE_PID=$!
+fi
 
 wait
