@@ -362,8 +362,15 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
 /// either pin the core CA out-of-band, or a fronting proxy like Caddy
 /// terminates a public cert and dials this listener over the local CA.
 async fn load_rest_tls(pki_dir: &std::path::Path) -> Result<RustlsConfig> {
-    let bundle = orca_sdk::pki::load_server(pki_dir)
-        .context("load REST TLS bundle — run `orca install` (pki init) first")?;
+    // Auto-init on first boot: previously this returned a hard error if the
+    // user hadn't run `orca install` yet, which also broke the daemon test
+    // harness (fresh HOME, no PKI). Init is idempotent and cheap.
+    if !orca_sdk::pki::ca_cert_path(pki_dir).exists()
+        || !orca_sdk::pki::server_cert_path(pki_dir).exists()
+    {
+        orca_sdk::pki::init(pki_dir).context("auto-init core PKI for REST TLS")?;
+    }
+    let bundle = orca_sdk::pki::load_server(pki_dir).context("load REST TLS bundle")?;
     RustlsConfig::from_pem(bundle.cert_pem.into_bytes(), bundle.key_pem.into_bytes())
         .await
         .context("build rustls config from core server cert + key")
