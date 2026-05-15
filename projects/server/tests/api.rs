@@ -34,11 +34,21 @@ impl TestApp {
         let tmp = TempDir::new().expect("tempdir");
         let db_path = tmp.path().join("test.db");
         let router = orca::serve::build_router(false, db_path.clone());
+        // Install the process-local loopback token once so the auth middleware
+        // sees a valid bearer on every request the harness makes. Idempotent —
+        // OnceLock means the first test wins and the rest share the token.
+        let _ = orca::loopback_token::install_at_startup();
         TestApp {
             router,
             _tmp: tmp,
             db_path,
         }
+    }
+
+    /// Authorization header value used by the harness on every request.
+    fn auth_header() -> String {
+        let tok = orca::loopback_token::get().unwrap_or("");
+        format!("Bearer {tok}")
     }
 
     /// Execute a single request against the router.
@@ -65,6 +75,7 @@ impl TestApp {
             .method("GET")
             .uri(uri)
             .header("x-correlation-id", "test-cid")
+            .header("authorization", Self::auth_header())
             .body(Body::empty())
             .unwrap();
         self.call(req).await
@@ -76,6 +87,7 @@ impl TestApp {
             .uri(uri)
             .header("content-type", "application/json")
             .header("x-correlation-id", "test-cid")
+            .header("authorization", Self::auth_header())
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
         self.call(req).await
@@ -86,6 +98,7 @@ impl TestApp {
             .method("DELETE")
             .uri(uri)
             .header("x-correlation-id", "test-cid")
+            .header("authorization", Self::auth_header())
             .body(Body::empty())
             .unwrap();
         self.call(req).await
