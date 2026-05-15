@@ -543,7 +543,9 @@ async fn pod_dev_enable(
     args: PodDevFanoutArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<PodDevEnableOutput> {
-    native_support::svc(ctx)?.dev_enable_fanout(&args.peers).await
+    native_support::svc(ctx)?
+        .dev_enable_fanout(&args.peers)
+        .await
 }
 
 /// Flip dev mode OFF across the mesh. Empty `peers` = local + every paired
@@ -553,5 +555,7 @@ async fn pod_dev_disable(
     args: PodDevFanoutArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<PodDevDisableOutput> {
-    native_support::svc(ctx)?.dev_disable_fanout(&args.peers).await
+    native_support::svc(ctx)?
+        .dev_disable_fanout(&args.peers)
+        .await
 }
