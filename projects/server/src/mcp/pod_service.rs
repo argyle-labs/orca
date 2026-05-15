@@ -357,11 +357,14 @@ impl PodService for ServerPod {
             .filter(|p| p.departed_at.is_none())
             .map(|peer| {
                 let addr = peer.peer_addr.clone();
-                let port = peer.peer_port;
+                // peer_port is the plugin/mTLS port (default 12002); the web
+                // API sits 2 below it (default 12000). TODO: store web_port in
+                // pod_peers so this works for non-default configurations.
+                let web_port = peer.peer_port.saturating_sub(2);
                 let peer_id = peer.peer_id.clone();
                 let hostname = peer.peer_hostname.clone();
                 tokio::spawn(async move {
-                    let url = format!("http://{addr}:{port}/api/system/dev-sync");
+                    let url = format!("http://{addr}:{web_port}/api/system/dev-sync");
                     match reqwest::Client::new()
                         .post(&url)
                         .timeout(std::time::Duration::from_secs(30))
