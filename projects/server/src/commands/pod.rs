@@ -500,6 +500,29 @@ fn now_secs() -> i64 {
 
 /// Dial a paired peer with our mesh client cert. Used by post-join methods
 /// (notify-trust, has-ca-key, push-ca-key, peer-leaving).
+pub async fn call_pod_method_pub(
+    host: &str,
+    port: u16,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value> {
+    call_pod_method(host, port, method, params).await
+}
+
+pub async fn dial_bootstrap_pub(
+    host: &str,
+    port: u16,
+    pinned_fp: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value> {
+    dial_bootstrap(host, port, pinned_fp, method, params).await
+}
+
+pub async fn replicate_ca_key_if_needed_pub(peer: &pdb::PeerRow) -> Result<()> {
+    replicate_ca_key_if_needed(peer).await
+}
+
 async fn call_pod_method(
     host: &str,
     port: u16,

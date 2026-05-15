@@ -16,6 +16,7 @@ pub mod infra_service;
 pub mod lifecycle_service;
 pub mod mgmt_service;
 pub mod pki_service;
+pub mod pod_service;
 pub mod plugin_runtime_service;
 pub mod plugins_service;
 pub mod profile_service;
@@ -106,6 +107,9 @@ pub fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
     let host_refresh: Arc<dyn orca_tools_def::host::HostRefreshHook + Send + Sync> =
         Arc::new(crate::host_identity::ServerHostRefreshHook);
     ctx.register_service(host_refresh);
+    let pod_svc: Arc<dyn orca_tools_def::pod::PodService> =
+        Arc::new(crate::mcp::pod_service::ServerPod);
+    ctx.register_service(pod_svc);
     let lifecycle_svc: Arc<dyn orca_tools_def::services::lifecycle::LifecycleService> =
         Arc::new(crate::mcp::lifecycle_service::ServerLifecycle {
             config: ctx.config.clone(),
