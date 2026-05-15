@@ -152,7 +152,30 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                 tracing::warn!("failed to update dev state: {e}");
             }
         }
-    } else if let Err(e) = orca_utils::state::write(&DaemonState {
+
+        // Simple dev-binary serve loop: bind, serve, exit on SIGTERM.
+        // Production daemon will reclaim port when we exit.
+        let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+            anyhow::anyhow!("failed to bind {addr}: {e} — is port {port} already in use?")
+        })?;
+        info!("[orca] dev binary listening on http://localhost:{port}");
+
+        // Best-effort plugin host (may fail if production daemon still owns the port)
+        crate::plugin_host::start(
+            &pki_dir,
+            orca_utils::config::APP_PLUGIN_PORT,
+            crate::plugin_host::PluginRegistry::new(),
+        );
+
+        let mut sigterm = signal(SignalKind::terminate())?;
+        tokio::select! {
+            result = axum::serve(listener, app) => result?,
+            _ = sigterm.recv() => {}
+        }
+        return Ok(());
+    }
+
+    if let Err(e) = orca_utils::state::write(&DaemonState {
         daemon_pid: std::process::id(),
         active_pid: std::process::id(),
         port,
