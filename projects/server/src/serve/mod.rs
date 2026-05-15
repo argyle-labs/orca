@@ -32,28 +32,6 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
         format!("0.0.0.0:{port}").parse()?
     };
 
-    // If we're a cargo-watch dev rebuild, the production daemon may have reclaimed the
-    // port after our previous run exited. Re-park it before we try to bind.
-    if std::env::var("ORCA_DEV_PARENT_PID").is_ok()
-        && let Ok(Some(s)) = orca_utils::state::read()
-        && matches!(s.mode, DaemonMode::Daemon)
-    {
-        let daemon_pid = s.daemon_pid;
-        tracing::info!("[dev] re-parking production daemon (pid {daemon_pid}) before bind");
-        let _ = std::process::Command::new("kill")
-            .args(["-USR1", &daemon_pid.to_string()])
-            .status();
-        // Wait up to 3 s for daemon to release the port.
-        for _ in 0..30 {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            if let Ok(Some(s2)) = orca_utils::state::read()
-                && matches!(s2.mode, DaemonMode::Parked)
-            {
-                break;
-            }
-        }
-    }
-
     info!("[orca] binding {}...", addr);
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
         anyhow::anyhow!("failed to bind {addr}: {e} — is port {port} already in use?")
@@ -142,7 +120,39 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
 
     let binary = resolve_daemon_binary();
 
-    if let Err(e) = orca_utils::state::write(&DaemonState {
+    // If we were spawned by cargo-watch (cmd_dev_enable), the production daemon
+    // is parked. Don't overwrite its daemon_pid; we'll re-park it below and register
+    // ourselves as the active dev process before binding.
+    let dev_spawn = std::env::var("ORCA_DEV_PARENT_PID").is_ok();
+
+    if dev_spawn {
+        if let Ok(Some(mut s)) = orca_utils::state::read() {
+            // If production thinks it's still in Daemon mode, send SIGUSR1 to park.
+            if matches!(s.mode, DaemonMode::Daemon) {
+                tracing::info!(
+                    "[dev] re-parking production daemon (pid {}) before bind",
+                    s.daemon_pid
+                );
+                let _ = std::process::Command::new("kill")
+                    .args(["-USR1", &s.daemon_pid.to_string()])
+                    .status();
+                for _ in 0..30 {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    if let Ok(Some(s2)) = orca_utils::state::read()
+                        && matches!(s2.mode, DaemonMode::Parked)
+                    {
+                        s = s2;
+                        break;
+                    }
+                }
+            }
+            s.active_pid = std::process::id();
+            s.mode = DaemonMode::Dev;
+            if let Err(e) = orca_utils::state::write(&s) {
+                tracing::warn!("failed to update dev state: {e}");
+            }
+        }
+    } else if let Err(e) = orca_utils::state::write(&DaemonState {
         daemon_pid: std::process::id(),
         active_pid: std::process::id(),
         port,
