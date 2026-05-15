@@ -511,6 +511,215 @@ pub fn cmd_update_clear_source() -> Result<()> {
     Ok(())
 }
 
+// ── Dev mode (git checkout + cargo watch) ────────────────────────────────────
+
+const DEV_REPO_SUBDIR: &str = "dev/orca";
+
+fn dev_repo_path() -> Option<std::path::PathBuf> {
+    let dir = std::env::var_os("ORCA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".orca")))?;
+    Some(dir.join(DEV_REPO_SUBDIR))
+}
+
+fn dev_pid_path() -> Option<std::path::PathBuf> {
+    let dir = std::env::var_os("ORCA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".orca")))?;
+    Some(dir.join("dev.pid"))
+}
+
+fn read_dev_pid() -> Option<u32> {
+    let raw = std::fs::read_to_string(dev_pid_path()?).ok()?;
+    raw.trim().parse().ok()
+}
+
+fn write_dev_pid(pid: u32) -> Result<()> {
+    let path = dev_pid_path().context("no ORCA_HOME or HOME")?;
+    std::fs::write(path, format!("{pid}\n"))?;
+    Ok(())
+}
+
+fn clear_dev_pid() {
+    if let Some(p) = dev_pid_path() {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+fn pid_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+pub struct DevEnableResult {
+    pub repo_path: String,
+    pub cloned: bool,
+    pub daemon_parked: bool,
+}
+
+pub fn cmd_dev_enable() -> Result<DevEnableResult> {
+    use orca_utils::config::APP_REPO_URL;
+    use std::process::Command;
+
+    let repo = dev_repo_path().context("no ORCA_HOME or HOME")?;
+
+    // Already in dev mode with a live process — idempotent
+    if let Some(pid) = read_dev_pid()
+        && pid_alive(pid)
+    {
+        let daemon_state = orca_utils::state::read()?;
+        let daemon_parked = daemon_state
+            .as_ref()
+            .map(|s| s.mode == orca_utils::state::DaemonMode::Parked || s.mode == orca_utils::state::DaemonMode::Dev)
+            .unwrap_or(false);
+        return Ok(DevEnableResult {
+            repo_path: repo.to_string_lossy().into(),
+            cloned: false,
+            daemon_parked,
+        });
+    }
+
+    let cloned = if !repo.exists() {
+        if let Some(parent) = repo.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let status = Command::new("git")
+            .args(["clone", "--depth=1", APP_REPO_URL, repo.to_str().unwrap_or(".")])
+            .status()?;
+        anyhow::ensure!(status.success(), "git clone failed");
+        true
+    } else {
+        false
+    };
+
+    // Park the production daemon if running
+    let daemon_parked = match orca_utils::state::read()? {
+        Some(s) if s.mode == orca_utils::state::DaemonMode::Daemon => {
+            Command::new("kill")
+                .args(["-USR1", &s.daemon_pid.to_string()])
+                .status()?;
+            tokio_block_on_park(s.daemon_pid)?;
+            true
+        }
+        _ => false,
+    };
+
+    // Spawn cargo watch in the background
+    let child = Command::new("cargo")
+        .args(["watch", "-x", "run -- daemon start"])
+        .current_dir(&repo)
+        .env("ORCA_DEV_PARENT_PID", std::process::id().to_string())
+        .spawn()?;
+
+    write_dev_pid(child.id())?;
+
+    Ok(DevEnableResult {
+        repo_path: repo.to_string_lossy().into(),
+        cloned,
+        daemon_parked,
+    })
+}
+
+fn tokio_block_on_park(daemon_pid: u32) -> Result<()> {
+    // Blocking wait for park — poll state file up to 5 s
+    for _ in 0..50 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if let Ok(Some(s)) = orca_utils::state::read()
+            && s.daemon_pid == daemon_pid
+            && s.mode == orca_utils::state::DaemonMode::Parked
+        {
+            return Ok(());
+        }
+    }
+    anyhow::bail!("daemon did not park within 5 s")
+}
+
+pub struct DevDisableResult {
+    pub dev_process_stopped: bool,
+    pub daemon_reclaimed: bool,
+}
+
+pub fn cmd_dev_disable() -> Result<DevDisableResult> {
+    use std::process::Command;
+
+    let dev_process_stopped = if let Some(pid) = read_dev_pid()
+        && pid_alive(pid)
+    {
+        // Kill the entire process group (cargo watch spawns child processes)
+        let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+        clear_dev_pid();
+        true
+    } else {
+        clear_dev_pid();
+        false
+    };
+
+    // Signal daemon to reclaim — it auto-reclaims when active_pid dies, but
+    // an explicit SIGUSR2 is faster
+    let daemon_reclaimed = match orca_utils::state::read()? {
+        Some(s) if s.mode != orca_utils::state::DaemonMode::Daemon => {
+            Command::new("kill")
+                .args(["-USR2", &s.daemon_pid.to_string()])
+                .status()
+                .map(|st| st.success())
+                .unwrap_or(false)
+        }
+        _ => false,
+    };
+
+    Ok(DevDisableResult {
+        dev_process_stopped,
+        daemon_reclaimed,
+    })
+}
+
+pub struct DevSyncResult {
+    pub commits_pulled: u32,
+    pub already_up_to_date: bool,
+    pub detail: String,
+}
+
+pub fn cmd_dev_sync() -> Result<DevSyncResult> {
+    let repo = dev_repo_path().context("no ORCA_HOME or HOME")?;
+    anyhow::ensure!(
+        repo.exists(),
+        "dev repo not found at {} — run `system dev enable` first",
+        repo.display()
+    );
+
+    let out = std::process::Command::new("git")
+        .args(["pull", "--ff-only"])
+        .current_dir(&repo)
+        .output()?;
+
+    let detail = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    let combined = if stderr.is_empty() {
+        detail.clone()
+    } else {
+        format!("{detail}\n{stderr}")
+    };
+
+    anyhow::ensure!(out.status.success(), "git pull failed: {combined}");
+
+    let already_up_to_date = detail.contains("Already up to date");
+    // Count commits pulled: each commit summary line starts with a SHA prefix
+    let commits_pulled = if already_up_to_date {
+        0
+    } else {
+        detail.lines().filter(|l| l.starts_with("   ")).count() as u32
+    };
+
+    Ok(DevSyncResult {
+        commits_pulled,
+        already_up_to_date,
+        detail: combined,
+    })
+}
+
 // ── sha256 cache for `--check` ───────────────────────────────────────────────
 //
 // `orca update --check` is a cheap preview: it resolves the target version

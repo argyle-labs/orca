@@ -2,8 +2,9 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use orca_sdk::pki;
 use orca_tools_def::pod::{
-    CertInfo, PodAcceptOutput, PodCertStatusOutput, PodDiscoveryRowDto, PodJoinOutput,
-    PodLeaveOutput, PodOfferOutput, PodPendingOfferDto, PodPingOutput, PodService, PodTrustOutput,
+    CertInfo, PodAcceptOutput, PodCertStatusOutput, PodDevSyncOutput, PodDevSyncPeerResult,
+    PodDiscoveryRowDto, PodJoinOutput, PodLeaveOutput, PodOfferOutput, PodPendingOfferDto,
+    PodPingOutput, PodService, PodTrustOutput,
 };
 use std::time::Instant;
 
@@ -336,6 +337,102 @@ impl PodService for ServerPod {
             notify_result,
             rows_removed: 2,
         })
+    }
+
+    async fn dev_sync(&self) -> Result<PodDevSyncOutput> {
+        use crate::commands::update::cmd_dev_sync;
+        use orca_utils::state::DaemonMode;
+
+        let conn = db::open_default()?;
+        let peers = pdb::list_peers(&conn)?;
+        drop(conn);
+
+        // For each active peer, call POST /api/system/dev-sync over plain HTTP.
+        // Peers not in dev mode return a 409/skipped response — we surface that
+        // as status="skipped" rather than an error.
+        let mut results: Vec<PodDevSyncPeerResult> = Vec::new();
+
+        let handles: Vec<_> = peers
+            .into_iter()
+            .filter(|p| p.departed_at.is_none())
+            .map(|peer| {
+                let addr = peer.peer_addr.clone();
+                let port = peer.peer_port;
+                let peer_id = peer.peer_id.clone();
+                let hostname = peer.peer_hostname.clone();
+                tokio::spawn(async move {
+                    let url = format!("http://{addr}:{port}/api/system/dev-sync");
+                    match reqwest::Client::new()
+                        .post(&url)
+                        .timeout(std::time::Duration::from_secs(30))
+                        .send()
+                        .await
+                    {
+                        Ok(resp) => {
+                            let status_code = resp.status();
+                            if status_code == reqwest::StatusCode::CONFLICT {
+                                PodDevSyncPeerResult {
+                                    peer_id,
+                                    hostname,
+                                    status: "skipped".into(),
+                                    detail: Some("not in dev mode".into()),
+                                }
+                            } else if status_code.is_success() {
+                                PodDevSyncPeerResult {
+                                    peer_id,
+                                    hostname,
+                                    status: "synced".into(),
+                                    detail: None,
+                                }
+                            } else {
+                                let body = resp.text().await.unwrap_or_default();
+                                PodDevSyncPeerResult {
+                                    peer_id,
+                                    hostname,
+                                    status: "error".into(),
+                                    detail: Some(format!("HTTP {status_code}: {body}")),
+                                }
+                            }
+                        }
+                        Err(e) => PodDevSyncPeerResult {
+                            peer_id,
+                            hostname,
+                            status: "error".into(),
+                            detail: Some(e.to_string()),
+                        },
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            if let Ok(result) = handle.await {
+                results.push(result);
+            }
+        }
+
+        // Also sync this host if it's in dev mode
+        if matches!(
+            orca_utils::state::read().ok().flatten().map(|s| s.mode),
+            Some(DaemonMode::Dev) | Some(DaemonMode::Parked)
+        ) {
+            match tokio::task::spawn_blocking(cmd_dev_sync).await? {
+                Ok(r) => results.push(PodDevSyncPeerResult {
+                    peer_id: "local".into(),
+                    hostname: "localhost".into(),
+                    status: if r.already_up_to_date { "skipped".into() } else { "synced".into() },
+                    detail: if r.already_up_to_date { None } else { Some(r.detail) },
+                }),
+                Err(e) => results.push(PodDevSyncPeerResult {
+                    peer_id: "local".into(),
+                    hostname: "localhost".into(),
+                    status: "error".into(),
+                    detail: Some(e.to_string()),
+                }),
+            }
+        }
+
+        Ok(PodDevSyncOutput { results })
     }
 
     fn cert_status(&self) -> Result<PodCertStatusOutput> {

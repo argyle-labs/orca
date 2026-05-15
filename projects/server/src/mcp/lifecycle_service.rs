@@ -5,7 +5,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use orca_tools_def::orca_lifecycle::{
     DoctorEntry, DoctorReport, LifecycleReport, ProjectsListReport, RuntimeSpecReport,
-    SpecDumpReport, UpdateCheckReport, UpdatePinReport,
+    SpecDumpReport, SystemDevDisableOutput, SystemDevEnableOutput, SystemDevSyncOutput,
+    UpdateCheckReport, UpdatePinReport,
 };
 use orca_tools_def::services::lifecycle::LifecycleService;
 use orca_tools_def::services::secrets::SecretsService;
@@ -14,8 +15,9 @@ use std::sync::Arc;
 
 use crate::commands::install::{InstallReport, cmd_install_report, cmd_uninstall_report};
 use crate::commands::update::{
-    apply_update, check_for_update, clear_version_pin, cmd_update_pin, read_version_pin,
-    resolve_channel, resolve_pin_veto, write_channel_marker,
+    apply_update, check_for_update, clear_version_pin, cmd_dev_disable, cmd_dev_enable,
+    cmd_dev_sync, cmd_update_pin, read_version_pin, resolve_channel, resolve_pin_veto,
+    write_channel_marker,
 };
 
 /// Resolve the GitHub bearer token: prefer the `github_token` secret managed
@@ -275,6 +277,32 @@ impl LifecycleService for ServerLifecycle {
         let spec = crate::serve::openapi_spec_json();
         Ok(SpecDumpReport {
             spec: serde_json::to_string_pretty(&spec)?,
+        })
+    }
+
+    async fn dev_enable(&self) -> Result<SystemDevEnableOutput> {
+        let r = tokio::task::spawn_blocking(cmd_dev_enable).await??;
+        Ok(SystemDevEnableOutput {
+            repo_path: r.repo_path,
+            cloned: r.cloned,
+            daemon_parked: r.daemon_parked,
+        })
+    }
+
+    async fn dev_disable(&self) -> Result<SystemDevDisableOutput> {
+        let r = tokio::task::spawn_blocking(cmd_dev_disable).await??;
+        Ok(SystemDevDisableOutput {
+            dev_process_stopped: r.dev_process_stopped,
+            daemon_reclaimed: r.daemon_reclaimed,
+        })
+    }
+
+    async fn dev_sync(&self) -> Result<SystemDevSyncOutput> {
+        let r = tokio::task::spawn_blocking(cmd_dev_sync).await??;
+        Ok(SystemDevSyncOutput {
+            commits_pulled: r.commits_pulled,
+            already_up_to_date: r.already_up_to_date,
+            detail: r.detail,
         })
     }
 

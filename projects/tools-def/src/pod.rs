@@ -54,6 +54,27 @@ pub struct PodPeerDto {
 #[serde(transparent)]
 pub struct PodPeerList(pub Vec<PodPeerDto>);
 
+// ── pod.dev.sync ─────────────────────────────────────────────────────────────
+
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodDevSyncPeerResult {
+    pub peer_id: String,
+    pub hostname: String,
+    /// "synced" | "skipped" | "error"
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodDevSyncOutput {
+    pub results: Vec<PodDevSyncPeerResult>,
+}
+
 // ── pod.accept ───────────────────────────────────────────────────────────────
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
@@ -338,6 +359,7 @@ mod native_support {
         async fn join(&self, inviter_addr: &str, port: Option<u16>) -> Result<PodJoinOutput>;
         async fn leave_peer(&self, peer_id: &str) -> Result<PodLeaveOutput>;
         fn cert_status(&self) -> Result<PodCertStatusOutput>;
+        async fn dev_sync(&self) -> Result<PodDevSyncOutput>;
     }
 
     pub(super) fn svc(ctx: &ToolCtx) -> Result<Arc<dyn PodService>> {
@@ -448,4 +470,14 @@ async fn pod_cert_status(
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<PodCertStatusOutput> {
     native_support::svc(ctx)?.cert_status()
+}
+
+/// git pull on every active peer running in dev mode; cargo watch auto-restarts.
+/// Peers not in dev mode are skipped (not an error).
+#[orca_tool(domain = "pod", verb = "dev_sync")]
+async fn pod_dev_sync(
+    _args: EmptyArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<PodDevSyncOutput> {
+    native_support::svc(ctx)?.dev_sync().await
 }
