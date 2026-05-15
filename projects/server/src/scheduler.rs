@@ -100,7 +100,7 @@ async fn tick(registry: &ToolRegistry, ctx: &ToolCtx, daemon_start: DateTime<Utc
                 continue;
             }
         };
-        let schedule = match Schedule::from_str(&parsed.cron) {
+        let schedule = match Schedule::from_str(&normalize_cron(&parsed.cron)) {
             Ok(s) => s,
             Err(e) => {
                 warn!(
@@ -149,6 +149,13 @@ async fn tick(registry: &ToolRegistry, ctx: &ToolCtx, daemon_start: DateTime<Utc
         }
     }
     Ok(())
+}
+
+/// Accept both 5-field Unix cron (`"0 3 * * *"`) and the `cron` crate's
+/// native 6-field form (`"0 0 3 * * *"`) by prepending `0 ` when needed.
+fn normalize_cron(expr: &str) -> String {
+    let n = expr.split_whitespace().count();
+    if n == 5 { format!("0 {expr}") } else { expr.to_string() }
 }
 
 /// Has `schedule` been due at least once since the later of (a) the job's

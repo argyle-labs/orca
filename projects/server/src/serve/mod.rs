@@ -9,6 +9,7 @@ pub mod tree;
 pub use openapi::orca_spec_json as openapi_spec_json;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -68,6 +69,7 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     // failures are logged and do not abort the daemon (a host without pod
     // material can still serve plugins and the HTTP API).
     spawn_pod_runtime(&pki_dir).await;
+    spawn_scheduler_runtime();
 
     axum::serve(listener, app).await?;
     Ok(())
@@ -114,6 +116,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
 
     // Pod mesh: mDNS responder + auto-offer scheduler (best-effort).
     spawn_pod_runtime(&pki_dir).await;
+    spawn_scheduler_runtime();
 
     let mut sigterm = signal(SignalKind::terminate())?;
 
@@ -293,6 +296,27 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
 
     std::mem::drop(crate::host_identity::spawn_refresh_task());
     info!("[host-addressing] refresh task armed (5m)");
+}
+
+/// Build the tool registry + ctx, register the registry on the ctx so
+/// nested tool dispatch works (e.g. `schedule.run` invoking another tool),
+/// then spawn the in-process cron scheduler. Best-effort: a config-load
+/// failure disables the scheduler but does not abort the daemon.
+fn spawn_scheduler_runtime() {
+    match orca_utils::config::Config::load() {
+        Ok(cfg) => {
+            let cfg = Arc::new(cfg);
+            let (reg, mut ctx) = crate::mcp::build_tool_registry(cfg);
+            let registry = Arc::new(reg);
+            // Make the registry reachable from inside tool dispatch — needed
+            // for `schedule.run` to re-dispatch the scheduled job's tool.
+            ctx.register_service(registry.clone());
+            let ctx = Arc::new(ctx);
+            std::mem::drop(crate::scheduler::spawn(registry, ctx));
+            info!("[scheduler] in-process cron scheduler armed (60s tick)");
+        }
+        Err(e) => tracing::warn!("[scheduler] Config::load failed, scheduler disabled: {e}"),
+    }
 }
 
 fn pid_alive(pid: u32) -> bool {
