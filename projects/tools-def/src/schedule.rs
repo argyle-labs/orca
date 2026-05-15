@@ -127,7 +127,11 @@ mod native_support {
     /// by prepending `0 ` to 5-field input.
     pub fn normalize_cron(expr: &str) -> String {
         let n = expr.split_whitespace().count();
-        if n == 5 { format!("0 {expr}") } else { expr.to_string() }
+        if n == 5 {
+            format!("0 {expr}")
+        } else {
+            expr.to_string()
+        }
     }
 }
 
