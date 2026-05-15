@@ -238,10 +238,63 @@ impl PodService for ServerPod {
             .collect())
     }
 
-    async fn offer(&self, _addr: &str, _port: Option<u16>) -> Result<PodOfferOutput> {
-        anyhow::bail!(
-            "manual pod offer is not yet implemented — mDNS auto-offer handles LAN pairing"
-        )
+    async fn offer(&self, addr: &str, port: Option<u16>) -> Result<PodOfferOutput> {
+        use crate::pod::scheduler::{OFFER_TTL_SECS, mint_pairing_code, push_offer};
+        use orca_utils::config::APP_PLUGIN_PORT;
+
+        let port = port.unwrap_or(APP_PLUGIN_PORT);
+
+        // Look up the joiner in the discovery table by addr.
+        let conn = db::open_default()?;
+        let discovery = pdb::list_discovery(&conn)?;
+        let d = discovery
+            .into_iter()
+            .find(|r| r.addr == addr || format!("{}:{}", r.addr, r.port) == addr)
+            .with_context(|| {
+                format!("{addr} not found in pod_discovery — is the joiner visible via mDNS?")
+            })?;
+
+        if pdb::has_open_outbound_offer(&conn, &d.pubkey_fp)? {
+            anyhow::bail!(
+                "an open outbound offer to {addr} already exists — wait for it to expire or for the joiner to accept"
+            );
+        }
+
+        let pod_id = pdb::get_pod_id(&conn)?.unwrap_or_else(|| "default".to_string());
+        let code = mint_pairing_code();
+        let code_hash = pdb::hash_code(&code);
+        let offer_id = uuid::Uuid::new_v4().to_string();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        pdb::insert_pending_offer(
+            &conn,
+            &offer_id,
+            "out",
+            &d.pubkey_fp,
+            &d.hostname,
+            &d.addr,
+            port,
+            &code_hash,
+            None,
+            None,
+            None,
+            OFFER_TTL_SECS,
+        )?;
+        drop(conn);
+
+        push_offer(&d.hostname, &d.addr, port, &d.pubkey_fp, &code, &pod_id).await?;
+
+        Ok(PodOfferOutput {
+            code,
+            joiner_hostname: d.hostname,
+            joiner_addr: d.addr,
+            joiner_port: port,
+            joiner_pubkey_fp: d.pubkey_fp,
+            offer_id,
+            expires_at: now + OFFER_TTL_SECS,
+        })
     }
 
     async fn join(&self, inviter_addr: &str, port: Option<u16>) -> Result<PodJoinOutput> {
