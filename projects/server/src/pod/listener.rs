@@ -19,7 +19,8 @@ use tokio_rustls::server::TlsStream;
 use tracing::warn;
 
 use super::{
-    POD_DEV_SYNC_METHOD, POD_PING_METHOD, PodDevSyncResult, PodPingResult, db as pdb, pki_dir,
+    POD_DEV_DISABLE_METHOD, POD_DEV_ENABLE_METHOD, POD_DEV_SYNC_METHOD, POD_PING_METHOD,
+    PodDevDisableResult, PodDevEnableResult, PodDevSyncResult, PodPingResult, db as pdb, pki_dir,
 };
 
 const POD_NOTIFY_TRUST_METHOD: &str = "pod/notify-trust";
@@ -128,6 +129,14 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
             value_response(id, &result)
         }
         POD_DEV_SYNC_METHOD => match handle_dev_sync().await {
+            Ok(r) => value_response(id, &r),
+            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+        },
+        POD_DEV_ENABLE_METHOD => match handle_dev_enable().await {
+            Ok(r) => value_response(id, &r),
+            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+        },
+        POD_DEV_DISABLE_METHOD => match handle_dev_disable().await {
             Ok(r) => value_response(id, &r),
             Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
         },
@@ -245,6 +254,63 @@ async fn handle_dev_sync() -> Result<PodDevSyncResult> {
             status: "error".into(),
             detail: Some(format!("join error: {e}")),
             commits_pulled: None,
+        }),
+    }
+}
+
+/// Handle `pod/dev-enable`: flip the peer into dev mode (clone repo if
+/// missing, park production daemon, spawn cargo-watch).
+async fn handle_dev_enable() -> Result<PodDevEnableResult> {
+    use crate::commands::update::cmd_dev_enable;
+
+    match tokio::task::spawn_blocking(cmd_dev_enable).await {
+        Ok(Ok(r)) => Ok(PodDevEnableResult {
+            status: "enabled".into(),
+            detail: None,
+            repo_path: Some(r.repo_path),
+            cloned: Some(r.cloned),
+            daemon_parked: Some(r.daemon_parked),
+        }),
+        Ok(Err(e)) => Ok(PodDevEnableResult {
+            status: "error".into(),
+            detail: Some(e.to_string()),
+            repo_path: None,
+            cloned: None,
+            daemon_parked: None,
+        }),
+        Err(e) => Ok(PodDevEnableResult {
+            status: "error".into(),
+            detail: Some(format!("join error: {e}")),
+            repo_path: None,
+            cloned: None,
+            daemon_parked: None,
+        }),
+    }
+}
+
+/// Handle `pod/dev-disable`: stop cargo-watch and let the production daemon
+/// reclaim the port.
+async fn handle_dev_disable() -> Result<PodDevDisableResult> {
+    use crate::commands::update::cmd_dev_disable;
+
+    match tokio::task::spawn_blocking(cmd_dev_disable).await {
+        Ok(Ok(r)) => Ok(PodDevDisableResult {
+            status: "disabled".into(),
+            detail: None,
+            dev_process_stopped: Some(r.dev_process_stopped),
+            daemon_reclaimed: Some(r.daemon_reclaimed),
+        }),
+        Ok(Err(e)) => Ok(PodDevDisableResult {
+            status: "error".into(),
+            detail: Some(e.to_string()),
+            dev_process_stopped: None,
+            daemon_reclaimed: None,
+        }),
+        Err(e) => Ok(PodDevDisableResult {
+            status: "error".into(),
+            detail: Some(format!("join error: {e}")),
+            dev_process_stopped: None,
+            daemon_reclaimed: None,
         }),
     }
 }

@@ -75,6 +75,58 @@ pub struct PodDevSyncOutput {
     pub results: Vec<PodDevSyncPeerResult>,
 }
 
+// ── pod.dev.enable / pod.dev.disable ────────────────────────────────────────
+
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Default, Serialize, Deserialize, JsonSchema)]
+pub struct PodDevFanoutArgs {
+    /// Subset of peer hostnames (or addrs) to target. Empty = every paired
+    /// peer plus this host.
+    #[cfg_attr(feature = "cli", clap(long))]
+    #[serde(default)]
+    pub peers: Vec<String>,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodDevEnablePeerResult {
+    pub peer_id: String,
+    pub hostname: String,
+    /// "enabled" | "error"
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodDevEnableOutput {
+    pub results: Vec<PodDevEnablePeerResult>,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodDevDisablePeerResult {
+    pub peer_id: String,
+    pub hostname: String,
+    /// "disabled" | "error"
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodDevDisableOutput {
+    pub results: Vec<PodDevDisablePeerResult>,
+}
+
 // ── pod.accept ───────────────────────────────────────────────────────────────
 
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
@@ -360,6 +412,8 @@ mod native_support {
         async fn leave_peer(&self, peer_id: &str) -> Result<PodLeaveOutput>;
         fn cert_status(&self) -> Result<PodCertStatusOutput>;
         async fn dev_sync(&self) -> Result<PodDevSyncOutput>;
+        async fn dev_enable_fanout(&self, peers: &[String]) -> Result<PodDevEnableOutput>;
+        async fn dev_disable_fanout(&self, peers: &[String]) -> Result<PodDevDisableOutput>;
     }
 
     pub(super) fn svc(ctx: &ToolCtx) -> Result<Arc<dyn PodService>> {
@@ -480,4 +534,24 @@ async fn pod_dev_sync(
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<PodDevSyncOutput> {
     native_support::svc(ctx)?.dev_sync().await
+}
+
+/// Flip dev mode ON across the mesh. Empty `peers` = local + every paired
+/// peer. Each peer clones the repo if needed and spawns cargo-watch.
+#[orca_tool(domain = "pod", verb = "dev_enable")]
+async fn pod_dev_enable(
+    args: PodDevFanoutArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<PodDevEnableOutput> {
+    native_support::svc(ctx)?.dev_enable_fanout(&args.peers).await
+}
+
+/// Flip dev mode OFF across the mesh. Empty `peers` = local + every paired
+/// peer. Each peer stops cargo-watch and the production daemon reclaims.
+#[orca_tool(domain = "pod", verb = "dev_disable")]
+async fn pod_dev_disable(
+    args: PodDevFanoutArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<PodDevDisableOutput> {
+    native_support::svc(ctx)?.dev_disable_fanout(&args.peers).await
 }

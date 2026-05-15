@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use orca_sdk::pki;
 use orca_tools_def::pod::{
-    CertInfo, PodAcceptOutput, PodCertStatusOutput, PodDevSyncOutput, PodDevSyncPeerResult,
+    CertInfo, PodAcceptOutput, PodCertStatusOutput, PodDevDisableOutput, PodDevDisablePeerResult,
+    PodDevEnableOutput, PodDevEnablePeerResult, PodDevSyncOutput, PodDevSyncPeerResult,
     PodDiscoveryRowDto, PodJoinOutput, PodLeaveOutput, PodOfferOutput, PodPendingOfferDto,
     PodPingOutput, PodService, PodTrustOutput,
 };
@@ -417,6 +418,122 @@ impl PodService for ServerPod {
         Ok(PodDevSyncOutput { results })
     }
 
+    async fn dev_enable_fanout(&self, peers: &[String]) -> Result<PodDevEnableOutput> {
+        use crate::commands::update::cmd_dev_enable;
+
+        let targets = select_peer_targets(peers)?;
+        let include_local = peers_includes_local(peers);
+
+        let handles: Vec<_> = targets
+            .into_iter()
+            .map(|(peer_id, hostname, addr)| {
+                tokio::spawn(async move {
+                    match crate::pod::dev_enable(&addr).await {
+                        Ok(r) => PodDevEnablePeerResult {
+                            peer_id,
+                            hostname,
+                            status: r.status,
+                            detail: r.detail,
+                        },
+                        Err(e) => PodDevEnablePeerResult {
+                            peer_id,
+                            hostname,
+                            status: "error".into(),
+                            detail: Some(e.to_string()),
+                        },
+                    }
+                })
+            })
+            .collect();
+
+        let mut results: Vec<PodDevEnablePeerResult> = Vec::new();
+        for h in handles {
+            if let Ok(r) = h.await {
+                results.push(r);
+            }
+        }
+
+        if include_local {
+            match tokio::task::spawn_blocking(cmd_dev_enable).await? {
+                Ok(r) => results.push(PodDevEnablePeerResult {
+                    peer_id: "local".into(),
+                    hostname: "localhost".into(),
+                    status: "enabled".into(),
+                    detail: Some(format!(
+                        "repo={} cloned={} parked={}",
+                        r.repo_path, r.cloned, r.daemon_parked
+                    )),
+                }),
+                Err(e) => results.push(PodDevEnablePeerResult {
+                    peer_id: "local".into(),
+                    hostname: "localhost".into(),
+                    status: "error".into(),
+                    detail: Some(e.to_string()),
+                }),
+            }
+        }
+
+        Ok(PodDevEnableOutput { results })
+    }
+
+    async fn dev_disable_fanout(&self, peers: &[String]) -> Result<PodDevDisableOutput> {
+        use crate::commands::update::cmd_dev_disable;
+
+        let targets = select_peer_targets(peers)?;
+        let include_local = peers_includes_local(peers);
+
+        let handles: Vec<_> = targets
+            .into_iter()
+            .map(|(peer_id, hostname, addr)| {
+                tokio::spawn(async move {
+                    match crate::pod::dev_disable(&addr).await {
+                        Ok(r) => PodDevDisablePeerResult {
+                            peer_id,
+                            hostname,
+                            status: r.status,
+                            detail: r.detail,
+                        },
+                        Err(e) => PodDevDisablePeerResult {
+                            peer_id,
+                            hostname,
+                            status: "error".into(),
+                            detail: Some(e.to_string()),
+                        },
+                    }
+                })
+            })
+            .collect();
+
+        let mut results: Vec<PodDevDisablePeerResult> = Vec::new();
+        for h in handles {
+            if let Ok(r) = h.await {
+                results.push(r);
+            }
+        }
+
+        if include_local {
+            match tokio::task::spawn_blocking(cmd_dev_disable).await? {
+                Ok(r) => results.push(PodDevDisablePeerResult {
+                    peer_id: "local".into(),
+                    hostname: "localhost".into(),
+                    status: "disabled".into(),
+                    detail: Some(format!(
+                        "dev_stopped={} reclaimed={}",
+                        r.dev_process_stopped, r.daemon_reclaimed
+                    )),
+                }),
+                Err(e) => results.push(PodDevDisablePeerResult {
+                    peer_id: "local".into(),
+                    hostname: "localhost".into(),
+                    status: "error".into(),
+                    detail: Some(e.to_string()),
+                }),
+            }
+        }
+
+        Ok(PodDevDisableOutput { results })
+    }
+
     fn cert_status(&self) -> Result<PodCertStatusOutput> {
         let pki_d = pki_dir();
         let founder = pki::has_mesh_ca_key(&pki_d);
@@ -444,4 +561,54 @@ impl PodService for ServerPod {
             bootstrap: parse(pki::bootstrap_cert_path(&pki_d)),
         })
     }
+}
+
+/// Resolve the peer fan-out target set. `filter` empty = every non-departed
+/// paired peer. Otherwise, only peers whose `peer_id`, `peer_hostname`, or
+/// `peer_addr` matches an entry in `filter` (case-insensitive). The special
+/// value `"local"` (and `"localhost"`) is consumed by `peers_includes_local`
+/// and ignored here.
+fn select_peer_targets(filter: &[String]) -> Result<Vec<(String, String, String)>> {
+    let conn = db::open_default()?;
+    let peers = pdb::list_peers(&conn)?;
+    drop(conn);
+
+    let filter_lc: Vec<String> = filter
+        .iter()
+        .map(|s| s.to_ascii_lowercase())
+        .filter(|s| s != "local" && s != "localhost")
+        .collect();
+
+    let want_all = filter.is_empty()
+        || filter
+            .iter()
+            .all(|s| matches!(s.to_ascii_lowercase().as_str(), "local" | "localhost"));
+
+    Ok(peers
+        .into_iter()
+        .filter(|p| p.departed_at.is_none())
+        .filter(|p| {
+            if want_all {
+                return true;
+            }
+            let id_lc = p.peer_id.to_ascii_lowercase();
+            let host_lc = p.peer_hostname.to_ascii_lowercase();
+            let addr_lc = p.peer_addr.to_ascii_lowercase();
+            filter_lc
+                .iter()
+                .any(|f| f == &id_lc || f == &host_lc || f == &addr_lc)
+        })
+        .map(|p| (p.peer_id, p.peer_hostname, p.peer_addr))
+        .collect())
+}
+
+/// Whether the fan-out should also flip the local host. Empty filter = yes;
+/// otherwise only when `"local"` or `"localhost"` appears explicitly.
+fn peers_includes_local(filter: &[String]) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    filter
+        .iter()
+        .any(|s| matches!(s.to_ascii_lowercase().as_str(), "local" | "localhost"))
 }

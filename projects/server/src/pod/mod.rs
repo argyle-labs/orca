@@ -40,6 +40,8 @@ use tokio_rustls::TlsConnector;
 
 pub const POD_PING_METHOD: &str = "pod/ping";
 pub const POD_DEV_SYNC_METHOD: &str = "pod/dev-sync";
+pub const POD_DEV_ENABLE_METHOD: &str = "pod/dev-enable";
+pub const POD_DEV_DISABLE_METHOD: &str = "pod/dev-disable";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PodPingResult {
@@ -76,6 +78,34 @@ pub async fn ping(host: &str) -> Result<PodPingResult> {
     call_typed(host, POD_PING_METHOD, None::<()>, Duration::from_secs(5)).await
 }
 
+/// Result of `pod/dev-enable`. `status` is `"enabled"` on success, `"error"`
+/// on failure (`detail` carries the message).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PodDevEnableResult {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloned: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_parked: Option<bool>,
+}
+
+/// Result of `pod/dev-disable`. `status` is `"disabled"` on success,
+/// `"error"` on failure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PodDevDisableResult {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev_process_stopped: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_reclaimed: Option<bool>,
+}
+
 /// Dial `host` over the existing pod mTLS channel and ask it to git-pull its
 /// dev checkout. `host` is a bare hostname or IP; SNI is fixed to
 /// `pod.orca.local`. Identity is proven by the mesh-CA-signed client cert —
@@ -88,6 +118,29 @@ pub async fn dev_sync(host: &str) -> Result<PodDevSyncResult> {
         POD_DEV_SYNC_METHOD,
         None::<()>,
         Duration::from_secs(45),
+    )
+    .await
+}
+
+/// Ask `host` to flip into dev mode. cmd_dev_enable may clone the repo on
+/// first run, so allow generous timeout.
+pub async fn dev_enable(host: &str) -> Result<PodDevEnableResult> {
+    call_typed(
+        host,
+        POD_DEV_ENABLE_METHOD,
+        None::<()>,
+        Duration::from_secs(120),
+    )
+    .await
+}
+
+/// Ask `host` to drop dev mode and let the production daemon reclaim.
+pub async fn dev_disable(host: &str) -> Result<PodDevDisableResult> {
+    call_typed(
+        host,
+        POD_DEV_DISABLE_METHOD,
+        None::<()>,
+        Duration::from_secs(30),
     )
     .await
 }
