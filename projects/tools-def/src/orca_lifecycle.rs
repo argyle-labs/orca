@@ -129,6 +129,43 @@ pub struct SystemUpdatePinArgs {
 }
 
 empty_args!(SystemUpdateUnpinArgs);
+empty_args!(SystemDevEnableArgs);
+empty_args!(SystemDevDisableArgs);
+empty_args!(SystemDevSyncArgs);
+
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SystemDevEnableOutput {
+    /// Path to the git checkout used as the dev source.
+    pub repo_path: String,
+    /// Whether the repo was freshly cloned (true) or already present (false).
+    pub cloned: bool,
+    /// Whether the production daemon was parked as part of this call.
+    pub daemon_parked: bool,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SystemDevDisableOutput {
+    /// Whether the dev process was running and was killed.
+    pub dev_process_stopped: bool,
+    /// Whether the production daemon reclaimed the port.
+    pub daemon_reclaimed: bool,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SystemDevSyncOutput {
+    /// Number of commits pulled.
+    pub commits_pulled: u32,
+    /// Whether the repo was already up to date.
+    pub already_up_to_date: bool,
+    /// Raw output from git pull for diagnostics.
+    pub detail: String,
+}
 
 // ── Tools ───────────────────────────────────────────────────────────────────
 
@@ -227,4 +264,33 @@ async fn system_runtime_spec(
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<RuntimeSpecReport> {
     svc(ctx)?.runtime_spec().await
+}
+
+/// Clone the orca repo (if not present) and start cargo watch, parking the production daemon.
+/// Idempotent — safe to call if dev mode is already active.
+#[orca_tool(domain = "system", verb = "dev_enable")]
+async fn system_dev_enable(
+    _args: SystemDevEnableArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<SystemDevEnableOutput> {
+    svc(ctx)?.dev_enable().await
+}
+
+/// Stop cargo watch and let the production daemon reclaim the port.
+#[orca_tool(domain = "system", verb = "dev_disable")]
+async fn system_dev_disable(
+    _args: SystemDevDisableArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<SystemDevDisableOutput> {
+    svc(ctx)?.dev_disable().await
+}
+
+/// git pull in the dev checkout; cargo watch detects the changes and restarts automatically.
+/// No-op (returns already_up_to_date) if dev mode is not active.
+#[orca_tool(domain = "system", verb = "dev_sync")]
+async fn system_dev_sync(
+    _args: SystemDevSyncArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<SystemDevSyncOutput> {
+    svc(ctx)?.dev_sync().await
 }

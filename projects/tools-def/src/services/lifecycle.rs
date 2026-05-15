@@ -7,7 +7,8 @@ use async_trait::async_trait;
 
 use crate::orca_lifecycle::{
     DoctorReport, LifecycleReport, ProjectsListReport, RuntimeSpecReport, SpecDumpReport,
-    UpdateCheckReport, UpdatePinReport,
+    SystemDevDisableOutput, SystemDevEnableOutput, SystemDevSyncOutput, UpdateCheckReport,
+    UpdatePinReport,
 };
 
 #[async_trait]
@@ -22,4 +23,7 @@ pub trait LifecycleService: Send + Sync {
     async fn projects_list(&self) -> Result<ProjectsListReport>;
     async fn spec_dump(&self) -> Result<SpecDumpReport>;
     async fn runtime_spec(&self) -> Result<RuntimeSpecReport>;
+    async fn dev_enable(&self) -> Result<SystemDevEnableOutput>;
+    async fn dev_disable(&self) -> Result<SystemDevDisableOutput>;
+    async fn dev_sync(&self) -> Result<SystemDevSyncOutput>;
 }

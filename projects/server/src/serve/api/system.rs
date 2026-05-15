@@ -90,3 +90,51 @@ pub async fn system_action_handler(Json(req): Json<SystemActionRequest>) -> Resp
     })
     .into_response()
 }
+
+#[derive(Serialize, ToSchema)]
+pub struct SystemDevSyncResponse {
+    pub commits_pulled: u32,
+    pub already_up_to_date: bool,
+    pub detail: String,
+}
+
+/// POST /api/system/dev-sync — git pull in the dev checkout; cargo watch restarts automatically.
+/// Returns 409 if this host is not in dev mode.
+#[utoipa::path(
+    post,
+    path = "/api/system/dev-sync",
+    responses(
+        (status = 200, description = "Sync result", body = SystemDevSyncResponse),
+        (status = 409, description = "Not in dev mode", body = ErrorResponse),
+        (status = 500, description = "Error", body = ErrorResponse),
+    ),
+    tag = "system"
+)]
+pub async fn system_dev_sync_handler() -> Response {
+    use crate::commands::update::cmd_dev_sync;
+    use orca_utils::state::DaemonMode;
+
+    let in_dev_mode = orca_utils::state::read()
+        .ok()
+        .flatten()
+        .map(|s| matches!(s.mode, DaemonMode::Dev | DaemonMode::Parked))
+        .unwrap_or(false);
+
+    if !in_dev_mode {
+        return err(
+            axum::http::StatusCode::CONFLICT,
+            "not in dev mode — run `system dev enable` first",
+        );
+    }
+
+    match tokio::task::spawn_blocking(cmd_dev_sync).await {
+        Ok(Ok(r)) => Json(SystemDevSyncResponse {
+            commits_pulled: r.commits_pulled,
+            already_up_to_date: r.already_up_to_date,
+            detail: r.detail,
+        })
+        .into_response(),
+        Ok(Err(e)) => err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
