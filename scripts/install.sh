@@ -15,6 +15,8 @@
 #   --skip-sha           ORCA_SKIP_SHA=1      skip sha256 verification (push mode w/ pre-verified bytes)
 #   --admin-pubkey <key> ORCA_ADMIN_PUBKEY    SSH pubkey to install for the orca service user
 #                                             — REQUIRED when running as root and orca user is new
+#   --dev-setup          ORCA_DEV_SETUP=1     install Rust toolchain + cargo-watch for dev mode
+#                                             (installs build deps via apt/apk as needed)
 #   GITHUB_TOKEN         required for download mode — releases are private
 #
 # Root-mode auto-bootstrap:
@@ -45,6 +47,7 @@ GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 FROM_FILE="${ORCA_FROM_FILE:-}"
 SKIP_SHA="${ORCA_SKIP_SHA:-0}"
 ADMIN_PUBKEY="${ORCA_ADMIN_PUBKEY:-}"
+DEV_SETUP="${ORCA_DEV_SETUP:-0}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -55,6 +58,7 @@ while [ $# -gt 0 ]; do
     --from-file)       FROM_FILE="$2"; shift 2 ;;
     --skip-sha)        SKIP_SHA=1; shift ;;
     --admin-pubkey)    ADMIN_PUBKEY="$2"; shift 2 ;;
+    --dev-setup)       DEV_SETUP=1; shift ;;
     -h|--help)         sed -n '2,32p' "$0" 2>/dev/null || echo "see scripts/install.sh header"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
@@ -63,6 +67,12 @@ done
 die() { echo "install.sh: $*" >&2; exit 1; }
 warn() { echo "install.sh: warning: $*" >&2; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
+
+# Dev-setup-only mode: install build deps + rustup + cargo-watch, then exit.
+# Triggered by ORCA_DEV_SETUP_ONLY=1 (set by root-mode --dev-setup re-invocation).
+if [ "${ORCA_DEV_SETUP_ONLY:-0}" = "1" ]; then
+  DEV_SETUP=1
+fi
 
 need chmod
 need mv
@@ -197,6 +207,58 @@ else
   INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
   ORCA_HOME_TARGET="${ORCA_HOME:-$HOME/.orca}"
   RUN_AS_ORCA=0
+fi
+
+# ── dev setup: Rust toolchain + cargo-watch ─────────────────────────────────
+# Installs build dependencies for the current distro, then rustup + cargo-watch
+# into the target user's home (ORCA_HOME_TARGET or $HOME).
+dev_setup() {
+  _home="${1:-$HOME}"
+  _cargo="${_home}/.cargo/bin/cargo"
+
+  echo "→ dev-setup: installing build dependencies"
+  if [ -f /etc/alpine-release ]; then
+    apk add --no-cache build-base curl openssl-dev pkgconf 2>/dev/null \
+      || warn "apk add failed — build tools may be incomplete"
+  elif [ -f /etc/debian_version ]; then
+    apt-get install -y build-essential curl pkg-config libssl-dev 2>/dev/null \
+      || warn "apt-get failed — build tools may be incomplete"
+  elif [ -f /etc/os-release ] && grep -qi 'unraid\|slackware' /etc/os-release 2>/dev/null; then
+    warn "Unraid/Slackware detected — skipping automatic build-tools install; ensure gcc is available"
+  else
+    warn "unknown distro — skipping build-tools install; ensure gcc and libssl-dev are available"
+  fi
+
+  if [ -x "$_cargo" ]; then
+    echo "→ dev-setup: rustup already installed at ${_home}/.cargo"
+  else
+    echo "→ dev-setup: installing rustup"
+    if command -v curl >/dev/null 2>&1; then
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --no-modify-path --default-toolchain stable
+    elif command -v wget >/dev/null 2>&1; then
+      wget -qO- https://sh.rustup.rs \
+        | sh -s -- -y --no-modify-path --default-toolchain stable
+    else
+      warn "neither curl nor wget found — cannot install rustup"
+      return 1
+    fi
+  fi
+
+  if [ -x "${_home}/.cargo/bin/cargo-watch" ]; then
+    echo "✓ dev-setup: cargo-watch already installed"
+  else
+    echo "→ dev-setup: installing cargo-watch"
+    "${_home}/.cargo/bin/cargo" install cargo-watch \
+      && echo "✓ dev-setup: cargo-watch installed" \
+      || warn "cargo-watch install failed"
+  fi
+}
+
+# Early exit for dev-setup-only invocations (root re-invokes as orca user).
+if [ "${ORCA_DEV_SETUP_ONLY:-0}" = "1" ]; then
+  dev_setup "$HOME"
+  exit $?
 fi
 
 # ── detect target triple ────────────────────────────────────────────────────
@@ -357,6 +419,12 @@ if [ "$RUN_AS_ORCA" = "1" ]; then
   echo "→ bootstrapping daemon as ${ORCA_USER} via system service"
   "${INSTALL_DIR}/orca" daemon install --service-user "$ORCA_USER" \
     || warn "daemon install failed — re-run: ${INSTALL_DIR}/orca daemon install --service-user $ORCA_USER"
+  if [ "$DEV_SETUP" = "1" ]; then
+    # Re-invoke this script as the orca user in dev-setup-only mode so
+    # rustup lands in their home (~/.cargo, ~/.rustup).
+    ORCA_DEV_SETUP_ONLY=1 su -s /bin/sh "$ORCA_USER" -c "sh '$0'" \
+      || warn "dev-setup failed — re-run: ORCA_DEV_SETUP_ONLY=1 su -s /bin/sh $ORCA_USER -c 'sh install.sh'"
+  fi
   exit 0
 fi
 
@@ -365,5 +433,9 @@ case ":$PATH:" in
   *":${INSTALL_DIR}:"*) ;;
   *) echo "  note: ${INSTALL_DIR} is not in your PATH" ;;
 esac
+
+if [ "$DEV_SETUP" = "1" ]; then
+  dev_setup "$HOME"
+fi
 
 "${INSTALL_DIR}/orca" --version 2>/dev/null || true
