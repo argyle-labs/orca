@@ -615,14 +615,23 @@ pub fn cmd_dev_enable() -> Result<DevEnableResult> {
         _ => false,
     };
 
-    // Spawn cargo watch in the background
+    // Spawn cargo watch in the background. Use a placeholder for ORCA_DEV_PARENT_PID;
+    // we overwrite state.active_pid below with the actual cargo-watch PID so the
+    // parked production daemon's reclaim-poll sees a live process.
     let child = Command::new("cargo")
         .args(["watch", "-x", "run -- daemon start"])
         .current_dir(&repo)
-        .env("ORCA_DEV_PARENT_PID", std::process::id().to_string())
+        .env("ORCA_DEV_PARENT_PID", "0") // overwritten below
         .spawn()?;
 
-    write_dev_pid(child.id())?;
+    let watch_pid = child.id();
+    write_dev_pid(watch_pid)?;
+
+    // Tell the parked daemon: the "active dev process" is cargo-watch, which lives forever.
+    if daemon_parked && let Ok(Some(mut s)) = orca_utils::state::read() {
+        s.active_pid = watch_pid;
+        let _ = orca_utils::state::write(&s);
+    }
 
     Ok(DevEnableResult {
         repo_path: repo.to_string_lossy().into(),
