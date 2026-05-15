@@ -307,9 +307,7 @@ fn step_pki_init(home: &Path, report: &mut InstallReport) {
 /// Idempotent — skips if `client.cert.pem` already exists.
 fn step_cli_client_cert(home: &Path, report: &mut InstallReport) {
     let pki_dir = home.join(APP_STATE_DIR).join(APP_PKI_DIR);
-    if pki::cli_client_cert_path(&pki_dir).exists()
-        && pki::cli_client_key_path(&pki_dir).exists()
-    {
+    if pki::cli_client_cert_path(&pki_dir).exists() && pki::cli_client_key_path(&pki_dir).exists() {
         report.skip(format!(
             "pki/cli: client cert already present at {}",
             pki::cli_client_cert_path(&pki_dir).display()

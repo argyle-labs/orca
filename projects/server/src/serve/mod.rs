@@ -281,7 +281,10 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         let handle = axum_server::Handle::new();
         let serve = axum_server::bind_rustls(addr, tls)
             .handle(handle.clone())
-            .serve(app.clone().into_make_service_with_connect_info::<std::net::SocketAddr>());
+            .serve(
+                app.clone()
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            );
 
         let parked = tokio::select! {
             result = serve => { result?; false }
@@ -361,12 +364,9 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
 async fn load_rest_tls(pki_dir: &std::path::Path) -> Result<RustlsConfig> {
     let bundle = orca_sdk::pki::load_server(pki_dir)
         .context("load REST TLS bundle — run `orca install` (pki init) first")?;
-    RustlsConfig::from_pem(
-        bundle.cert_pem.into_bytes(),
-        bundle.key_pem.into_bytes(),
-    )
-    .await
-    .context("build rustls config from core server cert + key")
+    RustlsConfig::from_pem(bundle.cert_pem.into_bytes(), bundle.key_pem.into_bytes())
+        .await
+        .context("build rustls config from core server cert + key")
 }
 
 /// Serve the Scalar API reference viewer.

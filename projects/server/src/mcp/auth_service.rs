@@ -111,9 +111,8 @@ impl AuthService for ServerAuth {
 
         let id = format!("tok_{}", hex_lower(&random_bytes::<12>()));
         let now = chrono::Utc::now().to_rfc3339();
-        let expires_at = expires_in_days.map(|d| {
-            (chrono::Utc::now() + chrono::Duration::days(d as i64)).to_rfc3339()
-        });
+        let expires_at = expires_in_days
+            .map(|d| (chrono::Utc::now() + chrono::Duration::days(d as i64)).to_rfc3339());
 
         let conn = db::open_default()?;
         db::api_tokens::insert(

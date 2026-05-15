@@ -160,11 +160,7 @@ pub enum AuthKind {
 }
 
 /// Routes reachable without auth. Keep this list short.
-const AUTH_OPEN_PREFIXES: &[&str] = &[
-    "/api/health",
-    "/api/openapi",
-    "/scalar",
-];
+const AUTH_OPEN_PREFIXES: &[&str] = &["/api/health", "/api/openapi", "/scalar"];
 
 /// Tool name inside the `/api/tools/` namespace that the bootstrap window is
 /// allowed to invoke. Anything else requires a real token.
@@ -234,7 +230,9 @@ fn bootstrap_allowed(path: &str, peer: SocketAddr) -> bool {
         Ok(c) => c,
         Err(_) => return false,
     };
-    db::api_tokens::count(&conn).map(|n| n == 0).unwrap_or(false)
+    db::api_tokens::count(&conn)
+        .map(|n| n == 0)
+        .unwrap_or(false)
 }
 
 /// Auth gate for `/api/*`. Order:

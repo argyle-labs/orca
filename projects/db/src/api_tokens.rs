@@ -141,7 +141,10 @@ mod tests {
 
         touch(&conn, &row.id, "2026-05-15T00:00:01Z").unwrap();
         let after = list(&conn).unwrap();
-        assert_eq!(after[0].last_used_at.as_deref(), Some("2026-05-15T00:00:01Z"));
+        assert_eq!(
+            after[0].last_used_at.as_deref(),
+            Some("2026-05-15T00:00:01Z")
+        );
 
         assert!(revoke(&conn, &row.id).unwrap());
         assert_eq!(count(&conn).unwrap(), 0);

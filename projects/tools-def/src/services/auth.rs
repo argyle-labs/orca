@@ -9,9 +9,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::orca_auth::{
-    ApiTokenSummary, AuthLoginOutput, AuthStatusReport, TokenCreateOutput,
-};
+use crate::orca_auth::{ApiTokenSummary, AuthLoginOutput, AuthStatusReport, TokenCreateOutput};
 
 #[async_trait]
 pub trait AuthService: Send + Sync {
