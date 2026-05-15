@@ -127,10 +127,10 @@ impl PodService for ServerPod {
             Err(e) => format!("warn: {e}"),
         };
 
-        if pdb::is_mutual_secure(new) {
-            if let Err(e) = crate::commands::pod::replicate_ca_key_if_needed_pub(&peer).await {
-                tracing::warn!("CA-key replication: {e}");
-            }
+        if pdb::is_mutual_secure(new)
+            && let Err(e) = crate::commands::pod::replicate_ca_key_if_needed_pub(&peer).await
+        {
+            tracing::warn!("CA-key replication: {e}");
         }
 
         Ok(PodTrustOutput {
