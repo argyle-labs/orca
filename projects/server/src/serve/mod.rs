@@ -58,6 +58,31 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     // Non-blocking update check — prints a notice if a newer version is available.
     tokio::spawn(crate::commands::startup_update_check());
 
+    // Dev-source auto-poll: if ~/.orca/dev-source is set, check for a newer
+    // binary every 10 s and self-restart after applying so the service manager
+    // picks up the new binary immediately.
+    if let Some(src) = crate::commands::update::read_dev_source() {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            interval.tick().await; // skip immediate tick
+            loop {
+                interval.tick().await;
+                match crate::commands::update::check_for_update_dev(&src).await {
+                    Ok(Some(_)) => {
+                        tracing::info!("[dev] new build detected — applying and restarting");
+                        if let Err(e) = crate::commands::update::apply_update_dev(&src).await {
+                            tracing::warn!("[dev] apply failed: {e}");
+                        } else {
+                            std::process::exit(0);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::debug!("[dev] update check: {e}"),
+                }
+            }
+        });
+    }
+
     // Plugin host: TCP + mTLS on APP_PLUGIN_PORT. Skips gracefully if PKI not initialized.
     crate::plugin_host::start(
         &pki_dir,
@@ -117,6 +142,29 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     // Pod mesh: mDNS responder + auto-offer scheduler (best-effort).
     spawn_pod_runtime(&pki_dir).await;
     spawn_scheduler_runtime();
+
+    // Dev-source auto-poll (same as run() path).
+    if let Some(src) = crate::commands::update::read_dev_source() {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                match crate::commands::update::check_for_update_dev(&src).await {
+                    Ok(Some(_)) => {
+                        tracing::info!("[dev] new build detected — applying and restarting");
+                        if let Err(e) = crate::commands::update::apply_update_dev(&src).await {
+                            tracing::warn!("[dev] apply failed: {e}");
+                        } else {
+                            std::process::exit(0);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::debug!("[dev] update check: {e}"),
+                }
+            }
+        });
+    }
 
     let mut sigterm = signal(SignalKind::terminate())?;
 

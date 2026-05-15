@@ -30,6 +30,7 @@ pub fn list_embedded_commands() -> Vec<String> {
 
 pub mod creds_cmd;
 pub mod daemon;
+pub mod dev_serve;
 pub mod hook_cmd;
 pub mod install;
 pub mod mcp_cmd;

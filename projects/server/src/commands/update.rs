@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use orca_utils::config::{APP_NAME, APP_REPO_API_URL};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -176,6 +176,101 @@ struct Asset {
     url: String, // API asset URL
 }
 
+// ── Dev source (local serve) ──────────────────────────────────────────────────
+
+fn dev_source_path() -> Option<PathBuf> {
+    let dir = std::env::var_os("ORCA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".orca")))?;
+    Some(dir.join("dev-source"))
+}
+
+pub fn read_dev_source() -> Option<String> {
+    let raw = std::fs::read_to_string(dev_source_path()?).ok()?;
+    let trimmed = raw.trim().to_string();
+    if trimmed.is_empty() { None } else { Some(trimmed) }
+}
+
+pub fn write_dev_source(url: &str) -> Result<()> {
+    let path = dev_source_path().context("no ORCA_HOME or HOME set")?;
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    std::fs::write(&path, format!("{}\n", url.trim()))?;
+    Ok(())
+}
+
+pub fn clear_dev_source() -> Result<()> {
+    if let Some(path) = dev_source_path() {
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DevVersionInfo {
+    pub sha256: String,
+}
+
+fn sha256_of_file(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let digest = sha2_digest(&bytes);
+    Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Check a local dev-serve endpoint for a newer binary.
+/// Returns `Some` if the sha256 on the server differs from the running binary.
+pub async fn check_for_update_dev(source_url: &str) -> Result<Option<String>> {
+    let url = format!("{}/version.json", source_url.trim_end_matches('/'));
+    let client = orca_utils::http::Client::new();
+    let info: DevVersionInfo = client
+        .get(url)
+        .send()
+        .await
+        .context("dev-source version check failed")?
+        .json()
+        .context("dev-source returned invalid version.json")?;
+
+    let current = current_binary_path()?;
+    let current_sha = sha256_of_file(&current).unwrap_or_default();
+    if info.sha256 == current_sha {
+        Ok(None)
+    } else {
+        Ok(Some(info.sha256))
+    }
+}
+
+/// Download and apply a binary from a local dev-serve endpoint.
+pub async fn apply_update_dev(source_url: &str) -> Result<()> {
+    let url = format!("{}/binary", source_url.trim_end_matches('/'));
+    let client = orca_utils::http::Client::new();
+    const MAX: usize = 128 * 1024 * 1024;
+    println!("[orca] downloading dev build from {source_url}...");
+    let resp = client
+        .get(url)
+        .max_body(MAX)
+        .timeout(std::time::Duration::from_secs(120))
+        .send_bytes()
+        .await
+        .context("dev binary download failed")?;
+
+    let current = current_binary_path()?;
+    let tmp = current.with_extension("tmp");
+    std::fs::write(&tmp, &resp.body).context("failed to write temp binary")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&tmp)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&tmp, perms)?;
+    }
+    std::fs::rename(&tmp, &current).context("failed to replace binary")?;
+    println!("[orca] dev build applied — restarting...");
+    Ok(())
+}
+
 /// Check GitHub for a newer release on the given channel.
 /// Stable channel: skips any pre-release tags.
 /// Rc/beta/alpha: also accepts pre-releases of that tier and below.
@@ -344,7 +439,25 @@ pub fn resolve_github_token() -> String {
 /// CLI entry: `orca update [--channel rc|stable|...]`. Empty channel reads the
 /// install marker; on a successful apply, the marker is rewritten so future
 /// invocations stay on the resolved channel.
+///
+/// If `~/.orca/dev-source` is set, skips GitHub and pulls from the local dev
+/// server instead. `--channel` overrides this (lets you escape back to GitHub).
 pub async fn cmd_update(channel_arg: &str) -> Result<()> {
+    // Dev-source takes priority when no explicit channel is given.
+    if channel_arg.trim().is_empty() {
+        if let Some(src) = read_dev_source() {
+            println!("[orca] current version: v{CURRENT_VERSION} ({BUILD_TARGET}, channel=dev)");
+            println!("[orca] checking dev source {src}...");
+            match check_for_update_dev(&src).await? {
+                None => println!("[orca] already up to date"),
+                Some(_) => {
+                    apply_update_dev(&src).await?;
+                }
+            }
+            return Ok(());
+        }
+    }
+
     let channel = resolve_channel(channel_arg);
     let token = resolve_github_token();
     println!(
@@ -372,6 +485,25 @@ pub async fn cmd_update(channel_arg: &str) -> Result<()> {
         eprintln!("[orca] warning: could not update channel marker: {e}");
     }
 
+    Ok(())
+}
+
+/// Set the dev source URL and confirm.
+pub fn cmd_update_set_source(url: &str) -> Result<()> {
+    let url = url.trim();
+    if url.is_empty() {
+        bail!("URL must not be empty");
+    }
+    write_dev_source(url)?;
+    println!("[orca] dev source set to {url}");
+    println!("[orca] run `orca update` to pull from it, or `orca update --clear-source` to remove");
+    Ok(())
+}
+
+/// Clear the dev source, reverting to GitHub-based updates.
+pub fn cmd_update_clear_source() -> Result<()> {
+    clear_dev_source()?;
+    println!("[orca] dev source cleared — `orca update` will use GitHub again");
     Ok(())
 }
 
