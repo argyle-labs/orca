@@ -115,10 +115,19 @@ mod native_support {
     }
 
     pub(super) fn next_run(cron_expr: &str) -> Option<String> {
-        let s = Schedule::from_str(cron_expr).ok()?;
+        let normalized = normalize_cron(cron_expr);
+        let s = Schedule::from_str(&normalized).ok()?;
         s.upcoming(Utc)
             .next()
             .map(|t| t.to_rfc3339_opts(SecondsFormat::Secs, true))
+    }
+
+    /// The `cron` crate parses 6- or 7-field expressions (with seconds at the
+    /// front). Operators write 5-field Unix cron more naturally — accept both
+    /// by prepending `0 ` to 5-field input.
+    pub fn normalize_cron(expr: &str) -> String {
+        let n = expr.split_whitespace().count();
+        if n == 5 { format!("0 {expr}") } else { expr.to_string() }
     }
 }
 
