@@ -1,12 +1,14 @@
 #![allow(clippy::disallowed_types)] // request/response body inspection — dynamic JSON shape
 use axum::{
     body::{Body, Bytes},
-    extract::Request,
-    http::{HeaderValue, header::HeaderName},
+    extract::{ConnectInfo, Request},
+    http::{HeaderValue, StatusCode, header::HeaderName},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use http_body_util::BodyExt;
+use sha2::{Digest, Sha256};
+use std::net::SocketAddr;
 use uuid::Uuid;
 
 pub const CORRELATION_ID_HEADER: &str = "x-correlation-id";
@@ -136,6 +138,143 @@ fn format_body(bytes: &Bytes) -> String {
         return s.to_string();
     }
     format!("[{} bytes binary]", bytes.len())
+}
+
+// ── Auth ────────────────────────────────────────────────────────────────────
+
+/// Identity attached to every request that passes `require_auth`.
+/// Handlers can pull it via `req.extensions().get::<AuthIdentity>()`.
+#[derive(Clone, Debug)]
+pub struct AuthIdentity {
+    pub kind: AuthKind,
+    /// "admin" | "read"
+    pub role: String,
+}
+
+#[derive(Clone, Debug)]
+pub enum AuthKind {
+    /// Bearer token from `api_tokens`. Carries the token row id.
+    Token { id: String, name: String },
+    /// Loopback with zero tokens in DB — only `auth.token_create` is reachable.
+    Bootstrap,
+}
+
+/// Routes reachable without auth. Keep this list short.
+const AUTH_OPEN_PREFIXES: &[&str] = &[
+    "/api/health",
+    "/api/openapi",
+    "/scalar",
+];
+
+/// Tool name inside the `/api/tools/` namespace that the bootstrap window is
+/// allowed to invoke. Anything else requires a real token.
+const BOOTSTRAP_ALLOWED_TOOL: &str = "/api/tools/auth.token_create";
+
+fn is_open_path(path: &str) -> bool {
+    AUTH_OPEN_PREFIXES.iter().any(|p| path.starts_with(p))
+}
+
+fn is_api_path(path: &str) -> bool {
+    path.starts_with("/api/")
+}
+
+fn sha256_hex(input: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(input);
+    let out = h.finalize();
+    let mut s = String::with_capacity(out.len() * 2);
+    for b in out {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+fn extract_bearer(req: &Request) -> Option<&str> {
+    req.headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .or_else(|| {
+            req.headers()
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.strip_prefix("bearer "))
+        })
+}
+
+fn try_token_auth(token: &str) -> Option<AuthIdentity> {
+    let conn = db::open_default().ok()?;
+    let hash = sha256_hex(token.as_bytes());
+    let row = db::api_tokens::find_by_hash(&conn, &hash).ok()??;
+    // Reject if past expires_at.
+    if let Some(expires_at) = row.expires_at.as_deref()
+        && let Ok(when) = chrono::DateTime::parse_from_rfc3339(expires_at)
+        && chrono::Utc::now() >= when.with_timezone(&chrono::Utc)
+    {
+        return None;
+    }
+    let _ = db::api_tokens::touch(&conn, &row.id, &chrono::Utc::now().to_rfc3339());
+    Some(AuthIdentity {
+        kind: AuthKind::Token {
+            id: row.id,
+            name: row.name,
+        },
+        role: row.role,
+    })
+}
+
+fn bootstrap_allowed(path: &str, peer: SocketAddr) -> bool {
+    if !peer.ip().is_loopback() {
+        return false;
+    }
+    if path != BOOTSTRAP_ALLOWED_TOOL {
+        return false;
+    }
+    let conn = match db::open_default() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    db::api_tokens::count(&conn).map(|n| n == 0).unwrap_or(false)
+}
+
+/// Auth gate for `/api/*`. Order:
+///   1. Open paths (`/api/health`, `/api/openapi`) — pass through.
+///   2. `Authorization: Bearer <token>` matched against `api_tokens` — pass.
+///   3. Loopback + zero tokens in DB + path == `auth.token_create` — bootstrap
+///      pass, identity = Bootstrap/admin. Closes as soon as any token exists.
+///   4. Otherwise 401.
+pub async fn require_auth(req: Request, next: Next) -> Response {
+    let path = req.uri().path().to_string();
+
+    if !is_api_path(&path) || is_open_path(&path) {
+        return next.run(req).await;
+    }
+
+    if let Some(token) = extract_bearer(&req)
+        && let Some(ident) = try_token_auth(token)
+    {
+        let mut req = req;
+        req.extensions_mut().insert(ident);
+        return next.run(req).await;
+    }
+
+    // Bootstrap fallback — only the very first token_create call from loopback.
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0);
+    if let Some(peer) = peer
+        && bootstrap_allowed(&path, peer)
+    {
+        let mut req = req;
+        req.extensions_mut().insert(AuthIdentity {
+            kind: AuthKind::Bootstrap,
+            role: "admin".into(),
+        });
+        return next.run(req).await;
+    }
+
+    (StatusCode::UNAUTHORIZED, "auth required").into_response()
 }
 
 #[cfg(test)]

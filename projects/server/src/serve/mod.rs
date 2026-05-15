@@ -735,6 +735,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         .route("/scalar", get(scalar_handler))
         .with_state(mcp_pool)
         .layer(axum::middleware::from_fn(middleware::log_requests))
+        .layer(axum::middleware::from_fn(middleware::require_auth))
         .layer(cors);
 
     // Mount the OrcaTool registry under /api/tools. Same registry as MCP stdio
