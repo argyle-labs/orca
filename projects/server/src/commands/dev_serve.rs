@@ -25,7 +25,11 @@ struct BinaryCache {
 
 impl BinaryCache {
     fn empty() -> Self {
-        Self { mtime: None, sha256: String::new(), bytes: Vec::new() }
+        Self {
+            mtime: None,
+            sha256: String::new(),
+            bytes: Vec::new(),
+        }
     }
 }
 
@@ -53,7 +57,11 @@ impl Srv {
             .with_context(|| format!("read {}", self.binary_path.display()))?;
         let sha256 = hex_sha256(&bytes);
         let mut cached = self.cache.write().await;
-        *cached = BinaryCache { mtime: current_mtime, sha256, bytes };
+        *cached = BinaryCache {
+            mtime: current_mtime,
+            sha256,
+            bytes,
+        };
         Ok(())
     }
 }
@@ -89,10 +97,7 @@ async fn binary_handler(State(srv): State<Srv>) -> impl IntoResponse {
         Ok(()) => {
             let bytes = srv.cache.read().await.bytes.clone();
             (
-                [(
-                    axum::http::header::CONTENT_TYPE,
-                    "application/octet-stream",
-                )],
+                [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
                 bytes,
             )
                 .into_response()
@@ -129,9 +134,7 @@ pub async fn cmd_dev_serve(binary: Option<&Path>, port: u16) -> Result<()> {
     println!("[orca dev serve] listening on http://0.0.0.0:{port}");
     println!("[orca dev serve]   GET /version.json  — sha256 of current build");
     println!("[orca dev serve]   GET /binary         — binary bytes");
-    println!(
-        "[orca dev serve] On each peer: orca update --source http://<mint-ip>:{port}",
-    );
+    println!("[orca dev serve] On each peer: orca update --source http://<mint-ip>:{port}",);
 
     let app = Router::new()
         .route("/version.json", get(version_handler))
@@ -143,6 +146,8 @@ pub async fn cmd_dev_serve(binary: Option<&Path>, port: u16) -> Result<()> {
         .await
         .with_context(|| format!("bind to port {port}"))?;
 
-    axum::serve(listener, app).await.context("dev serve error")?;
+    axum::serve(listener, app)
+        .await
+        .context("dev serve error")?;
     Ok(())
 }
