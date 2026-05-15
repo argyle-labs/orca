@@ -1,12 +1,11 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use std::time::Instant;
-
+use orca_sdk::pki;
 use orca_tools_def::pod::{
     CertInfo, PodAcceptOutput, PodCertStatusOutput, PodDiscoveryRowDto, PodJoinOutput,
     PodLeaveOutput, PodOfferOutput, PodPendingOfferDto, PodPingOutput, PodService, PodTrustOutput,
 };
-use orca_sdk::pki;
+use std::time::Instant;
 
 use crate::pod::{db as pdb, pki_dir};
 
@@ -154,7 +153,7 @@ impl PodService for ServerPod {
                     peer_id: None,
                     hostname: None,
                     version: None,
-                }
+                };
             }
         };
         let peer = match pdb::list_peers(&conn)
@@ -170,7 +169,7 @@ impl PodService for ServerPod {
                     peer_id: None,
                     hostname: None,
                     version: None,
-                }
+                };
             }
         };
 
