@@ -3,8 +3,12 @@
 
 use anyhow::{Result, bail};
 use async_trait::async_trait;
-use orca_tools_def::orca_auth::{AuthLoginOutput, AuthProviderStatus, AuthStatusReport};
+use orca_tools_def::orca_auth::{
+    ApiTokenSummary, AuthLoginOutput, AuthProviderStatus, AuthStatusReport, TokenCreateOutput,
+};
 use orca_tools_def::services::auth::AuthService;
+use rand::Rng;
+use sha2::{Digest, Sha256};
 
 const ANTHROPIC_KEY: &str = "anthropic_api_key";
 
@@ -88,4 +92,84 @@ impl AuthService for ServerAuth {
             other => bail!("unknown provider '{other}' (want: anthropic|github|atlassian)"),
         }
     }
+
+    async fn token_create(
+        &self,
+        name: &str,
+        role: &str,
+        expires_in_days: Option<u32>,
+    ) -> Result<TokenCreateOutput> {
+        if !matches!(role, "admin" | "read") {
+            bail!("role must be 'admin' or 'read', got '{role}'");
+        }
+        // 16 random bytes → 32 hex chars. `orca_` prefix keeps tokens
+        // self-identifying in logs/secret-scanners.
+        let mut raw = [0u8; 16];
+        rand::rng().fill_bytes(&mut raw);
+        let plaintext = format!("orca_{}", hex_lower(&raw));
+        let token_hash = sha256_hex(plaintext.as_bytes());
+
+        let id = format!("tok_{}", hex_lower(&random_bytes::<12>()));
+        let now = chrono::Utc::now().to_rfc3339();
+        let expires_at = expires_in_days.map(|d| {
+            (chrono::Utc::now() + chrono::Duration::days(d as i64)).to_rfc3339()
+        });
+
+        let conn = db::open_default()?;
+        db::api_tokens::insert(
+            &conn,
+            &id,
+            name,
+            &token_hash,
+            role,
+            &now,
+            expires_at.as_deref(),
+        )?;
+        Ok(TokenCreateOutput {
+            id,
+            name: name.to_string(),
+            token: plaintext,
+        })
+    }
+
+    async fn token_list(&self) -> Result<Vec<ApiTokenSummary>> {
+        let conn = db::open_default()?;
+        let rows = db::api_tokens::list(&conn)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| ApiTokenSummary {
+                id: r.id,
+                name: r.name,
+                role: r.role,
+                created_at: r.created_at,
+                last_used_at: r.last_used_at,
+                expires_at: r.expires_at,
+            })
+            .collect())
+    }
+
+    async fn token_revoke(&self, id: &str) -> Result<bool> {
+        let conn = db::open_default()?;
+        db::api_tokens::revoke(&conn, id)
+    }
+}
+
+fn random_bytes<const N: usize>() -> [u8; N] {
+    let mut buf = [0u8; N];
+    rand::rng().fill_bytes(&mut buf);
+    buf
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+fn sha256_hex(input: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(input);
+    hex_lower(&h.finalize())
 }

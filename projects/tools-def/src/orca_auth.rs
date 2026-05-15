@@ -111,3 +111,106 @@ async fn auth_login(
         .login(&args.provider, args.key.as_deref())
         .await
 }
+
+// ── API tokens (REST/MCP bearer auth, local-host scope) ─────────────────────
+
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+pub struct ApiTokenSummary {
+    pub id: String,
+    pub name: String,
+    /// "admin" | "read"
+    pub role: String,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct TokenCreateArgs {
+    /// Human-readable label (e.g. "ci-runner", "scott-laptop"). Must be unique on this host.
+    pub name: String,
+    /// "admin" | "read"
+    pub role: String,
+    /// Days until expiry. `None` = never expires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_days: Option<u32>,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct TokenCreateOutput {
+    pub id: String,
+    pub name: String,
+    /// Plaintext bearer token — returned exactly once. Store it now; it is
+    /// unrecoverable from the DB.
+    pub token: String,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct TokenListArgs {}
+
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct TokenListOutput {
+    pub tokens: Vec<ApiTokenSummary>,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct TokenRevokeArgs {
+    pub id: String,
+}
+
+#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct TokenRevokeOutput {
+    pub revoked: bool,
+}
+
+/// [MUTATES STATE] Mint a new REST/MCP bearer token on THIS host. Plaintext is
+/// returned exactly once and cannot be recovered from the DB. Token only
+/// authenticates calls to this host's `:12000` — not to other peers.
+#[orca_tool(domain = "auth", verb = "token_create")]
+async fn auth_token_create(
+    args: TokenCreateArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<TokenCreateOutput> {
+    auth_svc(ctx)?
+        .token_create(&args.name, &args.role, args.expires_in_days)
+        .await
+}
+
+/// List all REST/MCP bearer tokens registered on this host. Token hashes are not returned.
+#[orca_tool(domain = "auth", verb = "token_list")]
+async fn auth_token_list(
+    _args: TokenListArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<TokenListOutput> {
+    let tokens = auth_svc(ctx)?.token_list().await?;
+    Ok(TokenListOutput { tokens })
+}
+
+/// [MUTATES STATE] Revoke a token by id. Returns `revoked=false` if the id wasn't found.
+#[orca_tool(domain = "auth", verb = "token_revoke")]
+async fn auth_token_revoke(
+    args: TokenRevokeArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<TokenRevokeOutput> {
+    let revoked = auth_svc(ctx)?.token_revoke(&args.id).await?;
+    Ok(TokenRevokeOutput { revoked })
+}

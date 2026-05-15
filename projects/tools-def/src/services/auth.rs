@@ -9,7 +9,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::orca_auth::{AuthLoginOutput, AuthStatusReport};
+use crate::orca_auth::{
+    ApiTokenSummary, AuthLoginOutput, AuthStatusReport, TokenCreateOutput,
+};
 
 #[async_trait]
 pub trait AuthService: Send + Sync {
@@ -25,4 +27,21 @@ pub trait AuthService: Send + Sync {
     /// and the method drives the device-flow or PKCE callback to completion
     /// before returning.
     async fn login(&self, provider: &str, key: Option<&str>) -> Result<AuthLoginOutput>;
+
+    /// Mint a new API bearer token in THIS host's `api_tokens` table. The
+    /// plaintext is returned exactly once and never recoverable. Tokens are
+    /// scoped to the local REST API only — they don't authenticate calls to
+    /// other peers in the pod.
+    async fn token_create(
+        &self,
+        name: &str,
+        role: &str,
+        expires_in_days: Option<u32>,
+    ) -> Result<TokenCreateOutput>;
+
+    /// List all tokens registered on this host (hash excluded).
+    async fn token_list(&self) -> Result<Vec<ApiTokenSummary>>;
+
+    /// Revoke a token by id. Returns true if a row was deleted.
+    async fn token_revoke(&self, id: &str) -> Result<bool>;
 }

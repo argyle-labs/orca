@@ -8,6 +8,7 @@
 //! the bottom of this file, and a migration entry in `MIGRATIONS` if the table was added
 //! to an already-deployed database.
 
+pub mod api_tokens;
 pub mod config_store;
 pub mod docker_runtimes;
 pub mod docs;
