@@ -245,6 +245,10 @@ async fn main() -> Result<()> {
             });
             if matched {
                 let config = Config::load()?;
+                // OrcaTool-routed CLI commands bypass the legacy main()
+                // path's init; do it here so any tool that touches
+                // host_identity (e.g. pod.offer → push_offer) is safe.
+                orca::host_identity::init(&config.app_dir)?;
                 let rest = argv[1..].to_vec();
                 return dispatch_op(rest, config).await;
             }
