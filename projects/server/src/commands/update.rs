@@ -188,7 +188,11 @@ fn dev_source_path() -> Option<PathBuf> {
 pub fn read_dev_source() -> Option<String> {
     let raw = std::fs::read_to_string(dev_source_path()?).ok()?;
     let trimmed = raw.trim().to_string();
-    if trimmed.is_empty() { None } else { Some(trimmed) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 pub fn write_dev_source(url: &str) -> Result<()> {
