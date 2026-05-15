@@ -134,7 +134,13 @@ pub async fn system_dev_sync_handler() -> Response {
             detail: r.detail,
         })
         .into_response(),
-        Ok(Err(e)) => err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-        Err(e) => err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Ok(Err(e)) => err(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &e.to_string(),
+        ),
+        Err(e) => err(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &e.to_string(),
+        ),
     }
 }
