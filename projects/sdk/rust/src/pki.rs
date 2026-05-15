@@ -688,6 +688,15 @@ pub fn plugin_key_path(pki_dir: &Path, plugin_id: &str) -> PathBuf {
     pki_dir.join(format!("plugins/{plugin_id}/node.key.pem"))
 }
 
+/// CLI client cert — local-host identity for calling the REST API on `:12000`
+/// over mTLS. CN is `cli.<host_cn>`; signed by the core CA at `ca.cert.pem`.
+pub fn cli_client_cert_path(pki_dir: &Path) -> PathBuf {
+    pki_dir.join("client.cert.pem")
+}
+pub fn cli_client_key_path(pki_dir: &Path) -> PathBuf {
+    pki_dir.join("client.key.pem")
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 /// Generate and persist the CA + server cert. Safe to call multiple times —
@@ -784,6 +793,71 @@ pub fn issue(pki_dir: &Path, plugin_id: &str, capability: Capability) -> Result<
     Ok(NodeBundle {
         cert_pem: plugin_cert.pem(),
         key_pem: plugin_key.serialize_pem(),
+        ca_cert_pem,
+    })
+}
+
+// ── Issue CLI client cert ────────────────────────────────────────────────────
+
+/// Issue this host's CLI client cert from the core CA. CN = `cli.<host_cn>`;
+/// SAN = `cli.<host_cn>.orca.local`; EKU = ClientAuth. Idempotent: returns the
+/// existing bundle if `client.cert.pem` is already present.
+///
+/// Consumed by the orca CLI to authenticate to the local REST API (`:12000`)
+/// over mTLS. NOT used for pod federation — that uses `mesh/client/*` under
+/// the mesh CA.
+pub fn issue_cli_client_cert(pki_dir: &Path, host_cn: &str) -> Result<NodeBundle> {
+    let ca_cert_pem = std::fs::read_to_string(ca_cert_path(pki_dir))
+        .context("CA cert not found — run `orca install` (which runs pki::init) first")?;
+
+    if cli_client_cert_path(pki_dir).exists() && cli_client_key_path(pki_dir).exists() {
+        return Ok(NodeBundle {
+            cert_pem: std::fs::read_to_string(cli_client_cert_path(pki_dir))?,
+            key_pem: std::fs::read_to_string(cli_client_key_path(pki_dir))?,
+            ca_cert_pem,
+        });
+    }
+
+    let ca_key_pem = std::fs::read_to_string(ca_key_path(pki_dir))
+        .context("CA key not found — this host cannot sign new CLI client certs")?;
+    let ca_key = KeyPair::from_pem(&ca_key_pem)?;
+    let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key)?;
+
+    let key = gen_keypair()?;
+    let san = format!("cli.{host_cn}.orca.local");
+    let mut params = CertificateParams::new(vec![san])?;
+    params.is_ca = IsCa::NoCa;
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    set_validity_days(&mut params, PEER_VALIDITY_DAYS);
+    {
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, format!("cli.{host_cn}"));
+        dn.push(DnType::OrganizationName, "orca");
+        dn.push(DnType::OrganizationalUnitName, "cli");
+        params.distinguished_name = dn;
+    }
+    let cert = params.signed_by(&key, &issuer)?;
+
+    write_pem(cli_client_cert_path(pki_dir), &cert.pem())?;
+    write_pem(cli_client_key_path(pki_dir), &key.serialize_pem())?;
+
+    Ok(NodeBundle {
+        cert_pem: cert.pem(),
+        key_pem: key.serialize_pem(),
+        ca_cert_pem,
+    })
+}
+
+/// Load the CLI client cert bundle if it exists. Returns `None` if either
+/// `client.cert.pem` or `client.key.pem` is missing — caller decides whether
+/// to attempt issuance or fall back to bearer-token auth.
+pub fn load_cli_client(pki_dir: &Path) -> Option<NodeBundle> {
+    let cert_pem = std::fs::read_to_string(cli_client_cert_path(pki_dir)).ok()?;
+    let key_pem = std::fs::read_to_string(cli_client_key_path(pki_dir)).ok()?;
+    let ca_cert_pem = std::fs::read_to_string(ca_cert_path(pki_dir)).ok()?;
+    Some(NodeBundle {
+        cert_pem,
+        key_pem,
         ca_cert_pem,
     })
 }

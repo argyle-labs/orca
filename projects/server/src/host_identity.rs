@@ -69,6 +69,16 @@ pub fn machine_id_short() -> &'static str {
     &machine_id()[..12]
 }
 
+/// Hostname for use in standalone CLI flows (e.g. `orca install`) where
+/// `init()` may not have run. Mirrors `capture_hostname()` but is safe to
+/// call without the OnceLock being populated.
+pub fn cli_hostname_or_fallback() -> String {
+    if let Some(h) = HOSTNAME.get() {
+        return h.clone();
+    }
+    capture_hostname()
+}
+
 fn capture_hostname() -> String {
     let raw = std::process::Command::new("hostname")
         .output()

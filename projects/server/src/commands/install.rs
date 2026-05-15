@@ -159,6 +159,7 @@ pub fn cmd_install_report() -> InstallReport {
     step_install_binary(&home, &mut report);
     step_vault_dirs(&home, &mut report);
     step_pki_init(&home, &mut report);
+    step_cli_client_cert(&home, &mut report);
     step_claude_md(&home, &mut report);
     // Agents are served via the orca-local MCP server (list_agents / get_agent /
     // run_agent), not by a `~/.claude/agents` symlink. On hosts upgraded from
@@ -298,6 +299,33 @@ fn step_pki_init(home: &Path, report: &mut InstallReport) {
         }
         Ok(_) => report.ok(format!("pki: initialized at {}", pki_dir.display())),
         Err(e) => report.err(format!("pki: init failed: {e}")),
+    }
+}
+
+/// Issue this host's CLI client cert (CN=`cli.<host>`) signed by the local
+/// core CA. Used by the orca CLI to authenticate to the REST API over mTLS.
+/// Idempotent — skips if `client.cert.pem` already exists.
+fn step_cli_client_cert(home: &Path, report: &mut InstallReport) {
+    let pki_dir = home.join(APP_STATE_DIR).join(APP_PKI_DIR);
+    if pki::cli_client_cert_path(&pki_dir).exists()
+        && pki::cli_client_key_path(&pki_dir).exists()
+    {
+        report.skip(format!(
+            "pki/cli: client cert already present at {}",
+            pki::cli_client_cert_path(&pki_dir).display()
+        ));
+        return;
+    }
+    // host_identity::init() may not have run in the install CLI process; fall
+    // back to a hostname read so we don't panic. CN is cosmetic for routing —
+    // the trust gate is the signature, not the name.
+    let host_cn = crate::host_identity::cli_hostname_or_fallback();
+    match pki::issue_cli_client_cert(&pki_dir, &host_cn) {
+        Ok(_) => report.ok(format!(
+            "pki/cli: issued client cert cli.{host_cn} at {}",
+            pki::cli_client_cert_path(&pki_dir).display()
+        )),
+        Err(e) => report.err(format!("pki/cli: issue failed: {e}")),
     }
 }
 
