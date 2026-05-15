@@ -91,6 +91,7 @@ enum Command {
     /// With no flags: applies the latest update on the channel marker
     /// (~/.orca/channel). Use --channel to switch (also rewrites the marker).
     /// Use --check to preview (downloads + caches the .sha256 only).
+    /// Use --source to pull from a local `orca dev serve` instance instead of GitHub.
     Update {
         /// Channel override: stable | rc | beta | alpha. Falls back to the
         /// channel marker, then to "stable" if no marker is set.
@@ -106,6 +107,27 @@ enum Command {
         /// Clear the version pin. `orca update` resumes following the channel.
         #[arg(long, conflicts_with = "pin")]
         unpin: bool,
+        /// Set a dev-source URL (e.g. http://10.10.10.40:12009). Persists to
+        /// ~/.orca/dev-source; future `orca update` runs pull from there instead of GitHub.
+        #[arg(long, value_name = "URL", conflicts_with_all = ["clear_source", "channel", "pin", "unpin", "check"])]
+        source: Option<String>,
+        /// Clear the dev-source URL, reverting to GitHub-based updates.
+        #[arg(long, conflicts_with_all = ["source", "channel", "pin", "unpin", "check"])]
+        clear_source: bool,
+    },
+
+    /// Serve the locally-built linux binary for fleet hot-reload.
+    ///
+    /// Run this on the dev machine after `cargo build --release --target x86_64-unknown-linux-gnu`.
+    /// On each peer: `orca update --source http://<dev-ip>:12009`
+    /// The daemon auto-polls and restarts when a new build lands.
+    DevServe {
+        /// Path to the binary to serve (default: target/x86_64-unknown-linux-gnu/release/orca).
+        #[arg(long, value_name = "PATH")]
+        binary: Option<std::path::PathBuf>,
+        /// Port to listen on (default: 12009).
+        #[arg(long, default_value_t = 12009)]
+        port: u16,
     },
 
     /// Pod / mesh networking — bootstrap, ping, peer management.
@@ -290,8 +312,15 @@ async fn main() -> Result<()> {
             check,
             pin,
             unpin,
+            source,
+            clear_source,
         }) => {
-            if let Some(v) = pin {
+            if let Some(url) = source {
+                cmd::update::cmd_update_set_source(&url)?;
+                cmd::update::cmd_update("").await
+            } else if clear_source {
+                cmd::update::cmd_update_clear_source()
+            } else if let Some(v) = pin {
                 let pinned = cmd::update::cmd_update_pin(&v)?;
                 println!("[orca] pinned to {pinned}");
                 Ok(())
@@ -304,6 +333,9 @@ async fn main() -> Result<()> {
             } else {
                 cmd::update::cmd_update(channel.as_deref().unwrap_or("")).await
             }
+        }
+        Some(Command::DevServe { binary, port }) => {
+            cmd::dev_serve::cmd_dev_serve(binary.as_deref(), port).await
         }
         Some(Command::Pod { action }) => match action {
             PodAction::Init => {
