@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use orca::commands::{self as cmd, DaemonAction, HookAction, SpecAction, SystemAction};
 use orca::context::ProjectContext;
@@ -56,19 +56,6 @@ enum Command {
 
     /// Start MCP stdio server — exposes orca tools to Claude Code
     McpServe,
-
-    /// Run an allowlisted OrcaTool on a paired peer (or `local`) over mTLS.
-    Exec {
-        /// Target peer — peer_id, hostname, addr, or `local`/`localhost`.
-        #[arg(long)]
-        peer: String,
-        /// Fully-qualified tool name, e.g. `system.status`.
-        #[arg(long)]
-        tool: String,
-        /// JSON args payload for the tool. Defaults to `{}`.
-        #[arg(long)]
-        args: Option<String>,
-    },
 
     /// Start the orca web server (docs + services UI)
     Serve {
@@ -315,18 +302,6 @@ async fn main() -> Result<()> {
         }
         Some(Command::Run { agent, prompt }) => run_one_shot(&config, &agent, &prompt).await,
         Some(Command::McpServe) => mcp::serve(&config).await,
-        Some(Command::Exec { peer, tool, args }) => {
-            let payload: serde_json::Value = match args.as_deref() {
-                Some(s) => serde_json::from_str(s).context("invalid --args JSON")?,
-                None => serde_json::json!({}),
-            };
-            use std::sync::Arc;
-            let (_reg, ctx) = mcp::build_tool_registry(Arc::new(config));
-            let svc = orca_tools_def::pod::native_support::svc(&ctx)?;
-            let r = svc.exec(&peer, &tool, payload).await?;
-            println!("{}", serde_json::to_string_pretty(&r.result.0)?);
-            Ok(())
-        }
         Some(Command::Serve { dev, port }) => serve::run(dev, port, config.db_path.clone()).await,
         Some(Command::Daemon { action }) => match action {
             DaemonAction::Start { port } => serve::run_daemon(port, config.db_path.clone()).await,

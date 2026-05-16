@@ -359,18 +359,6 @@ pub struct PodCertStatusOutput {
     pub bootstrap: Option<CertInfo>,
 }
 
-// ── shared DTO for cross-module exec dispatch ───────────────────────────────
-
-/// Result envelope returned by [`PodService::exec`]. Internal type — the
-/// public surface lives in `crate::exec::ExecRunOutput`. JsonAny instead of
-/// raw Value keeps the trait wasm-safe.
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodExecDispatch {
-    pub peer: String,
-    pub tool: String,
-    pub result: crate::JsonAny,
-}
-
 // ── Native support: From impls, PodService trait, svc() helper ──────────────
 
 #[cfg(feature = "native")]
@@ -426,6 +414,10 @@ pub mod native_support {
         async fn dev_sync(&self) -> Result<PodDevSyncOutput>;
         async fn dev_enable_fanout(&self, peers: &[String]) -> Result<PodDevEnableOutput>;
         async fn dev_disable_fanout(&self, peers: &[String]) -> Result<PodDevDisableOutput>;
+        // Wire-level JSON-RPC dispatch — Value here is the on-wire payload,
+        // narrowed back to the tool's typed `OrcaToolDef::Output` inside
+        // [`crate::cli::exec_remote`] before reaching any user code.
+        #[allow(clippy::disallowed_types)]
         async fn exec(
             &self,
             peer: &str,
@@ -434,13 +426,26 @@ pub mod native_support {
         ) -> Result<PodExecDispatch>;
     }
 
+    /// Internal-only envelope for [`PodService::exec`]. JSON `Value` here is
+    /// the JSON-RPC wire payload — type-erased only because the peer-side
+    /// registry dispatches by name. Callers go through
+    /// [`crate::cli::exec_remote`], which deserializes into the typed
+    /// `OrcaToolDef::Output` immediately on receipt, so no opaque value ever
+    /// reaches a user-facing type.
+    #[allow(clippy::disallowed_types)]
+    pub struct PodExecDispatch {
+        pub peer: String,
+        pub tool: String,
+        pub result: serde_json::Value,
+    }
+
     pub fn svc(ctx: &ToolCtx) -> Result<Arc<dyn PodService>> {
         ctx.service::<Arc<dyn PodService>>()
     }
 }
 
 #[cfg(feature = "native")]
-pub use native_support::PodService;
+pub use native_support::{PodExecDispatch, PodService};
 
 // ── Tools ───────────────────────────────────────────────────────────────────
 

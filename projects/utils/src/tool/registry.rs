@@ -198,12 +198,12 @@ mod tests {
     use anyhow::Result;
     use async_trait::async_trait;
     use schemars::JsonSchema;
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize};
     use std::sync::Arc;
 
     // ── Test tool implementations ─────────────────────────────────────────────
 
-    #[derive(Deserialize, JsonSchema)]
+    #[derive(Deserialize, Serialize, JsonSchema)]
     struct EchoArgs {
         message: String,
     }
@@ -224,7 +224,7 @@ mod tests {
         }
     }
 
-    #[derive(Deserialize, JsonSchema)]
+    #[derive(Deserialize, Serialize, JsonSchema)]
     struct AddArgs {
         a: i64,
         b: i64,

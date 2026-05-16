@@ -2,13 +2,13 @@ use anyhow::Result;
 use async_trait::async_trait;
 use orca_utils::tool::{OrcaTool, OrcaToolDef, ToolCtx};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::mcp::specs;
 
 // ── list_rebuy_specs ──────────────────────────────────────────────────────────
 
-#[derive(Deserialize, JsonSchema)]
+#[derive(Deserialize, Serialize, JsonSchema)]
 pub struct ListRebuySpecsArgs {}
 
 pub struct ListRebuySpecs;
@@ -29,7 +29,7 @@ impl OrcaTool for ListRebuySpecs {
 }
 // ── get_rebuy_spec ────────────────────────────────────────────────────────────
 
-#[derive(Deserialize, JsonSchema)]
+#[derive(Deserialize, Serialize, JsonSchema)]
 pub struct GetRebuySpecArgs {
     /// Repo name (e.g. admin-api, apiv2, rebuyengine)
     pub repo: String,
@@ -54,7 +54,7 @@ impl OrcaTool for GetRebuySpec {
 }
 // ── get_rebuy_spec_public ─────────────────────────────────────────────────────
 
-#[derive(Deserialize, JsonSchema)]
+#[derive(Deserialize, Serialize, JsonSchema)]
 pub struct GetRebuySpecPublicArgs {
     /// Repo name (e.g. admin-api, apiv2)
     pub repo: String,
@@ -79,7 +79,7 @@ impl OrcaTool for GetRebuySpecPublic {
 }
 // ── get_rebuy_graphql_schema ──────────────────────────────────────────────────
 
-#[derive(Deserialize, JsonSchema)]
+#[derive(Deserialize, Serialize, JsonSchema)]
 pub struct GetRebuyGraphqlSchemaArgs {
     /// Repo name (e.g. admin-api)
     pub repo: String,
@@ -104,7 +104,7 @@ impl OrcaTool for GetRebuyGraphqlSchema {
 }
 // ── get_graphql_info ──────────────────────────────────────────────────────────
 
-#[derive(Deserialize, JsonSchema)]
+#[derive(Deserialize, Serialize, JsonSchema)]
 pub struct GetGraphqlInfoArgs {
     /// Repo name (e.g. admin-api)
     pub repo: String,

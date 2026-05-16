@@ -135,28 +135,38 @@ pub async fn dev_enable(host: &str) -> Result<PodDevEnableResult> {
     .await
 }
 
-/// Parameters for `pod/exec`. `tool` is a fully-qualified `<domain>.<verb>`
-/// name; `args` is the raw JSON args payload. The peer side checks the
-/// allowlist (`OrcaToolDef::REMOTE_OK`) before dispatching.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PodExecParams {
-    pub tool: String,
-    #[serde(default)]
-    pub args: serde_json::Value,
+// `pod/exec` is the wire-level JSON-RPC dispatch for cross-peer OrcaTool
+// invocation. The Value fields here are strictly the JSON-RPC wire payload —
+// the caller (`orca_tools_def::cli::exec_remote`) serializes the tool's
+// typed Args before this point and deserializes the typed Output immediately
+// after, so opaque JSON never reaches any user-facing type.
+mod exec_wire {
+    #![allow(clippy::disallowed_types)]
+    use serde::{Deserialize, Serialize};
+
+    /// Parameters for `pod/exec`. `tool` is a fully-qualified
+    /// `<domain>.<verb>` name; `args` is the on-wire JSON args payload.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct PodExecParams {
+        pub tool: String,
+        #[serde(default)]
+        pub args: serde_json::Value,
+    }
+
+    /// Wire result of `pod/exec` — `result` is the tool's serialized output.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct PodExecResult {
+        pub tool: String,
+        pub result: serde_json::Value,
+    }
 }
 
-/// Result of `pod/exec` — `result` is the tool's typed output as JSON.
-/// `tool` echoes the request for trace clarity. Errors surface as JSON-RPC
-/// errors at the wire level.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PodExecResult {
-    pub tool: String,
-    pub result: serde_json::Value,
-}
+pub use exec_wire::{PodExecParams, PodExecResult};
 
 /// Dial `host` and dispatch an allowlisted OrcaTool on the peer over mTLS.
 /// Identity is the mesh client cert; the peer additionally checks the tool's
 /// `REMOTE_OK` flag and 401s anything not in its allowlist.
+#[allow(clippy::disallowed_types)]
 pub async fn exec(host: &str, tool: &str, args: serde_json::Value) -> Result<PodExecResult> {
     call_typed(
         host,

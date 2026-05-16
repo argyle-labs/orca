@@ -568,7 +568,7 @@ impl PodService for ServerPod {
         Ok(PodExecDispatch {
             peer: peer.to_string(),
             tool: r.tool,
-            result: r.result.into(),
+            result: r.result,
         })
     }
 

@@ -69,6 +69,32 @@ pub fn build_root(mut root: Command) -> Command {
     root
 }
 
+/// Run an OrcaTool on a paired peer with end-to-end typed Args/Output. The
+/// JSON serialization happens internally — the call site, the trait API, and
+/// the rendered output all stay typed. JsonAny / Value never appear.
+///
+/// Peer dispatch goes through the `PodService::exec` wire method (mTLS over
+/// the existing pod channel). The remote allowlist (`REMOTE_OK = true` on
+/// the tool) is enforced on the peer side; calls to non-remote-ok tools
+/// surface here as an error.
+pub async fn exec_remote<T: crate::OrcaToolDef>(
+    peer: &str,
+    args: T::Args,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> Result<T::Output> {
+    // Wire-only serialization: Value lives entirely behind the
+    // PodService::exec trait boundary, never on a public type.
+    #[allow(clippy::disallowed_types)]
+    let args_value =
+        serde_json::to_value(&args).map_err(|e| anyhow::anyhow!("serialize args: {e}"))?;
+    let svc = crate::pod::native_support::svc(ctx)?;
+    let dispatch = svc.exec(peer, T::NAME, args_value).await?;
+    #[allow(clippy::disallowed_types)]
+    let out: T::Output = serde_json::from_value(dispatch.result)
+        .map_err(|e| anyhow::anyhow!("decode {} output from peer {peer}: {e}", T::NAME))?;
+    Ok(out)
+}
+
 /// Try to dispatch one parsed clap match through the inventory.
 /// Returns `Some(result)` if the (domain, verb) pair was found and ran;
 /// `None` if no match — caller should fall through to legacy dispatch.
@@ -132,7 +158,18 @@ macro_rules! register_op {
 
             fn build() -> clap::Command {
                 let cmd = clap::Command::new($verb).about($summary);
-                <<$tool as OrcaToolDef>::Args as clap::Args>::augment_args(cmd)
+                let cmd = <<$tool as OrcaToolDef>::Args as clap::Args>::augment_args(cmd);
+                // Cross-cutting: every tool gains `--peer <PEER>`. When set,
+                // we ship the typed Args to that peer over pod/exec and
+                // deserialize the typed Output back. REMOTE_OK gate is
+                // enforced on the peer side; remote_ok=false tools 401.
+                cmd.arg(
+                    clap::Arg::new("__peer")
+                        .long("peer")
+                        .value_name("PEER")
+                        .help("Run on a paired peer (peer_id, hostname, addr, or `local`) instead of this host")
+                        .required(false),
+                )
             }
 
             fn run(
@@ -141,9 +178,14 @@ macro_rules! register_op {
             ) -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = ::anyhow::Result<()>> + Send>> {
                 let m = m.clone();
                 Box::pin(async move {
+                    let peer = m.get_one::<String>("__peer").cloned();
                     let args = <<$tool as OrcaToolDef>::Args as clap::FromArgMatches>::from_arg_matches(&m)
                         .map_err(|e| ::anyhow::anyhow!("{e}"))?;
-                    let $out = <$tool as OrcaTool>::run(args, &ctx).await?;
+                    let $out: <$tool as OrcaToolDef>::Output = if let Some(peer) = peer {
+                        $crate::cli::exec_remote::<$tool>(&peer, args, &ctx).await?
+                    } else {
+                        <$tool as OrcaTool>::run(args, &ctx).await?
+                    };
                     { $render }
                     Ok(())
                 })

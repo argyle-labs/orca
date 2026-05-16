@@ -20,8 +20,8 @@ pub trait OrcaToolDef: Send + Sync + 'static {
     /// (uninstall, dev_disable, key rotation) MUST stay false.
     const REMOTE_OK: bool = false;
 
-    type Args: DeserializeOwned + JsonSchema + Send;
-    type Output: Serialize + JsonSchema + Send + 'static;
+    type Args: DeserializeOwned + Serialize + JsonSchema + Send;
+    type Output: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
 }
 
 /// Surface-reorg metadata. `NAME` is `<DOMAIN>.<VERB>` by convention; the
