@@ -73,6 +73,10 @@ thiserror = { workspace = true }
 sha2   = { workspace = true }
 rand   = { workspace = true }
 base64 = "0.22"
+# Argon2id for web-UI password hashing (auth.signup / signin / reset_password).
+argon2 = "0.5"
+# TTY echo-off password prompt for `orca admin reset-password`.
+rpassword = "7"
 
 # Bootstrap signing for pod offer / join-confirm frames.
 ed25519-dalek = { workspace = true }

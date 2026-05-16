@@ -1,4 +1,5 @@
 pub mod api;
+pub mod auth_routes;
 pub mod mcp_client;
 pub mod middleware;
 mod openapi;
@@ -380,6 +381,30 @@ async fn load_rest_tls(pki_dir: &std::path::Path) -> Result<RustlsConfig> {
 /// The SvelteKit `routes/scalar/+server.ts` is SSR-only and doesn't survive
 /// the prerendered static build embedded in the orca binary. This handler
 /// replaces it, serving the same Scalar HTML with the spec URL from ?url=.
+/// Open probe used by the browser TokenGate to decide between the
+/// one-click "create admin token" flow (loopback + zero tokens) and the
+/// "paste an existing token" flow. Identity is the connection peer IP —
+/// remote browsers always get `available=false`.
+#[derive(serde::Serialize)]
+struct BootstrapStatus {
+    available: bool,
+}
+
+async fn bootstrap_status_handler(
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
+) -> axum::Json<BootstrapStatus> {
+    let loopback = peer.ip().is_loopback();
+    let no_tokens = match db::open_default() {
+        Ok(conn) => db::api_tokens::count(&conn)
+            .map(|n| n == 0)
+            .unwrap_or(false),
+        Err(_) => false,
+    };
+    axum::Json(BootstrapStatus {
+        available: loopback && no_tokens,
+    })
+}
+
 async fn scalar_handler(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> axum::response::Response {
@@ -749,6 +774,20 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         // Scalar API reference viewer — served by Rust so it works in the
         // prerendered static build (SvelteKit SSR routes don't survive embedding).
         .route("/scalar", get(scalar_handler))
+        // Open probe: lets the browser TokenGate decide which UI to show
+        // (one-click bootstrap vs. paste an existing token).
+        .route("/api/auth/bootstrap", get(bootstrap_status_handler))
+        // Web-UI account auth (cookie sessions). All four are direct axum
+        // handlers — they need Set-Cookie which OrcaTool's fixed shape
+        // can't emit, and CLI/MCP don't need them.
+        .route("/api/auth/signup_status", get(auth_routes::signup_status))
+        .route("/api/auth/signup", axum::routing::post(auth_routes::signup))
+        .route("/api/auth/signin", axum::routing::post(auth_routes::signin))
+        .route(
+            "/api/auth/signout",
+            axum::routing::post(auth_routes::signout),
+        )
+        .route("/api/auth/me", get(auth_routes::me))
         .with_state(mcp_pool);
 
     // Mount the OrcaTool registry under /api/tools. Same registry as MCP stdio

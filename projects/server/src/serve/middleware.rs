@@ -155,12 +155,37 @@ pub struct AuthIdentity {
 pub enum AuthKind {
     /// Bearer token from `api_tokens`. Carries the token row id.
     Token { id: String, name: String },
+    /// Browser cookie session from `sessions`. Carries the session id + user id.
+    Session {
+        session_id: String,
+        user_id: String,
+        username: String,
+    },
     /// Loopback with zero tokens in DB — only `auth.token_create` is reachable.
     Bootstrap,
 }
 
+/// Name of the HTTP-only cookie carrying the web-UI session id.
+pub const SESSION_COOKIE: &str = "orca_session";
+
+/// 30 days, the sliding-expiry horizon refreshed on every authenticated request.
+pub const SESSION_TTL: chrono::Duration = chrono::Duration::days(30);
+
 /// Routes reachable without auth. Keep this list short.
-const AUTH_OPEN_PREFIXES: &[&str] = &["/api/health", "/api/openapi", "/scalar"];
+const AUTH_OPEN_PREFIXES: &[&str] = &[
+    "/api/health",
+    "/api/openapi",
+    "/scalar",
+    // Bootstrap probe: the TokenGate UI hits this before any token exists to
+    // decide which sign-in flow to show. Handler enforces loopback + zero-tokens
+    // itself, so leaving it open in middleware is safe.
+    "/api/auth/bootstrap",
+    // Sign-in / sign-up / sign-up-status: the browser hits these before it
+    // has a session cookie. Handlers validate credentials themselves.
+    "/api/auth/signin",
+    "/api/auth/signup",
+    "/api/auth/signup_status",
+];
 
 /// Tool name inside the `/api/tools/` namespace that the bootstrap window is
 /// allowed to invoke. Anything else requires a real token.
@@ -183,6 +208,54 @@ fn sha256_hex(input: &[u8]) -> String {
         s.push_str(&format!("{b:02x}"));
     }
     s
+}
+
+/// Extract a single named cookie value from a `Cookie:` header. Handles
+/// multiple cookies separated by `; ` per RFC 6265.
+fn extract_cookie<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
+    let header = req
+        .headers()
+        .get(axum::http::header::COOKIE)?
+        .to_str()
+        .ok()?;
+    for kv in header.split(';') {
+        let kv = kv.trim();
+        if let Some((k, v)) = kv.split_once('=')
+            && k == name
+        {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Resolve a cookie session id to an identity, sliding the expiry on the way.
+/// Returns `None` if the session is missing, revoked, or expired.
+fn try_session_auth(session_id: &str) -> Option<AuthIdentity> {
+    let conn = db::open_default().ok()?;
+    let row = db::sessions::find_active(&conn, session_id).ok()??;
+    let now = chrono::Utc::now();
+    if let Ok(when) = chrono::DateTime::parse_from_rfc3339(&row.expires_at)
+        && now >= when.with_timezone(&chrono::Utc)
+    {
+        return None;
+    }
+    // Slide: refresh last_used_at + expires_at on every authenticated request.
+    let new_expires = now + SESSION_TTL;
+    let _ = db::sessions::touch(
+        &conn,
+        &row.session_id,
+        &now.to_rfc3339(),
+        &new_expires.to_rfc3339(),
+    );
+    Some(AuthIdentity {
+        kind: AuthKind::Session {
+            session_id: row.session_id,
+            user_id: row.user_id,
+            username: row.username,
+        },
+        role: row.role,
+    })
 }
 
 fn extract_bearer(req: &Request) -> Option<&str> {
@@ -245,6 +318,15 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
 
     if !is_api_path(&path) || is_open_path(&path) {
+        return next.run(req).await;
+    }
+
+    // Cookie session — first authenticated branch, hot path for browsers.
+    if let Some(sid) = extract_cookie(&req, SESSION_COOKIE)
+        && let Some(ident) = try_session_auth(sid)
+    {
+        let mut req = req;
+        req.extensions_mut().insert(ident);
         return next.run(req).await;
     }
 

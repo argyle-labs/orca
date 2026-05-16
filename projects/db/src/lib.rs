@@ -31,9 +31,11 @@ pub mod proxmox;
 pub mod scheduler_runs;
 pub mod schema_databases;
 pub mod secrets;
+pub mod sessions;
 pub mod settings;
 pub mod startup;
 pub mod tool_mappings;
+pub mod users;
 
 use anyhow::{Context, Result};
 use orca_utils::config::{APP_DB_FILE, APP_STATE_DIR};

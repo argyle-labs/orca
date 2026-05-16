@@ -1,14 +1,63 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { authTokenSnapshot, setAuthToken } from '$lib/stores/authToken.svelte';
 
   let inputValue = $state('');
   let submitting = $state(false);
   let errorMsg = $state<string | null>(null);
+  // null = probing, true = first-time setup on loopback, false = paste flow
+  let bootstrap = $state<boolean | null>(null);
 
   const token = $derived(authTokenSnapshot());
   const open = $derived(token === null);
 
-  async function submit(e: SubmitEvent) {
+  onMount(async () => {
+    try {
+      const res = await fetch('/api/auth/bootstrap');
+      bootstrap = res.ok ? !!(await res.json()).available : false;
+    } catch {
+      bootstrap = false;
+    }
+  });
+
+  function defaultTokenName(): string {
+    const platform =
+      (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData
+        ?.platform ??
+      navigator.platform ??
+      'browser';
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[T:]/g, '-');
+    return `browser-${platform.toLowerCase()}-${stamp}`;
+  }
+
+  async function bootstrapMint() {
+    submitting = true;
+    errorMsg = null;
+    try {
+      const res = await fetch('/api/tools/auth.token_create', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: defaultTokenName(), role: 'admin' }),
+      });
+      if (!res.ok) {
+        errorMsg = `server responded ${res.status} — bootstrap may already be closed`;
+        bootstrap = false;
+        return;
+      }
+      const data = (await res.json()) as { token: string };
+      if (!data.token) {
+        errorMsg = 'response missing token';
+        return;
+      }
+      setAuthToken(data.token);
+    } catch (e) {
+      errorMsg = e instanceof Error ? e.message : String(e);
+    } finally {
+      submitting = false;
+    }
+  }
+
+  async function submitPaste(e: SubmitEvent) {
     e.preventDefault();
     errorMsg = null;
     const t = inputValue.trim();
@@ -18,14 +67,18 @@
     }
     submitting = true;
     try {
-      // Health is open; use it as a quick sanity probe that the token actually
-      // unlocks the API. We POST to a dummy authed endpoint via the WASM
-      // client to verify before persisting.
-      const res = await fetch('/api/health', {
-        headers: { authorization: `Bearer ${t}` },
+      // Verify against a real gated endpoint so a wrong token surfaces a 401.
+      const res = await fetch('/api/tools/auth.token_list', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${t}`,
+        },
+        body: '{}',
       });
       if (!res.ok) {
-        errorMsg = `server responded ${res.status}`;
+        errorMsg =
+          res.status === 401 ? 'token rejected by server' : `server responded ${res.status}`;
         return;
       }
       setAuthToken(t);
@@ -40,33 +93,50 @@
 
 {#if open}
   <div class="overlay" role="dialog" aria-modal="true" aria-labelledby="tg-title">
-    <form class="card" onsubmit={submit}>
-      <h2 id="tg-title">Sign in to orca</h2>
-      <p class="hint">
-        This host's REST API requires a bearer token. On the host itself run:
-      </p>
-      <pre>curl -sk -X POST https://localhost:12000/api/tools/auth.token_create \
-  -H 'content-type: application/json' \
-  -d '{`{"name":"my-browser","role":"admin"}`}'</pre>
-      <p class="hint">…and paste the returned <code>token</code> below.</p>
-      <label>
-        <span class="sr-only">Bearer token</span>
-        <input
-          type="password"
-          autocomplete="off"
-          spellcheck="false"
-          placeholder="orca_…"
-          bind:value={inputValue}
-          disabled={submitting}
-        />
-      </label>
-      {#if errorMsg}
-        <p class="error">{errorMsg}</p>
+    <div class="card">
+      {#if bootstrap === null}
+        <h2 id="tg-title">orca</h2>
+        <p class="hint">Checking authentication state…</p>
+      {:else if bootstrap}
+        <h2 id="tg-title">Welcome to orca</h2>
+        <p class="hint">
+          This host has no API tokens yet. Click below to mint an admin token for this
+          browser — the token is stored locally and used to authenticate every request.
+        </p>
+        <button onclick={bootstrapMint} disabled={submitting}>
+          {submitting ? 'Creating…' : 'Create admin token for this browser'}
+        </button>
+        {#if errorMsg}
+          <p class="error">{errorMsg}</p>
+        {/if}
+      {:else}
+        <h2 id="tg-title">Sign in to orca</h2>
+        <p class="hint">
+          This host's REST API requires a bearer token. On the host itself run:
+        </p>
+        <pre>orca auth token_create my-browser admin</pre>
+        <p class="hint">…and paste the returned <code>token</code> below.</p>
+        <form onsubmit={submitPaste}>
+          <label>
+            <span class="sr-only">Bearer token</span>
+            <input
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="orca_…"
+              bind:value={inputValue}
+              disabled={submitting}
+            />
+          </label>
+          {#if errorMsg}
+            <p class="error">{errorMsg}</p>
+          {/if}
+          <button type="submit" disabled={submitting || inputValue.length === 0}>
+            {submitting ? 'Verifying…' : 'Save token'}
+          </button>
+        </form>
       {/if}
-      <button type="submit" disabled={submitting || inputValue.length === 0}>
-        {submitting ? 'Verifying…' : 'Save token'}
-      </button>
-    </form>
+    </div>
   </div>
 {/if}
 
@@ -122,6 +192,11 @@
     border-radius: 4px;
     font-family: var(--font-mono);
     font-size: var(--text-sm);
+  }
+  form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
   }
   button {
     padding: 8px 14px;

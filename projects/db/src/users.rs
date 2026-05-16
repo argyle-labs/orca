@@ -1,0 +1,149 @@
+//! Web-UI account storage. Mesh-synced across every paired host.
+//!
+//! Username UNIQUE is case-insensitive — `username_lower` is the canonical key
+//! used for every lookup. `username` preserves the original case for display.
+//! Password hashes are argon2id (encoded form); this crate stores the string
+//! opaquely and leaves verification to the server crate.
+
+use anyhow::Result;
+use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct User {
+    pub id: String,
+    pub username: String,
+    pub role: String,
+    pub created_at: String,
+    pub password_updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserAuth {
+    pub id: String,
+    pub username: String,
+    pub role: String,
+    pub password_hash: String,
+}
+
+pub fn insert(
+    conn: &Connection,
+    id: &str,
+    username: &str,
+    password_hash: &str,
+    role: &str,
+    now: &str,
+) -> Result<User> {
+    let username_lower = username.to_lowercase();
+    conn.execute(
+        "INSERT INTO users
+            (id, username, username_lower, password_hash, role,
+             created_at, password_updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        params![id, username, username_lower, password_hash, role, now],
+    )?;
+    Ok(User {
+        id: id.to_string(),
+        username: username.to_string(),
+        role: role.to_string(),
+        created_at: now.to_string(),
+        password_updated_at: now.to_string(),
+    })
+}
+
+pub fn find_by_id(conn: &Connection, id: &str) -> Result<Option<User>> {
+    let r = conn
+        .query_row(
+            "SELECT id, username, role, created_at, password_updated_at
+             FROM users WHERE id = ?1",
+            params![id],
+            row_user,
+        )
+        .optional()?;
+    Ok(r)
+}
+
+/// Case-insensitive username lookup returning the auth-relevant fields,
+/// including `password_hash`. Used by `auth.signin` and `auth.reset_password`.
+pub fn find_auth_by_username(conn: &Connection, username: &str) -> Result<Option<UserAuth>> {
+    let key = username.to_lowercase();
+    let r = conn
+        .query_row(
+            "SELECT id, username, role, password_hash
+             FROM users WHERE username_lower = ?1",
+            params![key],
+            |r| {
+                Ok(UserAuth {
+                    id: r.get(0)?,
+                    username: r.get(1)?,
+                    role: r.get(2)?,
+                    password_hash: r.get(3)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(r)
+}
+
+pub fn set_password_hash(conn: &Connection, id: &str, new_hash: &str, now: &str) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE users SET password_hash = ?2, password_updated_at = ?3 WHERE id = ?1",
+        params![id, new_hash, now],
+    )?;
+    Ok(n > 0)
+}
+
+pub fn count(conn: &Connection) -> Result<i64> {
+    let n: i64 = conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?;
+    Ok(n)
+}
+
+pub fn list(conn: &Connection) -> Result<Vec<User>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, username, role, created_at, password_updated_at
+         FROM users ORDER BY created_at ASC",
+    )?;
+    let rows = stmt.query_map([], row_user)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn row_user(r: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
+    Ok(User {
+        id: r.get(0)?,
+        username: r.get(1)?,
+        role: r.get(2)?,
+        created_at: r.get(3)?,
+        password_updated_at: r.get(4)?,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::test_conn;
+
+    #[test]
+    fn case_insensitive_unique_and_lookup() {
+        let conn = test_conn();
+        insert(&conn, "u1", "Scott", "h1", "admin", "t0").unwrap();
+        // Same username different case — must reject.
+        assert!(insert(&conn, "u2", "scott", "h2", "member", "t0").is_err());
+
+        // Lookup by any case finds the same row.
+        let by_upper = find_auth_by_username(&conn, "SCOTT").unwrap().unwrap();
+        let by_mixed = find_auth_by_username(&conn, "ScOtT").unwrap().unwrap();
+        assert_eq!(by_upper.id, "u1");
+        assert_eq!(by_mixed.id, "u1");
+        // Display case is preserved.
+        assert_eq!(by_upper.username, "Scott");
+    }
+
+    #[test]
+    fn password_update_bumps_timestamp() {
+        let conn = test_conn();
+        insert(&conn, "u1", "alice", "h1", "member", "t0").unwrap();
+        assert!(set_password_hash(&conn, "u1", "h2", "t1").unwrap());
+        let u = find_by_id(&conn, "u1").unwrap().unwrap();
+        assert_eq!(u.password_updated_at, "t1");
+    }
+}

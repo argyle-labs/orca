@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use orca::commands::{self as cmd, DaemonAction, HookAction, SpecAction, SystemAction};
 use orca::context::ProjectContext;
@@ -149,6 +149,13 @@ enum Command {
         action: SystemAction,
     },
 
+    /// Local-only administrative commands. Never exposed over REST/MCP — these
+    /// require shell access to a paired host with DB access ("secure system").
+    Admin {
+        #[command(subcommand)]
+        action: AdminAction,
+    },
+
     /// Passthrough for `OrcaOp`-migrated domains — dispatched via inventory.
     /// Captures any first arg not matching a derive variant above; the
     /// `orca-tools-def::cli` registry routes it to the right tool.
@@ -208,6 +215,21 @@ enum PodAction {
         wipe_secrets: bool,
         #[arg(long)]
         wipe_all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum AdminAction {
+    /// Reset a user's password. Reads the new password from stdin (no plaintext
+    /// on argv). Requires shell access to this host's `orca` user — there is
+    /// deliberately no REST/MCP/peer surface for this command.
+    ResetPassword {
+        /// Username (case-insensitive). Must already exist in `users`.
+        username: String,
+        /// Revoke every active session for the user after the password change.
+        /// Default true.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        revoke_sessions: bool,
     },
 }
 
@@ -310,6 +332,7 @@ async fn main() -> Result<()> {
         Some(Command::Dev { port }) => cmd_dev(port, &config).await,
         Some(Command::Hook { action }) => cmd::cmd_hook(action),
         Some(Command::System { action }) => cmd::cmd_system(action),
+        Some(Command::Admin { action }) => cmd_admin(action).await,
         Some(Command::Op(argv)) => dispatch_op(argv, config).await,
         Some(Command::Update {
             channel,
@@ -653,4 +676,63 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
         Some(r) => r,
         None => anyhow::bail!("no OrcaOp matched"),
     }
+}
+
+async fn cmd_admin(action: AdminAction) -> Result<()> {
+    match action {
+        AdminAction::ResetPassword {
+            username,
+            revoke_sessions,
+        } => cmd_admin_reset_password(&username, revoke_sessions),
+    }
+}
+
+fn cmd_admin_reset_password(username: &str, revoke_sessions: bool) -> Result<()> {
+    use std::io::{IsTerminal, Read, Write};
+
+    let conn = db::open_default().context("open orca.db")?;
+    let row = db::users::find_auth_by_username(&conn, username)
+        .context("lookup user")?
+        .ok_or_else(|| anyhow::anyhow!("no such user: {username}"))?;
+
+    // Read new password from stdin. If stdin is a TTY, prompt + hide echo.
+    // Otherwise read a line (lets `echo newpw | orca admin reset-password u`
+    // work in scripts, with the obvious caveat that argv-history isn't where
+    // the secret lives in that flow).
+    let mut new_pw = String::new();
+    if std::io::stdin().is_terminal() {
+        eprint!("New password for {}: ", row.username);
+        std::io::stderr().flush().ok();
+        new_pw = rpassword::read_password().context("read password")?;
+        eprint!("Confirm: ");
+        std::io::stderr().flush().ok();
+        let confirm = rpassword::read_password().context("read confirmation")?;
+        if new_pw != confirm {
+            anyhow::bail!("passwords do not match");
+        }
+    } else {
+        std::io::stdin().read_to_string(&mut new_pw)?;
+        new_pw = new_pw.trim_end_matches(['\r', '\n']).to_string();
+    }
+    if new_pw.len() < 8 {
+        anyhow::bail!("password must be at least 8 characters");
+    }
+
+    let hash = orca::auth_password::hash_password(&new_pw).context("hash password")?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let updated =
+        db::users::set_password_hash(&conn, &row.id, &hash, &now).context("write new hash")?;
+    anyhow::ensure!(updated, "user row vanished mid-operation");
+
+    let revoked = if revoke_sessions {
+        db::sessions::revoke_all_for_user(&conn, &row.id, &now).context("revoke sessions")?
+    } else {
+        0
+    };
+
+    println!(
+        "password reset for {} (role={}, sessions_revoked={})",
+        row.username, row.role, revoked
+    );
+    Ok(())
 }
