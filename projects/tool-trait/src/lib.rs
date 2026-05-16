@@ -15,6 +15,10 @@ use serde::de::DeserializeOwned;
 pub trait OrcaToolDef: Send + Sync + 'static {
     const NAME: &'static str;
     const DESCRIPTION: &'static str;
+    /// Whether this tool may be invoked by a paired pod peer via `pod/exec`.
+    /// Default is **off** — opt in per-tool. Destructive or identity-tied ops
+    /// (uninstall, dev_disable, key rotation) MUST stay false.
+    const REMOTE_OK: bool = false;
 
     type Args: DeserializeOwned + JsonSchema + Send;
     type Output: Serialize + JsonSchema + Send + 'static;

@@ -23,6 +23,8 @@ use super::{OrcaTool, ToolCtx};
 pub trait ErasedTool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
+    /// Whether this tool may be invoked by a paired pod peer via `pod/exec`.
+    fn remote_ok(&self) -> bool;
     /// JSON Schema for this tool's Args — used for MCP tools/list, CLI flag generation,
     /// OpenAPI request body, and TS `.d.ts` emission.
     fn input_schema(&self) -> Value;
@@ -47,6 +49,10 @@ impl<T: OrcaTool> ErasedTool for ToolWrapper<T> {
 
     fn description(&self) -> &'static str {
         T::DESCRIPTION
+    }
+
+    fn remote_ok(&self) -> bool {
+        T::REMOTE_OK
     }
 
     fn input_schema(&self) -> Value {

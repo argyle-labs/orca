@@ -47,6 +47,7 @@ pub mod config;
 pub mod docker;
 pub mod docs;
 pub mod engine;
+pub mod exec;
 pub mod homeassistant;
 pub mod host;
 pub mod infra;

@@ -137,6 +137,7 @@ pub fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
     }
     let mut reg = ToolRegistry::new();
     register_all_tools(&mut reg);
+    crate::remote_ok::install(reg.remote_ok_names());
     (reg, ctx)
 }
 

@@ -32,5 +32,6 @@ pub mod mcp;
 pub mod periodic;
 pub mod plugin_host;
 pub mod pod;
+pub mod remote_ok;
 pub mod scheduler;
 pub mod serve;

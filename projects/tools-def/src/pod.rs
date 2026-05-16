@@ -359,10 +359,22 @@ pub struct PodCertStatusOutput {
     pub bootstrap: Option<CertInfo>,
 }
 
+// ── shared DTO for cross-module exec dispatch ───────────────────────────────
+
+/// Result envelope returned by [`PodService::exec`]. Internal type — the
+/// public surface lives in `crate::exec::ExecRunOutput`. JsonAny instead of
+/// raw Value keeps the trait wasm-safe.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodExecDispatch {
+    pub peer: String,
+    pub tool: String,
+    pub result: crate::JsonAny,
+}
+
 // ── Native support: From impls, PodService trait, svc() helper ──────────────
 
 #[cfg(feature = "native")]
-mod native_support {
+pub mod native_support {
     use super::*;
     use anyhow::Result;
     use async_trait::async_trait;
@@ -414,9 +426,15 @@ mod native_support {
         async fn dev_sync(&self) -> Result<PodDevSyncOutput>;
         async fn dev_enable_fanout(&self, peers: &[String]) -> Result<PodDevEnableOutput>;
         async fn dev_disable_fanout(&self, peers: &[String]) -> Result<PodDevDisableOutput>;
+        async fn exec(
+            &self,
+            peer: &str,
+            tool: &str,
+            args: serde_json::Value,
+        ) -> Result<PodExecDispatch>;
     }
 
-    pub(super) fn svc(ctx: &ToolCtx) -> Result<Arc<dyn PodService>> {
+    pub fn svc(ctx: &ToolCtx) -> Result<Arc<dyn PodService>> {
         ctx.service::<Arc<dyn PodService>>()
     }
 }
@@ -427,7 +445,7 @@ pub use native_support::PodService;
 // ── Tools ───────────────────────────────────────────────────────────────────
 
 /// List paired pod peers (mesh members).
-#[orca_tool(domain = "pod", verb = "list")]
+#[orca_tool(domain = "pod", verb = "list", remote_ok = true)]
 async fn pod_list(
     _args: EmptyArgs,
     _ctx: &orca_utils::tool::ToolCtx,

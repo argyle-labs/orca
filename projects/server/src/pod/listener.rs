@@ -19,8 +19,9 @@ use tokio_rustls::server::TlsStream;
 use tracing::warn;
 
 use super::{
-    POD_DEV_DISABLE_METHOD, POD_DEV_ENABLE_METHOD, POD_DEV_SYNC_METHOD, POD_PING_METHOD,
-    PodDevDisableResult, PodDevEnableResult, PodDevSyncResult, PodPingResult, db as pdb, pki_dir,
+    POD_DEV_DISABLE_METHOD, POD_DEV_ENABLE_METHOD, POD_DEV_SYNC_METHOD, POD_EXEC_METHOD,
+    POD_PING_METHOD, PodDevDisableResult, PodDevEnableResult, PodDevSyncResult, PodExecParams,
+    PodExecResult, PodPingResult, db as pdb, pki_dir,
 };
 
 const POD_NOTIFY_TRUST_METHOD: &str = "pod/notify-trust";
@@ -137,6 +138,10 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
             Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
         },
         POD_DEV_DISABLE_METHOD => match handle_dev_disable().await {
+            Ok(r) => value_response(id, &r),
+            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+        },
+        POD_EXEC_METHOD => match handle_exec(request).await {
             Ok(r) => value_response(id, &r),
             Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
         },
@@ -313,6 +318,65 @@ async fn handle_dev_disable() -> Result<PodDevDisableResult> {
             daemon_reclaimed: None,
         }),
     }
+}
+
+/// Handle `pod/exec`: dispatch an allowlisted local tool on this peer's
+/// behalf. The mesh mTLS chain already proves the caller is a paired peer;
+/// the additional `REMOTE_OK` allowlist check guards which tools that
+/// identity may invoke. We relay to our own loopback `/api/tools/<name>`
+/// rather than touching the registry directly so the relay benefits from
+/// the same auth/log/middleware stack as any other API call.
+async fn handle_exec(request: Request) -> Result<PodExecResult> {
+    let params: PodExecParams = match request.params {
+        Some(v) => serde_json::from_value(v).context("parse pod/exec params")?,
+        None => anyhow::bail!("pod/exec requires params"),
+    };
+
+    if !crate::remote_ok::is_allowed(&params.tool) {
+        anyhow::bail!(
+            "pod/exec refused: tool '{}' is not in the REMOTE_OK allowlist on this peer",
+            params.tool
+        );
+    }
+
+    let token = crate::loopback_token::get()
+        .map(|s| s.to_string())
+        .or_else(crate::loopback_token::read_from_disk)
+        .context("loopback token unavailable — daemon not fully started?")?;
+
+    let url = format!("https://127.0.0.1:12000/api/tools/{}", params.tool);
+
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .context("build loopback HTTP client")?;
+
+    let resp = client
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&params.args)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .with_context(|| format!("decode response body from {url}"))?;
+    if !status.is_success() {
+        anyhow::bail!(
+            "loopback tool '{}' returned HTTP {}: {}",
+            params.tool,
+            status.as_u16(),
+            body
+        );
+    }
+
+    Ok(PodExecResult {
+        tool: params.tool,
+        result: body,
+    })
 }
 
 fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {

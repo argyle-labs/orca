@@ -42,6 +42,7 @@ pub const POD_PING_METHOD: &str = "pod/ping";
 pub const POD_DEV_SYNC_METHOD: &str = "pod/dev-sync";
 pub const POD_DEV_ENABLE_METHOD: &str = "pod/dev-enable";
 pub const POD_DEV_DISABLE_METHOD: &str = "pod/dev-disable";
+pub const POD_EXEC_METHOD: &str = "pod/exec";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PodPingResult {
@@ -129,6 +130,41 @@ pub async fn dev_enable(host: &str) -> Result<PodDevEnableResult> {
         host,
         POD_DEV_ENABLE_METHOD,
         None::<()>,
+        Duration::from_secs(120),
+    )
+    .await
+}
+
+/// Parameters for `pod/exec`. `tool` is a fully-qualified `<domain>.<verb>`
+/// name; `args` is the raw JSON args payload. The peer side checks the
+/// allowlist (`OrcaToolDef::REMOTE_OK`) before dispatching.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PodExecParams {
+    pub tool: String,
+    #[serde(default)]
+    pub args: serde_json::Value,
+}
+
+/// Result of `pod/exec` — `result` is the tool's typed output as JSON.
+/// `tool` echoes the request for trace clarity. Errors surface as JSON-RPC
+/// errors at the wire level.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PodExecResult {
+    pub tool: String,
+    pub result: serde_json::Value,
+}
+
+/// Dial `host` and dispatch an allowlisted OrcaTool on the peer over mTLS.
+/// Identity is the mesh client cert; the peer additionally checks the tool's
+/// `REMOTE_OK` flag and 401s anything not in its allowlist.
+pub async fn exec(host: &str, tool: &str, args: serde_json::Value) -> Result<PodExecResult> {
+    call_typed(
+        host,
+        POD_EXEC_METHOD,
+        Some(PodExecParams {
+            tool: tool.to_string(),
+            args,
+        }),
         Duration::from_secs(120),
     )
     .await

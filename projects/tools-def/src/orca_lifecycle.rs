@@ -204,7 +204,7 @@ async fn system_doctor(
 }
 
 /// Probe GitHub releases for a newer version on `channel`. Does not apply anything.
-#[orca_tool(domain = "system", verb = "update-check")]
+#[orca_tool(domain = "system", verb = "update-check", remote_ok = true)]
 async fn system_update_check(
     args: SystemUpdateArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -213,7 +213,7 @@ async fn system_update_check(
 }
 
 /// [MUTATES STATE] Download + install the latest binary on `channel`. No-op if up to date.
-#[orca_tool(domain = "system", verb = "update-apply")]
+#[orca_tool(domain = "system", verb = "update-apply", remote_ok = true)]
 async fn system_update_apply(
     args: SystemUpdateArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -268,7 +268,7 @@ async fn system_runtime_spec(
 
 /// Clone the orca repo (if not present) and start cargo watch, parking the production daemon.
 /// Idempotent — safe to call if dev mode is already active.
-#[orca_tool(domain = "system", verb = "dev_enable")]
+#[orca_tool(domain = "system", verb = "dev_enable", remote_ok = true)]
 async fn system_dev_enable(
     _args: SystemDevEnableArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -287,7 +287,7 @@ async fn system_dev_disable(
 
 /// git pull in the dev checkout; cargo watch detects the changes and restarts automatically.
 /// No-op (returns already_up_to_date) if dev mode is not active.
-#[orca_tool(domain = "system", verb = "dev_sync")]
+#[orca_tool(domain = "system", verb = "dev_sync", remote_ok = true)]
 async fn system_dev_sync(
     _args: SystemDevSyncArgs,
     ctx: &orca_utils::tool::ToolCtx,

@@ -4,8 +4,8 @@ use orca_sdk::pki;
 use orca_tools_def::pod::{
     CertInfo, PodAcceptOutput, PodCertStatusOutput, PodDevDisableOutput, PodDevDisablePeerResult,
     PodDevEnableOutput, PodDevEnablePeerResult, PodDevSyncOutput, PodDevSyncPeerResult,
-    PodDiscoveryRowDto, PodJoinOutput, PodLeaveOutput, PodOfferOutput, PodPendingOfferDto,
-    PodPingOutput, PodService, PodTrustOutput,
+    PodDiscoveryRowDto, PodExecDispatch, PodJoinOutput, PodLeaveOutput, PodOfferOutput,
+    PodPendingOfferDto, PodPingOutput, PodService, PodTrustOutput,
 };
 use std::time::Instant;
 
@@ -532,6 +532,44 @@ impl PodService for ServerPod {
         }
 
         Ok(PodDevDisableOutput { results })
+    }
+
+    async fn exec(
+        &self,
+        peer: &str,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> Result<PodExecDispatch> {
+        // "local" / "localhost" → loopback round-trip via the same /api/tools
+        // path peers use. Lets the same code path validate the allowlist
+        // without leaving the host.
+        let is_local = matches!(peer.to_ascii_lowercase().as_str(), "local" | "localhost");
+
+        let addr = if is_local {
+            "127.0.0.1".to_string()
+        } else {
+            let conn = db::open_default()?;
+            let peers = pdb::list_peers(&conn)?;
+            drop(conn);
+            let want = peer.to_ascii_lowercase();
+            let row = peers
+                .into_iter()
+                .find(|p| {
+                    p.departed_at.is_none()
+                        && (p.peer_id.to_ascii_lowercase() == want
+                            || p.peer_hostname.to_ascii_lowercase() == want
+                            || p.peer_addr.to_ascii_lowercase() == want)
+                })
+                .with_context(|| format!("no active paired peer matches '{peer}'"))?;
+            row.peer_addr
+        };
+
+        let r = crate::pod::exec(&addr, tool, args).await?;
+        Ok(PodExecDispatch {
+            peer: peer.to_string(),
+            tool: r.tool,
+            result: r.result.into(),
+        })
     }
 
     fn cert_status(&self) -> Result<PodCertStatusOutput> {

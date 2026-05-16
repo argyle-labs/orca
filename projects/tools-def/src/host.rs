@@ -124,7 +124,7 @@ mod native_support {
 pub use native_support::HostRefreshHook;
 
 /// Local host snapshot: display name, machine_id, and every addressing channel.
-#[orca_tool(domain = "host", verb = "info")]
+#[orca_tool(domain = "host", verb = "info", remote_ok = true)]
 async fn host_info(
     _args: EmptyArgs,
     _ctx: &orca_utils::tool::ToolCtx,

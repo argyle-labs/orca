@@ -92,7 +92,7 @@ fn svc(
 }
 
 /// Snapshot of orca's installation: binary, ~/.claude/CLAUDE.md, vault dir, agents symlink, PKI init, MCP registration.
-#[orca_tool(domain = "system", verb = "status")]
+#[orca_tool(domain = "system", verb = "status", remote_ok = true)]
 async fn system_status(
     _args: SystemStatusArgs,
     ctx: &orca_utils::tool::ToolCtx,

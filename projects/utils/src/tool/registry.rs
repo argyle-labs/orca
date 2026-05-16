@@ -141,6 +141,16 @@ impl ToolRegistry {
         self.tools.iter().map(|t| t.name()).collect()
     }
 
+    /// Names of every registered tool whose `OrcaToolDef::REMOTE_OK` is true.
+    /// Used to populate the static allowlist for `pod/exec` dispatch.
+    pub fn remote_ok_names(&self) -> Vec<&'static str> {
+        self.tools
+            .iter()
+            .filter(|t| t.remote_ok())
+            .map(|t| t.name())
+            .collect()
+    }
+
     /// Execute a tool by name, accepting args as a JSON string or `key=value` pairs.
     ///
     /// Used by `orca exec <name> [--json '{...}' | key=value ...]`.

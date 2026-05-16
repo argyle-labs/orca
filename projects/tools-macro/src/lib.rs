@@ -44,6 +44,9 @@ struct ToolAttr {
     domain: LitStr,
     verb: LitStr,
     cli_mode: Option<Ident>,
+    /// Opt-in: `#[orca_tool(..., remote_ok = true)]` makes this tool callable
+    /// by paired pod peers via `pod/exec`. Default false.
+    remote_ok: bool,
 }
 
 impl Parse for ToolAttr {
@@ -52,6 +55,7 @@ impl Parse for ToolAttr {
         let mut domain = None;
         let mut verb = None;
         let mut cli_mode = None;
+        let mut remote_ok = false;
         for nv in items {
             let key = nv
                 .path
@@ -61,6 +65,19 @@ impl Parse for ToolAttr {
             match key.as_str() {
                 "domain" => domain = Some(lit_str(&nv.value)?),
                 "verb" => verb = Some(lit_str(&nv.value)?),
+                "remote_ok" => {
+                    remote_ok = match &nv.value {
+                        Expr::Lit(ExprLit {
+                            lit: Lit::Bool(b), ..
+                        }) => b.value,
+                        _ => {
+                            return Err(syn::Error::new_spanned(
+                                &nv.value,
+                                "remote_ok expects a bool literal",
+                            ));
+                        }
+                    };
+                }
                 "cli" => {
                     // accept either an ident (cli = manual) or a string ("manual")
                     cli_mode = Some(match &nv.value {
@@ -89,6 +106,7 @@ impl Parse for ToolAttr {
             verb: verb
                 .ok_or_else(|| syn::Error::new(Span::call_site(), "missing `verb = \"…\"`"))?,
             cli_mode,
+            remote_ok,
         })
     }
 }
@@ -160,6 +178,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     let domain = attr.domain;
     let verb = attr.verb;
     let tool_name = format!("{}.{}", domain.value(), verb.value());
+    let remote_ok_lit = attr.remote_ok;
 
     // Decide whether to render an args binding `let args = ...` (real ident)
     // or just discard (underscored).
@@ -246,6 +265,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
         impl ::orca_tools_def::OrcaToolDef for #zst_ident {
             const NAME: &'static str = #tool_name;
             const DESCRIPTION: &'static str = #description;
+            const REMOTE_OK: bool = #remote_ok_lit;
             type Args = #args_ty;
             type Output = #output_ty;
         }
