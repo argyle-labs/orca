@@ -749,10 +749,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         // Scalar API reference viewer — served by Rust so it works in the
         // prerendered static build (SvelteKit SSR routes don't survive embedding).
         .route("/scalar", get(scalar_handler))
-        .with_state(mcp_pool)
-        .layer(axum::middleware::from_fn(middleware::log_requests))
-        .layer(axum::middleware::from_fn(middleware::require_auth))
-        .layer(cors);
+        .with_state(mcp_pool);
 
     // Mount the OrcaTool registry under /api/tools. Same registry as MCP stdio
     // and CLI — one trait impl, three live surfaces (REST + MCP + CLI).
@@ -770,6 +767,12 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
             api
         }
     };
+
+    // Layers apply AFTER all nesting so /api/tools/* inherits auth + logging.
+    let api = api
+        .layer(axum::middleware::from_fn(middleware::log_requests))
+        .layer(axum::middleware::from_fn(middleware::require_auth))
+        .layer(cors);
 
     if dev {
         api.fallback(dev_proxy_handler)
