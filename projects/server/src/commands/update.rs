@@ -529,6 +529,40 @@ fn dev_pid_path() -> Option<std::path::PathBuf> {
     Some(dir.join("dev.pid"))
 }
 
+/// Find `cargo` for `dev_enable` — daemon-inherited PATH typically lacks
+/// `~/.cargo/bin` because rustup's env hook only runs in interactive shells.
+/// Try `$CARGO`, then `$CARGO_HOME/bin/cargo`, then `~/.cargo/bin/cargo`, then
+/// fall back to a PATH lookup.
+fn resolve_cargo_bin() -> Option<std::path::PathBuf> {
+    if let Some(v) = std::env::var_os("CARGO") {
+        let p = std::path::PathBuf::from(v);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    if let Some(home) = std::env::var_os("CARGO_HOME") {
+        let p = std::path::PathBuf::from(home).join("bin").join("cargo");
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let p = std::path::PathBuf::from(home).join(".cargo/bin/cargo");
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    // Final fallback: walk PATH ourselves (avoids an extra crate dep).
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join("cargo");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn read_dev_pid() -> Option<u32> {
     let raw = std::fs::read_to_string(dev_pid_path()?).ok()?;
     raw.trim().parse().ok()
@@ -618,9 +652,25 @@ pub fn cmd_dev_enable() -> Result<DevEnableResult> {
     // Spawn cargo watch in the background. Use a placeholder for ORCA_DEV_PARENT_PID;
     // we overwrite state.active_pid below with the actual cargo-watch PID so the
     // parked production daemon's reclaim-poll sees a live process.
-    let child = Command::new("cargo")
+    //
+    // The daemon's inherited PATH does not include `~/.cargo/bin` (rustup's
+    // env setup is shell-only), so resolve cargo explicitly and prepend
+    // cargo's bin dir to PATH for cargo-watch's child rustc/cargo invocations.
+    let cargo_bin = resolve_cargo_bin()
+        .context("locate cargo binary (install rustup and ensure ~/.cargo/bin is reachable)")?;
+    let cargo_dir = cargo_bin.parent().unwrap_or(std::path::Path::new("/"));
+    let augmented_path = match std::env::var_os("PATH") {
+        Some(p) => {
+            let mut paths = vec![cargo_dir.to_path_buf()];
+            paths.extend(std::env::split_paths(&p));
+            std::env::join_paths(paths).context("join PATH")?
+        }
+        None => cargo_dir.as_os_str().to_owned(),
+    };
+    let child = Command::new(&cargo_bin)
         .args(["watch", "-x", "run -- daemon start"])
         .current_dir(&repo)
+        .env("PATH", &augmented_path)
         .env("ORCA_DEV_PARENT_PID", "0") // overwritten below
         .spawn()?;
 
