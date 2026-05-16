@@ -13,7 +13,9 @@
     "test:run": "vitest run --reporter=verbose",
     "test:e2e": "playwright test",
     "format": "prettier --write src",
-    "format:check": "prettier --check src"
+    "format:check": "prettier --check src",
+    "openapi:emit": "cd ../.. && cargo run -p orca --quiet -- openapi emit > projects/frontend/openapi.json",
+    "gen:client": "npm run openapi:emit && openapi-ts"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.3",
@@ -30,13 +32,15 @@
     "codemirror": "^6.0.2",
     "graphql": "^16.13.2",
     "marked": "^15.0.12",
-    "svelte": "^5.55.5"
+    "svelte": "^5.55.5",
+    "zod": "^4.0.0"
   },
   "overrides": {
     "glob": "^13.0.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@hey-api/openapi-ts": "^0.97.0",
     "@playwright/test": "^1.49.0",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/svelte": "^5.3.1",

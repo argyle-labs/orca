@@ -14,39 +14,45 @@ use axum::{
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::serve::middleware::{AuthIdentity, AuthKind, SESSION_COOKIE, SESSION_TTL};
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct SignupRequest {
     pub username: String,
     pub password: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct SigninRequest {
     pub username: String,
     pub password: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct SessionOk {
     pub user_id: String,
     pub username: String,
     pub role: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct SignupStatus {
     pub allowed: bool,
     pub reason: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct MeOk {
     pub user_id: String,
     pub username: String,
     pub role: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct AuthErrorResponse {
+    pub error: String,
 }
 
 #[derive(Serialize)]
@@ -109,6 +115,15 @@ fn public_signup_enabled(conn: &db::Conn) -> bool {
         .unwrap_or(false)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/auth/signup_status",
+    operation_id = "authSignupStatus",
+    responses(
+        (status = 200, description = "Whether sign-up is currently allowed", body = SignupStatus),
+    ),
+    tag = "auth"
+)]
 pub async fn signup_status() -> Response {
     let conn = match db::open_default() {
         Ok(c) => c,
@@ -136,6 +151,19 @@ pub async fn signup_status() -> Response {
     .into_response()
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/signup",
+    operation_id = "authSignup",
+    request_body = SignupRequest,
+    responses(
+        (status = 200, description = "Account created; session cookie set", body = SessionOk),
+        (status = 400, description = "Bad request (validation)", body = AuthErrorResponse),
+        (status = 403, description = "Public sign-up disabled", body = AuthErrorResponse),
+        (status = 409, description = "Username already taken", body = AuthErrorResponse),
+    ),
+    tag = "auth"
+)]
 pub async fn signup(Json(req): Json<SignupRequest>) -> Response {
     let username = req.username.trim();
     if username.is_empty() {
@@ -187,6 +215,17 @@ pub async fn signup(Json(req): Json<SignupRequest>) -> Response {
     issue_session(&conn, &user_id, username, role)
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/signin",
+    operation_id = "authSignin",
+    request_body = SigninRequest,
+    responses(
+        (status = 200, description = "Signed in; session cookie set", body = SessionOk),
+        (status = 401, description = "Invalid credentials", body = AuthErrorResponse),
+    ),
+    tag = "auth"
+)]
 pub async fn signin(Json(req): Json<SigninRequest>) -> Response {
     let conn = match db::open_default() {
         Ok(c) => c,
@@ -228,6 +267,15 @@ fn issue_session(conn: &db::Conn, user_id: &str, username: &str, role: &str) -> 
     resp
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/signout",
+    operation_id = "authSignout",
+    responses(
+        (status = 200, description = "Session revoked; clear-cookie sent"),
+    ),
+    tag = "auth"
+)]
 pub async fn signout(req: Request) -> Response {
     // If the request had a valid session, revoke the row server-side.
     if let Some(ident) = req.extensions().get::<AuthIdentity>()
@@ -250,6 +298,16 @@ pub async fn signout(req: Request) -> Response {
     resp
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/auth/me",
+    operation_id = "authMe",
+    responses(
+        (status = 200, description = "Current identity", body = MeOk),
+        (status = 401, description = "Not signed in", body = AuthErrorResponse),
+    ),
+    tag = "auth"
+)]
 pub async fn me(req: Request) -> Response {
     match req.extensions().get::<AuthIdentity>() {
         Some(ident) => {

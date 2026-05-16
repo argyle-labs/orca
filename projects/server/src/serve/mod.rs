@@ -777,17 +777,9 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         // Open probe: lets the browser TokenGate decide which UI to show
         // (one-click bootstrap vs. paste an existing token).
         .route("/api/auth/bootstrap", get(bootstrap_status_handler))
-        // Web-UI account auth (cookie sessions). All four are direct axum
-        // handlers — they need Set-Cookie which OrcaTool's fixed shape
-        // can't emit, and CLI/MCP don't need them.
-        .route("/api/auth/signup_status", get(auth_routes::signup_status))
-        .route("/api/auth/signup", axum::routing::post(auth_routes::signup))
-        .route("/api/auth/signin", axum::routing::post(auth_routes::signin))
-        .route(
-            "/api/auth/signout",
-            axum::routing::post(auth_routes::signout),
-        )
-        .route("/api/auth/me", get(auth_routes::me))
+        // Web-UI account auth routes (signup_status / signup / signin /
+        // signout / me) are wired via `openapi_router()` so they appear in
+        // the emitted OpenAPI spec for the hey-api codegen pipeline.
         .with_state(mcp_pool);
 
     // Mount the OrcaTool registry under /api/tools. Same registry as MCP stdio

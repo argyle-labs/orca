@@ -1,0 +1,5753 @@
+{
+  "components": {
+    "schemas": {
+      "AuthErrorResponse": {
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
+      "ComponentStatus": {
+        "properties": {
+          "installed": {
+            "type": "boolean"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "installed",
+          "path"
+        ],
+        "type": "object"
+      },
+      "ConfluenceSearchQuery": {
+        "properties": {
+          "cql": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "CredInfo": {
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "synced": {
+            "type": "boolean"
+          },
+          "updatedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "synced",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "Ctx7Response": {
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "libraryId": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "topic": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "libraryId",
+          "title",
+          "content"
+        ],
+        "type": "object"
+      },
+      "DockerActionRequest": {
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "projectPath": {
+            "type": "string"
+          },
+          "service": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tail": {
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "projectPath",
+          "action"
+        ],
+        "type": "object"
+      },
+      "DockerActionResponse": {
+        "properties": {
+          "composeFile": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "output": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "output"
+        ],
+        "type": "object"
+      },
+      "DockerRuntimeAddRequest": {
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "socketPath": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "url": {
+            "description": "HTTP URL for web-based orchestrators (Dockge, Portainer)",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "DockerRuntimeInfo": {
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "socketPath": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "url": {
+            "description": "HTTP URL for web-based orchestrators (Dockge, Portainer)",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "DockerService": {
+        "properties": {
+          "health": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "ports": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "running": {
+            "type": "boolean"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "state",
+          "running",
+          "health",
+          "ports"
+        ],
+        "type": "object"
+      },
+      "DockerServicesResponse": {
+        "properties": {
+          "composeFile": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "services": {
+            "items": {
+              "$ref": "#/components/schemas/DockerService"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "services"
+        ],
+        "type": "object"
+      },
+      "ErrorResponse": {
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
+      "FsBrowseResponse": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/FsEntry"
+            },
+            "type": "array"
+          },
+          "parent": {
+            "description": "Parent directory path (absent when at root).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "Resolved absolute path that was listed.",
+            "type": "string"
+          },
+          "unrestrictedEnabled": {
+            "description": "Whether unrestricted browsing is currently enabled in orca.db.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "entries",
+          "unrestrictedEnabled"
+        ],
+        "type": "object"
+      },
+      "FsEntry": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "path"
+        ],
+        "type": "object"
+      },
+      "GraphQlEnum": {
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "values": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "values"
+        ],
+        "type": "object"
+      },
+      "GraphQlField": {
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "typeName": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "typeName",
+          "required"
+        ],
+        "type": "object"
+      },
+      "GraphQlInfo": {
+        "properties": {
+          "enums": {
+            "items": {
+              "$ref": "#/components/schemas/GraphQlEnum"
+            },
+            "type": "array"
+          },
+          "inputs": {
+            "items": {
+              "$ref": "#/components/schemas/GraphQlType"
+            },
+            "type": "array"
+          },
+          "mutations": {
+            "items": {
+              "$ref": "#/components/schemas/GraphQlOperation"
+            },
+            "type": "array"
+          },
+          "queries": {
+            "items": {
+              "$ref": "#/components/schemas/GraphQlOperation"
+            },
+            "type": "array"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "subscriptions": {
+            "items": {
+              "$ref": "#/components/schemas/GraphQlOperation"
+            },
+            "type": "array"
+          },
+          "types": {
+            "items": {
+              "$ref": "#/components/schemas/GraphQlType"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "repo",
+          "queries",
+          "mutations",
+          "subscriptions",
+          "types",
+          "inputs",
+          "enums"
+        ],
+        "type": "object"
+      },
+      "GraphQlOperation": {
+        "properties": {
+          "args": {
+            "items": {
+              "$ref": "#/components/schemas/GraphQlField"
+            },
+            "type": "array"
+          },
+          "deprecated": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "returns": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "args",
+          "returns",
+          "deprecated"
+        ],
+        "type": "object"
+      },
+      "GraphQlType": {
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/GraphQlField"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "fields"
+        ],
+        "type": "object"
+      },
+      "GraphqlDownloadQuery": {
+        "properties": {
+          "format": {
+            "description": "sdl (default) or introspection",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "GraphqlProxyRequest": {
+        "properties": {
+          "operationName": {
+            "description": "Operation name",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "GraphQL query or mutation document",
+            "type": "string"
+          },
+          "shop": {
+            "description": "Shopify shop domain (e.g. \"myshop.myshopify.com\" or \"myshop\")",
+            "type": "string"
+          },
+          "token": {
+            "description": "Shopify Admin API access token",
+            "type": "string"
+          },
+          "variables": {
+            "description": "Query variables"
+          }
+        },
+        "required": [
+          "shop",
+          "token",
+          "query"
+        ],
+        "type": "object"
+      },
+      "HealthCheck": {
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "output": {
+            "type": "string"
+          },
+          "tool": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "label",
+          "tool",
+          "output",
+          "ok"
+        ],
+        "type": "object"
+      },
+      "HealthResponse": {
+        "properties": {
+          "checks": {
+            "items": {
+              "$ref": "#/components/schemas/HealthCheck"
+            },
+            "type": "array"
+          },
+          "timestamp": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "timestamp",
+          "checks"
+        ],
+        "type": "object"
+      },
+      "JiraIssuesQuery": {
+        "properties": {
+          "jql": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "maxResults": {
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "LlmProviderAddRequest": {
+        "properties": {
+          "kind": {
+            "description": "\"lmstudio\" | \"ollama\"",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "url"
+        ],
+        "type": "object"
+      },
+      "LlmProviderInfo": {
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "kind": {
+            "description": "\"lmstudio\" | \"ollama\"",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "reachable": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "url",
+          "kind",
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "LogProject": {
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          },
+          "services": {
+            "items": {
+              "$ref": "#/components/schemas/LogService"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "project",
+          "path",
+          "services"
+        ],
+        "type": "object"
+      },
+      "LogService": {
+        "properties": {
+          "health": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "ports": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "running": {
+            "type": "boolean"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "state",
+          "running",
+          "health",
+          "ports"
+        ],
+        "type": "object"
+      },
+      "LogServicesResponse": {
+        "properties": {
+          "projects": {
+            "items": {
+              "$ref": "#/components/schemas/LogProject"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "projects"
+        ],
+        "type": "object"
+      },
+      "LogsResponse": {
+        "properties": {
+          "output": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "output"
+        ],
+        "type": "object"
+      },
+      "MapRequest": {
+        "properties": {
+          "external_tool": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "orca_tool": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "orca_tool",
+          "external_tool"
+        ],
+        "type": "object"
+      },
+      "MappingRow": {
+        "properties": {
+          "confidence": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "external_tool": {
+            "type": "string"
+          },
+          "match_type": {
+            "type": "string"
+          },
+          "mcp_name": {
+            "type": "string"
+          },
+          "orca_tool": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "orca_tool",
+          "mcp_name",
+          "external_tool",
+          "match_type",
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "McpContent": {
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "text"
+        ],
+        "type": "object"
+      },
+      "McpRunRequest": {
+        "properties": {
+          "arguments": {},
+          "name": {
+            "type": "string"
+          },
+          "server": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server",
+          "name"
+        ],
+        "type": "object"
+      },
+      "McpRunResponse": {
+        "properties": {
+          "content": {
+            "items": {
+              "$ref": "#/components/schemas/McpContent"
+            },
+            "type": "array"
+          },
+          "isError": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "McpServerAddRequest": {
+        "properties": {
+          "args": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "command": {
+            "type": "string"
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "command"
+        ],
+        "type": "object"
+      },
+      "McpServerInfo": {
+        "properties": {
+          "args": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "command": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "command",
+          "args",
+          "env",
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "McpToolInfo": {
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "inputSchema": {},
+          "name": {
+            "type": "string"
+          },
+          "server": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server",
+          "name",
+          "description",
+          "inputSchema"
+        ],
+        "type": "object"
+      },
+      "MeOk": {
+        "properties": {
+          "role": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "username",
+          "role"
+        ],
+        "type": "object"
+      },
+      "MpcStatus": {
+        "properties": {
+          "registered": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "registered"
+        ],
+        "type": "object"
+      },
+      "NodeType": {
+        "enum": [
+          "file",
+          "dir"
+        ],
+        "type": "string"
+      },
+      "OkResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "type": "object"
+      },
+      "PluginDataEntry": {
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          },
+          "value": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "key",
+          "value",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "PluginInfo": {
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "mcpCommand": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mode": {
+            "type": "string"
+          },
+          "navLinks": {
+            "items": {},
+            "type": "array"
+          },
+          "tier": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "tier",
+          "description",
+          "mode",
+          "enabled",
+          "navLinks"
+        ],
+        "type": "object"
+      },
+      "PluginInstallRequest": {
+        "properties": {
+          "instanceId": {
+            "description": "Optional instance id override — allows multiple instances of the same\nplugin template with separate credentials (e.g. \"atlassian@infra\").",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "manifest": {
+            "description": "Absolute or ~/ path to the orca-plugin.toml on the server's filesystem.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "manifest"
+        ],
+        "type": "object"
+      },
+      "PluginToolCallRequest": {
+        "properties": {
+          "arguments": {
+            "description": "Arbitrary JSON the plugin tool expects. Validated by the plugin, not\nby the host — the host is a transparent forwarder."
+          },
+          "timeoutSecs": {
+            "description": "Optional override (seconds). Defaults to `DEFAULT_CALL_TIMEOUT`.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "arguments"
+        ],
+        "type": "object"
+      },
+      "PluginToolCallResponse": {
+        "properties": {
+          "result": {
+            "description": "Opaque payload returned by the plugin tool."
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object"
+      },
+      "PluginToolInfo": {
+        "properties": {
+          "connected": {
+            "description": "Whether the owning plugin is currently connected to the host.",
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string"
+          },
+          "fqName": {
+            "type": "string"
+          },
+          "inputSchema": {
+            "description": "JSON Schema for the tool's input arguments. Returned as a parsed\nobject so the MCP layer can pass it straight through."
+          },
+          "name": {
+            "type": "string"
+          },
+          "pluginId": {
+            "type": "string"
+          },
+          "sensitivity": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pluginId",
+          "name",
+          "fqName",
+          "description",
+          "inputSchema",
+          "sensitivity",
+          "connected"
+        ],
+        "type": "object"
+      },
+      "PrQuery": {
+        "properties": {
+          "slug": {
+            "type": "string"
+          },
+          "workspace": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace",
+          "slug"
+        ],
+        "type": "object"
+      },
+      "ProgressRequest": {
+        "properties": {
+          "page": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "page"
+        ],
+        "type": "object"
+      },
+      "ProgressResponse": {
+        "properties": {
+          "page": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "RepoInfo": {
+        "properties": {
+          "remote": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "workspace": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace",
+          "slug",
+          "remote"
+        ],
+        "type": "object"
+      },
+      "SchemaColumn": {
+        "properties": {
+          "extra": {
+            "type": "string"
+          },
+          "fk_target": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "nullable": {
+            "type": "boolean"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "type"
+        ],
+        "type": "object"
+      },
+      "SchemaDbAddRequest": {
+        "properties": {
+          "container": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "database": {
+            "type": "string"
+          },
+          "domainsFile": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "driver": {
+            "description": "mysql | postgres | sqlite",
+            "type": "string"
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          },
+          "port": {
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "database"
+        ],
+        "type": "object"
+      },
+      "SchemaDbInfo": {
+        "properties": {
+          "container": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "database": {
+            "type": "string"
+          },
+          "domainsFile": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "driver": {
+            "description": "mysql | postgres | sqlite",
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "port": {
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "driver",
+          "user",
+          "database",
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "SchemaDomain": {
+        "properties": {
+          "color": {
+            "type": "string"
+          },
+          "group": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "subgroup": {
+            "type": "string"
+          },
+          "tables": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "color",
+          "tables"
+        ],
+        "type": "object"
+      },
+      "SchemaForeignKey": {
+        "properties": {
+          "column": {
+            "type": "string"
+          },
+          "refColumn": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "refTable": {
+            "type": "string"
+          },
+          "table": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "table",
+          "column",
+          "refTable"
+        ],
+        "type": "object"
+      },
+      "SchemaResponse": {
+        "properties": {
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "showTabs": {
+            "type": "boolean"
+          },
+          "tabs": {
+            "items": {
+              "$ref": "#/components/schemas/SchemaTab"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "tabs",
+          "showTabs"
+        ],
+        "type": "object"
+      },
+      "SchemaTab": {
+        "properties": {
+          "columns": {
+            "additionalProperties": {
+              "items": {
+                "$ref": "#/components/schemas/SchemaColumn"
+              },
+              "type": "array"
+            },
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "domains": {
+            "items": {
+              "$ref": "#/components/schemas/SchemaDomain"
+            },
+            "type": "array"
+          },
+          "foreignKeys": {
+            "items": {
+              "$ref": "#/components/schemas/SchemaForeignKey"
+            },
+            "type": "array"
+          },
+          "tables": {
+            "items": {
+              "$ref": "#/components/schemas/SchemaTableInfo"
+            },
+            "type": "array"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "tables",
+          "columns",
+          "foreignKeys",
+          "domains"
+        ],
+        "type": "object"
+      },
+      "SchemaTableInfo": {
+        "properties": {
+          "comment": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "comment"
+        ],
+        "type": "object"
+      },
+      "SearchResult": {
+        "properties": {
+          "matches": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "path": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "root",
+          "path",
+          "matches"
+        ],
+        "type": "object"
+      },
+      "SessionOk": {
+        "properties": {
+          "role": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "username",
+          "role"
+        ],
+        "type": "object"
+      },
+      "SetCredRequest": {
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "value"
+        ],
+        "type": "object"
+      },
+      "SetPluginDataRequest": {
+        "properties": {
+          "value": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "type": "object"
+      },
+      "SigninRequest": {
+        "properties": {
+          "password": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "type": "object"
+      },
+      "SignupRequest": {
+        "properties": {
+          "password": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "type": "object"
+      },
+      "SignupStatus": {
+        "properties": {
+          "allowed": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "allowed",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "SpecDownloadQuery": {
+        "properties": {
+          "format": {
+            "description": "json (default) or yaml",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "SpecFiles": {
+        "properties": {
+          "full": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "public": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "SpecInfo": {
+        "properties": {
+          "cachedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "pathCount": {
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "sourceMcp": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "SpecMeta": {
+        "properties": {
+          "baseUrl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "capturedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "files": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SpecFiles"
+              }
+            ]
+          },
+          "notes": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pathCount": {
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "project": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "project",
+          "source"
+        ],
+        "type": "object"
+      },
+      "SpecQuery": {
+        "properties": {
+          "download": {
+            "description": "true adds Content-Disposition: attachment header",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "format": {
+            "description": "\"json\" (default) or \"yaml\"",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "SpecRegisterRequest": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "url"
+        ],
+        "type": "object"
+      },
+      "SystemActionRequest": {
+        "properties": {
+          "action": {
+            "description": "\"install\" or \"uninstall\"",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "SystemActionResponse": {
+        "properties": {
+          "done": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "skipped": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "ok",
+          "done",
+          "skipped",
+          "errors"
+        ],
+        "type": "object"
+      },
+      "SystemDevSyncResponse": {
+        "properties": {
+          "already_up_to_date": {
+            "type": "boolean"
+          },
+          "commits_pulled": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "commits_pulled",
+          "already_up_to_date",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "SystemStatusResponse": {
+        "properties": {
+          "agents": {
+            "$ref": "#/components/schemas/ComponentStatus"
+          },
+          "binary": {
+            "$ref": "#/components/schemas/ComponentStatus"
+          },
+          "claude_md": {
+            "$ref": "#/components/schemas/ComponentStatus"
+          },
+          "mcp": {
+            "$ref": "#/components/schemas/MpcStatus"
+          },
+          "vault": {
+            "$ref": "#/components/schemas/ComponentStatus"
+          }
+        },
+        "required": [
+          "binary",
+          "claude_md",
+          "vault",
+          "agents",
+          "mcp"
+        ],
+        "type": "object"
+      },
+      "TestRunQuery": {
+        "properties": {
+          "suite": {
+            "description": "Which suite to run: rust | frontend | e2e | all",
+            "type": "string"
+          }
+        },
+        "required": [
+          "suite"
+        ],
+        "type": "object"
+      },
+      "TestRunResponse": {
+        "properties": {
+          "duration_ms": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "exit_code": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "failed": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output": {
+            "type": "string"
+          },
+          "passed": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "suite": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "suite",
+          "output",
+          "exit_code",
+          "passed",
+          "failed",
+          "duration_ms"
+        ],
+        "type": "object"
+      },
+      "TransitionBody": {
+        "properties": {
+          "transitionId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "transitionId"
+        ],
+        "type": "object"
+      },
+      "TreeNode": {
+        "properties": {
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/TreeNode"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "order": {
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/NodeType"
+          }
+        },
+        "required": [
+          "name",
+          "path",
+          "type"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "orca local dev tool — docs, services, schema, MCP proxy",
+    "license": {
+      "name": ""
+    },
+    "title": "orca API",
+    "version": "0.0.3-rc.34"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/auth/me": {
+      "get": {
+        "operationId": "authMe",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeOk"
+                }
+              }
+            },
+            "description": "Current identity"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthErrorResponse"
+                }
+              }
+            },
+            "description": "Not signed in"
+          }
+        },
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/signin": {
+      "post": {
+        "operationId": "authSignin",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SigninRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionOk"
+                }
+              }
+            },
+            "description": "Signed in; session cookie set"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid credentials"
+          }
+        },
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/signout": {
+      "post": {
+        "operationId": "authSignout",
+        "responses": {
+          "200": {
+            "description": "Session revoked; clear-cookie sent"
+          }
+        },
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/signup": {
+      "post": {
+        "operationId": "authSignup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionOk"
+                }
+              }
+            },
+            "description": "Account created; session cookie set"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthErrorResponse"
+                }
+              }
+            },
+            "description": "Bad request (validation)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthErrorResponse"
+                }
+              }
+            },
+            "description": "Public sign-up disabled"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthErrorResponse"
+                }
+              }
+            },
+            "description": "Username already taken"
+          }
+        },
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/signup_status": {
+      "get": {
+        "operationId": "authSignupStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignupStatus"
+                }
+              }
+            },
+            "description": "Whether sign-up is currently allowed"
+          }
+        },
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/bitbucket/prs": {
+      "get": {
+        "operationId": "listBitbucketPRs",
+        "parameters": [
+          {
+            "description": "Bitbucket workspace slug",
+            "in": "query",
+            "name": "workspace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repository slug",
+            "in": "query",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Open pull requests from Bitbucket API (pagelen=50)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Credential or upstream error"
+          }
+        },
+        "summary": "GET /api/bitbucket/prs?workspace=X&slug=Y\nProxies to the Bitbucket REST API using stored Atlassian credentials.",
+        "tags": [
+          "bitbucket"
+        ]
+      }
+    },
+    "/api/bitbucket/repos": {
+      "get": {
+        "operationId": "listBitbucketRepos",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RepoInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Bitbucket repos found under REBUY_ROOT"
+          }
+        },
+        "summary": "GET /api/bitbucket/repos\nScans REBUY_ROOT (or ~/code/rebuy) for git dirs with Bitbucket remotes.",
+        "tags": [
+          "bitbucket"
+        ]
+      }
+    },
+    "/api/confluence/search": {
+      "get": {
+        "operationId": "searchConfluence",
+        "parameters": [
+          {
+            "description": "CQL query (default: type = page ORDER BY lastModified DESC)",
+            "in": "query",
+            "name": "cql",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Max results (default: 25)",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Confluence search results"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "confluence"
+        ]
+      }
+    },
+    "/api/ctx7": {
+      "get": {
+        "operationId": "getLibraryDocs",
+        "parameters": [
+          {
+            "description": "Library name to look up (npm package, crate, etc.)",
+            "in": "query",
+            "name": "q",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Specific topic or function to focus on",
+            "in": "query",
+            "name": "topic",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ctx7Response"
+                }
+              }
+            },
+            "description": "Library documentation"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing query"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Library not found"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "context7 not available"
+          }
+        },
+        "tags": [
+          "library"
+        ]
+      }
+    },
+    "/api/doc": {
+      "get": {
+        "operationId": "getDoc",
+        "parameters": [
+          {
+            "description": "Vault root name (orca/rebuy/docs)",
+            "in": "query",
+            "name": "root",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "File path relative to root",
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Pass `llm` to strip decorative markdown (bold, italic, images, HRs) and collapse whitespace — reduces token usage when the content will be read by a language model",
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {}
+            },
+            "description": "Document content as plain text"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unknown root"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "File not found"
+          }
+        },
+        "tags": [
+          "docs"
+        ]
+      }
+    },
+    "/api/docker/action": {
+      "post": {
+        "operationId": "runDockerAction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DockerActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DockerActionResponse"
+                }
+              }
+            },
+            "description": "Action output"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unknown action"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "No compose file"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Docker error"
+          }
+        },
+        "tags": [
+          "docker"
+        ]
+      }
+    },
+    "/api/docker/engine": {
+      "get": {
+        "operationId": "getDockerEngine",
+        "responses": {
+          "200": {
+            "description": "Docker engine status"
+          }
+        },
+        "tags": [
+          "docker"
+        ]
+      }
+    },
+    "/api/docker/engine/start": {
+      "post": {
+        "operationId": "startDockerEngine",
+        "responses": {
+          "200": {
+            "description": "Engine start output"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Failed to start engine"
+          }
+        },
+        "tags": [
+          "docker"
+        ]
+      }
+    },
+    "/api/docker/runtimes": {
+      "get": {
+        "operationId": "listDockerRuntimes",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DockerRuntimeInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "All registered Docker runtimes"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "docker"
+        ]
+      },
+      "post": {
+        "operationId": "addDockerRuntime",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DockerRuntimeAddRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "docker"
+        ]
+      }
+    },
+    "/api/docker/runtimes/{name}": {
+      "delete": {
+        "operationId": "removeDockerRuntime",
+        "parameters": [
+          {
+            "description": "Runtime name",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "docker"
+        ]
+      }
+    },
+    "/api/docker/services": {
+      "get": {
+        "operationId": "getDockerServices",
+        "parameters": [
+          {
+            "description": "Absolute path to the Docker Compose project directory",
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DockerServicesResponse"
+                }
+              }
+            },
+            "description": "Compose file path and service list"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Docker error"
+          }
+        },
+        "tags": [
+          "docker"
+        ]
+      }
+    },
+    "/api/engines": {
+      "get": {
+        "operationId": "listEngines",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/LlmProviderInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Registered LLM backends"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "engines"
+        ]
+      },
+      "post": {
+        "operationId": "addEngine",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LlmProviderAddRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "engines"
+        ]
+      }
+    },
+    "/api/engines/{name}": {
+      "delete": {
+        "operationId": "removeEngine",
+        "parameters": [
+          {
+            "description": "Engine name",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "engines"
+        ]
+      }
+    },
+    "/api/engines/{name}/disable": {
+      "patch": {
+        "operationId": "disableEngine",
+        "parameters": [
+          {
+            "description": "Engine name",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "engines"
+        ]
+      }
+    },
+    "/api/engines/{name}/enable": {
+      "patch": {
+        "operationId": "enableEngine",
+        "parameters": [
+          {
+            "description": "Engine name",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "engines"
+        ]
+      }
+    },
+    "/api/fs/browse": {
+      "get": {
+        "operationId": "fsBrowse",
+        "parameters": [
+          {
+            "description": "Directory to list (supports ~/). Defaults to home directory.",
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Request browsing outside home directory (requires fs.allow_unrestricted = true in orca.db).",
+            "in": "query",
+            "name": "allowAll",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FsBrowseResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "fs"
+        ]
+      }
+    },
+    "/api/github/orgs": {
+      "get": {
+        "operationId": "listGithubOrgs",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Organizations for the authenticated user"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "github"
+        ]
+      }
+    },
+    "/api/github/repos": {
+      "get": {
+        "operationId": "listGithubRepos",
+        "parameters": [
+          {
+            "description": "Filter type: all | owner | public | private | member",
+            "in": "query",
+            "name": "type",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Sort by: created | updated | pushed | full_name",
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Results per page (max 100, default 30)",
+            "in": "query",
+            "name": "per_page",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "List of repos for the authenticated user"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "github"
+        ]
+      }
+    },
+    "/api/github/repos/{owner}/{repo}/issues": {
+      "get": {
+        "operationId": "listGithubIssues",
+        "parameters": [
+          {
+            "description": "Repository owner",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repository name",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Issue state: open | closed | all",
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Results per page",
+            "in": "query",
+            "name": "per_page",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Issues (PRs excluded)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "github"
+        ]
+      }
+    },
+    "/api/github/repos/{owner}/{repo}/pulls": {
+      "get": {
+        "operationId": "listGithubPRs",
+        "parameters": [
+          {
+            "description": "Repository owner",
+            "in": "path",
+            "name": "owner",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repository name",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "PR state: open | closed | all",
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Results per page",
+            "in": "query",
+            "name": "per_page",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Pull requests"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "github"
+        ]
+      }
+    },
+    "/api/github/user": {
+      "get": {
+        "operationId": "getGithubUser",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Authenticated GitHub user"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "github"
+        ]
+      }
+    },
+    "/api/health": {
+      "get": {
+        "operationId": "ping",
+        "responses": {
+          "200": {
+            "description": "Server is alive"
+          }
+        },
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/api/jira/issues": {
+      "get": {
+        "operationId": "listJiraIssues",
+        "parameters": [
+          {
+            "description": "JQL query (default: assignee = currentUser() ORDER BY updated DESC)",
+            "in": "query",
+            "name": "jql",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Max results to return (default: 50)",
+            "in": "query",
+            "name": "maxResults",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Jira search result"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Config or credential error"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Upstream Jira API error"
+          }
+        },
+        "tags": [
+          "jira"
+        ]
+      }
+    },
+    "/api/jira/issues/{key}/transitions": {
+      "get": {
+        "operationId": "getJiraTransitions",
+        "parameters": [
+          {
+            "description": "Jira issue key (e.g. PROJ-123)",
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Available transitions"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "jira"
+        ]
+      },
+      "post": {
+        "operationId": "transitionJiraIssue",
+        "parameters": [
+          {
+            "description": "Jira issue key",
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransitionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "jira"
+        ]
+      }
+    },
+    "/api/learning/progress": {
+      "get": {
+        "operationId": "getLearningProgress",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProgressResponse"
+                }
+              }
+            },
+            "description": "Last visited learning page"
+          }
+        },
+        "tags": [
+          "learning"
+        ]
+      },
+      "post": {
+        "operationId": "saveLearningProgress",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProgressRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Progress saved"
+          }
+        },
+        "tags": [
+          "learning"
+        ]
+      }
+    },
+    "/api/logs": {
+      "get": {
+        "operationId": "getLogs",
+        "parameters": [
+          {
+            "description": "Absolute path to the project directory",
+            "in": "query",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Specific service name (omit for all)",
+            "in": "query",
+            "name": "service",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Number of log lines to return (default 200)",
+            "in": "query",
+            "name": "tail",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogsResponse"
+                }
+              }
+            },
+            "description": "Log output"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "No compose file found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Docker error"
+          }
+        },
+        "tags": [
+          "logs"
+        ]
+      }
+    },
+    "/api/logs/services": {
+      "get": {
+        "operationId": "getLogServices",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogServicesResponse"
+                }
+              }
+            },
+            "description": "All Docker projects and their service states"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Rebuy root not found"
+          }
+        },
+        "tags": [
+          "logs"
+        ]
+      }
+    },
+    "/api/mcp/mappings": {
+      "get": {
+        "operationId": "listMcpMappings",
+        "parameters": [
+          {
+            "description": "Filter by MCP server name",
+            "in": "query",
+            "name": "name",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MappingRow"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "mcp"
+        ]
+      },
+      "post": {
+        "operationId": "createMcpMapping",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MapRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "mcp"
+        ]
+      }
+    },
+    "/api/mcp/mappings/{orca_tool}": {
+      "delete": {
+        "operationId": "deleteMcpMapping",
+        "parameters": [
+          {
+            "description": "Orca tool name to unmap",
+            "in": "path",
+            "name": "orca_tool",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "mcp"
+        ]
+      }
+    },
+    "/api/mcp/run": {
+      "post": {
+        "operationId": "runMcpTool",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpRunResponse"
+                }
+              }
+            },
+            "description": "Tool result"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unknown MCP server"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Tool execution error"
+          }
+        },
+        "tags": [
+          "mcp"
+        ]
+      }
+    },
+    "/api/mcp/servers": {
+      "get": {
+        "operationId": "listMcpServers",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/McpServerInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "All registered MCP servers"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "mcp"
+        ]
+      },
+      "post": {
+        "operationId": "addMcpServer",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpServerAddRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "mcp"
+        ]
+      }
+    },
+    "/api/mcp/servers/{name}": {
+      "delete": {
+        "operationId": "removeMcpServer",
+        "parameters": [
+          {
+            "description": "Server name",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "mcp"
+        ]
+      }
+    },
+    "/api/mcp/tools": {
+      "get": {
+        "operationId": "getMcpTools",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/McpToolInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "All tools from all connected MCP servers"
+          }
+        },
+        "tags": [
+          "mcp"
+        ]
+      }
+    },
+    "/api/plugin-tools": {
+      "get": {
+        "operationId": "listPluginTools",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PluginToolInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "All declared plugin tools"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "plugin-tools"
+        ]
+      }
+    },
+    "/api/plugin-tools/{fq_name}/call": {
+      "post": {
+        "operationId": "callPluginTool",
+        "parameters": [
+          {
+            "description": "Fully-qualified tool name `<plugin_id>.<name>`",
+            "in": "path",
+            "name": "fq_name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PluginToolCallRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginToolCallResponse"
+                }
+              }
+            },
+            "description": "Tool result"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Tool not registered or plugin not connected"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Plugin returned an error or did not respond"
+          }
+        },
+        "tags": [
+          "plugin-tools"
+        ]
+      }
+    },
+    "/api/plugins": {
+      "get": {
+        "operationId": "listPlugins",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PluginInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "All registered plugins"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "plugins"
+        ]
+      },
+      "post": {
+        "operationId": "installPlugin",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PluginInstallRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Plugin id that was installed"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/api/plugins/{id}": {
+      "delete": {
+        "operationId": "removePlugin",
+        "parameters": [
+          {
+            "description": "Plugin ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/api/plugins/{id}/creds": {
+      "get": {
+        "operationId": "listPluginCreds",
+        "parameters": [
+          {
+            "description": "Plugin ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CredInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Credential keys for plugin (no values)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "plugins"
+        ]
+      },
+      "put": {
+        "operationId": "setPluginCred",
+        "parameters": [
+          {
+            "description": "Plugin ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetCredRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/api/plugins/{id}/creds/sync": {
+      "post": {
+        "operationId": "syncPluginCreds",
+        "parameters": [
+          {
+            "description": "Plugin ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Number of credentials synced"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/api/plugins/{id}/creds/{key}": {
+      "delete": {
+        "operationId": "deletePluginCred",
+        "parameters": [
+          {
+            "description": "Plugin ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Credential key",
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/api/plugins/{id}/data": {
+      "get": {
+        "operationId": "listPluginData",
+        "parameters": [
+          {
+            "description": "Plugin ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PluginDataEntry"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "All data entries for plugin"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/api/plugins/{id}/data/{key}": {
+      "delete": {
+        "operationId": "deletePluginData",
+        "parameters": [
+          {
+            "description": "Plugin ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Data key",
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "plugins"
+        ]
+      },
+      "get": {
+        "operationId": "getPluginData",
+        "parameters": [
+          {
+            "description": "Plugin ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Data key",
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginDataEntry"
+                }
+              }
+            },
+            "description": "Data entry"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "plugins"
+        ]
+      },
+      "put": {
+        "operationId": "setPluginData",
+        "parameters": [
+          {
+            "description": "Plugin ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Data key",
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetPluginDataRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/api/plugins/{id}/disable": {
+      "patch": {
+        "operationId": "disablePlugin",
+        "parameters": [
+          {
+            "description": "Plugin ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/api/plugins/{id}/enable": {
+      "patch": {
+        "operationId": "enablePlugin",
+        "parameters": [
+          {
+            "description": "Plugin ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/api/plugins/{id}/health": {
+      "get": {
+        "operationId": "getPluginHealth",
+        "parameters": [
+          {
+            "description": "Plugin ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Plugin health status"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/api/rebuy/health/local": {
+      "get": {
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "All service health checks"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "rebuy MCP unavailable"
+          }
+        },
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/api/schema": {
+      "get": {
+        "operationId": "getSchema",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SchemaResponse"
+                }
+              }
+            },
+            "description": "Database schema tabs"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "No databases configured"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "All DB connections failed"
+          }
+        },
+        "tags": [
+          "schema"
+        ]
+      }
+    },
+    "/api/schema/databases": {
+      "get": {
+        "operationId": "listSchemaDatabases",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SchemaDbInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "All registered schema databases"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "schema"
+        ]
+      },
+      "post": {
+        "operationId": "addSchemaDatabase",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SchemaDbAddRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "schema"
+        ]
+      }
+    },
+    "/api/schema/databases/{name}": {
+      "delete": {
+        "operationId": "removeSchemaDatabase",
+        "parameters": [
+          {
+            "description": "Database name",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "schema"
+        ]
+      }
+    },
+    "/api/schema/domains": {
+      "get": {
+        "operationId": "getSchemaDomains",
+        "responses": {
+          "200": {
+            "description": "All domain definitions from all configured databases"
+          }
+        },
+        "tags": [
+          "schema"
+        ]
+      }
+    },
+    "/api/search": {
+      "get": {
+        "operationId": "searchDocs",
+        "parameters": [
+          {
+            "description": "Search query",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Limit search to a specific root (orca/rebuy)",
+            "in": "query",
+            "name": "root",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SearchResult"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Search results"
+          }
+        },
+        "tags": [
+          "docs"
+        ]
+      }
+    },
+    "/api/specs": {
+      "get": {
+        "operationId": "listSpecs",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SpecMeta"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "All registered external specs"
+          }
+        },
+        "tags": [
+          "specs"
+        ]
+      }
+    },
+    "/api/specs/db": {
+      "get": {
+        "operationId": "listDbSpecs",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SpecInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "All URL-registered specs from orca.db"
+          }
+        },
+        "tags": [
+          "specs"
+        ]
+      }
+    },
+    "/api/specs/register": {
+      "post": {
+        "operationId": "registerSpec",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpecRegisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpecInfo"
+                }
+              }
+            },
+            "description": "Spec fetched and stored"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad request"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Failed to fetch spec from URL"
+          }
+        },
+        "tags": [
+          "specs"
+        ]
+      }
+    },
+    "/api/specs/sync-mcp/{server}": {
+      "post": {
+        "operationId": "syncMcpSpecs",
+        "parameters": [
+          {
+            "description": "MCP server name (e.g. rebuy-cli)",
+            "in": "path",
+            "name": "server",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Sync result"
+          }
+        },
+        "tags": [
+          "specs"
+        ]
+      }
+    },
+    "/api/specs/{name}/refresh": {
+      "post": {
+        "operationId": "refreshSpec",
+        "parameters": [
+          {
+            "description": "Spec name to refresh",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpecInfo"
+                }
+              }
+            },
+            "description": "Spec refreshed from stored URL"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Spec not found or has no URL"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Failed to fetch spec from URL"
+          }
+        },
+        "tags": [
+          "specs"
+        ]
+      }
+    },
+    "/api/specs/{name}/unregister": {
+      "delete": {
+        "operationId": "unregisterSpec",
+        "parameters": [
+          {
+            "description": "Spec name to unregister",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Spec removed from DB"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Spec not found"
+          }
+        },
+        "tags": [
+          "specs"
+        ]
+      }
+    },
+    "/api/specs/{repo}": {
+      "get": {
+        "operationId": "getSpec",
+        "parameters": [
+          {
+            "description": "Repository name (e.g. admin-api)",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Response format: json (default) or yaml",
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Set true to receive Content-Disposition: attachment",
+            "in": "query",
+            "name": "download",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Full OpenAPI spec for the repo"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid repo name"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Spec not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid spec JSON"
+          }
+        },
+        "tags": [
+          "specs"
+        ]
+      }
+    },
+    "/api/specs/{repo}/download": {
+      "get": {
+        "operationId": "downloadSpec",
+        "parameters": [
+          {
+            "description": "Repository name (e.g. admin-api)",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "json (default) or yaml",
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OpenAPI spec file download"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid repo name"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Spec not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid spec JSON or YAML conversion failed"
+          }
+        },
+        "tags": [
+          "specs"
+        ]
+      }
+    },
+    "/api/specs/{repo}/graphql": {
+      "get": {
+        "operationId": "getSpecGraphql",
+        "parameters": [
+          {
+            "description": "Repository name (e.g. admin-api)",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Set true to receive Content-Disposition: attachment",
+            "in": "query",
+            "name": "download",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {}
+            },
+            "description": "GraphQL SDL schema for the repo"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid repo name"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Schema not found"
+          }
+        },
+        "tags": [
+          "specs"
+        ]
+      }
+    },
+    "/api/specs/{repo}/graphql/download": {
+      "get": {
+        "operationId": "downloadGraphql",
+        "parameters": [
+          {
+            "description": "Repository name (e.g. admin-api)",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "sdl (default) or introspection",
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "GraphQL schema download"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid repo name"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Schema not found"
+          }
+        },
+        "tags": [
+          "specs"
+        ]
+      }
+    },
+    "/api/specs/{repo}/graphql/info": {
+      "get": {
+        "operationId": "getSpecGraphqlInfo",
+        "parameters": [
+          {
+            "description": "Repository name (e.g. admin-api)",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphQlInfo"
+                }
+              }
+            },
+            "description": "Parsed GraphQL schema — types, queries, mutations, subscriptions"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid repo name"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "GraphQL schema not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "SDL parse error"
+          }
+        },
+        "tags": [
+          "specs"
+        ]
+      }
+    },
+    "/api/specs/{repo}/graphql/proxy": {
+      "post": {
+        "operationId": "proxyGraphql",
+        "parameters": [
+          {
+            "description": "Repository name (e.g. shopify-admin)",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GraphqlProxyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "GraphQL response JSON from the upstream shop"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid repo name or request body"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Upstream request failed"
+          }
+        },
+        "tags": [
+          "specs"
+        ]
+      }
+    },
+    "/api/specs/{repo}/public": {
+      "get": {
+        "operationId": "getSpecPublic",
+        "parameters": [
+          {
+            "description": "Repository name (e.g. admin-api)",
+            "in": "path",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Response format: json (default) or yaml",
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Set true to receive Content-Disposition: attachment",
+            "in": "query",
+            "name": "download",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Public-tagged operations only"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid repo name"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Spec not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid spec JSON"
+          }
+        },
+        "tags": [
+          "specs"
+        ]
+      }
+    },
+    "/api/system/action": {
+      "post": {
+        "operationId": "system_action_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SystemActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemActionResponse"
+                }
+              }
+            },
+            "description": "Action result"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad request"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "POST /api/system/action — run install or uninstall",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/system/dev-sync": {
+      "post": {
+        "operationId": "system_dev_sync_handler",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemDevSyncResponse"
+                }
+              }
+            },
+            "description": "Sync result"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not in dev mode"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "POST /api/system/dev-sync — git pull in the dev checkout; cargo watch restarts automatically.\nReturns 409 if this host is not in dev mode.",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/system/status": {
+      "get": {
+        "operationId": "system_status_handler",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Installation status"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "GET /api/system/status — installation status for the web UI",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/api/tests/run": {
+      "get": {
+        "operationId": "runTests",
+        "parameters": [
+          {
+            "description": "Test suite to run: rust | frontend | e2e | all",
+            "in": "query",
+            "name": "suite",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestRunResponse"
+                }
+              }
+            },
+            "description": "Test run result"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Runner error"
+          }
+        },
+        "tags": [
+          "tests"
+        ]
+      }
+    },
+    "/api/tree": {
+      "get": {
+        "operationId": "getTree",
+        "parameters": [
+          {
+            "description": "Skip compaction — return raw filesystem tree",
+            "in": "query",
+            "name": "raw",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Document tree indexed by root name"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "tags": [
+          "docs"
+        ]
+      }
+    }
+  },
+  "tags": [
+    {
+      "description": "Orca vault document tree and search [public]",
+      "name": "docs"
+    },
+    {
+      "description": "Library documentation via context7 [public]",
+      "name": "library"
+    },
+    {
+      "description": "MCP tool proxy — run any connected MCP server tool",
+      "name": "mcp"
+    },
+    {
+      "description": "Docker Compose service management",
+      "name": "docker"
+    },
+    {
+      "description": "MySQL schema visualizer",
+      "name": "schema"
+    },
+    {
+      "description": "Rebuy service health checks",
+      "name": "health"
+    },
+    {
+      "description": "Docker service log streaming",
+      "name": "logs"
+    },
+    {
+      "description": "External API spec registry",
+      "name": "specs"
+    },
+    {
+      "description": "Test suite runner",
+      "name": "tests"
+    },
+    {
+      "description": "Jira issue management via Atlassian REST API",
+      "name": "jira"
+    },
+    {
+      "description": "Confluence search via Atlassian REST API",
+      "name": "confluence"
+    },
+    {
+      "description": "Bitbucket repo and PR listing",
+      "name": "bitbucket"
+    },
+    {
+      "description": "GitHub repos, pull requests, and issues",
+      "name": "github"
+    },
+    {
+      "description": "Orca installation status and install/uninstall actions",
+      "name": "system"
+    },
+    {
+      "description": "Learning progress tracking",
+      "name": "learning"
+    },
+    {
+      "description": "Plugin registry and credential management",
+      "name": "plugins"
+    },
+    {
+      "description": "Browser sign-up / sign-in / session management",
+      "name": "auth"
+    }
+  ],
+  "x-orca": {
+    "project": "orca",
+    "repo": "orca",
+    "source": "live"
+  }
+}

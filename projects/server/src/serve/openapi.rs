@@ -6,6 +6,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use super::api;
+use super::auth_routes;
 use super::mcp_client::McpPool;
 
 /// Static OpenAPI doc skeleton — info, tags, and shared schemas.
@@ -86,6 +87,12 @@ use super::mcp_client::McpPool;
         super::api::SetCredRequest,
         super::api::PluginDataEntry,
         super::api::SetPluginDataRequest,
+        auth_routes::SignupRequest,
+        auth_routes::SigninRequest,
+        auth_routes::SessionOk,
+        auth_routes::SignupStatus,
+        auth_routes::MeOk,
+        auth_routes::AuthErrorResponse,
     )),
     tags(
         // Public domains — served at /api/openapi/public.json
@@ -106,6 +113,7 @@ use super::mcp_client::McpPool;
         (name = "system",     description = "Orca installation status and install/uninstall actions"),
         (name = "learning",   description = "Learning progress tracking"),
         (name = "plugins",    description = "Plugin registry and credential management"),
+        (name = "auth",       description = "Browser sign-up / sign-in / session management"),
     )
 )]
 pub struct ApiDoc;
@@ -213,7 +221,12 @@ pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
         .routes(routes!(api::system_status_handler))
         .routes(routes!(api::system_action_handler))
         .routes(routes!(api::system_dev_sync_handler))
-        .routes(routes!(api::fs_browse_handler));
+        .routes(routes!(api::fs_browse_handler))
+        .routes(routes!(auth_routes::signup_status))
+        .routes(routes!(auth_routes::signup))
+        .routes(routes!(auth_routes::signin))
+        .routes(routes!(auth_routes::signout))
+        .routes(routes!(auth_routes::me));
     #[cfg(feature = "pdf")]
     let router = router.routes(routes!(api::pdf_handler));
     router

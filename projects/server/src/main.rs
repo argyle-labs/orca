@@ -149,6 +149,15 @@ enum Command {
         action: SystemAction,
     },
 
+    /// Emit orca's own OpenAPI 3 spec to stdout as raw JSON. Used by the
+    /// frontend codegen pipeline (`hey-api` reads this to generate the
+    /// typed TS client). Unlike `orca spec dump` (OrcaTool wrapper), this
+    /// prints the spec object directly without a `{spec: "..."}` envelope.
+    Openapi {
+        #[command(subcommand)]
+        action: OpenapiAction,
+    },
+
     /// Local-only administrative commands. Never exposed over REST/MCP — these
     /// require shell access to a paired host with DB access ("secure system").
     Admin {
@@ -216,6 +225,12 @@ enum PodAction {
         #[arg(long)]
         wipe_all: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum OpenapiAction {
+    /// Print the live OpenAPI 3 JSON spec to stdout (no envelope, no server boot).
+    Emit,
 }
 
 #[derive(Subcommand)]
@@ -431,6 +446,13 @@ async fn main() -> Result<()> {
                 Ok(())
             }
             other => cmd::cmd_spec(other),
+        },
+        Some(Command::Openapi { action }) => match action {
+            OpenapiAction::Emit => {
+                let spec = openapi_spec_json();
+                println!("{}", serde_json::to_string_pretty(&spec)?);
+                Ok(())
+            }
         },
         None => {
             let explicit = cli.project.as_deref().unwrap_or("");
