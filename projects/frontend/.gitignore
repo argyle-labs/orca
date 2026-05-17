@@ -11,6 +11,11 @@ build/
 coverage/
 playwright-report/
 
+# openapi-ts: spec is fetched live from the running daemon at codegen time;
+# the dump + error logs are throwaway artifacts.
+openapi.json
+openapi-ts-error-*.log
+
 # Env
 .env.local
 .env.*.local

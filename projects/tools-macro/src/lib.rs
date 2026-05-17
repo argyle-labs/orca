@@ -229,6 +229,29 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
         },
     };
 
+    // OpenAPI emission — unconditional (the spec is built from schemars, no
+    // native deps needed). Every tool gets one `/api/tools/<NAME>` POST entry
+    // injected into the spec at runtime.
+    let openapi_block = quote! {
+        ::inventory::submit! {
+            ::orca_tools_def::openapi::OpenApiToolRegistration {
+                name: #tool_name,
+                description: #description,
+                domain: #domain,
+                args_schema: || {
+                    ::serde_json::to_value(
+                        ::schemars::schema_for!(<#zst_ident as ::orca_tools_def::OrcaToolDef>::Args)
+                    ).unwrap_or(::serde_json::Value::Object(::serde_json::Map::new()))
+                },
+                output_schema: || {
+                    ::serde_json::to_value(
+                        ::schemars::schema_for!(<#zst_ident as ::orca_tools_def::OrcaToolDef>::Output)
+                    ).unwrap_or(::serde_json::Value::Object(::serde_json::Map::new()))
+                },
+            }
+        }
+    };
+
     // WASM method emission — gated. Works as long as `#[orca_tool]` is used
     // in the same crate as `OrcaClient` (orca-tools-def today). Cross-crate
     // emission is a follow-up.
@@ -298,6 +321,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
 
         #cli_block
         #wasm_block
+        #openapi_block
     };
 
     Ok(expanded)

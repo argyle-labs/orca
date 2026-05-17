@@ -18,7 +18,7 @@ use axum::Router;
 use axum::routing::get;
 use axum_server::tls_rustls::RustlsConfig;
 use orca_utils::state::{DaemonMode, DaemonState};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::info;
 
 pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()> {
@@ -34,11 +34,22 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
         format!("0.0.0.0:{port}").parse()?
     };
 
-    let tls = load_rest_tls(&pki_dir).await?;
+    // In dev we serve plain HTTP — no self-signed cert ordeal, browsers
+    // happily store cookies, http://localhost:12000 "just works". Production
+    // still gets TLS.
+    let tls = if dev {
+        None
+    } else {
+        Some(load_rest_tls(&pki_dir).await?)
+    };
     if let Err(e) = crate::loopback_token::install_at_startup() {
         tracing::warn!("loopback token install failed: {e:#}");
     }
-    info!("[orca] binding {} (https)...", addr);
+    info!(
+        "[orca] binding {} ({})...",
+        addr,
+        if dev { "http" } else { "https" }
+    );
 
     // Register as the active dev process so the parked daemon won't auto-reclaim.
     // Use ORCA_DEV_PARENT_PID (the shell script PID) so the registration stays
@@ -98,10 +109,20 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     spawn_pod_runtime(&pki_dir).await;
     spawn_scheduler_runtime();
 
-    info!("[orca] listening on https://localhost:{port}");
-    axum_server::bind_rustls(addr, tls)
-        .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-        .await?;
+    let scheme = if dev { "http" } else { "https" };
+    info!("[orca] listening on {scheme}://localhost:{port}");
+    match tls {
+        Some(tls) => {
+            axum_server::bind_rustls(addr, tls)
+                .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+                .await?;
+        }
+        None => {
+            axum_server::bind(addr)
+                .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+                .await?;
+        }
+    }
     Ok(())
 }
 
@@ -750,10 +771,38 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
     // Ensures reqwest (rustls-no-provider) has a crypto provider; idempotent.
     crate::llm::ensure_crypto_provider();
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    // Plumb the dev flag to auth_routes so session cookies use SameSite=None
+    // in dev (cross-port) and SameSite=Strict in prod (same-origin).
+    auth_routes::set_dev_mode(dev);
+
+    // In dev the browser may load the page from vite (:12001) while the API
+    // lives on :12000 — that's cross-origin, so we mirror the request origin
+    // and enable credentials. In prod the UI is same-origin (Caddy / orca
+    // proxy), so we keep the tighter `Allow-Origin: *` with no credentials.
+    let cors = if dev {
+        use axum::http::{HeaderName, Method};
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::mirror_request())
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::PATCH,
+                Method::DELETE,
+                Method::OPTIONS,
+            ])
+            .allow_headers([
+                HeaderName::from_static("content-type"),
+                HeaderName::from_static("authorization"),
+                HeaderName::from_static("x-correlation-id"),
+            ])
+            .allow_credentials(true)
+    } else {
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    };
 
     let mcp_pool = Arc::new(mcp_client::McpPool::new_with_db(db_path));
 
@@ -800,9 +849,12 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
     };
 
     // Layers apply AFTER all nesting so /api/tools/* inherits auth + logging.
+    // Outermost to innermost (last added = outermost): CORS → log_requests →
+    // require_auth → handler. Logging sits OUTSIDE auth so 401s are still
+    // logged — otherwise rejected requests vanish silently from the log.
     let api = api
-        .layer(axum::middleware::from_fn(middleware::log_requests))
         .layer(axum::middleware::from_fn(middleware::require_auth))
+        .layer(axum::middleware::from_fn(middleware::log_requests))
         .layer(cors);
 
     if dev {

@@ -1,44 +1,39 @@
-import type { OrcaClient } from '$lib/orca/index';
-import { orca } from '$lib/orcaClient';
+// Generic tool dispatcher used by the command palette + any caller that
+// wants runtime tool-name lookup with a uniform toast/error pipeline.
+//
+// The hey-api SDK already produces a typed function per OpenAPI operation —
+// when you know the tool at compile time, import it directly from
+// `$lib/client/sdk.gen` and call it as a normal function. This module exists
+// for the dynamic case (palette enumeration, generic dispatch).
+
+import * as sdk from '$lib/client/sdk.gen';
 import { notifications } from '$lib/stores/notifications';
 
 /**
- * Keys on `OrcaClient` whose values are async tool methods of the shape
- * `(args: X) => Promise<Y>`. Excludes `free`, `Symbol.dispose`, and any
- * future non-tool members automatically.
+ * Every exported async function in the generated SDK is callable here.
+ * Names are operationIds: `health`, `podList`, `hostInfo`, etc.
  */
-export type ToolName = {
-  [K in keyof OrcaClient]: OrcaClient[K] extends (args: never) => Promise<unknown> ? K : never;
-}[keyof OrcaClient];
-
-/** Argument type for a given tool — extracted from the generated declaration. */
-export type ToolArgs<N extends ToolName> = OrcaClient[N] extends (args: infer A) => Promise<unknown>
-  ? A
-  : never;
-
-/** Result type for a given tool. */
-export type ToolResult<N extends ToolName> = OrcaClient[N] extends (args: never) => Promise<infer R>
-  ? R
-  : never;
+export type ToolName = keyof typeof sdk;
 
 /**
- * Invoke an OrcaTool by name with full type safety.
- *
- * - `name` is constrained to actual tool methods on `OrcaClient`.
- * - `args` is checked against the tool's declared input type.
- * - The return is the tool's declared output type (or `null` on caught failure).
- *
- * On failure, pushes an error toast unless `silent`. On success with a
- * `successMessage`, pushes a success toast.
- *
- * Every UI call goes through this — never hand-roll `fetch` or call WASM
- * methods directly in component bodies.
+ * Hey-api functions accept an options object; we pass `body` for POSTs and
+ * an empty object for GETs. The dispatcher hides the difference.
  */
-export async function runTool<N extends ToolName>(
-  name: N,
-  args: ToolArgs<N>,
+type AnyToolFn = (opts: { body?: unknown }) => Promise<{
+  data?: unknown;
+  error?: unknown;
+  response?: Response;
+}>;
+
+/**
+ * Invoke a tool by operationId. Pushes an error toast on failure unless
+ * `silent`. Returns the unwrapped `data` field, or null if the call errored.
+ */
+export async function runTool(
+  name: ToolName,
+  args: Record<string, unknown> = {},
   opts: { silent?: boolean; successMessage?: string } = {},
-): Promise<ToolResult<N> | null> {
+): Promise<unknown> {
   try {
     const result = await callTool(name, args);
     if (opts.successMessage) notifications.success(opts.successMessage);
@@ -49,16 +44,33 @@ export async function runTool<N extends ToolName>(
   }
 }
 
-/** Strict variant that throws — for callers that want to manage their own error UX. */
-export async function callTool<N extends ToolName>(
-  name: N,
-  args: ToolArgs<N>,
-): Promise<ToolResult<N>> {
-  const client = await orca();
-  // Narrowing through `keyof OrcaClient` is sound because `ToolName` is
-  // derived from that exact set, and we've already type-checked the args.
-  const method = client[name] as unknown as (a: ToolArgs<N>) => Promise<ToolResult<N>>;
-  return method.call(client, args);
+/**
+ * Strict variant — throws on failure. Use when the caller wants to manage
+ * error UX itself.
+ */
+export async function callTool<T = unknown>(
+  name: ToolName,
+  args: Record<string, unknown> = {},
+): Promise<T> {
+  const fn = (sdk as unknown as Record<string, AnyToolFn>)[name as string];
+  if (typeof fn !== 'function') {
+    throw new Error(`unknown tool: ${String(name)}`);
+  }
+  const res = await fn({ body: args });
+  if (res.error || !res.response?.ok) {
+    const msg =
+      (res.error as { error?: string } | undefined)?.error ??
+      `${String(name)} failed (${res.response?.status ?? 'no response'})`;
+    throw new Error(msg);
+  }
+  return res.data as T;
+}
+
+/** Names of every callable tool — used by the command palette. */
+export function allToolNames(): ToolName[] {
+  return (Object.keys(sdk) as ToolName[])
+    .filter((k) => typeof (sdk as Record<string, unknown>)[k as string] === 'function')
+    .sort();
 }
 
 function formatError(toolName: string, err: unknown): string {

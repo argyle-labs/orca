@@ -250,6 +250,43 @@ enum AdminAction {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // In dev, tee logs to /tmp/orca-dev.log so they're inspectable without
+    // capturing the TTY where cargo-watch runs.
+    let log_file: Box<dyn std::io::Write + Send + Sync> = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/orca-dev.log")
+    {
+        Ok(f) => Box::new(f),
+        Err(_) => Box::new(std::io::sink()),
+    };
+    let writer = std::sync::Mutex::new(log_file);
+    let make_writer = move || -> Box<dyn std::io::Write> {
+        // Multi-writer: stderr + log file.
+        struct Tee<A: std::io::Write, B: std::io::Write>(A, B);
+        impl<A: std::io::Write, B: std::io::Write> std::io::Write for Tee<A, B> {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                let _ = self.1.write_all(b);
+                self.0.write(b)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                let _ = self.1.flush();
+                self.0.flush()
+            }
+        }
+        let file = writer.lock().unwrap_or_else(|e| e.into_inner());
+        // We can't move out of MutexGuard; clone a fresh file handle each call.
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/orca-dev.log")
+            .ok();
+        drop(file);
+        match f {
+            Some(f) => Box::new(Tee(std::io::stderr(), f)),
+            None => Box::new(std::io::stderr()),
+        }
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("ORCA_LOG").unwrap_or_else(|_| {
@@ -258,7 +295,7 @@ async fn main() -> Result<()> {
         )
         .with_target(false)
         .compact()
-        .with_writer(std::io::stderr)
+        .with_writer(make_writer)
         .init();
 
     // Short-circuit OrcaOp ops *before* clap parse: the derive `Cli` has a

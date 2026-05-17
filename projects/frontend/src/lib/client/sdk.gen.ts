@@ -15,6 +15,48 @@ import type {
   AddSchemaDatabaseData,
   AddSchemaDatabaseErrors,
   AddSchemaDatabaseResponses,
+  AgentBackendClearKeyData,
+  AgentBackendClearKeyErrors,
+  AgentBackendClearKeyResponses,
+  AgentBackendKeyStatusData,
+  AgentBackendKeyStatusErrors,
+  AgentBackendKeyStatusResponses,
+  AgentBackendOverrideData,
+  AgentBackendOverrideErrors,
+  AgentBackendOverrideResponses,
+  AgentBackendSetKeyData,
+  AgentBackendSetKeyErrors,
+  AgentBackendSetKeyResponses,
+  AgentBackendSetModeData,
+  AgentBackendSetModeErrors,
+  AgentBackendSetModeResponses,
+  AgentBackendStatusData,
+  AgentBackendStatusErrors,
+  AgentBackendStatusResponses,
+  AgentBackendUseServerAnthropicData,
+  AgentBackendUseServerAnthropicErrors,
+  AgentBackendUseServerAnthropicResponses,
+  AgentsGetConfigData,
+  AgentsGetConfigErrors,
+  AgentsGetConfigResponses,
+  AgentsGetContextData,
+  AgentsGetContextErrors,
+  AgentsGetContextResponses,
+  AgentsGetData,
+  AgentsGetErrors,
+  AgentsGetResponses,
+  AgentsListData,
+  AgentsListErrors,
+  AgentsListResponses,
+  AgentsSearchLogsData,
+  AgentsSearchLogsErrors,
+  AgentsSearchLogsResponses,
+  AuthLoginData,
+  AuthLoginErrors,
+  AuthLoginResponses,
+  AuthLogoutData,
+  AuthLogoutErrors,
+  AuthLogoutResponses,
   AuthMeData,
   AuthMeErrors,
   AuthMeResponses,
@@ -28,12 +70,48 @@ import type {
   AuthSignupResponses,
   AuthSignupStatusData,
   AuthSignupStatusResponses,
+  AuthStatusData,
+  AuthStatusErrors,
+  AuthStatusResponses,
+  AuthTokenCreateData,
+  AuthTokenCreateErrors,
+  AuthTokenCreateResponses,
+  AuthTokenListData,
+  AuthTokenListErrors,
+  AuthTokenListResponses,
+  AuthTokenRevokeData,
+  AuthTokenRevokeErrors,
+  AuthTokenRevokeResponses,
   CallPluginToolData,
   CallPluginToolErrors,
   CallPluginToolResponses,
+  ConfigDeleteData,
+  ConfigDeleteErrors,
+  ConfigDeleteResponses,
+  ConfigGetData,
+  ConfigGetErrors,
+  ConfigGetResponses,
+  ConfigListData,
+  ConfigListErrors,
+  ConfigListResponses,
+  ConfigSetData,
+  ConfigSetErrors,
+  ConfigSetResponses,
   CreateMcpMappingData,
   CreateMcpMappingErrors,
   CreateMcpMappingResponses,
+  DbDownData,
+  DbDownErrors,
+  DbDownResponses,
+  DbMigrateData,
+  DbMigrateErrors,
+  DbMigrateResponses,
+  DbStatusData,
+  DbStatusErrors,
+  DbStatusResponses,
+  DbUpData,
+  DbUpErrors,
+  DbUpResponses,
   DeleteMcpMappingData,
   DeleteMcpMappingErrors,
   DeleteMcpMappingResponses,
@@ -49,6 +127,69 @@ import type {
   DisablePluginData,
   DisablePluginErrors,
   DisablePluginResponses,
+  DockerActionData,
+  DockerActionErrors,
+  DockerActionResponses,
+  DockerEngineData,
+  DockerEngineErrors,
+  DockerEngineResponses,
+  DockerEngineStartData,
+  DockerEngineStartErrors,
+  DockerEngineStartResponses,
+  DockerLogsData,
+  DockerLogsErrors,
+  DockerLogServicesData,
+  DockerLogServicesErrors,
+  DockerLogServicesResponses,
+  DockerLogsResponses,
+  DockerRuntimeAddData,
+  DockerRuntimeAddErrors,
+  DockerRuntimeAddResponses,
+  DockerRuntimeListData,
+  DockerRuntimeListErrors,
+  DockerRuntimeListResponses,
+  DockerRuntimeRemoveData,
+  DockerRuntimeRemoveErrors,
+  DockerRuntimeRemoveResponses,
+  DockerServicesData,
+  DockerServicesErrors,
+  DockerServicesResponses,
+  DocPatternAddData,
+  DocPatternAddErrors,
+  DocPatternAddResponses,
+  DocPatternListData,
+  DocPatternListErrors,
+  DocPatternListResponses,
+  DocPatternRemoveData,
+  DocPatternRemoveErrors,
+  DocPatternRemoveResponses,
+  DocRootAddData,
+  DocRootAddErrors,
+  DocRootAddResponses,
+  DocRootListData,
+  DocRootListErrors,
+  DocRootListResponses,
+  DocRootRemoveData,
+  DocRootRemoveErrors,
+  DocRootRemoveResponses,
+  DocsFullTreeData,
+  DocsFullTreeErrors,
+  DocsFullTreeResponses,
+  DocsListCommandsData,
+  DocsListCommandsErrors,
+  DocsListCommandsResponses,
+  DocsListRootsData,
+  DocsListRootsErrors,
+  DocsListRootsResponses,
+  DocsReadData,
+  DocsReadErrors,
+  DocsReadResponses,
+  DocsSearchData,
+  DocsSearchErrors,
+  DocsSearchResponses,
+  DocsTreeData,
+  DocsTreeErrors,
+  DocsTreeResponses,
   DownloadGraphqlData,
   DownloadGraphqlErrors,
   DownloadGraphqlResponses,
@@ -61,6 +202,21 @@ import type {
   EnablePluginData,
   EnablePluginErrors,
   EnablePluginResponses,
+  EngineAddData,
+  EngineAddErrors,
+  EngineAddResponses,
+  EngineDisableData,
+  EngineDisableErrors,
+  EngineDisableResponses,
+  EngineEnableData,
+  EngineEnableErrors,
+  EngineEnableResponses,
+  EngineListData,
+  EngineListErrors,
+  EngineListResponses,
+  EngineRemoveData,
+  EngineRemoveErrors,
+  EngineRemoveResponses,
   FsBrowseData,
   FsBrowseErrors,
   FsBrowseResponses,
@@ -120,6 +276,45 @@ import type {
   GetTreeData,
   GetTreeErrors,
   GetTreeResponses,
+  HaAutomationListData,
+  HaAutomationListErrors,
+  HaAutomationListResponses,
+  HaEndpointAddData,
+  HaEndpointAddErrors,
+  HaEndpointAddResponses,
+  HaEndpointListData,
+  HaEndpointListErrors,
+  HaEndpointListResponses,
+  HaEndpointRemoveData,
+  HaEndpointRemoveErrors,
+  HaEndpointRemoveResponses,
+  HaEntityListData,
+  HaEntityListErrors,
+  HaEntityListResponses,
+  HaEntityStateData,
+  HaEntityStateErrors,
+  HaEntityStateResponses,
+  HaServiceCallData,
+  HaServiceCallErrors,
+  HaServiceCallResponses,
+  HostInfoData,
+  HostInfoErrors,
+  HostInfoResponses,
+  HostRefreshData,
+  HostRefreshErrors,
+  HostRefreshResponses,
+  HostSetData,
+  HostSetErrors,
+  HostSetResponses,
+  InfraRunTestsData,
+  InfraRunTestsErrors,
+  InfraRunTestsResponses,
+  InfraServiceLogsData,
+  InfraServiceLogsErrors,
+  InfraServiceLogsResponses,
+  InfraServicesData,
+  InfraServicesErrors,
+  InfraServicesResponses,
   InstallPluginData,
   InstallPluginErrors,
   InstallPluginResponses,
@@ -174,8 +369,170 @@ import type {
   ListSchemaDatabasesResponses,
   ListSpecsData,
   ListSpecsResponses,
+  McpAddData,
+  McpAddErrors,
+  McpAddResponses,
+  McpFederationListToolsData,
+  McpFederationListToolsErrors,
+  McpFederationListToolsResponses,
+  McpFederationRunData,
+  McpFederationRunErrors,
+  McpFederationRunResponses,
+  McpListData,
+  McpListErrors,
+  McpListMappingsData,
+  McpListMappingsErrors,
+  McpListMappingsResponses,
+  McpListResponses,
+  McpMapData,
+  McpMapErrors,
+  McpMapResponses,
+  McpRemoveData,
+  McpRemoveErrors,
+  McpRemoveResponses,
+  McpSyncData,
+  McpSyncErrors,
+  McpSyncResponses,
+  McpUnmapData,
+  McpUnmapErrors,
+  McpUnmapResponses,
   PingData,
   PingResponses,
+  PkiCaInitData,
+  PkiCaInitErrors,
+  PkiCaInitResponses,
+  PkiCertIssueData,
+  PkiCertIssueErrors,
+  PkiCertIssueResponses,
+  PkiListData,
+  PkiListErrors,
+  PkiListResponses,
+  PluginAddData,
+  PluginAddErrors,
+  PluginAddResponses,
+  PluginDataGetData,
+  PluginDataGetErrors,
+  PluginDataGetResponses,
+  PluginDataSetData,
+  PluginDataSetErrors,
+  PluginDataSetResponses,
+  PluginDisableData,
+  PluginDisableErrors,
+  PluginDisableResponses,
+  PluginEnableData,
+  PluginEnableErrors,
+  PluginEnableResponses,
+  PluginListCredsData,
+  PluginListCredsErrors,
+  PluginListCredsResponses,
+  PluginListData,
+  PluginListErrors,
+  PluginListResponses,
+  PluginRemoveCredData,
+  PluginRemoveCredErrors,
+  PluginRemoveCredResponses,
+  PluginRemoveData,
+  PluginRemoveErrors,
+  PluginRemoveResponses,
+  PluginSetCredData,
+  PluginSetCredErrors,
+  PluginSetCredResponses,
+  PluginSyncCredsData,
+  PluginSyncCredsErrors,
+  PluginSyncCredsResponses,
+  PodAcceptData,
+  PodAcceptErrors,
+  PodAcceptResponses,
+  PodCertStatusData,
+  PodCertStatusErrors,
+  PodCertStatusResponses,
+  PodDevDisableData,
+  PodDevDisableErrors,
+  PodDevDisableResponses,
+  PodDevEnableData,
+  PodDevEnableErrors,
+  PodDevEnableResponses,
+  PodDevSyncData,
+  PodDevSyncErrors,
+  PodDevSyncResponses,
+  PodDiscoverData,
+  PodDiscoverErrors,
+  PodDiscoverResponses,
+  PodJoinData,
+  PodJoinErrors,
+  PodJoinResponses,
+  PodLeaveData,
+  PodLeaveErrors,
+  PodLeaveResponses,
+  PodListData,
+  PodListErrors,
+  PodListResponses,
+  PodOfferData,
+  PodOfferErrors,
+  PodOfferResponses,
+  PodPendingData,
+  PodPendingErrors,
+  PodPendingResponses,
+  PodPingData,
+  PodPingErrors,
+  PodPingResponses,
+  PodTrustData,
+  PodTrustErrors,
+  PodTrustResponses,
+  ProfileCreateData,
+  ProfileCreateErrors,
+  ProfileCreateResponses,
+  ProfileCurrentData,
+  ProfileCurrentErrors,
+  ProfileCurrentResponses,
+  ProfileDeleteData,
+  ProfileDeleteErrors,
+  ProfileDeleteResponses,
+  ProfileListData,
+  ProfileListErrors,
+  ProfileListResponses,
+  ProfileShareData,
+  ProfileShareErrors,
+  ProfileShareResponses,
+  ProfileSharesData,
+  ProfileSharesErrors,
+  ProfileSharesResponses,
+  ProfileShowData,
+  ProfileShowErrors,
+  ProfileShowResponses,
+  ProfileUnshareData,
+  ProfileUnshareErrors,
+  ProfileUnshareResponses,
+  ProfileUseData,
+  ProfileUseErrors,
+  ProfileUseResponses,
+  ProjectsListData,
+  ProjectsListErrors,
+  ProjectsListResponses,
+  ProxmoxContainerActionData,
+  ProxmoxContainerActionErrors,
+  ProxmoxContainerActionResponses,
+  ProxmoxContainersData,
+  ProxmoxContainersErrors,
+  ProxmoxContainersResponses,
+  ProxmoxEndpointAddData,
+  ProxmoxEndpointAddErrors,
+  ProxmoxEndpointAddResponses,
+  ProxmoxEndpointListData,
+  ProxmoxEndpointListErrors,
+  ProxmoxEndpointListResponses,
+  ProxmoxEndpointRemoveData,
+  ProxmoxEndpointRemoveErrors,
+  ProxmoxEndpointRemoveResponses,
+  ProxmoxNodesData,
+  ProxmoxNodesErrors,
+  ProxmoxNodesResponses,
+  ProxmoxVmActionData,
+  ProxmoxVmActionErrors,
+  ProxmoxVmActionResponses,
+  ProxmoxVmsData,
+  ProxmoxVmsErrors,
+  ProxmoxVmsResponses,
   ProxyGraphqlData,
   ProxyGraphqlErrors,
   ProxyGraphqlResponses,
@@ -211,17 +568,83 @@ import type {
   RunTestsResponses,
   SaveLearningProgressData,
   SaveLearningProgressResponses,
+  ScheduleListData,
+  ScheduleListErrors,
+  ScheduleListResponses,
+  ScheduleRunData,
+  ScheduleRunErrors,
+  ScheduleRunResponses,
+  ScheduleStatusData,
+  ScheduleStatusErrors,
+  ScheduleStatusResponses,
+  SchemaAddData,
+  SchemaAddErrors,
+  SchemaAddResponses,
+  SchemaListData,
+  SchemaListErrors,
+  SchemaListResponses,
+  SchemaRemoveData,
+  SchemaRemoveErrors,
+  SchemaRemoveResponses,
+  SchemaViewGetData,
+  SchemaViewGetErrors,
+  SchemaViewGetResponses,
+  SchemaViewListDomainsData,
+  SchemaViewListDomainsErrors,
+  SchemaViewListDomainsResponses,
   SearchConfluenceData,
   SearchConfluenceErrors,
   SearchConfluenceResponses,
   SearchDocsData,
   SearchDocsResponses,
+  SecretBackendsData,
+  SecretBackendsErrors,
+  SecretBackendsResponses,
+  SecretDeleteData,
+  SecretDeleteErrors,
+  SecretDeleteResponses,
+  SecretGetData,
+  SecretGetErrors,
+  SecretGetResponses,
+  SecretListData,
+  SecretListErrors,
+  SecretListResponses,
+  SecretSetData,
+  SecretSetErrors,
+  SecretSetResponses,
   SetPluginCredData,
   SetPluginCredErrors,
   SetPluginCredResponses,
   SetPluginDataData,
   SetPluginDataErrors,
   SetPluginDataResponses,
+  SpecDumpData,
+  SpecDumpErrors,
+  SpecDumpResponses,
+  SpecGraphqlInfoData,
+  SpecGraphqlInfoErrors,
+  SpecGraphqlInfoResponses,
+  SpecListData,
+  SpecListDbData,
+  SpecListDbErrors,
+  SpecListDbResponses,
+  SpecListErrors,
+  SpecListResponses,
+  SpecProxyGraphqlData,
+  SpecProxyGraphqlErrors,
+  SpecProxyGraphqlResponses,
+  SpecRefreshData,
+  SpecRefreshErrors,
+  SpecRefreshResponses,
+  SpecRegisterData,
+  SpecRegisterErrors,
+  SpecRegisterResponses,
+  SpecSyncMcpData,
+  SpecSyncMcpErrors,
+  SpecSyncMcpResponses,
+  SpecUnregisterData,
+  SpecUnregisterErrors,
+  SpecUnregisterResponses,
   StartDockerEngineData,
   StartDockerEngineErrors,
   StartDockerEngineResponses,
@@ -230,15 +653,57 @@ import type {
   SyncPluginCredsData,
   SyncPluginCredsErrors,
   SyncPluginCredsResponses,
+  SystemActionData,
+  SystemActionErrors,
   SystemActionHandlerData,
   SystemActionHandlerErrors,
   SystemActionHandlerResponses,
+  SystemActionResponses,
+  SystemDevDisableData,
+  SystemDevDisableErrors,
+  SystemDevDisableResponses,
+  SystemDevEnableData,
+  SystemDevEnableErrors,
+  SystemDevEnableResponses,
+  SystemDevSyncData,
+  SystemDevSyncErrors,
   SystemDevSyncHandlerData,
   SystemDevSyncHandlerErrors,
   SystemDevSyncHandlerResponses,
+  SystemDevSyncResponses,
+  SystemDoctorData,
+  SystemDoctorErrors,
+  SystemDoctorResponses,
+  SystemHealthData,
+  SystemHealthErrors,
+  SystemHealthResponses,
+  SystemInstallData,
+  SystemInstallErrors,
+  SystemInstallResponses,
+  SystemRuntimeSpecData,
+  SystemRuntimeSpecErrors,
+  SystemRuntimeSpecResponses,
+  SystemStatusData,
+  SystemStatusErrors,
   SystemStatusHandlerData,
   SystemStatusHandlerErrors,
   SystemStatusHandlerResponses,
+  SystemStatusResponses,
+  SystemUninstallData,
+  SystemUninstallErrors,
+  SystemUninstallResponses,
+  SystemUpdateApplyData,
+  SystemUpdateApplyErrors,
+  SystemUpdateApplyResponses,
+  SystemUpdateCheckData,
+  SystemUpdateCheckErrors,
+  SystemUpdateCheckResponses,
+  SystemUpdatePinData,
+  SystemUpdatePinErrors,
+  SystemUpdatePinResponses,
+  SystemUpdateUnpinData,
+  SystemUpdateUnpinErrors,
+  SystemUpdateUnpinResponses,
   TransitionJiraIssueData,
   TransitionJiraIssueErrors,
   TransitionJiraIssueResponses,
@@ -1048,6 +1513,2729 @@ export const runTests = <ThrowOnError extends boolean = false>(
   (options.client ?? client).get<RunTestsResponses, RunTestsErrors, ThrowOnError>({
     url: '/api/tests/run',
     ...options,
+  });
+
+/**
+ * [MUTATES STATE] Remove the stored Anthropic API key from the encrypted orca DB.
+ *
+ * [MUTATES STATE] Remove the stored Anthropic API key from the encrypted orca DB.
+ */
+export const agentBackendClearKey = <ThrowOnError extends boolean = false>(
+  options: Options<AgentBackendClearKeyData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    AgentBackendClearKeyResponses,
+    AgentBackendClearKeyErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/agent-backend.clear-key',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Report whether an Anthropic API key is stored in the encrypted orca DB. Never echoes the raw key — only a masked preview.
+ *
+ * Report whether an Anthropic API key is stored in the encrypted orca DB. Never echoes the raw key — only a masked preview.
+ */
+export const agentBackendKeyStatus = <ThrowOnError extends boolean = false>(
+  options: Options<AgentBackendKeyStatusData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    AgentBackendKeyStatusResponses,
+    AgentBackendKeyStatusErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/agent-backend.key-status',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Set, change, or clear a per-agent backend override (only consulted in hybrid mode). backend=clear deletes the override.
+ *
+ * [MUTATES STATE] Set, change, or clear a per-agent backend override (only consulted in hybrid mode). backend=clear deletes the override.
+ */
+export const agentBackendOverride = <ThrowOnError extends boolean = false>(
+  options: Options<AgentBackendOverrideData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    AgentBackendOverrideResponses,
+    AgentBackendOverrideErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/agent-backend.override',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Store an Anthropic API key in the encrypted orca DB (settings table, key 'secrets.anthropic_api_key'). The DB is SQLCipher-encrypted at rest. Required for server-side Anthropic calls.
+ *
+ * [MUTATES STATE] Store an Anthropic API key in the encrypted orca DB (settings table, key 'secrets.anthropic_api_key'). The DB is SQLCipher-encrypted at rest. Required for server-side Anthropic calls.
+ */
+export const agentBackendSetKey = <ThrowOnError extends boolean = false>(
+  options: Options<AgentBackendSetKeyData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    AgentBackendSetKeyResponses,
+    AgentBackendSetKeyErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/agent-backend.set-key',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Set the global agent backend mode. local = always LM Studio. claude = always route to Claude (server-side if enabled, else delegate to caller). hybrid = check per-agent override; default is Claude when no override is set.
+ *
+ * [MUTATES STATE] Set the global agent backend mode. local = always LM Studio. claude = always route to Claude (server-side if enabled, else delegate to caller). hybrid = check per-agent override; default is Claude when no override is set.
+ */
+export const agentBackendSetMode = <ThrowOnError extends boolean = false>(
+  options: Options<AgentBackendSetModeData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    AgentBackendSetModeResponses,
+    AgentBackendSetModeErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/agent-backend.set-mode',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Show the current agent backend configuration: mode (local|claude|hybrid), per-agent overrides, and whether server-side Anthropic calls are enabled.
+ *
+ * Show the current agent backend configuration: mode (local|claude|hybrid), per-agent overrides, and whether server-side Anthropic calls are enabled.
+ */
+export const agentBackendStatus = <ThrowOnError extends boolean = false>(
+  options: Options<AgentBackendStatusData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    AgentBackendStatusResponses,
+    AgentBackendStatusErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/agent-backend.status',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Toggle whether the orca server makes Anthropic API calls directly when the resolver picks Claude. When false (default), Claude-routed agents return a delegate-to-claude-code envelope instead. Requires a stored API key when true.
+ *
+ * [MUTATES STATE] Toggle whether the orca server makes Anthropic API calls directly when the resolver picks Claude. When false (default), Claude-routed agents return a delegate-to-claude-code envelope instead. Requires a stored API key when true.
+ */
+export const agentBackendUseServerAnthropic = <ThrowOnError extends boolean = false>(
+  options: Options<AgentBackendUseServerAnthropicData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    AgentBackendUseServerAnthropicResponses,
+    AgentBackendUseServerAnthropicErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/agent-backend.use-server-anthropic',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Return the full system prompt for a named orca agent. Use this to invoke an agent programmatically via Agent(general-purpose, prompt=<result>+task).
+ *
+ * Return the full system prompt for a named orca agent. Use this to invoke an agent programmatically via Agent(general-purpose, prompt=<result>+task).
+ */
+export const agentsGet = <ThrowOnError extends boolean = false>(
+  options: Options<AgentsGetData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<AgentsGetResponses, AgentsGetErrors, ThrowOnError>({
+    url: '/api/tools/agents.get',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Read an orca configuration/reference document by name (e.g. TOOL_RULES, DELEGATION, SEVERITY_RUBRIC, CANONICAL_SOURCES, CODING_RULES). Call with no name to list available files.
+ *
+ * Read an orca configuration/reference document by name (e.g. TOOL_RULES, DELEGATION, SEVERITY_RUBRIC, CANONICAL_SOURCES, CODING_RULES). Call with no name to list available files.
+ */
+export const agentsGetConfig = <ThrowOnError extends boolean = false>(
+  options: Options<AgentsGetConfigData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<AgentsGetConfigResponses, AgentsGetConfigErrors, ThrowOnError>({
+    url: '/api/tools/agents.get-config',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Load the memory context for an orca project. Returns the MEMORY.md index and all memory files for the project.
+ *
+ * Load the memory context for an orca project. Returns the MEMORY.md index and all memory files for the project.
+ */
+export const agentsGetContext = <ThrowOnError extends boolean = false>(
+  options: Options<AgentsGetContextData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<AgentsGetContextResponses, AgentsGetContextErrors, ThrowOnError>({
+    url: '/api/tools/agents.get-context',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List all available orca agents with their names and descriptions.
+ *
+ * List all available orca agents with their names and descriptions.
+ */
+export const agentsList = <ThrowOnError extends boolean = false>(
+  options: Options<AgentsListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<AgentsListResponses, AgentsListErrors, ThrowOnError>({
+    url: '/api/tools/agents.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Search orca session history for a keyword. Returns matching log entries with session ID, role, and content preview.
+ *
+ * Search orca session history for a keyword. Returns matching log entries with session ID, role, and content preview.
+ */
+export const agentsSearchLogs = <ThrowOnError extends boolean = false>(
+  options: Options<AgentsSearchLogsData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<AgentsSearchLogsResponses, AgentsSearchLogsErrors, ThrowOnError>({
+    url: '/api/tools/agents.search-logs',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Authenticate with a provider. Anthropic: pass `key`. GitHub: device-flow. Atlassian: PKCE.
+ *
+ * [MUTATES STATE] Authenticate with a provider. Anthropic: pass `key`. GitHub: device-flow. Atlassian: PKCE.
+ */
+export const authLogin = <ThrowOnError extends boolean = false>(
+  options: Options<AuthLoginData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<AuthLoginResponses, AuthLoginErrors, ThrowOnError>({
+    url: '/api/tools/auth.login',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove a stored credential. `removed=false` if nothing was stored.
+ *
+ * [MUTATES STATE] Remove a stored credential. `removed=false` if nothing was stored.
+ */
+export const authLogout = <ThrowOnError extends boolean = false>(
+  options: Options<AuthLogoutData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<AuthLogoutResponses, AuthLogoutErrors, ThrowOnError>({
+    url: '/api/tools/auth.logout',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Snapshot every configured credential the host knows about (Anthropic key + OAuth tokens).
+ *
+ * Snapshot every configured credential the host knows about (Anthropic key + OAuth tokens).
+ */
+export const authStatus = <ThrowOnError extends boolean = false>(
+  options: Options<AuthStatusData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<AuthStatusResponses, AuthStatusErrors, ThrowOnError>({
+    url: '/api/tools/auth.status',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Mint a new REST/MCP bearer token on THIS host. Plaintext is returned exactly once and cannot be recovered from the DB. Token only authenticates calls to this host's `:12000` — not to other peers.
+ *
+ * [MUTATES STATE] Mint a new REST/MCP bearer token on THIS host. Plaintext is returned exactly once and cannot be recovered from the DB. Token only authenticates calls to this host's `:12000` — not to other peers.
+ */
+export const authTokenCreate = <ThrowOnError extends boolean = false>(
+  options: Options<AuthTokenCreateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<AuthTokenCreateResponses, AuthTokenCreateErrors, ThrowOnError>({
+    url: '/api/tools/auth.token_create',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List all REST/MCP bearer tokens registered on this host. Token hashes are not returned.
+ *
+ * List all REST/MCP bearer tokens registered on this host. Token hashes are not returned.
+ */
+export const authTokenList = <ThrowOnError extends boolean = false>(
+  options: Options<AuthTokenListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<AuthTokenListResponses, AuthTokenListErrors, ThrowOnError>({
+    url: '/api/tools/auth.token_list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Revoke a token by id. Returns `revoked=false` if the id wasn't found.
+ *
+ * [MUTATES STATE] Revoke a token by id. Returns `revoked=false` if the id wasn't found.
+ */
+export const authTokenRevoke = <ThrowOnError extends boolean = false>(
+  options: Options<AuthTokenRevokeData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<AuthTokenRevokeResponses, AuthTokenRevokeErrors, ThrowOnError>({
+    url: '/api/tools/auth.token_revoke',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Delete a config row owned by the local host.
+ *
+ * Delete a config row owned by the local host.
+ */
+export const configDelete = <ThrowOnError extends boolean = false>(
+  options: Options<ConfigDeleteData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<ConfigDeleteResponses, ConfigDeleteErrors, ThrowOnError>({
+    url: '/api/tools/config.delete',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Fetch a single config row by noun+name.
+ *
+ * Fetch a single config row by noun+name.
+ */
+export const configGet = <ThrowOnError extends boolean = false>(
+  options: Options<ConfigGetData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<ConfigGetResponses, ConfigGetErrors, ThrowOnError>({
+    url: '/api/tools/config.get',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List config rows. Optionally filter by noun and/or host_owner.
+ *
+ * List config rows. Optionally filter by noun and/or host_owner.
+ */
+export const configList = <ThrowOnError extends boolean = false>(
+  options: Options<ConfigListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<ConfigListResponses, ConfigListErrors, ThrowOnError>({
+    url: '/api/tools/config.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Upsert a config row. Refuses to write rows owned by a different host — cross-host writes route via the pod mesh once peer-tool dispatch lands (§3.3).
+ *
+ * Upsert a config row. Refuses to write rows owned by a different host — cross-host writes route via the pod mesh once peer-tool dispatch lands (§3.3).
+ */
+export const configSet = <ThrowOnError extends boolean = false>(
+  options: Options<ConfigSetData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<ConfigSetResponses, ConfigSetErrors, ThrowOnError>({
+    url: '/api/tools/config.set',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Revert the most recently applied migration (one step).
+ *
+ * [MUTATES STATE] Revert the most recently applied migration (one step).
+ */
+export const dbDown = <ThrowOnError extends boolean = false>(
+  options: Options<DbDownData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DbDownResponses, DbDownErrors, ThrowOnError>({
+    url: '/api/tools/db.down',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Apply all pending migrations.
+ *
+ * [MUTATES STATE] Apply all pending migrations.
+ */
+export const dbMigrate = <ThrowOnError extends boolean = false>(
+  options: Options<DbMigrateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DbMigrateResponses, DbMigrateErrors, ThrowOnError>({
+    url: '/api/tools/db.migrate',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Show current schema version and pending-migration count.
+ *
+ * Show current schema version and pending-migration count.
+ */
+export const dbStatus = <ThrowOnError extends boolean = false>(
+  options: Options<DbStatusData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DbStatusResponses, DbStatusErrors, ThrowOnError>({
+    url: '/api/tools/db.status',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Apply the next pending migration (one step).
+ *
+ * [MUTATES STATE] Apply the next pending migration (one step).
+ */
+export const dbUp = <ThrowOnError extends boolean = false>(
+  options: Options<DbUpData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DbUpResponses, DbUpErrors, ThrowOnError>({
+    url: '/api/tools/db.up',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Add a directory name to the global doc ignore list.
+ *
+ * [MUTATES STATE] Add a directory name to the global doc ignore list.
+ */
+export const docPatternAdd = <ThrowOnError extends boolean = false>(
+  options: Options<DocPatternAddData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DocPatternAddResponses, DocPatternAddErrors, ThrowOnError>({
+    url: '/api/tools/doc-pattern.add',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List directory names excluded from all doc roots (e.g. node_modules, .git).
+ *
+ * List directory names excluded from all doc roots (e.g. node_modules, .git).
+ */
+export const docPatternList = <ThrowOnError extends boolean = false>(
+  options: Options<DocPatternListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DocPatternListResponses, DocPatternListErrors, ThrowOnError>({
+    url: '/api/tools/doc-pattern.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove a directory name from the global doc ignore list.
+ *
+ * [MUTATES STATE] Remove a directory name from the global doc ignore list.
+ */
+export const docPatternRemove = <ThrowOnError extends boolean = false>(
+  options: Options<DocPatternRemoveData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DocPatternRemoveResponses, DocPatternRemoveErrors, ThrowOnError>({
+    url: '/api/tools/doc-pattern.remove',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Register a documentation root directory in orca.db.
+ *
+ * [MUTATES STATE] Register a documentation root directory in orca.db.
+ */
+export const docRootAdd = <ThrowOnError extends boolean = false>(
+  options: Options<DocRootAddData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DocRootAddResponses, DocRootAddErrors, ThrowOnError>({
+    url: '/api/tools/doc-root.add',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List all documentation roots registered in orca.db.
+ *
+ * List all documentation roots registered in orca.db.
+ */
+export const docRootList = <ThrowOnError extends boolean = false>(
+  options: Options<DocRootListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DocRootListResponses, DocRootListErrors, ThrowOnError>({
+    url: '/api/tools/doc-root.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove a documentation root from orca.db by name.
+ *
+ * [MUTATES STATE] Remove a documentation root from orca.db by name.
+ */
+export const docRootRemove = <ThrowOnError extends boolean = false>(
+  options: Options<DocRootRemoveData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DocRootRemoveResponses, DocRootRemoveErrors, ThrowOnError>({
+    url: '/api/tools/doc-root.remove',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Register a Docker runtime in orca.db. Provide socketPath, host, or url.
+ *
+ * [MUTATES STATE] Register a Docker runtime in orca.db. Provide socketPath, host, or url.
+ */
+export const dockerRuntimeAdd = <ThrowOnError extends boolean = false>(
+  options: Options<DockerRuntimeAddData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DockerRuntimeAddResponses, DockerRuntimeAddErrors, ThrowOnError>({
+    url: '/api/tools/docker-runtime.add',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List all Docker runtimes registered in orca.db.
+ *
+ * List all Docker runtimes registered in orca.db.
+ */
+export const dockerRuntimeList = <ThrowOnError extends boolean = false>(
+  options: Options<DockerRuntimeListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    DockerRuntimeListResponses,
+    DockerRuntimeListErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/docker-runtime.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove a Docker runtime from orca.db by name.
+ *
+ * [MUTATES STATE] Remove a Docker runtime from orca.db by name.
+ */
+export const dockerRuntimeRemove = <ThrowOnError extends boolean = false>(
+  options: Options<DockerRuntimeRemoveData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    DockerRuntimeRemoveResponses,
+    DockerRuntimeRemoveErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/docker-runtime.remove',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Run a docker-compose lifecycle action against the compose project at `project_path`.
+ *
+ * [MUTATES STATE] Run a docker-compose lifecycle action against the compose project at `project_path`.
+ */
+export const dockerAction = <ThrowOnError extends boolean = false>(
+  options: Options<DockerActionData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DockerActionResponses, DockerActionErrors, ThrowOnError>({
+    url: '/api/tools/docker.action',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Probe the local docker engine (colima | desktop | none) and whether it is running.
+ *
+ * Probe the local docker engine (colima | desktop | none) and whether it is running.
+ */
+export const dockerEngine = <ThrowOnError extends boolean = false>(
+  options: Options<DockerEngineData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DockerEngineResponses, DockerEngineErrors, ThrowOnError>({
+    url: '/api/tools/docker.engine',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Start the local docker engine. Returns the start-command output.
+ *
+ * [MUTATES STATE] Start the local docker engine. Returns the start-command output.
+ */
+export const dockerEngineStart = <ThrowOnError extends boolean = false>(
+  options: Options<DockerEngineStartData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    DockerEngineStartResponses,
+    DockerEngineStartErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/docker.engine-start',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List every docker-compose project under the rebuy root with its service states. Powers the cross-project logs panel.
+ *
+ * List every docker-compose project under the rebuy root with its service states. Powers the cross-project logs panel.
+ */
+export const dockerLogServices = <ThrowOnError extends boolean = false>(
+  options: Options<DockerLogServicesData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    DockerLogServicesResponses,
+    DockerLogServicesErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/docker.log-services',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Read docker-compose logs from the project at `project` (optionally scoped to a service).
+ *
+ * Read docker-compose logs from the project at `project` (optionally scoped to a service).
+ */
+export const dockerLogs = <ThrowOnError extends boolean = false>(
+  options: Options<DockerLogsData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DockerLogsResponses, DockerLogsErrors, ThrowOnError>({
+    url: '/api/tools/docker.logs',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List the compose services under `path` with state/health/ports plus the resolved compose-file path.
+ *
+ * List the compose services under `path` with state/health/ports plus the resolved compose-file path.
+ */
+export const dockerServices = <ThrowOnError extends boolean = false>(
+  options: Options<DockerServicesData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DockerServicesResponses, DockerServicesErrors, ThrowOnError>({
+    url: '/api/tools/docker.services',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Multi-root documentation tree — every registered root in one call. When `raw` is true, returns the uncompacted filesystem layout.
+ *
+ * Multi-root documentation tree — every registered root in one call. When `raw` is true, returns the uncompacted filesystem layout.
+ */
+export const docsFullTree = <ThrowOnError extends boolean = false>(
+  options: Options<DocsFullTreeData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DocsFullTreeResponses, DocsFullTreeErrors, ThrowOnError>({
+    url: '/api/tools/docs.full-tree',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List all Claude slash commands and skills from the orca vault.
+ *
+ * List all Claude slash commands and skills from the orca vault.
+ */
+export const docsListCommands = <ThrowOnError extends boolean = false>(
+  options: Options<DocsListCommandsData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DocsListCommandsResponses, DocsListCommandsErrors, ThrowOnError>({
+    url: '/api/tools/docs.list-commands',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List available documentation roots (rebuy, orca) with file counts and paths.
+ *
+ * List available documentation roots (rebuy, orca) with file counts and paths.
+ */
+export const docsListRoots = <ThrowOnError extends boolean = false>(
+  options: Options<DocsListRootsData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DocsListRootsResponses, DocsListRootsErrors, ThrowOnError>({
+    url: '/api/tools/docs.list-roots',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Read a documentation file by root and relative path (e.g. root=rebuy, path=admin-api/README).
+ *
+ * Read a documentation file by root and relative path (e.g. root=rebuy, path=admin-api/README).
+ */
+export const docsRead = <ThrowOnError extends boolean = false>(
+  options: Options<DocsReadData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DocsReadResponses, DocsReadErrors, ThrowOnError>({
+    url: '/api/tools/docs.read',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Search documentation files for a keyword across one or all roots.
+ *
+ * Search documentation files for a keyword across one or all roots.
+ */
+export const docsSearch = <ThrowOnError extends boolean = false>(
+  options: Options<DocsSearchData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DocsSearchResponses, DocsSearchErrors, ThrowOnError>({
+    url: '/api/tools/docs.search',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Get the compacted documentation tree for a root, optionally scoped to a subpath. Returns a typed tree of .md files.
+ *
+ * Get the compacted documentation tree for a root, optionally scoped to a subpath. Returns a typed tree of .md files.
+ */
+export const docsTree = <ThrowOnError extends boolean = false>(
+  options: Options<DocsTreeData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DocsTreeResponses, DocsTreeErrors, ThrowOnError>({
+    url: '/api/tools/docs.tree',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Register a new LLM backend. Kind auto-inferred from URL if not supplied.
+ *
+ * Register a new LLM backend. Kind auto-inferred from URL if not supplied.
+ */
+export const engineAdd = <ThrowOnError extends boolean = false>(
+  options: Options<EngineAddData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<EngineAddResponses, EngineAddErrors, ThrowOnError>({
+    url: '/api/tools/engine.add',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Disable a backend without removing it.
+ *
+ * Disable a backend without removing it.
+ */
+export const engineDisable = <ThrowOnError extends boolean = false>(
+  options: Options<EngineDisableData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<EngineDisableResponses, EngineDisableErrors, ThrowOnError>({
+    url: '/api/tools/engine.disable',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Enable a backend for model discovery.
+ *
+ * Enable a backend for model discovery.
+ */
+export const engineEnable = <ThrowOnError extends boolean = false>(
+  options: Options<EngineEnableData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<EngineEnableResponses, EngineEnableErrors, ThrowOnError>({
+    url: '/api/tools/engine.enable',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List registered LLM backends (LM Studio, Ollama).
+ *
+ * List registered LLM backends (LM Studio, Ollama).
+ */
+export const engineList = <ThrowOnError extends boolean = false>(
+  options: Options<EngineListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<EngineListResponses, EngineListErrors, ThrowOnError>({
+    url: '/api/tools/engine.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Remove a registered LLM backend.
+ *
+ * Remove a registered LLM backend.
+ */
+export const engineRemove = <ThrowOnError extends boolean = false>(
+  options: Options<EngineRemoveData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<EngineRemoveResponses, EngineRemoveErrors, ThrowOnError>({
+    url: '/api/tools/engine.remove',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Register or update a Home Assistant endpoint in orca.db. Auth uses a long-lived access token (Bearer header).
+ *
+ * [MUTATES STATE] Register or update a Home Assistant endpoint in orca.db. Auth uses a long-lived access token (Bearer header).
+ */
+export const haEndpointAdd = <ThrowOnError extends boolean = false>(
+  options: Options<HaEndpointAddData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<HaEndpointAddResponses, HaEndpointAddErrors, ThrowOnError>({
+    url: '/api/tools/ha-endpoint.add',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List all Home Assistant endpoints registered in orca.db (tokens are redacted).
+ *
+ * List all Home Assistant endpoints registered in orca.db (tokens are redacted).
+ */
+export const haEndpointList = <ThrowOnError extends boolean = false>(
+  options: Options<HaEndpointListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<HaEndpointListResponses, HaEndpointListErrors, ThrowOnError>({
+    url: '/api/tools/ha-endpoint.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove a Home Assistant endpoint from orca.db by name.
+ *
+ * [MUTATES STATE] Remove a Home Assistant endpoint from orca.db by name.
+ */
+export const haEndpointRemove = <ThrowOnError extends boolean = false>(
+  options: Options<HaEndpointRemoveData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<HaEndpointRemoveResponses, HaEndpointRemoveErrors, ThrowOnError>({
+    url: '/api/tools/ha-endpoint.remove',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List Home Assistant automations for a registered endpoint.
+ *
+ * List Home Assistant automations for a registered endpoint.
+ */
+export const haAutomationList = <ThrowOnError extends boolean = false>(
+  options: Options<HaAutomationListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<HaAutomationListResponses, HaAutomationListErrors, ThrowOnError>({
+    url: '/api/tools/ha.automation-list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List Home Assistant entities for a registered endpoint, optionally filtered by domain.
+ *
+ * List Home Assistant entities for a registered endpoint, optionally filtered by domain.
+ */
+export const haEntityList = <ThrowOnError extends boolean = false>(
+  options: Options<HaEntityListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<HaEntityListResponses, HaEntityListErrors, ThrowOnError>({
+    url: '/api/tools/ha.entity-list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Fetch the current state of a single Home Assistant entity.
+ *
+ * Fetch the current state of a single Home Assistant entity.
+ */
+export const haEntityState = <ThrowOnError extends boolean = false>(
+  options: Options<HaEntityStateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<HaEntityStateResponses, HaEntityStateErrors, ThrowOnError>({
+    url: '/api/tools/ha.entity-state',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Invoke a Home Assistant service (e.g. light.turn_on, switch.toggle). Returns the list of changed entity states.
+ *
+ * [MUTATES STATE] Invoke a Home Assistant service (e.g. light.turn_on, switch.toggle). Returns the list of changed entity states.
+ */
+export const haServiceCall = <ThrowOnError extends boolean = false>(
+  options: Options<HaServiceCallData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<HaServiceCallResponses, HaServiceCallErrors, ThrowOnError>({
+    url: '/api/tools/ha.service-call',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Local host snapshot: display name, machine_id, and every addressing channel.
+ *
+ * Local host snapshot: display name, machine_id, and every addressing channel.
+ */
+export const hostInfo = <ThrowOnError extends boolean = false>(
+  options: Options<HostInfoData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<HostInfoResponses, HostInfoErrors, ThrowOnError>({
+    url: '/api/tools/host.info',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Re-detect every host addressing channel (LAN + Tailscale + settings overrides).
+ *
+ * Re-detect every host addressing channel (LAN + Tailscale + settings overrides).
+ */
+export const hostRefresh = <ThrowOnError extends boolean = false>(
+  options: Options<HostRefreshData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<HostRefreshResponses, HostRefreshErrors, ThrowOnError>({
+    url: '/api/tools/host.refresh',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Write a manual host addressing override (display_name, fqdn, or a channel value).
+ *
+ * Write a manual host addressing override (display_name, fqdn, or a channel value).
+ */
+export const hostSet = <ThrowOnError extends boolean = false>(
+  options: Options<HostSetData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<HostSetResponses, HostSetErrors, ThrowOnError>({
+    url: '/api/tools/host.set',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Run the orca project test suite. Returns test output with pass/fail counts. Suites: rust (cargo test), frontend (vitest), e2e (playwright), all.
+ *
+ * Run the orca project test suite. Returns test output with pass/fail counts. Suites: rust (cargo test), frontend (vitest), e2e (playwright), all.
+ */
+export const infraRunTests = <ThrowOnError extends boolean = false>(
+  options: Options<InfraRunTestsData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<InfraRunTestsResponses, InfraRunTestsErrors, ThrowOnError>({
+    url: '/api/tools/infra.run-tests',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Fetch docker compose logs for a running rebuy service. Specify the project path and service name.
+ *
+ * Fetch docker compose logs for a running rebuy service. Specify the project path and service name.
+ */
+export const infraServiceLogs = <ThrowOnError extends boolean = false>(
+  options: Options<InfraServiceLogsData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<InfraServiceLogsResponses, InfraServiceLogsErrors, ThrowOnError>({
+    url: '/api/tools/infra.service-logs',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List all running docker compose services across all rebuy projects. Returns project name, path, and per-service state/health/ports.
+ *
+ * List all running docker compose services across all rebuy projects. Returns project name, path, and per-service state/health/ports.
+ */
+export const infraServices = <ThrowOnError extends boolean = false>(
+  options: Options<InfraServicesData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<InfraServicesResponses, InfraServicesErrors, ThrowOnError>({
+    url: '/api/tools/infra.services',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List every tool advertised by every registered MCP server (connects on demand).
+ *
+ * List every tool advertised by every registered MCP server (connects on demand).
+ */
+export const mcpFederationListTools = <ThrowOnError extends boolean = false>(
+  options: Options<McpFederationListToolsData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    McpFederationListToolsResponses,
+    McpFederationListToolsErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/mcp-federation.list-tools',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Invoke a tool on a registered MCP server. Returns the typed `tools/call` envelope (`{ content, isError, structuredContent? }`).
+ *
+ * [MUTATES STATE] Invoke a tool on a registered MCP server. Returns the typed `tools/call` envelope (`{ content, isError, structuredContent? }`).
+ */
+export const mcpFederationRun = <ThrowOnError extends boolean = false>(
+  options: Options<McpFederationRunData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<McpFederationRunResponses, McpFederationRunErrors, ThrowOnError>({
+    url: '/api/tools/mcp-federation.run',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Add or update an MCP server in orca.db. Use when registering a new MCP server for orca to federate.
+ *
+ * [MUTATES STATE] Add or update an MCP server in orca.db. Use when registering a new MCP server for orca to federate.
+ */
+export const mcpAdd = <ThrowOnError extends boolean = false>(
+  options: Options<McpAddData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<McpAddResponses, McpAddErrors, ThrowOnError>({
+    url: '/api/tools/mcp.add',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List all MCP servers registered in orca.db (orca's own managed registry). Does not include ~/.claude.json servers managed by Claude Code directly.
+ *
+ * List all MCP servers registered in orca.db (orca's own managed registry). Does not include ~/.claude.json servers managed by Claude Code directly.
+ */
+export const mcpList = <ThrowOnError extends boolean = false>(
+  options: Options<McpListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<McpListResponses, McpListErrors, ThrowOnError>({
+    url: '/api/tools/mcp.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List all tool mappings in orca.db, optionally filtered by server name.
+ *
+ * List all tool mappings in orca.db, optionally filtered by server name.
+ */
+export const mcpListMappings = <ThrowOnError extends boolean = false>(
+  options: Options<McpListMappingsData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<McpListMappingsResponses, McpListMappingsErrors, ThrowOnError>({
+    url: '/api/tools/mcp.list-mappings',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Map an orca tool name to a specific tool on a registered MCP server.
+ *
+ * [MUTATES STATE] Map an orca tool name to a specific tool on a registered MCP server.
+ */
+export const mcpMap = <ThrowOnError extends boolean = false>(
+  options: Options<McpMapData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<McpMapResponses, McpMapErrors, ThrowOnError>({
+    url: '/api/tools/mcp.map',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove an MCP server from orca.db by name.
+ *
+ * [MUTATES STATE] Remove an MCP server from orca.db by name.
+ */
+export const mcpRemove = <ThrowOnError extends boolean = false>(
+  options: Options<McpRemoveData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<McpRemoveResponses, McpRemoveErrors, ThrowOnError>({
+    url: '/api/tools/mcp.remove',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Auto-discover and map tools from registered MCP servers. Provide name or set all=true.
+ *
+ * [MUTATES STATE] Auto-discover and map tools from registered MCP servers. Provide name or set all=true.
+ */
+export const mcpSync = <ThrowOnError extends boolean = false>(
+  options: Options<McpSyncData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<McpSyncResponses, McpSyncErrors, ThrowOnError>({
+    url: '/api/tools/mcp.sync',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove a tool mapping from orca.db.
+ *
+ * [MUTATES STATE] Remove a tool mapping from orca.db.
+ */
+export const mcpUnmap = <ThrowOnError extends boolean = false>(
+  options: Options<McpUnmapData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<McpUnmapResponses, McpUnmapErrors, ThrowOnError>({
+    url: '/api/tools/mcp.unmap',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Initialize the orca CA and server cert. Safe to re-run; skips if CA exists.
+ *
+ * [MUTATES STATE] Initialize the orca CA and server cert. Safe to re-run; skips if CA exists.
+ */
+export const pkiCaInit = <ThrowOnError extends boolean = false>(
+  options: Options<PkiCaInitData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PkiCaInitResponses, PkiCaInitErrors, ThrowOnError>({
+    url: '/api/tools/pki.ca-init',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Issue a cert for a plugin.
+ *
+ * [MUTATES STATE] Issue a cert for a plugin.
+ */
+export const pkiCertIssue = <ThrowOnError extends boolean = false>(
+  options: Options<PkiCertIssueData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PkiCertIssueResponses, PkiCertIssueErrors, ThrowOnError>({
+    url: '/api/tools/pki.cert-issue',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List all issued plugin certs.
+ *
+ * List all issued plugin certs.
+ */
+export const pkiList = <ThrowOnError extends boolean = false>(
+  options: Options<PkiListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PkiListResponses, PkiListErrors, ThrowOnError>({
+    url: '/api/tools/pki.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Read a single key from a plugin's encrypted KV store in orca.db.
+ *
+ * Read a single key from a plugin's encrypted KV store in orca.db.
+ */
+export const pluginDataGet = <ThrowOnError extends boolean = false>(
+  options: Options<PluginDataGetData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PluginDataGetResponses, PluginDataGetErrors, ThrowOnError>({
+    url: '/api/tools/plugin-data.get',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Upsert a single key in a plugin's encrypted KV store in orca.db.
+ *
+ * [MUTATES STATE] Upsert a single key in a plugin's encrypted KV store in orca.db.
+ */
+export const pluginDataSet = <ThrowOnError extends boolean = false>(
+  options: Options<PluginDataSetData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PluginDataSetResponses, PluginDataSetErrors, ThrowOnError>({
+    url: '/api/tools/plugin-data.set',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Install an orca plugin from a manifest path or URL.
+ *
+ * [MUTATES STATE] Install an orca plugin from a manifest path or URL.
+ */
+export const pluginAdd = <ThrowOnError extends boolean = false>(
+  options: Options<PluginAddData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PluginAddResponses, PluginAddErrors, ThrowOnError>({
+    url: '/api/tools/plugin.add',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Disable a registered orca plugin.
+ *
+ * [MUTATES STATE] Disable a registered orca plugin.
+ */
+export const pluginDisable = <ThrowOnError extends boolean = false>(
+  options: Options<PluginDisableData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PluginDisableResponses, PluginDisableErrors, ThrowOnError>({
+    url: '/api/tools/plugin.disable',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Enable a registered orca plugin.
+ *
+ * [MUTATES STATE] Enable a registered orca plugin.
+ */
+export const pluginEnable = <ThrowOnError extends boolean = false>(
+  options: Options<PluginEnableData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PluginEnableResponses, PluginEnableErrors, ThrowOnError>({
+    url: '/api/tools/plugin.enable',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List all orca plugins registered in orca.db.
+ *
+ * List all orca plugins registered in orca.db.
+ */
+export const pluginList = <ThrowOnError extends boolean = false>(
+  options: Options<PluginListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PluginListResponses, PluginListErrors, ThrowOnError>({
+    url: '/api/tools/plugin.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List all stored credentials for a plugin (keys only — values are never returned).
+ *
+ * List all stored credentials for a plugin (keys only — values are never returned).
+ */
+export const pluginListCreds = <ThrowOnError extends boolean = false>(
+  options: Options<PluginListCredsData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PluginListCredsResponses, PluginListCredsErrors, ThrowOnError>({
+    url: '/api/tools/plugin.list-creds',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove an installed orca plugin by ID.
+ *
+ * [MUTATES STATE] Remove an installed orca plugin by ID.
+ */
+export const pluginRemove = <ThrowOnError extends boolean = false>(
+  options: Options<PluginRemoveData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PluginRemoveResponses, PluginRemoveErrors, ThrowOnError>({
+    url: '/api/tools/plugin.remove',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove a stored credential for a plugin from orca.db.
+ *
+ * [MUTATES STATE] Remove a stored credential for a plugin from orca.db.
+ */
+export const pluginRemoveCred = <ThrowOnError extends boolean = false>(
+  options: Options<PluginRemoveCredData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PluginRemoveCredResponses, PluginRemoveCredErrors, ThrowOnError>({
+    url: '/api/tools/plugin.remove-cred',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Store a credential value for a plugin in orca.db.
+ *
+ * [MUTATES STATE] Store a credential value for a plugin in orca.db.
+ */
+export const pluginSetCred = <ThrowOnError extends boolean = false>(
+  options: Options<PluginSetCredData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PluginSetCredResponses, PluginSetCredErrors, ThrowOnError>({
+    url: '/api/tools/plugin.set-cred',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Sync stored credentials for a plugin to its runtime environment.
+ *
+ * [MUTATES STATE] Sync stored credentials for a plugin to its runtime environment.
+ */
+export const pluginSyncCreds = <ThrowOnError extends boolean = false>(
+  options: Options<PluginSyncCredsData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PluginSyncCredsResponses, PluginSyncCredsErrors, ThrowOnError>({
+    url: '/api/tools/plugin.sync-creds',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Accept a pending pod-membership offer by pairing code.
+ *
+ * Accept a pending pod-membership offer by pairing code.
+ */
+export const podAccept = <ThrowOnError extends boolean = false>(
+  options: Options<PodAcceptData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodAcceptResponses, PodAcceptErrors, ThrowOnError>({
+    url: '/api/tools/pod.accept',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Days-remaining + rotation state for every mesh cert on this host.
+ *
+ * Days-remaining + rotation state for every mesh cert on this host.
+ */
+export const podCertStatus = <ThrowOnError extends boolean = false>(
+  options: Options<PodCertStatusData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodCertStatusResponses, PodCertStatusErrors, ThrowOnError>({
+    url: '/api/tools/pod.cert-status',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Flip dev mode OFF across the mesh. Empty `peers` = local + every paired peer. Each peer stops cargo-watch and the production daemon reclaims.
+ *
+ * Flip dev mode OFF across the mesh. Empty `peers` = local + every paired peer. Each peer stops cargo-watch and the production daemon reclaims.
+ */
+export const podDevDisable = <ThrowOnError extends boolean = false>(
+  options: Options<PodDevDisableData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodDevDisableResponses, PodDevDisableErrors, ThrowOnError>({
+    url: '/api/tools/pod.dev_disable',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Flip dev mode ON across the mesh. Empty `peers` = local + every paired peer. Each peer clones the repo if needed and spawns cargo-watch.
+ *
+ * Flip dev mode ON across the mesh. Empty `peers` = local + every paired peer. Each peer clones the repo if needed and spawns cargo-watch.
+ */
+export const podDevEnable = <ThrowOnError extends boolean = false>(
+  options: Options<PodDevEnableData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodDevEnableResponses, PodDevEnableErrors, ThrowOnError>({
+    url: '/api/tools/pod.dev_enable',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * git pull on every active peer running in dev mode; cargo watch auto-restarts. Peers not in dev mode are skipped (not an error).
+ *
+ * git pull on every active peer running in dev mode; cargo watch auto-restarts. Peers not in dev mode are skipped (not an error).
+ */
+export const podDevSync = <ThrowOnError extends boolean = false>(
+  options: Options<PodDevSyncData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodDevSyncResponses, PodDevSyncErrors, ThrowOnError>({
+    url: '/api/tools/pod.dev_sync',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List orcas seen on the network via mDNS (paired + unclaimed).
+ *
+ * List orcas seen on the network via mDNS (paired + unclaimed).
+ */
+export const podDiscover = <ThrowOnError extends boolean = false>(
+  options: Options<PodDiscoverData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodDiscoverResponses, PodDiscoverErrors, ThrowOnError>({
+    url: '/api/tools/pod.discover',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Joiner-initiated pair: request an offer from an out-of-mDNS inviter.
+ *
+ * Joiner-initiated pair: request an offer from an out-of-mDNS inviter.
+ */
+export const podJoin = <ThrowOnError extends boolean = false>(
+  options: Options<PodJoinData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodJoinResponses, PodJoinErrors, ThrowOnError>({
+    url: '/api/tools/pod.join',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Best-effort notify a peer we're leaving, then drop pod_peers + pod_trust rows for it.
+ *
+ * Best-effort notify a peer we're leaving, then drop pod_peers + pod_trust rows for it.
+ */
+export const podLeave = <ThrowOnError extends boolean = false>(
+  options: Options<PodLeaveData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodLeaveResponses, PodLeaveErrors, ThrowOnError>({
+    url: '/api/tools/pod.leave',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List paired pod peers (mesh members).
+ *
+ * List paired pod peers (mesh members).
+ */
+export const podList = <ThrowOnError extends boolean = false>(
+  options: Options<PodListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodListResponses, PodListErrors, ThrowOnError>({
+    url: '/api/tools/pod.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Push a pod-membership offer to a discovered joiner.
+ *
+ * Push a pod-membership offer to a discovered joiner.
+ */
+export const podOffer = <ThrowOnError extends boolean = false>(
+  options: Options<PodOfferData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodOfferResponses, PodOfferErrors, ThrowOnError>({
+    url: '/api/tools/pod.offer',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List pending inbound pod-membership offers.
+ *
+ * List pending inbound pod-membership offers.
+ */
+export const podPending = <ThrowOnError extends boolean = false>(
+  options: Options<PodPendingData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodPendingResponses, PodPendingErrors, ThrowOnError>({
+    url: '/api/tools/pod.pending',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * mTLS ping a paired peer; returns latency + their self-reported identity.
+ *
+ * mTLS ping a paired peer; returns latency + their self-reported identity.
+ */
+export const podPing = <ThrowOnError extends boolean = false>(
+  options: Options<PodPingData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodPingResponses, PodPingErrors, ThrowOnError>({
+    url: '/api/tools/pod.ping',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Toggle local trust for a paired peer; replicates CA key on mutual-secure.
+ *
+ * Toggle local trust for a paired peer; replicates CA key on mutual-secure.
+ */
+export const podTrust = <ThrowOnError extends boolean = false>(
+  options: Options<PodTrustData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodTrustResponses, PodTrustErrors, ThrowOnError>({
+    url: '/api/tools/pod.trust',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Create a new profile owned by the current user.
+ *
+ * [MUTATES STATE] Create a new profile owned by the current user.
+ */
+export const profileCreate = <ThrowOnError extends boolean = false>(
+  options: Options<ProfileCreateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<ProfileCreateResponses, ProfileCreateErrors, ThrowOnError>({
+    url: '/api/tools/profile.create',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Show the currently active profile (or None).
+ *
+ * Show the currently active profile (or None).
+ */
+export const profileCurrent = <ThrowOnError extends boolean = false>(
+  options: Options<ProfileCurrentData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<ProfileCurrentResponses, ProfileCurrentErrors, ThrowOnError>({
+    url: '/api/tools/profile.current',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Delete a profile (owner only).
+ *
+ * [MUTATES STATE] Delete a profile (owner only).
+ */
+export const profileDelete = <ThrowOnError extends boolean = false>(
+  options: Options<ProfileDeleteData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<ProfileDeleteResponses, ProfileDeleteErrors, ThrowOnError>({
+    url: '/api/tools/profile.delete',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List all profiles the current user can access (owned + shared).
+ *
+ * List all profiles the current user can access (owned + shared).
+ */
+export const profileList = <ThrowOnError extends boolean = false>(
+  options: Options<ProfileListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<ProfileListResponses, ProfileListErrors, ThrowOnError>({
+    url: '/api/tools/profile.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Share a profile with another user.
+ *
+ * [MUTATES STATE] Share a profile with another user.
+ */
+export const profileShare = <ThrowOnError extends boolean = false>(
+  options: Options<ProfileShareData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<ProfileShareResponses, ProfileShareErrors, ThrowOnError>({
+    url: '/api/tools/profile.share',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List sharees on a profile (owner only).
+ *
+ * List sharees on a profile (owner only).
+ */
+export const profileShares = <ThrowOnError extends boolean = false>(
+  options: Options<ProfileSharesData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<ProfileSharesResponses, ProfileSharesErrors, ThrowOnError>({
+    url: '/api/tools/profile.shares',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Show details of a profile (defaults to the active one).
+ *
+ * Show details of a profile (defaults to the active one).
+ */
+export const profileShow = <ThrowOnError extends boolean = false>(
+  options: Options<ProfileShowData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<ProfileShowResponses, ProfileShowErrors, ThrowOnError>({
+    url: '/api/tools/profile.show',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove a share from a profile.
+ *
+ * [MUTATES STATE] Remove a share from a profile.
+ */
+export const profileUnshare = <ThrowOnError extends boolean = false>(
+  options: Options<ProfileUnshareData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<ProfileUnshareResponses, ProfileUnshareErrors, ThrowOnError>({
+    url: '/api/tools/profile.unshare',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Set the active profile for the current user.
+ *
+ * [MUTATES STATE] Set the active profile for the current user.
+ */
+export const profileUse = <ThrowOnError extends boolean = false>(
+  options: Options<ProfileUseData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<ProfileUseResponses, ProfileUseErrors, ThrowOnError>({
+    url: '/api/tools/profile.use',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List projects (memory directories under the orca vault root).
+ *
+ * List projects (memory directories under the orca vault root).
+ */
+export const projectsList = <ThrowOnError extends boolean = false>(
+  options: Options<ProjectsListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<ProjectsListResponses, ProjectsListErrors, ThrowOnError>({
+    url: '/api/tools/projects.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Register or update a Proxmox VE endpoint in orca.db. Auth uses an API token (PVEAPIToken header).
+ *
+ * [MUTATES STATE] Register or update a Proxmox VE endpoint in orca.db. Auth uses an API token (PVEAPIToken header).
+ */
+export const proxmoxEndpointAdd = <ThrowOnError extends boolean = false>(
+  options: Options<ProxmoxEndpointAddData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    ProxmoxEndpointAddResponses,
+    ProxmoxEndpointAddErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/proxmox-endpoint.add',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List all Proxmox VE endpoints registered in orca.db (token secrets are redacted).
+ *
+ * List all Proxmox VE endpoints registered in orca.db (token secrets are redacted).
+ */
+export const proxmoxEndpointList = <ThrowOnError extends boolean = false>(
+  options: Options<ProxmoxEndpointListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    ProxmoxEndpointListResponses,
+    ProxmoxEndpointListErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/proxmox-endpoint.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove a Proxmox VE endpoint from orca.db by name.
+ *
+ * [MUTATES STATE] Remove a Proxmox VE endpoint from orca.db by name.
+ */
+export const proxmoxEndpointRemove = <ThrowOnError extends boolean = false>(
+  options: Options<ProxmoxEndpointRemoveData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    ProxmoxEndpointRemoveResponses,
+    ProxmoxEndpointRemoveErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/proxmox-endpoint.remove',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Run a lifecycle action on a Proxmox LXC container.
+ *
+ * [MUTATES STATE] Run a lifecycle action on a Proxmox LXC container.
+ */
+export const proxmoxContainerAction = <ThrowOnError extends boolean = false>(
+  options: Options<ProxmoxContainerActionData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    ProxmoxContainerActionResponses,
+    ProxmoxContainerActionErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/proxmox.container-action',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List LXC containers on a Proxmox node.
+ *
+ * List LXC containers on a Proxmox node.
+ */
+export const proxmoxContainers = <ThrowOnError extends boolean = false>(
+  options: Options<ProxmoxContainersData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    ProxmoxContainersResponses,
+    ProxmoxContainersErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/proxmox.containers',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List Proxmox VE cluster nodes for a registered endpoint.
+ *
+ * List Proxmox VE cluster nodes for a registered endpoint.
+ */
+export const proxmoxNodes = <ThrowOnError extends boolean = false>(
+  options: Options<ProxmoxNodesData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<ProxmoxNodesResponses, ProxmoxNodesErrors, ThrowOnError>({
+    url: '/api/tools/proxmox.nodes',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Run a lifecycle action on a Proxmox VM (start/stop/shutdown/reboot).
+ *
+ * [MUTATES STATE] Run a lifecycle action on a Proxmox VM (start/stop/shutdown/reboot).
+ */
+export const proxmoxVmAction = <ThrowOnError extends boolean = false>(
+  options: Options<ProxmoxVmActionData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<ProxmoxVmActionResponses, ProxmoxVmActionErrors, ThrowOnError>({
+    url: '/api/tools/proxmox.vm-action',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List QEMU VMs on a Proxmox node.
+ *
+ * List QEMU VMs on a Proxmox node.
+ */
+export const proxmoxVms = <ThrowOnError extends boolean = false>(
+  options: Options<ProxmoxVmsData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<ProxmoxVmsResponses, ProxmoxVmsErrors, ThrowOnError>({
+    url: '/api/tools/proxmox.vms',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List schedule rows with their next firing time.
+ *
+ * List schedule rows with their next firing time.
+ */
+export const scheduleList = <ThrowOnError extends boolean = false>(
+  options: Options<ScheduleListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<ScheduleListResponses, ScheduleListErrors, ThrowOnError>({
+    url: '/api/tools/schedule.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Invoke a scheduled job immediately, out-of-band from the loop. Useful for testing schedule wiring without waiting for the next firing.
+ *
+ * Invoke a scheduled job immediately, out-of-band from the loop. Useful for testing schedule wiring without waiting for the next firing.
+ */
+export const scheduleRun = <ThrowOnError extends boolean = false>(
+  options: Options<ScheduleRunData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<ScheduleRunResponses, ScheduleRunErrors, ThrowOnError>({
+    url: '/api/tools/schedule.run',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Show per-job last-run status from the scheduler_runs history.
+ *
+ * Show per-job last-run status from the scheduler_runs history.
+ */
+export const scheduleStatus = <ThrowOnError extends boolean = false>(
+  options: Options<ScheduleStatusData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<ScheduleStatusResponses, ScheduleStatusErrors, ThrowOnError>({
+    url: '/api/tools/schedule.status',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Return the multi-tab schema view across every configured database. Result is `{ tabs, showTabs, errors? }`.
+ *
+ * Return the multi-tab schema view across every configured database. Result is `{ tabs, showTabs, errors? }`.
+ */
+export const schemaViewGet = <ThrowOnError extends boolean = false>(
+  options: Options<SchemaViewGetData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SchemaViewGetResponses, SchemaViewGetErrors, ThrowOnError>({
+    url: '/api/tools/schema-view.get',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Return the flattened list of domain definitions across every configured database.
+ *
+ * Return the flattened list of domain definitions across every configured database.
+ */
+export const schemaViewListDomains = <ThrowOnError extends boolean = false>(
+  options: Options<SchemaViewListDomainsData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    SchemaViewListDomainsResponses,
+    SchemaViewListDomainsErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/schema-view.list-domains',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Add or update a schema database in orca.db. Use container OR host/port, not both.
+ *
+ * [MUTATES STATE] Add or update a schema database in orca.db. Use container OR host/port, not both.
+ */
+export const schemaAdd = <ThrowOnError extends boolean = false>(
+  options: Options<SchemaAddData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SchemaAddResponses, SchemaAddErrors, ThrowOnError>({
+    url: '/api/tools/schema.add',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List all MySQL/MariaDB schema databases registered in orca.db.
+ *
+ * List all MySQL/MariaDB schema databases registered in orca.db.
+ */
+export const schemaList = <ThrowOnError extends boolean = false>(
+  options: Options<SchemaListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SchemaListResponses, SchemaListErrors, ThrowOnError>({
+    url: '/api/tools/schema.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove a schema database from orca.db by name.
+ *
+ * [MUTATES STATE] Remove a schema database from orca.db by name.
+ */
+export const schemaRemove = <ThrowOnError extends boolean = false>(
+  options: Options<SchemaRemoveData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SchemaRemoveResponses, SchemaRemoveErrors, ThrowOnError>({
+    url: '/api/tools/schema.remove',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List backend kinds available on this host (lets the UI render a backend picker).
+ *
+ * List backend kinds available on this host (lets the UI render a backend picker).
+ */
+export const secretBackends = <ThrowOnError extends boolean = false>(
+  options: Options<SecretBackendsData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SecretBackendsResponses, SecretBackendsErrors, ThrowOnError>({
+    url: '/api/tools/secret.backends',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove a secret. The inline value is zeroed; for external backends only the orca registration is removed (the upstream vault is untouched).
+ *
+ * [MUTATES STATE] Remove a secret. The inline value is zeroed; for external backends only the orca registration is removed (the upstream vault is untouched).
+ */
+export const secretDelete = <ThrowOnError extends boolean = false>(
+  options: Options<SecretDeleteData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SecretDeleteResponses, SecretDeleteErrors, ThrowOnError>({
+    url: '/api/tools/secret.delete',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [SENSITIVE] Fetch a secret value by name. Resolves via the configured backend.
+ *
+ * [SENSITIVE] Fetch a secret value by name. Resolves via the configured backend.
+ */
+export const secretGet = <ThrowOnError extends boolean = false>(
+  options: Options<SecretGetData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SecretGetResponses, SecretGetErrors, ThrowOnError>({
+    url: '/api/tools/secret.get',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List configured secrets (names + backends + metadata). Never returns values.
+ *
+ * List configured secrets (names + backends + metadata). Never returns values.
+ */
+export const secretList = <ThrowOnError extends boolean = false>(
+  options: Options<SecretListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SecretListResponses, SecretListErrors, ThrowOnError>({
+    url: '/api/tools/secret.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Create or update a secret. For 'inline' backend, `value` is required; for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field').
+ *
+ * [MUTATES STATE] Create or update a secret. For 'inline' backend, `value` is required; for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field').
+ */
+export const secretSet = <ThrowOnError extends boolean = false>(
+  options: Options<SecretSetData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SecretSetResponses, SecretSetErrors, ThrowOnError>({
+    url: '/api/tools/secret.set',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Dump orca's own OpenAPI JSON document. Used by build pipelines that don't want to spin up the HTTP server.
+ *
+ * Dump orca's own OpenAPI JSON document. Used by build pipelines that don't want to spin up the HTTP server.
+ */
+export const specDump = <ThrowOnError extends boolean = false>(
+  options: Options<SpecDumpData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SpecDumpResponses, SpecDumpErrors, ThrowOnError>({
+    url: '/api/tools/spec.dump',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Parse the local `<repo>.graphql` SDL into a structured types/queries/mutations view.
+ *
+ * Parse the local `<repo>.graphql` SDL into a structured types/queries/mutations view.
+ */
+export const specGraphqlInfo = <ThrowOnError extends boolean = false>(
+  options: Options<SpecGraphqlInfoData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SpecGraphqlInfoResponses, SpecGraphqlInfoErrors, ThrowOnError>({
+    url: '/api/tools/spec.graphql-info',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List every registered OpenAPI / GraphQL spec — filesystem-resident, DB-backed, and plugin-declared — with per-source metadata.
+ *
+ * List every registered OpenAPI / GraphQL spec — filesystem-resident, DB-backed, and plugin-declared — with per-source metadata.
+ */
+export const specList = <ThrowOnError extends boolean = false>(
+  options: Options<SpecListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SpecListResponses, SpecListErrors, ThrowOnError>({
+    url: '/api/tools/spec.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List URL-registered + MCP-synced specs from orca.db (the DB-backed slice only).
+ *
+ * List URL-registered + MCP-synced specs from orca.db (the DB-backed slice only).
+ */
+export const specListDb = <ThrowOnError extends boolean = false>(
+  options: Options<SpecListDbData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SpecListDbResponses, SpecListDbErrors, ThrowOnError>({
+    url: '/api/tools/spec.list-db',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Proxy a GraphQL request to a Shopify shop using the configured shop+token. Returns the raw upstream JSON body.
+ *
+ * Proxy a GraphQL request to a Shopify shop using the configured shop+token. Returns the raw upstream JSON body.
+ */
+export const specProxyGraphql = <ThrowOnError extends boolean = false>(
+  options: Options<SpecProxyGraphqlData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SpecProxyGraphqlResponses, SpecProxyGraphqlErrors, ThrowOnError>({
+    url: '/api/tools/spec.proxy-graphql',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Re-fetch a previously-registered spec from its stored URL and update orca.db.
+ *
+ * [MUTATES STATE] Re-fetch a previously-registered spec from its stored URL and update orca.db.
+ */
+export const specRefresh = <ThrowOnError extends boolean = false>(
+  options: Options<SpecRefreshData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SpecRefreshResponses, SpecRefreshErrors, ThrowOnError>({
+    url: '/api/tools/spec.refresh',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Fetch a JSON OpenAPI spec from `url` and persist it under `name` in orca.db.
+ *
+ * [MUTATES STATE] Fetch a JSON OpenAPI spec from `url` and persist it under `name` in orca.db.
+ */
+export const specRegister = <ThrowOnError extends boolean = false>(
+  options: Options<SpecRegisterData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SpecRegisterResponses, SpecRegisterErrors, ThrowOnError>({
+    url: '/api/tools/spec.register',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Connect to `server` (an MCP server), call its `{prefix}_spec_list` and `{prefix}_spec_schema` tools, and upsert every advertised repo into orca.db.
+ *
+ * [MUTATES STATE] Connect to `server` (an MCP server), call its `{prefix}_spec_list` and `{prefix}_spec_schema` tools, and upsert every advertised repo into orca.db.
+ */
+export const specSyncMcp = <ThrowOnError extends boolean = false>(
+  options: Options<SpecSyncMcpData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SpecSyncMcpResponses, SpecSyncMcpErrors, ThrowOnError>({
+    url: '/api/tools/spec.sync-mcp',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove a spec from orca.db. Returns `removed: true` when a row was deleted.
+ *
+ * [MUTATES STATE] Remove a spec from orca.db. Returns `removed: true` when a row was deleted.
+ */
+export const specUnregister = <ThrowOnError extends boolean = false>(
+  options: Options<SpecUnregisterData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SpecUnregisterResponses, SpecUnregisterErrors, ThrowOnError>({
+    url: '/api/tools/spec.unregister',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Run orca's install or uninstall flow. Returns the per-step report.
+ *
+ * [MUTATES STATE] Run orca's install or uninstall flow. Returns the per-step report.
+ */
+export const systemAction = <ThrowOnError extends boolean = false>(
+  options: Options<SystemActionData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SystemActionResponses, SystemActionErrors, ThrowOnError>({
+    url: '/api/tools/system.action',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Stop cargo watch and let the production daemon reclaim the port.
+ *
+ * Stop cargo watch and let the production daemon reclaim the port.
+ */
+export const systemDevDisable = <ThrowOnError extends boolean = false>(
+  options: Options<SystemDevDisableData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SystemDevDisableResponses, SystemDevDisableErrors, ThrowOnError>({
+    url: '/api/tools/system.dev_disable',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Clone the orca repo (if not present) and start cargo watch, parking the production daemon. Idempotent — safe to call if dev mode is already active.
+ *
+ * Clone the orca repo (if not present) and start cargo watch, parking the production daemon. Idempotent — safe to call if dev mode is already active.
+ */
+export const systemDevEnable = <ThrowOnError extends boolean = false>(
+  options: Options<SystemDevEnableData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SystemDevEnableResponses, SystemDevEnableErrors, ThrowOnError>({
+    url: '/api/tools/system.dev_enable',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * git pull in the dev checkout; cargo watch detects the changes and restarts automatically. No-op (returns already_up_to_date) if dev mode is not active.
+ *
+ * git pull in the dev checkout; cargo watch detects the changes and restarts automatically. No-op (returns already_up_to_date) if dev mode is not active.
+ */
+export const systemDevSync = <ThrowOnError extends boolean = false>(
+  options: Options<SystemDevSyncData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SystemDevSyncResponses, SystemDevSyncErrors, ThrowOnError>({
+    url: '/api/tools/system.dev_sync',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Validate agent files, symlinks, config, tool availability — returns ok/warn/error entries.
+ *
+ * Validate agent files, symlinks, config, tool availability — returns ok/warn/error entries.
+ */
+export const systemDoctor = <ThrowOnError extends boolean = false>(
+  options: Options<SystemDoctorData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SystemDoctorResponses, SystemDoctorErrors, ThrowOnError>({
+    url: '/api/tools/system.doctor',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Liveness probe — returns {ok: true} when the server is alive.
+ *
+ * Liveness probe — returns {ok: true} when the server is alive.
+ */
+export const systemHealth = <ThrowOnError extends boolean = false>(
+  options: Options<SystemHealthData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SystemHealthResponses, SystemHealthErrors, ThrowOnError>({
+    url: '/api/tools/system.health',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Install orca: wire symlinks, register MCP server, install binary.
+ *
+ * [MUTATES STATE] Install orca: wire symlinks, register MCP server, install binary.
+ */
+export const systemInstall = <ThrowOnError extends boolean = false>(
+  options: Options<SystemInstallData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SystemInstallResponses, SystemInstallErrors, ThrowOnError>({
+    url: '/api/tools/system.install',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Report this binary's runtime composition: whether the web UI is embedded, build target triple. Used by installers to decide whether to fetch a JS runtime alongside the binary.
+ *
+ * Report this binary's runtime composition: whether the web UI is embedded, build target triple. Used by installers to decide whether to fetch a JS runtime alongside the binary.
+ */
+export const systemRuntimeSpec = <ThrowOnError extends boolean = false>(
+  options: Options<SystemRuntimeSpecData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    SystemRuntimeSpecResponses,
+    SystemRuntimeSpecErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/system.runtime-spec',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Snapshot of orca's installation: binary, ~/.claude/CLAUDE.md, vault dir, agents symlink, PKI init, MCP registration.
+ *
+ * Snapshot of orca's installation: binary, ~/.claude/CLAUDE.md, vault dir, agents symlink, PKI init, MCP registration.
+ */
+export const systemStatus = <ThrowOnError extends boolean = false>(
+  options: Options<SystemStatusData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SystemStatusResponses, SystemStatusErrors, ThrowOnError>({
+    url: '/api/tools/system.status',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove binary, MCP registration, and CLAUDE.md symlinks.
+ *
+ * [MUTATES STATE] Remove binary, MCP registration, and CLAUDE.md symlinks.
+ */
+export const systemUninstall = <ThrowOnError extends boolean = false>(
+  options: Options<SystemUninstallData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SystemUninstallResponses, SystemUninstallErrors, ThrowOnError>({
+    url: '/api/tools/system.uninstall',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Download + install the latest binary on `channel`. No-op if up to date.
+ *
+ * [MUTATES STATE] Download + install the latest binary on `channel`. No-op if up to date.
+ */
+export const systemUpdateApply = <ThrowOnError extends boolean = false>(
+  options: Options<SystemUpdateApplyData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    SystemUpdateApplyResponses,
+    SystemUpdateApplyErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/system.update-apply',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Probe GitHub releases for a newer version on `channel`. Does not apply anything.
+ *
+ * Probe GitHub releases for a newer version on `channel`. Does not apply anything.
+ */
+export const systemUpdateCheck = <ThrowOnError extends boolean = false>(
+  options: Options<SystemUpdateCheckData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    SystemUpdateCheckResponses,
+    SystemUpdateCheckErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/system.update-check',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Pin orca to a specific version. Future `orca update` runs will not upgrade past this version.
+ *
+ * [MUTATES STATE] Pin orca to a specific version. Future `orca update` runs will not upgrade past this version.
+ */
+export const systemUpdatePin = <ThrowOnError extends boolean = false>(
+  options: Options<SystemUpdatePinData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SystemUpdatePinResponses, SystemUpdatePinErrors, ThrowOnError>({
+    url: '/api/tools/system.update-pin',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Clear the version pin. `orca update` will resume upgrading to the latest on the configured channel.
+ *
+ * [MUTATES STATE] Clear the version pin. `orca update` will resume upgrading to the latest on the configured channel.
+ */
+export const systemUpdateUnpin = <ThrowOnError extends boolean = false>(
+  options: Options<SystemUpdateUnpinData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    SystemUpdateUnpinResponses,
+    SystemUpdateUnpinErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/system.update-unpin',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
   });
 
 export const getTree = <ThrowOnError extends boolean = false>(

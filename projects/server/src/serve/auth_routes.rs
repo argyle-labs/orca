@@ -18,6 +18,33 @@ use utoipa::ToSchema;
 
 use crate::serve::middleware::{AuthIdentity, AuthKind, SESSION_COOKIE, SESSION_TTL};
 
+/// Runtime-set by `serve::run` so cookie attributes can vary between dev
+/// (cross-port browser ↔ API: needs `SameSite=None`) and production (single
+/// HTTPS origin: tighter `SameSite=Strict`).
+static DEV_MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+pub fn set_dev_mode(dev: bool) {
+    let _ = DEV_MODE.set(dev);
+}
+
+fn same_site() -> &'static str {
+    if *DEV_MODE.get().unwrap_or(&false) {
+        "Lax"
+    } else {
+        "Strict"
+    }
+}
+
+/// In prod we require HTTPS so cookies get `Secure`. In dev we serve plain
+/// HTTP so the attribute would prevent the cookie from being stored at all.
+fn secure_attr() -> &'static str {
+    if *DEV_MODE.get().unwrap_or(&false) {
+        ""
+    } else {
+        " Secure;"
+    }
+}
+
 #[derive(Deserialize, ToSchema)]
 pub struct SignupRequest {
     pub username: String,
@@ -88,14 +115,13 @@ fn new_session_id() -> String {
 
 /// Build the `Set-Cookie` header value for a freshly minted session.
 fn session_cookie_value(session_id: &str) -> String {
-    // Max-Age in seconds (30d). Secure because we only serve over HTTPS now.
-    // SameSite=Strict prevents the browser from sending it on cross-site
-    // requests — UI is the only intended caller.
     format!(
-        "{name}={sid}; Path=/; Max-Age={ttl}; HttpOnly; Secure; SameSite=Strict",
+        "{name}={sid}; Path=/; Max-Age={ttl}; HttpOnly;{sec} SameSite={ss}",
         name = SESSION_COOKIE,
         sid = session_id,
         ttl = SESSION_TTL.num_seconds(),
+        sec = secure_attr(),
+        ss = same_site(),
     )
 }
 
@@ -103,7 +129,11 @@ fn session_cookie_value(session_id: &str) -> String {
 /// `/signout` so the browser drops the cookie even if the server-side row
 /// is somehow already gone.
 fn clear_cookie_value() -> String {
-    format!("{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict")
+    format!(
+        "{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly;{sec} SameSite={ss}",
+        sec = secure_attr(),
+        ss = same_site()
+    )
 }
 
 fn public_signup_enabled(conn: &db::Conn) -> bool {
@@ -233,14 +263,28 @@ pub async fn signin(Json(req): Json<SigninRequest>) -> Response {
     };
     let row = match db::users::find_auth_by_username(&conn, &req.username) {
         Ok(Some(r)) => r,
-        Ok(None) => return err(StatusCode::UNAUTHORIZED, "invalid credentials"),
+        Ok(None) => {
+            tracing::warn!(
+                username = %req.username,
+                pw_len = req.password.len(),
+                "signin failed: no such user"
+            );
+            return err(StatusCode::UNAUTHORIZED, "invalid credentials");
+        }
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("lookup: {e}")),
     };
     let ok =
         crate::auth_password::verify_password(&req.password, &row.password_hash).unwrap_or(false);
     if !ok {
+        tracing::warn!(
+            username = %req.username,
+            pw_len = req.password.len(),
+            user_id = %row.id,
+            "signin failed: password verify mismatch"
+        );
         return err(StatusCode::UNAUTHORIZED, "invalid credentials");
     }
+    tracing::info!(username = %row.username, user_id = %row.id, "signin ok");
     issue_session(&conn, &row.id, &row.username, &row.role)
 }
 

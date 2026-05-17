@@ -2,13 +2,83 @@
 
 import * as z from 'zod';
 
+export const zAgentBackendOverrideEntry = z.object({
+  agent: z.string(),
+  backend: z.string(),
+});
+
+export const zAgentEntry = z.object({
+  description: z.string(),
+  name: z.string(),
+});
+
+export const zApiTokenSummary = z.object({
+  created_at: z.string(),
+  expires_at: z.string().nullish(),
+  id: z.string(),
+  last_used_at: z.string().nullish(),
+  name: z.string(),
+  role: z.string(),
+});
+
 export const zAuthErrorResponse = z.object({
   error: z.string(),
+});
+
+export const zAuthProviderStatus = z.object({
+  configured: z.boolean(),
+  identity: z.string().nullish(),
+  provider: z.string(),
+});
+
+export const zBackendInfo = z.object({
+  kind: z.string(),
+  supports_store: z.boolean(),
+});
+
+export const zCertInfo = z.object({
+  cn: z.string(),
+  days_remaining: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  expires_at: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  fingerprint: z.string(),
+  issued_at: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
 });
 
 export const zComponentStatus = z.object({
   installed: z.boolean(),
   path: z.string(),
+});
+
+export const zConfigRowOut = z.object({
+  host_owner: z.string(),
+  id: z.string(),
+  is_replica: z.boolean(),
+  json: z.string(),
+  name: z.string(),
+  noun: z.string(),
+  updated_at: z.string(),
+  updated_by: z.string(),
 });
 
 export const zConfluenceSearchQuery = z.object({
@@ -33,6 +103,69 @@ export const zCtx7Response = z.object({
   topic: z.string().nullish(),
 });
 
+export const zDbSpecRow = z.object({
+  cachedAt: z.string().nullish(),
+  enabled: z.boolean(),
+  name: z.string(),
+  pathCount: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
+    .nullish(),
+  sourceMcp: z.string().nullish(),
+  url: z.string().nullish(),
+});
+
+export const zDocNodeKind = z.enum(['file', 'dir']);
+
+export const zDocRootEntry = z.object({
+  docCount: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+  exists: z.boolean(),
+  name: z.string(),
+  path: z.string(),
+});
+
+export const zDocRootRegEntry = z.object({
+  description: z.string().nullish(),
+  enabled: z.boolean(),
+  name: z.string(),
+  path: z.string(),
+});
+
+export const zDocSearchMatch = z.object({
+  line: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+  text: z.string(),
+});
+
+export const zDocSearchHit = z.object({
+  matches: z.array(zDocSearchMatch),
+  path: z.string(),
+  root: z.string(),
+});
+
+export const zDocTreeNode = z.object({
+  children: z.array(z.lazy((): any => zDocTreeNode)).nullish(),
+  name: z.string(),
+  order: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
+    .nullish(),
+  path: z.string(),
+  type: zDocNodeKind,
+});
+
+export const zDocRootTreeEntry = z.object({
+  nodes: z.array(zDocTreeNode),
+  root: z.string(),
+});
+
 export const zDockerActionRequest = z.object({
   action: z.string(),
   projectPath: z.string(),
@@ -49,7 +182,17 @@ export const zDockerActionResponse = z.object({
   output: z.string(),
 });
 
+export const zDockerEngineKind = z.enum(['colima', 'desktop', 'none']);
+
 export const zDockerRuntimeAddRequest = z.object({
+  host: z.string().nullish(),
+  name: z.string(),
+  socketPath: z.string().nullish(),
+  url: z.string().nullish(),
+});
+
+export const zDockerRuntimeEntry = z.object({
+  enabled: z.boolean(),
   host: z.string().nullish(),
   name: z.string(),
   socketPath: z.string().nullish(),
@@ -72,9 +215,29 @@ export const zDockerService = z.object({
   state: z.string(),
 });
 
+export const zDockerServiceRow = z.object({
+  health: z.string(),
+  name: z.string(),
+  ports: z.array(z.string()),
+  running: z.boolean(),
+  state: z.string(),
+});
+
+export const zDockerLogProject = z.object({
+  path: z.string(),
+  project: z.string(),
+  services: z.array(zDockerServiceRow),
+});
+
 export const zDockerServicesResponse = z.object({
   composeFile: z.string().nullish(),
   services: z.array(zDockerService),
+});
+
+export const zDoctorEntry = z.object({
+  category: z.string(),
+  message: z.string(),
+  status: z.string(),
 });
 
 export const zErrorResponse = z.object({
@@ -142,6 +305,12 @@ export const zGraphqlProxyRequest = z.object({
   variables: z.unknown().optional(),
 });
 
+export const zHaEndpointEntry = z.object({
+  baseUrl: z.string(),
+  enabled: z.boolean(),
+  name: z.string(),
+});
+
 export const zHealthCheck = z.object({
   label: z.string(),
   ok: z.boolean(),
@@ -154,6 +323,20 @@ export const zHealthResponse = z.object({
   timestamp: z.string(),
 });
 
+export const zHostChannel = z.object({
+  detected_at: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  key: z.string(),
+  source: z.string(),
+  value: z.string(),
+});
+
 export const zJiraIssuesQuery = z.object({
   jql: z.string().nullish(),
   maxResults: z
@@ -161,6 +344,23 @@ export const zJiraIssuesQuery = z.object({
     .gte(0)
     .max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' })
     .nullish(),
+});
+
+export const zJobStatus = z.object({
+  job_name: z.string(),
+  last_run_duration_ms: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    })
+    .nullish(),
+  last_run_error: z.string().nullish(),
+  last_run_finished: z.string().nullish(),
+  last_run_ok: z.boolean().nullish(),
+  last_run_started: z.string().nullish(),
 });
 
 export const zLlmProviderAddRequest = z.object({
@@ -175,6 +375,14 @@ export const zLlmProviderInfo = z.object({
   name: z.string(),
   reachable: z.boolean().nullish(),
   url: z.string(),
+});
+
+export const zLogMatchEntry = z.object({
+  agent: z.string().nullish(),
+  contentPreview: z.string(),
+  important: z.boolean(),
+  role: z.string(),
+  session: z.string(),
 });
 
 export const zLogService = z.object({
@@ -205,6 +413,15 @@ export const zMapRequest = z.object({
   orca_tool: z.string(),
 });
 
+export const zMappingEntry = z.object({
+  confidence: z.number().nullish(),
+  enabled: z.boolean(),
+  external_tool: z.string(),
+  match_type: z.string(),
+  mcp_name: z.string(),
+  orca_tool: z.string(),
+});
+
 export const zMappingRow = z.object({
   confidence: z.number().nullish(),
   enabled: z.boolean(),
@@ -217,6 +434,10 @@ export const zMappingRow = z.object({
 export const zMcpContent = z.object({
   text: z.string(),
   type: z.string(),
+});
+
+export const zMcpRegistration = z.object({
+  registered: z.boolean(),
 });
 
 export const zMcpRunRequest = z.object({
@@ -237,12 +458,30 @@ export const zMcpServerAddRequest = z.object({
   name: z.string(),
 });
 
+export const zMcpServerEntry = z.object({
+  args: z.array(z.string()),
+  command: z.string(),
+  enabled: z.boolean(),
+  env: z.record(z.string(), z.string()),
+  name: z.string(),
+});
+
 export const zMcpServerInfo = z.object({
   args: z.array(z.string()),
   command: z.string(),
   enabled: z.boolean(),
   env: z.record(z.string(), z.string()),
   name: z.string(),
+});
+
+/**
+ * `input_schema` is raw JSON Schema from the upstream MCP server — shape is server-defined.
+ */
+export const zMcpToolEntry = z.object({
+  description: z.string(),
+  inputSchema: z.unknown(),
+  name: z.string(),
+  server: z.string(),
 });
 
 export const zMcpToolInfo = z.object({
@@ -258,6 +497,11 @@ export const zMeOk = z.object({
   username: z.string(),
 });
 
+export const zMemoryFile = z.object({
+  content: z.string(),
+  name: z.string(),
+});
+
 export const zMpcStatus = z.object({
   registered: z.boolean(),
 });
@@ -268,10 +512,49 @@ export const zOkResponse = z.object({
   ok: z.boolean(),
 });
 
+export const zPathExists = z.object({
+  exists: z.boolean(),
+  path: z.string(),
+});
+
+export const zPathInitialized = z.object({
+  initialized: z.boolean(),
+  path: z.string(),
+});
+
+export const zPathInstalled = z.object({
+  installed: z.boolean(),
+  path: z.string(),
+});
+
+export const zPathLinked = z.object({
+  linked: z.boolean(),
+  path: z.string(),
+});
+
+export const zPkiCertEntry = z.object({
+  cert_path: z.string(),
+  plugin_id: z.string(),
+});
+
+export const zPluginCredEntry = z.object({
+  key: z.string(),
+  synced: z.boolean(),
+  updatedAt: z.string(),
+});
+
 export const zPluginDataEntry = z.object({
   key: z.string(),
   updatedAt: z.string(),
   value: z.record(z.string(), z.unknown()),
+});
+
+export const zPluginEntry = z.object({
+  enabled: z.boolean(),
+  id: z.string(),
+  mcpCommand: z.string().nullish(),
+  mode: z.string(),
+  tier: z.string(),
 });
 
 export const zPluginInfo = z.object({
@@ -314,9 +597,136 @@ export const zPluginToolInfo = z.object({
   sensitivity: z.string(),
 });
 
+export const zPodDevDisablePeerResult = z.object({
+  detail: z.string().nullish(),
+  hostname: z.string(),
+  peer_id: z.string(),
+  status: z.string(),
+});
+
+export const zPodDevEnablePeerResult = z.object({
+  detail: z.string().nullish(),
+  hostname: z.string(),
+  peer_id: z.string(),
+  status: z.string(),
+});
+
+export const zPodDevSyncPeerResult = z.object({
+  detail: z.string().nullish(),
+  hostname: z.string(),
+  peer_id: z.string(),
+  status: z.string(),
+});
+
+export const zPodDiscoveryRowDto = z.object({
+  addr: z.string(),
+  can_invite: z.boolean(),
+  first_seen_at: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  hostname: z.string(),
+  last_seen_at: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  peer_id: z.string().nullish(),
+  port: z.int().gte(0).lte(65535),
+  pubkey_fp: z.string(),
+  state: z.string(),
+});
+
+export const zPodPeerAddressDto = z.object({
+  kind: z.string(),
+  last_seen_at: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  source: z.string(),
+  value: z.string(),
+});
+
+export const zPodPeerDto = z.object({
+  addr: z.string(),
+  addresses: z.array(zPodPeerAddressDto).optional().default([]),
+  hostname: z.string(),
+  last_seen_at: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  local_secure: z.boolean(),
+  peer_id: z.string(),
+  peer_secure: z.boolean(),
+  port: z.int().gte(0).lte(65535),
+  status: z.string(),
+});
+
+export const zPodPendingOfferDto = z.object({
+  created_at: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  direction: z.string(),
+  expires_at: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  inviter_peer_id: z.string().nullish(),
+  offer_id: z.string(),
+  peer_addr: z.string(),
+  peer_hostname: z.string(),
+  peer_port: z.int().gte(0).lte(65535),
+  peer_pubkey_fp: z.string(),
+  pod_id: z.string().nullish(),
+  ttl_secs: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+});
+
 export const zPrQuery = z.object({
   slug: z.string(),
   workspace: z.string(),
+});
+
+export const zProfileShareEntry = z.object({
+  role: z.string(),
+  user_id: z.string(),
+});
+
+export const zProfileSummary = z.object({
+  id: z.string(),
+  is_active: z.boolean(),
+  name: z.string(),
+  owner_user_id: z.string(),
 });
 
 export const zProgressRequest = z.object({
@@ -327,10 +737,35 @@ export const zProgressResponse = z.object({
   page: z.string().nullish(),
 });
 
+export const zProviderDto = z.object({
+  created_at: z.string(),
+  enabled: z.boolean(),
+  kind: z.string(),
+  name: z.string(),
+  url: z.string(),
+});
+
+export const zProxmoxEndpointEntry = z.object({
+  baseUrl: z.string(),
+  enabled: z.boolean(),
+  insecure: z.boolean(),
+  name: z.string(),
+  tokenId: z.string(),
+});
+
 export const zRepoInfo = z.object({
   remote: z.string(),
   slug: z.string(),
   workspace: z.string(),
+});
+
+export const zScheduleEntry = z.object({
+  cron: z.string(),
+  host_owner: z.string(),
+  is_replica: z.boolean(),
+  job: z.string(),
+  name: z.string(),
+  next_run: z.string().nullish(),
 });
 
 export const zSchemaColumn = z.object({
@@ -356,6 +791,18 @@ export const zSchemaDbAddRequest = z.object({
     .max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' })
     .nullish(),
   user: z.string().optional(),
+});
+
+export const zSchemaDbEntry = z.object({
+  container: z.string().nullish(),
+  database: z.string(),
+  domainsFile: z.string().nullish(),
+  driver: z.string(),
+  enabled: z.boolean(),
+  host: z.string().nullish(),
+  name: z.string(),
+  port: z.int().gte(0).lte(65535).nullish(),
+  user: z.string(),
 });
 
 export const zSchemaDbInfo = z.object({
@@ -415,6 +862,27 @@ export const zSearchResult = z.object({
   root: z.string(),
 });
 
+export const zSecretEntry = z.object({
+  backend: z.string(),
+  description: z.string().nullish(),
+  name: z.string(),
+  ref_path: z.string(),
+  updated_at: z.string(),
+});
+
+export const zServiceState = z.object({
+  health: z.string().nullish(),
+  name: z.string(),
+  ports: z.array(z.string()),
+  state: z.string(),
+});
+
+export const zProjectServices = z.object({
+  path: z.string(),
+  project: z.string(),
+  services: z.array(zServiceState),
+});
+
 export const zSessionOk = z.object({
   role: z.string(),
   user_id: z.string(),
@@ -454,6 +922,11 @@ export const zSpecFiles = z.object({
   public: z.string().nullish(),
 });
 
+export const zSpecFilesPresence = z.object({
+  full: z.boolean(),
+  public: z.boolean(),
+});
+
 export const zSpecInfo = z.object({
   cachedAt: z.string().nullish(),
   enabled: z.boolean(),
@@ -483,6 +956,23 @@ export const zSpecMeta = z.object({
   source: z.string(),
 });
 
+export const zSpecMetaRow = z.object({
+  baseUrl: z.string().nullish(),
+  capturedAt: z.string().nullish(),
+  files: zSpecFilesPresence,
+  hasGraphql: z.boolean(),
+  namespace: z.string(),
+  pathCount: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
+    .nullish(),
+  project: z.string(),
+  repo: z.string(),
+  source: z.string(),
+  sourceMcp: z.string().nullish(),
+});
+
 export const zSpecQuery = z.object({
   download: z.boolean().nullish(),
   format: z.string().nullish(),
@@ -491,6 +981,19 @@ export const zSpecQuery = z.object({
 export const zSpecRegisterRequest = z.object({
   name: z.string(),
   url: z.string(),
+});
+
+export const zSyncToolsServerEntry = z.object({
+  added: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+  error: z.string().nullish(),
+  server: z.string(),
+  skipped: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
 });
 
 export const zSystemActionRequest = z.object({
@@ -1091,6 +1594,2755 @@ export const zRunTestsQuery = z.object({
  * Test run result
  */
 export const zRunTestsResponse = zTestRunResponse;
+
+/**
+ * ClearArgs
+ */
+export const zAgentBackendClearKeyBody = z.record(z.string(), z.unknown());
+
+/**
+ * ApiKeyMutationResult
+ *
+ * Outcome of a mutation against the encrypted API-key slot.
+ */
+export const zAgentBackendClearKeyResponse = z.object({
+  masked: z.string().nullish(),
+  message: z.string(),
+  present: z.boolean(),
+});
+
+/**
+ * StatusArgs
+ */
+export const zAgentBackendKeyStatusBody = z.record(z.string(), z.unknown());
+
+/**
+ * ApiKeyStatus
+ *
+ * Whether a stored API key exists.
+ */
+export const zAgentBackendKeyStatusResponse = z.object({
+  masked: z.string().nullish(),
+  present: z.boolean(),
+});
+
+/**
+ * OverrideArgs
+ */
+export const zAgentBackendOverrideBody = z.object({
+  agent: z.string(),
+  backend: z.string(),
+});
+
+/**
+ * OverrideResult
+ *
+ * Tool result
+ */
+export const zAgentBackendOverrideResponse = z.object({
+  agent: z.string(),
+  backend: z.string().nullish(),
+  cleared: z.boolean(),
+});
+
+/**
+ * SetArgs
+ */
+export const zAgentBackendSetKeyBody = z.object({
+  key: z.string(),
+});
+
+/**
+ * ApiKeyMutationResult
+ *
+ * Outcome of a mutation against the encrypted API-key slot.
+ */
+export const zAgentBackendSetKeyResponse = z.object({
+  masked: z.string().nullish(),
+  message: z.string(),
+  present: z.boolean(),
+});
+
+/**
+ * SetModeArgs
+ */
+export const zAgentBackendSetModeBody = z.object({
+  mode: z.string(),
+});
+
+/**
+ * SetModeResult
+ *
+ * Tool result
+ */
+export const zAgentBackendSetModeResponse = z.object({
+  mode: z.string(),
+});
+
+/**
+ * AgentBackendStatusArgs
+ */
+export const zAgentBackendStatusBody = z.record(z.string(), z.unknown());
+
+/**
+ * AgentBackendStatusOutput
+ *
+ * Tool result
+ */
+export const zAgentBackendStatusResponse = z.object({
+  api_key_in_db: z.boolean(),
+  mode: z.string(),
+  overrides: z.array(zAgentBackendOverrideEntry),
+  use_server_anthropic: z.boolean(),
+});
+
+/**
+ * UseServerAnthropicArgs
+ */
+export const zAgentBackendUseServerAnthropicBody = z.object({
+  enabled: z.boolean(),
+});
+
+/**
+ * UseServerAnthropicResult
+ *
+ * Tool result
+ */
+export const zAgentBackendUseServerAnthropicResponse = z.object({
+  enabled: z.boolean(),
+});
+
+/**
+ * GetAgentArgs
+ */
+export const zAgentsGetBody = z.object({
+  name: z.string(),
+});
+
+/**
+ * GetAgentOutput
+ *
+ * Tool result
+ */
+export const zAgentsGetResponse = z.object({
+  name: z.string(),
+  prompt: z.string(),
+});
+
+/**
+ * GetConfigArgs
+ */
+export const zAgentsGetConfigBody = z.object({
+  name: z.string().nullish(),
+});
+
+/**
+ * GetConfigOutput
+ *
+ * Tool result
+ */
+export const zAgentsGetConfigResponse = z.object({
+  available: z.array(z.string()),
+  content: z.string().nullish(),
+  name: z.string().nullish(),
+});
+
+/**
+ * GetContextArgs
+ */
+export const zAgentsGetContextBody = z.object({
+  project: z.string(),
+});
+
+/**
+ * GetContextOutput
+ *
+ * Tool result
+ */
+export const zAgentsGetContextResponse = z.object({
+  exists: z.boolean(),
+  files: z.array(zMemoryFile),
+  index: z.string().nullish(),
+  project: z.string(),
+});
+
+/**
+ * ListAgentsArgs
+ */
+export const zAgentsListBody = z.record(z.string(), z.unknown());
+
+/**
+ * ListAgentsOutput
+ *
+ * Tool result
+ */
+export const zAgentsListResponse = z.object({
+  agents: z.array(zAgentEntry),
+});
+
+/**
+ * SearchLogsArgs
+ */
+export const zAgentsSearchLogsBody = z.object({
+  query: z.string(),
+});
+
+/**
+ * SearchLogsOutput
+ *
+ * Tool result
+ */
+export const zAgentsSearchLogsResponse = z.object({
+  enhancedSummary: z.string().nullish(),
+  matches: z.array(zLogMatchEntry),
+  query: z.string(),
+});
+
+/**
+ * AuthLoginArgs
+ */
+export const zAuthLoginBody = z.object({
+  key: z.string().nullish(),
+  provider: z.string(),
+});
+
+/**
+ * AuthLoginOutput
+ *
+ * Tool result
+ */
+export const zAuthLoginResponse = z.object({
+  identity: z.string().nullish(),
+  provider: z.string(),
+  stored: z.boolean(),
+});
+
+/**
+ * AuthLogoutArgs
+ */
+export const zAuthLogoutBody = z.object({
+  provider: z.string(),
+});
+
+/**
+ * AuthLogoutOutput
+ *
+ * Tool result
+ */
+export const zAuthLogoutResponse = z.object({
+  provider: z.string(),
+  removed: z.boolean(),
+});
+
+/**
+ * AuthStatusArgs
+ */
+export const zAuthStatusBody = z.record(z.string(), z.unknown());
+
+/**
+ * AuthStatusReport
+ *
+ * Tool result
+ */
+export const zAuthStatusResponse = z.object({
+  providers: z.array(zAuthProviderStatus),
+});
+
+/**
+ * TokenCreateArgs
+ */
+export const zAuthTokenCreateBody = z.object({
+  expires_in_days: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
+    .nullish(),
+  name: z.string(),
+  role: z.string(),
+});
+
+/**
+ * TokenCreateOutput
+ *
+ * Tool result
+ */
+export const zAuthTokenCreateResponse = z.object({
+  id: z.string(),
+  name: z.string(),
+  token: z.string(),
+});
+
+/**
+ * TokenListArgs
+ */
+export const zAuthTokenListBody = z.record(z.string(), z.unknown());
+
+/**
+ * TokenListOutput
+ *
+ * Tool result
+ */
+export const zAuthTokenListResponse = z.object({
+  tokens: z.array(zApiTokenSummary),
+});
+
+/**
+ * TokenRevokeArgs
+ */
+export const zAuthTokenRevokeBody = z.object({
+  id: z.string(),
+});
+
+/**
+ * TokenRevokeOutput
+ *
+ * Tool result
+ */
+export const zAuthTokenRevokeResponse = z.object({
+  revoked: z.boolean(),
+});
+
+/**
+ * ConfigDeleteArgs
+ */
+export const zConfigDeleteBody = z.object({
+  host: z.string().nullish(),
+  name: z.string(),
+  noun: z.string(),
+});
+
+/**
+ * ConfigDeleteOutput
+ *
+ * Tool result
+ */
+export const zConfigDeleteResponse = z.object({
+  removed: z.boolean(),
+});
+
+/**
+ * ConfigGetArgs
+ */
+export const zConfigGetBody = z.object({
+  name: z.string(),
+  noun: z.string(),
+});
+
+/**
+ * ConfigGetOutput
+ *
+ * Tool result
+ */
+export const zConfigGetResponse = z.object({
+  row: zConfigRowOut.nullish(),
+});
+
+/**
+ * ConfigListArgs
+ */
+export const zConfigListBody = z.object({
+  host: z.string().nullish(),
+  noun: z.string().nullish(),
+});
+
+/**
+ * ConfigListOutput
+ *
+ * Tool result
+ */
+export const zConfigListResponse = z.object({
+  rows: z.array(zConfigRowOut),
+});
+
+/**
+ * ConfigSetArgs
+ */
+export const zConfigSetBody = z.object({
+  host: z.string().nullish(),
+  json: z.string(),
+  name: z.string(),
+  noun: z.string(),
+});
+
+/**
+ * ConfigSetOutput
+ *
+ * Tool result
+ */
+export const zConfigSetResponse = z.object({
+  created: z.boolean(),
+  row: zConfigRowOut,
+});
+
+/**
+ * DbDownArgs
+ */
+export const zDbDownBody = z.record(z.string(), z.unknown());
+
+/**
+ * DbMigrateReport
+ *
+ * Tool result
+ */
+export const zDbDownResponse = z.object({
+  after: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  applied: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+  before: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  direction: z.string(),
+});
+
+/**
+ * DbMigrateArgs
+ */
+export const zDbMigrateBody = z.record(z.string(), z.unknown());
+
+/**
+ * DbMigrateReport
+ *
+ * Tool result
+ */
+export const zDbMigrateResponse = z.object({
+  after: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  applied: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+  before: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  direction: z.string(),
+});
+
+/**
+ * DbStatusArgs
+ */
+export const zDbStatusBody = z.record(z.string(), z.unknown());
+
+/**
+ * DbStatusReport
+ *
+ * Tool result
+ */
+export const zDbStatusResponse = z.object({
+  current: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  pending: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+  total: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+});
+
+/**
+ * DbUpArgs
+ */
+export const zDbUpBody = z.record(z.string(), z.unknown());
+
+/**
+ * DbMigrateReport
+ *
+ * Tool result
+ */
+export const zDbUpResponse = z.object({
+  after: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  applied: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+  before: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  direction: z.string(),
+});
+
+/**
+ * DocIgnorePatternArgs
+ */
+export const zDocPatternAddBody = z.object({
+  pattern: z.string(),
+});
+
+/**
+ * DocIgnorePatternMutationResult
+ *
+ * Tool result
+ */
+export const zDocPatternAddResponse = z.object({
+  changed: z.boolean(),
+  pattern: z.string(),
+});
+
+/**
+ * ListDocIgnorePatternsArgs
+ */
+export const zDocPatternListBody = z.record(z.string(), z.unknown());
+
+/**
+ * ListDocIgnorePatternsOutput
+ *
+ * Tool result
+ */
+export const zDocPatternListResponse = z.object({
+  patterns: z.array(z.string()),
+});
+
+/**
+ * DocIgnorePatternArgs
+ */
+export const zDocPatternRemoveBody = z.object({
+  pattern: z.string(),
+});
+
+/**
+ * DocIgnorePatternMutationResult
+ *
+ * Tool result
+ */
+export const zDocPatternRemoveResponse = z.object({
+  changed: z.boolean(),
+  pattern: z.string(),
+});
+
+/**
+ * AddDocRootArgs
+ */
+export const zDocRootAddBody = z.object({
+  description: z.string().nullish(),
+  name: z.string(),
+  path: z.string(),
+});
+
+/**
+ * DocRootMutationResult
+ *
+ * Tool result
+ */
+export const zDocRootAddResponse = z.object({
+  changed: z.boolean(),
+  name: z.string(),
+});
+
+/**
+ * ListDocRootsArgs
+ */
+export const zDocRootListBody = z.record(z.string(), z.unknown());
+
+/**
+ * ListDocRootsOutput
+ *
+ * Tool result
+ */
+export const zDocRootListResponse = z.object({
+  roots: z.array(zDocRootRegEntry),
+});
+
+/**
+ * RemoveDocRootArgs
+ */
+export const zDocRootRemoveBody = z.object({
+  name: z.string(),
+});
+
+/**
+ * DocRootMutationResult
+ *
+ * Tool result
+ */
+export const zDocRootRemoveResponse = z.object({
+  changed: z.boolean(),
+  name: z.string(),
+});
+
+/**
+ * AddDockerRuntimeArgs
+ */
+export const zDockerRuntimeAddBody = z.object({
+  host: z.string().nullish(),
+  name: z.string(),
+  socketPath: z.string().nullish(),
+  url: z.string().nullish(),
+});
+
+/**
+ * DockerRuntimeMutationResult
+ *
+ * Tool result
+ */
+export const zDockerRuntimeAddResponse = z.object({
+  changed: z.boolean(),
+  name: z.string(),
+});
+
+/**
+ * ListDockerRuntimesArgs
+ */
+export const zDockerRuntimeListBody = z.record(z.string(), z.unknown());
+
+/**
+ * ListDockerRuntimesOutput
+ *
+ * Tool result
+ */
+export const zDockerRuntimeListResponse = z.object({
+  runtimes: z.array(zDockerRuntimeEntry),
+});
+
+/**
+ * RemoveDockerRuntimeArgs
+ */
+export const zDockerRuntimeRemoveBody = z.object({
+  name: z.string(),
+});
+
+/**
+ * DockerRuntimeMutationResult
+ *
+ * Tool result
+ */
+export const zDockerRuntimeRemoveResponse = z.object({
+  changed: z.boolean(),
+  name: z.string(),
+});
+
+/**
+ * RunDockerActionArgs
+ */
+export const zDockerActionBody = z.object({
+  action: z.string(),
+  projectPath: z.string(),
+  service: z.string().nullish(),
+  tail: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
+    .nullish(),
+});
+
+/**
+ * DockerActionResult
+ *
+ * Tool result
+ */
+export const zDockerActionResponse2 = z.object({
+  composeFile: z.string().nullish(),
+  output: z.string(),
+});
+
+/**
+ * GetDockerEngineArgs
+ */
+export const zDockerEngineBody = z.record(z.string(), z.unknown());
+
+/**
+ * DockerEngineStatus
+ *
+ * Tool result
+ */
+export const zDockerEngineResponse = z.object({
+  engine: zDockerEngineKind,
+  running: z.boolean(),
+});
+
+/**
+ * StartDockerEngineArgs
+ */
+export const zDockerEngineStartBody = z.record(z.string(), z.unknown());
+
+/**
+ * StartDockerEngineOutput
+ *
+ * Tool result
+ */
+export const zDockerEngineStartResponse = z.object({
+  output: z.string(),
+});
+
+/**
+ * GetLogServicesArgs
+ */
+export const zDockerLogServicesBody = z.record(z.string(), z.unknown());
+
+/**
+ * GetLogServicesOutput
+ *
+ * Tool result
+ */
+export const zDockerLogServicesResponse = z.object({
+  projects: z.array(zDockerLogProject),
+});
+
+/**
+ * GetLogsArgs
+ */
+export const zDockerLogsBody = z.object({
+  project: z.string(),
+  service: z.string().nullish(),
+  tail: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
+    .nullish(),
+});
+
+/**
+ * GetLogsOutput
+ *
+ * Tool result
+ */
+export const zDockerLogsResponse = z.object({
+  output: z.string(),
+});
+
+/**
+ * GetDockerServicesArgs
+ */
+export const zDockerServicesBody = z.object({
+  path: z.string(),
+});
+
+/**
+ * DockerServicesView
+ *
+ * Tool result
+ */
+export const zDockerServicesResponse2 = z.object({
+  composeFile: z.string().nullish(),
+  services: z.array(zDockerServiceRow),
+});
+
+/**
+ * GetFullTreeArgs
+ */
+export const zDocsFullTreeBody = z.object({
+  raw: z.boolean().nullish(),
+});
+
+/**
+ * GetFullTreeOutput
+ *
+ * Tool result
+ */
+export const zDocsFullTreeResponse = z.object({
+  roots: z.array(zDocRootTreeEntry),
+});
+
+/**
+ * ListCommandsArgs
+ */
+export const zDocsListCommandsBody = z.record(z.string(), z.unknown());
+
+/**
+ * ListCommandsOutput
+ *
+ * Tool result
+ */
+export const zDocsListCommandsResponse = z.object({
+  commands: z.array(z.string()),
+});
+
+/**
+ * ListRootsArgs
+ */
+export const zDocsListRootsBody = z.record(z.string(), z.unknown());
+
+/**
+ * ListRootsOutput
+ *
+ * Tool result
+ */
+export const zDocsListRootsResponse = z.object({
+  roots: z.array(zDocRootEntry),
+});
+
+/**
+ * ReadDocArgs
+ */
+export const zDocsReadBody = z.object({
+  format: z.string().nullish(),
+  path: z.string(),
+  root: z.string(),
+});
+
+/**
+ * ReadDocOutput
+ *
+ * Tool result
+ */
+export const zDocsReadResponse = z.object({
+  content: z.string(),
+  path: z.string(),
+  root: z.string(),
+});
+
+/**
+ * SearchDocsArgs
+ */
+export const zDocsSearchBody = z.object({
+  format: z.string().nullish(),
+  query: z.string(),
+  root: z.string().nullish(),
+});
+
+/**
+ * SearchDocsOutput
+ *
+ * Tool result
+ */
+export const zDocsSearchResponse = z.object({
+  enhancedSummary: z.string().nullish(),
+  hits: z.array(zDocSearchHit),
+  query: z.string(),
+});
+
+/**
+ * GetTreeArgs
+ */
+export const zDocsTreeBody = z.object({
+  path: z.string().nullish(),
+  root: z.string(),
+});
+
+/**
+ * GetTreeOutput
+ *
+ * Tool result
+ */
+export const zDocsTreeResponse = z.object({
+  nodes: z.array(zDocTreeNode),
+  path: z.string().nullish(),
+  root: z.string(),
+});
+
+/**
+ * AddArgs
+ */
+export const zEngineAddBody = z.object({
+  kind: z.string().optional().default(''),
+  name: z.string(),
+  url: z.string(),
+});
+
+/**
+ * EngineOpResult
+ *
+ * Outcome of a mutation (add/remove/enable/disable).
+ */
+export const zEngineAddResponse = z.object({
+  message: z.string(),
+});
+
+/**
+ * NameArgs
+ */
+export const zEngineDisableBody = z.object({
+  name: z.string(),
+});
+
+/**
+ * EngineOpResult
+ *
+ * Outcome of a mutation (add/remove/enable/disable).
+ */
+export const zEngineDisableResponse = z.object({
+  message: z.string(),
+});
+
+/**
+ * NameArgs
+ */
+export const zEngineEnableBody = z.object({
+  name: z.string(),
+});
+
+/**
+ * EngineOpResult
+ *
+ * Outcome of a mutation (add/remove/enable/disable).
+ */
+export const zEngineEnableResponse = z.object({
+  message: z.string(),
+});
+
+/**
+ * EmptyArgs
+ */
+export const zEngineListBody = z.record(z.string(), z.unknown());
+
+/**
+ * ProviderList
+ *
+ * Newtype wrapping `Vec<ProviderDto>` so it crosses the WASM boundary with a
+ * real TS array type (`ProviderDto[]`) instead of `any`.
+ */
+export const zEngineListResponse = z.array(zProviderDto);
+
+/**
+ * NameArgs
+ */
+export const zEngineRemoveBody = z.object({
+  name: z.string(),
+});
+
+/**
+ * EngineOpResult
+ *
+ * Outcome of a mutation (add/remove/enable/disable).
+ */
+export const zEngineRemoveResponse = z.object({
+  message: z.string(),
+});
+
+/**
+ * AddHomeAssistantEndpointArgs
+ */
+export const zHaEndpointAddBody = z.object({
+  baseUrl: z.string(),
+  name: z.string(),
+  token: z.string(),
+});
+
+/**
+ * HaMutationResult
+ *
+ * Tool result
+ */
+export const zHaEndpointAddResponse = z.object({
+  changed: z.boolean(),
+  name: z.string(),
+});
+
+/**
+ * ListHomeAssistantEndpointsArgs
+ */
+export const zHaEndpointListBody = z.record(z.string(), z.unknown());
+
+/**
+ * ListHomeAssistantEndpointsOutput
+ *
+ * Tool result
+ */
+export const zHaEndpointListResponse = z.object({
+  endpoints: z.array(zHaEndpointEntry),
+});
+
+/**
+ * RemoveHomeAssistantEndpointArgs
+ */
+export const zHaEndpointRemoveBody = z.object({
+  name: z.string(),
+});
+
+/**
+ * HaMutationResult
+ *
+ * Tool result
+ */
+export const zHaEndpointRemoveResponse = z.object({
+  changed: z.boolean(),
+  name: z.string(),
+});
+
+/**
+ * HaAutomationListArgs
+ */
+export const zHaAutomationListBody = z.object({
+  endpoint: z.string(),
+});
+
+/**
+ * HaEntityListArgs
+ */
+export const zHaEntityListBody = z.object({
+  domain: z.string().nullish(),
+  endpoint: z.string(),
+});
+
+/**
+ * HaEntityStateArgs
+ */
+export const zHaEntityStateBody = z.object({
+  endpoint: z.string(),
+  entity_id: z.string(),
+});
+
+/**
+ * HaServiceCallArgs
+ */
+export const zHaServiceCallBody = z.object({
+  data: z.record(z.string(), z.unknown()).nullish(),
+  domain: z.string(),
+  endpoint: z.string(),
+  entity_id: z.string().nullish(),
+  service: z.string(),
+});
+
+/**
+ * EmptyArgs
+ */
+export const zHostInfoBody = z.record(z.string(), z.unknown());
+
+/**
+ * HostInfoOutput
+ *
+ * Tool result
+ */
+export const zHostInfoResponse = z.object({
+  channels: z.array(zHostChannel),
+  display_name: z.string(),
+  machine_id: z.string(),
+});
+
+/**
+ * EmptyArgs
+ */
+export const zHostRefreshBody = z.record(z.string(), z.unknown());
+
+/**
+ * HostRefreshOutput
+ *
+ * Tool result
+ */
+export const zHostRefreshResponse = z.object({
+  channels: z.array(zHostChannel),
+});
+
+/**
+ * HostSetArgs
+ */
+export const zHostSetBody = z.object({
+  key: z.string(),
+  value: z.string(),
+});
+
+/**
+ * HostSetOutput
+ *
+ * Tool result
+ */
+export const zHostSetResponse = z.object({
+  key: z.string(),
+  value: z.string(),
+});
+
+/**
+ * RunTestsArgs
+ */
+export const zInfraRunTestsBody = z.object({
+  suite: z.string().nullish(),
+});
+
+/**
+ * RunTestsOutput
+ *
+ * Tool result
+ */
+export const zInfraRunTestsResponse = z.object({
+  duration_ms: z.coerce
+    .bigint()
+    .gte(BigInt(0))
+    .max(BigInt('18446744073709551615'), {
+      error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
+    }),
+  exit_code: z
+    .int()
+    .min(-2147483648, { error: 'Invalid value: Expected int32 to be >= -2147483648' })
+    .max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
+  failed: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+  output: z.string(),
+  passed: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+  suite: z.string(),
+});
+
+/**
+ * GetServiceLogsArgs
+ */
+export const zInfraServiceLogsBody = z.object({
+  project: z.string(),
+  service: z.string(),
+  tail: z.coerce
+    .bigint()
+    .gte(BigInt(0))
+    .max(BigInt('18446744073709551615'), {
+      error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
+    })
+    .nullish(),
+});
+
+/**
+ * GetServiceLogsOutput
+ *
+ * Tool result
+ */
+export const zInfraServiceLogsResponse = z.object({
+  output: z.string(),
+  project: z.string(),
+  service: z.string(),
+});
+
+/**
+ * ListServicesArgs
+ */
+export const zInfraServicesBody = z.record(z.string(), z.unknown());
+
+/**
+ * ListServicesOutput
+ *
+ * Tool result
+ */
+export const zInfraServicesResponse = z.object({
+  projects: z.array(zProjectServices),
+});
+
+/**
+ * ListMcpToolsArgs
+ */
+export const zMcpFederationListToolsBody = z.record(z.string(), z.unknown());
+
+/**
+ * ListMcpToolsOutput
+ *
+ * Tool result
+ */
+export const zMcpFederationListToolsResponse = z.object({
+  tools: z.array(zMcpToolEntry),
+});
+
+/**
+ * RunMcpToolArgs
+ *
+ * `args` is passed straight through to the upstream MCP tool — its shape is
+ * dictated by each tool's own input schema and cannot be typed statically.
+ */
+export const zMcpFederationRunBody = z.object({
+  args: z.record(z.string(), z.unknown()).nullish().default(null),
+  server: z.string(),
+  tool: z.string(),
+});
+
+/**
+ * RunMcpToolOutput
+ *
+ * `structured_content` is opaque — its shape is each tool's own output schema,
+ * which orca cannot know at this layer (MCP passthrough).
+ */
+export const zMcpFederationRunResponse = z.object({
+  content: z.array(zMcpContent),
+  isError: z.boolean(),
+  structuredContent: z.unknown().optional(),
+});
+
+/**
+ * AddMcpServerArgs
+ */
+export const zMcpAddBody = z.object({
+  args: z.array(z.string()).nullish(),
+  command: z.string(),
+  env: z.record(z.string(), z.string()).nullish(),
+  name: z.string(),
+});
+
+/**
+ * McpServerMutationResult
+ *
+ * Tool result
+ */
+export const zMcpAddResponse = z.object({
+  changed: z.boolean(),
+  name: z.string(),
+});
+
+/**
+ * ListMcpServersArgs
+ */
+export const zMcpListBody = z.record(z.string(), z.unknown());
+
+/**
+ * ListMcpServersOutput
+ *
+ * Tool result
+ */
+export const zMcpListResponse = z.object({
+  servers: z.array(zMcpServerEntry),
+});
+
+/**
+ * ListToolMappingsArgs
+ */
+export const zMcpListMappingsBody = z.object({
+  name: z.string().nullish(),
+});
+
+/**
+ * ListToolMappingsOutput
+ *
+ * Tool result
+ */
+export const zMcpListMappingsResponse = z.object({
+  mappings: z.array(zMappingEntry),
+});
+
+/**
+ * MapToolArgs
+ */
+export const zMcpMapBody = z.object({
+  external_tool: z.string(),
+  name: z.string(),
+  orca_tool: z.string(),
+});
+
+/**
+ * MapToolResult
+ *
+ * Tool result
+ */
+export const zMcpMapResponse = z.object({
+  external_tool: z.string(),
+  mcp_name: z.string(),
+  orca_tool: z.string(),
+});
+
+/**
+ * RemoveMcpServerArgs
+ */
+export const zMcpRemoveBody = z.object({
+  name: z.string(),
+});
+
+/**
+ * McpServerMutationResult
+ *
+ * Tool result
+ */
+export const zMcpRemoveResponse = z.object({
+  changed: z.boolean(),
+  name: z.string(),
+});
+
+/**
+ * SyncToolsArgs
+ */
+export const zMcpSyncBody = z.object({
+  all: z.boolean().nullish(),
+  name: z.string().nullish(),
+  threshold: z.number().nullish(),
+});
+
+/**
+ * SyncToolsOutput
+ *
+ * Tool result
+ */
+export const zMcpSyncResponse = z.object({
+  results: z.array(zSyncToolsServerEntry),
+});
+
+/**
+ * UnmapToolArgs
+ */
+export const zMcpUnmapBody = z.object({
+  orca_tool: z.string(),
+});
+
+/**
+ * UnmapToolResult
+ *
+ * Tool result
+ */
+export const zMcpUnmapResponse = z.object({
+  changed: z.boolean(),
+  orca_tool: z.string(),
+});
+
+/**
+ * PkiCaInitArgs
+ */
+export const zPkiCaInitBody = z.record(z.string(), z.unknown());
+
+/**
+ * PkiInitReport
+ *
+ * Tool result
+ */
+export const zPkiCaInitResponse = z.object({
+  ca_path: z.string(),
+  created: z.boolean(),
+  server_cert_path: z.string(),
+});
+
+/**
+ * PkiCertIssueArgs
+ */
+export const zPkiCertIssueBody = z.object({
+  capability: z.string().optional().default('general'),
+  plugin_id: z.string(),
+});
+
+/**
+ * PkiCertReport
+ *
+ * Tool result
+ */
+export const zPkiCertIssueResponse = z.object({
+  capability: z.string(),
+  cert_path: z.string(),
+  key_path: z.string(),
+  plugin_id: z.string(),
+});
+
+/**
+ * PkiListArgs
+ */
+export const zPkiListBody = z.record(z.string(), z.unknown());
+
+/**
+ * PkiListReport
+ *
+ * Tool result
+ */
+export const zPkiListResponse = z.object({
+  certs: z.array(zPkiCertEntry),
+});
+
+/**
+ * GetPluginDataArgs
+ */
+export const zPluginDataGetBody = z.object({
+  key: z.string(),
+  plugin: z.string(),
+});
+
+/**
+ * GetPluginDataOutput
+ *
+ * Tool result
+ */
+export const zPluginDataGetResponse = z.object({
+  value: z.unknown(),
+});
+
+/**
+ * SetPluginDataArgs
+ */
+export const zPluginDataSetBody = z.object({
+  key: z.string(),
+  plugin: z.string(),
+  value: z.unknown(),
+});
+
+/**
+ * SetPluginDataOutput
+ *
+ * Tool result
+ */
+export const zPluginDataSetResponse = z.object({
+  ok: z.boolean(),
+});
+
+/**
+ * AddPluginArgs
+ */
+export const zPluginAddBody = z.object({
+  instance_id: z.string().nullish(),
+  manifest: z.string(),
+});
+
+/**
+ * AddPluginOutput
+ *
+ * Tool result
+ */
+export const zPluginAddResponse = z.object({
+  id: z.string(),
+});
+
+/**
+ * PluginIdArgs
+ */
+export const zPluginDisableBody = z.object({
+  id: z.string(),
+});
+
+/**
+ * PluginMutationResult
+ *
+ * Tool result
+ */
+export const zPluginDisableResponse = z.object({
+  changed: z.boolean(),
+  id: z.string(),
+});
+
+/**
+ * PluginIdArgs
+ */
+export const zPluginEnableBody = z.object({
+  id: z.string(),
+});
+
+/**
+ * PluginMutationResult
+ *
+ * Tool result
+ */
+export const zPluginEnableResponse = z.object({
+  changed: z.boolean(),
+  id: z.string(),
+});
+
+/**
+ * ListPluginsArgs
+ */
+export const zPluginListBody = z.object({
+  workspace: z.string().nullish(),
+});
+
+/**
+ * ListPluginsOutput
+ *
+ * Tool result
+ */
+export const zPluginListResponse = z.object({
+  plugins: z.array(zPluginEntry),
+});
+
+/**
+ * ListPluginCredsArgs
+ */
+export const zPluginListCredsBody = z.object({
+  plugin: z.string(),
+});
+
+/**
+ * ListPluginCredsOutput
+ *
+ * Tool result
+ */
+export const zPluginListCredsResponse = z.object({
+  credentials: z.array(zPluginCredEntry),
+  plugin: z.string(),
+});
+
+/**
+ * PluginIdArgs
+ */
+export const zPluginRemoveBody = z.object({
+  id: z.string(),
+});
+
+/**
+ * PluginMutationResult
+ *
+ * Tool result
+ */
+export const zPluginRemoveResponse = z.object({
+  changed: z.boolean(),
+  id: z.string(),
+});
+
+/**
+ * RemovePluginCredArgs
+ */
+export const zPluginRemoveCredBody = z.object({
+  key: z.string(),
+  plugin: z.string(),
+});
+
+/**
+ * PluginCredMutationResult
+ *
+ * Tool result
+ */
+export const zPluginRemoveCredResponse = z.object({
+  changed: z.boolean(),
+  key: z.string(),
+  plugin: z.string(),
+});
+
+/**
+ * SetPluginCredArgs
+ */
+export const zPluginSetCredBody = z.object({
+  key: z.string(),
+  plugin: z.string(),
+  value: z.string(),
+});
+
+/**
+ * PluginCredMutationResult
+ *
+ * Tool result
+ */
+export const zPluginSetCredResponse = z.object({
+  changed: z.boolean(),
+  key: z.string(),
+  plugin: z.string(),
+});
+
+/**
+ * SyncPluginCredsArgs
+ */
+export const zPluginSyncCredsBody = z.object({
+  plugin: z.string(),
+});
+
+/**
+ * SyncPluginCredsOutput
+ *
+ * Tool result
+ */
+export const zPluginSyncCredsResponse = z.object({
+  plugin: z.string(),
+});
+
+/**
+ * PodAcceptArgs
+ */
+export const zPodAcceptBody = z.object({
+  code: z.string(),
+});
+
+/**
+ * PodAcceptOutput
+ *
+ * Tool result
+ */
+export const zPodAcceptResponse = z.object({
+  inviter_addr: z.string(),
+  inviter_hostname: z.string(),
+  inviter_peer_id: z.string(),
+  inviter_port: z.int().gte(0).lte(65535),
+  pod_id: z.string(),
+  self_secure: z.boolean(),
+});
+
+/**
+ * EmptyArgs
+ */
+export const zPodCertStatusBody = z.record(z.string(), z.unknown());
+
+/**
+ * PodCertStatusOutput
+ *
+ * Tool result
+ */
+export const zPodCertStatusResponse = z.object({
+  bootstrap: zCertInfo.nullish(),
+  ca_previous: zCertInfo.nullish(),
+  founder: z.boolean(),
+  leaf_client: zCertInfo.nullish(),
+  leaf_server: zCertInfo.nullish(),
+  member: z.boolean(),
+  mesh_ca: zCertInfo.nullish(),
+});
+
+/**
+ * PodDevFanoutArgs
+ */
+export const zPodDevDisableBody = z.object({
+  peers: z.array(z.string()).optional().default([]),
+});
+
+/**
+ * PodDevDisableOutput
+ *
+ * Tool result
+ */
+export const zPodDevDisableResponse = z.object({
+  results: z.array(zPodDevDisablePeerResult),
+});
+
+/**
+ * PodDevFanoutArgs
+ */
+export const zPodDevEnableBody = z.object({
+  peers: z.array(z.string()).optional().default([]),
+});
+
+/**
+ * PodDevEnableOutput
+ *
+ * Tool result
+ */
+export const zPodDevEnableResponse = z.object({
+  results: z.array(zPodDevEnablePeerResult),
+});
+
+/**
+ * EmptyArgs
+ */
+export const zPodDevSyncBody = z.record(z.string(), z.unknown());
+
+/**
+ * PodDevSyncOutput
+ *
+ * Tool result
+ */
+export const zPodDevSyncResponse = z.object({
+  results: z.array(zPodDevSyncPeerResult),
+});
+
+/**
+ * EmptyArgs
+ */
+export const zPodDiscoverBody = z.record(z.string(), z.unknown());
+
+/**
+ * Array_of_PodDiscoveryRowDto
+ *
+ * Tool result
+ */
+export const zPodDiscoverResponse = z.array(zPodDiscoveryRowDto);
+
+/**
+ * PodJoinArgs
+ */
+export const zPodJoinBody = z.object({
+  inviter_addr: z.string(),
+  port: z.int().gte(0).lte(65535).nullish(),
+});
+
+/**
+ * PodJoinOutput
+ *
+ * Tool result
+ */
+export const zPodJoinResponse = z.object({
+  code: z.string(),
+  inviter_addr: z.string(),
+  inviter_port: z.int().gte(0).lte(65535),
+});
+
+/**
+ * PodLeaveArgs
+ */
+export const zPodLeaveBody = z.object({
+  peer_id: z.string(),
+});
+
+/**
+ * PodLeaveOutput
+ *
+ * Tool result
+ */
+export const zPodLeaveResponse = z.object({
+  notify_result: z.string(),
+  peer_id: z.string(),
+  rows_removed: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+});
+
+/**
+ * EmptyArgs
+ */
+export const zPodListBody = z.record(z.string(), z.unknown());
+
+/**
+ * Array_of_PodPeerDto
+ *
+ * Tool result
+ */
+export const zPodListResponse = z.array(zPodPeerDto);
+
+/**
+ * PodOfferArgs
+ */
+export const zPodOfferBody = z.object({
+  addr: z.string(),
+  port: z.int().gte(0).lte(65535).nullish(),
+});
+
+/**
+ * PodOfferOutput
+ *
+ * Tool result
+ */
+export const zPodOfferResponse = z.object({
+  code: z.string(),
+  expires_at: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  joiner_addr: z.string(),
+  joiner_hostname: z.string(),
+  joiner_port: z.int().gte(0).lte(65535),
+  joiner_pubkey_fp: z.string(),
+  offer_id: z.string(),
+});
+
+/**
+ * EmptyArgs
+ */
+export const zPodPendingBody = z.record(z.string(), z.unknown());
+
+/**
+ * Array_of_PodPendingOfferDto
+ *
+ * Tool result
+ */
+export const zPodPendingResponse = z.array(zPodPendingOfferDto);
+
+/**
+ * PodPingArgs
+ */
+export const zPodPingBody = z.object({
+  peer_id: z.string(),
+});
+
+/**
+ * PodPingOutput
+ *
+ * Tool result
+ */
+export const zPodPingResponse = z.object({
+  error: z.string().nullish(),
+  hostname: z.string().nullish(),
+  latency_ms: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+  ok: z.boolean(),
+  peer_id: z.string().nullish(),
+  version: z.string().nullish(),
+});
+
+/**
+ * PodTrustArgs
+ */
+export const zPodTrustBody = z.object({
+  on: z.boolean(),
+  peer_id: z.string(),
+});
+
+/**
+ * PodTrustOutput
+ *
+ * Tool result
+ */
+export const zPodTrustResponse = z.object({
+  local_secure: z.boolean(),
+  mutual: z.boolean(),
+  notify_result: z.string(),
+  peer_id: z.string(),
+  peer_secure: z.boolean(),
+});
+
+/**
+ * ProfileCreateArgs
+ */
+export const zProfileCreateBody = z.object({
+  description: z.string().nullish(),
+  name: z.string(),
+});
+
+/**
+ * ProfileDetail
+ *
+ * Tool result
+ */
+export const zProfileCreateResponse = z.object({
+  access: z.string(),
+  description: z.string().nullish(),
+  id: z.string(),
+  name: z.string(),
+  owner_user_id: z.string(),
+  root: z.string(),
+});
+
+/**
+ * ProfileCurrentArgs
+ */
+export const zProfileCurrentBody = z.record(z.string(), z.unknown());
+
+/**
+ * ProfileCurrentReport
+ *
+ * Tool result
+ */
+export const zProfileCurrentResponse = z.object({
+  active: zProfileSummary.nullish(),
+});
+
+/**
+ * ProfileSpecArgs
+ */
+export const zProfileDeleteBody = z.object({
+  spec: z.string(),
+});
+
+/**
+ * ProfileMutationResult
+ *
+ * Tool result
+ */
+export const zProfileDeleteResponse = z.object({
+  changed: z.boolean(),
+  id: z.string(),
+  name: z.string(),
+});
+
+/**
+ * ProfileListArgs
+ */
+export const zProfileListBody = z.record(z.string(), z.unknown());
+
+/**
+ * ProfileListReport
+ *
+ * Tool result
+ */
+export const zProfileListResponse = z.object({
+  profiles: z.array(zProfileSummary),
+});
+
+/**
+ * ProfileShareArgs
+ */
+export const zProfileShareBody = z.object({
+  role: z.string(),
+  spec: z.string(),
+  user: z.string(),
+});
+
+/**
+ * ProfileMutationResult
+ *
+ * Tool result
+ */
+export const zProfileShareResponse = z.object({
+  changed: z.boolean(),
+  id: z.string(),
+  name: z.string(),
+});
+
+/**
+ * ProfileSpecArgs
+ */
+export const zProfileSharesBody = z.object({
+  spec: z.string(),
+});
+
+/**
+ * ProfileSharesReport
+ *
+ * Tool result
+ */
+export const zProfileSharesResponse = z.object({
+  profile_id: z.string(),
+  shares: z.array(zProfileShareEntry),
+});
+
+/**
+ * ProfileShowArgs
+ */
+export const zProfileShowBody = z.object({
+  spec: z.string().nullish(),
+});
+
+/**
+ * ProfileDetail
+ *
+ * Tool result
+ */
+export const zProfileShowResponse = z.object({
+  access: z.string(),
+  description: z.string().nullish(),
+  id: z.string(),
+  name: z.string(),
+  owner_user_id: z.string(),
+  root: z.string(),
+});
+
+/**
+ * ProfileUnshareArgs
+ */
+export const zProfileUnshareBody = z.object({
+  spec: z.string(),
+  user: z.string(),
+});
+
+/**
+ * ProfileMutationResult
+ *
+ * Tool result
+ */
+export const zProfileUnshareResponse = z.object({
+  changed: z.boolean(),
+  id: z.string(),
+  name: z.string(),
+});
+
+/**
+ * ProfileSpecArgs
+ */
+export const zProfileUseBody = z.object({
+  spec: z.string(),
+});
+
+/**
+ * ProfileMutationResult
+ *
+ * Tool result
+ */
+export const zProfileUseResponse = z.object({
+  changed: z.boolean(),
+  id: z.string(),
+  name: z.string(),
+});
+
+/**
+ * ProjectsListArgs
+ */
+export const zProjectsListBody = z.record(z.string(), z.unknown());
+
+/**
+ * ProjectsListReport
+ *
+ * Tool result
+ */
+export const zProjectsListResponse = z.object({
+  projects: z.array(z.string()),
+});
+
+/**
+ * AddProxmoxEndpointArgs
+ */
+export const zProxmoxEndpointAddBody = z.object({
+  baseUrl: z.string(),
+  insecure: z.boolean().nullish(),
+  name: z.string(),
+  tokenId: z.string(),
+  tokenSecret: z.string(),
+});
+
+/**
+ * ProxmoxMutationResult
+ *
+ * Tool result
+ */
+export const zProxmoxEndpointAddResponse = z.object({
+  changed: z.boolean(),
+  name: z.string(),
+});
+
+/**
+ * ListProxmoxEndpointsArgs
+ */
+export const zProxmoxEndpointListBody = z.record(z.string(), z.unknown());
+
+/**
+ * ListProxmoxEndpointsOutput
+ *
+ * Tool result
+ */
+export const zProxmoxEndpointListResponse = z.object({
+  endpoints: z.array(zProxmoxEndpointEntry),
+});
+
+/**
+ * RemoveProxmoxEndpointArgs
+ */
+export const zProxmoxEndpointRemoveBody = z.object({
+  name: z.string(),
+});
+
+/**
+ * ProxmoxMutationResult
+ *
+ * Tool result
+ */
+export const zProxmoxEndpointRemoveResponse = z.object({
+  changed: z.boolean(),
+  name: z.string(),
+});
+
+/**
+ * ProxmoxContainerActionArgs
+ */
+export const zProxmoxContainerActionBody = z.object({
+  action: z.string(),
+  endpoint: z.string(),
+  node: z.string(),
+  vmid: z.coerce
+    .bigint()
+    .gte(BigInt(0))
+    .max(BigInt('18446744073709551615'), {
+      error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
+    }),
+});
+
+/**
+ * ProxmoxActionResult
+ *
+ * Result of a Proxmox lifecycle action.
+ */
+export const zProxmoxContainerActionResponse = z.object({
+  action: z.string(),
+  node: z.string(),
+  status: z.int().gte(0).lte(65535),
+  upid: z.string().nullish(),
+  vmid: z.coerce
+    .bigint()
+    .gte(BigInt(0))
+    .max(BigInt('18446744073709551615'), {
+      error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
+    }),
+});
+
+/**
+ * ProxmoxListContainersArgs
+ */
+export const zProxmoxContainersBody = z.object({
+  endpoint: z.string(),
+  node: z.string(),
+});
+
+/**
+ * ProxmoxListNodesArgs
+ */
+export const zProxmoxNodesBody = z.object({
+  endpoint: z.string(),
+});
+
+/**
+ * ProxmoxVmActionArgs
+ */
+export const zProxmoxVmActionBody = z.object({
+  action: z.string(),
+  endpoint: z.string(),
+  node: z.string(),
+  vmid: z.coerce
+    .bigint()
+    .gte(BigInt(0))
+    .max(BigInt('18446744073709551615'), {
+      error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
+    }),
+});
+
+/**
+ * ProxmoxActionResult
+ *
+ * Result of a Proxmox lifecycle action.
+ */
+export const zProxmoxVmActionResponse = z.object({
+  action: z.string(),
+  node: z.string(),
+  status: z.int().gte(0).lte(65535),
+  upid: z.string().nullish(),
+  vmid: z.coerce
+    .bigint()
+    .gte(BigInt(0))
+    .max(BigInt('18446744073709551615'), {
+      error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
+    }),
+});
+
+/**
+ * ProxmoxListVmsArgs
+ */
+export const zProxmoxVmsBody = z.object({
+  endpoint: z.string(),
+  node: z.string(),
+});
+
+/**
+ * ScheduleListArgs
+ */
+export const zScheduleListBody = z.object({
+  host: z.string().nullish(),
+});
+
+/**
+ * ScheduleListOutput
+ *
+ * Tool result
+ */
+export const zScheduleListResponse = z.object({
+  schedules: z.array(zScheduleEntry),
+});
+
+/**
+ * ScheduleRunArgs
+ */
+export const zScheduleRunBody = z.object({
+  name: z.string(),
+});
+
+/**
+ * ScheduleRunOutput
+ *
+ * Tool result
+ */
+export const zScheduleRunResponse = z.object({
+  duration_ms: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  error: z.string().nullish(),
+  job: z.string(),
+  ok: z.boolean(),
+});
+
+/**
+ * ScheduleStatusArgs
+ */
+export const zScheduleStatusBody = z.object({
+  job: z.string().nullish(),
+});
+
+/**
+ * ScheduleStatusOutput
+ *
+ * Tool result
+ */
+export const zScheduleStatusResponse = z.object({
+  jobs: z.array(zJobStatus),
+});
+
+/**
+ * GetSchemaArgs
+ */
+export const zSchemaViewGetBody = z.record(z.string(), z.unknown());
+
+/**
+ * GetSchemaOutput
+ *
+ * Tool result
+ */
+export const zSchemaViewGetResponse = z.object({
+  errors: z.array(z.string()).nullish(),
+  showTabs: z.boolean(),
+  tabs: z.array(zSchemaTab),
+});
+
+/**
+ * GetSchemaDomainsArgs
+ */
+export const zSchemaViewListDomainsBody = z.record(z.string(), z.unknown());
+
+/**
+ * GetSchemaDomainsOutput
+ *
+ * Tool result
+ */
+export const zSchemaViewListDomainsResponse = z.object({
+  domains: z.array(zSchemaDomain),
+});
+
+/**
+ * AddSchemaArgs
+ */
+export const zSchemaAddBody = z.object({
+  container: z.string().nullish(),
+  database: z.string(),
+  domainsFile: z.string().nullish(),
+  host: z.string().nullish(),
+  name: z.string(),
+  password: z.string(),
+  port: z.int().gte(0).lte(65535).nullish(),
+  user: z.string(),
+});
+
+/**
+ * SchemaMutationResult
+ *
+ * Tool result
+ */
+export const zSchemaAddResponse = z.object({
+  changed: z.boolean(),
+  name: z.string(),
+});
+
+/**
+ * ListSchemasArgs
+ */
+export const zSchemaListBody = z.record(z.string(), z.unknown());
+
+/**
+ * ListSchemasOutput
+ *
+ * Tool result
+ */
+export const zSchemaListResponse = z.object({
+  schemas: z.array(zSchemaDbEntry),
+});
+
+/**
+ * RemoveSchemaArgs
+ */
+export const zSchemaRemoveBody = z.object({
+  name: z.string(),
+});
+
+/**
+ * SchemaMutationResult
+ *
+ * Tool result
+ */
+export const zSchemaRemoveResponse = z.object({
+  changed: z.boolean(),
+  name: z.string(),
+});
+
+/**
+ * SecretBackendsArgs
+ */
+export const zSecretBackendsBody = z.record(z.string(), z.unknown());
+
+/**
+ * SecretBackendsReport
+ *
+ * Tool result
+ */
+export const zSecretBackendsResponse = z.object({
+  backends: z.array(zBackendInfo),
+});
+
+/**
+ * SecretDeleteArgs
+ */
+export const zSecretDeleteBody = z.object({
+  name: z.string(),
+});
+
+/**
+ * SecretDeleteReport
+ *
+ * Tool result
+ */
+export const zSecretDeleteResponse = z.object({
+  name: z.string(),
+  removed: z.boolean(),
+});
+
+/**
+ * SecretGetArgs
+ */
+export const zSecretGetBody = z.object({
+  name: z.string(),
+});
+
+/**
+ * SecretGetReport
+ *
+ * Tool result
+ */
+export const zSecretGetResponse = z.object({
+  backend: z.string(),
+  name: z.string(),
+  value: z.string(),
+});
+
+/**
+ * SecretListArgs
+ */
+export const zSecretListBody = z.record(z.string(), z.unknown());
+
+/**
+ * SecretListReport
+ *
+ * Tool result
+ */
+export const zSecretListResponse = z.object({
+  secrets: z.array(zSecretEntry),
+});
+
+/**
+ * SecretSetArgs
+ */
+export const zSecretSetBody = z.object({
+  backend: z.string().optional().default('inline'),
+  description: z.string().nullish(),
+  name: z.string(),
+  ref_path: z.string().nullish(),
+  value: z.string().nullish(),
+});
+
+/**
+ * SecretMutationReport
+ *
+ * Tool result
+ */
+export const zSecretSetResponse = z.object({
+  backend: z.string(),
+  created: z.boolean(),
+  name: z.string(),
+});
+
+/**
+ * SpecDumpArgs
+ */
+export const zSpecDumpBody = z.record(z.string(), z.unknown());
+
+/**
+ * SpecDumpReport
+ *
+ * Tool result
+ */
+export const zSpecDumpResponse = z.object({
+  spec: z.string(),
+});
+
+/**
+ * GetSpecGraphqlInfoArgs
+ */
+export const zSpecGraphqlInfoBody = z.object({
+  repo: z.string(),
+});
+
+/**
+ * GraphQlInfoData
+ *
+ * Tool result
+ */
+export const zSpecGraphqlInfoResponse = z.object({
+  enums: z.array(zGraphQlEnum),
+  inputs: z.array(zGraphQlType),
+  mutations: z.array(zGraphQlOperation),
+  queries: z.array(zGraphQlOperation),
+  repo: z.string(),
+  subscriptions: z.array(zGraphQlOperation),
+  types: z.array(zGraphQlType),
+});
+
+/**
+ * ListSpecsArgs
+ */
+export const zSpecListBody = z.record(z.string(), z.unknown());
+
+/**
+ * ListSpecsOutput
+ *
+ * Tool result
+ */
+export const zSpecListResponse = z.object({
+  specs: z.array(zSpecMetaRow),
+});
+
+/**
+ * ListDbSpecsArgs
+ */
+export const zSpecListDbBody = z.record(z.string(), z.unknown());
+
+/**
+ * ListDbSpecsOutput
+ *
+ * Tool result
+ */
+export const zSpecListDbResponse = z.object({
+  specs: z.array(zDbSpecRow),
+});
+
+/**
+ * ProxyGraphqlArgs
+ *
+ * `variables` is opaque — GraphQL variable maps are free-form per operation.
+ */
+export const zSpecProxyGraphqlBody = z.object({
+  operation_name: z.string().nullish(),
+  query: z.string(),
+  repo: z.string(),
+  shop: z.string(),
+  token: z.string(),
+  variables: z.unknown().optional(),
+});
+
+/**
+ * GraphqlProxyResult
+ *
+ * `body` is opaque — GraphQL response shapes vary per query and are not owned by orca.
+ */
+export const zSpecProxyGraphqlResponse = z.object({
+  body: z.unknown(),
+  status: z.int().gte(0).lte(65535),
+});
+
+/**
+ * RefreshSpecArgs
+ */
+export const zSpecRefreshBody = z.object({
+  name: z.string(),
+});
+
+/**
+ * RegisterSpecResult
+ *
+ * Tool result
+ */
+export const zSpecRefreshResponse = z.object({
+  cachedAt: z.string().nullish(),
+  enabled: z.boolean(),
+  name: z.string(),
+  pathCount: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
+    .nullish(),
+  sourceMcp: z.string().nullish(),
+  url: z.string().nullish(),
+});
+
+/**
+ * RegisterSpecArgs
+ */
+export const zSpecRegisterBody = z.object({
+  name: z.string(),
+  url: z.string(),
+});
+
+/**
+ * RegisterSpecResult
+ *
+ * Tool result
+ */
+export const zSpecRegisterResponse = z.object({
+  cachedAt: z.string().nullish(),
+  enabled: z.boolean(),
+  name: z.string(),
+  pathCount: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
+    .nullish(),
+  sourceMcp: z.string().nullish(),
+  url: z.string().nullish(),
+});
+
+/**
+ * SyncMcpSpecsArgs
+ */
+export const zSpecSyncMcpBody = z.object({
+  server: z.string(),
+});
+
+/**
+ * SyncMcpSpecsResult
+ *
+ * Tool result
+ */
+export const zSpecSyncMcpResponse = z.object({
+  errors: z.array(z.string()),
+  server: z.string(),
+  synced: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+});
+
+/**
+ * UnregisterSpecArgs
+ */
+export const zSpecUnregisterBody = z.object({
+  name: z.string(),
+});
+
+/**
+ * UnregisterSpecOutput
+ *
+ * Tool result
+ */
+export const zSpecUnregisterResponse = z.object({
+  removed: z.boolean(),
+});
+
+/**
+ * SystemActionArgs
+ */
+export const zSystemActionBody = z.object({
+  action: z.string(),
+});
+
+/**
+ * SystemActionResult
+ *
+ * Tool result
+ */
+export const zSystemActionResponse2 = z.object({
+  done: z.array(z.string()),
+  errors: z.array(z.string()),
+  ok: z.boolean(),
+  skipped: z.array(z.string()),
+});
+
+/**
+ * SystemDevDisableArgs
+ */
+export const zSystemDevDisableBody = z.record(z.string(), z.unknown());
+
+/**
+ * SystemDevDisableOutput
+ *
+ * Tool result
+ */
+export const zSystemDevDisableResponse = z.object({
+  daemon_reclaimed: z.boolean(),
+  dev_process_stopped: z.boolean(),
+});
+
+/**
+ * SystemDevEnableArgs
+ */
+export const zSystemDevEnableBody = z.record(z.string(), z.unknown());
+
+/**
+ * SystemDevEnableOutput
+ *
+ * Tool result
+ */
+export const zSystemDevEnableResponse = z.object({
+  cloned: z.boolean(),
+  daemon_parked: z.boolean(),
+  repo_path: z.string(),
+});
+
+/**
+ * SystemDevSyncArgs
+ */
+export const zSystemDevSyncBody = z.record(z.string(), z.unknown());
+
+/**
+ * SystemDevSyncOutput
+ *
+ * Tool result
+ */
+export const zSystemDevSyncResponse2 = z.object({
+  already_up_to_date: z.boolean(),
+  commits_pulled: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+  detail: z.string(),
+});
+
+/**
+ * SystemDoctorArgs
+ */
+export const zSystemDoctorBody = z.record(z.string(), z.unknown());
+
+/**
+ * DoctorReport
+ *
+ * Tool result
+ */
+export const zSystemDoctorResponse = z.object({
+  entries: z.array(zDoctorEntry),
+});
+
+/**
+ * HealthArgs
+ */
+export const zSystemHealthBody = z.record(z.string(), z.unknown());
+
+/**
+ * HealthOutput
+ *
+ * Tool result
+ */
+export const zSystemHealthResponse = z.object({
+  ok: z.boolean(),
+});
+
+/**
+ * SystemInstallArgs
+ */
+export const zSystemInstallBody = z.record(z.string(), z.unknown());
+
+/**
+ * LifecycleReport
+ *
+ * Tool result
+ */
+export const zSystemInstallResponse = z.object({
+  done: z.array(z.string()),
+  errors: z.array(z.string()),
+  skipped: z.array(z.string()),
+});
+
+/**
+ * SystemRuntimeSpecArgs
+ */
+export const zSystemRuntimeSpecBody = z.record(z.string(), z.unknown());
+
+/**
+ * RuntimeSpecReport
+ *
+ * Tool result
+ */
+export const zSystemRuntimeSpecResponse = z.object({
+  frontend: z.string(),
+  target: z.string(),
+  version: z.string(),
+});
+
+/**
+ * SystemStatusArgs
+ */
+export const zSystemStatusBody = z.record(z.string(), z.unknown());
+
+/**
+ * SystemStatusReport
+ *
+ * Tool result
+ */
+export const zSystemStatusResponse2 = z.object({
+  agents: zPathLinked,
+  binary: zPathInstalled,
+  claude_md: zPathLinked,
+  mcp: zMcpRegistration,
+  pki: zPathInitialized,
+  vault: zPathExists,
+});
+
+/**
+ * SystemUninstallArgs
+ */
+export const zSystemUninstallBody = z.record(z.string(), z.unknown());
+
+/**
+ * LifecycleReport
+ *
+ * Tool result
+ */
+export const zSystemUninstallResponse = z.object({
+  done: z.array(z.string()),
+  errors: z.array(z.string()),
+  skipped: z.array(z.string()),
+});
+
+/**
+ * SystemUpdateArgs
+ */
+export const zSystemUpdateApplyBody = z.object({
+  channel: z.string().optional().default('stable'),
+});
+
+/**
+ * LifecycleReport
+ *
+ * Tool result
+ */
+export const zSystemUpdateApplyResponse = z.object({
+  done: z.array(z.string()),
+  errors: z.array(z.string()),
+  skipped: z.array(z.string()),
+});
+
+/**
+ * SystemUpdateArgs
+ */
+export const zSystemUpdateCheckBody = z.object({
+  channel: z.string().optional().default('stable'),
+});
+
+/**
+ * UpdateCheckReport
+ *
+ * Tool result
+ */
+export const zSystemUpdateCheckResponse = z.object({
+  asset_url: z.string().nullish(),
+  channel: z.string(),
+  latest: z.string().nullish(),
+  pinned_to: z.string().nullish(),
+  up_to_date: z.boolean(),
+});
+
+/**
+ * SystemUpdatePinArgs
+ */
+export const zSystemUpdatePinBody = z.object({
+  version: z.string(),
+});
+
+/**
+ * UpdatePinReport
+ *
+ * Tool result
+ */
+export const zSystemUpdatePinResponse = z.object({
+  cleared: z.boolean(),
+  pinned_to: z.string().nullish(),
+});
+
+/**
+ * SystemUpdateUnpinArgs
+ */
+export const zSystemUpdateUnpinBody = z.record(z.string(), z.unknown());
+
+/**
+ * UpdatePinReport
+ *
+ * Tool result
+ */
+export const zSystemUpdateUnpinResponse = z.object({
+  cleared: z.boolean(),
+  pinned_to: z.string().nullish(),
+});
 
 export const zGetTreeQuery = z.object({
   raw: z.boolean().optional(),

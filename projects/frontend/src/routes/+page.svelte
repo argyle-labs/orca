@@ -38,8 +38,8 @@
   async function refreshLocal(inst: Instance) {
     try {
       const [health, spec] = await Promise.all([
-        callTool('health', {}),
-        callTool('system_runtime_spec', {}),
+        callTool('ping', {}),
+        callTool('systemRuntimeSpec', {}),
       ]);
       inst.health = (health as { ok: boolean }).ok ? 'up' : 'down';
       const s = spec as { version: string; target: string; frontend: string };
@@ -58,9 +58,18 @@
 
   async function refreshPodPeers() {
     try {
-      const peers = await callTool('pod_list', {});
+      const peersResult = await callTool<{
+        peer_id: string;
+        hostname: string;
+        addr: string;
+        port: number;
+        status: string;
+        local_secure: boolean;
+        peer_secure: boolean;
+        addresses?: { kind: string; value: string }[];
+      }[]>('podList', {});
       const local = instances.find((i) => i.role === 'local');
-      const podRows: Instance[] = (peers ?? []).map((p) => ({
+      const podRows: Instance[] = (peersResult ?? []).map((p) => ({
         id: `pod:${p.peer_id}`,
         label: p.hostname || p.peer_id,
         origin: `${p.addr}:${p.port}`,

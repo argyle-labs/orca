@@ -1,6 +1,9 @@
 <script lang="ts">
   import '../app.css';
+  import '$lib/clientConfig';
   import { onMount } from 'svelte';
+  import { page } from '$app/state';
+  import { goto } from '$app/navigation';
   import { serverHealth } from '$lib/stores/serverHealth';
   import {
     getPalette,
@@ -17,16 +20,37 @@
     isCommandPaletteOpen,
     toggleCommandPalette,
   } from '$lib/stores/commandPalette.svelte';
+  import {
+    refreshSession,
+    sessionSnapshot,
+    signOut,
+    signupStatus,
+  } from '$lib/stores/session.svelte';
   import Notification from '$lib/components/Notification.svelte';
   import ThemeMenu from '$lib/components/ThemeMenu.svelte';
   import Sidebar from '$lib/components/Sidebar.svelte';
   import CommandPalette from '$lib/components/CommandPalette.svelte';
-  import TokenGate from '$lib/components/TokenGate.svelte';
 
   let { children } = $props();
 
   const sidebarOpen = $derived(getSidebarOpen());
   const paletteOpen = $derived(isCommandPaletteOpen());
+  const session = $derived(sessionSnapshot());
+
+  const PUBLIC_ROUTES = ['/signin', '/signup'];
+  const onPublicRoute = $derived(PUBLIC_ROUTES.includes(page.url.pathname));
+
+  // Redirect anonymous users away from authed routes; pick /signup when
+  // the host has no users yet, otherwise /signin.
+  $effect(() => {
+    if (session.kind !== 'anonymous' || onPublicRoute) return;
+    (async () => {
+      const status = await signupStatus();
+      const target =
+        status?.allowed && status.reason === 'first_user' ? '/signup' : '/signin';
+      await goto(target);
+    })();
+  });
 
   $effect(() => {
     document.documentElement.setAttribute('data-theme', getPalette());
@@ -38,6 +62,7 @@
   onMount(() => {
     const stopHealth = serverHealth.start();
     const stopBp = initSidebarMediaListener();
+    refreshSession();
 
     // Re-enable transitions only after the first paint settles. The class is
     // added by the inline script in app.html so first paint is static; we
@@ -72,31 +97,42 @@
 <div class="app">
   <header class="topbar">
     <div class="topbar-left">
-      <button
-        class="icon-btn"
-        onclick={toggleSidebar}
-        aria-label={sidebarOpen ? 'Close sidebar' : 'Open sidebar'}
-        title="Toggle sidebar (⌘\)"
-      >
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6">
-          <rect x="1" y="1" width="14" height="14" rx="1.5" />
-          <line x1="5" y1="1" x2="5" y2="15" />
-        </svg>
-      </button>
+      {#if session.kind === 'signed-in'}
+        <button
+          class="icon-btn"
+          onclick={toggleSidebar}
+          aria-label={sidebarOpen ? 'Close sidebar' : 'Open sidebar'}
+          title="Toggle sidebar (⌘\)"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6">
+            <rect x="1" y="1" width="14" height="14" rx="1.5" />
+            <line x1="5" y1="1" x2="5" y2="15" />
+          </svg>
+        </button>
+      {/if}
       <a href="/" class="brand">orca</a>
     </div>
 
     <div class="topbar-right">
-      <button class="search-btn" onclick={toggleCommandPalette} title="Search & commands (⌘K)">
-        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8">
-          <circle cx="6.5" cy="6.5" r="4.5" />
-          <line x1="10.5" y1="10.5" x2="14" y2="14" />
-        </svg>
-        <span class="search-label">Search</span>
-        <kbd>⌘K</kbd>
-      </button>
+      {#if session.kind === 'signed-in'}
+        <button class="search-btn" onclick={toggleCommandPalette} title="Search & commands (⌘K)">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8">
+            <circle cx="6.5" cy="6.5" r="4.5" />
+            <line x1="10.5" y1="10.5" x2="14" y2="14" />
+          </svg>
+          <span class="search-label">Search</span>
+          <kbd>⌘K</kbd>
+        </button>
+      {/if}
 
       <ThemeMenu />
+
+      {#if session.kind === 'signed-in'}
+        <button class="signout-btn" onclick={() => signOut()} title="Sign out">
+          {session.user.username}
+          <span class="signout-x" aria-hidden="true">↩</span>
+        </button>
+      {/if}
     </div>
   </header>
 
@@ -108,14 +144,15 @@
   {/if}
 
   <div class="body">
-    <Sidebar />
+    {#if session.kind === 'signed-in'}
+      <Sidebar />
+    {/if}
     <main class="content">{@render children()}</main>
   </div>
 </div>
 
 <CommandPalette />
 <Notification />
-<TokenGate />
 
 <style>
   .app {
@@ -222,4 +259,20 @@
   @media (max-width: 768px) {
     .search-label { display: none; min-width: 0; }
   }
+
+  .signout-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 26px;
+    padding: 0 8px;
+    background: transparent;
+    color: var(--color-text-muted);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: var(--text-xs);
+  }
+  .signout-btn:hover { background: var(--color-surface-2); color: var(--color-text); }
+  .signout-x { color: var(--color-text-dim); }
 </style>

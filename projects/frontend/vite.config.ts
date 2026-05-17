@@ -6,7 +6,10 @@ export default defineConfig({
   server: {
     port: 12001,
     host: '127.0.0.1',
-    hmr: { clientPort: 12001 },
+    // HMR goes through the orca proxy on :12000 (which forwards WSS → 12001)
+    // so the browser only ever talks to one origin. This makes session
+    // cookies same-origin and avoids cross-port ETP cookie blocks.
+    hmr: { clientPort: 12000, protocol: 'ws' },
   },
   build: {
     // The graphiql+react bundle (~1850 kB) and codemirror (~960 kB) are lazy-loaded

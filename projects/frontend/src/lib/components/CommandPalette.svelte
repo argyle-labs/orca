@@ -1,8 +1,7 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { onMount, tick } from 'svelte';
-  import { orca } from '$lib/orcaClient';
-  import { runTool, type ToolName } from '$lib/stores/runTool';
+  import { runTool, allToolNames, type ToolName } from '$lib/stores/runTool';
   import { NAV_SECTIONS } from '$lib/nav';
   import {
     isCommandPaletteOpen,
@@ -20,29 +19,11 @@
   let inputEl: HTMLInputElement | null = $state(null);
   let toolNames = $state<ToolName[]>([]);
 
-  /**
-   * Enumerate tool methods off the OrcaClient prototype.
-   *
-   * The runtime list is the source of truth (it's whatever wasm-pack
-   * generated). We narrow it to `ToolName` — the compile-time set derived
-   * from `OrcaClient`'s typed methods — so downstream usage stays type-safe.
-   * Anything on the prototype that isn't a `ToolName` falls out.
-   */
-  onMount(async () => {
-    try {
-      const client = await orca();
-      const validToolNames = new Set<string>(
-        Object.getOwnPropertyNames(Object.getPrototypeOf(client)).filter(
-          (n) => n !== 'constructor' && n !== 'free' && !n.startsWith('_'),
-        ),
-      );
-      // Cast is safe: ToolName is a subset of OrcaClient's own method names,
-      // and we've filtered out the non-tool members (free, dispose, ctor).
-      toolNames = Array.from(validToolNames).sort() as ToolName[];
-    } catch {
-      // Server unreachable at startup — palette still works for nav entries.
-      toolNames = [];
-    }
+  // Enumerate tool functions from the generated SDK module. Source of truth
+  // is whatever the live OpenAPI spec produced — every operationId becomes a
+  // callable name here automatically.
+  onMount(() => {
+    toolNames = allToolNames();
   });
 
   const navEntries = $derived<Entry[]>(
@@ -82,14 +63,19 @@
     activeIdx = 0;
   });
 
-  function humanize(snake: string): string {
-    return snake.replace(/_/g, ' ');
+  // operationIds are camelCase (e.g. `hostInfo`, `agentBackendKeyStatus`).
+  // Split on capitals for a readable label and use the first word as the group.
+  function humanize(camel: string): string {
+    return camel
+      .replace(/([A-Z])/g, ' $1')
+      .trim()
+      .toLowerCase();
   }
 
   function groupOf(method: ToolName): string {
     const s = String(method);
-    const i = s.indexOf('_');
-    return i > 0 ? s.slice(0, i) : 'misc';
+    const match = s.match(/^[a-z]+/);
+    return match ? match[0] : 'misc';
   }
 
   function filterAndRank(entries: Entry[], q: string): Entry[] {

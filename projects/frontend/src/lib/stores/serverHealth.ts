@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import { orca } from '$lib/orcaClient';
+import { ping } from '$lib/client/sdk.gen';
 
 export type ServerStatus = 'unknown' | 'up' | 'down';
 
@@ -11,11 +11,13 @@ function createServerHealth() {
   let timer: ReturnType<typeof setTimeout> | null = null;
 
   async function check() {
+    // /api/health is open (no auth). Any HTTP response — even a non-2xx —
+    // proves reachability. Only a thrown fetch error means "down". A 401
+    // elsewhere is "not signed in", NOT a backend outage.
     let ok: boolean;
     try {
-      const client = await orca();
-      const result = (await client.health({})) as { ok: boolean };
-      ok = !!result?.ok;
+      const res = await ping();
+      ok = !!res.response;
     } catch {
       ok = false;
     }

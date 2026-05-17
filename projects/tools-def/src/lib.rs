@@ -41,6 +41,8 @@ pub struct ToolRegistration {
 
 inventory::collect!(ToolRegistration);
 
+pub mod openapi;
+
 pub mod agent_backend;
 pub mod agents;
 pub mod config;
