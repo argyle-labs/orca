@@ -69,6 +69,17 @@ pub struct RuntimeSpecReport {
     pub frontend: String,
     /// Build target triple of this binary (e.g. `aarch64-apple-darwin`).
     pub target: String,
+    /// Current daemon operating mode: "daemon" | "parked" | "dev". `None`
+    /// when the state file is absent (binary not running as the registered daemon).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Release channel marker (`stable` | `rc` | `beta` | `alpha`). `None`
+    /// when no channel marker has been written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    /// Active version pin if any (`orca update --pin`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_to: Option<String>,
 }
 
 // ── Args ────────────────────────────────────────────────────────────────────
@@ -230,7 +241,7 @@ async fn spec_dump(
 }
 
 /// Report this binary's runtime composition: whether the web UI is embedded, build target triple. Used by installers to decide whether to fetch a JS runtime alongside the binary.
-#[orca_tool(domain = "system", verb = "runtime-spec")]
+#[orca_tool(domain = "system", verb = "runtime-spec", remote_ok = true)]
 async fn system_runtime_spec(
     _args: SystemRuntimeSpecArgs,
     ctx: &orca_utils::tool::ToolCtx,

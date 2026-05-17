@@ -5,9 +5,9 @@ use orca_tools_def::pod::{
     CertInfo, PodAcceptOutput, PodCertStatusOutput, PodDevDisableOutput, PodDevDisablePeerResult,
     PodDevEnableOutput, PodDevEnablePeerResult, PodDevSyncOutput, PodDevSyncPeerResult,
     PodDiscoveryRowDto, PodExecDispatch, PodJoinOutput, PodLeaveOutput, PodOfferOutput,
-    PodPendingOfferDto, PodPingOutput, PodService, PodTrustOutput,
+    PodPeerAddressDto, PodPeerDto, PodPendingOfferDto, PodPingOutput, PodService, PodTrustOutput,
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::pod::{db as pdb, pki_dir};
 
@@ -15,6 +15,10 @@ pub struct ServerPod;
 
 #[async_trait]
 impl PodService for ServerPod {
+    async fn list_enriched(&self) -> Result<Vec<PodPeerDto>> {
+        list_enriched_impl().await
+    }
+
     async fn accept(&self, code: &str) -> Result<PodAcceptOutput> {
         let conn = db::open_default()?;
         let offer = pdb::find_pending_offer_by_code(&conn, code)?
@@ -638,6 +642,177 @@ fn select_peer_targets(filter: &[String]) -> Result<Vec<(String, String, String)
         })
         .map(|p| (p.peer_id, p.peer_hostname, p.peer_addr))
         .collect())
+}
+
+/// Build the local-host row for `pod.list`. Uses the in-process lifecycle
+/// service so the synthetic local entry stays in lock-step with what every
+/// remote peer would self-report via `system.runtime-spec`.
+async fn local_peer_row() -> PodPeerDto {
+    let frontend = if cfg!(feature = "ui") {
+        "embedded"
+    } else {
+        "disabled"
+    };
+    let mode = orca_utils::state::read()
+        .ok()
+        .flatten()
+        .map(|s| match s.mode {
+            orca_utils::state::DaemonMode::Daemon => "daemon".to_string(),
+            orca_utils::state::DaemonMode::Parked => "parked".to_string(),
+            orca_utils::state::DaemonMode::Dev => "dev".to_string(),
+        });
+    let channel = crate::commands::update::read_channel_marker().map(|c| c.as_marker().to_string());
+    let pinned_to = crate::commands::update::read_version_pin();
+    // update-check is intentionally skipped for the local row: it requires
+    // the secrets service to mint a GitHub token, and we don't want pod.list
+    // to fail (or hang on GitHub) when called before the daemon is fully
+    // wired. Remote peers go through their own service registration so it's
+    // available for them via the fanout path.
+    PodPeerDto {
+        peer_id: "local".into(),
+        hostname: crate::host_identity::display_hostname().to_string(),
+        addr: "127.0.0.1".into(),
+        port: orca_utils::config::APP_PLUGIN_PORT,
+        last_seen_at: chrono::Utc::now().timestamp(),
+        local_secure: true,
+        peer_secure: true,
+        status: "active".into(),
+        addresses: Vec::<PodPeerAddressDto>::new(),
+        local: true,
+        reachable: Some(true),
+        latency_ms: Some(0),
+        probe_error: None,
+        version: Some(env!("ORCA_VERSION").into()),
+        target: Some(env!("ORCA_BUILD_TARGET").into()),
+        frontend: Some(frontend.into()),
+        mode,
+        channel,
+        pinned_to,
+        update_latest: None,
+        update_available: None,
+    }
+}
+
+/// Probe a single peer in parallel for ping + runtime-spec + update-check,
+/// merging the results into the base DB row. All probes are bounded by their
+/// own short timeout so one slow peer doesn't stall the whole list.
+async fn enrich_peer(mut base: PodPeerDto) -> PodPeerDto {
+    use orca_tools_def::orca_lifecycle::{RuntimeSpecReport, UpdateCheckReport};
+
+    let addr = base.addr.clone();
+
+    let ping_fut = async {
+        let started = Instant::now();
+        let r = tokio::time::timeout(Duration::from_secs(3), crate::pod::ping(&addr)).await;
+        match r {
+            Ok(Ok(p)) => Ok((started.elapsed().as_millis() as u32, p)),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(_) => Err("ping timeout".to_string()),
+        }
+    };
+    let spec_fut = async {
+        let r = tokio::time::timeout(
+            Duration::from_secs(5),
+            crate::pod::exec(&addr, "system.runtime-spec", serde_json::json!({})),
+        )
+        .await;
+        match r {
+            Ok(Ok(res)) => serde_json::from_value::<RuntimeSpecReport>(res.result)
+                .map_err(|e| format!("parse runtime-spec: {e}")),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(_) => Err("runtime-spec timeout".to_string()),
+        }
+    };
+    let upd_fut = async {
+        let r = tokio::time::timeout(
+            Duration::from_secs(10),
+            crate::pod::exec(
+                &addr,
+                "system.update-check",
+                serde_json::json!({"channel": "stable"}),
+            ),
+        )
+        .await;
+        match r {
+            Ok(Ok(res)) => serde_json::from_value::<UpdateCheckReport>(res.result)
+                .map_err(|e| format!("parse update-check: {e}")),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(_) => Err("update-check timeout".to_string()),
+        }
+    };
+
+    let (ping_res, spec_res, upd_res) = tokio::join!(ping_fut, spec_fut, upd_fut);
+
+    let mut first_err: Option<String> = None;
+
+    match ping_res {
+        Ok((ms, _p)) => {
+            base.reachable = Some(true);
+            base.latency_ms = Some(ms);
+        }
+        Err(e) => {
+            base.reachable = Some(false);
+            first_err.get_or_insert(format!("ping: {e}"));
+        }
+    }
+
+    match spec_res {
+        Ok(s) => {
+            base.version = Some(s.version);
+            base.target = Some(s.target);
+            base.frontend = Some(s.frontend);
+            base.mode = s.mode;
+            base.channel = s.channel;
+            base.pinned_to = s.pinned_to;
+        }
+        Err(e) => {
+            first_err.get_or_insert(format!("runtime-spec: {e}"));
+        }
+    }
+
+    match upd_res {
+        Ok(u) => {
+            base.update_latest = u.latest;
+            base.update_available = Some(!u.up_to_date);
+            if base.pinned_to.is_none() {
+                base.pinned_to = u.pinned_to;
+            }
+        }
+        Err(e) => {
+            first_err.get_or_insert(format!("update-check: {e}"));
+        }
+    }
+
+    base.probe_error = first_err;
+    base
+}
+
+/// Read DB rows, prepend a synthetic local row, fan out probes to every
+/// active remote peer in parallel.
+async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
+    let conn = db::open_default()?;
+    let rows = db::pod::list_peers(&conn)?;
+    drop(conn);
+
+    let (active, inactive): (Vec<_>, Vec<_>) = rows
+        .into_iter()
+        .map(PodPeerDto::from)
+        .partition(|p| p.status == "active");
+
+    let probe_handles: Vec<_> = active
+        .into_iter()
+        .map(|p| tokio::spawn(enrich_peer(p)))
+        .collect();
+
+    let mut out: Vec<PodPeerDto> = Vec::with_capacity(probe_handles.len() + inactive.len() + 1);
+    out.push(local_peer_row().await);
+    for h in probe_handles {
+        if let Ok(p) = h.await {
+            out.push(p);
+        }
+    }
+    out.extend(inactive);
+    Ok(out)
 }
 
 /// Whether the fan-out should also flip the local host. Empty filter = yes;

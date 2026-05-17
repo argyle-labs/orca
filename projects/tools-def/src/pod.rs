@@ -40,6 +40,48 @@ pub struct PodPeerDto {
     /// for peers paired before slice 4 of the host-addressing plan landed.
     #[serde(default)]
     pub addresses: Vec<PodPeerAddressDto>,
+    /// True for the synthetic local-host row prepended to `pod.list`. Remote
+    /// peers are always false. Lets UIs flag "this is me" without string
+    /// matching the hostname.
+    #[serde(default)]
+    pub local: bool,
+    /// `pod/ping` succeeded inside the fanout budget. `None` when probing was
+    /// skipped (e.g. departed peers); `Some(false)` when the dial errored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reachable: Option<bool>,
+    /// Round-trip latency of the `pod/ping` probe, milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u32>,
+    /// Error string from the probe path (ping / runtime-spec / update-check).
+    /// First failure wins so the UI has one line to surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_error: Option<String>,
+    /// Peer-reported `system.runtime-spec.version`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Peer-reported build target triple.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Peer-reported "embedded" / "disabled" UI flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontend: Option<String>,
+    /// Peer-reported daemon mode: "daemon" | "parked" | "dev".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Peer-reported release channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    /// Peer-reported version pin if set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_to: Option<String>,
+    /// Latest release tag visible to the peer on its channel. Pulled from
+    /// `system.update-check`; `None` when the probe failed or timed out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_latest: Option<String>,
+    /// True when an update is available for the peer (and not blocked by
+    /// `pinned_to`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_available: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -335,6 +377,18 @@ pub mod native_support {
                 peer_secure: p.peer_secure,
                 status: p.status,
                 addresses: p.addresses.into_iter().map(Into::into).collect(),
+                local: false,
+                reachable: None,
+                latency_ms: None,
+                probe_error: None,
+                version: None,
+                target: None,
+                frontend: None,
+                mode: None,
+                channel: None,
+                pinned_to: None,
+                update_latest: None,
+                update_available: None,
             }
         }
     }
@@ -344,6 +398,13 @@ pub mod native_support {
     /// behind this trait so the daemon owns all the network/process state.
     #[async_trait]
     pub trait PodService: Send + Sync {
+        /// Enriched peer list used by `pod.list`. Adds a synthetic local row
+        /// (built from this host's runtime spec) and fans out `pod/ping`,
+        /// `system.runtime-spec`, and `system.update-check` over the mesh to
+        /// fill the per-peer optional fields. Failed probes leave fields
+        /// `None` with `probe_error` populated; the call never errors solely
+        /// because a peer is unreachable.
+        async fn list_enriched(&self) -> Result<Vec<PodPeerDto>>;
         async fn accept(&self, code: &str) -> Result<PodAcceptOutput>;
         async fn trust(&self, peer_id: &str, on: bool) -> Result<PodTrustOutput>;
         async fn ping(&self, peer_id: &str) -> PodPingOutput;
@@ -395,14 +456,10 @@ pub use native_support::{PodExecDispatch, PodService};
 #[orca_tool(domain = "pod", verb = "list", remote_ok = true)]
 async fn pod_list(
     _args: EmptyArgs,
-    _ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<PodPeerList> {
-    let conn = orca_db::open_default()?;
     Ok(PodPeerList(
-        orca_db::pod::list_peers(&conn)?
-            .into_iter()
-            .map(Into::into)
-            .collect(),
+        native_support::svc(ctx)?.list_enriched().await?,
     ))
 }
 
