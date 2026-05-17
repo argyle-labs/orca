@@ -1,7 +1,7 @@
 //! Abstract service traits injected into `ToolCtx` so server-coupled tool
-//! `run` bodies can live in this wasm-safe crate.
+//! `run` bodies can live in this crate.
 //!
-//! The trait *signatures* are wasm-safe (no server-internal types leak
+//! The trait *signatures* are (no server-internal types leak
 //! through). The *implementations* live in `projects/server/` and call the
 //! real internal modules.
 

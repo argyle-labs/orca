@@ -19,10 +19,8 @@
 //!   - `#[cfg(feature = "native")] inventory::submit!` into the
 //!     `ORCA_TOOLS` slice exposed by `orca-tools-def` so the registry picks
 //!     it up at startup without any central enrollment list.
-//!   - `#[cfg(feature = "wasm")] #[wasm_bindgen] impl OrcaClient { … }` — one
-//!     typed JS method per tool. Lives in the same crate as the fn, which is
-//!     fine because all current tool bodies sit in `orca-tools-def` where
-//!     `OrcaClient` is defined. Cross-crate emission is a follow-up.
+//!   - An `OpenApiToolRegistration` inventory entry — the spec endpoint hoists
+//!     every tool path automatically (see `tools-def::openapi`).
 //!
 //! Scope: this slice only supports the canonical `async fn name(args: T,
 //! ctx: &ToolCtx) -> Result<O>` form. Named-parameter expansion can be added
@@ -252,11 +250,9 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
         }
     };
 
-
     // Wrap the user-authored fn in `#[cfg(feature = "native")]` — its body
     // is what brings in the native deps (db, integrations, etc.). The
-    // OrcaToolDef + wasm method emissions stay unconditional so wasm-only
-    // builds keep their typed OrcaClient methods.
+    // OrcaToolDef emission stays unconditional.
     let expanded = quote! {
         #[cfg(feature = "native")]
         #inner_fn

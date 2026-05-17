@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::orca_tool;
 
-// ── Args / Output (wasm-safe) ────────────────────────────────────────────────
+// ── Args / Output ────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ConfigRowOut {

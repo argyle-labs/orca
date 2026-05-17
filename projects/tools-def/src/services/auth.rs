@@ -1,5 +1,5 @@
 //! `AuthService` — abstracts credential storage and OAuth flows so the auth
-//! tools (login / logout / status) can live in this wasm-safe crate while
+//! tools (login / logout / status) can live in this crate while
 //! the actual server-side device-flow and PKCE plumbing stays in
 //! `projects/server/src/commands/{auth,oauth}.rs`.
 //!

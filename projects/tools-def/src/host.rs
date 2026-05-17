@@ -7,17 +7,15 @@
 //!   - `host.refresh` — force a re-detect (LAN + Tailscale + manual rows).
 //!
 //! Migrated to the `#[orca_tool]` proc-macro as the proof-of-shape pilot.
-//! The macro emits `OrcaToolDef` + `OrcaOp` + wasm method unconditionally
-//! and the `OrcaTool::run` thunk + inventory registration under
-//! `feature = "native"`. Args/Output types stay defined outside the
-//! native gate so wasm builds keep their typed `OrcaClient` methods.
+//! The macro emits `OrcaToolDef` + `OrcaOp` unconditionally and the
+//! `OrcaTool::run` thunk + inventory registration under `feature = "native"`.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::orca_tool;
 
-// ── Args / Output types (wasm-safe, shared by every surface) ────────────────
+// ── Args / Output types (shared by every surface) ────────────────
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -89,7 +87,7 @@ mod native_support {
 
     /// Best-effort OS hostname read for the info snapshot. We mirror the
     /// `hostname` Command path used inside the daemon's host_identity init —
-    /// the cached static there isn't reachable from this wasm-safe crate.
+    /// the cached static there isn't reachable from this crate.
     pub(super) fn os_hostname() -> String {
         std::process::Command::new("hostname")
             .output()

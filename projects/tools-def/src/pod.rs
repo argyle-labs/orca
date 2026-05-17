@@ -4,14 +4,14 @@
 //! render paired peers without a bespoke REST endpoint. The remaining ops
 //! delegate to `PodService` (registered by the server) because they need
 //! mTLS dials, PKI material, and bootstrap signing — all server-side state
-//! that this wasm-safe crate must not touch directly.
+//! that this crate must not touch directly.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::orca_tool;
 
-// ── Args / Output types (wasm-safe, shared by every surface) ────────────────
+// ── Args / Output types (shared by every surface) ────────────────
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -340,7 +340,7 @@ pub mod native_support {
     }
 
     /// Service hook the server registers at startup. tools-def stays
-    /// wasm-safe — every mTLS dial, PKI read, and bootstrap signing op lives
+    /// — every mTLS dial, PKI read, and bootstrap signing op lives
     /// behind this trait so the daemon owns all the network/process state.
     #[async_trait]
     pub trait PodService: Send + Sync {
