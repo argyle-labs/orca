@@ -61,6 +61,113 @@ pub struct SpecDumpReport {
     pub spec: String,
 }
 
+/// Cross-platform OS / hardware / process / network snapshot. Every field
+/// is optional so the same shape works on macOS, Linux, and (eventually)
+/// Windows — a collector failure leaves the field `None` rather than
+/// breaking the whole report.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Default)]
+pub struct SystemInfoReport {
+    // ── OS ──
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel_version: Option<String>,
+    /// Linux distro long name (`Ubuntu 24.04.2 LTS`). `None` on macOS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distro: Option<String>,
+
+    // ── Hardware ──
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_logical: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_physical: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_total_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_available_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap_total_mb: Option<u64>,
+
+    // ── Host / uptime ──
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fqdn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_time_unix: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_uptime_secs: Option<u64>,
+    /// Unix load averages (1/5/15 min). `None` on Windows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_avg_1: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_avg_5: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_avg_15: Option<f64>,
+
+    // ── This orca process ──
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_started_at_unix: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_uptime_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_rss_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_threads: Option<u32>,
+
+    // ── Storage (filesystem hosting ~/.orca) ──
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orca_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orca_fs_total_gb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orca_fs_avail_gb: Option<u64>,
+
+    // ── Runtime / integrations ──
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_present: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_peer_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_paired_count: Option<u32>,
+
+    // ── Network interfaces ──
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<NetIfaceDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_ipv4: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_ipv6: Option<String>,
+
+    /// Wall-clock when this snapshot was collected. Cached snapshots may be
+    /// up to ~30s stale; consumers use this to decide whether to trust a
+    /// metric like load average.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_at_unix: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+pub struct NetIfaceDto {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ipv4: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ipv6: Vec<String>,
+    /// True for loopback interfaces (lo / lo0).
+    #[serde(default)]
+    pub loopback: bool,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RuntimeSpecReport {
     /// Orca version from `CARGO_PKG_VERSION` at build time.
@@ -80,6 +187,10 @@ pub struct RuntimeSpecReport {
     /// Active version pin if any (`orca update --pin`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_to: Option<String>,
+    /// Cross-platform system snapshot (OS / hardware / process / network).
+    /// `None` only if the collector failed to initialise on the peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<SystemInfoReport>,
 }
 
 // ── Args ────────────────────────────────────────────────────────────────────

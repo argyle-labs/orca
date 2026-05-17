@@ -36,3 +36,4 @@ pub mod pod;
 pub mod remote_ok;
 pub mod scheduler;
 pub mod serve;
+pub mod system_info;

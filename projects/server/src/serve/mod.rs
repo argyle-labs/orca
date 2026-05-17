@@ -45,6 +45,7 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     if let Err(e) = crate::loopback_token::install_at_startup() {
         tracing::warn!("loopback token install failed: {e:#}");
     }
+    crate::system_info::spawn_refresher();
     info!(
         "[orca] binding {} ({})...",
         addr,

@@ -89,6 +89,9 @@ mdns-sd = "0.19"
 # (host_identity::detect_all). Pure Rust, cross-platform.
 if-addrs = "0.14"
 
+# Cross-platform system snapshot for system.runtime-spec / pod.list.
+sysinfo = { workspace = true }
+
 # Text width measurement (TUI from merged conversation)
 unicode-width = "0.2"
 

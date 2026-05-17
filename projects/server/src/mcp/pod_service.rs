@@ -690,6 +690,7 @@ async fn local_peer_row() -> PodPeerDto {
         pinned_to,
         update_latest: None,
         update_available: None,
+        system: Some((*crate::system_info::current_or_collect()).clone()),
     }
 }
 
@@ -764,6 +765,7 @@ async fn enrich_peer(mut base: PodPeerDto) -> PodPeerDto {
             base.mode = s.mode;
             base.channel = s.channel;
             base.pinned_to = s.pinned_to;
+            base.system = s.system;
         }
         Err(e) => {
             first_err.get_or_insert(format!("runtime-spec: {e}"));

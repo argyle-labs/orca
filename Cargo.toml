@@ -96,6 +96,11 @@ tower = { version = "0.5", features = ["util"] }
 glob = "0.3"
 pulldown-cmark = "0.13"
 
+# System introspection for system.runtime-spec / pod.list enrichment.
+# Maintained cross-platform crate (macOS/Linux/Windows). Interface MACs
+# come from `if-addrs` which is already in the server crate.
+sysinfo = { version = "0.32", default-features = false, features = ["system", "disk", "network"] }
+
 [workspace]
 members = [
     "projects/db",

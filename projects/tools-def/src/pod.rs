@@ -82,6 +82,10 @@ pub struct PodPeerDto {
     /// `pinned_to`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_available: Option<bool>,
+    /// Cross-platform OS / hardware / process / network snapshot reported
+    /// by the peer's `system.runtime-spec`. `None` when the probe failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<crate::orca_lifecycle::SystemInfoReport>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -389,6 +393,7 @@ pub mod native_support {
                 pinned_to: None,
                 update_latest: None,
                 update_available: None,
+                system: None,
             }
         }
     }

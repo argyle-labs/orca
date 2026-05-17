@@ -323,6 +323,7 @@ impl LifecycleService for ServerLifecycle {
         let channel =
             crate::commands::update::read_channel_marker().map(|c| c.as_marker().to_string());
         let pinned_to = crate::commands::update::read_version_pin();
+        let system = Some((*crate::system_info::current_or_collect()).clone());
         Ok(RuntimeSpecReport {
             version: env!("ORCA_VERSION").into(),
             frontend: frontend.into(),
@@ -330,6 +331,7 @@ impl LifecycleService for ServerLifecycle {
             mode,
             channel,
             pinned_to,
+            system,
         })
     }
 }
