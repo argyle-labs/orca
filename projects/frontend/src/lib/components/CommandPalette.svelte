@@ -117,13 +117,11 @@
       await goto(entry.href);
       return;
     }
-    // The palette is the generic dispatcher: tools picked from here are
-    // invoked with empty args. Tools whose Args type has required fields
-    // will surface a typed validation error through the toast pipeline.
-    // The two-step `as never` cast is intentional — we're erasing the
-    // per-tool arg constraint at the dispatch boundary on purpose. Domain
-    // pages always call `runTool` directly with the right typed args.
-    await runTool(entry.tool, {} as never, { successMessage: `${entry.label} ✓` });
+    // Palette is a generic dispatcher: tools picked from here are invoked
+    // with empty args. Tools whose Args type has required fields surface a
+    // typed validation error through the toast pipeline. Domain pages should
+    // call the typed SDK function directly instead.
+    await runTool(entry.tool, {}, { successMessage: `${entry.label} ✓` });
   }
 
   function handleKey(e: KeyboardEvent) {
