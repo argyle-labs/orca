@@ -57,6 +57,17 @@ pub struct SigninRequest {
     pub password: String,
 }
 
+#[derive(Deserialize, ToSchema)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ChangePasswordOk {
+    pub ok: bool,
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct SessionOk {
     pub user_id: String,
@@ -340,6 +351,64 @@ pub async fn signout(req: Request) -> Response {
         clear_cookie_value().parse().expect("cookie value is ascii"),
     );
     resp
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/auth/change_password",
+    operation_id = "authChangePassword",
+    request_body = ChangePasswordRequest,
+    responses(
+        (status = 200, description = "Password changed", body = ChangePasswordOk),
+        (status = 400, description = "Bad request (validation)", body = AuthErrorResponse),
+        (status = 401, description = "Not signed in or current password wrong", body = AuthErrorResponse),
+    ),
+    tag = "auth"
+)]
+pub async fn change_password(
+    axum::extract::Extension(ident): axum::extract::Extension<AuthIdentity>,
+    Json(body): Json<ChangePasswordRequest>,
+) -> Response {
+    let user_id = match &ident.kind {
+        AuthKind::Session { user_id, .. } => user_id.clone(),
+        _ => return err(StatusCode::UNAUTHORIZED, "session required"),
+    };
+
+    if body.new_password.len() < 8 {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "new password must be at least 8 characters",
+        );
+    }
+
+    let conn = match db::open_default() {
+        Ok(c) => c,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db: {e}")),
+    };
+
+    let user = match db::users::find_by_id(&conn, &user_id) {
+        Ok(Some(u)) => u,
+        _ => return err(StatusCode::UNAUTHORIZED, "user no longer exists"),
+    };
+    let auth = match db::users::find_auth_by_username(&conn, &user.username) {
+        Ok(Some(a)) => a,
+        _ => return err(StatusCode::UNAUTHORIZED, "user no longer exists"),
+    };
+    let ok = crate::auth_password::verify_password(&body.current_password, &auth.password_hash)
+        .unwrap_or(false);
+    if !ok {
+        return err(StatusCode::UNAUTHORIZED, "current password incorrect");
+    }
+
+    let hash = match crate::auth_password::hash_password(&body.new_password) {
+        Ok(h) => h,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("hash: {e}")),
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    if let Err(e) = db::users::set_password_hash(&conn, &user_id, &hash, &now) {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("update: {e}"));
+    }
+    Json(ChangePasswordOk { ok: true }).into_response()
 }
 
 #[utoipa::path(

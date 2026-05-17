@@ -58,6 +58,15 @@ export type CertInfo = {
   issued_at: number;
 };
 
+export type ChangePasswordOk = {
+  ok: boolean;
+};
+
+export type ChangePasswordRequest = {
+  current_password: string;
+  new_password: string;
+};
+
 export type ComponentStatus = {
   installed: boolean;
   path: string;
@@ -1064,6 +1073,36 @@ export type TreeNode = {
   path: string;
   type: NodeType;
 };
+
+export type AuthChangePasswordData = {
+  body: ChangePasswordRequest;
+  path?: never;
+  query?: never;
+  url: '/api/auth/change_password';
+};
+
+export type AuthChangePasswordErrors = {
+  /**
+   * Bad request (validation)
+   */
+  400: AuthErrorResponse;
+  /**
+   * Not signed in or current password wrong
+   */
+  401: AuthErrorResponse;
+};
+
+export type AuthChangePasswordError = AuthChangePasswordErrors[keyof AuthChangePasswordErrors];
+
+export type AuthChangePasswordResponses = {
+  /**
+   * Password changed
+   */
+  200: ChangePasswordOk;
+};
+
+export type AuthChangePasswordResponse =
+  AuthChangePasswordResponses[keyof AuthChangePasswordResponses];
 
 export type AuthMeData = {
   body?: never;

@@ -51,6 +51,9 @@ import type {
   AgentsSearchLogsData,
   AgentsSearchLogsErrors,
   AgentsSearchLogsResponses,
+  AuthChangePasswordData,
+  AuthChangePasswordErrors,
+  AuthChangePasswordResponses,
   AuthLoginData,
   AuthLoginErrors,
   AuthLoginResponses,
@@ -729,6 +732,22 @@ export type Options<
    */
   meta?: Record<string, unknown>;
 };
+
+export const authChangePassword = <ThrowOnError extends boolean = false>(
+  options: Options<AuthChangePasswordData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    AuthChangePasswordResponses,
+    AuthChangePasswordErrors,
+    ThrowOnError
+  >({
+    url: '/api/auth/change_password',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
 
 export const authMe = <ThrowOnError extends boolean = false>(
   options?: Options<AuthMeData, ThrowOnError>,

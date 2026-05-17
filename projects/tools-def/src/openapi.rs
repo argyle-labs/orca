@@ -167,10 +167,10 @@ fn hoist_defs(schema: &mut Value, out: &mut Map<String, Value>) {
 fn rewrite_refs(v: &mut Value) {
     match v {
         Value::Object(map) => {
-            if let Some(Value::String(s)) = map.get_mut("$ref") {
-                if let Some(rest) = s.strip_prefix("#/$defs/") {
-                    *s = format!("#/components/schemas/{rest}");
-                }
+            if let Some(Value::String(s)) = map.get_mut("$ref")
+                && let Some(rest) = s.strip_prefix("#/$defs/")
+            {
+                *s = format!("#/components/schemas/{rest}");
             }
             for child in map.values_mut() {
                 rewrite_refs(child);

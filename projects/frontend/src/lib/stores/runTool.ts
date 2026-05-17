@@ -19,7 +19,7 @@ export type ToolName = keyof typeof sdk;
  * Hey-api functions accept an options object; we pass `body` for POSTs and
  * an empty object for GETs. The dispatcher hides the difference.
  */
-type AnyToolFn = (opts: { body?: unknown }) => Promise<{
+type AnyToolFn = (opts?: { body?: unknown }) => Promise<{
   data?: unknown;
   error?: unknown;
   response?: Response;
@@ -56,7 +56,12 @@ export async function callTool<T = unknown>(
   if (typeof fn !== 'function') {
     throw new Error(`unknown tool: ${String(name)}`);
   }
-  const res = await fn({ body: args });
+  // hey-api emits one of `.get(/`.post(`/`.put(`/`.delete(`/`.patch(` in
+  // the body of every generated SDK function. GETs reject any body (fetch
+  // refuses), POSTs need a body so the request gets a Content-Type and
+  // doesn't 415. Detect by inspecting the compiled source.
+  const wantsBody = !/\.(get|head)\(/.test(fn.toString());
+  const res = await fn(wantsBody ? { body: args } : undefined);
   if (res.error || !res.response?.ok) {
     const msg =
       (res.error as { error?: string } | undefined)?.error ??

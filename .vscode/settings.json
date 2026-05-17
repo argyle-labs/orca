@@ -1,11 +1,13 @@
 {
   "cSpell.words": [
+    "cifs",
     "cmark",
     "Creds",
     "crossterm",
     "impls",
     "jsonschema",
     "lmstudio",
+    "mountpoint",
     "pemfile",
     "ratatui",
     "reqwest",
@@ -15,12 +17,14 @@
     "rustyline",
     "schemars",
     "serde",
+    "smbfs",
     "sqlcipher",
     "stty",
     "tsify",
     "tungstenite",
     "typst",
     "upid",
+    "urlencode",
     "utoipa",
     "vmid"
   ]

@@ -65,6 +65,15 @@ export const zCertInfo = z.object({
     }),
 });
 
+export const zChangePasswordOk = z.object({
+  ok: z.boolean(),
+});
+
+export const zChangePasswordRequest = z.object({
+  current_password: z.string(),
+  new_password: z.string(),
+});
+
 export const zComponentStatus = z.object({
   installed: z.boolean(),
   path: z.string(),
@@ -1066,6 +1075,13 @@ export const zTreeNode = z.object({
   path: z.string(),
   type: zNodeType,
 });
+
+export const zAuthChangePasswordBody = zChangePasswordRequest;
+
+/**
+ * Password changed
+ */
+export const zAuthChangePasswordResponse = zChangePasswordOk;
 
 /**
  * Current identity

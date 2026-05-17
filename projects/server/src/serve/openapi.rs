@@ -89,6 +89,8 @@ use super::mcp_client::McpPool;
         super::api::SetPluginDataRequest,
         auth_routes::SignupRequest,
         auth_routes::SigninRequest,
+        auth_routes::ChangePasswordRequest,
+        auth_routes::ChangePasswordOk,
         auth_routes::SessionOk,
         auth_routes::SignupStatus,
         auth_routes::MeOk,
@@ -226,6 +228,7 @@ pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
         .routes(routes!(auth_routes::signup))
         .routes(routes!(auth_routes::signin))
         .routes(routes!(auth_routes::signout))
+        .routes(routes!(auth_routes::change_password))
         .routes(routes!(auth_routes::me));
     #[cfg(feature = "pdf")]
     let router = router.routes(routes!(api::pdf_handler));

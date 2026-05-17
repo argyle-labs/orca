@@ -146,7 +146,7 @@ pub(crate) fn parse_proc_mounts(raw: &str) -> Vec<Mount> {
 #[cfg(target_os = "macos")]
 pub(crate) fn parse_macos_mounts(raw: &str) -> Vec<Mount> {
     // Sample line:
-    //   //user@server/share on /Volumes/share (smbfs, nodev, nosuid, mounted by user)
+    //user@server/share on /Volumes/share (smbfs, nodev, nosuid, mounted by user)
     raw.lines()
         .filter_map(|line| {
             let (source, rest) = line.split_once(" on ")?;

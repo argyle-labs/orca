@@ -4,6 +4,7 @@
 
 import { goto } from '$app/navigation';
 import {
+  authChangePassword,
   authMe,
   authSignin,
   authSignout,
@@ -61,6 +62,21 @@ export async function signUp(username: string, password: string): Promise<void> 
     throw new Error(msg);
   }
   await refreshSession();
+}
+
+export async function changePassword(
+  current_password: string,
+  new_password: string,
+): Promise<void> {
+  const res = await authChangePassword({
+    body: { current_password, new_password },
+  });
+  if (!res.response?.ok) {
+    const msg =
+      (res.error as { error?: string } | undefined)?.error ??
+      'change password failed';
+    throw new Error(msg);
+  }
 }
 
 export async function signOut(): Promise<void> {

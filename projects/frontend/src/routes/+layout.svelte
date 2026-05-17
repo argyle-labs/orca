@@ -23,13 +23,13 @@
   import {
     refreshSession,
     sessionSnapshot,
-    signOut,
     signupStatus,
   } from '$lib/stores/session.svelte';
   import Notification from '$lib/components/Notification.svelte';
   import ThemeMenu from '$lib/components/ThemeMenu.svelte';
   import Sidebar from '$lib/components/Sidebar.svelte';
   import CommandPalette from '$lib/components/CommandPalette.svelte';
+  import UserMenu from '$lib/components/UserMenu.svelte';
 
   let { children } = $props();
 
@@ -128,10 +128,7 @@
       <ThemeMenu />
 
       {#if session.kind === 'signed-in'}
-        <button class="signout-btn" onclick={() => signOut()} title="Sign out">
-          {session.user.username}
-          <span class="signout-x" aria-hidden="true">↩</span>
-        </button>
+        <UserMenu user={session.user} />
       {/if}
     </div>
   </header>
@@ -260,19 +257,4 @@
     .search-label { display: none; min-width: 0; }
   }
 
-  .signout-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 26px;
-    padding: 0 8px;
-    background: transparent;
-    color: var(--color-text-muted);
-    border: 1px solid var(--color-border);
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: var(--text-xs);
-  }
-  .signout-btn:hover { background: var(--color-surface-2); color: var(--color-text); }
-  .signout-x { color: var(--color-text-dim); }
 </style>
