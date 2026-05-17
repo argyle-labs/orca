@@ -252,27 +252,6 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
         }
     };
 
-    // WASM method emission — gated. Works as long as `#[orca_tool]` is used
-    // in the same crate as `OrcaClient` (orca-tools-def today). Cross-crate
-    // emission is a follow-up.
-    let wasm_block = quote! {
-        #[cfg(feature = "wasm")]
-        const _: () = {
-            use ::orca_tools_def::wasm::OrcaClient;
-            use ::orca_tools_def::OrcaToolDef;
-            use ::wasm_bindgen::prelude::*;
-            #[wasm_bindgen]
-            impl OrcaClient {
-                #[wasm_bindgen]
-                pub async fn #fn_ident(
-                    &self,
-                    args: <#zst_ident as OrcaToolDef>::Args,
-                ) -> Result<<#zst_ident as OrcaToolDef>::Output, ::wasm_bindgen::JsValue> {
-                    self.call_tool_typed::<#zst_ident>(args).await
-                }
-            }
-        };
-    };
 
     // Wrap the user-authored fn in `#[cfg(feature = "native")]` — its body
     // is what brings in the native deps (db, integrations, etc.). The
@@ -320,7 +299,6 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
         }
 
         #cli_block
-        #wasm_block
         #openapi_block
     };
 
