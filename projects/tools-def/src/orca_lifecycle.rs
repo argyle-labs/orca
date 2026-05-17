@@ -8,8 +8,6 @@ use crate::orca_tool;
 
 // ── Shared outputs ──────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct LifecycleReport {
     pub done: Vec<String>,
@@ -17,8 +15,6 @@ pub struct LifecycleReport {
     pub errors: Vec<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DoctorEntry {
     pub category: String,
@@ -26,15 +22,11 @@ pub struct DoctorEntry {
     pub message: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DoctorReport {
     pub entries: Vec<DoctorEntry>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct UpdateCheckReport {
     pub channel: String,
@@ -49,8 +41,6 @@ pub struct UpdateCheckReport {
     pub pinned_to: Option<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct UpdatePinReport {
     /// The active pin after this operation, or None if the pin was cleared.
@@ -60,23 +50,17 @@ pub struct UpdatePinReport {
     pub cleared: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProjectsListReport {
     pub projects: Vec<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SpecDumpReport {
     /// Orca's own OpenAPI JSON document, pretty-printed.
     pub spec: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RuntimeSpecReport {
     /// Orca version from `CARGO_PKG_VERSION` at build time.
@@ -91,8 +75,6 @@ pub struct RuntimeSpecReport {
 
 macro_rules! empty_args {
     ($name:ident) => {
-        #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-        #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
         #[cfg_attr(feature = "cli", derive(clap::Args))]
         #[derive(Serialize, Deserialize, JsonSchema)]
         pub struct $name {}
@@ -105,8 +87,6 @@ empty_args!(ProjectsListArgs);
 empty_args!(SpecDumpArgs);
 empty_args!(SystemRuntimeSpecArgs);
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SystemUpdateArgs {
@@ -119,8 +99,6 @@ fn default_channel() -> String {
     "stable".into()
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SystemUpdatePinArgs {
@@ -133,8 +111,6 @@ empty_args!(SystemDevEnableArgs);
 empty_args!(SystemDevDisableArgs);
 empty_args!(SystemDevSyncArgs);
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SystemDevEnableOutput {
     /// Path to the git checkout used as the dev source.
@@ -145,8 +121,6 @@ pub struct SystemDevEnableOutput {
     pub daemon_parked: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SystemDevDisableOutput {
     /// Whether the dev process was running and was killed.
@@ -155,8 +129,6 @@ pub struct SystemDevDisableOutput {
     pub daemon_reclaimed: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SystemDevSyncOutput {
     /// Number of commits pulled.

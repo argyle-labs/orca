@@ -13,14 +13,10 @@ use crate::orca_tool;
 
 // ── Args / Output types (wasm-safe, shared by every surface) ────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct EmptyArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodPeerAddressDto {
     pub kind: String,
@@ -29,8 +25,6 @@ pub struct PodPeerAddressDto {
     pub last_seen_at: i64,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodPeerDto {
     pub peer_id: String,
@@ -48,16 +42,12 @@ pub struct PodPeerDto {
     pub addresses: Vec<PodPeerAddressDto>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub struct PodPeerList(pub Vec<PodPeerDto>);
 
 // ── pod.dev.sync ─────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodDevSyncPeerResult {
     pub peer_id: String,
@@ -68,8 +58,6 @@ pub struct PodDevSyncPeerResult {
     pub detail: Option<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodDevSyncOutput {
     pub results: Vec<PodDevSyncPeerResult>,
@@ -77,8 +65,6 @@ pub struct PodDevSyncOutput {
 
 // ── pod.dev.enable / pod.dev.disable ────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Default, Serialize, Deserialize, JsonSchema)]
 pub struct PodDevFanoutArgs {
@@ -89,8 +75,6 @@ pub struct PodDevFanoutArgs {
     pub peers: Vec<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodDevEnablePeerResult {
     pub peer_id: String,
@@ -101,15 +85,11 @@ pub struct PodDevEnablePeerResult {
     pub detail: Option<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodDevEnableOutput {
     pub results: Vec<PodDevEnablePeerResult>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodDevDisablePeerResult {
     pub peer_id: String,
@@ -120,8 +100,6 @@ pub struct PodDevDisablePeerResult {
     pub detail: Option<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodDevDisableOutput {
     pub results: Vec<PodDevDisablePeerResult>,
@@ -129,8 +107,6 @@ pub struct PodDevDisableOutput {
 
 // ── pod.accept ───────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodAcceptArgs {
@@ -138,8 +114,6 @@ pub struct PodAcceptArgs {
     pub code: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodAcceptOutput {
     pub pod_id: String,
@@ -154,8 +128,6 @@ pub struct PodAcceptOutput {
 
 // ── pod.trust ────────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodTrustArgs {
@@ -163,8 +135,6 @@ pub struct PodTrustArgs {
     pub on: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodTrustOutput {
     pub peer_id: String,
@@ -176,8 +146,6 @@ pub struct PodTrustOutput {
 
 // ── pod.ping ─────────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodPingArgs {
@@ -186,8 +154,6 @@ pub struct PodPingArgs {
     pub peer_id: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodPingOutput {
     pub ok: bool,
@@ -204,8 +170,6 @@ pub struct PodPingOutput {
 
 // ── pod.discover ─────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodDiscoveryRowDto {
     pub pubkey_fp: String,
@@ -220,16 +184,12 @@ pub struct PodDiscoveryRowDto {
     pub last_seen_at: i64,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub struct PodDiscoveryList(pub Vec<PodDiscoveryRowDto>);
 
 // ── pod.pending ──────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodPendingOfferDto {
     pub offer_id: String,
@@ -247,16 +207,12 @@ pub struct PodPendingOfferDto {
     pub created_at: i64,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub struct PodPendingList(pub Vec<PodPendingOfferDto>);
 
 // ── pod.offer ────────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodOfferArgs {
@@ -269,8 +225,6 @@ pub struct PodOfferArgs {
     pub port: Option<u16>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodOfferOutput {
     /// Pairing code minted for this offer; show to the operator so they can
@@ -286,8 +240,6 @@ pub struct PodOfferOutput {
 
 // ── pod.join ─────────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodJoinArgs {
@@ -297,8 +249,6 @@ pub struct PodJoinArgs {
     pub port: Option<u16>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodJoinOutput {
     pub code: String,
@@ -308,8 +258,6 @@ pub struct PodJoinOutput {
 
 // ── pod.leave ────────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodLeaveArgs {
@@ -319,8 +267,6 @@ pub struct PodLeaveArgs {
     pub peer_id: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodLeaveOutput {
     pub peer_id: String,
@@ -330,8 +276,6 @@ pub struct PodLeaveOutput {
 
 // ── pod.cert-status ──────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct CertInfo {
     pub cn: String,
@@ -341,8 +285,6 @@ pub struct CertInfo {
     pub days_remaining: i64,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodCertStatusOutput {
     pub founder: bool,

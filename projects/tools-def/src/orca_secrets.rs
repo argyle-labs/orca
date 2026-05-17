@@ -12,8 +12,6 @@ use crate::orca_tool;
 
 // ── Shared types ────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct SecretEntry {
     pub name: String,
@@ -26,8 +24,6 @@ pub struct SecretEntry {
     pub updated_at: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct BackendInfo {
     pub kind: String,
@@ -36,14 +32,10 @@ pub struct BackendInfo {
 
 // ── secret.list ─────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SecretListArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SecretListReport {
     pub secrets: Vec<SecretEntry>,
@@ -51,16 +43,12 @@ pub struct SecretListReport {
 
 // ── secret.get ──────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SecretGetArgs {
     pub name: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SecretGetReport {
     pub name: String,
@@ -70,8 +58,6 @@ pub struct SecretGetReport {
 
 // ── secret.set ──────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SecretSetArgs {
@@ -97,8 +83,6 @@ fn default_inline() -> String {
     "inline".into()
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SecretMutationReport {
     pub name: String,
@@ -108,16 +92,12 @@ pub struct SecretMutationReport {
 
 // ── secret.delete ───────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SecretDeleteArgs {
     pub name: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SecretDeleteReport {
     pub name: String,
@@ -126,14 +106,10 @@ pub struct SecretDeleteReport {
 
 // ── secret.backends ─────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SecretBackendsArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SecretBackendsReport {
     pub backends: Vec<BackendInfo>,

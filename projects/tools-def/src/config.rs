@@ -17,8 +17,6 @@ use crate::orca_tool;
 
 // ── Args / Output (wasm-safe) ────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ConfigRowOut {
     pub id: String,
@@ -31,8 +29,6 @@ pub struct ConfigRowOut {
     pub updated_by: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema, Default)]
 pub struct ConfigListArgs {
@@ -44,15 +40,11 @@ pub struct ConfigListArgs {
     pub host: Option<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ConfigListOutput {
     pub rows: Vec<ConfigRowOut>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ConfigGetArgs {
@@ -62,15 +54,11 @@ pub struct ConfigGetArgs {
     pub name: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ConfigGetOutput {
     pub row: Option<ConfigRowOut>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ConfigSetArgs {
@@ -84,16 +72,12 @@ pub struct ConfigSetArgs {
     pub host: Option<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ConfigSetOutput {
     pub row: ConfigRowOut,
     pub created: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ConfigDeleteArgs {
@@ -104,8 +88,6 @@ pub struct ConfigDeleteArgs {
     pub host: Option<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ConfigDeleteOutput {
     pub removed: bool,

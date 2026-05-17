@@ -17,8 +17,6 @@ use crate::orca_tool;
 
 // ── Shared row shapes ───────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SpecFilesPresence {
@@ -26,8 +24,6 @@ pub struct SpecFilesPresence {
     pub public: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SpecMetaRow {
@@ -48,8 +44,6 @@ pub struct SpecMetaRow {
     pub files: SpecFilesPresence,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct DbSpecRow {
@@ -65,8 +59,6 @@ pub struct DbSpecRow {
     pub enabled: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisterSpecResult {
@@ -82,8 +74,6 @@ pub struct RegisterSpecResult {
     pub enabled: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct SyncMcpSpecsResult {
     pub server: String,
@@ -93,8 +83,6 @@ pub struct SyncMcpSpecsResult {
 
 // ── GraphQlInfo (mirrors scanner output) ───────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphQlField {
@@ -105,8 +93,6 @@ pub struct GraphQlField {
     pub required: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct GraphQlOperation {
     pub name: String,
@@ -117,8 +103,6 @@ pub struct GraphQlOperation {
     pub deprecated: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct GraphQlType {
     pub name: String,
@@ -127,8 +111,6 @@ pub struct GraphQlType {
     pub fields: Vec<GraphQlField>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct GraphQlEnum {
     pub name: String,
@@ -137,8 +119,6 @@ pub struct GraphQlEnum {
     pub values: Vec<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct GraphQlInfoData {
     pub repo: String,
@@ -161,14 +141,11 @@ mod graphql_proxy_result_mod {
     use super::*;
 
     /// `body` is opaque — GraphQL response shapes vary per query and are not owned by orca.
-    #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-    #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
     #[derive(Serialize, Deserialize, JsonSchema, Clone)]
     pub struct GraphqlProxyResult {
         pub status: u16,
         /// Raw GraphQL response body — shape varies per query, so this is
         /// intentionally arbitrary JSON. Callers downcast based on their query.
-        #[cfg_attr(feature = "wasm", tsify(type = "unknown"))]
         pub body: Value,
     }
 }
@@ -180,36 +157,26 @@ pub use graphql_proxy_result_mod::GraphqlProxyResult;
 // ═══════════════════════════════════════════════════════════════════════════
 
 // list_specs
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListSpecsArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListSpecsOutput {
     pub specs: Vec<SpecMetaRow>,
 }
 
 // list_db_specs
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListDbSpecsArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListDbSpecsOutput {
     pub specs: Vec<DbSpecRow>,
 }
 
 // register_spec
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RegisterSpecArgs {
@@ -218,8 +185,6 @@ pub struct RegisterSpecArgs {
 }
 
 // refresh_spec
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RefreshSpecArgs {
@@ -227,24 +192,18 @@ pub struct RefreshSpecArgs {
 }
 
 // unregister_spec
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct UnregisterSpecArgs {
     pub name: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct UnregisterSpecOutput {
     pub removed: bool,
 }
 
 // sync_mcp_specs
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SyncMcpSpecsArgs {
@@ -252,8 +211,6 @@ pub struct SyncMcpSpecsArgs {
 }
 
 // get_spec_graphql_info
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetSpecGraphqlInfoArgs {
@@ -266,8 +223,6 @@ mod proxy_graphql_args_mod {
     use super::*;
 
     /// `variables` is opaque — GraphQL variable maps are free-form per operation.
-    #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-    #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
     #[derive(Serialize, Deserialize, JsonSchema)]
     pub struct ProxyGraphqlArgs {
         pub repo: String,
@@ -279,7 +234,6 @@ mod proxy_graphql_args_mod {
         pub query: String,
         /// Query variables — arbitrary JSON per the GraphQL spec.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "wasm", tsify(type = "unknown | undefined"))]
         pub variables: Option<Value>,
         /// Optional operation name when the document defines multiple.
         #[serde(default, skip_serializing_if = "Option::is_none")]

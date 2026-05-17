@@ -9,8 +9,6 @@ use serde_json::{Map, Value};
 
 use crate::orca_tool;
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HaEntityListArgs {
@@ -20,8 +18,6 @@ pub struct HaEntityListArgs {
     pub domain: Option<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HaEntityStateArgs {
@@ -30,16 +26,12 @@ pub struct HaEntityStateArgs {
     pub entity_id: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HaAutomationListArgs {
     pub endpoint: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HaServiceCallArgs {
@@ -53,7 +45,6 @@ pub struct HaServiceCallArgs {
     /// Optional service data payload merged into the request body.
     /// Shape is service-defined — HA does not publish a typed schema per service.
     #[allow(clippy::disallowed_types)]
-    #[cfg_attr(feature = "wasm", tsify(type = "Record<string, unknown> | null"))]
     pub data: Option<Map<String, Value>>,
 }
 

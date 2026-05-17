@@ -18,8 +18,6 @@ use serde_json::Value;
 // MCP servers + tool mappings — shared row shapes
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct McpServerEntry {
     pub name: String,
@@ -29,8 +27,6 @@ pub struct McpServerEntry {
     pub enabled: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct MappingEntry {
     pub orca_tool: String,
@@ -42,8 +38,6 @@ pub struct MappingEntry {
     pub enabled: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SyncToolsServerEntry {
     pub server: String,
@@ -55,14 +49,10 @@ pub struct SyncToolsServerEntry {
 
 // ── list_mcp_servers ────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListMcpServersArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListMcpServersOutput {
     pub servers: Vec<McpServerEntry>,
@@ -70,8 +60,6 @@ pub struct ListMcpServersOutput {
 
 // ── add_mcp_server ──────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct AddMcpServerArgs {
@@ -84,8 +72,6 @@ pub struct AddMcpServerArgs {
     pub env: Option<HashMap<String, String>>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct McpServerMutationResult {
     pub name: String,
@@ -94,8 +80,6 @@ pub struct McpServerMutationResult {
 
 // ── remove_mcp_server ───────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RemoveMcpServerArgs {
@@ -104,8 +88,6 @@ pub struct RemoveMcpServerArgs {
 
 // ── map_tool / unmap_tool ───────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct MapToolArgs {
@@ -114,8 +96,6 @@ pub struct MapToolArgs {
     pub external_tool: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct MapToolResult {
     pub orca_tool: String,
@@ -123,16 +103,12 @@ pub struct MapToolResult {
     pub external_tool: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct UnmapToolArgs {
     pub orca_tool: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct UnmapToolResult {
     pub orca_tool: String,
@@ -141,8 +117,6 @@ pub struct UnmapToolResult {
 
 // ── sync_tools ──────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SyncToolsArgs {
@@ -154,8 +128,6 @@ pub struct SyncToolsArgs {
     pub threshold: Option<f64>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SyncToolsOutput {
     pub results: Vec<SyncToolsServerEntry>,
@@ -163,8 +135,6 @@ pub struct SyncToolsOutput {
 
 // ── list_tool_mappings ──────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListToolMappingsArgs {
@@ -173,8 +143,6 @@ pub struct ListToolMappingsArgs {
     pub name: Option<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListToolMappingsOutput {
     pub mappings: Vec<MappingEntry>,
@@ -184,8 +152,6 @@ pub struct ListToolMappingsOutput {
 // Schema databases
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaDbEntry {
@@ -204,21 +170,15 @@ pub struct SchemaDbEntry {
     pub enabled: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListSchemasArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListSchemasOutput {
     pub schemas: Vec<SchemaDbEntry>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -237,16 +197,12 @@ pub struct AddSchemaArgs {
     pub domains_file: Option<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SchemaMutationResult {
     pub name: String,
     pub changed: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RemoveSchemaArgs {
@@ -257,8 +213,6 @@ pub struct RemoveSchemaArgs {
 // Docker runtimes
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DockerRuntimeEntry {
@@ -272,21 +226,15 @@ pub struct DockerRuntimeEntry {
     pub enabled: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListDockerRuntimesArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListDockerRuntimesOutput {
     pub runtimes: Vec<DockerRuntimeEntry>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -300,16 +248,12 @@ pub struct AddDockerRuntimeArgs {
     pub url: Option<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DockerRuntimeMutationResult {
     pub name: String,
     pub changed: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RemoveDockerRuntimeArgs {
@@ -320,8 +264,6 @@ pub struct RemoveDockerRuntimeArgs {
 // Doc roots + ignore patterns
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DocRootRegEntry {
     pub name: String,
@@ -331,21 +273,15 @@ pub struct DocRootRegEntry {
     pub enabled: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListDocRootsArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListDocRootsOutput {
     pub roots: Vec<DocRootRegEntry>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct AddDocRootArgs {
@@ -355,45 +291,33 @@ pub struct AddDocRootArgs {
     pub description: Option<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DocRootMutationResult {
     pub name: String,
     pub changed: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RemoveDocRootArgs {
     pub name: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListDocIgnorePatternsArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListDocIgnorePatternsOutput {
     pub patterns: Vec<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DocIgnorePatternArgs {
     pub pattern: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DocIgnorePatternMutationResult {
     pub pattern: String,
@@ -404,8 +328,6 @@ pub struct DocIgnorePatternMutationResult {
 // Proxmox endpoints
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxmoxEndpointEntry {
@@ -416,21 +338,15 @@ pub struct ProxmoxEndpointEntry {
     pub enabled: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListProxmoxEndpointsArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListProxmoxEndpointsOutput {
     pub endpoints: Vec<ProxmoxEndpointEntry>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -443,16 +359,12 @@ pub struct AddProxmoxEndpointArgs {
     pub insecure: Option<bool>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxMutationResult {
     pub name: String,
     pub changed: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RemoveProxmoxEndpointArgs {
@@ -463,8 +375,6 @@ pub struct RemoveProxmoxEndpointArgs {
 // Home Assistant endpoints
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct HaEndpointEntry {
@@ -473,21 +383,15 @@ pub struct HaEndpointEntry {
     pub enabled: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListHomeAssistantEndpointsArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListHomeAssistantEndpointsOutput {
     pub endpoints: Vec<HaEndpointEntry>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -497,16 +401,12 @@ pub struct AddHomeAssistantEndpointArgs {
     pub token: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HaMutationResult {
     pub name: String,
     pub changed: bool,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RemoveHomeAssistantEndpointArgs {
@@ -527,8 +427,6 @@ mod mcp_fed {
     use super::*;
 
     /// `input_schema` is raw JSON Schema from the upstream MCP server — shape is server-defined.
-    #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-    #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
     #[derive(Serialize, Deserialize, JsonSchema)]
     #[serde(rename_all = "camelCase")]
     pub struct McpToolEntry {
@@ -536,18 +434,13 @@ mod mcp_fed {
         pub name: String,
         pub description: String,
         /// Raw JSON Schema as advertised by the upstream MCP server — shape is server-defined.
-        #[cfg_attr(feature = "wasm", tsify(type = "unknown"))]
         pub input_schema: serde_json::Value,
     }
 
-    #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-    #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
     #[cfg_attr(feature = "cli", derive(clap::Args))]
     #[derive(Serialize, Deserialize, JsonSchema)]
     pub struct ListMcpToolsArgs {}
 
-    #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-    #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
     #[derive(Serialize, Deserialize, JsonSchema)]
     pub struct ListMcpToolsOutput {
         pub tools: Vec<McpToolEntry>,
@@ -555,8 +448,6 @@ mod mcp_fed {
 
     /// `args` is passed straight through to the upstream MCP tool — its shape is
     /// dictated by each tool's own input schema and cannot be typed statically.
-    #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-    #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
     #[derive(Serialize, Deserialize, JsonSchema)]
     pub struct RunMcpToolArgs {
         /// Registered MCP server name.
@@ -566,7 +457,6 @@ mod mcp_fed {
         /// JSON arguments object passed straight through to the tool.
         /// Opaque by the MCP protocol — shape is dictated by each tool's own input schema.
         #[serde(default)]
-        #[cfg_attr(feature = "wasm", tsify(type = "Record<string, unknown> | null"))]
         pub args: Option<serde_json::Map<String, serde_json::Value>>,
     }
 
@@ -576,8 +466,6 @@ mod mcp_fed {
     /// (carry `data` base64 + `mime_type`), `resource` (carries `resource`).
     /// We preserve every shape: required fields are typed, optional ones are
     /// kept as opaque JSON so we never lose data.
-    #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-    #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
     #[derive(Serialize, Deserialize, JsonSchema)]
     #[serde(rename_all = "camelCase")]
     pub struct McpContent {
@@ -592,14 +480,11 @@ mod mcp_fed {
         pub mime_type: Option<String>,
         /// Opaque MCP `resource` content block — shape is server-defined per MCP spec.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "wasm", tsify(type = "unknown"))]
         pub resource: Option<Value>,
     }
 
     /// `structured_content` is opaque — its shape is each tool's own output schema,
     /// which orca cannot know at this layer (MCP passthrough).
-    #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-    #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
     #[derive(Serialize, Deserialize, JsonSchema)]
     #[serde(rename_all = "camelCase")]
     pub struct RunMcpToolOutput {
@@ -609,7 +494,6 @@ mod mcp_fed {
         /// (MCP `structuredContent`). Kept as opaque JSON — its shape is the
         /// tool's own output schema, which orca cannot know at this layer.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "wasm", tsify(type = "unknown"))]
         pub structured_content: Option<Value>,
     }
 }
@@ -623,15 +507,11 @@ pub use mcp_fed::{
 // Schema view — get_schema / get_schema_domains
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetSchemaArgs {}
 
 /// One row in `tabs[*].tables`.
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SchemaTableInfo {
     pub name: String,
@@ -642,8 +522,6 @@ pub struct SchemaTableInfo {
 ///
 /// Field names match what the HTTP `/api/schema` handler emits today (the
 /// frontend reads `fk_target` snake_case directly).
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SchemaColumn {
     pub name: String,
@@ -655,8 +533,6 @@ pub struct SchemaColumn {
     pub fk_target: Option<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaForeignKey {
@@ -668,8 +544,6 @@ pub struct SchemaForeignKey {
 
 /// Domain grouping (loaded from each schema DB's `domainsFile` JSON).
 /// Optional fields (`group`, `subgroup`) are not always present.
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SchemaDomain {
     pub key: String,
@@ -682,8 +556,6 @@ pub struct SchemaDomain {
     pub subgroup: Option<String>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaTab {
@@ -694,8 +566,6 @@ pub struct SchemaTab {
     pub domains: Vec<SchemaDomain>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GetSchemaOutput {
@@ -705,14 +575,10 @@ pub struct GetSchemaOutput {
     pub errors: Option<Vec<String>>,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetSchemaDomainsArgs {}
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetSchemaDomainsOutput {
     pub domains: Vec<SchemaDomain>,

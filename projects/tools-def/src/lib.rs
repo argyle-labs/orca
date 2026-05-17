@@ -1,12 +1,12 @@
-//! Wasm-safe definitions for OrcaTool — metadata + Args/Output types only.
+//! Definitions for OrcaTool — metadata + Args/Output types.
 //!
 //! Every tool is annotated with `#[orca_tool(domain = "...", verb = "...")]`
 //! in its module. The proc-macro emits, in the same crate as the function:
-//!   - The ZST + `OrcaToolDef` + `OrcaOp` impls (unconditional, so wasm builds
-//!     keep their typed `OrcaClient` methods).
+//!   - The ZST + `OrcaToolDef` + `OrcaOp` impls.
 //!   - `#[cfg(feature = "native")]` `OrcaTool::run` thunk + an
 //!     `inventory::submit!` into the `ORCA_TOOLS` slice.
-//!   - `#[cfg(feature = "wasm")]` a typed `OrcaClient::<fn_ident>` method.
+//!   - An `OpenApiToolRegistration` inventory entry so the spec endpoint can
+//!     hoist every tool path automatically.
 //!   - `#[cfg(feature = "cli")]` a `register_op!` CLI entry (skippable via
 //!     `cli = manual` / `cli = skip`).
 //!
@@ -30,9 +30,6 @@ pub use orca_tools_macro::orca_tool;
 
 /// One entry per `#[orca_tool]`-annotated function. The native registry
 /// walks `inventory::iter::<ToolRegistration>` to enroll them all.
-/// `register` takes `&mut ToolRegistry` boxed behind the `__private`
-/// re-export so this struct stays defined unconditionally — wasm builds
-/// carry the type but never register anything.
 pub struct ToolRegistration {
     pub name: &'static str,
     #[cfg(feature = "native")]
@@ -73,9 +70,6 @@ pub mod system;
 /// Re-export of the opaque JSON passthrough wrapper — see `json_any` module for policy.
 #[allow(clippy::disallowed_types)]
 pub use json_any::JsonAny;
-
-#[cfg(feature = "wasm")]
-pub mod wasm;
 
 #[cfg(feature = "cli")]
 pub mod cli;

@@ -14,11 +14,9 @@ use serde_json::Value;
 /// (e.g. Home Assistant entity dumps, Proxmox cluster listings, MCP structuredContent).
 /// Using `Value` here is intentional — the upstream schema is not owned by orca.
 #[allow(clippy::disallowed_types)]
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
-pub struct JsonAny(#[cfg_attr(feature = "wasm", tsify(type = "unknown"))] pub Value);
+pub struct JsonAny(pub Value);
 
 #[allow(clippy::disallowed_types)]
 impl From<Value> for JsonAny {

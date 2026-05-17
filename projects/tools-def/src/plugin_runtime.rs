@@ -12,8 +12,6 @@ use serde_json::Value;
 
 use crate::orca_tool;
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetPluginDataArgs {
@@ -21,29 +19,21 @@ pub struct GetPluginDataArgs {
     pub key: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetPluginDataOutput {
     /// Stored value — arbitrary JSON. Stored as TEXT in orca.db; the
     /// host parses/serializes at the edge so callers never see a string.
-    #[cfg_attr(feature = "wasm", tsify(type = "unknown"))]
     pub value: Value,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SetPluginDataArgs {
     pub plugin: String,
     pub key: String,
     /// Arbitrary JSON value — the host serializes it to TEXT at the storage edge.
-    #[cfg_attr(feature = "wasm", tsify(type = "unknown"))]
     pub value: Value,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SetPluginDataOutput {
     pub ok: bool,

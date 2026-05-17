@@ -5,8 +5,6 @@ use crate::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxListNodesArgs {
@@ -14,8 +12,6 @@ pub struct ProxmoxListNodesArgs {
     pub endpoint: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxListVmsArgs {
@@ -24,8 +20,6 @@ pub struct ProxmoxListVmsArgs {
     pub node: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxListContainersArgs {
@@ -35,8 +29,6 @@ pub struct ProxmoxListContainersArgs {
 }
 
 /// Result of a Proxmox lifecycle action.
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxActionResult {
     pub node: String,
@@ -47,8 +39,6 @@ pub struct ProxmoxActionResult {
     pub status: u16,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxVmActionArgs {
@@ -59,8 +49,6 @@ pub struct ProxmoxVmActionArgs {
     pub action: String,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxContainerActionArgs {

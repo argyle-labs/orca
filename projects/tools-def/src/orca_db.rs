@@ -7,8 +7,6 @@ use crate::orca_tool;
 
 // ── Shared outputs ──────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DbStatusReport {
     /// Highest applied migration version (YYYYMMDDHHMMSS timestamp, or 0 if
@@ -20,8 +18,6 @@ pub struct DbStatusReport {
     pub pending: u32,
 }
 
-#[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DbMigrateReport {
     pub before: i64,
@@ -35,8 +31,6 @@ pub struct DbMigrateReport {
 
 macro_rules! empty_args {
     ($name:ident) => {
-        #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
-        #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
         #[cfg_attr(feature = "cli", derive(clap::Args))]
         #[derive(Serialize, Deserialize, JsonSchema)]
         pub struct $name {}
