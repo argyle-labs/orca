@@ -12,7 +12,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use sysinfo::{Disks, Networks, Pid, ProcessRefreshKind, RefreshKind, System};
 
-const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+/// In-memory cache refresh interval. Short so any client poll (UI every
+/// ~1-10s, MCP, CLI) gets near-live data without re-running sysinfo on every
+/// call. DB persistence runs on its own slower cadence — see
+/// `crate::host_status_writer`.
+const REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 
 static CACHE: OnceLock<Mutex<Option<Arc<SystemInfoReport>>>> = OnceLock::new();
 

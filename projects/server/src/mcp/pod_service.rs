@@ -7,7 +7,7 @@ use orca_tools_def::pod::{
     PodDiscoveryRowDto, PodExecDispatch, PodJoinOutput, PodLeaveOutput, PodOfferOutput,
     PodPeerAddressDto, PodPeerDto, PodPendingOfferDto, PodPingOutput, PodService, PodTrustOutput,
 };
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::pod::{db as pdb, pki_dir};
 
@@ -694,124 +694,61 @@ async fn local_peer_row() -> PodPeerDto {
     }
 }
 
-/// Probe a single peer in parallel for ping + runtime-spec + update-check,
-/// merging the results into the base DB row. All probes are bounded by their
-/// own short timeout so one slow peer doesn't stall the whole list.
-async fn enrich_peer(mut base: PodPeerDto) -> PodPeerDto {
-    use orca_tools_def::orca_lifecycle::{RuntimeSpecReport, UpdateCheckReport};
+/// "Reachable" threshold derived from snapshot freshness. A peer whose
+/// latest synced status row is within this window is considered alive; older
+/// than this and the dashboard treats it as offline. Matches the sync
+/// puller's 60s cadence with a multiplier so a single missed pull doesn't
+/// flip the indicator.
+const REACHABLE_FRESHNESS_SECS: i64 = 180;
 
-    let addr = base.addr.clone();
-
-    let ping_fut = async {
-        let started = Instant::now();
-        let r = tokio::time::timeout(Duration::from_secs(3), crate::pod::ping(&addr)).await;
-        match r {
-            Ok(Ok(p)) => Ok((started.elapsed().as_millis() as u32, p)),
-            Ok(Err(e)) => Err(e.to_string()),
-            Err(_) => Err("ping timeout".to_string()),
-        }
-    };
-    let spec_fut = async {
-        let r = tokio::time::timeout(
-            Duration::from_secs(5),
-            crate::pod::exec(&addr, "system.runtime-spec", serde_json::json!({})),
-        )
-        .await;
-        match r {
-            Ok(Ok(res)) => serde_json::from_value::<RuntimeSpecReport>(res.result)
-                .map_err(|e| format!("parse runtime-spec: {e}")),
-            Ok(Err(e)) => Err(e.to_string()),
-            Err(_) => Err("runtime-spec timeout".to_string()),
-        }
-    };
-    let upd_fut = async {
-        let r = tokio::time::timeout(
-            Duration::from_secs(10),
-            crate::pod::exec(
-                &addr,
-                "system.update-check",
-                serde_json::json!({"channel": "stable"}),
-            ),
-        )
-        .await;
-        match r {
-            Ok(Ok(res)) => serde_json::from_value::<UpdateCheckReport>(res.result)
-                .map_err(|e| format!("parse update-check: {e}")),
-            Ok(Err(e)) => Err(e.to_string()),
-            Err(_) => Err("update-check timeout".to_string()),
-        }
-    };
-
-    let (ping_res, spec_res, upd_res) = tokio::join!(ping_fut, spec_fut, upd_fut);
-
-    let mut first_err: Option<String> = None;
-
-    match ping_res {
-        Ok((ms, _p)) => {
-            base.reachable = Some(true);
-            base.latency_ms = Some(ms);
-        }
-        Err(e) => {
-            base.reachable = Some(false);
-            first_err.get_or_insert(format!("ping: {e}"));
-        }
-    }
-
-    match spec_res {
-        Ok(s) => {
-            base.version = Some(s.version);
-            base.target = Some(s.target);
-            base.frontend = Some(s.frontend);
-            base.mode = s.mode;
-            base.channel = s.channel;
-            base.pinned_to = s.pinned_to;
-            base.system = s.system;
-        }
-        Err(e) => {
-            first_err.get_or_insert(format!("runtime-spec: {e}"));
-        }
-    }
-
-    match upd_res {
-        Ok(u) => {
-            base.update_latest = u.latest;
-            base.update_available = Some(!u.up_to_date);
-            if base.pinned_to.is_none() {
-                base.pinned_to = u.pinned_to;
-            }
-        }
-        Err(e) => {
-            first_err.get_or_insert(format!("update-check: {e}"));
-        }
-    }
-
-    base.probe_error = first_err;
-    base
+/// Fill the per-peer enrichment fields from the local `host_status` table.
+/// The peer itself wrote those rows; the sync puller mirrored them in.
+/// No network IO — this is the read-only consumer side of the mesh sync.
+fn enrich_from_local_db(base: &mut PodPeerDto, latest: &db::host_status::HostStatusRow) {
+    base.system = serde_json::from_str::<orca_tools_def::orca_lifecycle::SystemInfoReport>(
+        &latest.payload_json,
+    )
+    .ok();
+    let now = chrono::Utc::now().timestamp();
+    base.reachable = Some(now - latest.snapshot_at_unix <= REACHABLE_FRESHNESS_SECS);
+    // Re-purpose latency_ms to mean "age of latest snapshot in seconds" when
+    // we have no live ping. Clamp at u32::MAX to avoid overflow on very old
+    // rows; the dashboard treats anything > REACHABLE_FRESHNESS_SECS as
+    // stale anyway.
+    let age = (now - latest.snapshot_at_unix).max(0);
+    base.latency_ms = Some(u32::try_from(age).unwrap_or(u32::MAX));
 }
 
-/// Read DB rows, prepend a synthetic local row, fan out probes to every
-/// active remote peer in parallel.
+/// Read pod_peers + local host_status; merge into enriched DTOs.
+/// No RPC fanout — every cross-host field comes from the locally-mirrored
+/// status table, which the sync puller keeps fresh in the background.
 async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
-    let conn = db::open_default()?;
-    let rows = db::pod::list_peers(&conn)?;
-    drop(conn);
+    let (active, inactive, status_by_peer) =
+        tokio::task::spawn_blocking(|| -> Result<(_, _, _)> {
+            let conn = db::open_default()?;
+            let peers = db::pod::list_peers(&conn)?;
+            let status_rows = db::host_status::latest_per_peer(&conn)?;
+            let mut map: std::collections::HashMap<String, db::host_status::HostStatusRow> =
+                std::collections::HashMap::new();
+            for r in status_rows {
+                map.insert(r.peer_id.clone(), r);
+            }
+            let (active, inactive): (Vec<PodPeerDto>, Vec<PodPeerDto>) = peers
+                .into_iter()
+                .map(PodPeerDto::from)
+                .partition(|p| p.status == "active");
+            Ok((active, inactive, map))
+        })
+        .await??;
 
-    let (active, inactive): (Vec<_>, Vec<_>) = rows
-        .into_iter()
-        .map(PodPeerDto::from)
-        .partition(|p| p.status == "active");
-
-    let probe_handles: Vec<_> = active
-        .into_iter()
-        .map(|p| tokio::spawn(enrich_peer(p)))
-        .collect();
-
-    let mut out: Vec<PodPeerDto> = Vec::with_capacity(probe_handles.len() + inactive.len() + 1);
+    let mut out: Vec<PodPeerDto> = Vec::with_capacity(active.len() + inactive.len() + 1);
     out.push(local_peer_row().await);
-    for h in probe_handles {
-        if let Ok(p) = h.await {
-            out.push(p);
+
+    for mut p in active {
+        if let Some(latest) = status_by_peer.get(&p.peer_id) {
+            enrich_from_local_db(&mut p, latest);
         }
+        out.push(p);
     }
     out.extend(inactive);
     Ok(out)

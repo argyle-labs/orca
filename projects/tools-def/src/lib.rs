@@ -48,6 +48,7 @@ pub mod docs;
 pub mod engine;
 pub mod homeassistant;
 pub mod host;
+pub mod host_status;
 pub mod infra;
 pub mod json_any;
 pub mod meta;

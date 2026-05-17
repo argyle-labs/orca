@@ -26,6 +26,7 @@ pub use crate::conversation::tui;
 
 pub mod auth_password;
 pub mod host_identity;
+pub mod host_status_writer;
 pub mod log_cmd;
 pub mod loopback_token;
 pub mod markdown;
