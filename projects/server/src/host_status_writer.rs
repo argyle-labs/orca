@@ -109,6 +109,8 @@ async fn pull_peer_status_once() -> Result<()> {
     })
     .await??;
 
+    let ids: Vec<String> = peers.iter().map(|(p, _)| p.clone()).collect();
+    tracing::info!("host_status puller tick: {} peers — {:?}", ids.len(), ids);
     let mut handles = Vec::with_capacity(peers.len());
     for (peer_id, addr) in peers {
         handles.push(tokio::spawn(pull_one_peer(peer_id, addr)));
