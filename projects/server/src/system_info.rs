@@ -66,6 +66,7 @@ pub fn spawn_refresher() {
 /// Synchronously collect a fresh snapshot. Used by the refresher and by
 /// tests; production callers should use [`current`].
 pub fn collect_blocking() -> SystemInfoReport {
+    let (virt, dmi_vendor, dmi_product) = detect_virtualization();
     let mut report = SystemInfoReport {
         snapshot_at_unix: Some(chrono::Utc::now().timestamp()),
         arch: Some(std::env::consts::ARCH.to_string()),
@@ -76,6 +77,10 @@ pub fn collect_blocking() -> SystemInfoReport {
         hostname: System::host_name(),
         boot_time_unix: Some(System::boot_time() as i64),
         system_uptime_secs: Some(System::uptime()),
+        virtualization: virt,
+        dmi_vendor,
+        dmi_product,
+        proxmox_role: detect_proxmox_role(),
         ..Default::default()
     };
 
@@ -214,6 +219,66 @@ fn orca_dir() -> Option<PathBuf> {
     std::env::var_os("ORCA_HOME")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(orca_utils::config::APP_STATE_DIR)))
+}
+
+/// Returns `(virtualization, dmi_vendor, dmi_product)`.
+///
+/// Linux: reads `/sys/class/dmi/id/sys_vendor` + `product_name` (KVM/QEMU
+/// guests under Proxmox/libvirt show `QEMU` + a generic PC product), plus
+/// `/proc/1/cgroup` for container hints. macOS: all `None`.
+fn detect_virtualization() -> (Option<String>, Option<String>, Option<String>) {
+    #[cfg(not(target_os = "linux"))]
+    {
+        (None, None, None)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let vendor = std::fs::read_to_string("/sys/class/dmi/id/sys_vendor")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let product = std::fs::read_to_string("/sys/class/dmi/id/product_name")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        // Container detection first — DMI inside a container reflects the host.
+        let cgroup = std::fs::read_to_string("/proc/1/cgroup").unwrap_or_default();
+        let virt = if cgroup.contains("/docker/") || cgroup.contains("docker-") {
+            Some("docker".to_string())
+        } else if cgroup.contains("/lxc/") || cgroup.contains("lxc-") {
+            Some("lxc".to_string())
+        } else {
+            match vendor.as_deref() {
+                Some("QEMU") => Some("kvm".to_string()),
+                Some("VMware, Inc.") => Some("vmware".to_string()),
+                Some("Microsoft Corporation") if product.as_deref() == Some("Virtual Machine") => {
+                    Some("hyperv".to_string())
+                }
+                Some("Xen") => Some("xen".to_string()),
+                Some("innotek GmbH") => Some("virtualbox".to_string()),
+                Some(_) => Some("none".to_string()),
+                None => None,
+            }
+        };
+        (virt, vendor, product)
+    }
+}
+
+/// Proxmox hosts ship pmxcfs at `/etc/pve/` and the `pveversion` binary —
+/// either marker alone is a strong, false-positive-free Proxmox signal that
+/// works without root and without shelling out. Guest attribution happens
+/// later in the mesh inference layer (tap-MAC match against PVE hosts).
+fn detect_proxmox_role() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        if std::path::Path::new("/etc/pve").is_dir()
+            || std::path::Path::new("/usr/bin/pveversion").is_file()
+        {
+            return Some("host".to_string());
+        }
+    }
+    None
 }
 
 fn which(name: &str) -> Option<PathBuf> {

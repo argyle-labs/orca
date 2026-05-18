@@ -78,6 +78,25 @@ pub struct SystemInfoReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distro: Option<String>,
 
+    // ── Virtualization ──
+    /// Hypervisor / container kind: `kvm`, `qemu`, `vmware`, `lxc`,
+    /// `docker`, `none`, etc. Linux-only — read from `/sys/class/dmi/id/`
+    /// + `/proc/1/cgroup`. macOS reports `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtualization: Option<String>,
+    /// DMI system vendor (`QEMU`, `Dell Inc.`, `LENOVO`, ...). Linux-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dmi_vendor: Option<String>,
+    /// DMI product name (`Standard PC (i440FX + PIIX, 1996)`, ...). Linux-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dmi_product: Option<String>,
+    /// Proxmox role inferred from on-disk markers: `"host"` when
+    /// `/etc/pve/` (pmxcfs) is mounted, `"guest"` when the inference
+    /// layer matches this VM's MAC to a PVE host's tap interface,
+    /// otherwise `None`. NEVER set by user config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxmox_role: Option<String>,
+
     // ── Hardware ──
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arch: Option<String>,
