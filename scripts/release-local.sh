@@ -208,9 +208,41 @@ cmd_cleanup_rcs() {
   cleanup_rcs "$stable" "${2:-}"
 }
 
+usage() {
+  cat <<'EOF'
+usage: release-local.sh <command> [args]
+
+commands:
+  rc <patch|minor|major>      cut + publish a new release candidate
+  promote                     promote the latest RC to a stable release
+                              (auto-deletes superseded RC tags unless
+                              PROMOTE_KEEP_RCS=1)
+  cleanup-rcs <ver> [--dry-run]
+                              delete every RC tag + GitHub release for a
+                              given stable version (e.g. 0.0.3)
+  help, -h, --help            show this message
+
+env knobs:
+  RELEASE_PARALLEL_TARGETS    max targets built in parallel (default: cores/4)
+  RELEASE_CARGO_JOBS          cargo -j per target build (default: cores/parallel)
+  RELEASE_TARGETS             override target list (space-separated)
+  RELEASE_FEATURES            extra cargo features (e.g. pdf, php-ast)
+  RELEASE_NO_DEFAULT_FEATURES=1
+                              build headless (no embedded UI)
+  PROMOTE_KEEP_RCS=1          keep RC releases in place after promote
+
+examples:
+  release-local.sh rc patch
+  release-local.sh promote
+  release-local.sh cleanup-rcs 0.0.3 --dry-run
+EOF
+}
+
 case "${1:-}" in
-  rc)           shift; cmd_rc "$@" ;;
-  promote)      shift; cmd_promote "$@" ;;
-  cleanup-rcs)  shift; cmd_cleanup_rcs "$@" ;;
-  *) die "usage: release-local.sh {rc <patch|minor|major> | promote | cleanup-rcs <ver> [--dry-run]}" ;;
+  rc)              shift; cmd_rc "$@" ;;
+  promote)         shift; cmd_promote "$@" ;;
+  cleanup-rcs)     shift; cmd_cleanup_rcs "$@" ;;
+  help|-h|--help)  usage ;;
+  "")              usage; exit 1 ;;
+  *)               echo "unknown command: $1" >&2; echo >&2; usage; exit 1 ;;
 esac

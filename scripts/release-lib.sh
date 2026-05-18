@@ -303,6 +303,19 @@ stage_target_asset() {
   cd "$REPO_ROOT"
   mkdir -p "$DIST_DIR"
   cp "target/${target}/${RELEASE_PROFILE}/orca" "${DIST_DIR}/${asset}"
+  # Ad-hoc sign Darwin assets BEFORE hashing so the published sha256 matches
+  # what install.sh writes to disk. Without the signature, macOS Gatekeeper
+  # SIGKILLs the binary on first launch — even when invoked from launchd.
+  # codesign only runs on the build host's mac; cross-built darwin assets
+  # produced on Linux get signed by install.sh on the target instead.
+  case "$target" in
+    *-apple-darwin)
+      if [ "$(uname -s)" = "Darwin" ]; then
+        codesign --force --sign - "${DIST_DIR}/${asset}" 2>/dev/null \
+          || log "warn: codesign failed for ${asset} — install.sh will retry on target"
+      fi
+      ;;
+  esac
   ( cd "$DIST_DIR" && shasum -a 256 "$asset" > "${asset}.sha256" )
 }
 

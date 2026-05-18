@@ -395,6 +395,11 @@ mv "${TMP}/orca" "${INSTALL_DIR}/orca"
 
 if [ "$(uname -s)" = "Darwin" ]; then
   xattr -d com.apple.quarantine "${INSTALL_DIR}/orca" 2>/dev/null || true
+  # Ad-hoc sign so Gatekeeper accepts the binary. Idempotent — re-signs an
+  # already-signed binary too, which matters for cross-built linux→macOS
+  # releases that didn't get signed on the build host. Without this, the
+  # daemon gets SIGKILLed on first launch and launchctl reports exit -9.
+  codesign --force --sign - "${INSTALL_DIR}/orca" 2>/dev/null || true
 fi
 
 mkdir -p "$ORCA_HOME_TARGET"
