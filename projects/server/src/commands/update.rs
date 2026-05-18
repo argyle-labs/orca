@@ -418,9 +418,56 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
     }
 
     std::fs::rename(&tmp, &current).context("failed to replace binary")?;
-    println!("[orca] updated to v{} — restart to activate", info.version);
 
+    // macOS: ad-hoc sign so Gatekeeper accepts the new binary on next launch.
+    // Without this the launchd daemon gets SIGKILLed on respawn (exit -9).
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(&current)
+            .status();
+    }
+
+    println!("[orca] updated to v{} — scheduling restart", info.version);
+    schedule_self_restart();
     Ok(())
+}
+
+/// Detach a 2s delayed restart of whichever supervisor owns this daemon
+/// (launchd on macOS, systemd-user / systemd-system on Linux). The delay
+/// lets the in-flight update RPC return its response before SIGTERM lands;
+/// the supervisor then respawns with the freshly-written binary.
+///
+/// Falls back to a plain SIGTERM-to-self for daemons not under a supervisor
+/// (e.g. nohup'd dev runs) — they have to be restarted manually, but at
+/// least we don't keep serving a deleted-inode old binary.
+fn schedule_self_restart() {
+    let my_pid = std::process::id();
+    #[cfg(target_os = "macos")]
+    let cmd = format!(
+        "sleep 2; if launchctl list 2>/dev/null | grep -q com.orca.daemon; then \
+             launchctl kickstart -k gui/$(id -u)/com.orca.daemon; \
+         else kill -TERM {my_pid}; fi"
+    );
+    #[cfg(target_os = "linux")]
+    let cmd = format!(
+        "sleep 2; \
+         if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active orca.service >/dev/null 2>&1; then \
+             systemctl --user restart orca.service; \
+         elif command -v systemctl >/dev/null 2>&1 && systemctl is-active orca.service >/dev/null 2>&1; then \
+             systemctl restart orca.service; \
+         else kill -TERM {my_pid}; fi"
+    );
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let cmd = format!("sleep 2; kill -TERM {my_pid}");
+
+    let _ = std::process::Command::new("sh")
+        .args(["-c", &cmd])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// Resolve the GitHub token: prefer the `github_token` secret in orca.db (the

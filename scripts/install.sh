@@ -402,6 +402,28 @@ if [ "$(uname -s)" = "Darwin" ]; then
   codesign --force --sign - "${INSTALL_DIR}/orca" 2>/dev/null || true
 fi
 
+# Bounce the running daemon onto the new binary. kill-stale (above) already
+# killed it; this restarts whichever supervisor owns it (launchd on macOS,
+# systemd-user on Linux). Idempotent and silent if no supervisor is loaded.
+restart_orca_service() {
+  case "$(uname -s)" in
+    Darwin)
+      if launchctl list 2>/dev/null | grep -q com.orca.daemon; then
+        launchctl kickstart -k "gui/$(id -u)/com.orca.daemon" 2>/dev/null \
+          && echo "✓ daemon restarted (launchd)"
+      fi
+      ;;
+    Linux)
+      if command -v systemctl >/dev/null 2>&1 \
+         && systemctl --user is-enabled orca.service >/dev/null 2>&1; then
+        systemctl --user restart orca.service 2>/dev/null \
+          && echo "✓ daemon restarted (systemd --user)"
+      fi
+      ;;
+  esac
+}
+restart_orca_service
+
 mkdir -p "$ORCA_HOME_TARGET"
 printf '%s\n' "$CHANNEL" > "${ORCA_HOME_TARGET}/channel"
 
@@ -424,6 +446,16 @@ if [ "$RUN_AS_ORCA" = "1" ]; then
   echo "→ bootstrapping daemon as ${ORCA_USER} via system service"
   "${INSTALL_DIR}/orca" daemon install --service-user "$ORCA_USER" \
     || warn "daemon install failed — re-run: ${INSTALL_DIR}/orca daemon install --service-user $ORCA_USER"
+  # Restart the service so it picks up the new binary instead of running the
+  # old (now-deleted) inode kill-stale terminated above. Detects systemd,
+  # openrc, and unraid rc scripts — silent no-op if none match.
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled orca.service >/dev/null 2>&1; then
+    systemctl restart orca.service 2>/dev/null && echo "✓ daemon restarted (systemd)"
+  elif command -v rc-service >/dev/null 2>&1 && rc-service -e orca >/dev/null 2>&1; then
+    rc-service orca restart 2>/dev/null && echo "✓ daemon restarted (openrc)"
+  elif [ -x /etc/rc.d/rc.orca ]; then
+    /etc/rc.d/rc.orca restart >/dev/null 2>&1 && echo "✓ daemon restarted (unraid)"
+  fi
   if [ "$DEV_SETUP" = "1" ]; then
     # Re-invoke this script as the orca user in dev-setup-only mode so
     # rustup lands in their home (~/.cargo, ~/.rustup).
