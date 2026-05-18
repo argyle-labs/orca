@@ -130,6 +130,19 @@ async fn pull_one_peer(peer_id: String, addr: String) {
 }
 
 async fn pull_one_peer_inner(peer_id: &str, addr: &str) -> Result<()> {
+    // Refresh peer_hostname opportunistically — pod/ping always returns the
+    // OS hostname even on peers that don't have host_status code yet.
+    if let Ok(Ok(pong)) = tokio::time::timeout(Duration::from_secs(5), crate::pod::ping(addr)).await
+    {
+        let pid = peer_id.to_string();
+        let host = pong.hostname.clone();
+        let _ = tokio::task::spawn_blocking(move || -> Result<()> {
+            let conn = db::open_default()?;
+            db::pod::update_hostname(&conn, &pid, &host)
+        })
+        .await;
+    }
+
     let watermark = {
         let pid = peer_id.to_string();
         tokio::task::spawn_blocking(move || -> Result<Option<i64>> {

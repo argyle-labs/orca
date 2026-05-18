@@ -65,3 +65,17 @@ pub fn list_peers(conn: &Connection) -> Result<Vec<PeerSummary>> {
     }
     Ok(rows)
 }
+
+/// Refresh `pod_peers.peer_hostname` for a peer when we learn its real OS
+/// hostname (e.g. from a `pod/ping` reply or a `host_status` snapshot).
+/// No-op when `hostname` is empty so callers don't have to guard.
+pub fn update_hostname(conn: &Connection, peer_id: &str, hostname: &str) -> Result<()> {
+    if hostname.is_empty() {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE pod_peers SET peer_hostname = ?1 WHERE peer_id = ?2 AND peer_hostname <> ?1",
+        rusqlite::params![hostname, peer_id],
+    )?;
+    Ok(())
+}

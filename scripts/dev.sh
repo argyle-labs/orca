@@ -133,20 +133,20 @@ echo ""
 # the whole process group.
 DEV_LINUX_TARGET=x86_64-unknown-linux-gnu
 DEV_BINARY=target/${DEV_LINUX_TARGET}/release/orca
-DEV_LOG=trace,hyper=warn,mio=warn,h2=warn,reqwest=warn,rustls=warn,tower_http=warn,tungstenite=warn
-DEV_SERVER_CMD='while true; do ORCA_LOG='"$DEV_LOG"' ../../target/debug/orca serve --dev; echo "  [server exited — respawning in 1s]"; sleep 1; done'
+export ORCA_LOG=${ORCA_LOG:-trace,hyper=warn,mio=warn,h2=warn,reqwest=warn,rustls=warn,tower_http=warn,tungstenite=warn}
+DEV_SERVER_CMD='while true; do ../../target/debug/orca serve --dev; echo "  [server exited — respawning in 1s]"; sleep 1; done'
 
 if [[ $SERVE_BINARY -eq 1 ]]; then
   # Linux release build runs as a background -s step after the debug build so
   # both share one cargo-watch process and avoid fighting over the Cargo lock.
   DEV_LINUX_BUILD_CMD="cargo build --release --target ${DEV_LINUX_TARGET} 2>&1 | sed 's/^/[linux]    /' &"
-  ORCA_LOG=$DEV_LOG cargo watch -C projects/server \
+  cargo watch -C projects/server \
     -w src -w Cargo.toml \
     -x build \
     -s "$DEV_LINUX_BUILD_CMD" \
     -s "$DEV_SERVER_CMD" 2>&1 | sed 's/^/[server]   /' &
 else
-  ORCA_LOG=$DEV_LOG cargo watch -C projects/server \
+  cargo watch -C projects/server \
     -w src -w Cargo.toml \
     -x build \
     -s "$DEV_SERVER_CMD" 2>&1 | sed 's/^/[server]   /' &
