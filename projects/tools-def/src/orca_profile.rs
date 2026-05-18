@@ -195,7 +195,7 @@ async fn profile_unshare(
     profile_svc(ctx)?.unshare(&args.spec, &args.user).await
 }
 
-/// List sharees on a profile (owner only).
+/// List shares on a profile (owner only).
 #[orca_tool(domain = "profile", verb = "shares")]
 async fn profile_shares(
     args: ProfileSpecArgs,

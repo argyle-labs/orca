@@ -615,6 +615,20 @@ pub fn cmd_dev_enable() -> Result<DevEnableResult> {
 
     let repo = dev_repo_path().context("no ORCA_HOME or HOME")?;
 
+    // Already in dev mode according to the running daemon's state file —
+    // idempotent. Catches the case where dev.pid is stale (cargo-watch
+    // respawned the daemon out-of-band) but mode is correctly Dev.
+    if let Ok(Some(s)) = orca_utils::state::read()
+        && matches!(s.mode, orca_utils::state::DaemonMode::Dev)
+        && pid_alive(s.daemon_pid)
+    {
+        return Ok(DevEnableResult {
+            repo_path: repo.to_string_lossy().into(),
+            cloned: false,
+            daemon_parked: false,
+        });
+    }
+
     // Already in dev mode with a live process — idempotent
     if let Some(pid) = read_dev_pid()
         && pid_alive(pid)
@@ -706,13 +720,23 @@ pub fn cmd_dev_enable() -> Result<DevEnableResult> {
 }
 
 fn tokio_block_on_park(daemon_pid: u32) -> Result<()> {
-    // Blocking wait for park — poll state file up to 5 s
+    // Blocking wait for park — poll state file up to 5 s. If the recorded
+    // daemon PID isn't alive (stale state from a crashed/replaced binary),
+    // treat that as already-parked: nothing is holding the port anyway.
     for _ in 0..50 {
         std::thread::sleep(std::time::Duration::from_millis(100));
-        if let Ok(Some(s)) = orca_utils::state::read()
-            && s.daemon_pid == daemon_pid
-            && s.mode == orca_utils::state::DaemonMode::Parked
-        {
+        if let Ok(Some(s)) = orca_utils::state::read() {
+            if s.daemon_pid == daemon_pid && s.mode == orca_utils::state::DaemonMode::Parked {
+                return Ok(());
+            }
+            // State changed out from under us — different daemon now owns
+            // the port (e.g. a cargo-watch rebuild). Caller will race the
+            // new owner; safer to surface that as "parked enough".
+            if s.daemon_pid != daemon_pid {
+                return Ok(());
+            }
+        }
+        if !pid_alive(daemon_pid) {
             return Ok(());
         }
     }
