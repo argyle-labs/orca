@@ -233,22 +233,45 @@ fn install_global(registry: PluginRegistry) -> PluginRegistry {
     GLOBAL_REGISTRY.get().cloned().unwrap_or(registry)
 }
 
+/// Currently-running plugin-host accept task. `Some` while bound, `None` while
+/// parked. Park/reclaim on the REST daemon flips this in tandem so the dev
+/// binary can take :12002 without a port-race.
+static RUNNING_TASK: OnceLock<StdMutex<Option<tokio::task::JoinHandle<()>>>> = OnceLock::new();
+
+fn task_slot() -> &'static StdMutex<Option<tokio::task::JoinHandle<()>>> {
+    RUNNING_TASK.get_or_init(|| StdMutex::new(None))
+}
+
 /// Start the plugin host in a background task. Returns immediately.
 /// If the PKI directory doesn't contain a CA, logs a warning and skips the host.
 /// `plugin_registry` is shared so callers (e.g. the MCP bridge) can look up
 /// connected plugins by id and invoke their tools.
-pub fn start(
-    pki_dir: &Path,
-    port: u16,
-    plugin_registry: PluginRegistry,
-) -> tokio::task::JoinHandle<()> {
+///
+/// Idempotent: if a host task is already running, this is a no-op.
+pub fn start(pki_dir: &Path, port: u16, plugin_registry: PluginRegistry) {
+    let mut slot = task_slot().lock().expect("plugin_host slot poisoned");
+    if slot.as_ref().is_some_and(|h| !h.is_finished()) {
+        return;
+    }
     let pki_dir = pki_dir.to_owned();
     let plugin_registry = install_global(plugin_registry);
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         if let Err(e) = run(&pki_dir, port, plugin_registry).await {
             warn!("[plugin-host] failed to start: {e:#}");
         }
-    })
+    });
+    *slot = Some(handle);
+}
+
+/// Stop the plugin host accept loop. Drops the listener so :12002 is released.
+/// In-flight connections continue until they finish naturally — only the
+/// accept task is aborted. Safe to call when no host is running.
+pub fn stop() {
+    let mut slot = task_slot().lock().expect("plugin_host slot poisoned");
+    if let Some(h) = slot.take() {
+        h.abort();
+        info!("[plugin-host] stopped — port released");
+    }
 }
 
 async fn run(pki_dir: &Path, port: u16, plugin_registry: PluginRegistry) -> Result<()> {

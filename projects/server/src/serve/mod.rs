@@ -174,6 +174,21 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                         break;
                     }
                 }
+                // Production released :12000 but its plugin host on :12002 is
+                // independent — poll until :12002 actually frees so our bind
+                // below doesn't race the prior listener's TCP teardown.
+                for _ in 0..50 {
+                    if tokio::net::TcpListener::bind((
+                        "0.0.0.0",
+                        orca_utils::config::APP_PLUGIN_PORT,
+                    ))
+                    .await
+                    .is_ok()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
             }
             s.active_pid = std::process::id();
             s.mode = DaemonMode::Dev;
@@ -314,8 +329,10 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         let parked = tokio::select! {
             result = serve => { result?; false }
             _ = sigusr1.recv() => {
-                // Park: drop the listener so the port is released for the dev binary.
+                // Park: drop the REST listener AND stop the plugin host so both
+                // :12000 and :12002 are released for the dev binary.
                 handle.shutdown();
+                crate::plugin_host::stop();
                 true
             }
             _ = sigterm.recv() => {
@@ -351,6 +368,12 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             tokio::select! {
                 _ = sigusr2.recv() => {
                     info!("[orca] daemon reclaiming port {port}");
+                    // Bring the plugin host back up alongside REST.
+                    crate::plugin_host::start(
+                        &pki_dir,
+                        orca_utils::config::APP_PLUGIN_PORT,
+                        crate::plugin_host::PluginRegistry::new(),
+                    );
                     break;
                 }
                 _ = sigterm.recv() => {
@@ -369,6 +392,11 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                         };
                         if abandoned {
                             info!("[orca] auto-reclaiming port {port} (dev abandoned)");
+                            crate::plugin_host::start(
+                                &pki_dir,
+                                orca_utils::config::APP_PLUGIN_PORT,
+                                crate::plugin_host::PluginRegistry::new(),
+                            );
                             break;
                         }
                     }
