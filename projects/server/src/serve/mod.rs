@@ -156,19 +156,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     // Fallback: detect when this binary itself lives under `target/debug/` — that's
     // the unambiguous footprint of `cargo run` / `cargo watch`, and catches legacy
     // cargo-watch instances that pre-date the env-var convention.
-    let dev_spawn = std::env::var("ORCA_DEV_PARENT_PID").is_ok()
-        || std::env::current_exe()
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_owned()))
-            .zip(std::env::current_exe().ok())
-            .is_some_and(|(name, p)| {
-                // Only the cargo-built dev binary at `target/{debug,release}/orca`
-                // (or target/<triple>/...). Excludes `target/debug/deps/orca-<hash>`
-                // test binaries, which would otherwise hijack the dev branch.
-                name == "orca"
-                    && p.to_str()
-                        .is_some_and(|s| s.contains("/target/") && !s.contains("/deps/"))
-            });
+    let dev_spawn = std::env::var("ORCA_DEV_PARENT_PID").is_ok() || spawned_by_cargo_watch();
 
     if dev_spawn {
         if let Ok(Some(mut s)) = orca_utils::state::read() {
