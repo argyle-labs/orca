@@ -152,7 +152,15 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     // If we were spawned by cargo-watch (cmd_dev_enable), the production daemon
     // is parked. Don't overwrite its daemon_pid; we'll re-park it below and register
     // ourselves as the active dev process before binding.
-    let dev_spawn = std::env::var("ORCA_DEV_PARENT_PID").is_ok();
+    // Primary signal: env-var set by `pod dev_enable` when it spawns cargo-watch.
+    // Fallback: detect when this binary itself lives under `target/debug/` — that's
+    // the unambiguous footprint of `cargo run` / `cargo watch`, and catches legacy
+    // cargo-watch instances that pre-date the env-var convention.
+    let dev_spawn = std::env::var("ORCA_DEV_PARENT_PID").is_ok()
+        || std::env::current_exe()
+            .ok()
+            .and_then(|p| p.to_str().map(str::to_owned))
+            .is_some_and(|p| p.contains("/target/debug/"));
 
     if dev_spawn {
         if let Ok(Some(mut s)) = orca_utils::state::read() {
