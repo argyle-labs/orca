@@ -575,6 +575,50 @@ fn spawn_scheduler_runtime() {
     }
 }
 
+/// Walk the parent-process chain on Linux looking for `cargo-watch`. Catches
+/// legacy cargo-watch instances on peers that pre-date the
+/// `ORCA_DEV_PARENT_PID` env-var convention (the daemon's immediate parent
+/// is usually `sh` from `cargo watch -x run -- daemon start`, so we have to
+/// walk up). Returns false on non-Linux and on any /proc read error.
+fn spawned_by_cargo_watch() -> bool {
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+    #[cfg(target_os = "linux")]
+    {
+        fn ppid_and_comm(pid: u32) -> Option<(u32, String)> {
+            let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+            let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                .ok()?
+                .trim()
+                .to_owned();
+            let ppid = status
+                .lines()
+                .find_map(|l| l.strip_prefix("PPid:"))
+                .and_then(|v| v.trim().parse().ok())?;
+            Some((ppid, comm))
+        }
+        let mut pid = std::process::id();
+        for _ in 0..8 {
+            match ppid_and_comm(pid) {
+                Some((0, _)) | None => return false,
+                Some((parent, _)) => {
+                    let parent_comm = std::fs::read_to_string(format!("/proc/{parent}/comm"))
+                        .unwrap_or_default()
+                        .trim()
+                        .to_owned();
+                    if parent_comm == "cargo-watch" {
+                        return true;
+                    }
+                    pid = parent;
+                }
+            }
+        }
+        false
+    }
+}
+
 fn pid_alive(pid: u32) -> bool {
     std::process::Command::new("kill")
         .args(["-0", &pid.to_string()])
