@@ -195,6 +195,25 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             if let Err(e) = orca_utils::state::write(&s) {
                 tracing::warn!("failed to update dev state: {e}");
             }
+        } else {
+            // No prior state on disk (first dev spawn or state cleared).
+            // Initialize a Dev state so peers' `pod/dev-sync` sees we're in
+            // dev mode after cargo-watch respawns us across rebuilds.
+            let parent_pid: u32 = std::env::var("ORCA_DEV_PARENT_PID")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(std::process::id);
+            if let Err(e) = orca_utils::state::write(&DaemonState {
+                daemon_pid: std::process::id(),
+                active_pid: parent_pid,
+                port,
+                mode: DaemonMode::Dev,
+                binary: binary.clone(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                started_at: chrono::Utc::now(),
+            }) {
+                tracing::warn!("failed to initialize dev state: {e}");
+            }
         }
 
         // Simple dev-binary serve loop: bind, serve, exit on SIGTERM.

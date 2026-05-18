@@ -290,7 +290,9 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("ORCA_LOG").unwrap_or_else(|_| {
-                tracing_subscriber::EnvFilter::new("warn,orca=info,tower_http=warn,axum=warn")
+                tracing_subscriber::EnvFilter::new(
+                    "warn,orca=info,tower_http=warn,axum=warn,mdns_sd=warn,mdns=warn",
+                )
             }),
         )
         .with_target(false)

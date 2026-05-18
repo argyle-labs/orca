@@ -552,12 +552,27 @@ fn resolve_cargo_bin() -> Option<std::path::PathBuf> {
             return Some(p);
         }
     }
-    // Final fallback: walk PATH ourselves (avoids an extra crate dep).
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join("cargo");
-        if candidate.is_file() {
-            return Some(candidate);
+    // Walk PATH ourselves (avoids an extra crate dep).
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join("cargo");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    // Last-ditch: well-known service-user homes. systemd/runuser/openrc
+    // service launches often inherit a minimal env without HOME or with HOME
+    // pointing at the invoker rather than the target user. Try the standard
+    // service-user paths so dev_enable still works under those launchers.
+    for candidate in [
+        "/var/lib/orca/.cargo/bin/cargo",
+        "/home/orca/.cargo/bin/cargo",
+        "/root/.cargo/bin/cargo",
+    ] {
+        let p = std::path::PathBuf::from(candidate);
+        if p.is_file() {
+            return Some(p);
         }
     }
     None
