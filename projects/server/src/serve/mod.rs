@@ -212,6 +212,10 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             crate::plugin_host::PluginRegistry::new(),
         );
 
+        crate::system_info::spawn_refresher();
+        crate::host_status_writer::spawn_local_writer();
+        crate::host_status_writer::spawn_sync_puller();
+
         let mut sigterm = signal(SignalKind::terminate())?;
         let handle = axum_server::Handle::new();
         let serve = axum_server::bind_rustls(addr, tls)
@@ -246,6 +250,13 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     // Pod mesh: mDNS responder + auto-offer scheduler (best-effort).
     spawn_pod_runtime(&pki_dir).await;
     spawn_scheduler_runtime();
+
+    // Per-host status snapshots + mesh-pull replication. Cheap idempotent
+    // spawns — both `serve --dev` and `daemon start` need them so every host
+    // contributes rows to the mesh.
+    crate::system_info::spawn_refresher();
+    crate::host_status_writer::spawn_local_writer();
+    crate::host_status_writer::spawn_sync_puller();
 
     // Dev-source auto-poll (same as run() path).
     if let Some(src) = crate::commands::update::read_dev_source() {
