@@ -18,12 +18,13 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 /// One capability: implement this trait and it is automatically available via
-/// MCP, REST (`/api/tools/<name>`), CLI (`orca exec <name>`), and the WASM
-/// client (`orcaClient.<name>(args)`). No other files to edit.
+/// MCP, REST (`/api/tools/<name>`), and CLI (`orca exec <name>`). The frontend
+/// consumes the same tools via the OpenAPI spec + hey-api codegen. No other
+/// files to edit.
 ///
 /// `Args` and `Output` are both `JsonSchema` so each surface can emit the
-/// right typed wrapper: utoipa for REST/OpenAPI, MCP `tools/list`, CLI flags,
-/// and wasm-bindgen `.d.ts` types for the frontend.
+/// right typed wrapper: utoipa for REST/OpenAPI, MCP `tools/list`, and CLI
+/// flags.
 ///
 /// # Implementing
 ///

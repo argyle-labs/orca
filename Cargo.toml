@@ -101,8 +101,17 @@ pulldown-cmark = "0.13"
 # come from `if-addrs` which is already in the server crate.
 sysinfo = { version = "0.32", default-features = false, features = ["system", "disk", "network"] }
 
+# UniFFI — Mozilla's Rust→Swift/Kotlin binding generator. Used by
+# projects/mobile/ to expose every #[orca_tool] as a typed method to iOS
+# and Android apps that embed the orca core in-process.
+# - `uniffi` crate: derives + runtime scaffolding for cdylib.
+# - `uniffi_bindgen` binary: codegens Swift/Kotlin bindings from the .udl/proc-macros
+#   exposed by the cdylib (built separately, not a runtime dep).
+uniffi = { version = "0.29", features = ["tokio"] }
+
 [workspace]
 members = [
+    "projects/app-kit",
     "projects/db",
     "projects/sdk/rust",
     "projects/server",
