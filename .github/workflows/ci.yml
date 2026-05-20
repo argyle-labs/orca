@@ -171,12 +171,11 @@ jobs:
           shared-key: ci-rust
           cache-on-failure: true
 
-      # Baseline 2026-05-19: 44.98% line / 44.84% region / 44.41% function
-      # coverage. Floor set at 44 (lines) so the first PR that adds even one
-      # test holds the line; raise as we climb. Use exact-integer floor — never
-      # round down further than the recorded baseline.
-      - name: Coverage gate (line coverage ≥ 44%)
-        run: cargo llvm-cov --workspace --no-fail-fast --fail-under-lines 44
+      # Baseline 2026-05-19: 44.98% line. 2026-05-20: +0.69% from tools-def
+      # host.rs tests (now 45.67% workspace lines). Raise the floor every time
+      # tests land. Use exact-integer floor — never round below recorded value.
+      - name: Coverage gate (line coverage ≥ 45%)
+        run: cargo llvm-cov --workspace --no-fail-fast --fail-under-lines 45
 
       - name: HTML report
         if: always()

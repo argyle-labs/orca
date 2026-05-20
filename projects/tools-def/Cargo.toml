@@ -56,3 +56,7 @@ cron              = { workspace = true,         optional = true }
 # CLI-only deps.
 clap              = { workspace = true,         optional = true }
 colored           = { workspace = true,         optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

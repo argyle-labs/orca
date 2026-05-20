@@ -22,3 +22,16 @@ async fn health(
 ) -> anyhow::Result<HealthOutput> {
     Ok(HealthOutput { ok: true })
 }
+
+#[cfg(all(test, feature = "native"))]
+mod tests {
+    use super::*;
+    use crate::test_support::empty_ctx;
+
+    #[tokio::test]
+    async fn health_returns_ok_true() {
+        let ctx = empty_ctx();
+        let out = health(HealthArgs {}, &ctx).await.unwrap();
+        assert!(out.ok);
+    }
+}

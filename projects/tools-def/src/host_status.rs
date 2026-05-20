@@ -92,3 +92,132 @@ async fn host_status_detail(
     let rows = orca_db::host_status::rows_for_peer(&conn, &args.peer_id, args.since_unix, limit)?;
     Ok(HostStatusRows(rows_to_dtos(rows)))
 }
+
+#[cfg(all(test, feature = "native"))]
+mod tests {
+    use super::*;
+    use crate::test_support::empty_ctx;
+
+    fn seed(conn: &orca_db::Conn) {
+        // Two peers, multiple rows each, one with malformed payload to exercise
+        // the `system = None` branch.
+        orca_db::host_status::insert_status(conn, "alpha", 100, r#"{"bad":true}"#, 101, "local")
+            .unwrap();
+        orca_db::host_status::insert_status(
+            conn,
+            "alpha",
+            200,
+            r#"{"bad":true}"#, // still unparseable as SystemInfoReport
+            201,
+            "local",
+        )
+        .unwrap();
+        orca_db::host_status::insert_status(conn, "beta", 150, r#"{"bad":true}"#, 151, "synced")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn host_status_list_returns_latest_per_peer() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let ctx = empty_ctx();
+        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+            seed(&orca_db::open_default().unwrap());
+            let out = host_status_list(HostStatusRowsArgs {}, &ctx).await.unwrap();
+            let mut by_peer: std::collections::HashMap<_, _> =
+                out.0.iter().map(|r| (r.peer_id.clone(), r)).collect();
+            assert_eq!(by_peer.len(), 2);
+            assert_eq!(by_peer.remove("alpha").unwrap().snapshot_at_unix, 200);
+            assert_eq!(by_peer.remove("beta").unwrap().snapshot_at_unix, 150);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn host_status_detail_returns_history_newest_first() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let ctx = empty_ctx();
+        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+            seed(&orca_db::open_default().unwrap());
+            let out = host_status_detail(
+                HostStatusDetailArgs {
+                    peer_id: "alpha".into(),
+                    since_unix: None,
+                    limit: None,
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            assert_eq!(out.0.len(), 2);
+            assert_eq!(out.0[0].snapshot_at_unix, 200);
+            assert_eq!(out.0[1].snapshot_at_unix, 100);
+            assert!(out.0[0].system.is_none(), "unparseable payload → None");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn host_status_detail_honors_since_unix_watermark() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let ctx = empty_ctx();
+        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+            seed(&orca_db::open_default().unwrap());
+            let out = host_status_detail(
+                HostStatusDetailArgs {
+                    peer_id: "alpha".into(),
+                    since_unix: Some(150),
+                    limit: None,
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            assert_eq!(out.0.len(), 1);
+            assert_eq!(out.0[0].snapshot_at_unix, 200);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn host_status_detail_honors_limit() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let ctx = empty_ctx();
+        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+            seed(&orca_db::open_default().unwrap());
+            let out = host_status_detail(
+                HostStatusDetailArgs {
+                    peer_id: "alpha".into(),
+                    since_unix: None,
+                    limit: Some(1),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            assert_eq!(out.0.len(), 1);
+            assert_eq!(out.0[0].snapshot_at_unix, 200);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn host_status_detail_unknown_peer_is_empty() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let ctx = empty_ctx();
+        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+            seed(&orca_db::open_default().unwrap());
+            let out = host_status_detail(
+                HostStatusDetailArgs {
+                    peer_id: "nope".into(),
+                    since_unix: None,
+                    limit: None,
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            assert_eq!(out.0.len(), 0);
+        })
+        .await;
+    }
+}

@@ -194,3 +194,241 @@ async fn host_refresh(
         .collect();
     Ok(HostRefreshOutput { channels })
 }
+
+#[cfg(all(test, feature = "native"))]
+mod tests {
+    use super::*;
+    use crate::test_support::empty_ctx as make_ctx;
+    use std::sync::Arc;
+
+    #[test]
+    fn host_channel_from_row_copies_fields() {
+        let row = orca_db::host_addressing::HostAddressingRow {
+            key: "lan_v4".to_string(),
+            value: "10.0.0.1".to_string(),
+            source: "manual".to_string(),
+            detected_at: 42,
+        };
+        let ch: HostChannel = row.into();
+        assert_eq!(ch.key, "lan_v4");
+        assert_eq!(ch.value, "10.0.0.1");
+        assert_eq!(ch.source, "manual");
+        assert_eq!(ch.detected_at, 42);
+    }
+
+    #[test]
+    fn allowed_keys_cover_expected_channels() {
+        for k in [
+            "display_name",
+            "fqdn",
+            "lan_v4",
+            "lan_v6",
+            "tailscale_v4",
+            "tailscale_v6",
+        ] {
+            assert!(ALLOWED_HOST_KEYS.contains(&k), "missing {k}");
+        }
+    }
+
+    #[test]
+    fn os_hostname_returns_non_empty() {
+        // The detect path shells out to `hostname`; on any sane test host this
+        // returns a non-empty string. Falls back to "unknown" if not.
+        let h = native_support::os_hostname();
+        assert!(!h.is_empty());
+    }
+
+    #[tokio::test]
+    async fn host_info_uses_display_name_channel_when_present() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let ctx = make_ctx();
+        orca_db::with_db_path(path.clone(), async move {
+            let conn = orca_db::open_default().unwrap();
+            orca_db::host_addressing::upsert_host_addressing(
+                &conn,
+                "display_name",
+                "testbox",
+                "manual",
+            )
+            .unwrap();
+            orca_db::host_addressing::upsert_host_addressing(
+                &conn,
+                "lan_v4",
+                "10.0.0.5",
+                "autodetect",
+            )
+            .unwrap();
+            drop(conn);
+
+            let out = host_info(EmptyArgs {}, &ctx).await.unwrap();
+            assert_eq!(out.display_name, "testbox");
+            assert_eq!(out.channels.len(), 2);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn host_info_falls_back_to_os_hostname_when_no_channel() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let ctx = make_ctx();
+        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+            let out = host_info(EmptyArgs {}, &ctx).await.unwrap();
+            assert!(!out.display_name.is_empty());
+            assert_eq!(out.channels.len(), 0);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn host_set_rejects_unknown_key() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let ctx = make_ctx();
+        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+            let res = host_set(
+                HostSetArgs {
+                    key: "bogus".into(),
+                    value: "x".into(),
+                },
+                &ctx,
+            )
+            .await;
+            let err = res.err().expect("unknown key should fail");
+            assert!(err.to_string().contains("not in the allowlist"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn host_set_writes_display_name_to_settings() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let ctx = make_ctx();
+        orca_db::with_db_path(path.clone(), async move {
+            let out = host_set(
+                HostSetArgs {
+                    key: "display_name".into(),
+                    value: "alpha".into(),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            assert_eq!(out.key, "display_name");
+            assert_eq!(out.value, "alpha");
+            let conn = orca_db::open_default().unwrap();
+            assert_eq!(
+                orca_db::settings::get(&conn, "host.display_name").unwrap(),
+                Some("alpha".to_string())
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn host_set_writes_fqdn_to_settings() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let ctx = make_ctx();
+        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+            host_set(
+                HostSetArgs {
+                    key: "fqdn".into(),
+                    value: "alpha.example.com".into(),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            let conn = orca_db::open_default().unwrap();
+            assert_eq!(
+                orca_db::settings::get(&conn, "host.fqdn").unwrap(),
+                Some("alpha.example.com".to_string())
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn host_set_writes_channel_value_to_host_addressing() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let ctx = make_ctx();
+        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+            host_set(
+                HostSetArgs {
+                    key: "lan_v4".into(),
+                    value: "10.0.0.7".into(),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            let conn = orca_db::open_default().unwrap();
+            let rows = orca_db::host_addressing::list_host_addressing(&conn).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].key, "lan_v4");
+            assert_eq!(rows[0].value, "10.0.0.7");
+            assert_eq!(rows[0].source, "manual");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn host_refresh_without_hook_returns_existing_channels() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let ctx = make_ctx();
+        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+            let conn = orca_db::open_default().unwrap();
+            orca_db::host_addressing::upsert_host_addressing(
+                &conn,
+                "lan_v4",
+                "10.0.0.9",
+                "autodetect",
+            )
+            .unwrap();
+            drop(conn);
+
+            let out = host_refresh(EmptyArgs {}, &ctx).await.unwrap();
+            assert_eq!(out.channels.len(), 1);
+            assert_eq!(out.channels[0].key, "lan_v4");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn host_refresh_invokes_registered_hook() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct CountingHook {
+            called: Arc<AtomicBool>,
+        }
+        impl HostRefreshHook for CountingHook {
+            fn refresh(&self, conn: &orca_db::Conn) -> anyhow::Result<()> {
+                self.called.store(true, Ordering::SeqCst);
+                orca_db::host_addressing::upsert_host_addressing(
+                    conn,
+                    "tailscale_v4",
+                    "100.64.0.1",
+                    "autodetect",
+                )?;
+                Ok(())
+            }
+        }
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let called = Arc::new(AtomicBool::new(false));
+        let hook: Arc<dyn HostRefreshHook + Send + Sync> = Arc::new(CountingHook {
+            called: called.clone(),
+        });
+        let mut ctx = make_ctx();
+        ctx.register_service(hook);
+
+        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+            let out = host_refresh(EmptyArgs {}, &ctx).await.unwrap();
+            assert!(called.load(Ordering::SeqCst));
+            assert_eq!(out.channels.len(), 1);
+            assert_eq!(out.channels[0].key, "tailscale_v4");
+            assert_eq!(out.channels[0].value, "100.64.0.1");
+        })
+        .await;
+    }
+}

@@ -70,6 +70,9 @@ pub mod spec_registry;
 pub mod sweep;
 pub mod system;
 
+#[cfg(all(test, feature = "native"))]
+pub(crate) mod test_support;
+
 /// Re-export of the opaque JSON passthrough wrapper — see `json_any` module for policy.
 #[allow(clippy::disallowed_types)]
 pub use json_any::JsonAny;

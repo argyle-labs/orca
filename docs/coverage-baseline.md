@@ -42,3 +42,10 @@ cargo llvm-cov --workspace --html --no-fail-fast --output-dir target/llvm-cov
 
 See task #7 (add CI gate that ratchets from this baseline) and
 `project_test_coverage_100.md` for the order-of-attack plan.
+
+## Progress log
+
+| Date       | Lines % | Δ      | Slice                                                  |
+|------------|--------:|-------:|--------------------------------------------------------|
+| 2026-05-19 | 44.98 % |    —   | Baseline.                                              |
+| 2026-05-20 | 45.67 % | +0.69  | `tools-def/host.rs` — 11 tests covering all 3 tools.   |
