@@ -270,7 +270,10 @@ pub fn register_doc_root(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideDo
 pub trait ProvideProxmoxEndpoint {
     fn proxmox_endpoint(&self) -> std::sync::Arc<dyn ProxmoxEndpointService>;
 }
-pub fn register_proxmox_endpoint(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideProxmoxEndpoint) {
+pub fn register_proxmox_endpoint(
+    ctx: &mut orca_utils::tool::ToolCtx,
+    p: &impl ProvideProxmoxEndpoint,
+) {
     ctx.register_service(p.proxmox_endpoint());
 }
 

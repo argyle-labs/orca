@@ -115,10 +115,7 @@ pub trait ProvideHostRefresh {
 }
 
 #[cfg(feature = "native")]
-pub fn register_host_refresh(
-    ctx: &mut orca_utils::tool::ToolCtx,
-    p: &impl ProvideHostRefresh,
-) {
+pub fn register_host_refresh(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideHostRefresh) {
     ctx.register_service(p.host_refresh());
 }
 
