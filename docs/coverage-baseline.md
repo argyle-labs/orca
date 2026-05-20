@@ -49,3 +49,6 @@ See task #7 (add CI gate that ratchets from this baseline) and
 |------------|--------:|-------:|--------------------------------------------------------|
 | 2026-05-19 | 44.98 % |    —   | Baseline.                                              |
 | 2026-05-20 | 45.67 % | +0.69  | `tools-def/host.rs` — 11 tests covering all 3 tools.   |
+| 2026-05-20 | 46.28 % | +0.61  | tools-def: `meta`, `system` (mock service), `host_status` (5 cases). |
+| 2026-05-20 | 46.94 % | +0.66  | tools-def: `plugin_runtime`, `orca_db`, `infra` — stub-service tests. |
+| 2026-05-20 | 47.52 % | +0.58  | tools-def: `engine` — `infer_kind` unit + full lifecycle DB tests. |

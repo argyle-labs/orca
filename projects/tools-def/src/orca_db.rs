@@ -83,3 +83,117 @@ async fn db_down(
 ) -> anyhow::Result<DbMigrateReport> {
     db_svc(ctx)?.down().await
 }
+
+#[cfg(all(test, feature = "native"))]
+mod tests {
+    use super::*;
+    use crate::services::db_admin::DbAdminService;
+    use crate::test_support::empty_ctx;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Stub {
+        status_calls: AtomicUsize,
+        migrate_calls: AtomicUsize,
+        up_calls: AtomicUsize,
+        down_calls: AtomicUsize,
+    }
+    impl Stub {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                status_calls: AtomicUsize::new(0),
+                migrate_calls: AtomicUsize::new(0),
+                up_calls: AtomicUsize::new(0),
+                down_calls: AtomicUsize::new(0),
+            })
+        }
+    }
+    fn rep(dir: &str, before: i64, after: i64) -> DbMigrateReport {
+        DbMigrateReport {
+            before,
+            after,
+            applied: (after - before).unsigned_abs() as u32,
+            direction: dir.into(),
+        }
+    }
+    #[async_trait]
+    impl DbAdminService for Stub {
+        async fn status(&self) -> Result<DbStatusReport> {
+            self.status_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(DbStatusReport {
+                current: 42,
+                total: 50,
+                pending: 8,
+            })
+        }
+        async fn migrate(&self) -> Result<DbMigrateReport> {
+            self.migrate_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(rep("up", 42, 50))
+        }
+        async fn up(&self) -> Result<DbMigrateReport> {
+            self.up_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(rep("up", 42, 43))
+        }
+        async fn down(&self) -> Result<DbMigrateReport> {
+            self.down_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(rep("down", 42, 41))
+        }
+    }
+
+    fn ctx_with_stub() -> (orca_utils::tool::ToolCtx, Arc<Stub>) {
+        let stub = Stub::new();
+        let svc: Arc<dyn DbAdminService> = stub.clone();
+        let mut ctx = empty_ctx();
+        ctx.register_service(svc);
+        (ctx, stub)
+    }
+
+    #[tokio::test]
+    async fn db_status_forwards_to_service() {
+        let (ctx, stub) = ctx_with_stub();
+        let r = db_status(DbStatusArgs {}, &ctx).await.unwrap();
+        assert_eq!(r.current, 42);
+        assert_eq!(r.total, 50);
+        assert_eq!(r.pending, 8);
+        assert_eq!(stub.status_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn db_migrate_forwards_and_returns_delta() {
+        let (ctx, stub) = ctx_with_stub();
+        let r = db_migrate(DbMigrateArgs {}, &ctx).await.unwrap();
+        assert_eq!(r.before, 42);
+        assert_eq!(r.after, 50);
+        assert_eq!(r.applied, 8);
+        assert_eq!(r.direction, "up");
+        assert_eq!(stub.migrate_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn db_up_forwards_single_step() {
+        let (ctx, stub) = ctx_with_stub();
+        let r = db_up(DbUpArgs {}, &ctx).await.unwrap();
+        assert_eq!(r.after - r.before, 1);
+        assert_eq!(stub.up_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn db_down_forwards_single_step_back() {
+        let (ctx, stub) = ctx_with_stub();
+        let r = db_down(DbDownArgs {}, &ctx).await.unwrap();
+        assert_eq!(r.direction, "down");
+        assert_eq!(r.before - r.after, 1);
+        assert_eq!(stub.down_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn db_tools_error_when_service_missing() {
+        let ctx = empty_ctx();
+        assert!(db_status(DbStatusArgs {}, &ctx).await.is_err());
+        assert!(db_migrate(DbMigrateArgs {}, &ctx).await.is_err());
+        assert!(db_up(DbUpArgs {}, &ctx).await.is_err());
+        assert!(db_down(DbDownArgs {}, &ctx).await.is_err());
+    }
+}

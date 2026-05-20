@@ -103,15 +103,8 @@ mod tests {
         // the `system = None` branch.
         orca_db::host_status::insert_status(conn, "alpha", 100, "not json at all", 101, "local")
             .unwrap();
-        orca_db::host_status::insert_status(
-            conn,
-            "alpha",
-            200,
-            "not json at all", // still unparseable as SystemInfoReport
-            201,
-            "local",
-        )
-        .unwrap();
+        orca_db::host_status::insert_status(conn, "alpha", 200, "not json at all", 201, "local")
+            .unwrap();
         orca_db::host_status::insert_status(conn, "beta", 150, "not json at all", 151, "synced")
             .unwrap();
     }

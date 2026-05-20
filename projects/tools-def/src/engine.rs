@@ -165,6 +165,186 @@ async fn engine_disable(
     }
 }
 
+#[cfg(all(test, feature = "native"))]
+mod tests {
+    use super::*;
+    use crate::test_support::empty_ctx;
+
+    #[test]
+    fn infer_kind_uses_supplied_value() {
+        assert_eq!(infer_kind("http://x", "ollama").unwrap(), "ollama");
+        assert_eq!(infer_kind("http://x", "lmstudio").unwrap(), "lmstudio");
+    }
+
+    #[test]
+    fn infer_kind_defaults_to_lmstudio() {
+        assert_eq!(infer_kind("http://localhost:1234", "").unwrap(), "lmstudio");
+    }
+
+    #[test]
+    fn infer_kind_defaults_to_ollama_on_11434() {
+        assert_eq!(infer_kind("http://localhost:11434", "").unwrap(), "ollama");
+    }
+
+    #[test]
+    fn infer_kind_rejects_unknown() {
+        let e = infer_kind("http://x", "bogus").unwrap_err();
+        assert!(e.to_string().contains("unknown backend kind"));
+    }
+
+    #[test]
+    fn provider_dto_from_db_row_copies_fields() {
+        let dto: ProviderDto = orca_db::llm::Provider {
+            name: "n".into(),
+            url: "u".into(),
+            kind: "ollama".into(),
+            enabled: true,
+            created_at: "ts".into(),
+        }
+        .into();
+        assert_eq!(dto.name, "n");
+        assert_eq!(dto.url, "u");
+        assert_eq!(dto.kind, "ollama");
+        assert!(dto.enabled);
+        assert_eq!(dto.created_at, "ts");
+    }
+
+    #[tokio::test]
+    async fn engine_lifecycle_add_list_disable_remove() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let ctx = empty_ctx();
+        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+            // empty initially
+            let list0 = engine_list(EmptyArgs {}, &ctx).await.unwrap();
+            assert!(list0.0.is_empty());
+
+            // add
+            let r = engine_add(
+                AddArgs {
+                    name: "local".into(),
+                    url: "http://localhost:1234".into(),
+                    kind: String::new(),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            assert!(r.message.contains("lmstudio"));
+
+            let list1 = engine_list(EmptyArgs {}, &ctx).await.unwrap();
+            assert_eq!(list1.0.len(), 1);
+            assert!(list1.0[0].enabled);
+
+            // disable
+            let d = engine_disable(
+                NameArgs {
+                    name: "local".into(),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            assert!(d.message.contains("disabled"));
+            let list2 = engine_list(EmptyArgs {}, &ctx).await.unwrap();
+            assert!(!list2.0[0].enabled);
+
+            // enable
+            engine_enable(
+                NameArgs {
+                    name: "local".into(),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            let list3 = engine_list(EmptyArgs {}, &ctx).await.unwrap();
+            assert!(list3.0[0].enabled);
+
+            // remove
+            engine_remove(
+                NameArgs {
+                    name: "local".into(),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+            let list4 = engine_list(EmptyArgs {}, &ctx).await.unwrap();
+            assert!(list4.0.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn engine_remove_unknown_errors() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let ctx = empty_ctx();
+        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+            let e = engine_remove(
+                NameArgs {
+                    name: "ghost".into(),
+                },
+                &ctx,
+            )
+            .await
+            .err()
+            .unwrap();
+            assert!(e.to_string().contains("no backend named"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn engine_enable_unknown_errors() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let ctx = empty_ctx();
+        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+            assert!(
+                engine_enable(
+                    NameArgs {
+                        name: "ghost".into()
+                    },
+                    &ctx,
+                )
+                .await
+                .is_err()
+            );
+            assert!(
+                engine_disable(
+                    NameArgs {
+                        name: "ghost".into()
+                    },
+                    &ctx,
+                )
+                .await
+                .is_err()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn engine_add_rejects_unknown_kind() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let ctx = empty_ctx();
+        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+            let e = engine_add(
+                AddArgs {
+                    name: "x".into(),
+                    url: "http://x".into(),
+                    kind: "bogus".into(),
+                },
+                &ctx,
+            )
+            .await
+            .err()
+            .unwrap();
+            assert!(e.to_string().contains("unknown"));
+        })
+        .await;
+    }
+}
+
 // ── CLI registration — bespoke colored rendering ────────────────────────────
 #[cfg(feature = "cli")]
 mod cli_register {
