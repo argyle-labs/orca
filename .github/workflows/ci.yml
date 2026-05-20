@@ -143,6 +143,52 @@ jobs:
       - name: Doctests
         run: cargo test --doc --workspace --no-fail-fast
 
+  # ── Rust coverage ────────────────────────────────────────────────────────
+  # Ratchets up to 100% per project_test_coverage_100.md / docs/coverage-baseline.md.
+  # `--fail-under-lines` floor is the recorded baseline; bump it as new tests
+  # land. Below the floor = PR fails. A PR may NEVER lower this number.
+  coverage-rust:
+    name: Coverage Rust
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: rui314/setup-mold@v1
+        if: runner.os == 'Linux'
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-rust
+          cache-on-failure: true
+
+      # Baseline 2026-05-19: 44.98% line / 44.84% region / 44.41% function
+      # coverage. Floor set at 44 (lines) so the first PR that adds even one
+      # test holds the line; raise as we climb. Use exact-integer floor — never
+      # round down further than the recorded baseline.
+      - name: Coverage gate (line coverage ≥ 44%)
+        run: cargo llvm-cov --workspace --no-fail-fast --fail-under-lines 44
+
+      - name: HTML report
+        if: always()
+        run: cargo llvm-cov report --html --output-dir target/llvm-cov
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-html
+          path: target/llvm-cov/
+          retention-days: 14
+
   # ── TS SDK ───────────────────────────────────────────────────────────────
   build-sdk-ts:
     name: Build TS SDK
