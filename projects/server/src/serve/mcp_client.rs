@@ -145,7 +145,7 @@ pub struct McpTool {
     pub name: String,
     pub description: String,
     #[serde(rename = "inputSchema")]
-    pub input_schema: Value,
+    pub input_schema: orca_tools_def::json_schema::JsonSchemaNode,
 }
 
 impl McpClient {
@@ -277,7 +277,7 @@ impl McpClient {
             .map(|t| McpTool {
                 name: t["name"].as_str().unwrap_or("").to_string(),
                 description: t["description"].as_str().unwrap_or("").to_string(),
-                input_schema: t["inputSchema"].clone(),
+                input_schema: serde_json::from_value(t["inputSchema"].clone()).unwrap_or_default(),
             })
             .collect();
         self.tools = tools;

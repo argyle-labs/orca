@@ -53,9 +53,8 @@ pub struct McpToolMeta {
     pub server: String,
     pub name: String,
     pub description: String,
-    /// Raw JSON Schema from the upstream MCP server — shape is server-defined.
-    #[allow(clippy::disallowed_types)]
-    pub input_schema: Value,
+    /// Typed JSON Schema from the upstream MCP server.
+    pub input_schema: crate::json_schema::JsonSchemaNode,
 }
 
 #[async_trait]

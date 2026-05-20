@@ -152,7 +152,11 @@ impl McpRegistryService for ServerMcpRegistry {
                     .and_then(|s| s.as_str())
                     .unwrap_or("")
                     .to_string(),
-                input_schema: v.get("inputSchema").cloned().unwrap_or(Value::Null),
+                input_schema: v
+                    .get("inputSchema")
+                    .cloned()
+                    .and_then(|x| serde_json::from_value(x).ok())
+                    .unwrap_or_default(),
             })
             .collect())
     }

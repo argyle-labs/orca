@@ -425,16 +425,18 @@ pub struct RemoveHomeAssistantEndpointArgs {
 #[allow(clippy::disallowed_types)]
 mod mcp_fed {
     use super::*;
+    use crate::json_schema::JsonSchemaNode;
 
-    /// `input_schema` is raw JSON Schema from the upstream MCP server — shape is server-defined.
+    /// `input_schema` is JSON Schema from the upstream MCP server, typed via
+    /// `JsonSchemaNode` (full vocabulary + recursive typed extensions; no `Value` leak).
     #[derive(Serialize, Deserialize, JsonSchema)]
     #[serde(rename_all = "camelCase")]
     pub struct McpToolEntry {
         pub server: String,
         pub name: String,
         pub description: String,
-        /// Raw JSON Schema as advertised by the upstream MCP server — shape is server-defined.
-        pub input_schema: serde_json::Value,
+        /// Typed JSON Schema as advertised by the upstream MCP server.
+        pub input_schema: JsonSchemaNode,
     }
 
     #[cfg_attr(feature = "cli", derive(clap::Args))]
