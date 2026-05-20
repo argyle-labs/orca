@@ -15,3 +15,13 @@ pub trait DbAdminService: Send + Sync {
     async fn up(&self) -> Result<DbMigrateReport>;
     async fn down(&self) -> Result<DbMigrateReport>;
 }
+
+/// Embedder hook — see `services::mod` doc.
+pub trait ProvideDbAdmin {
+    fn db_admin(&self) -> std::sync::Arc<dyn DbAdminService>;
+}
+
+/// Register a `DbAdminService` into `ToolCtx`.
+pub fn register_db_admin(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideDbAdmin) {
+    ctx.register_service(p.db_admin());
+}

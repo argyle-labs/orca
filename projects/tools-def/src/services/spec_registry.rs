@@ -48,3 +48,13 @@ pub trait SpecRegistryService: Send + Sync {
         operation_name: Option<&str>,
     ) -> Result<GraphqlProxyResult>;
 }
+
+/// Embedder hook — see `services::mod` doc.
+pub trait ProvideSpecRegistry {
+    fn spec_registry(&self) -> std::sync::Arc<dyn SpecRegistryService>;
+}
+
+/// Register a `SpecRegistryService` into `ToolCtx`.
+pub fn register_spec_registry(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideSpecRegistry) {
+    ctx.register_service(p.spec_registry());
+}

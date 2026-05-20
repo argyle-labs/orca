@@ -65,9 +65,9 @@ pub mod plugins;
 pub mod pod;
 pub mod proxmox;
 pub mod schedule;
-pub mod sweep;
 pub mod services;
 pub mod spec_registry;
+pub mod sweep;
 pub mod system;
 
 /// Re-export of the opaque JSON passthrough wrapper — see `json_any` module for policy.

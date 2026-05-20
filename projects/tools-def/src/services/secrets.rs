@@ -72,3 +72,13 @@ pub trait SecretsBackend: Send + Sync {
     /// this should be a no-op or vendor-specific cleanup).
     async fn delete(&self, ref_path: &str) -> Result<()>;
 }
+
+/// Embedder hook — see `services::mod` doc.
+pub trait ProvideSecrets {
+    fn secrets(&self) -> std::sync::Arc<dyn SecretsService>;
+}
+
+/// Register a `SecretsService` into `ToolCtx`.
+pub fn register_secrets(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideSecrets) {
+    ctx.register_service(p.secrets());
+}

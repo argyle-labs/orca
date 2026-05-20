@@ -40,3 +40,13 @@ pub trait DockerService: Send + Sync {
     /// state. Used by the cross-project logs panel.
     async fn log_services(&self) -> Result<Vec<DockerLogProject>>;
 }
+
+/// Embedder hook — see `services::mod` doc.
+pub trait ProvideDocker {
+    fn docker(&self) -> std::sync::Arc<dyn DockerService>;
+}
+
+/// Register a `DockerService` into `ToolCtx`.
+pub fn register_docker(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideDocker) {
+    ctx.register_service(p.docker());
+}

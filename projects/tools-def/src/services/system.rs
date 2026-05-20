@@ -16,3 +16,13 @@ pub trait SystemService: Send + Sync {
     /// report.
     async fn action(&self, action: &str) -> Result<SystemActionResult>;
 }
+
+/// Embedder hook — see `services::mod` doc.
+pub trait ProvideSystem {
+    fn system(&self) -> std::sync::Arc<dyn SystemService>;
+}
+
+/// Register a `SystemService` into `ToolCtx`.
+pub fn register_system(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideSystem) {
+    ctx.register_service(p.system());
+}

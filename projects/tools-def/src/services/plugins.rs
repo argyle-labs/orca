@@ -41,3 +41,13 @@ pub trait PluginsService: Send + Sync {
 
     async fn sync_plugin_creds(&self, plugin: &str) -> Result<()>;
 }
+
+/// Embedder hook — see `services::mod` doc.
+pub trait ProvidePlugins {
+    fn plugins(&self) -> std::sync::Arc<dyn PluginsService>;
+}
+
+/// Register a `PluginsService` into `ToolCtx`.
+pub fn register_plugins(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvidePlugins) {
+    ctx.register_service(p.plugins());
+}

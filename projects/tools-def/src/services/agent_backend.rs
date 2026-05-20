@@ -32,3 +32,16 @@ pub trait AgentBackendService: Send + Sync {
     /// Whether an Anthropic API key is currently stored in the encrypted DB.
     async fn api_key_present(&self) -> Result<bool>;
 }
+
+/// Embedder hook — implemented by hosts (orca-server, orca-app-kit) to
+/// yield their concrete `AgentBackendService` impl into `ToolCtx`. See
+/// `services::mod` doc for the convention.
+pub trait ProvideAgentBackend {
+    fn agent_backend(&self) -> std::sync::Arc<dyn AgentBackendService>;
+}
+
+/// Register an `AgentBackendService` into `ToolCtx` from any embedder that
+/// implements `ProvideAgentBackend`.
+pub fn register_agent_backend(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideAgentBackend) {
+    ctx.register_service(p.agent_backend());
+}

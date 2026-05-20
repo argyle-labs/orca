@@ -62,3 +62,14 @@ pub trait AgentsService: Send + Sync {
     /// summary when a local model is available.
     async fn search_logs(&self, query: &str, limit: usize) -> Result<SearchLogsData>;
 }
+
+/// Embedder hook — implemented by hosts to yield their concrete
+/// `AgentsService` impl into `ToolCtx`. See `services::mod` doc.
+pub trait ProvideAgents {
+    fn agents(&self) -> std::sync::Arc<dyn AgentsService>;
+}
+
+/// Register an `AgentsService` into `ToolCtx`.
+pub fn register_agents(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideAgents) {
+    ctx.register_service(p.agents());
+}

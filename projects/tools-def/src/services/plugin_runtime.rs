@@ -22,3 +22,13 @@ pub trait PluginRuntimeService: Send + Sync {
     #[allow(clippy::disallowed_types)]
     async fn set(&self, plugin: &str, key: &str, value: &Value) -> Result<()>;
 }
+
+/// Embedder hook — see `services::mod` doc.
+pub trait ProvidePluginRuntime {
+    fn plugin_runtime(&self) -> std::sync::Arc<dyn PluginRuntimeService>;
+}
+
+/// Register a `PluginRuntimeService` into `ToolCtx`.
+pub fn register_plugin_runtime(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvidePluginRuntime) {
+    ctx.register_service(p.plugin_runtime());
+}

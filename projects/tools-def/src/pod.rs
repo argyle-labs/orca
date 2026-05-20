@@ -455,6 +455,16 @@ pub mod native_support {
 #[cfg(feature = "native")]
 pub use native_support::{PodExecDispatch, PodService};
 
+#[cfg(feature = "native")]
+pub trait ProvidePod {
+    fn pod(&self) -> std::sync::Arc<dyn PodService>;
+}
+
+#[cfg(feature = "native")]
+pub fn register_pod(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvidePod) {
+    ctx.register_service(p.pod());
+}
+
 // ── Tools ───────────────────────────────────────────────────────────────────
 
 /// List paired pod peers (mesh members).

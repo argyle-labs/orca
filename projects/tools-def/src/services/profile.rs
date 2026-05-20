@@ -22,3 +22,13 @@ pub trait ProfileService: Send + Sync {
     async fn unshare(&self, spec: &str, user: &str) -> Result<ProfileMutationResult>;
     async fn shares(&self, spec: &str) -> Result<ProfileSharesReport>;
 }
+
+/// Embedder hook — see `services::mod` doc.
+pub trait ProvideProfile {
+    fn profile(&self) -> std::sync::Arc<dyn ProfileService>;
+}
+
+/// Register a `ProfileService` into `ToolCtx`.
+pub fn register_profile(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideProfile) {
+    ctx.register_service(p.profile());
+}

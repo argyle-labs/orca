@@ -43,3 +43,13 @@ pub trait AuthService: Send + Sync {
     /// Revoke a token by id. Returns true if a row was deleted.
     async fn token_revoke(&self, id: &str) -> Result<bool>;
 }
+
+/// Embedder hook — see `services::mod` doc.
+pub trait ProvideAuth {
+    fn auth(&self) -> std::sync::Arc<dyn AuthService>;
+}
+
+/// Register a `AuthService` into `ToolCtx`.
+pub fn register_auth(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideAuth) {
+    ctx.register_service(p.auth());
+}

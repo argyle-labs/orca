@@ -82,3 +82,13 @@ pub trait DocsService: Send + Sync {
     /// All embedded slash-command / skill basenames in the orca vault.
     async fn list_commands(&self) -> Result<Vec<String>>;
 }
+
+/// Embedder hook — see `services::mod` doc.
+pub trait ProvideDocs {
+    fn docs(&self) -> std::sync::Arc<dyn DocsService>;
+}
+
+/// Register a `DocsService` into `ToolCtx`.
+pub fn register_docs(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideDocs) {
+    ctx.register_service(p.docs());
+}

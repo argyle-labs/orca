@@ -24,3 +24,6 @@ uniffi::setup_scaffolding!();
 // reference, the linker would drop the crate.
 #[allow(unused_imports)]
 use orca_tools_def as _;
+
+pub mod lifecycle;
+pub use lifecycle::{AppKitConfig, OrcaAppKit};

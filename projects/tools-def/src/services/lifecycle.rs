@@ -27,3 +27,13 @@ pub trait LifecycleService: Send + Sync {
     async fn dev_disable(&self) -> Result<SystemDevDisableOutput>;
     async fn dev_sync(&self) -> Result<SystemDevSyncOutput>;
 }
+
+/// Embedder hook — see `services::mod` doc.
+pub trait ProvideLifecycle {
+    fn lifecycle(&self) -> std::sync::Arc<dyn LifecycleService>;
+}
+
+/// Register a `LifecycleService` into `ToolCtx`.
+pub fn register_lifecycle(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideLifecycle) {
+    ctx.register_service(p.lifecycle());
+}

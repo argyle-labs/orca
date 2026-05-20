@@ -35,3 +35,13 @@ pub trait InfraService: Send + Sync {
     async fn service_logs(&self, project: &str, service: &str, tail: u64) -> Result<String>;
     async fn run_tests(&self, suite: &str) -> Result<TestRunResult>;
 }
+
+/// Embedder hook — see `services::mod` doc.
+pub trait ProvideInfra {
+    fn infra(&self) -> std::sync::Arc<dyn InfraService>;
+}
+
+/// Register a `InfraService` into `ToolCtx`.
+pub fn register_infra(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideInfra) {
+    ctx.register_service(p.infra());
+}

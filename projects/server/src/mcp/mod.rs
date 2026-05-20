@@ -51,17 +51,36 @@ pub fn register_all_tools(reg: &mut ToolRegistry) {
     spec_tools::register(reg);
 }
 
-pub fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
-    use orca_tools_def::services::agent_backend::AgentBackendService;
-    let mut ctx = ToolCtx::new(config);
-    let agent_backend: Arc<dyn AgentBackendService> =
-        Arc::new(crate::llm::agent_backend_service::ServerAgentBackend);
-    ctx.register_service(agent_backend);
-    let agents_svc: Arc<dyn orca_tools_def::services::agents::AgentsService> =
+/// Concrete embedder that satisfies the per-service `Provide*` traits in
+/// `tools_def::services::*`. Each `impl ProvideFoo for ServerEmbedder` is the
+/// single source of truth for which server-side type backs that service.
+struct ServerEmbedder {
+    config: Arc<Config>,
+}
+
+impl orca_tools_def::services::agent_backend::ProvideAgentBackend for ServerEmbedder {
+    fn agent_backend(
+        &self,
+    ) -> Arc<dyn orca_tools_def::services::agent_backend::AgentBackendService> {
+        Arc::new(crate::llm::agent_backend_service::ServerAgentBackend)
+    }
+}
+
+impl orca_tools_def::services::agents::ProvideAgents for ServerEmbedder {
+    fn agents(&self) -> Arc<dyn orca_tools_def::services::agents::AgentsService> {
         Arc::new(crate::mcp::agents_service::ServerAgents {
-            config: ctx.config.clone(),
-        });
-    ctx.register_service(agents_svc);
+            config: self.config.clone(),
+        })
+    }
+}
+
+pub fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
+    let embedder = ServerEmbedder {
+        config: config.clone(),
+    };
+    let mut ctx = ToolCtx::new(config);
+    orca_tools_def::services::agent_backend::register_agent_backend(&mut ctx, &embedder);
+    orca_tools_def::services::agents::register_agents(&mut ctx, &embedder);
     let docs_svc: Arc<dyn orca_tools_def::services::docs::DocsService> =
         Arc::new(crate::mcp::docs_service::ServerDocs {
             config: ctx.config.clone(),

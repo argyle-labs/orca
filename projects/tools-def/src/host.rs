@@ -109,6 +109,19 @@ mod native_support {
 #[cfg(feature = "native")]
 pub use native_support::HostRefreshHook;
 
+#[cfg(feature = "native")]
+pub trait ProvideHostRefresh {
+    fn host_refresh(&self) -> std::sync::Arc<dyn HostRefreshHook + Send + Sync>;
+}
+
+#[cfg(feature = "native")]
+pub fn register_host_refresh(
+    ctx: &mut orca_utils::tool::ToolCtx,
+    p: &impl ProvideHostRefresh,
+) {
+    ctx.register_service(p.host_refresh());
+}
+
 /// Local host snapshot: display name, machine_id, and every addressing channel.
 #[orca_tool(domain = "host", verb = "info", remote_ok = true)]
 async fn host_info(
