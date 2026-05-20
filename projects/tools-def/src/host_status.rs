@@ -101,18 +101,18 @@ mod tests {
     fn seed(conn: &orca_db::Conn) {
         // Two peers, multiple rows each, one with malformed payload to exercise
         // the `system = None` branch.
-        orca_db::host_status::insert_status(conn, "alpha", 100, r#"{"bad":true}"#, 101, "local")
+        orca_db::host_status::insert_status(conn, "alpha", 100, "not json at all", 101, "local")
             .unwrap();
         orca_db::host_status::insert_status(
             conn,
             "alpha",
             200,
-            r#"{"bad":true}"#, // still unparseable as SystemInfoReport
+            "not json at all", // still unparseable as SystemInfoReport
             201,
             "local",
         )
         .unwrap();
-        orca_db::host_status::insert_status(conn, "beta", 150, r#"{"bad":true}"#, 151, "synced")
+        orca_db::host_status::insert_status(conn, "beta", 150, "not json at all", 151, "synced")
             .unwrap();
     }
 
