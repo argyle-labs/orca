@@ -132,6 +132,48 @@ fn same_v4_slash_24(a: &str, b: &str) -> bool {
     matches!((prefix(a), prefix(b)), (Some(x), Some(y)) if x == y)
 }
 
+/// Try `f(target)` for each `target` in order. Return the first `Ok` value;
+/// if every attempt fails, return the last error. `Err("no dial targets")`
+/// when the slice is empty.
+///
+/// Generic over the future + return so this combinator is testable without
+/// touching the TLS stack. Callers compose this with `call_typed` (or any
+/// per-target dial function) to get full multi-channel retry semantics.
+pub async fn try_targets<R, F, Fut>(targets: &[String], mut f: F) -> anyhow::Result<R>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<R>>,
+{
+    let mut last_err: Option<anyhow::Error> = None;
+    for t in targets {
+        match f(t.clone()).await {
+            Ok(r) => return Ok(r),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no dial targets")))
+}
+
+/// DB-backed convenience wrapper: load this host's `host_addressing` rows
+/// and the named peer's `pod_peer_addresses` rows, then return the dial-target
+/// list. `legacy_peer_addr` is the single-address fallback from
+/// `pod_peers.peer_addr` for rc.≤24 compat.
+pub fn dial_targets_for_peer(
+    conn: &rusqlite::Connection,
+    peer_id: &str,
+    legacy_peer_addr: &str,
+) -> anyhow::Result<Vec<String>> {
+    let local: Vec<Channel> = db::host_addressing::list_host_addressing(conn)?
+        .into_iter()
+        .map(|r| Channel::new(r.key, r.value))
+        .collect();
+    let peer: Vec<Channel> = db::host_addressing::list_peer_addresses(conn, peer_id)?
+        .into_iter()
+        .map(|r| Channel::new(r.kind, r.value))
+        .collect();
+    Ok(select_dial_targets(&local, &peer, legacy_peer_addr))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +267,46 @@ mod tests {
         let local = vec![ch(TAILSCALE_V6, "fd7a::1")];
         let out = select_dial_targets(&local, &peer, "");
         assert_eq!(out, vec!["fe80::5"]);
+    }
+
+    #[tokio::test]
+    async fn try_targets_returns_first_success() {
+        let targets = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let mut tried: Vec<String> = Vec::new();
+        let out = try_targets(&targets, |t| {
+            tried.push(t.clone());
+            async move {
+                if t == "b" {
+                    Ok::<_, anyhow::Error>(42)
+                } else {
+                    Err(anyhow::anyhow!("nope: {t}"))
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(out, 42);
+        // stops after first success
+        assert_eq!(tried, vec!["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn try_targets_returns_last_error_on_all_fail() {
+        let targets = vec!["a".to_string(), "b".to_string()];
+        let err = try_targets(&targets, |t| async move {
+            Err::<(), _>(anyhow::anyhow!("fail: {t}"))
+        })
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("fail: b"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn try_targets_empty_slice_errors() {
+        let err = try_targets::<(), _, _>(&[], |_| async { Ok(()) })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no dial targets"));
     }
 
     #[test]

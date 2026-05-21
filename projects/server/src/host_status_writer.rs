@@ -132,12 +132,26 @@ async fn pull_one_peer(peer_id: String, addr: String) {
 }
 
 async fn pull_one_peer_inner(peer_id: &str, addr: &str) -> Result<()> {
+    // Build the multi-channel dial list off-thread (DB I/O), then race through
+    // it sequentially. Falls back to the single legacy `addr` when the peer
+    // hasn't yet propagated a snapshot.
+    let targets = {
+        let pid = peer_id.to_string();
+        let addr_owned = addr.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
+            let conn = db::open_default()?;
+            crate::pod::dialer::dial_targets_for_peer(&conn, &pid, &addr_owned)
+        })
+        .await??
+    };
+
     // Refresh peer_hostname + addressing opportunistically — pod/ping always
     // returns the OS hostname, and rc.25+ peers also include a full addressing
     // snapshot (display_name + per-channel addresses). Display name from the
     // snapshot wins; fall back to OS hostname for rc.≤24 peers.
-    if let Ok(Ok(pong)) = tokio::time::timeout(Duration::from_secs(5), crate::pod::ping(addr)).await
-    {
+    let ping_fut =
+        crate::pod::dialer::try_targets(&targets, |t| async move { crate::pod::ping(&t).await });
+    if let Ok(Ok(pong)) = tokio::time::timeout(Duration::from_secs(5), ping_fut).await {
         let pid = peer_id.to_string();
         let host = pong
             .addressing
