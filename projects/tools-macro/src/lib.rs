@@ -138,14 +138,28 @@ fn lit_str(expr: &Expr) -> syn::Result<LitStr> {
     }
 }
 
+// The proc_macro_attribute entry is a thin trampoline into `expand_to_tokens`
+// — it parses TokenStreams that only exist during downstream compilation, so
+// unit tests can't drive it. Gating it on `not(test)` keeps it instrumented
+// by the production build (where it's the only public surface) and out of
+// the test build's coverage denominator. Tests cover `expand_to_tokens`
+// directly.
+#[cfg(not(test))]
 #[proc_macro_attribute]
 pub fn orca_tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr = parse_macro_input!(attr as ToolAttr);
     let item = parse_macro_input!(item as ItemFn);
+    expand_to_tokens(attr, item).into()
+}
 
+/// Wrapper around `expand` that flattens `Result` into a single `TokenStream2`,
+/// turning errors into compile_error invocations. Pulled out so the
+/// error-flattening branch is testable — the `#[proc_macro_attribute]` entry
+/// above is unreachable from unit tests.
+fn expand_to_tokens(attr: ToolAttr, item: ItemFn) -> TokenStream2 {
     match expand(attr, item) {
-        Ok(ts) => ts.into(),
-        Err(e) => e.to_compile_error().into(),
+        Ok(ts) => ts,
+        Err(e) => e.to_compile_error(),
     }
 }
 
@@ -171,16 +185,12 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             ));
         }
     };
-    let _ctx_arg = match sig_iter.next() {
-        Some(FnArg::Typed(PatType { pat, ty, .. })) => Some((pat.clone(), (**ty).clone())),
-        None => None,
-        _ => {
-            return Err(syn::Error::new_spanned(
-                &item.sig.inputs,
-                "second param must be `ctx: &ToolCtx`",
-            ));
-        }
-    };
+    // Peek the second arg — we don't use its type (the thunk hardcodes
+    // `&ToolCtx`) but require that, if present, it's a typed positional
+    // param rather than a `self` receiver. Iteration after the first param
+    // is guaranteed by Rust's grammar to be either Typed or absent, so
+    // there is no `_` arm to defend against.
+    let _ = sig_iter.next();
 
     // Return type: `Result<OutputTy>` or `Result<OutputTy, ErrTy>` — we only
     // care about OutputTy for the OrcaToolDef::Output projection.
@@ -370,6 +380,403 @@ fn collect_doc(attrs: &[Attribute]) -> Option<String> {
         }
     }
     if out.is_empty() { None } else { Some(out) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quote::quote;
+    use syn::parse_quote;
+
+    // ── snake_to_pascal ───────────────────────────────────────────────────────
+
+    #[test]
+    fn snake_to_pascal_capitalizes_single_word() {
+        assert_eq!(snake_to_pascal("host"), "Host");
+    }
+
+    #[test]
+    fn snake_to_pascal_handles_multiple_segments() {
+        assert_eq!(snake_to_pascal("host_info_v2"), "HostInfoV2");
+    }
+
+    #[test]
+    fn snake_to_pascal_handles_empty_string() {
+        assert_eq!(snake_to_pascal(""), "");
+    }
+
+    #[test]
+    fn snake_to_pascal_handles_leading_and_trailing_underscores() {
+        // Leading/trailing underscores trigger the `cap = true` branch
+        // without consuming a char — exercises both the `if c == '_'` and
+        // `else if cap` branches.
+        assert_eq!(snake_to_pascal("_foo_"), "Foo");
+    }
+
+    // ── collect_doc ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn collect_doc_returns_none_for_no_doc_attrs() {
+        let attrs: Vec<Attribute> = vec![parse_quote!(#[derive(Debug)])];
+        assert!(collect_doc(&attrs).is_none());
+    }
+
+    #[test]
+    fn collect_doc_collects_single_doc_line() {
+        let attrs: Vec<Attribute> = vec![parse_quote!(#[doc = "hello"])];
+        assert_eq!(collect_doc(&attrs).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn collect_doc_concatenates_multiple_lines_with_space() {
+        let attrs: Vec<Attribute> = vec![
+            parse_quote!(#[doc = "first line"]),
+            parse_quote!(#[doc = "second line"]),
+        ];
+        assert_eq!(
+            collect_doc(&attrs).as_deref(),
+            Some("first line second line")
+        );
+    }
+
+    #[test]
+    fn collect_doc_ignores_non_doc_attrs() {
+        let attrs: Vec<Attribute> = vec![
+            parse_quote!(#[derive(Debug)]),
+            parse_quote!(#[doc = "kept"]),
+            parse_quote!(#[allow(dead_code)]),
+        ];
+        assert_eq!(collect_doc(&attrs).as_deref(), Some("kept"));
+    }
+
+    // ── extract_ok_ty ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn extract_ok_ty_handles_result_single_arg() {
+        let ret: ReturnType = parse_quote!(-> Result<u32>);
+        let ty = extract_ok_ty(&ret).expect("ok type extracted");
+        assert_eq!(quote!(#ty).to_string(), "u32");
+    }
+
+    #[test]
+    fn extract_ok_ty_handles_result_two_args() {
+        let ret: ReturnType = parse_quote!(-> Result<String, MyErr>);
+        let ty = extract_ok_ty(&ret).unwrap();
+        assert_eq!(quote!(#ty).to_string(), "String");
+    }
+
+    #[test]
+    fn extract_ok_ty_returns_none_for_unit_return() {
+        let ret: ReturnType = ReturnType::Default;
+        assert!(extract_ok_ty(&ret).is_none());
+    }
+
+    #[test]
+    fn extract_ok_ty_returns_none_for_non_result_path() {
+        let ret: ReturnType = parse_quote!(-> Option<u32>);
+        assert!(extract_ok_ty(&ret).is_none());
+    }
+
+    #[test]
+    fn extract_ok_ty_returns_none_for_non_path_type() {
+        // Tuple type — not a Type::Path.
+        let ret: ReturnType = parse_quote!(-> (u32, u32));
+        assert!(extract_ok_ty(&ret).is_none());
+    }
+
+    #[test]
+    fn extract_ok_ty_returns_none_for_path_without_angle_brackets() {
+        let ret: ReturnType = parse_quote!(-> Result);
+        assert!(extract_ok_ty(&ret).is_none());
+    }
+
+    // ── lit_str ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lit_str_accepts_string_literal() {
+        let expr: Expr = parse_quote!("hello");
+        assert_eq!(lit_str(&expr).unwrap().value(), "hello");
+    }
+
+    #[test]
+    fn lit_str_rejects_non_string_literal() {
+        let expr: Expr = parse_quote!(42);
+        assert!(lit_str(&expr).is_err());
+    }
+
+    // ── ToolAttr parsing ──────────────────────────────────────────────────────
+
+    fn parse_attr(ts: proc_macro2::TokenStream) -> syn::Result<ToolAttr> {
+        syn::parse2(ts)
+    }
+
+    #[test]
+    fn tool_attr_parses_minimum_required_fields() {
+        let attr = parse_attr(quote!(domain = "host", verb = "info")).unwrap();
+        assert_eq!(attr.domain.value(), "host");
+        assert_eq!(attr.verb.value(), "info");
+        assert!(!attr.remote_ok);
+        assert!(attr.cli_mode.is_none());
+        assert!(attr.role.is_none());
+    }
+
+    #[test]
+    fn tool_attr_parses_all_optional_fields() {
+        let attr = parse_attr(quote!(
+            domain = "x",
+            verb = "y",
+            remote_ok = true,
+            cli = manual,
+            role = "admin"
+        ))
+        .unwrap();
+        assert!(attr.remote_ok);
+        assert_eq!(attr.cli_mode.unwrap().to_string(), "manual");
+        assert_eq!(attr.role.unwrap().value(), "admin");
+    }
+
+    #[test]
+    fn tool_attr_accepts_cli_as_string_literal() {
+        let attr = parse_attr(quote!(domain = "x", verb = "y", cli = "skip")).unwrap();
+        assert_eq!(attr.cli_mode.unwrap().to_string(), "skip");
+    }
+
+    #[test]
+    fn tool_attr_rejects_non_bool_remote_ok() {
+        let err = parse_attr(quote!(domain = "x", verb = "y", remote_ok = "true"))
+            .err()
+            .expect("expected parse error");
+        assert!(err.to_string().contains("remote_ok"));
+    }
+
+    #[test]
+    fn tool_attr_rejects_invalid_role_value() {
+        let err = parse_attr(quote!(domain = "x", verb = "y", role = "wizard"))
+            .err()
+            .expect("expected parse error");
+        assert!(err.to_string().contains("role must be"));
+    }
+
+    #[test]
+    fn tool_attr_rejects_unknown_key() {
+        let err = parse_attr(quote!(domain = "x", verb = "y", banana = "split"))
+            .err()
+            .expect("expected parse error");
+        assert!(err.to_string().contains("unknown key"));
+    }
+
+    #[test]
+    fn tool_attr_rejects_missing_domain() {
+        let err = parse_attr(quote!(verb = "y"))
+            .err()
+            .expect("expected parse error");
+        assert!(err.to_string().contains("missing `domain"));
+    }
+
+    #[test]
+    fn tool_attr_rejects_missing_verb() {
+        let err = parse_attr(quote!(domain = "x"))
+            .err()
+            .expect("expected parse error");
+        assert!(err.to_string().contains("missing `verb"));
+    }
+
+    #[test]
+    fn tool_attr_rejects_non_ident_cli_mode_expr() {
+        // `cli = 42` — not an ident, not a string.
+        let err = parse_attr(quote!(domain = "x", verb = "y", cli = 42))
+            .err()
+            .expect("expected parse error");
+        assert!(err.to_string().contains("expected ident"));
+    }
+
+    // ── expand ────────────────────────────────────────────────────────────────
+
+    fn ok_fn() -> ItemFn {
+        parse_quote! {
+            /// Doc line one.
+            /// Doc line two.
+            async fn host_info(args: HostInfoArgs, ctx: &ToolCtx) -> anyhow::Result<HostInfoOutput> {
+                let _ = args;
+                let _ = ctx;
+                Ok(HostInfoOutput {})
+            }
+        }
+    }
+
+    fn attr_ok() -> ToolAttr {
+        parse_attr(quote!(domain = "host", verb = "info")).unwrap()
+    }
+
+    #[test]
+    fn expand_emits_zst_and_orca_tool_def_for_minimal_input() {
+        let out = expand(attr_ok(), ok_fn()).unwrap().to_string();
+        assert!(out.contains("pub struct HostInfo"), "got: {out}");
+        assert!(out.contains("OrcaToolDef"), "got: {out}");
+        assert!(out.contains("\"host.info\""), "got: {out}");
+        // Doc lines collapsed with space separator.
+        assert!(out.contains("Doc line one. Doc line two."), "got: {out}");
+    }
+
+    #[test]
+    fn expand_with_remote_ok_emits_const_remote_ok_true() {
+        let attr = parse_attr(quote!(domain = "h", verb = "v", remote_ok = true)).unwrap();
+        let out = expand(attr, ok_fn()).unwrap().to_string();
+        assert!(out.contains("REMOTE_OK : bool = true"), "got: {out}");
+    }
+
+    #[test]
+    fn expand_with_role_emits_required_role_override() {
+        let attr = parse_attr(quote!(domain = "h", verb = "v", role = "admin")).unwrap();
+        let out = expand(attr, ok_fn()).unwrap().to_string();
+        assert!(
+            out.contains("REQUIRED_ROLE : & 'static str = \"admin\""),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_without_role_does_not_emit_required_role_const() {
+        let out = expand(attr_ok(), ok_fn()).unwrap().to_string();
+        assert!(!out.contains("REQUIRED_ROLE"), "got: {out}");
+    }
+
+    #[test]
+    fn expand_cli_manual_skips_register_op_block() {
+        let attr = parse_attr(quote!(domain = "h", verb = "v", cli = manual)).unwrap();
+        let out = expand(attr, ok_fn()).unwrap().to_string();
+        assert!(!out.contains("register_op"), "got: {out}");
+    }
+
+    #[test]
+    fn expand_cli_skip_also_skips_register_op_block() {
+        let attr = parse_attr(quote!(domain = "h", verb = "v", cli = skip)).unwrap();
+        let out = expand(attr, ok_fn()).unwrap().to_string();
+        assert!(!out.contains("register_op"), "got: {out}");
+    }
+
+    #[test]
+    fn expand_default_cli_emits_register_op_block() {
+        let out = expand(attr_ok(), ok_fn()).unwrap().to_string();
+        assert!(out.contains("register_op"), "got: {out}");
+    }
+
+    #[test]
+    fn expand_rejects_non_async_fn() {
+        let item: ItemFn = parse_quote! {
+            fn host_info(args: A, ctx: &ToolCtx) -> anyhow::Result<O> { unimplemented!() }
+        };
+        let err = expand(attr_ok(), item).err().expect("expected parse error");
+        assert!(err.to_string().contains("async fn"));
+    }
+
+    #[test]
+    fn expand_rejects_fn_with_no_args() {
+        let item: ItemFn = parse_quote! {
+            async fn host_info() -> anyhow::Result<O> { unimplemented!() }
+        };
+        let err = expand(attr_ok(), item).err().expect("expected parse error");
+        assert!(err.to_string().contains("expected first param"));
+    }
+
+    #[test]
+    fn expand_rejects_unparseable_return_type() {
+        let item: ItemFn = parse_quote! {
+            async fn host_info(args: A, ctx: &ToolCtx) -> Option<O> { unimplemented!() }
+        };
+        let err = expand(attr_ok(), item).err().expect("expected parse error");
+        assert!(err.to_string().contains("Result"));
+    }
+
+    #[test]
+    fn expand_underscored_args_param_uses_discarded_binding() {
+        let item: ItemFn = parse_quote! {
+            async fn host_info(_args: A, ctx: &ToolCtx) -> anyhow::Result<O> {
+                let _ = ctx;
+                unimplemented!()
+            }
+        };
+        let out = expand(attr_ok(), item).unwrap().to_string();
+        // The thunk should declare a `_args` param rather than re-binding.
+        assert!(out.contains("_args"), "got: {out}");
+    }
+
+    #[test]
+    fn expand_with_only_one_arg_treats_missing_ctx_as_none_branch() {
+        // Single-arg fn — second param is absent, exercising `None => None`
+        // in the ctx_arg match. Must still have a valid Result return.
+        let item: ItemFn = parse_quote! {
+            async fn host_info(args: A) -> anyhow::Result<O> {
+                let _ = args;
+                unimplemented!()
+            }
+        };
+        // Expansion succeeds — ctx is synthesized into the thunk regardless.
+        let out = expand(attr_ok(), item).unwrap().to_string();
+        assert!(out.contains("HostInfo"));
+    }
+
+    #[test]
+    fn expand_to_tokens_ok_returns_expansion() {
+        let ts = expand_to_tokens(attr_ok(), ok_fn()).to_string();
+        assert!(ts.contains("HostInfo"));
+    }
+
+    #[test]
+    fn expand_to_tokens_err_returns_compile_error() {
+        // Non-async fn → expand errors → expand_to_tokens flattens into a
+        // compile_error invocation.
+        let item: ItemFn = parse_quote! {
+            fn host_info(args: A, ctx: &ToolCtx) -> anyhow::Result<O> { unimplemented!() }
+        };
+        let ts = expand_to_tokens(attr_ok(), item).to_string();
+        assert!(ts.contains("compile_error"), "got: {ts}");
+    }
+
+    #[test]
+    fn expand_handles_non_ident_args_pattern() {
+        // Tuple-destructured args param: `(a, b): (u32, u32)` — Pat is not
+        // Pat::Ident, exercising the `_ => true` branch in `needs_args_binding`
+        // AND the `_ => quote!(__orca_args)` branch in `args_forward`.
+        let item: ItemFn = parse_quote! {
+            async fn host_info((a, b): (u32, u32), ctx: &ToolCtx) -> anyhow::Result<O> {
+                let _ = (a, b, ctx);
+                unimplemented!()
+            }
+        };
+        let out = expand(attr_ok(), item).unwrap().to_string();
+        assert!(out.contains("__orca_args"), "got: {out}");
+    }
+
+    #[test]
+    fn extract_ok_ty_skips_non_type_generic_args() {
+        // Result<'a, T> — the first generic argument is a lifetime, not a
+        // type. `find_map` should skip it and pick T.
+        let ret: ReturnType = parse_quote!(-> Result<'a, T>);
+        let ty = extract_ok_ty(&ret).expect("ok type extracted");
+        assert_eq!(quote!(#ty).to_string(), "T");
+    }
+
+    #[test]
+    fn collect_doc_ignores_non_namevalue_doc_attrs() {
+        // `#[doc(hidden)]` is Meta::List, not Meta::NameValue — the inner
+        // `if let` falls through without appending to `out`, so a sole
+        // doc(hidden) attr yields None (out is empty).
+        let attrs: Vec<Attribute> = vec![parse_quote!(#[doc(hidden)])];
+        assert!(collect_doc(&attrs).is_none());
+    }
+
+    #[test]
+    fn expand_no_doc_falls_back_to_fn_name_as_description() {
+        let item: ItemFn = parse_quote! {
+            async fn host_info(args: A, ctx: &ToolCtx) -> anyhow::Result<O> {
+                let _ = (args, ctx);
+                unimplemented!()
+            }
+        };
+        let out = expand(attr_ok(), item).unwrap().to_string();
+        assert!(out.contains("\"host_info\""), "got: {out}");
+    }
 }
 
 fn snake_to_pascal(s: &str) -> String {

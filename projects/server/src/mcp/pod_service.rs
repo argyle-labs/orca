@@ -432,8 +432,10 @@ impl PodService for ServerPod {
     async fn dev_enable_fanout(&self, peers: &[String]) -> Result<PodDevEnableOutput> {
         use crate::commands::update::cmd_dev_enable;
 
-        let targets = select_peer_targets(peers)?;
+        let all_targets = select_peer_targets(peers)?;
         let include_local = peers_includes_local(peers);
+        let exclude = load_dev_exclude_set()?;
+        let (targets, excluded) = partition_dev_targets(all_targets, &exclude);
 
         let handles: Vec<_> = targets
             .into_iter()
@@ -458,6 +460,14 @@ impl PodService for ServerPod {
             .collect();
 
         let mut results: Vec<PodDevEnablePeerResult> = Vec::new();
+        for (peer_id, hostname, _addr) in excluded {
+            results.push(PodDevEnablePeerResult {
+                peer_id,
+                hostname,
+                status: "skipped".into(),
+                detail: Some("excluded by pod.dev_exclude_peers".into()),
+            });
+        }
         for h in handles {
             if let Ok(r) = h.await {
                 results.push(r);
@@ -562,17 +572,7 @@ impl PodService for ServerPod {
             let conn = db::open_default()?;
             let peers = pdb::list_peers(&conn)?;
             drop(conn);
-            let want = peer.to_ascii_lowercase();
-            let row = peers
-                .into_iter()
-                .find(|p| {
-                    p.departed_at.is_none()
-                        && (p.peer_id.to_ascii_lowercase() == want
-                            || p.peer_hostname.to_ascii_lowercase() == want
-                            || p.peer_addr.to_ascii_lowercase() == want)
-                })
-                .with_context(|| format!("no active paired peer matches '{peer}'"))?;
-            row.peer_addr
+            resolve_peer_addr(&peers, peer)?
         };
 
         let r = crate::pod::exec(&addr, tool, args).await?;
@@ -770,4 +770,217 @@ fn peers_includes_local(filter: &[String]) -> bool {
     filter
         .iter()
         .any(|s| matches!(s.to_ascii_lowercase().as_str(), "local" | "localhost"))
+}
+
+/// Resolve a user-supplied peer selector (peer_id, hostname, or addr) to a
+/// concrete dial address. Match is case-insensitive across all three fields;
+/// departed peers are skipped. Ambiguity (e.g. two paired peers with the same
+/// hostname) is rejected with a message listing the colliding peer_ids so the
+/// caller can re-issue with the unambiguous form.
+fn resolve_peer_addr(peers: &[pdb::PeerRow], input: &str) -> Result<String> {
+    let want = input.to_ascii_lowercase();
+    let matches: Vec<&pdb::PeerRow> = peers
+        .iter()
+        .filter(|p| {
+            p.departed_at.is_none()
+                && (p.peer_id.to_ascii_lowercase() == want
+                    || p.peer_hostname.to_ascii_lowercase() == want
+                    || p.peer_addr.to_ascii_lowercase() == want)
+        })
+        .collect();
+    match matches.as_slice() {
+        [] => anyhow::bail!("no active paired peer matches '{input}'"),
+        [one] => Ok(one.peer_addr.clone()),
+        many => {
+            let ids: Vec<&str> = many.iter().map(|p| p.peer_id.as_str()).collect();
+            anyhow::bail!(
+                "ambiguous peer selector '{input}' matches {} peers: {}; re-run with the peer_id form",
+                many.len(),
+                ids.join(", ")
+            )
+        }
+    }
+}
+
+/// Settings key holding the comma-separated peer_id / hostname exclusion list
+/// for `pod dev_enable`. Operator-controlled — never auto-populated. Set via
+/// `orca config set pod.dev_exclude_peers "<csv>"`. Hosts named here are
+/// reported as `status="skipped"` with detail `"excluded by …"` rather than
+/// being dialled, so a disk-constrained box (loki: 54 GB root, can't hold the
+/// ~20 GB cargo + target tree) doesn't get pulled into dev mode on a fanout.
+const DEV_EXCLUDE_KEY: &str = "pod.dev_exclude_peers";
+
+/// Read the dev-mode exclusion set from settings. Tokens are
+/// comma-separated, case-insensitive; whitespace + empty entries are
+/// ignored. Returns an empty set when the key is unset.
+fn load_dev_exclude_set() -> Result<std::collections::HashSet<String>> {
+    let conn = db::open_default()?;
+    let raw = db::settings::get(&conn, DEV_EXCLUDE_KEY)?;
+    drop(conn);
+    Ok(parse_exclude_set(raw.as_deref()))
+}
+
+fn parse_exclude_set(raw: Option<&str>) -> std::collections::HashSet<String> {
+    raw.unwrap_or("")
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Split fanout targets into (kept, excluded). A target is excluded when its
+/// peer_id, hostname, or addr (case-insensitive) appears in the exclude set.
+type DevTarget = (String, String, String);
+fn partition_dev_targets(
+    targets: Vec<DevTarget>,
+    exclude: &std::collections::HashSet<String>,
+) -> (Vec<DevTarget>, Vec<DevTarget>) {
+    if exclude.is_empty() {
+        return (targets, Vec::new());
+    }
+    let mut kept = Vec::with_capacity(targets.len());
+    let mut skipped = Vec::new();
+    for t in targets {
+        let (id_lc, host_lc, addr_lc) = (
+            t.0.to_ascii_lowercase(),
+            t.1.to_ascii_lowercase(),
+            t.2.to_ascii_lowercase(),
+        );
+        if exclude.contains(&id_lc) || exclude.contains(&host_lc) || exclude.contains(&addr_lc) {
+            skipped.push(t);
+        } else {
+            kept.push(t);
+        }
+    }
+    (kept, skipped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn peer(id: &str, hostname: &str, addr: &str, departed: bool) -> pdb::PeerRow {
+        pdb::PeerRow {
+            peer_id: id.into(),
+            peer_hostname: hostname.into(),
+            peer_addr: addr.into(),
+            peer_port: 12002,
+            pubkey_fp: None,
+            first_seen_at: 0,
+            last_seen_at: 0,
+            departed_at: if departed { Some(1) } else { None },
+            local_secure: false,
+            peer_secure: false,
+        }
+    }
+
+    #[test]
+    fn resolves_by_peer_id_case_insensitive() {
+        let peers = vec![peer("peer.abc", "willow", "10.0.0.1", false)];
+        assert_eq!(resolve_peer_addr(&peers, "PEER.abc").unwrap(), "10.0.0.1");
+    }
+
+    #[test]
+    fn resolves_by_hostname() {
+        let peers = vec![peer("peer.abc", "willow", "10.0.0.1", false)];
+        assert_eq!(resolve_peer_addr(&peers, "willow").unwrap(), "10.0.0.1");
+    }
+
+    #[test]
+    fn resolves_by_addr() {
+        let peers = vec![peer("peer.abc", "willow", "10.0.0.1", false)];
+        assert_eq!(resolve_peer_addr(&peers, "10.0.0.1").unwrap(), "10.0.0.1");
+    }
+
+    #[test]
+    fn departed_peers_are_skipped() {
+        let peers = vec![peer("peer.abc", "willow", "10.0.0.1", true)];
+        let err = resolve_peer_addr(&peers, "willow").unwrap_err();
+        assert!(err.to_string().contains("no active paired peer"));
+    }
+
+    #[test]
+    fn no_match_errors_with_selector() {
+        let peers = vec![peer("peer.abc", "willow", "10.0.0.1", false)];
+        let err = resolve_peer_addr(&peers, "mint").unwrap_err();
+        assert!(err.to_string().contains("'mint'"));
+    }
+
+    #[test]
+    fn ambiguous_hostname_lists_peer_ids() {
+        let peers = vec![
+            peer("peer.abc", "willow", "10.0.0.1", false),
+            peer("peer.def", "willow", "10.0.0.2", false),
+        ];
+        let err = resolve_peer_addr(&peers, "willow").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ambiguous"), "got: {msg}");
+        assert!(msg.contains("peer.abc"), "got: {msg}");
+        assert!(msg.contains("peer.def"), "got: {msg}");
+    }
+
+    #[test]
+    fn parse_exclude_set_handles_unset_empty_whitespace_and_case() {
+        assert!(parse_exclude_set(None).is_empty());
+        assert!(parse_exclude_set(Some("")).is_empty());
+        assert!(parse_exclude_set(Some(" , ,")).is_empty());
+        let s = parse_exclude_set(Some("Loki, peer.ABC ,, willow"));
+        assert!(s.contains("loki"));
+        assert!(s.contains("peer.abc"));
+        assert!(s.contains("willow"));
+        assert_eq!(s.len(), 3);
+    }
+
+    fn t(id: &str, h: &str, a: &str) -> DevTarget {
+        (id.into(), h.into(), a.into())
+    }
+
+    #[test]
+    fn partition_with_empty_exclude_keeps_everything() {
+        let targets = vec![t("peer.a", "willow", "10.0.0.1")];
+        let (kept, skipped) = partition_dev_targets(targets.clone(), &Default::default());
+        assert_eq!(kept, targets);
+        assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn partition_excludes_by_hostname() {
+        let targets = vec![
+            t("peer.a", "willow", "10.0.0.1"),
+            t("peer.b", "loki", "10.0.0.2"),
+        ];
+        let exclude = parse_exclude_set(Some("loki"));
+        let (kept, skipped) = partition_dev_targets(targets, &exclude);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].1, "willow");
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].1, "loki");
+    }
+
+    #[test]
+    fn partition_excludes_by_peer_id_case_insensitive() {
+        let targets = vec![t("peer.1a068644-54a", "loki", "10.0.0.2")];
+        let exclude = parse_exclude_set(Some("PEER.1a068644-54a"));
+        let (kept, skipped) = partition_dev_targets(targets, &exclude);
+        assert!(kept.is_empty());
+        assert_eq!(skipped.len(), 1);
+    }
+
+    #[test]
+    fn partition_excludes_by_addr() {
+        let targets = vec![t("peer.a", "willow", "10.0.0.99")];
+        let exclude = parse_exclude_set(Some("10.0.0.99"));
+        let (kept, skipped) = partition_dev_targets(targets, &exclude);
+        assert!(kept.is_empty());
+        assert_eq!(skipped.len(), 1);
+    }
+
+    #[test]
+    fn one_active_one_departed_with_same_hostname_is_not_ambiguous() {
+        let peers = vec![
+            peer("peer.abc", "willow", "10.0.0.1", true),
+            peer("peer.def", "willow", "10.0.0.2", false),
+        ];
+        assert_eq!(resolve_peer_addr(&peers, "willow").unwrap(), "10.0.0.2");
+    }
 }

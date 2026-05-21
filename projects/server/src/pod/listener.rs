@@ -321,6 +321,24 @@ async fn handle_dev_disable() -> Result<PodDevDisableResult> {
     }
 }
 
+/// Pure authorization gate for `pod/exec`. Refuses tools not in the
+/// `REMOTE_OK` allowlist and tools whose `REQUIRED_ROLE` is anything other
+/// than `"any"` — paired peers carry no human identity, so admin-role tools
+/// cannot be satisfied over the relay.
+fn authorize_exec(tool: &str, remote_ok: bool, required_role: &str) -> Result<()> {
+    if !remote_ok {
+        anyhow::bail!(
+            "pod/exec refused: tool '{tool}' is not in the REMOTE_OK allowlist on this peer"
+        );
+    }
+    if required_role != "any" {
+        anyhow::bail!(
+            "pod/exec refused: tool '{tool}' requires role '{required_role}' which paired peers cannot satisfy"
+        );
+    }
+    Ok(())
+}
+
 /// Handle `pod/exec`: dispatch an allowlisted local tool on this peer's
 /// behalf. The mesh mTLS chain already proves the caller is a paired peer;
 /// the additional `REMOTE_OK` allowlist check guards which tools that
@@ -333,25 +351,11 @@ async fn handle_exec(request: Request) -> Result<PodExecResult> {
         None => anyhow::bail!("pod/exec requires params"),
     };
 
-    if !crate::remote_ok::is_allowed(&params.tool) {
-        anyhow::bail!(
-            "pod/exec refused: tool '{}' is not in the REMOTE_OK allowlist on this peer",
-            params.tool
-        );
-    }
-
-    // Belt-and-suspenders: peers have no human identity, so admin-role tools
-    // are refused at this gate even if (mis)configured as `remote_ok = true`.
-    // The REST gate downstream would let the loopback admin token through, so
-    // we must stop it here.
-    let required = crate::tool_roles::required_role(&params.tool);
-    if required != "any" {
-        anyhow::bail!(
-            "pod/exec refused: tool '{}' requires role '{}' which paired peers cannot satisfy",
-            params.tool,
-            required
-        );
-    }
+    authorize_exec(
+        &params.tool,
+        crate::remote_ok::is_allowed(&params.tool),
+        crate::tool_roles::required_role(&params.tool),
+    )?;
 
     let token = crate::loopback_token::get()
         .map(|s| s.to_string())
@@ -498,4 +502,38 @@ fn build_addressing_snapshot() -> Option<HostAddressingSnapshot> {
         display_name,
         channels,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authorize_exec_refuses_when_not_remote_ok() {
+        let err = authorize_exec("system.dev_enable", false, "any").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("REMOTE_OK allowlist"), "got: {msg}");
+        assert!(msg.contains("system.dev_enable"), "got: {msg}");
+    }
+
+    #[test]
+    fn authorize_exec_refuses_admin_role_even_when_remote_ok() {
+        let err = authorize_exec("system.dev_enable", true, "admin").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("requires role 'admin'"), "got: {msg}");
+        assert!(msg.contains("paired peers cannot satisfy"), "got: {msg}");
+    }
+
+    #[test]
+    fn authorize_exec_refuses_unknown_role_strings() {
+        // Any non-"any" role string fails closed — defense against typos in
+        // `#[orca_tool(role = "...")]`.
+        let err = authorize_exec("x.y", true, "wizard").unwrap_err();
+        assert!(err.to_string().contains("requires role 'wizard'"));
+    }
+
+    #[test]
+    fn authorize_exec_passes_remote_ok_and_any_role() {
+        authorize_exec("docs.search", true, "any").expect("should pass");
+    }
 }

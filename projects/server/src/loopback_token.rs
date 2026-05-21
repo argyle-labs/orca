@@ -59,6 +59,15 @@ pub fn get() -> Option<&'static str> {
     TOKEN.get().map(|s| s.as_str())
 }
 
+/// Test-only seeding hook — installs a deterministic loopback token from
+/// unit tests that need to exercise the loopback fast path without minting
+/// real randomness or writing to disk. First-call-wins, matching the
+/// production OnceLock semantics.
+#[cfg(test)]
+pub(crate) fn set_for_tests(s: String) {
+    let _ = TOKEN.set(s);
+}
+
 /// Read the token from disk. Used by loopback HTTP clients that aren't the
 /// daemon itself (e.g. a CLI subcommand re-entering the API). Returns `None`
 /// if the file is missing — caller should fall back to whatever they did

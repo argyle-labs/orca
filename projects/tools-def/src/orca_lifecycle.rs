@@ -412,3 +412,270 @@ async fn system_dev_sync(
 ) -> anyhow::Result<SystemDevSyncOutput> {
     svc(ctx)?.dev_sync().await
 }
+
+#[cfg(all(test, feature = "native"))]
+mod tests {
+    use super::*;
+    use crate::services::lifecycle::LifecycleService;
+    use crate::test_support::empty_ctx;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct StubLifecycle {
+        last_channel: Mutex<Option<String>>,
+        last_version: Mutex<Option<String>>,
+    }
+
+    #[async_trait]
+    impl LifecycleService for StubLifecycle {
+        async fn install(&self) -> Result<LifecycleReport> {
+            Ok(LifecycleReport {
+                done: vec!["install".into()],
+                skipped: vec![],
+                errors: vec![],
+            })
+        }
+        async fn uninstall(&self) -> Result<LifecycleReport> {
+            Ok(LifecycleReport {
+                done: vec!["uninstall".into()],
+                skipped: vec![],
+                errors: vec![],
+            })
+        }
+        async fn doctor(&self) -> Result<DoctorReport> {
+            Ok(DoctorReport {
+                entries: vec![DoctorEntry {
+                    category: "binary".into(),
+                    status: "ok".into(),
+                    message: "present".into(),
+                }],
+            })
+        }
+        async fn update_check(&self, channel: &str) -> Result<UpdateCheckReport> {
+            *self.last_channel.lock().unwrap() = Some(channel.to_string());
+            Ok(UpdateCheckReport {
+                channel: channel.to_string(),
+                latest: Some("v9.9.9".into()),
+                up_to_date: false,
+                asset_url: None,
+                pinned_to: None,
+            })
+        }
+        async fn update_apply(&self, channel: &str) -> Result<LifecycleReport> {
+            *self.last_channel.lock().unwrap() = Some(channel.to_string());
+            Ok(LifecycleReport {
+                done: vec![format!("update:{channel}")],
+                skipped: vec![],
+                errors: vec![],
+            })
+        }
+        async fn update_pin(&self, version: &str) -> Result<UpdatePinReport> {
+            *self.last_version.lock().unwrap() = Some(version.to_string());
+            Ok(UpdatePinReport {
+                pinned_to: Some(version.to_string()),
+                cleared: false,
+            })
+        }
+        async fn update_unpin(&self) -> Result<UpdatePinReport> {
+            Ok(UpdatePinReport {
+                pinned_to: None,
+                cleared: true,
+            })
+        }
+        async fn projects_list(&self) -> Result<ProjectsListReport> {
+            Ok(ProjectsListReport {
+                projects: vec!["alpha".into(), "beta".into()],
+            })
+        }
+        async fn spec_dump(&self) -> Result<SpecDumpReport> {
+            Ok(SpecDumpReport { spec: "{}".into() })
+        }
+        async fn runtime_spec(&self) -> Result<RuntimeSpecReport> {
+            Ok(RuntimeSpecReport {
+                version: "0.0.0".into(),
+                frontend: "disabled".into(),
+                target: "test".into(),
+                mode: None,
+                channel: None,
+                pinned_to: None,
+                system: None,
+            })
+        }
+        async fn dev_enable(&self) -> Result<SystemDevEnableOutput> {
+            Ok(SystemDevEnableOutput {
+                repo_path: "/tmp/orca".into(),
+                cloned: true,
+                daemon_parked: true,
+            })
+        }
+        async fn dev_disable(&self) -> Result<SystemDevDisableOutput> {
+            Ok(SystemDevDisableOutput {
+                dev_process_stopped: true,
+                daemon_reclaimed: true,
+            })
+        }
+        async fn dev_sync(&self) -> Result<SystemDevSyncOutput> {
+            Ok(SystemDevSyncOutput {
+                commits_pulled: 3,
+                already_up_to_date: false,
+                detail: "pulled".into(),
+            })
+        }
+    }
+
+    fn ctx_with_stub() -> (orca_utils::tool::ToolCtx, Arc<StubLifecycle>) {
+        let stub = Arc::new(StubLifecycle::default());
+        let svc: Arc<dyn LifecycleService> = stub.clone();
+        let mut ctx = empty_ctx();
+        ctx.register_service(svc);
+        (ctx, stub)
+    }
+
+    #[test]
+    fn default_channel_is_stable() {
+        assert_eq!(default_channel(), "stable");
+    }
+
+    #[tokio::test]
+    async fn install_forwards_to_service() {
+        let (ctx, _) = ctx_with_stub();
+        let r = system_install(SystemInstallArgs {}, &ctx).await.unwrap();
+        assert_eq!(r.done, vec!["install".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn uninstall_forwards_to_service() {
+        let (ctx, _) = ctx_with_stub();
+        let r = system_uninstall(SystemUninstallArgs {}, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(r.done, vec!["uninstall".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn doctor_returns_entries_from_service() {
+        let (ctx, _) = ctx_with_stub();
+        let r = system_doctor(SystemDoctorArgs {}, &ctx).await.unwrap();
+        assert_eq!(r.entries.len(), 1);
+        assert_eq!(r.entries[0].status, "ok");
+    }
+
+    #[tokio::test]
+    async fn update_check_forwards_channel() {
+        let (ctx, stub) = ctx_with_stub();
+        let r = system_update_check(
+            SystemUpdateArgs {
+                channel: "rc".into(),
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.channel, "rc");
+        assert_eq!(stub.last_channel.lock().unwrap().as_deref(), Some("rc"));
+    }
+
+    #[tokio::test]
+    async fn update_apply_forwards_channel() {
+        let (ctx, stub) = ctx_with_stub();
+        let r = system_update_apply(
+            SystemUpdateArgs {
+                channel: "beta".into(),
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.done, vec!["update:beta".to_string()]);
+        assert_eq!(stub.last_channel.lock().unwrap().as_deref(), Some("beta"));
+    }
+
+    #[tokio::test]
+    async fn update_pin_forwards_version() {
+        let (ctx, stub) = ctx_with_stub();
+        let r = system_update_pin(
+            SystemUpdatePinArgs {
+                version: "v1.2.3".into(),
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.pinned_to.as_deref(), Some("v1.2.3"));
+        assert!(!r.cleared);
+        assert_eq!(stub.last_version.lock().unwrap().as_deref(), Some("v1.2.3"));
+    }
+
+    #[tokio::test]
+    async fn update_unpin_clears() {
+        let (ctx, _) = ctx_with_stub();
+        let r = system_update_unpin(SystemUpdateUnpinArgs {}, &ctx)
+            .await
+            .unwrap();
+        assert!(r.cleared);
+        assert!(r.pinned_to.is_none());
+    }
+
+    #[tokio::test]
+    async fn projects_list_returns_service_projects() {
+        let (ctx, _) = ctx_with_stub();
+        let r = projects_list(ProjectsListArgs {}, &ctx).await.unwrap();
+        assert_eq!(r.projects, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn spec_dump_returns_service_spec() {
+        let (ctx, _) = ctx_with_stub();
+        let r = spec_dump(SpecDumpArgs {}, &ctx).await.unwrap();
+        assert_eq!(r.spec, "{}");
+    }
+
+    #[tokio::test]
+    async fn runtime_spec_returns_service_report() {
+        let (ctx, _) = ctx_with_stub();
+        let r = system_runtime_spec(SystemRuntimeSpecArgs {}, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(r.frontend, "disabled");
+    }
+
+    #[tokio::test]
+    async fn dev_enable_forwards_to_service() {
+        let (ctx, _) = ctx_with_stub();
+        let r = system_dev_enable(SystemDevEnableArgs {}, &ctx)
+            .await
+            .unwrap();
+        assert!(r.cloned);
+        assert!(r.daemon_parked);
+    }
+
+    #[tokio::test]
+    async fn dev_disable_forwards_to_service() {
+        let (ctx, _) = ctx_with_stub();
+        let r = system_dev_disable(SystemDevDisableArgs {}, &ctx)
+            .await
+            .unwrap();
+        assert!(r.dev_process_stopped);
+        assert!(r.daemon_reclaimed);
+    }
+
+    #[tokio::test]
+    async fn dev_sync_forwards_to_service() {
+        let (ctx, _) = ctx_with_stub();
+        let r = system_dev_sync(SystemDevSyncArgs {}, &ctx).await.unwrap();
+        assert_eq!(r.commits_pulled, 3);
+    }
+
+    #[tokio::test]
+    async fn svc_errors_when_service_not_registered() {
+        let ctx = empty_ctx();
+        let err = system_install(SystemInstallArgs {}, &ctx).await.err();
+        assert!(
+            err.is_some(),
+            "expected error when LifecycleService missing"
+        );
+    }
+}

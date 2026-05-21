@@ -534,9 +534,17 @@ pub fn migrate(conn: &Connection, direction: MigrateDirection, steps: usize) -> 
 // ── Schema ───────────────────────────────────────────────────────────────────
 
 fn apply_schema(conn: &Connection) -> Result<()> {
-    // Consolidated v1 baseline (2026-05-12 squash) — folds the legacy
-    // migrations 1..26 into a single CREATE-IF-NOT-EXISTS bundle. Future
-    // schema changes are appended to MIGRATIONS as version=1 onward.
+    // Consolidated v2 baseline (2026-05-20 squash) — folds the previous v1
+    // baseline + every timestamp-versioned migration that landed between
+    // 2026-05-13 and 2026-05-17 into a single CREATE-IF-NOT-EXISTS bundle.
+    // Future schema changes go back into `projects/db/migrations/` as new
+    // timestamp-versioned `.up.sql` / `.down.sql` pairs.
+    //
+    // Why the squash: keeping 13 pre-prod migrations around makes every
+    // fresh install replay them in order, and locks the column shapes for
+    // pod_peers + pod_self into a sequence of ALTER TABLEs rather than the
+    // intended final CREATE. Window closes the moment a non-Scott peer
+    // joins the mesh (= the first time we have to honour replay history).
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS learning_progress (
@@ -940,6 +948,87 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_scheduler_runs_job_started
             ON scheduler_runs(job_name, started_at DESC);
+
+        -- host_addressing: this host's multi-channel addresses (display name,
+        -- LAN v4/v6, Tailscale, FQDN, …). Keyed by channel kind; rebuilt by
+        -- the host_identity refresh job. Mirrors the dial-target snapshot
+        -- pod/ping shares with peers.
+        CREATE TABLE IF NOT EXISTS host_addressing (
+            key         TEXT PRIMARY KEY,
+            value       TEXT NOT NULL,
+            source      TEXT NOT NULL,
+            detected_at INTEGER NOT NULL
+        );
+
+        -- pod_peer_addresses: per-peer multi-channel address records, mirrored
+        -- in via pod/ping. Augments pod_peers (which holds a single primary
+        -- addr) with every kind we've seen.
+        CREATE TABLE IF NOT EXISTS pod_peer_addresses (
+            peer_id      TEXT NOT NULL,
+            kind         TEXT NOT NULL,
+            value        TEXT NOT NULL,
+            source       TEXT NOT NULL,
+            last_seen_at INTEGER NOT NULL,
+            PRIMARY KEY (peer_id, kind, value),
+            FOREIGN KEY (peer_id) REFERENCES pod_peers(peer_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_pod_peer_addresses_peer
+            ON pod_peer_addresses(peer_id);
+
+        -- REST/MCP API bearer tokens. token_hash is sha256(plaintext); the
+        -- raw token is returned exactly once from auth.token_create and is
+        -- never recoverable from the DB. See project_rest_auth_design.md.
+        CREATE TABLE IF NOT EXISTS api_tokens (
+            id           TEXT PRIMARY KEY,
+            name         TEXT NOT NULL UNIQUE,
+            token_hash   TEXT NOT NULL UNIQUE,
+            role         TEXT NOT NULL CHECK (role IN ('admin','read')),
+            created_at   TEXT NOT NULL,
+            last_used_at TEXT,
+            expires_at   TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
+
+        -- Web-UI account auth. Per project_rest_auth_v2.md:
+        --   * username UNIQUE is case-insensitive — username_lower is the canonical key.
+        --   * password_hash is argon2id (encoded form: \"$argon2id$...\").
+        --   * sessions slide on every authenticated request (last_used_at, expires_at refresh).
+        CREATE TABLE IF NOT EXISTS users (
+            id                  TEXT PRIMARY KEY,
+            username            TEXT NOT NULL,
+            username_lower      TEXT NOT NULL UNIQUE,
+            password_hash       TEXT NOT NULL,
+            role                TEXT NOT NULL CHECK (role IN ('admin','member')),
+            created_at          TEXT NOT NULL,
+            password_updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sessions (
+            id           TEXT PRIMARY KEY,
+            user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at   TEXT NOT NULL,
+            last_used_at TEXT NOT NULL,
+            expires_at   TEXT NOT NULL,
+            revoked_at   TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_sessions_user_active
+            ON sessions(user_id, expires_at) WHERE revoked_at IS NULL;
+
+        -- Per-peer system snapshot timeseries. source='local' rows are written
+        -- by this host's persistence task; source='synced' rows are mirrored
+        -- in from the peer's own DB by the sync puller. (peer_id, snapshot_at)
+        -- PK makes duplicate sync imports a no-op (INSERT OR IGNORE). Per-peer
+        -- retention cap is enforced inside host_status::insert_status.
+        CREATE TABLE IF NOT EXISTS host_status (
+            peer_id          TEXT    NOT NULL,
+            snapshot_at_unix INTEGER NOT NULL,
+            payload_json     TEXT    NOT NULL,
+            received_at_unix INTEGER NOT NULL,
+            source           TEXT    NOT NULL CHECK (source IN ('local','synced')),
+            PRIMARY KEY (peer_id, snapshot_at_unix)
+        );
+        CREATE INDEX IF NOT EXISTS idx_host_status_peer_time
+            ON host_status (peer_id, snapshot_at_unix DESC);
         ",
     )?;
     Ok(())

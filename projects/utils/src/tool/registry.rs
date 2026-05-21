@@ -480,6 +480,79 @@ mod tests {
         assert_eq!(reg.required_role("ghost"), None);
     }
 
+    // ── Default impl ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn default_returns_empty_registry() {
+        let reg = ToolRegistry::default();
+        assert!(reg.names().is_empty());
+    }
+
+    // ── HTTP dispatch (axum_router) ───────────────────────────────────────────
+    //
+    // Exercises http_dispatch's three paths (unknown→404, error→500, ok→200)
+    // by routing through the real axum Router produced by axum_router. Echo
+    // tool's required_role=admin is irrelevant here — the role gate lives in
+    // the server crate's middleware, not the registry itself.
+
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request as AxumReq, StatusCode as StCode};
+    use tower::ServiceExt;
+
+    fn router() -> axum::Router {
+        let mut reg = ToolRegistry::new();
+        reg.register::<EchoTool>();
+        Arc::new(reg).axum_router(Arc::new(make_ctx()))
+    }
+
+    async fn body_string(b: Body) -> String {
+        let bytes = to_bytes(b, 64 * 1024).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn http_dispatch_returns_200_with_serialized_output() {
+        let req = AxumReq::builder()
+            .method("POST")
+            .uri("/echo")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"message":"hi"}"#))
+            .unwrap();
+        let resp = router().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StCode::OK);
+        let body = body_string(resp.into_body()).await;
+        assert!(body.contains("hi"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn http_dispatch_returns_404_for_unknown_tool() {
+        let req = AxumReq::builder()
+            .method("POST")
+            .uri("/ghost")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let resp = router().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StCode::NOT_FOUND);
+        let body = body_string(resp.into_body()).await;
+        assert!(body.contains("unknown tool"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn http_dispatch_returns_500_on_dispatch_error() {
+        // Missing required `message` field → tool dispatch returns Err.
+        let req = AxumReq::builder()
+            .method("POST")
+            .uri("/echo")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let resp = router().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StCode::INTERNAL_SERVER_ERROR);
+        let body = body_string(resp.into_body()).await;
+        assert!(body.contains("invalid args"), "body: {body}");
+    }
+
     #[tokio::test]
     async fn cli_dispatch_invalid_json_errors() {
         let mut reg = ToolRegistry::new();

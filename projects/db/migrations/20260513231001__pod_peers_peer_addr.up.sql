@@ -1,1 +1,0 @@
-ALTER TABLE pod_peers ADD COLUMN peer_addr TEXT NOT NULL DEFAULT '';

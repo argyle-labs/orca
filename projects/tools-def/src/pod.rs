@@ -596,3 +596,424 @@ async fn pod_dev_disable(
         .dev_disable_fanout(&args.peers)
         .await
 }
+
+#[cfg(all(test, feature = "native"))]
+mod tests {
+    use super::native_support::PodExecDispatch;
+    use super::*;
+    use crate::test_support::empty_ctx;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct StubPod {
+        last_accept_code: Mutex<Option<String>>,
+        last_trust: Mutex<Option<(String, bool)>>,
+        last_ping_peer: Mutex<Option<String>>,
+        last_offer: Mutex<Option<(String, Option<u16>)>>,
+        last_join: Mutex<Option<(String, Option<u16>)>>,
+        last_leave_peer: Mutex<Option<String>>,
+        last_fanout_peers: Mutex<Option<Vec<String>>>,
+        last_exec: Mutex<Option<(String, String, serde_json::Value)>>,
+    }
+
+    #[async_trait]
+    impl PodService for StubPod {
+        async fn list_enriched(&self) -> Result<Vec<PodPeerDto>> {
+            Ok(vec![PodPeerDto {
+                peer_id: "peer.abc".into(),
+                hostname: "willow".into(),
+                addr: "10.0.0.1".into(),
+                port: 12002,
+                last_seen_at: 0,
+                local_secure: true,
+                peer_secure: true,
+                status: "active".into(),
+                addresses: vec![],
+                local: false,
+                reachable: Some(true),
+                latency_ms: Some(7),
+                probe_error: None,
+                version: None,
+                target: None,
+                frontend: None,
+                mode: None,
+                channel: None,
+                pinned_to: None,
+                update_latest: None,
+                update_available: None,
+                system: None,
+            }])
+        }
+        async fn accept(&self, code: &str) -> Result<PodAcceptOutput> {
+            *self.last_accept_code.lock().unwrap() = Some(code.into());
+            Ok(PodAcceptOutput {
+                pod_id: "pod-1".into(),
+                inviter_peer_id: "peer.inv".into(),
+                inviter_hostname: "mint".into(),
+                inviter_addr: "10.0.0.2".into(),
+                inviter_port: 12002,
+                self_secure: false,
+            })
+        }
+        async fn trust(&self, peer_id: &str, on: bool) -> Result<PodTrustOutput> {
+            *self.last_trust.lock().unwrap() = Some((peer_id.into(), on));
+            Ok(PodTrustOutput {
+                peer_id: peer_id.into(),
+                local_secure: on,
+                peer_secure: true,
+                mutual: on,
+                notify_result: "ok".into(),
+            })
+        }
+        async fn ping(&self, peer_id: &str) -> PodPingOutput {
+            *self.last_ping_peer.lock().unwrap() = Some(peer_id.into());
+            PodPingOutput {
+                ok: true,
+                latency_ms: 3,
+                error: None,
+                peer_id: Some(peer_id.into()),
+                hostname: Some("loki".into()),
+                version: Some("0.0.0".into()),
+            }
+        }
+        fn discover(&self) -> Result<Vec<PodDiscoveryRowDto>> {
+            Ok(vec![PodDiscoveryRowDto {
+                pubkey_fp: "fp".into(),
+                peer_id: None,
+                hostname: "freyr".into(),
+                addr: "10.0.0.3".into(),
+                port: 12002,
+                state: "seen".into(),
+                can_invite: true,
+                first_seen_at: 0,
+                last_seen_at: 0,
+            }])
+        }
+        fn pending(&self) -> Result<Vec<PodPendingOfferDto>> {
+            Ok(vec![])
+        }
+        async fn offer(&self, addr: &str, port: Option<u16>) -> Result<PodOfferOutput> {
+            *self.last_offer.lock().unwrap() = Some((addr.into(), port));
+            Ok(PodOfferOutput {
+                code: "ABC123".into(),
+                joiner_hostname: "thor".into(),
+                joiner_addr: addr.into(),
+                joiner_port: port.unwrap_or(12002),
+                joiner_pubkey_fp: "fp".into(),
+                offer_id: "oid".into(),
+                expires_at: 0,
+            })
+        }
+        async fn join(&self, inviter_addr: &str, port: Option<u16>) -> Result<PodJoinOutput> {
+            *self.last_join.lock().unwrap() = Some((inviter_addr.into(), port));
+            Ok(PodJoinOutput {
+                code: "XYZ".into(),
+                inviter_addr: inviter_addr.into(),
+                inviter_port: port.unwrap_or(12002),
+            })
+        }
+        async fn leave_peer(&self, peer_id: &str) -> Result<PodLeaveOutput> {
+            *self.last_leave_peer.lock().unwrap() = Some(peer_id.into());
+            Ok(PodLeaveOutput {
+                peer_id: peer_id.into(),
+                notify_result: "ok".into(),
+                rows_removed: 2,
+            })
+        }
+        fn cert_status(&self) -> Result<PodCertStatusOutput> {
+            Ok(PodCertStatusOutput {
+                founder: true,
+                member: true,
+                mesh_ca: None,
+                leaf_server: None,
+                leaf_client: None,
+                ca_previous: None,
+                bootstrap: None,
+            })
+        }
+        async fn dev_sync(&self) -> Result<PodDevSyncOutput> {
+            Ok(PodDevSyncOutput { results: vec![] })
+        }
+        async fn dev_enable_fanout(&self, peers: &[String]) -> Result<PodDevEnableOutput> {
+            *self.last_fanout_peers.lock().unwrap() = Some(peers.to_vec());
+            Ok(PodDevEnableOutput { results: vec![] })
+        }
+        async fn dev_disable_fanout(&self, peers: &[String]) -> Result<PodDevDisableOutput> {
+            *self.last_fanout_peers.lock().unwrap() = Some(peers.to_vec());
+            Ok(PodDevDisableOutput { results: vec![] })
+        }
+        async fn exec(
+            &self,
+            peer: &str,
+            tool: &str,
+            args: serde_json::Value,
+        ) -> Result<PodExecDispatch> {
+            *self.last_exec.lock().unwrap() = Some((peer.into(), tool.into(), args.clone()));
+            Ok(PodExecDispatch {
+                peer: peer.into(),
+                tool: tool.into(),
+                result: serde_json::json!({"ok": true}),
+            })
+        }
+    }
+
+    fn ctx_with_stub() -> (orca_utils::tool::ToolCtx, Arc<StubPod>) {
+        let stub = Arc::new(StubPod::default());
+        let svc: Arc<dyn PodService> = stub.clone();
+        let mut ctx = empty_ctx();
+        ctx.register_service(svc);
+        (ctx, stub)
+    }
+
+    #[test]
+    fn pod_peer_address_from_db_row() {
+        let row = orca_db::host_addressing::PodPeerAddress {
+            peer_id: "peer.x".into(),
+            kind: "lan_v4".into(),
+            value: "10.0.0.5".into(),
+            source: "mdns".into(),
+            last_seen_at: 42,
+        };
+        let dto: PodPeerAddressDto = row.into();
+        assert_eq!(dto.kind, "lan_v4");
+        assert_eq!(dto.value, "10.0.0.5");
+        assert_eq!(dto.source, "mdns");
+        assert_eq!(dto.last_seen_at, 42);
+    }
+
+    #[test]
+    fn pod_peer_from_db_summary_defaults_optional_fields_to_none() {
+        let row = orca_db::pod::PeerSummary {
+            peer_id: "peer.x".into(),
+            hostname: "h".into(),
+            addr: "1.2.3.4".into(),
+            port: 12002,
+            last_seen_at: 1,
+            local_secure: true,
+            peer_secure: false,
+            status: "active".into(),
+            addresses: vec![],
+        };
+        let dto: PodPeerDto = row.into();
+        assert_eq!(dto.peer_id, "peer.x");
+        assert!(!dto.local);
+        assert!(dto.reachable.is_none());
+        assert!(dto.version.is_none());
+        assert!(dto.system.is_none());
+    }
+
+    #[tokio::test]
+    async fn pod_list_forwards_to_service() {
+        let (ctx, _) = ctx_with_stub();
+        let out = pod_list(EmptyArgs {}, &ctx).await.unwrap();
+        assert_eq!(out.0.len(), 1);
+        assert_eq!(out.0[0].peer_id, "peer.abc");
+    }
+
+    #[tokio::test]
+    async fn pod_accept_forwards_code() {
+        let (ctx, stub) = ctx_with_stub();
+        let out = pod_accept(
+            PodAcceptArgs {
+                code: "code1".into(),
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.pod_id, "pod-1");
+        assert_eq!(
+            stub.last_accept_code.lock().unwrap().as_deref(),
+            Some("code1")
+        );
+    }
+
+    #[tokio::test]
+    async fn pod_trust_forwards_peer_and_flag() {
+        let (ctx, stub) = ctx_with_stub();
+        let out = pod_trust(
+            PodTrustArgs {
+                peer_id: "peer.t".into(),
+                on: true,
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert!(out.mutual);
+        let g = stub.last_trust.lock().unwrap();
+        assert_eq!(g.as_ref().unwrap(), &("peer.t".to_string(), true));
+    }
+
+    #[tokio::test]
+    async fn pod_ping_forwards_peer() {
+        let (ctx, stub) = ctx_with_stub();
+        let out = pod_ping(
+            PodPingArgs {
+                peer_id: "peer.p".into(),
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert!(out.ok);
+        assert_eq!(
+            stub.last_ping_peer.lock().unwrap().as_deref(),
+            Some("peer.p")
+        );
+    }
+
+    #[tokio::test]
+    async fn pod_discover_wraps_service_rows() {
+        let (ctx, _) = ctx_with_stub();
+        let out = pod_discover(EmptyArgs {}, &ctx).await.unwrap();
+        assert_eq!(out.0.len(), 1);
+        assert_eq!(out.0[0].hostname, "freyr");
+    }
+
+    #[tokio::test]
+    async fn pod_pending_wraps_service_rows() {
+        let (ctx, _) = ctx_with_stub();
+        let out = pod_pending(EmptyArgs {}, &ctx).await.unwrap();
+        assert!(out.0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pod_offer_forwards_addr_and_port() {
+        let (ctx, stub) = ctx_with_stub();
+        let out = pod_offer(
+            PodOfferArgs {
+                addr: "1.2.3.4".into(),
+                port: Some(9999),
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.joiner_port, 9999);
+        let g = stub.last_offer.lock().unwrap();
+        assert_eq!(g.as_ref().unwrap(), &("1.2.3.4".to_string(), Some(9999)));
+    }
+
+    #[tokio::test]
+    async fn pod_join_forwards_inviter_and_port() {
+        let (ctx, stub) = ctx_with_stub();
+        let out = pod_join(
+            PodJoinArgs {
+                inviter_addr: "host.local".into(),
+                port: None,
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.inviter_addr, "host.local");
+        let g = stub.last_join.lock().unwrap();
+        assert_eq!(g.as_ref().unwrap(), &("host.local".to_string(), None));
+    }
+
+    #[tokio::test]
+    async fn pod_leave_forwards_peer() {
+        let (ctx, stub) = ctx_with_stub();
+        let out = pod_leave(
+            PodLeaveArgs {
+                peer_id: "peer.l".into(),
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.rows_removed, 2);
+        assert_eq!(
+            stub.last_leave_peer.lock().unwrap().as_deref(),
+            Some("peer.l")
+        );
+    }
+
+    #[tokio::test]
+    async fn pod_cert_status_passthrough() {
+        let (ctx, _) = ctx_with_stub();
+        let out = pod_cert_status(EmptyArgs {}, &ctx).await.unwrap();
+        assert!(out.founder);
+        assert!(out.member);
+    }
+
+    #[tokio::test]
+    async fn pod_dev_sync_passthrough() {
+        let (ctx, _) = ctx_with_stub();
+        let out = pod_dev_sync(EmptyArgs {}, &ctx).await.unwrap();
+        assert!(out.results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pod_dev_enable_forwards_peers() {
+        let (ctx, stub) = ctx_with_stub();
+        let _ = pod_dev_enable(
+            PodDevFanoutArgs {
+                peers: vec!["a".into(), "b".into()],
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let g = stub.last_fanout_peers.lock().unwrap();
+        assert_eq!(g.as_ref().unwrap(), &vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn pod_dev_disable_forwards_peers() {
+        let (ctx, stub) = ctx_with_stub();
+        let _ = pod_dev_disable(
+            PodDevFanoutArgs {
+                peers: vec!["solo".into()],
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let g = stub.last_fanout_peers.lock().unwrap();
+        assert_eq!(g.as_ref().unwrap(), &vec!["solo".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn exec_dispatch_records_peer_tool_and_args() {
+        let stub = StubPod::default();
+        let out = stub
+            .exec("peer.x", "tool.y", serde_json::json!({"k": "v"}))
+            .await
+            .unwrap();
+        assert_eq!(out.peer, "peer.x");
+        assert_eq!(out.tool, "tool.y");
+        assert_eq!(out.result, serde_json::json!({"ok": true}));
+        let g = stub.last_exec.lock().unwrap();
+        let (p, t, a) = g.as_ref().unwrap();
+        assert_eq!(p, "peer.x");
+        assert_eq!(t, "tool.y");
+        assert_eq!(a, &serde_json::json!({"k": "v"}));
+    }
+
+    struct DummyProvider(Arc<StubPod>);
+    impl ProvidePod for DummyProvider {
+        fn pod(&self) -> Arc<dyn PodService> {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn register_pod_installs_service_into_ctx() {
+        let mut ctx = empty_ctx();
+        let stub = Arc::new(StubPod::default());
+        register_pod(&mut ctx, &DummyProvider(stub));
+        // svc() resolves only if register_pod actually installed it.
+        let _svc = native_support::svc(&ctx).expect("service registered");
+    }
+
+    #[tokio::test]
+    async fn svc_errors_when_service_not_registered() {
+        let ctx = empty_ctx();
+        let err = pod_list(EmptyArgs {}, &ctx).await.err();
+        assert!(err.is_some(), "expected error when PodService missing");
+    }
+}

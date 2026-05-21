@@ -1,1 +1,0 @@
-ALTER TABLE pod_self ADD COLUMN pod_id TEXT;
