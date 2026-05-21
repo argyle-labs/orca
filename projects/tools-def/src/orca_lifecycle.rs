@@ -221,12 +221,39 @@ macro_rules! empty_args {
         pub struct $name {}
     };
 }
-empty_args!(SystemInstallArgs);
-empty_args!(SystemUninstallArgs);
 empty_args!(SystemDoctorArgs);
+empty_args!(EmptyDeleteArgs);
 empty_args!(ProjectsListArgs);
 empty_args!(SpecDumpArgs);
 empty_args!(SystemRuntimeSpecArgs);
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SystemLifecycleUpdateArgs {
+    /// "install" | "uninstall"
+    pub action: String,
+}
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SystemDevUpdateArgs {
+    /// "enable" | "disable" | "sync"
+    pub action: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SystemDevUpdateOutput {
+    pub action: String,
+    /// `dev_enable` result (when action == "enable").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable: Option<SystemDevEnableOutput>,
+    /// `dev_disable` result (when action == "disable").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable: Option<SystemDevDisableOutput>,
+    /// `dev_sync` result (when action == "sync").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SystemDevSyncOutput>,
+}
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -246,11 +273,6 @@ pub struct SystemUpdatePinArgs {
     /// Version to pin to, e.g. "v0.0.4-rc.1". A leading `v` is optional.
     pub version: String,
 }
-
-empty_args!(SystemUpdateUnpinArgs);
-empty_args!(SystemDevEnableArgs);
-empty_args!(SystemDevDisableArgs);
-empty_args!(SystemDevSyncArgs);
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SystemDevEnableOutput {
@@ -289,27 +311,25 @@ fn svc(
     ctx.service::<std::sync::Arc<dyn crate::services::lifecycle::LifecycleService>>()
 }
 
-/// [MUTATES STATE] Install orca: wire symlinks, register MCP server, install binary.
-#[orca_tool(domain = "system", verb = "install")]
-async fn system_install(
-    _args: SystemInstallArgs,
+/// [MUTATES STATE] Drive the system lifecycle. `action`:
+/// - `install`: wire symlinks, register MCP server, install binary.
+/// - `uninstall`: remove binary, MCP registration, and CLAUDE.md symlinks.
+#[orca_tool(domain = "system.lifecycle", verb = "update")]
+async fn system_lifecycle_update(
+    args: SystemLifecycleUpdateArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<LifecycleReport> {
-    svc(ctx)?.install().await
-}
-
-/// [MUTATES STATE] Remove binary, MCP registration, and CLAUDE.md symlinks.
-#[orca_tool(domain = "system", verb = "uninstall")]
-async fn system_uninstall(
-    _args: SystemUninstallArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<LifecycleReport> {
-    svc(ctx)?.uninstall().await
+    let s = svc(ctx)?;
+    match args.action.as_str() {
+        "install" => s.install().await,
+        "uninstall" => s.uninstall().await,
+        other => anyhow::bail!("unknown action '{other}' (expected install|uninstall)"),
+    }
 }
 
 /// Validate agent files, symlinks, config, tool availability — returns ok/warn/error entries.
-#[orca_tool(domain = "system", verb = "doctor")]
-async fn system_doctor(
+#[orca_tool(domain = "system.diagnostic", verb = "list")]
+async fn system_diagnostic_list(
     _args: SystemDoctorArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<DoctorReport> {
@@ -317,8 +337,8 @@ async fn system_doctor(
 }
 
 /// Probe GitHub releases for a newer version on `channel`. Does not apply anything.
-#[orca_tool(domain = "system", verb = "update-check", remote_ok = true)]
-async fn system_update_check(
+#[orca_tool(domain = "system.update", verb = "detail", remote_ok = true)]
+async fn system_update_detail(
     args: SystemUpdateArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<UpdateCheckReport> {
@@ -326,8 +346,8 @@ async fn system_update_check(
 }
 
 /// [MUTATES STATE] Download + install the latest binary on `channel`. No-op if up to date.
-#[orca_tool(domain = "system", verb = "update-apply", remote_ok = true)]
-async fn system_update_apply(
+#[orca_tool(domain = "system.update", verb = "create", remote_ok = true)]
+async fn system_update_create(
     args: SystemUpdateArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<LifecycleReport> {
@@ -335,8 +355,8 @@ async fn system_update_apply(
 }
 
 /// [MUTATES STATE] Pin orca to a specific version. Future `orca update` runs will not upgrade past this version.
-#[orca_tool(domain = "system", verb = "update-pin")]
-async fn system_update_pin(
+#[orca_tool(domain = "system.update", verb = "update")]
+async fn system_update_update(
     args: SystemUpdatePinArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<UpdatePinReport> {
@@ -344,9 +364,9 @@ async fn system_update_pin(
 }
 
 /// [MUTATES STATE] Clear the version pin. `orca update` will resume upgrading to the latest on the configured channel.
-#[orca_tool(domain = "system", verb = "update-unpin")]
-async fn system_update_unpin(
-    _args: SystemUpdateUnpinArgs,
+#[orca_tool(domain = "system.update", verb = "delete")]
+async fn system_update_delete(
+    _args: EmptyDeleteArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<UpdatePinReport> {
     svc(ctx)?.update_unpin().await
@@ -371,46 +391,42 @@ async fn spec_detail(
 }
 
 /// Report this binary's runtime composition: whether the web UI is embedded, build target triple. Used by installers to decide whether to fetch a JS runtime alongside the binary.
-#[orca_tool(domain = "system", verb = "runtime-spec", remote_ok = true)]
-async fn system_runtime_spec(
+#[orca_tool(domain = "system.runtime", verb = "detail", remote_ok = true)]
+async fn system_runtime_detail(
     _args: SystemRuntimeSpecArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<RuntimeSpecReport> {
     svc(ctx)?.runtime_spec().await
 }
 
-/// Clone the orca repo (if not present) and start cargo watch, parking the production daemon.
-/// Idempotent — safe to call if dev mode is already active.
+/// Drive this host's dev mode. `action`:
+/// - `enable`: clone the orca repo if needed, start cargo watch, park the production daemon. Idempotent.
+/// - `disable`: stop cargo watch and let the production daemon reclaim the port.
+/// - `sync`: git pull in the dev checkout; cargo watch restarts automatically. No-op when dev mode is inactive.
 #[orca_tool(
-    domain = "system",
-    verb = "dev_enable",
+    domain = "system.dev",
+    verb = "update",
     remote_ok = true,
     role = "admin"
 )]
-async fn system_dev_enable(
-    _args: SystemDevEnableArgs,
+async fn system_dev_update(
+    args: SystemDevUpdateArgs,
     ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<SystemDevEnableOutput> {
-    svc(ctx)?.dev_enable().await
-}
-
-/// Stop cargo watch and let the production daemon reclaim the port.
-#[orca_tool(domain = "system", verb = "dev_disable", role = "admin")]
-async fn system_dev_disable(
-    _args: SystemDevDisableArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<SystemDevDisableOutput> {
-    svc(ctx)?.dev_disable().await
-}
-
-/// git pull in the dev checkout; cargo watch detects the changes and restarts automatically.
-/// No-op (returns already_up_to_date) if dev mode is not active.
-#[orca_tool(domain = "system", verb = "dev_sync", remote_ok = true, role = "admin")]
-async fn system_dev_sync(
-    _args: SystemDevSyncArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<SystemDevSyncOutput> {
-    svc(ctx)?.dev_sync().await
+) -> anyhow::Result<SystemDevUpdateOutput> {
+    let s = svc(ctx)?;
+    let mut out = SystemDevUpdateOutput {
+        action: args.action.clone(),
+        enable: None,
+        disable: None,
+        sync: None,
+    };
+    match args.action.as_str() {
+        "enable" => out.enable = Some(s.dev_enable().await?),
+        "disable" => out.disable = Some(s.dev_disable().await?),
+        "sync" => out.sync = Some(s.dev_sync().await?),
+        other => anyhow::bail!("unknown action '{other}' (expected enable|disable|sync)"),
+    }
+    Ok(out)
 }
 
 #[cfg(all(test, feature = "native"))]
@@ -539,34 +555,60 @@ mod tests {
         assert_eq!(default_channel(), "stable");
     }
 
+    fn lifecycle_args(action: &str) -> SystemLifecycleUpdateArgs {
+        SystemLifecycleUpdateArgs {
+            action: action.into(),
+        }
+    }
+
+    fn dev_args(action: &str) -> SystemDevUpdateArgs {
+        SystemDevUpdateArgs {
+            action: action.into(),
+        }
+    }
+
     #[tokio::test]
-    async fn install_forwards_to_service() {
+    async fn lifecycle_install_forwards_to_service() {
         let (ctx, _) = ctx_with_stub();
-        let r = system_install(SystemInstallArgs {}, &ctx).await.unwrap();
+        let r = system_lifecycle_update(lifecycle_args("install"), &ctx)
+            .await
+            .unwrap();
         assert_eq!(r.done, vec!["install".to_string()]);
     }
 
     #[tokio::test]
-    async fn uninstall_forwards_to_service() {
+    async fn lifecycle_uninstall_forwards_to_service() {
         let (ctx, _) = ctx_with_stub();
-        let r = system_uninstall(SystemUninstallArgs {}, &ctx)
+        let r = system_lifecycle_update(lifecycle_args("uninstall"), &ctx)
             .await
             .unwrap();
         assert_eq!(r.done, vec!["uninstall".to_string()]);
     }
 
     #[tokio::test]
-    async fn doctor_returns_entries_from_service() {
+    async fn lifecycle_rejects_unknown_action() {
         let (ctx, _) = ctx_with_stub();
-        let r = system_doctor(SystemDoctorArgs {}, &ctx).await.unwrap();
+        assert!(
+            system_lifecycle_update(lifecycle_args("bogus"), &ctx)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn diagnostic_list_returns_entries_from_service() {
+        let (ctx, _) = ctx_with_stub();
+        let r = system_diagnostic_list(SystemDoctorArgs {}, &ctx)
+            .await
+            .unwrap();
         assert_eq!(r.entries.len(), 1);
         assert_eq!(r.entries[0].status, "ok");
     }
 
     #[tokio::test]
-    async fn update_check_forwards_channel() {
+    async fn update_detail_forwards_channel() {
         let (ctx, stub) = ctx_with_stub();
-        let r = system_update_check(
+        let r = system_update_detail(
             SystemUpdateArgs {
                 channel: "rc".into(),
             },
@@ -579,9 +621,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_apply_forwards_channel() {
+    async fn update_create_forwards_channel() {
         let (ctx, stub) = ctx_with_stub();
-        let r = system_update_apply(
+        let r = system_update_create(
             SystemUpdateArgs {
                 channel: "beta".into(),
             },
@@ -594,9 +636,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_pin_forwards_version() {
+    async fn update_update_forwards_version() {
         let (ctx, stub) = ctx_with_stub();
-        let r = system_update_pin(
+        let r = system_update_update(
             SystemUpdatePinArgs {
                 version: "v1.2.3".into(),
             },
@@ -610,9 +652,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_unpin_clears() {
+    async fn update_delete_clears() {
         let (ctx, _) = ctx_with_stub();
-        let r = system_update_unpin(SystemUpdateUnpinArgs {}, &ctx)
+        let r = system_update_delete(EmptyDeleteArgs {}, &ctx)
             .await
             .unwrap();
         assert!(r.cleared);
@@ -627,7 +669,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spec_dump_returns_service_spec() {
+    async fn spec_detail_returns_service_spec() {
         let (ctx, _) = ctx_with_stub();
         let r = spec_detail(SpecDumpArgs {}, &ctx).await.unwrap();
         assert_eq!(r.spec, "{}");
@@ -636,43 +678,50 @@ mod tests {
     #[tokio::test]
     async fn runtime_spec_returns_service_report() {
         let (ctx, _) = ctx_with_stub();
-        let r = system_runtime_spec(SystemRuntimeSpecArgs {}, &ctx)
+        let r = system_runtime_detail(SystemRuntimeSpecArgs {}, &ctx)
             .await
             .unwrap();
         assert_eq!(r.frontend, "disabled");
     }
 
     #[tokio::test]
-    async fn dev_enable_forwards_to_service() {
+    async fn dev_update_enable_forwards_to_service() {
         let (ctx, _) = ctx_with_stub();
-        let r = system_dev_enable(SystemDevEnableArgs {}, &ctx)
-            .await
-            .unwrap();
-        assert!(r.cloned);
-        assert!(r.daemon_parked);
+        let r = system_dev_update(dev_args("enable"), &ctx).await.unwrap();
+        let e = r.enable.expect("enable variant populated");
+        assert!(e.cloned);
+        assert!(e.daemon_parked);
     }
 
     #[tokio::test]
-    async fn dev_disable_forwards_to_service() {
+    async fn dev_update_disable_forwards_to_service() {
         let (ctx, _) = ctx_with_stub();
-        let r = system_dev_disable(SystemDevDisableArgs {}, &ctx)
-            .await
-            .unwrap();
-        assert!(r.dev_process_stopped);
-        assert!(r.daemon_reclaimed);
+        let r = system_dev_update(dev_args("disable"), &ctx).await.unwrap();
+        let d = r.disable.expect("disable variant populated");
+        assert!(d.dev_process_stopped);
+        assert!(d.daemon_reclaimed);
     }
 
     #[tokio::test]
-    async fn dev_sync_forwards_to_service() {
+    async fn dev_update_sync_forwards_to_service() {
         let (ctx, _) = ctx_with_stub();
-        let r = system_dev_sync(SystemDevSyncArgs {}, &ctx).await.unwrap();
-        assert_eq!(r.commits_pulled, 3);
+        let r = system_dev_update(dev_args("sync"), &ctx).await.unwrap();
+        let s = r.sync.expect("sync variant populated");
+        assert_eq!(s.commits_pulled, 3);
+    }
+
+    #[tokio::test]
+    async fn dev_update_rejects_unknown_action() {
+        let (ctx, _) = ctx_with_stub();
+        assert!(system_dev_update(dev_args("bogus"), &ctx).await.is_err());
     }
 
     #[tokio::test]
     async fn svc_errors_when_service_not_registered() {
         let ctx = empty_ctx();
-        let err = system_install(SystemInstallArgs {}, &ctx).await.err();
+        let err = system_lifecycle_update(lifecycle_args("install"), &ctx)
+            .await
+            .err();
         assert!(
             err.is_some(),
             "expected error when LifecycleService missing"

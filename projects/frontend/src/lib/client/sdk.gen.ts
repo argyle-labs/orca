@@ -51,15 +51,18 @@ import type {
   AuthChangePasswordData,
   AuthChangePasswordErrors,
   AuthChangePasswordResponses,
-  AuthLoginData,
-  AuthLoginErrors,
-  AuthLoginResponses,
-  AuthLogoutData,
-  AuthLogoutErrors,
-  AuthLogoutResponses,
   AuthMeData,
   AuthMeErrors,
   AuthMeResponses,
+  AuthSessionCreateData,
+  AuthSessionCreateErrors,
+  AuthSessionCreateResponses,
+  AuthSessionDeleteData,
+  AuthSessionDeleteErrors,
+  AuthSessionDeleteResponses,
+  AuthSessionDetailData,
+  AuthSessionDetailErrors,
+  AuthSessionDetailResponses,
   AuthSigninData,
   AuthSigninErrors,
   AuthSigninResponses,
@@ -70,18 +73,15 @@ import type {
   AuthSignupResponses,
   AuthSignupStatusData,
   AuthSignupStatusResponses,
-  AuthStatusData,
-  AuthStatusErrors,
-  AuthStatusResponses,
   AuthTokenCreateData,
   AuthTokenCreateErrors,
   AuthTokenCreateResponses,
+  AuthTokenDeleteData,
+  AuthTokenDeleteErrors,
+  AuthTokenDeleteResponses,
   AuthTokenListData,
   AuthTokenListErrors,
   AuthTokenListResponses,
-  AuthTokenRevokeData,
-  AuthTokenRevokeErrors,
-  AuthTokenRevokeResponses,
   CallPluginToolData,
   CallPluginToolErrors,
   CallPluginToolResponses,
@@ -103,15 +103,9 @@ import type {
   DbDetailData,
   DbDetailErrors,
   DbDetailResponses,
-  DbDownData,
-  DbDownErrors,
-  DbDownResponses,
-  DbMigrateData,
-  DbMigrateErrors,
-  DbMigrateResponses,
-  DbUpData,
-  DbUpErrors,
-  DbUpResponses,
+  DbLifecycleUpdateData,
+  DbLifecycleUpdateErrors,
+  DbLifecycleUpdateResponses,
   DeleteMcpMappingData,
   DeleteMcpMappingErrors,
   DeleteMcpMappingResponses,
@@ -127,21 +121,12 @@ import type {
   DisablePluginData,
   DisablePluginErrors,
   DisablePluginResponses,
-  DockerActionData,
-  DockerActionErrors,
-  DockerActionResponses,
-  DockerEngineData,
-  DockerEngineErrors,
-  DockerEngineResponses,
-  DockerEngineStartData,
-  DockerEngineStartErrors,
-  DockerEngineStartResponses,
-  DockerLogsData,
-  DockerLogsErrors,
-  DockerLogServicesData,
-  DockerLogServicesErrors,
-  DockerLogServicesResponses,
-  DockerLogsResponses,
+  DockerEngineDetailData,
+  DockerEngineDetailErrors,
+  DockerEngineDetailResponses,
+  DockerEngineUpdateData,
+  DockerEngineUpdateErrors,
+  DockerEngineUpdateResponses,
   DockerRuntimeCreateData,
   DockerRuntimeCreateErrors,
   DockerRuntimeCreateResponses,
@@ -151,9 +136,18 @@ import type {
   DockerRuntimeListData,
   DockerRuntimeListErrors,
   DockerRuntimeListResponses,
-  DockerServicesData,
-  DockerServicesErrors,
-  DockerServicesResponses,
+  DockerServiceDetailData,
+  DockerServiceDetailErrors,
+  DockerServiceDetailResponses,
+  DockerServiceListData,
+  DockerServiceListErrors,
+  DockerServiceListLogsData,
+  DockerServiceListLogsErrors,
+  DockerServiceListLogsResponses,
+  DockerServiceListResponses,
+  DockerServiceUpdateData,
+  DockerServiceUpdateErrors,
+  DockerServiceUpdateResponses,
   DocPatternCreateData,
   DocPatternCreateErrors,
   DocPatternCreateResponses,
@@ -288,15 +282,15 @@ import type {
   HaEndpointListData,
   HaEndpointListErrors,
   HaEndpointListResponses,
+  HaEntityDetailData,
+  HaEntityDetailErrors,
+  HaEntityDetailResponses,
   HaEntityListData,
   HaEntityListErrors,
   HaEntityListResponses,
-  HaEntityStateData,
-  HaEntityStateErrors,
-  HaEntityStateResponses,
-  HaServiceCallData,
-  HaServiceCallErrors,
-  HaServiceCallResponses,
+  HaServiceUpdateData,
+  HaServiceUpdateErrors,
+  HaServiceUpdateResponses,
   HostDetailData,
   HostDetailErrors,
   HostDetailResponses,
@@ -312,15 +306,15 @@ import type {
   HostStatusListData,
   HostStatusListErrors,
   HostStatusListResponses,
-  InfraRunTestsData,
-  InfraRunTestsErrors,
-  InfraRunTestsResponses,
-  InfraServiceLogsData,
-  InfraServiceLogsErrors,
-  InfraServiceLogsResponses,
-  InfraServicesData,
-  InfraServicesErrors,
-  InfraServicesResponses,
+  InfraServiceDetailData,
+  InfraServiceDetailErrors,
+  InfraServiceDetailResponses,
+  InfraServiceListData,
+  InfraServiceListErrors,
+  InfraServiceListResponses,
+  InfraTestCreateData,
+  InfraTestCreateErrors,
+  InfraTestCreateResponses,
   InstallPluginData,
   InstallPluginErrors,
   InstallPluginResponses,
@@ -389,33 +383,45 @@ import type {
   McpFederationRunResponses,
   McpListData,
   McpListErrors,
-  McpListMappingsData,
-  McpListMappingsErrors,
-  McpListMappingsResponses,
   McpListResponses,
-  McpMapData,
-  McpMapErrors,
-  McpMapResponses,
+  McpMappingCreateData,
+  McpMappingCreateErrors,
+  McpMappingCreateResponses,
+  McpMappingDeleteData,
+  McpMappingDeleteErrors,
+  McpMappingDeleteResponses,
+  McpMappingListData,
+  McpMappingListErrors,
+  McpMappingListResponses,
   McpSyncData,
   McpSyncErrors,
   McpSyncResponses,
-  McpUnmapData,
-  McpUnmapErrors,
-  McpUnmapResponses,
   PingData,
   PingResponses,
-  PkiCaInitData,
-  PkiCaInitErrors,
-  PkiCaInitResponses,
-  PkiCertIssueData,
-  PkiCertIssueErrors,
-  PkiCertIssueResponses,
+  PkiCaCreateData,
+  PkiCaCreateErrors,
+  PkiCaCreateResponses,
+  PkiCertCreateData,
+  PkiCertCreateErrors,
+  PkiCertCreateResponses,
   PkiListData,
   PkiListErrors,
   PkiListResponses,
   PluginCreateData,
   PluginCreateErrors,
   PluginCreateResponses,
+  PluginCredCreateData,
+  PluginCredCreateErrors,
+  PluginCredCreateResponses,
+  PluginCredDeleteData,
+  PluginCredDeleteErrors,
+  PluginCredDeleteResponses,
+  PluginCredListData,
+  PluginCredListErrors,
+  PluginCredListResponses,
+  PluginCredSyncData,
+  PluginCredSyncErrors,
+  PluginCredSyncResponses,
   PluginDataGetData,
   PluginDataGetErrors,
   PluginDataGetResponses,
@@ -431,60 +437,42 @@ import type {
   PluginEnableData,
   PluginEnableErrors,
   PluginEnableResponses,
-  PluginListCredsData,
-  PluginListCredsErrors,
-  PluginListCredsResponses,
   PluginListData,
   PluginListErrors,
   PluginListResponses,
-  PluginRemoveCredData,
-  PluginRemoveCredErrors,
-  PluginRemoveCredResponses,
-  PluginSetCredData,
-  PluginSetCredErrors,
-  PluginSetCredResponses,
-  PluginSyncCredsData,
-  PluginSyncCredsErrors,
-  PluginSyncCredsResponses,
-  PodAcceptData,
-  PodAcceptErrors,
-  PodAcceptResponses,
-  PodCertStatusData,
-  PodCertStatusErrors,
-  PodCertStatusResponses,
-  PodDevDisableData,
-  PodDevDisableErrors,
-  PodDevDisableResponses,
-  PodDevEnableData,
-  PodDevEnableErrors,
-  PodDevEnableResponses,
-  PodDevSyncData,
-  PodDevSyncErrors,
-  PodDevSyncResponses,
-  PodDiscoverData,
-  PodDiscoverErrors,
-  PodDiscoverResponses,
-  PodJoinData,
-  PodJoinErrors,
-  PodJoinResponses,
-  PodLeaveData,
-  PodLeaveErrors,
-  PodLeaveResponses,
-  PodListData,
-  PodListErrors,
-  PodListResponses,
-  PodOfferData,
-  PodOfferErrors,
-  PodOfferResponses,
-  PodPendingData,
-  PodPendingErrors,
-  PodPendingResponses,
-  PodPingData,
-  PodPingErrors,
-  PodPingResponses,
-  PodTrustData,
-  PodTrustErrors,
-  PodTrustResponses,
+  PodDetailData,
+  PodDetailErrors,
+  PodDetailResponses,
+  PodDevUpdateData,
+  PodDevUpdateErrors,
+  PodDevUpdateResponses,
+  PodDiscoveryListData,
+  PodDiscoveryListErrors,
+  PodDiscoveryListResponses,
+  PodHandshakeCreateData,
+  PodHandshakeCreateErrors,
+  PodHandshakeCreateResponses,
+  PodHandshakeListData,
+  PodHandshakeListErrors,
+  PodHandshakeListResponses,
+  PodInviteCreateData,
+  PodInviteCreateErrors,
+  PodInviteCreateResponses,
+  PodJoinCreateData,
+  PodJoinCreateErrors,
+  PodJoinCreateResponses,
+  PodPeerDeleteData,
+  PodPeerDeleteErrors,
+  PodPeerDeleteResponses,
+  PodPeerDetailData,
+  PodPeerDetailErrors,
+  PodPeerDetailResponses,
+  PodPeerListData,
+  PodPeerListErrors,
+  PodPeerListResponses,
+  PodPeerUpdateData,
+  PodPeerUpdateErrors,
+  PodPeerUpdateResponses,
   ProfileCreateData,
   ProfileCreateErrors,
   ProfileCreateResponses,
@@ -497,30 +485,30 @@ import type {
   ProfileListData,
   ProfileListErrors,
   ProfileListResponses,
-  ProfileShareData,
-  ProfileShareErrors,
-  ProfileShareResponses,
-  ProfileSharesData,
-  ProfileSharesErrors,
-  ProfileSharesResponses,
+  ProfileShareCreateData,
+  ProfileShareCreateErrors,
+  ProfileShareCreateResponses,
+  ProfileShareDeleteData,
+  ProfileShareDeleteErrors,
+  ProfileShareDeleteResponses,
+  ProfileShareListData,
+  ProfileShareListErrors,
+  ProfileShareListResponses,
   ProfileShowData,
   ProfileShowErrors,
   ProfileShowResponses,
-  ProfileUnshareData,
-  ProfileUnshareErrors,
-  ProfileUnshareResponses,
   ProfileUseData,
   ProfileUseErrors,
   ProfileUseResponses,
   ProjectsListData,
   ProjectsListErrors,
   ProjectsListResponses,
-  ProxmoxContainerActionData,
-  ProxmoxContainerActionErrors,
-  ProxmoxContainerActionResponses,
-  ProxmoxContainersData,
-  ProxmoxContainersErrors,
-  ProxmoxContainersResponses,
+  ProxmoxContainerListData,
+  ProxmoxContainerListErrors,
+  ProxmoxContainerListResponses,
+  ProxmoxContainerUpdateData,
+  ProxmoxContainerUpdateErrors,
+  ProxmoxContainerUpdateResponses,
   ProxmoxEndpointCreateData,
   ProxmoxEndpointCreateErrors,
   ProxmoxEndpointCreateResponses,
@@ -530,15 +518,15 @@ import type {
   ProxmoxEndpointListData,
   ProxmoxEndpointListErrors,
   ProxmoxEndpointListResponses,
-  ProxmoxNodesData,
-  ProxmoxNodesErrors,
-  ProxmoxNodesResponses,
-  ProxmoxVmActionData,
-  ProxmoxVmActionErrors,
-  ProxmoxVmActionResponses,
-  ProxmoxVmsData,
-  ProxmoxVmsErrors,
-  ProxmoxVmsResponses,
+  ProxmoxNodeListData,
+  ProxmoxNodeListErrors,
+  ProxmoxNodeListResponses,
+  ProxmoxVmListData,
+  ProxmoxVmListErrors,
+  ProxmoxVmListResponses,
+  ProxmoxVmUpdateData,
+  ProxmoxVmUpdateErrors,
+  ProxmoxVmUpdateResponses,
   ProxyGraphqlData,
   ProxyGraphqlErrors,
   ProxyGraphqlResponses,
@@ -624,33 +612,33 @@ import type {
   SetPluginDataData,
   SetPluginDataErrors,
   SetPluginDataResponses,
-  SpecDumpData,
-  SpecDumpErrors,
-  SpecDumpResponses,
-  SpecGraphqlInfoData,
-  SpecGraphqlInfoErrors,
-  SpecGraphqlInfoResponses,
+  SpecCreateData,
+  SpecCreateErrors,
+  SpecCreateResponses,
+  SpecDeleteData,
+  SpecDeleteErrors,
+  SpecDeleteResponses,
+  SpecDetailData,
+  SpecDetailErrors,
+  SpecDetailResponses,
+  SpecGraphqlDetailData,
+  SpecGraphqlDetailErrors,
+  SpecGraphqlDetailResponses,
+  SpecGraphqlUpdateData,
+  SpecGraphqlUpdateErrors,
+  SpecGraphqlUpdateResponses,
   SpecListData,
   SpecListDbData,
   SpecListDbErrors,
   SpecListDbResponses,
   SpecListErrors,
   SpecListResponses,
-  SpecProxyGraphqlData,
-  SpecProxyGraphqlErrors,
-  SpecProxyGraphqlResponses,
   SpecRefreshData,
   SpecRefreshErrors,
   SpecRefreshResponses,
-  SpecRegisterData,
-  SpecRegisterErrors,
-  SpecRegisterResponses,
   SpecSyncMcpData,
   SpecSyncMcpErrors,
   SpecSyncMcpResponses,
-  SpecUnregisterData,
-  SpecUnregisterErrors,
-  SpecUnregisterResponses,
   StartDockerEngineData,
   StartDockerEngineErrors,
   StartDockerEngineResponses,
@@ -662,57 +650,45 @@ import type {
   SyncPluginCredsData,
   SyncPluginCredsErrors,
   SyncPluginCredsResponses,
-  SystemActionData,
-  SystemActionErrors,
   SystemActionHandlerData,
   SystemActionHandlerErrors,
   SystemActionHandlerResponses,
-  SystemActionResponses,
-  SystemDevDisableData,
-  SystemDevDisableErrors,
-  SystemDevDisableResponses,
-  SystemDevEnableData,
-  SystemDevEnableErrors,
-  SystemDevEnableResponses,
-  SystemDevSyncData,
-  SystemDevSyncErrors,
+  SystemDetailData,
+  SystemDetailErrors,
+  SystemDetailResponses,
   SystemDevSyncHandlerData,
   SystemDevSyncHandlerErrors,
   SystemDevSyncHandlerResponses,
-  SystemDevSyncResponses,
-  SystemDoctorData,
-  SystemDoctorErrors,
-  SystemDoctorResponses,
+  SystemDevUpdateData,
+  SystemDevUpdateErrors,
+  SystemDevUpdateResponses,
+  SystemDiagnosticListData,
+  SystemDiagnosticListErrors,
+  SystemDiagnosticListResponses,
   SystemHealthData,
   SystemHealthErrors,
   SystemHealthResponses,
-  SystemInstallData,
-  SystemInstallErrors,
-  SystemInstallResponses,
-  SystemRuntimeSpecData,
-  SystemRuntimeSpecErrors,
-  SystemRuntimeSpecResponses,
-  SystemStatusData,
-  SystemStatusErrors,
+  SystemLifecycleUpdateData,
+  SystemLifecycleUpdateErrors,
+  SystemLifecycleUpdateResponses,
+  SystemRuntimeDetailData,
+  SystemRuntimeDetailErrors,
+  SystemRuntimeDetailResponses,
   SystemStatusHandlerData,
   SystemStatusHandlerErrors,
   SystemStatusHandlerResponses,
-  SystemStatusResponses,
-  SystemUninstallData,
-  SystemUninstallErrors,
-  SystemUninstallResponses,
-  SystemUpdateApplyData,
-  SystemUpdateApplyErrors,
-  SystemUpdateApplyResponses,
-  SystemUpdateCheckData,
-  SystemUpdateCheckErrors,
-  SystemUpdateCheckResponses,
-  SystemUpdatePinData,
-  SystemUpdatePinErrors,
-  SystemUpdatePinResponses,
-  SystemUpdateUnpinData,
-  SystemUpdateUnpinErrors,
-  SystemUpdateUnpinResponses,
+  SystemUpdateCreateData,
+  SystemUpdateCreateErrors,
+  SystemUpdateCreateResponses,
+  SystemUpdateDeleteData,
+  SystemUpdateDeleteErrors,
+  SystemUpdateDeleteResponses,
+  SystemUpdateDetailData,
+  SystemUpdateDetailErrors,
+  SystemUpdateDetailResponses,
+  SystemUpdateUpdateData,
+  SystemUpdateUpdateErrors,
+  SystemUpdateUpdateResponses,
   TransitionJiraIssueData,
   TransitionJiraIssueErrors,
   TransitionJiraIssueResponses,
@@ -1756,11 +1732,15 @@ export const agentsSearchLogs = <ThrowOnError extends boolean = false>(
  *
  * [MUTATES STATE] Authenticate with a provider. Anthropic: pass `key`. GitHub: device-flow. Atlassian: PKCE.
  */
-export const authLogin = <ThrowOnError extends boolean = false>(
-  options: Options<AuthLoginData, ThrowOnError>,
+export const authSessionCreate = <ThrowOnError extends boolean = false>(
+  options: Options<AuthSessionCreateData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<AuthLoginResponses, AuthLoginErrors, ThrowOnError>({
-    url: '/api/tools/auth.login',
+  (options.client ?? client).post<
+    AuthSessionCreateResponses,
+    AuthSessionCreateErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/auth.session.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1773,11 +1753,15 @@ export const authLogin = <ThrowOnError extends boolean = false>(
  *
  * [MUTATES STATE] Remove a stored credential. `removed=false` if nothing was stored.
  */
-export const authLogout = <ThrowOnError extends boolean = false>(
-  options: Options<AuthLogoutData, ThrowOnError>,
+export const authSessionDelete = <ThrowOnError extends boolean = false>(
+  options: Options<AuthSessionDeleteData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<AuthLogoutResponses, AuthLogoutErrors, ThrowOnError>({
-    url: '/api/tools/auth.logout',
+  (options.client ?? client).post<
+    AuthSessionDeleteResponses,
+    AuthSessionDeleteErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/auth.session.delete',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1790,11 +1774,15 @@ export const authLogout = <ThrowOnError extends boolean = false>(
  *
  * Snapshot every configured credential the host knows about (Anthropic key + OAuth tokens).
  */
-export const authStatus = <ThrowOnError extends boolean = false>(
-  options: Options<AuthStatusData, ThrowOnError>,
+export const authSessionDetail = <ThrowOnError extends boolean = false>(
+  options: Options<AuthSessionDetailData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<AuthStatusResponses, AuthStatusErrors, ThrowOnError>({
-    url: '/api/tools/auth.status',
+  (options.client ?? client).post<
+    AuthSessionDetailResponses,
+    AuthSessionDetailErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/auth.session.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1811,7 +1799,24 @@ export const authTokenCreate = <ThrowOnError extends boolean = false>(
   options: Options<AuthTokenCreateData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<AuthTokenCreateResponses, AuthTokenCreateErrors, ThrowOnError>({
-    url: '/api/tools/auth.token_create',
+    url: '/api/tools/auth.token.create',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Revoke a token by id. Returns `revoked=false` if the id wasn't found.
+ *
+ * [MUTATES STATE] Revoke a token by id. Returns `revoked=false` if the id wasn't found.
+ */
+export const authTokenDelete = <ThrowOnError extends boolean = false>(
+  options: Options<AuthTokenDeleteData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<AuthTokenDeleteResponses, AuthTokenDeleteErrors, ThrowOnError>({
+    url: '/api/tools/auth.token.delete',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1828,24 +1833,7 @@ export const authTokenList = <ThrowOnError extends boolean = false>(
   options: Options<AuthTokenListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<AuthTokenListResponses, AuthTokenListErrors, ThrowOnError>({
-    url: '/api/tools/auth.token_list',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Revoke a token by id. Returns `revoked=false` if the id wasn't found.
- *
- * [MUTATES STATE] Revoke a token by id. Returns `revoked=false` if the id wasn't found.
- */
-export const authTokenRevoke = <ThrowOnError extends boolean = false>(
-  options: Options<AuthTokenRevokeData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<AuthTokenRevokeResponses, AuthTokenRevokeErrors, ThrowOnError>({
-    url: '/api/tools/auth.token_revoke',
+    url: '/api/tools/auth.token.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1939,49 +1927,19 @@ export const dbDetail = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * [MUTATES STATE] Revert the most recently applied migration (one step).
+ * [MUTATES STATE] Drive the migration runner. `action`: - `migrate`: apply all pending migrations. - `up`: apply the next pending migration (one step). - `down`: revert the most recently applied migration (one step).
  *
- * [MUTATES STATE] Revert the most recently applied migration (one step).
+ * [MUTATES STATE] Drive the migration runner. `action`: - `migrate`: apply all pending migrations. - `up`: apply the next pending migration (one step). - `down`: revert the most recently applied migration (one step).
  */
-export const dbDown = <ThrowOnError extends boolean = false>(
-  options: Options<DbDownData, ThrowOnError>,
+export const dbLifecycleUpdate = <ThrowOnError extends boolean = false>(
+  options: Options<DbLifecycleUpdateData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<DbDownResponses, DbDownErrors, ThrowOnError>({
-    url: '/api/tools/db.down',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Apply all pending migrations.
- *
- * [MUTATES STATE] Apply all pending migrations.
- */
-export const dbMigrate = <ThrowOnError extends boolean = false>(
-  options: Options<DbMigrateData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<DbMigrateResponses, DbMigrateErrors, ThrowOnError>({
-    url: '/api/tools/db.migrate',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Apply the next pending migration (one step).
- *
- * [MUTATES STATE] Apply the next pending migration (one step).
- */
-export const dbUp = <ThrowOnError extends boolean = false>(
-  options: Options<DbUpData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<DbUpResponses, DbUpErrors, ThrowOnError>({
-    url: '/api/tools/db.up',
+  (options.client ?? client).post<
+    DbLifecycleUpdateResponses,
+    DbLifecycleUpdateErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/db.lifecycle.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2155,32 +2113,19 @@ export const dockerRuntimeList = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * [MUTATES STATE] Run a docker-compose lifecycle action against the compose project at `project_path`.
- *
- * [MUTATES STATE] Run a docker-compose lifecycle action against the compose project at `project_path`.
- */
-export const dockerAction = <ThrowOnError extends boolean = false>(
-  options: Options<DockerActionData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<DockerActionResponses, DockerActionErrors, ThrowOnError>({
-    url: '/api/tools/docker.action',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
  * Probe the local docker engine (colima | desktop | none) and whether it is running.
  *
  * Probe the local docker engine (colima | desktop | none) and whether it is running.
  */
-export const dockerEngine = <ThrowOnError extends boolean = false>(
-  options: Options<DockerEngineData, ThrowOnError>,
+export const dockerEngineDetail = <ThrowOnError extends boolean = false>(
+  options: Options<DockerEngineDetailData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<DockerEngineResponses, DockerEngineErrors, ThrowOnError>({
-    url: '/api/tools/docker.engine',
+  (options.client ?? client).post<
+    DockerEngineDetailResponses,
+    DockerEngineDetailErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/docker.engine.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2193,36 +2138,15 @@ export const dockerEngine = <ThrowOnError extends boolean = false>(
  *
  * [MUTATES STATE] Start the local docker engine. Returns the start-command output.
  */
-export const dockerEngineStart = <ThrowOnError extends boolean = false>(
-  options: Options<DockerEngineStartData, ThrowOnError>,
+export const dockerEngineUpdate = <ThrowOnError extends boolean = false>(
+  options: Options<DockerEngineUpdateData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<
-    DockerEngineStartResponses,
-    DockerEngineStartErrors,
+    DockerEngineUpdateResponses,
+    DockerEngineUpdateErrors,
     ThrowOnError
   >({
-    url: '/api/tools/docker.engine-start',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * List every docker-compose project under the rebuy root with its service states. Powers the cross-project logs panel.
- *
- * List every docker-compose project under the rebuy root with its service states. Powers the cross-project logs panel.
- */
-export const dockerLogServices = <ThrowOnError extends boolean = false>(
-  options: Options<DockerLogServicesData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    DockerLogServicesResponses,
-    DockerLogServicesErrors,
-    ThrowOnError
-  >({
-    url: '/api/tools/docker.log-services',
+    url: '/api/tools/docker.engine.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2235,11 +2159,15 @@ export const dockerLogServices = <ThrowOnError extends boolean = false>(
  *
  * Read docker-compose logs from the project at `project` (optionally scoped to a service).
  */
-export const dockerLogs = <ThrowOnError extends boolean = false>(
-  options: Options<DockerLogsData, ThrowOnError>,
+export const dockerServiceDetail = <ThrowOnError extends boolean = false>(
+  options: Options<DockerServiceDetailData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<DockerLogsResponses, DockerLogsErrors, ThrowOnError>({
-    url: '/api/tools/docker.logs',
+  (options.client ?? client).post<
+    DockerServiceDetailResponses,
+    DockerServiceDetailErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/docker.service.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2252,11 +2180,57 @@ export const dockerLogs = <ThrowOnError extends boolean = false>(
  *
  * List the compose services under `path` with state/health/ports plus the resolved compose-file path.
  */
-export const dockerServices = <ThrowOnError extends boolean = false>(
-  options: Options<DockerServicesData, ThrowOnError>,
+export const dockerServiceList = <ThrowOnError extends boolean = false>(
+  options: Options<DockerServiceListData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<DockerServicesResponses, DockerServicesErrors, ThrowOnError>({
-    url: '/api/tools/docker.services',
+  (options.client ?? client).post<
+    DockerServiceListResponses,
+    DockerServiceListErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/docker.service.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List every docker-compose project under the rebuy root with its service states. Powers the cross-project logs panel.
+ *
+ * List every docker-compose project under the rebuy root with its service states. Powers the cross-project logs panel.
+ */
+export const dockerServiceListLogs = <ThrowOnError extends boolean = false>(
+  options: Options<DockerServiceListLogsData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    DockerServiceListLogsResponses,
+    DockerServiceListLogsErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/docker.service.list-logs',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Run a docker-compose lifecycle action against the compose project at `project_path`.
+ *
+ * [MUTATES STATE] Run a docker-compose lifecycle action against the compose project at `project_path`.
+ */
+export const dockerServiceUpdate = <ThrowOnError extends boolean = false>(
+  options: Options<DockerServiceUpdateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    DockerServiceUpdateResponses,
+    DockerServiceUpdateErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/docker.service.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2511,7 +2485,24 @@ export const haAutomationList = <ThrowOnError extends boolean = false>(
   options: Options<HaAutomationListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<HaAutomationListResponses, HaAutomationListErrors, ThrowOnError>({
-    url: '/api/tools/ha.automation-list',
+    url: '/api/tools/ha.automation.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Fetch the current state of a single Home Assistant entity.
+ *
+ * Fetch the current state of a single Home Assistant entity.
+ */
+export const haEntityDetail = <ThrowOnError extends boolean = false>(
+  options: Options<HaEntityDetailData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<HaEntityDetailResponses, HaEntityDetailErrors, ThrowOnError>({
+    url: '/api/tools/ha.entity.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2528,24 +2519,7 @@ export const haEntityList = <ThrowOnError extends boolean = false>(
   options: Options<HaEntityListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<HaEntityListResponses, HaEntityListErrors, ThrowOnError>({
-    url: '/api/tools/ha.entity-list',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Fetch the current state of a single Home Assistant entity.
- *
- * Fetch the current state of a single Home Assistant entity.
- */
-export const haEntityState = <ThrowOnError extends boolean = false>(
-  options: Options<HaEntityStateData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<HaEntityStateResponses, HaEntityStateErrors, ThrowOnError>({
-    url: '/api/tools/ha.entity-state',
+    url: '/api/tools/ha.entity.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2558,11 +2532,11 @@ export const haEntityState = <ThrowOnError extends boolean = false>(
  *
  * [MUTATES STATE] Invoke a Home Assistant service (e.g. light.turn_on, switch.toggle). Returns the list of changed entity states.
  */
-export const haServiceCall = <ThrowOnError extends boolean = false>(
-  options: Options<HaServiceCallData, ThrowOnError>,
+export const haServiceUpdate = <ThrowOnError extends boolean = false>(
+  options: Options<HaServiceUpdateData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<HaServiceCallResponses, HaServiceCallErrors, ThrowOnError>({
-    url: '/api/tools/ha.service-call',
+  (options.client ?? client).post<HaServiceUpdateResponses, HaServiceUpdateErrors, ThrowOnError>({
+    url: '/api/tools/ha.service.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2656,32 +2630,19 @@ export const hostStatusList = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * Run the orca project test suite. Returns test output with pass/fail counts. Suites: rust (cargo test), frontend (vitest), e2e (playwright), all.
- *
- * Run the orca project test suite. Returns test output with pass/fail counts. Suites: rust (cargo test), frontend (vitest), e2e (playwright), all.
- */
-export const infraRunTests = <ThrowOnError extends boolean = false>(
-  options: Options<InfraRunTestsData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<InfraRunTestsResponses, InfraRunTestsErrors, ThrowOnError>({
-    url: '/api/tools/infra.run-tests',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
  * Fetch docker compose logs for a running rebuy service. Specify the project path and service name.
  *
  * Fetch docker compose logs for a running rebuy service. Specify the project path and service name.
  */
-export const infraServiceLogs = <ThrowOnError extends boolean = false>(
-  options: Options<InfraServiceLogsData, ThrowOnError>,
+export const infraServiceDetail = <ThrowOnError extends boolean = false>(
+  options: Options<InfraServiceDetailData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<InfraServiceLogsResponses, InfraServiceLogsErrors, ThrowOnError>({
-    url: '/api/tools/infra.service-logs',
+  (options.client ?? client).post<
+    InfraServiceDetailResponses,
+    InfraServiceDetailErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/infra.service.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2694,11 +2655,28 @@ export const infraServiceLogs = <ThrowOnError extends boolean = false>(
  *
  * List all running docker compose services across all rebuy projects. Returns project name, path, and per-service state/health/ports.
  */
-export const infraServices = <ThrowOnError extends boolean = false>(
-  options: Options<InfraServicesData, ThrowOnError>,
+export const infraServiceList = <ThrowOnError extends boolean = false>(
+  options: Options<InfraServiceListData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<InfraServicesResponses, InfraServicesErrors, ThrowOnError>({
-    url: '/api/tools/infra.services',
+  (options.client ?? client).post<InfraServiceListResponses, InfraServiceListErrors, ThrowOnError>({
+    url: '/api/tools/infra.service.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Run the orca project test suite. Returns test output with pass/fail counts. Suites: rust (cargo test), frontend (vitest), e2e (playwright), all.
+ *
+ * Run the orca project test suite. Returns test output with pass/fail counts. Suites: rust (cargo test), frontend (vitest), e2e (playwright), all.
+ */
+export const infraTestCreate = <ThrowOnError extends boolean = false>(
+  options: Options<InfraTestCreateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<InfraTestCreateResponses, InfraTestCreateErrors, ThrowOnError>({
+    url: '/api/tools/infra.test.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2796,15 +2774,15 @@ export const mcpList = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * List all tool mappings in orca.db, optionally filtered by server name.
+ * [MUTATES STATE] Map an orca tool name to a specific tool on a registered MCP server.
  *
- * List all tool mappings in orca.db, optionally filtered by server name.
+ * [MUTATES STATE] Map an orca tool name to a specific tool on a registered MCP server.
  */
-export const mcpListMappings = <ThrowOnError extends boolean = false>(
-  options: Options<McpListMappingsData, ThrowOnError>,
+export const mcpMappingCreate = <ThrowOnError extends boolean = false>(
+  options: Options<McpMappingCreateData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<McpListMappingsResponses, McpListMappingsErrors, ThrowOnError>({
-    url: '/api/tools/mcp.list-mappings',
+  (options.client ?? client).post<McpMappingCreateResponses, McpMappingCreateErrors, ThrowOnError>({
+    url: '/api/tools/mcp.mapping.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2813,15 +2791,32 @@ export const mcpListMappings = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * [MUTATES STATE] Map an orca tool name to a specific tool on a registered MCP server.
+ * [MUTATES STATE] Remove a tool mapping from orca.db.
  *
- * [MUTATES STATE] Map an orca tool name to a specific tool on a registered MCP server.
+ * [MUTATES STATE] Remove a tool mapping from orca.db.
  */
-export const mcpMap = <ThrowOnError extends boolean = false>(
-  options: Options<McpMapData, ThrowOnError>,
+export const mcpMappingDelete = <ThrowOnError extends boolean = false>(
+  options: Options<McpMappingDeleteData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<McpMapResponses, McpMapErrors, ThrowOnError>({
-    url: '/api/tools/mcp.map',
+  (options.client ?? client).post<McpMappingDeleteResponses, McpMappingDeleteErrors, ThrowOnError>({
+    url: '/api/tools/mcp.mapping.delete',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List all tool mappings in orca.db, optionally filtered by server name.
+ *
+ * List all tool mappings in orca.db, optionally filtered by server name.
+ */
+export const mcpMappingList = <ThrowOnError extends boolean = false>(
+  options: Options<McpMappingListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<McpMappingListResponses, McpMappingListErrors, ThrowOnError>({
+    url: '/api/tools/mcp.mapping.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2847,32 +2842,15 @@ export const mcpSync = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * [MUTATES STATE] Remove a tool mapping from orca.db.
- *
- * [MUTATES STATE] Remove a tool mapping from orca.db.
- */
-export const mcpUnmap = <ThrowOnError extends boolean = false>(
-  options: Options<McpUnmapData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<McpUnmapResponses, McpUnmapErrors, ThrowOnError>({
-    url: '/api/tools/mcp.unmap',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
  * [MUTATES STATE] Initialize the orca CA and server cert. Safe to re-run; skips if CA exists.
  *
  * [MUTATES STATE] Initialize the orca CA and server cert. Safe to re-run; skips if CA exists.
  */
-export const pkiCaInit = <ThrowOnError extends boolean = false>(
-  options: Options<PkiCaInitData, ThrowOnError>,
+export const pkiCaCreate = <ThrowOnError extends boolean = false>(
+  options: Options<PkiCaCreateData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<PkiCaInitResponses, PkiCaInitErrors, ThrowOnError>({
-    url: '/api/tools/pki.ca-init',
+  (options.client ?? client).post<PkiCaCreateResponses, PkiCaCreateErrors, ThrowOnError>({
+    url: '/api/tools/pki.ca.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2885,11 +2863,11 @@ export const pkiCaInit = <ThrowOnError extends boolean = false>(
  *
  * [MUTATES STATE] Issue a cert for a plugin.
  */
-export const pkiCertIssue = <ThrowOnError extends boolean = false>(
-  options: Options<PkiCertIssueData, ThrowOnError>,
+export const pkiCertCreate = <ThrowOnError extends boolean = false>(
+  options: Options<PkiCertCreateData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<PkiCertIssueResponses, PkiCertIssueErrors, ThrowOnError>({
-    url: '/api/tools/pki.cert-issue',
+  (options.client ?? client).post<PkiCertCreateResponses, PkiCertCreateErrors, ThrowOnError>({
+    url: '/api/tools/pki.cert.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2966,6 +2944,74 @@ export const pluginCreate = <ThrowOnError extends boolean = false>(
   });
 
 /**
+ * [MUTATES STATE] Store a credential value for a plugin in orca.db.
+ *
+ * [MUTATES STATE] Store a credential value for a plugin in orca.db.
+ */
+export const pluginCredCreate = <ThrowOnError extends boolean = false>(
+  options: Options<PluginCredCreateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PluginCredCreateResponses, PluginCredCreateErrors, ThrowOnError>({
+    url: '/api/tools/plugin.cred.create',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove a stored credential for a plugin from orca.db.
+ *
+ * [MUTATES STATE] Remove a stored credential for a plugin from orca.db.
+ */
+export const pluginCredDelete = <ThrowOnError extends boolean = false>(
+  options: Options<PluginCredDeleteData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PluginCredDeleteResponses, PluginCredDeleteErrors, ThrowOnError>({
+    url: '/api/tools/plugin.cred.delete',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List all stored credentials for a plugin (keys only — values are never returned).
+ *
+ * List all stored credentials for a plugin (keys only — values are never returned).
+ */
+export const pluginCredList = <ThrowOnError extends boolean = false>(
+  options: Options<PluginCredListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PluginCredListResponses, PluginCredListErrors, ThrowOnError>({
+    url: '/api/tools/plugin.cred.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Sync stored credentials for a plugin to its runtime environment.
+ *
+ * [MUTATES STATE] Sync stored credentials for a plugin to its runtime environment.
+ */
+export const pluginCredSync = <ThrowOnError extends boolean = false>(
+  options: Options<PluginCredSyncData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PluginCredSyncResponses, PluginCredSyncErrors, ThrowOnError>({
+    url: '/api/tools/plugin.cred.sync',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
  * [MUTATES STATE] Remove an installed orca plugin by ID.
  *
  * [MUTATES STATE] Remove an installed orca plugin by ID.
@@ -3034,100 +3080,15 @@ export const pluginList = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * List all stored credentials for a plugin (keys only — values are never returned).
- *
- * List all stored credentials for a plugin (keys only — values are never returned).
- */
-export const pluginListCreds = <ThrowOnError extends boolean = false>(
-  options: Options<PluginListCredsData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<PluginListCredsResponses, PluginListCredsErrors, ThrowOnError>({
-    url: '/api/tools/plugin.list-creds',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Remove a stored credential for a plugin from orca.db.
- *
- * [MUTATES STATE] Remove a stored credential for a plugin from orca.db.
- */
-export const pluginRemoveCred = <ThrowOnError extends boolean = false>(
-  options: Options<PluginRemoveCredData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<PluginRemoveCredResponses, PluginRemoveCredErrors, ThrowOnError>({
-    url: '/api/tools/plugin.remove-cred',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Store a credential value for a plugin in orca.db.
- *
- * [MUTATES STATE] Store a credential value for a plugin in orca.db.
- */
-export const pluginSetCred = <ThrowOnError extends boolean = false>(
-  options: Options<PluginSetCredData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<PluginSetCredResponses, PluginSetCredErrors, ThrowOnError>({
-    url: '/api/tools/plugin.set-cred',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Sync stored credentials for a plugin to its runtime environment.
- *
- * [MUTATES STATE] Sync stored credentials for a plugin to its runtime environment.
- */
-export const pluginSyncCreds = <ThrowOnError extends boolean = false>(
-  options: Options<PluginSyncCredsData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<PluginSyncCredsResponses, PluginSyncCredsErrors, ThrowOnError>({
-    url: '/api/tools/plugin.sync-creds',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Accept a pending pod-membership offer by pairing code.
- *
- * Accept a pending pod-membership offer by pairing code.
- */
-export const podAccept = <ThrowOnError extends boolean = false>(
-  options: Options<PodAcceptData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<PodAcceptResponses, PodAcceptErrors, ThrowOnError>({
-    url: '/api/tools/pod.accept',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
  * Days-remaining + rotation state for every mesh cert on this host.
  *
  * Days-remaining + rotation state for every mesh cert on this host.
  */
-export const podCertStatus = <ThrowOnError extends boolean = false>(
-  options: Options<PodCertStatusData, ThrowOnError>,
+export const podDetail = <ThrowOnError extends boolean = false>(
+  options: Options<PodDetailData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<PodCertStatusResponses, PodCertStatusErrors, ThrowOnError>({
-    url: '/api/tools/pod.cert-status',
+  (options.client ?? client).post<PodDetailResponses, PodDetailErrors, ThrowOnError>({
+    url: '/api/tools/pod.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -3136,49 +3097,15 @@ export const podCertStatus = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * Flip dev mode OFF across the mesh. Empty `peers` = local + every paired peer. Each peer stops cargo-watch and the production daemon reclaims.
+ * Update dev mode across the mesh. `action`: - `sync`: git pull on every active dev peer (cargo watch auto-restarts). - `enable`: flip dev mode ON for `peers` (or local + every paired peer if empty). - `disable`: flip dev mode OFF for `peers` (or local + every paired peer if empty).
  *
- * Flip dev mode OFF across the mesh. Empty `peers` = local + every paired peer. Each peer stops cargo-watch and the production daemon reclaims.
+ * Update dev mode across the mesh. `action`: - `sync`: git pull on every active dev peer (cargo watch auto-restarts). - `enable`: flip dev mode ON for `peers` (or local + every paired peer if empty). - `disable`: flip dev mode OFF for `peers` (or local + every paired peer if empty).
  */
-export const podDevDisable = <ThrowOnError extends boolean = false>(
-  options: Options<PodDevDisableData, ThrowOnError>,
+export const podDevUpdate = <ThrowOnError extends boolean = false>(
+  options: Options<PodDevUpdateData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<PodDevDisableResponses, PodDevDisableErrors, ThrowOnError>({
-    url: '/api/tools/pod.dev_disable',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Flip dev mode ON across the mesh. Empty `peers` = local + every paired peer. Each peer clones the repo if needed and spawns cargo-watch.
- *
- * Flip dev mode ON across the mesh. Empty `peers` = local + every paired peer. Each peer clones the repo if needed and spawns cargo-watch.
- */
-export const podDevEnable = <ThrowOnError extends boolean = false>(
-  options: Options<PodDevEnableData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<PodDevEnableResponses, PodDevEnableErrors, ThrowOnError>({
-    url: '/api/tools/pod.dev_enable',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * git pull on every active peer running in dev mode; cargo watch auto-restarts. Peers not in dev mode are skipped (not an error).
- *
- * git pull on every active peer running in dev mode; cargo watch auto-restarts. Peers not in dev mode are skipped (not an error).
- */
-export const podDevSync = <ThrowOnError extends boolean = false>(
-  options: Options<PodDevSyncData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<PodDevSyncResponses, PodDevSyncErrors, ThrowOnError>({
-    url: '/api/tools/pod.dev_sync',
+  (options.client ?? client).post<PodDevUpdateResponses, PodDevUpdateErrors, ThrowOnError>({
+    url: '/api/tools/pod.dev.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -3191,11 +3118,11 @@ export const podDevSync = <ThrowOnError extends boolean = false>(
  *
  * List orcas seen on the network via mDNS (paired + unclaimed).
  */
-export const podDiscover = <ThrowOnError extends boolean = false>(
-  options: Options<PodDiscoverData, ThrowOnError>,
+export const podDiscoveryList = <ThrowOnError extends boolean = false>(
+  options: Options<PodDiscoveryListData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<PodDiscoverResponses, PodDiscoverErrors, ThrowOnError>({
-    url: '/api/tools/pod.discover',
+  (options.client ?? client).post<PodDiscoveryListResponses, PodDiscoveryListErrors, ThrowOnError>({
+    url: '/api/tools/pod.discovery.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -3204,66 +3131,19 @@ export const podDiscover = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * Joiner-initiated pair: request an offer from an out-of-mDNS inviter.
+ * Accept a pending pod-membership offer by pairing code.
  *
- * Joiner-initiated pair: request an offer from an out-of-mDNS inviter.
+ * Accept a pending pod-membership offer by pairing code.
  */
-export const podJoin = <ThrowOnError extends boolean = false>(
-  options: Options<PodJoinData, ThrowOnError>,
+export const podHandshakeCreate = <ThrowOnError extends boolean = false>(
+  options: Options<PodHandshakeCreateData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<PodJoinResponses, PodJoinErrors, ThrowOnError>({
-    url: '/api/tools/pod.join',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Best-effort notify a peer we're leaving, then drop pod_peers + pod_trust rows for it.
- *
- * Best-effort notify a peer we're leaving, then drop pod_peers + pod_trust rows for it.
- */
-export const podLeave = <ThrowOnError extends boolean = false>(
-  options: Options<PodLeaveData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<PodLeaveResponses, PodLeaveErrors, ThrowOnError>({
-    url: '/api/tools/pod.leave',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * List paired pod peers (mesh members).
- *
- * List paired pod peers (mesh members).
- */
-export const podList = <ThrowOnError extends boolean = false>(
-  options: Options<PodListData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<PodListResponses, PodListErrors, ThrowOnError>({
-    url: '/api/tools/pod.list',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Push a pod-membership offer to a discovered joiner.
- *
- * Push a pod-membership offer to a discovered joiner.
- */
-export const podOffer = <ThrowOnError extends boolean = false>(
-  options: Options<PodOfferData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<PodOfferResponses, PodOfferErrors, ThrowOnError>({
-    url: '/api/tools/pod.offer',
+  (options.client ?? client).post<
+    PodHandshakeCreateResponses,
+    PodHandshakeCreateErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/pod.handshake.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -3276,11 +3156,62 @@ export const podOffer = <ThrowOnError extends boolean = false>(
  *
  * List pending inbound pod-membership offers.
  */
-export const podPending = <ThrowOnError extends boolean = false>(
-  options: Options<PodPendingData, ThrowOnError>,
+export const podHandshakeList = <ThrowOnError extends boolean = false>(
+  options: Options<PodHandshakeListData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<PodPendingResponses, PodPendingErrors, ThrowOnError>({
-    url: '/api/tools/pod.pending',
+  (options.client ?? client).post<PodHandshakeListResponses, PodHandshakeListErrors, ThrowOnError>({
+    url: '/api/tools/pod.handshake.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Push a pod-membership offer to a discovered joiner.
+ *
+ * Push a pod-membership offer to a discovered joiner.
+ */
+export const podInviteCreate = <ThrowOnError extends boolean = false>(
+  options: Options<PodInviteCreateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodInviteCreateResponses, PodInviteCreateErrors, ThrowOnError>({
+    url: '/api/tools/pod.invite.create',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Joiner-initiated pair: request an offer from an out-of-mDNS inviter.
+ *
+ * Joiner-initiated pair: request an offer from an out-of-mDNS inviter.
+ */
+export const podJoinCreate = <ThrowOnError extends boolean = false>(
+  options: Options<PodJoinCreateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodJoinCreateResponses, PodJoinCreateErrors, ThrowOnError>({
+    url: '/api/tools/pod.join.create',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Best-effort notify a peer we're leaving, then drop pod_peers + pod_trust rows for it.
+ *
+ * Best-effort notify a peer we're leaving, then drop pod_peers + pod_trust rows for it.
+ */
+export const podPeerDelete = <ThrowOnError extends boolean = false>(
+  options: Options<PodPeerDeleteData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodPeerDeleteResponses, PodPeerDeleteErrors, ThrowOnError>({
+    url: '/api/tools/pod.peer.delete',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -3293,11 +3224,28 @@ export const podPending = <ThrowOnError extends boolean = false>(
  *
  * mTLS ping a paired peer; returns latency + their self-reported identity.
  */
-export const podPing = <ThrowOnError extends boolean = false>(
-  options: Options<PodPingData, ThrowOnError>,
+export const podPeerDetail = <ThrowOnError extends boolean = false>(
+  options: Options<PodPeerDetailData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<PodPingResponses, PodPingErrors, ThrowOnError>({
-    url: '/api/tools/pod.ping',
+  (options.client ?? client).post<PodPeerDetailResponses, PodPeerDetailErrors, ThrowOnError>({
+    url: '/api/tools/pod.peer.detail',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List paired pod peers (mesh members).
+ *
+ * List paired pod peers (mesh members).
+ */
+export const podPeerList = <ThrowOnError extends boolean = false>(
+  options: Options<PodPeerListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodPeerListResponses, PodPeerListErrors, ThrowOnError>({
+    url: '/api/tools/pod.peer.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -3310,11 +3258,11 @@ export const podPing = <ThrowOnError extends boolean = false>(
  *
  * Toggle local trust for a paired peer; replicates CA key on mutual-secure.
  */
-export const podTrust = <ThrowOnError extends boolean = false>(
-  options: Options<PodTrustData, ThrowOnError>,
+export const podPeerUpdate = <ThrowOnError extends boolean = false>(
+  options: Options<PodPeerUpdateData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<PodTrustResponses, PodTrustErrors, ThrowOnError>({
-    url: '/api/tools/pod.trust',
+  (options.client ?? client).post<PodPeerUpdateResponses, PodPeerUpdateErrors, ThrowOnError>({
+    url: '/api/tools/pod.peer.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -3395,11 +3343,36 @@ export const profileList = <ThrowOnError extends boolean = false>(
  *
  * [MUTATES STATE] Share a profile with another user.
  */
-export const profileShare = <ThrowOnError extends boolean = false>(
-  options: Options<ProfileShareData, ThrowOnError>,
+export const profileShareCreate = <ThrowOnError extends boolean = false>(
+  options: Options<ProfileShareCreateData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<ProfileShareResponses, ProfileShareErrors, ThrowOnError>({
-    url: '/api/tools/profile.share',
+  (options.client ?? client).post<
+    ProfileShareCreateResponses,
+    ProfileShareCreateErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/profile.share.create',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove a share from a profile.
+ *
+ * [MUTATES STATE] Remove a share from a profile.
+ */
+export const profileShareDelete = <ThrowOnError extends boolean = false>(
+  options: Options<ProfileShareDeleteData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    ProfileShareDeleteResponses,
+    ProfileShareDeleteErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/profile.share.delete',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -3412,11 +3385,11 @@ export const profileShare = <ThrowOnError extends boolean = false>(
  *
  * List shares on a profile (owner only).
  */
-export const profileShares = <ThrowOnError extends boolean = false>(
-  options: Options<ProfileSharesData, ThrowOnError>,
+export const profileShareList = <ThrowOnError extends boolean = false>(
+  options: Options<ProfileShareListData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<ProfileSharesResponses, ProfileSharesErrors, ThrowOnError>({
-    url: '/api/tools/profile.shares',
+  (options.client ?? client).post<ProfileShareListResponses, ProfileShareListErrors, ThrowOnError>({
+    url: '/api/tools/profile.share.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -3434,23 +3407,6 @@ export const profileShow = <ThrowOnError extends boolean = false>(
 ) =>
   (options.client ?? client).post<ProfileShowResponses, ProfileShowErrors, ThrowOnError>({
     url: '/api/tools/profile.show',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Remove a share from a profile.
- *
- * [MUTATES STATE] Remove a share from a profile.
- */
-export const profileUnshare = <ThrowOnError extends boolean = false>(
-  options: Options<ProfileUnshareData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<ProfileUnshareResponses, ProfileUnshareErrors, ThrowOnError>({
-    url: '/api/tools/profile.unshare',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -3556,19 +3512,19 @@ export const proxmoxEndpointList = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * [MUTATES STATE] Run a lifecycle action on a Proxmox LXC container.
+ * List LXC containers on a Proxmox node.
  *
- * [MUTATES STATE] Run a lifecycle action on a Proxmox LXC container.
+ * List LXC containers on a Proxmox node.
  */
-export const proxmoxContainerAction = <ThrowOnError extends boolean = false>(
-  options: Options<ProxmoxContainerActionData, ThrowOnError>,
+export const proxmoxContainerList = <ThrowOnError extends boolean = false>(
+  options: Options<ProxmoxContainerListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<
-    ProxmoxContainerActionResponses,
-    ProxmoxContainerActionErrors,
+    ProxmoxContainerListResponses,
+    ProxmoxContainerListErrors,
     ThrowOnError
   >({
-    url: '/api/tools/proxmox.container-action',
+    url: '/api/tools/proxmox.container.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -3577,19 +3533,19 @@ export const proxmoxContainerAction = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * List LXC containers on a Proxmox node.
+ * [MUTATES STATE] Run a lifecycle action on a Proxmox LXC container.
  *
- * List LXC containers on a Proxmox node.
+ * [MUTATES STATE] Run a lifecycle action on a Proxmox LXC container.
  */
-export const proxmoxContainers = <ThrowOnError extends boolean = false>(
-  options: Options<ProxmoxContainersData, ThrowOnError>,
+export const proxmoxContainerUpdate = <ThrowOnError extends boolean = false>(
+  options: Options<ProxmoxContainerUpdateData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<
-    ProxmoxContainersResponses,
-    ProxmoxContainersErrors,
+    ProxmoxContainerUpdateResponses,
+    ProxmoxContainerUpdateErrors,
     ThrowOnError
   >({
-    url: '/api/tools/proxmox.containers',
+    url: '/api/tools/proxmox.container.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -3602,28 +3558,11 @@ export const proxmoxContainers = <ThrowOnError extends boolean = false>(
  *
  * List Proxmox VE cluster nodes for a registered endpoint.
  */
-export const proxmoxNodes = <ThrowOnError extends boolean = false>(
-  options: Options<ProxmoxNodesData, ThrowOnError>,
+export const proxmoxNodeList = <ThrowOnError extends boolean = false>(
+  options: Options<ProxmoxNodeListData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<ProxmoxNodesResponses, ProxmoxNodesErrors, ThrowOnError>({
-    url: '/api/tools/proxmox.nodes',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Run a lifecycle action on a Proxmox VM (start/stop/shutdown/reboot).
- *
- * [MUTATES STATE] Run a lifecycle action on a Proxmox VM (start/stop/shutdown/reboot).
- */
-export const proxmoxVmAction = <ThrowOnError extends boolean = false>(
-  options: Options<ProxmoxVmActionData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<ProxmoxVmActionResponses, ProxmoxVmActionErrors, ThrowOnError>({
-    url: '/api/tools/proxmox.vm-action',
+  (options.client ?? client).post<ProxmoxNodeListResponses, ProxmoxNodeListErrors, ThrowOnError>({
+    url: '/api/tools/proxmox.node.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -3636,11 +3575,28 @@ export const proxmoxVmAction = <ThrowOnError extends boolean = false>(
  *
  * List QEMU VMs on a Proxmox node.
  */
-export const proxmoxVms = <ThrowOnError extends boolean = false>(
-  options: Options<ProxmoxVmsData, ThrowOnError>,
+export const proxmoxVmList = <ThrowOnError extends boolean = false>(
+  options: Options<ProxmoxVmListData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<ProxmoxVmsResponses, ProxmoxVmsErrors, ThrowOnError>({
-    url: '/api/tools/proxmox.vms',
+  (options.client ?? client).post<ProxmoxVmListResponses, ProxmoxVmListErrors, ThrowOnError>({
+    url: '/api/tools/proxmox.vm.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Run a lifecycle action on a Proxmox VM (start/stop/shutdown/reboot).
+ *
+ * [MUTATES STATE] Run a lifecycle action on a Proxmox VM (start/stop/shutdown/reboot).
+ */
+export const proxmoxVmUpdate = <ThrowOnError extends boolean = false>(
+  options: Options<ProxmoxVmUpdateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<ProxmoxVmUpdateResponses, ProxmoxVmUpdateErrors, ThrowOnError>({
+    url: '/api/tools/proxmox.vm.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -3870,15 +3826,49 @@ export const secretSet = <ThrowOnError extends boolean = false>(
   });
 
 /**
+ * [MUTATES STATE] Fetch a JSON OpenAPI spec from `url` and persist it under `name` in orca.db.
+ *
+ * [MUTATES STATE] Fetch a JSON OpenAPI spec from `url` and persist it under `name` in orca.db.
+ */
+export const specCreate = <ThrowOnError extends boolean = false>(
+  options: Options<SpecCreateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SpecCreateResponses, SpecCreateErrors, ThrowOnError>({
+    url: '/api/tools/spec.create',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove a spec from orca.db. Returns `removed: true` when a row was deleted.
+ *
+ * [MUTATES STATE] Remove a spec from orca.db. Returns `removed: true` when a row was deleted.
+ */
+export const specDelete = <ThrowOnError extends boolean = false>(
+  options: Options<SpecDeleteData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SpecDeleteResponses, SpecDeleteErrors, ThrowOnError>({
+    url: '/api/tools/spec.delete',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
  * Dump orca's own OpenAPI JSON document. Used by build pipelines that don't want to spin up the HTTP server.
  *
  * Dump orca's own OpenAPI JSON document. Used by build pipelines that don't want to spin up the HTTP server.
  */
-export const specDump = <ThrowOnError extends boolean = false>(
-  options: Options<SpecDumpData, ThrowOnError>,
+export const specDetail = <ThrowOnError extends boolean = false>(
+  options: Options<SpecDetailData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<SpecDumpResponses, SpecDumpErrors, ThrowOnError>({
-    url: '/api/tools/spec.dump',
+  (options.client ?? client).post<SpecDetailResponses, SpecDetailErrors, ThrowOnError>({
+    url: '/api/tools/spec.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -3891,11 +3881,36 @@ export const specDump = <ThrowOnError extends boolean = false>(
  *
  * Parse the local `<repo>.graphql` SDL into a structured types/queries/mutations view.
  */
-export const specGraphqlInfo = <ThrowOnError extends boolean = false>(
-  options: Options<SpecGraphqlInfoData, ThrowOnError>,
+export const specGraphqlDetail = <ThrowOnError extends boolean = false>(
+  options: Options<SpecGraphqlDetailData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<SpecGraphqlInfoResponses, SpecGraphqlInfoErrors, ThrowOnError>({
-    url: '/api/tools/spec.graphql-info',
+  (options.client ?? client).post<
+    SpecGraphqlDetailResponses,
+    SpecGraphqlDetailErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/spec.graphql.detail',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Proxy a GraphQL request to a Shopify shop using the configured shop+token. Returns the raw upstream JSON body.
+ *
+ * Proxy a GraphQL request to a Shopify shop using the configured shop+token. Returns the raw upstream JSON body.
+ */
+export const specGraphqlUpdate = <ThrowOnError extends boolean = false>(
+  options: Options<SpecGraphqlUpdateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    SpecGraphqlUpdateResponses,
+    SpecGraphqlUpdateErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/spec.graphql.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -3938,23 +3953,6 @@ export const specListDb = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * Proxy a GraphQL request to a Shopify shop using the configured shop+token. Returns the raw upstream JSON body.
- *
- * Proxy a GraphQL request to a Shopify shop using the configured shop+token. Returns the raw upstream JSON body.
- */
-export const specProxyGraphql = <ThrowOnError extends boolean = false>(
-  options: Options<SpecProxyGraphqlData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<SpecProxyGraphqlResponses, SpecProxyGraphqlErrors, ThrowOnError>({
-    url: '/api/tools/spec.proxy-graphql',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
  * [MUTATES STATE] Re-fetch a previously-registered spec from its stored URL and update orca.db.
  *
  * [MUTATES STATE] Re-fetch a previously-registered spec from its stored URL and update orca.db.
@@ -3972,23 +3970,6 @@ export const specRefresh = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * [MUTATES STATE] Fetch a JSON OpenAPI spec from `url` and persist it under `name` in orca.db.
- *
- * [MUTATES STATE] Fetch a JSON OpenAPI spec from `url` and persist it under `name` in orca.db.
- */
-export const specRegister = <ThrowOnError extends boolean = false>(
-  options: Options<SpecRegisterData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<SpecRegisterResponses, SpecRegisterErrors, ThrowOnError>({
-    url: '/api/tools/spec.register',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
  * [MUTATES STATE] Connect to `server` (an MCP server), call its `{prefix}_spec_list` and `{prefix}_spec_schema` tools, and upsert every advertised repo into orca.db.
  *
  * [MUTATES STATE] Connect to `server` (an MCP server), call its `{prefix}_spec_list` and `{prefix}_spec_schema` tools, and upsert every advertised repo into orca.db.
@@ -3998,23 +3979,6 @@ export const specSyncMcp = <ThrowOnError extends boolean = false>(
 ) =>
   (options.client ?? client).post<SpecSyncMcpResponses, SpecSyncMcpErrors, ThrowOnError>({
     url: '/api/tools/spec.sync-mcp',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Remove a spec from orca.db. Returns `removed: true` when a row was deleted.
- *
- * [MUTATES STATE] Remove a spec from orca.db. Returns `removed: true` when a row was deleted.
- */
-export const specUnregister = <ThrowOnError extends boolean = false>(
-  options: Options<SpecUnregisterData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<SpecUnregisterResponses, SpecUnregisterErrors, ThrowOnError>({
-    url: '/api/tools/spec.unregister',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -4044,15 +4008,15 @@ export const sweepOrganization = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * [MUTATES STATE] Run orca's install or uninstall flow. Returns the per-step report.
+ * Snapshot of orca's installation: binary, ~/.claude/CLAUDE.md, vault dir, agents symlink, PKI init, MCP registration.
  *
- * [MUTATES STATE] Run orca's install or uninstall flow. Returns the per-step report.
+ * Snapshot of orca's installation: binary, ~/.claude/CLAUDE.md, vault dir, agents symlink, PKI init, MCP registration.
  */
-export const systemAction = <ThrowOnError extends boolean = false>(
-  options: Options<SystemActionData, ThrowOnError>,
+export const systemDetail = <ThrowOnError extends boolean = false>(
+  options: Options<SystemDetailData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<SystemActionResponses, SystemActionErrors, ThrowOnError>({
-    url: '/api/tools/system.action',
+  (options.client ?? client).post<SystemDetailResponses, SystemDetailErrors, ThrowOnError>({
+    url: '/api/tools/system.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -4061,49 +4025,15 @@ export const systemAction = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * Stop cargo watch and let the production daemon reclaim the port.
+ * Drive this host's dev mode. `action`: - `enable`: clone the orca repo if needed, start cargo watch, park the production daemon. Idempotent. - `disable`: stop cargo watch and let the production daemon reclaim the port. - `sync`: git pull in the dev checkout; cargo watch restarts automatically. No-op when dev mode is inactive.
  *
- * Stop cargo watch and let the production daemon reclaim the port.
+ * Drive this host's dev mode. `action`: - `enable`: clone the orca repo if needed, start cargo watch, park the production daemon. Idempotent. - `disable`: stop cargo watch and let the production daemon reclaim the port. - `sync`: git pull in the dev checkout; cargo watch restarts automatically. No-op when dev mode is inactive.
  */
-export const systemDevDisable = <ThrowOnError extends boolean = false>(
-  options: Options<SystemDevDisableData, ThrowOnError>,
+export const systemDevUpdate = <ThrowOnError extends boolean = false>(
+  options: Options<SystemDevUpdateData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<SystemDevDisableResponses, SystemDevDisableErrors, ThrowOnError>({
-    url: '/api/tools/system.dev_disable',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Clone the orca repo (if not present) and start cargo watch, parking the production daemon. Idempotent — safe to call if dev mode is already active.
- *
- * Clone the orca repo (if not present) and start cargo watch, parking the production daemon. Idempotent — safe to call if dev mode is already active.
- */
-export const systemDevEnable = <ThrowOnError extends boolean = false>(
-  options: Options<SystemDevEnableData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<SystemDevEnableResponses, SystemDevEnableErrors, ThrowOnError>({
-    url: '/api/tools/system.dev_enable',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * git pull in the dev checkout; cargo watch detects the changes and restarts automatically. No-op (returns already_up_to_date) if dev mode is not active.
- *
- * git pull in the dev checkout; cargo watch detects the changes and restarts automatically. No-op (returns already_up_to_date) if dev mode is not active.
- */
-export const systemDevSync = <ThrowOnError extends boolean = false>(
-  options: Options<SystemDevSyncData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<SystemDevSyncResponses, SystemDevSyncErrors, ThrowOnError>({
-    url: '/api/tools/system.dev_sync',
+  (options.client ?? client).post<SystemDevUpdateResponses, SystemDevUpdateErrors, ThrowOnError>({
+    url: '/api/tools/system.dev.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -4116,11 +4046,15 @@ export const systemDevSync = <ThrowOnError extends boolean = false>(
  *
  * Validate agent files, symlinks, config, tool availability — returns ok/warn/error entries.
  */
-export const systemDoctor = <ThrowOnError extends boolean = false>(
-  options: Options<SystemDoctorData, ThrowOnError>,
+export const systemDiagnosticList = <ThrowOnError extends boolean = false>(
+  options: Options<SystemDiagnosticListData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<SystemDoctorResponses, SystemDoctorErrors, ThrowOnError>({
-    url: '/api/tools/system.doctor',
+  (options.client ?? client).post<
+    SystemDiagnosticListResponses,
+    SystemDiagnosticListErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/system.diagnostic.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -4146,15 +4080,19 @@ export const systemHealth = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * [MUTATES STATE] Install orca: wire symlinks, register MCP server, install binary.
+ * [MUTATES STATE] Drive the system lifecycle. `action`: - `install`: wire symlinks, register MCP server, install binary. - `uninstall`: remove binary, MCP registration, and CLAUDE.md symlinks.
  *
- * [MUTATES STATE] Install orca: wire symlinks, register MCP server, install binary.
+ * [MUTATES STATE] Drive the system lifecycle. `action`: - `install`: wire symlinks, register MCP server, install binary. - `uninstall`: remove binary, MCP registration, and CLAUDE.md symlinks.
  */
-export const systemInstall = <ThrowOnError extends boolean = false>(
-  options: Options<SystemInstallData, ThrowOnError>,
+export const systemLifecycleUpdate = <ThrowOnError extends boolean = false>(
+  options: Options<SystemLifecycleUpdateData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<SystemInstallResponses, SystemInstallErrors, ThrowOnError>({
-    url: '/api/tools/system.install',
+  (options.client ?? client).post<
+    SystemLifecycleUpdateResponses,
+    SystemLifecycleUpdateErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/system.lifecycle.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -4167,49 +4105,15 @@ export const systemInstall = <ThrowOnError extends boolean = false>(
  *
  * Report this binary's runtime composition: whether the web UI is embedded, build target triple. Used by installers to decide whether to fetch a JS runtime alongside the binary.
  */
-export const systemRuntimeSpec = <ThrowOnError extends boolean = false>(
-  options: Options<SystemRuntimeSpecData, ThrowOnError>,
+export const systemRuntimeDetail = <ThrowOnError extends boolean = false>(
+  options: Options<SystemRuntimeDetailData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<
-    SystemRuntimeSpecResponses,
-    SystemRuntimeSpecErrors,
+    SystemRuntimeDetailResponses,
+    SystemRuntimeDetailErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.runtime-spec',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Snapshot of orca's installation: binary, ~/.claude/CLAUDE.md, vault dir, agents symlink, PKI init, MCP registration.
- *
- * Snapshot of orca's installation: binary, ~/.claude/CLAUDE.md, vault dir, agents symlink, PKI init, MCP registration.
- */
-export const systemStatus = <ThrowOnError extends boolean = false>(
-  options: Options<SystemStatusData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<SystemStatusResponses, SystemStatusErrors, ThrowOnError>({
-    url: '/api/tools/system.status',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Remove binary, MCP registration, and CLAUDE.md symlinks.
- *
- * [MUTATES STATE] Remove binary, MCP registration, and CLAUDE.md symlinks.
- */
-export const systemUninstall = <ThrowOnError extends boolean = false>(
-  options: Options<SystemUninstallData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<SystemUninstallResponses, SystemUninstallErrors, ThrowOnError>({
-    url: '/api/tools/system.uninstall',
+    url: '/api/tools/system.runtime.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -4222,53 +4126,15 @@ export const systemUninstall = <ThrowOnError extends boolean = false>(
  *
  * [MUTATES STATE] Download + install the latest binary on `channel`. No-op if up to date.
  */
-export const systemUpdateApply = <ThrowOnError extends boolean = false>(
-  options: Options<SystemUpdateApplyData, ThrowOnError>,
+export const systemUpdateCreate = <ThrowOnError extends boolean = false>(
+  options: Options<SystemUpdateCreateData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<
-    SystemUpdateApplyResponses,
-    SystemUpdateApplyErrors,
+    SystemUpdateCreateResponses,
+    SystemUpdateCreateErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.update-apply',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Probe GitHub releases for a newer version on `channel`. Does not apply anything.
- *
- * Probe GitHub releases for a newer version on `channel`. Does not apply anything.
- */
-export const systemUpdateCheck = <ThrowOnError extends boolean = false>(
-  options: Options<SystemUpdateCheckData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemUpdateCheckResponses,
-    SystemUpdateCheckErrors,
-    ThrowOnError
-  >({
-    url: '/api/tools/system.update-check',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Pin orca to a specific version. Future `orca update` runs will not upgrade past this version.
- *
- * [MUTATES STATE] Pin orca to a specific version. Future `orca update` runs will not upgrade past this version.
- */
-export const systemUpdatePin = <ThrowOnError extends boolean = false>(
-  options: Options<SystemUpdatePinData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<SystemUpdatePinResponses, SystemUpdatePinErrors, ThrowOnError>({
-    url: '/api/tools/system.update-pin',
+    url: '/api/tools/system.update.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -4281,15 +4147,57 @@ export const systemUpdatePin = <ThrowOnError extends boolean = false>(
  *
  * [MUTATES STATE] Clear the version pin. `orca update` will resume upgrading to the latest on the configured channel.
  */
-export const systemUpdateUnpin = <ThrowOnError extends boolean = false>(
-  options: Options<SystemUpdateUnpinData, ThrowOnError>,
+export const systemUpdateDelete = <ThrowOnError extends boolean = false>(
+  options: Options<SystemUpdateDeleteData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<
-    SystemUpdateUnpinResponses,
-    SystemUpdateUnpinErrors,
+    SystemUpdateDeleteResponses,
+    SystemUpdateDeleteErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.update-unpin',
+    url: '/api/tools/system.update.delete',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Probe GitHub releases for a newer version on `channel`. Does not apply anything.
+ *
+ * Probe GitHub releases for a newer version on `channel`. Does not apply anything.
+ */
+export const systemUpdateDetail = <ThrowOnError extends boolean = false>(
+  options: Options<SystemUpdateDetailData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    SystemUpdateDetailResponses,
+    SystemUpdateDetailErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/system.update.detail',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Pin orca to a specific version. Future `orca update` runs will not upgrade past this version.
+ *
+ * [MUTATES STATE] Pin orca to a specific version. Future `orca update` runs will not upgrade past this version.
+ */
+export const systemUpdateUpdate = <ThrowOnError extends boolean = false>(
+  options: Options<SystemUpdateUpdateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    SystemUpdateUpdateResponses,
+    SystemUpdateUpdateErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/system.update.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',

@@ -2,12 +2,11 @@
 //! the install-status snapshot.
 #![allow(clippy::disallowed_types)] // install_status() returns Value — local helpers forced by that boundary
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use async_trait::async_trait;
 use orca_tools_def::services::system::SystemService;
 use orca_tools_def::system::{
-    McpRegistration, PathExists, PathInitialized, PathInstalled, PathLinked, SystemActionResult,
-    SystemStatusReport,
+    McpRegistration, PathExists, PathInitialized, PathInstalled, PathLinked, SystemStatusReport,
 };
 use serde_json::Value;
 
@@ -56,25 +55,6 @@ impl SystemService for ServerSystem {
             mcp: McpRegistration {
                 registered: field_bool(&v, "mcp", "registered"),
             },
-        })
-    }
-
-    async fn action(&self, action: &str) -> Result<SystemActionResult> {
-        use crate::commands::install::{cmd_install_report, cmd_uninstall_report};
-        let report = match action {
-            "install" => cmd_install_report(),
-            "uninstall" => cmd_uninstall_report(),
-            other => {
-                return Err(anyhow!(
-                    "unknown action '{other}' — use 'install' or 'uninstall'"
-                ));
-            }
-        };
-        Ok(SystemActionResult {
-            ok: report.success(),
-            done: report.done,
-            skipped: report.skipped,
-            errors: report.errors,
         })
     }
 }

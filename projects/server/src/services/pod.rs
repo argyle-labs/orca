@@ -2,10 +2,9 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use orca_sdk::pki;
 use orca_tools_def::pod::{
-    CertInfo, PodAcceptOutput, PodCertStatusOutput, PodDevDisableOutput, PodDevDisablePeerResult,
-    PodDevEnableOutput, PodDevEnablePeerResult, PodDevSyncOutput, PodDevSyncPeerResult,
-    PodDiscoveryRowDto, PodExecDispatch, PodJoinOutput, PodLeaveOutput, PodOfferOutput,
-    PodPeerAddressDto, PodPeerDto, PodPendingOfferDto, PodPingOutput, PodService, PodTrustOutput,
+    CertInfo, PodAcceptOutput, PodCertStatusOutput, PodDevPeerResult, PodDiscoveryRowDto,
+    PodExecDispatch, PodJoinOutput, PodLeaveOutput, PodOfferOutput, PodPeerAddressDto, PodPeerDto,
+    PodPendingOfferDto, PodPingOutput, PodService, PodTrustOutput,
 };
 use std::time::Instant;
 
@@ -351,7 +350,7 @@ impl PodService for ServerPod {
         })
     }
 
-    async fn dev_sync(&self) -> Result<PodDevSyncOutput> {
+    async fn dev_sync(&self) -> Result<Vec<PodDevPeerResult>> {
         use crate::commands::update::cmd_dev_sync;
         use orca_utils::state::DaemonMode;
 
@@ -363,7 +362,7 @@ impl PodService for ServerPod {
         // SNI=pod.orca.local). Identity is proven by the mesh-CA-signed client
         // cert — no bearer tokens, no plaintext HTTP, no cert-distribution
         // problem. Peers not in dev mode reply with status="skipped".
-        let mut results: Vec<PodDevSyncPeerResult> = Vec::new();
+        let mut results: Vec<PodDevPeerResult> = Vec::new();
 
         let handles: Vec<_> = peers
             .into_iter()
@@ -374,13 +373,13 @@ impl PodService for ServerPod {
                 let hostname = peer.peer_hostname.clone();
                 tokio::spawn(async move {
                     match crate::pod::dev_sync(&addr).await {
-                        Ok(r) => PodDevSyncPeerResult {
+                        Ok(r) => PodDevPeerResult {
                             peer_id,
                             hostname,
                             status: r.status,
                             detail: r.detail,
                         },
-                        Err(e) => PodDevSyncPeerResult {
+                        Err(e) => PodDevPeerResult {
                             peer_id,
                             hostname,
                             status: "error".into(),
@@ -403,7 +402,7 @@ impl PodService for ServerPod {
             Some(DaemonMode::Dev) | Some(DaemonMode::Parked)
         ) {
             match tokio::task::spawn_blocking(cmd_dev_sync).await? {
-                Ok(r) => results.push(PodDevSyncPeerResult {
+                Ok(r) => results.push(PodDevPeerResult {
                     peer_id: "local".into(),
                     hostname: "localhost".into(),
                     status: if r.already_up_to_date {
@@ -417,7 +416,7 @@ impl PodService for ServerPod {
                         Some(r.detail)
                     },
                 }),
-                Err(e) => results.push(PodDevSyncPeerResult {
+                Err(e) => results.push(PodDevPeerResult {
                     peer_id: "local".into(),
                     hostname: "localhost".into(),
                     status: "error".into(),
@@ -426,10 +425,10 @@ impl PodService for ServerPod {
             }
         }
 
-        Ok(PodDevSyncOutput { results })
+        Ok(results)
     }
 
-    async fn dev_enable_fanout(&self, peers: &[String]) -> Result<PodDevEnableOutput> {
+    async fn dev_enable_fanout(&self, peers: &[String]) -> Result<Vec<PodDevPeerResult>> {
         use crate::commands::update::cmd_dev_enable;
 
         let all_targets = select_peer_targets(peers)?;
@@ -442,13 +441,13 @@ impl PodService for ServerPod {
             .map(|(peer_id, hostname, addr)| {
                 tokio::spawn(async move {
                     match crate::pod::dev_enable(&addr).await {
-                        Ok(r) => PodDevEnablePeerResult {
+                        Ok(r) => PodDevPeerResult {
                             peer_id,
                             hostname,
                             status: r.status,
                             detail: r.detail,
                         },
-                        Err(e) => PodDevEnablePeerResult {
+                        Err(e) => PodDevPeerResult {
                             peer_id,
                             hostname,
                             status: "error".into(),
@@ -459,9 +458,9 @@ impl PodService for ServerPod {
             })
             .collect();
 
-        let mut results: Vec<PodDevEnablePeerResult> = Vec::new();
+        let mut results: Vec<PodDevPeerResult> = Vec::new();
         for (peer_id, hostname, _addr) in excluded {
-            results.push(PodDevEnablePeerResult {
+            results.push(PodDevPeerResult {
                 peer_id,
                 hostname,
                 status: "skipped".into(),
@@ -476,7 +475,7 @@ impl PodService for ServerPod {
 
         if include_local {
             match tokio::task::spawn_blocking(cmd_dev_enable).await? {
-                Ok(r) => results.push(PodDevEnablePeerResult {
+                Ok(r) => results.push(PodDevPeerResult {
                     peer_id: "local".into(),
                     hostname: "localhost".into(),
                     status: "enabled".into(),
@@ -485,7 +484,7 @@ impl PodService for ServerPod {
                         r.repo_path, r.cloned, r.daemon_parked
                     )),
                 }),
-                Err(e) => results.push(PodDevEnablePeerResult {
+                Err(e) => results.push(PodDevPeerResult {
                     peer_id: "local".into(),
                     hostname: "localhost".into(),
                     status: "error".into(),
@@ -494,10 +493,10 @@ impl PodService for ServerPod {
             }
         }
 
-        Ok(PodDevEnableOutput { results })
+        Ok(results)
     }
 
-    async fn dev_disable_fanout(&self, peers: &[String]) -> Result<PodDevDisableOutput> {
+    async fn dev_disable_fanout(&self, peers: &[String]) -> Result<Vec<PodDevPeerResult>> {
         use crate::commands::update::cmd_dev_disable;
 
         let targets = select_peer_targets(peers)?;
@@ -508,13 +507,13 @@ impl PodService for ServerPod {
             .map(|(peer_id, hostname, addr)| {
                 tokio::spawn(async move {
                     match crate::pod::dev_disable(&addr).await {
-                        Ok(r) => PodDevDisablePeerResult {
+                        Ok(r) => PodDevPeerResult {
                             peer_id,
                             hostname,
                             status: r.status,
                             detail: r.detail,
                         },
-                        Err(e) => PodDevDisablePeerResult {
+                        Err(e) => PodDevPeerResult {
                             peer_id,
                             hostname,
                             status: "error".into(),
@@ -525,7 +524,7 @@ impl PodService for ServerPod {
             })
             .collect();
 
-        let mut results: Vec<PodDevDisablePeerResult> = Vec::new();
+        let mut results: Vec<PodDevPeerResult> = Vec::new();
         for h in handles {
             if let Ok(r) = h.await {
                 results.push(r);
@@ -534,7 +533,7 @@ impl PodService for ServerPod {
 
         if include_local {
             match tokio::task::spawn_blocking(cmd_dev_disable).await? {
-                Ok(r) => results.push(PodDevDisablePeerResult {
+                Ok(r) => results.push(PodDevPeerResult {
                     peer_id: "local".into(),
                     hostname: "localhost".into(),
                     status: "disabled".into(),
@@ -543,7 +542,7 @@ impl PodService for ServerPod {
                         r.dev_process_stopped, r.daemon_reclaimed
                     )),
                 }),
-                Err(e) => results.push(PodDevDisablePeerResult {
+                Err(e) => results.push(PodDevPeerResult {
                     peer_id: "local".into(),
                     hostname: "localhost".into(),
                     status: "error".into(),
@@ -552,7 +551,7 @@ impl PodService for ServerPod {
             }
         }
 
-        Ok(PodDevDisableOutput { results })
+        Ok(results)
     }
 
     #[allow(clippy::disallowed_types)] // mirrors PodService::exec — peer-mesh wire payload

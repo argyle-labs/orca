@@ -138,10 +138,13 @@ mod inventory_tests {
             .into_iter()
             .map(|e| e.name)
             .collect();
-        assert!(names.contains(&"pod.list"), "missing pod.list: {names:?}");
         assert!(
-            names.contains(&"pod.accept"),
-            "missing pod.accept: {names:?}"
+            names.contains(&"pod.peer.list"),
+            "missing pod.peer.list: {names:?}"
+        );
+        assert!(
+            names.contains(&"pod.handshake.create"),
+            "missing pod.handshake.create: {names:?}"
         );
     }
 

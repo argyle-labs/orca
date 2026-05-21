@@ -90,68 +90,38 @@ pub struct PodPeerDto {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
-pub struct PodPeerList(pub Vec<PodPeerDto>);
+pub struct PodPeerListOutput(pub Vec<PodPeerDto>);
 
-// ── pod.dev.sync ─────────────────────────────────────────────────────────────
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodDevSyncPeerResult {
-    pub peer_id: String,
-    pub hostname: String,
-    /// "synced" | "skipped" | "error"
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodDevSyncOutput {
-    pub results: Vec<PodDevSyncPeerResult>,
-}
-
-// ── pod.dev.enable / pod.dev.disable ────────────────────────────────────────
+// ── pod.dev.update (unified sync/enable/disable) ────────────────────────────
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Default, Serialize, Deserialize, JsonSchema)]
-pub struct PodDevFanoutArgs {
-    /// Subset of peer hostnames (or addrs) to target. Empty = every paired
-    /// peer plus this host.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodDevUpdateArgs {
+    /// "sync" | "enable" | "disable"
+    pub action: String,
+    /// Target peers (used by enable/disable; empty for sync).
     #[cfg_attr(feature = "cli", clap(long))]
     #[serde(default)]
     pub peers: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodDevEnablePeerResult {
+pub struct PodDevPeerResult {
     pub peer_id: String,
     pub hostname: String,
-    /// "enabled" | "error"
+    /// Action-dependent: "synced"|"skipped"|"enabled"|"disabled"|"error"
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodDevEnableOutput {
-    pub results: Vec<PodDevEnablePeerResult>,
+pub struct PodDevUpdateOutput {
+    pub action: String,
+    pub results: Vec<PodDevPeerResult>,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodDevDisablePeerResult {
-    pub peer_id: String,
-    pub hostname: String,
-    /// "disabled" | "error"
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodDevDisableOutput {
-    pub results: Vec<PodDevDisablePeerResult>,
-}
-
-// ── pod.accept ───────────────────────────────────────────────────────────────
+// ── pod.handshake.create (was pod.accept) ────────────────────────────────────
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -232,7 +202,7 @@ pub struct PodDiscoveryRowDto {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
-pub struct PodDiscoveryList(pub Vec<PodDiscoveryRowDto>);
+pub struct PodDiscoveryListOutput(pub Vec<PodDiscoveryRowDto>);
 
 // ── pod.pending ──────────────────────────────────────────────────────────────
 
@@ -255,7 +225,7 @@ pub struct PodPendingOfferDto {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
-pub struct PodPendingList(pub Vec<PodPendingOfferDto>);
+pub struct PodPendingListOutput(pub Vec<PodPendingOfferDto>);
 
 // ── pod.offer ────────────────────────────────────────────────────────────────
 
@@ -419,9 +389,9 @@ pub mod native_support {
         async fn join(&self, inviter_addr: &str, port: Option<u16>) -> Result<PodJoinOutput>;
         async fn leave_peer(&self, peer_id: &str) -> Result<PodLeaveOutput>;
         fn cert_status(&self) -> Result<PodCertStatusOutput>;
-        async fn dev_sync(&self) -> Result<PodDevSyncOutput>;
-        async fn dev_enable_fanout(&self, peers: &[String]) -> Result<PodDevEnableOutput>;
-        async fn dev_disable_fanout(&self, peers: &[String]) -> Result<PodDevDisableOutput>;
+        async fn dev_sync(&self) -> Result<Vec<PodDevPeerResult>>;
+        async fn dev_enable_fanout(&self, peers: &[String]) -> Result<Vec<PodDevPeerResult>>;
+        async fn dev_disable_fanout(&self, peers: &[String]) -> Result<Vec<PodDevPeerResult>>;
         // Wire-level JSON-RPC dispatch — Value here is the on-wire payload,
         // narrowed back to the tool's typed `OrcaToolDef::Output` inside
         // [`crate::cli::exec_remote`] before reaching any user code.
@@ -468,19 +438,19 @@ pub fn register_pod(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvidePod) {
 // ── Tools ───────────────────────────────────────────────────────────────────
 
 /// List paired pod peers (mesh members).
-#[orca_tool(domain = "pod", verb = "list", remote_ok = true)]
-async fn pod_list(
+#[orca_tool(domain = "pod.peer", verb = "list", remote_ok = true)]
+async fn pod_peer_list(
     _args: EmptyArgs,
     ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<PodPeerList> {
-    Ok(PodPeerList(
+) -> anyhow::Result<PodPeerListOutput> {
+    Ok(PodPeerListOutput(
         native_support::svc(ctx)?.list_enriched().await?,
     ))
 }
 
 /// Accept a pending pod-membership offer by pairing code.
-#[orca_tool(domain = "pod", verb = "accept")]
-async fn pod_accept(
+#[orca_tool(domain = "pod.handshake", verb = "create")]
+async fn pod_handshake_create(
     args: PodAcceptArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<PodAcceptOutput> {
@@ -488,8 +458,8 @@ async fn pod_accept(
 }
 
 /// Toggle local trust for a paired peer; replicates CA key on mutual-secure.
-#[orca_tool(domain = "pod", verb = "trust")]
-async fn pod_trust(
+#[orca_tool(domain = "pod.peer", verb = "update")]
+async fn pod_peer_update(
     args: PodTrustArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<PodTrustOutput> {
@@ -499,8 +469,8 @@ async fn pod_trust(
 }
 
 /// mTLS ping a paired peer; returns latency + their self-reported identity.
-#[orca_tool(domain = "pod", verb = "ping")]
-async fn pod_ping(
+#[orca_tool(domain = "pod.peer", verb = "detail")]
+async fn pod_peer_detail(
     args: PodPingArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<PodPingOutput> {
@@ -508,26 +478,28 @@ async fn pod_ping(
 }
 
 /// List orcas seen on the network via mDNS (paired + unclaimed).
-#[orca_tool(domain = "pod", verb = "discover")]
-async fn pod_discover(
+#[orca_tool(domain = "pod.discovery", verb = "list")]
+async fn pod_discovery_list(
     _args: EmptyArgs,
     ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<PodDiscoveryList> {
-    Ok(PodDiscoveryList(native_support::svc(ctx)?.discover()?))
+) -> anyhow::Result<PodDiscoveryListOutput> {
+    Ok(PodDiscoveryListOutput(
+        native_support::svc(ctx)?.discover()?,
+    ))
 }
 
 /// List pending inbound pod-membership offers.
-#[orca_tool(domain = "pod", verb = "pending")]
-async fn pod_pending(
+#[orca_tool(domain = "pod.handshake", verb = "list")]
+async fn pod_handshake_list(
     _args: EmptyArgs,
     ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<PodPendingList> {
-    Ok(PodPendingList(native_support::svc(ctx)?.pending()?))
+) -> anyhow::Result<PodPendingListOutput> {
+    Ok(PodPendingListOutput(native_support::svc(ctx)?.pending()?))
 }
 
 /// Push a pod-membership offer to a discovered joiner.
-#[orca_tool(domain = "pod", verb = "offer")]
-async fn pod_offer(
+#[orca_tool(domain = "pod.invite", verb = "create")]
+async fn pod_invite_create(
     args: PodOfferArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<PodOfferOutput> {
@@ -535,8 +507,8 @@ async fn pod_offer(
 }
 
 /// Joiner-initiated pair: request an offer from an out-of-mDNS inviter.
-#[orca_tool(domain = "pod", verb = "join")]
-async fn pod_join(
+#[orca_tool(domain = "pod.join", verb = "create")]
+async fn pod_join_create(
     args: PodJoinArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<PodJoinOutput> {
@@ -546,8 +518,8 @@ async fn pod_join(
 }
 
 /// Best-effort notify a peer we're leaving, then drop pod_peers + pod_trust rows for it.
-#[orca_tool(domain = "pod", verb = "leave")]
-async fn pod_leave(
+#[orca_tool(domain = "pod.peer", verb = "delete")]
+async fn pod_peer_delete(
     args: PodLeaveArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<PodLeaveOutput> {
@@ -555,46 +527,34 @@ async fn pod_leave(
 }
 
 /// Days-remaining + rotation state for every mesh cert on this host.
-#[orca_tool(domain = "pod", verb = "cert-status")]
-async fn pod_cert_status(
+#[orca_tool(domain = "pod", verb = "detail")]
+async fn pod_detail(
     _args: EmptyArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<PodCertStatusOutput> {
     native_support::svc(ctx)?.cert_status()
 }
 
-/// git pull on every active peer running in dev mode; cargo watch auto-restarts.
-/// Peers not in dev mode are skipped (not an error).
-#[orca_tool(domain = "pod", verb = "dev_sync", role = "admin")]
-async fn pod_dev_sync(
-    _args: EmptyArgs,
+/// Update dev mode across the mesh. `action`:
+/// - `sync`: git pull on every active dev peer (cargo watch auto-restarts).
+/// - `enable`: flip dev mode ON for `peers` (or local + every paired peer if empty).
+/// - `disable`: flip dev mode OFF for `peers` (or local + every paired peer if empty).
+#[orca_tool(domain = "pod.dev", verb = "update", role = "admin")]
+async fn pod_dev_update(
+    args: PodDevUpdateArgs,
     ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<PodDevSyncOutput> {
-    native_support::svc(ctx)?.dev_sync().await
-}
-
-/// Flip dev mode ON across the mesh. Empty `peers` = local + every paired
-/// peer. Each peer clones the repo if needed and spawns cargo-watch.
-#[orca_tool(domain = "pod", verb = "dev_enable", role = "admin")]
-async fn pod_dev_enable(
-    args: PodDevFanoutArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<PodDevEnableOutput> {
-    native_support::svc(ctx)?
-        .dev_enable_fanout(&args.peers)
-        .await
-}
-
-/// Flip dev mode OFF across the mesh. Empty `peers` = local + every paired
-/// peer. Each peer stops cargo-watch and the production daemon reclaims.
-#[orca_tool(domain = "pod", verb = "dev_disable", role = "admin")]
-async fn pod_dev_disable(
-    args: PodDevFanoutArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<PodDevDisableOutput> {
-    native_support::svc(ctx)?
-        .dev_disable_fanout(&args.peers)
-        .await
+) -> anyhow::Result<PodDevUpdateOutput> {
+    let s = native_support::svc(ctx)?;
+    let results = match args.action.as_str() {
+        "sync" => s.dev_sync().await?,
+        "enable" => s.dev_enable_fanout(&args.peers).await?,
+        "disable" => s.dev_disable_fanout(&args.peers).await?,
+        other => anyhow::bail!("unknown action '{other}' (expected sync|enable|disable)"),
+    };
+    Ok(PodDevUpdateOutput {
+        action: args.action,
+        results,
+    })
 }
 
 #[cfg(all(test, feature = "native"))]
@@ -736,16 +696,16 @@ mod tests {
                 bootstrap: None,
             })
         }
-        async fn dev_sync(&self) -> Result<PodDevSyncOutput> {
-            Ok(PodDevSyncOutput { results: vec![] })
+        async fn dev_sync(&self) -> Result<Vec<PodDevPeerResult>> {
+            Ok(vec![])
         }
-        async fn dev_enable_fanout(&self, peers: &[String]) -> Result<PodDevEnableOutput> {
+        async fn dev_enable_fanout(&self, peers: &[String]) -> Result<Vec<PodDevPeerResult>> {
             *self.last_fanout_peers.lock().unwrap() = Some(peers.to_vec());
-            Ok(PodDevEnableOutput { results: vec![] })
+            Ok(vec![])
         }
-        async fn dev_disable_fanout(&self, peers: &[String]) -> Result<PodDevDisableOutput> {
+        async fn dev_disable_fanout(&self, peers: &[String]) -> Result<Vec<PodDevPeerResult>> {
             *self.last_fanout_peers.lock().unwrap() = Some(peers.to_vec());
-            Ok(PodDevDisableOutput { results: vec![] })
+            Ok(vec![])
         }
         #[allow(clippy::disallowed_types)] // mirrors trait — peer-mesh wire payload
         async fn exec(
@@ -811,7 +771,7 @@ mod tests {
     #[tokio::test]
     async fn pod_list_forwards_to_service() {
         let (ctx, _) = ctx_with_stub();
-        let out = pod_list(EmptyArgs {}, &ctx).await.unwrap();
+        let out = pod_peer_list(EmptyArgs {}, &ctx).await.unwrap();
         assert_eq!(out.0.len(), 1);
         assert_eq!(out.0[0].peer_id, "peer.abc");
     }
@@ -819,7 +779,7 @@ mod tests {
     #[tokio::test]
     async fn pod_accept_forwards_code() {
         let (ctx, stub) = ctx_with_stub();
-        let out = pod_accept(
+        let out = pod_handshake_create(
             PodAcceptArgs {
                 code: "code1".into(),
             },
@@ -837,7 +797,7 @@ mod tests {
     #[tokio::test]
     async fn pod_trust_forwards_peer_and_flag() {
         let (ctx, stub) = ctx_with_stub();
-        let out = pod_trust(
+        let out = pod_peer_update(
             PodTrustArgs {
                 peer_id: "peer.t".into(),
                 on: true,
@@ -854,7 +814,7 @@ mod tests {
     #[tokio::test]
     async fn pod_ping_forwards_peer() {
         let (ctx, stub) = ctx_with_stub();
-        let out = pod_ping(
+        let out = pod_peer_detail(
             PodPingArgs {
                 peer_id: "peer.p".into(),
             },
@@ -872,7 +832,7 @@ mod tests {
     #[tokio::test]
     async fn pod_discover_wraps_service_rows() {
         let (ctx, _) = ctx_with_stub();
-        let out = pod_discover(EmptyArgs {}, &ctx).await.unwrap();
+        let out = pod_discovery_list(EmptyArgs {}, &ctx).await.unwrap();
         assert_eq!(out.0.len(), 1);
         assert_eq!(out.0[0].hostname, "freyr");
     }
@@ -880,14 +840,14 @@ mod tests {
     #[tokio::test]
     async fn pod_pending_wraps_service_rows() {
         let (ctx, _) = ctx_with_stub();
-        let out = pod_pending(EmptyArgs {}, &ctx).await.unwrap();
+        let out = pod_handshake_list(EmptyArgs {}, &ctx).await.unwrap();
         assert!(out.0.is_empty());
     }
 
     #[tokio::test]
     async fn pod_offer_forwards_addr_and_port() {
         let (ctx, stub) = ctx_with_stub();
-        let out = pod_offer(
+        let out = pod_invite_create(
             PodOfferArgs {
                 addr: "1.2.3.4".into(),
                 port: Some(9999),
@@ -904,7 +864,7 @@ mod tests {
     #[tokio::test]
     async fn pod_join_forwards_inviter_and_port() {
         let (ctx, stub) = ctx_with_stub();
-        let out = pod_join(
+        let out = pod_join_create(
             PodJoinArgs {
                 inviter_addr: "host.local".into(),
                 port: None,
@@ -921,7 +881,7 @@ mod tests {
     #[tokio::test]
     async fn pod_leave_forwards_peer() {
         let (ctx, stub) = ctx_with_stub();
-        let out = pod_leave(
+        let out = pod_peer_delete(
             PodLeaveArgs {
                 peer_id: "peer.l".into(),
             },
@@ -939,23 +899,33 @@ mod tests {
     #[tokio::test]
     async fn pod_cert_status_passthrough() {
         let (ctx, _) = ctx_with_stub();
-        let out = pod_cert_status(EmptyArgs {}, &ctx).await.unwrap();
+        let out = pod_detail(EmptyArgs {}, &ctx).await.unwrap();
         assert!(out.founder);
         assert!(out.member);
     }
 
     #[tokio::test]
-    async fn pod_dev_sync_passthrough() {
+    async fn pod_dev_update_sync_passthrough() {
         let (ctx, _) = ctx_with_stub();
-        let out = pod_dev_sync(EmptyArgs {}, &ctx).await.unwrap();
+        let out = pod_dev_update(
+            PodDevUpdateArgs {
+                action: "sync".into(),
+                peers: vec![],
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.action, "sync");
         assert!(out.results.is_empty());
     }
 
     #[tokio::test]
-    async fn pod_dev_enable_forwards_peers() {
+    async fn pod_dev_update_enable_forwards_peers() {
         let (ctx, stub) = ctx_with_stub();
-        let _ = pod_dev_enable(
-            PodDevFanoutArgs {
+        let _ = pod_dev_update(
+            PodDevUpdateArgs {
+                action: "enable".into(),
                 peers: vec!["a".into(), "b".into()],
             },
             &ctx,
@@ -967,10 +937,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pod_dev_disable_forwards_peers() {
+    async fn pod_dev_update_disable_forwards_peers() {
         let (ctx, stub) = ctx_with_stub();
-        let _ = pod_dev_disable(
-            PodDevFanoutArgs {
+        let _ = pod_dev_update(
+            PodDevUpdateArgs {
+                action: "disable".into(),
                 peers: vec!["solo".into()],
             },
             &ctx,
@@ -979,6 +950,21 @@ mod tests {
         .unwrap();
         let g = stub.last_fanout_peers.lock().unwrap();
         assert_eq!(g.as_ref().unwrap(), &vec!["solo".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn pod_dev_update_rejects_unknown_action() {
+        let (ctx, _) = ctx_with_stub();
+        let err = pod_dev_update(
+            PodDevUpdateArgs {
+                action: "bogus".into(),
+                peers: vec![],
+            },
+            &ctx,
+        )
+        .await
+        .err();
+        assert!(err.is_some());
     }
 
     #[tokio::test]
@@ -1017,7 +1003,7 @@ mod tests {
     #[tokio::test]
     async fn svc_errors_when_service_not_registered() {
         let ctx = empty_ctx();
-        let err = pod_list(EmptyArgs {}, &ctx).await.err();
+        let err = pod_peer_list(EmptyArgs {}, &ctx).await.err();
         assert!(err.is_some(), "expected error when PodService missing");
     }
 }

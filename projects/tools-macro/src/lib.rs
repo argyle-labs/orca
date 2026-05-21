@@ -209,13 +209,19 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     let verb = attr.verb;
     let tool_name = format!("{}.{}", domain.value(), verb.value());
     let remote_ok_lit = attr.remote_ok;
-    // REQUIRED_ROLE: honoured when the author sets `role = "..."`; otherwise
-    // the OrcaToolDef default ("any") wins. Secure-by-default (derive from
-    // verb) is blocked on the CRUD verb unification — see
-    // `feedback_crud_unification_blocks_security`.
+    // REQUIRED_ROLE: explicit `role = "..."` wins; otherwise default-deny
+    // derives from the verb — read-shaped verbs (`list`/`detail`/`search`) get
+    // "any", anything else gets "admin". This closes C2 (default-deny on
+    // mutating endpoints) — see `feedback_crud_unification_blocks_security`.
     let role_const = match attr.role.as_ref() {
         Some(s) => quote! { const REQUIRED_ROLE: &'static str = #s; },
-        None => quote! {},
+        None => {
+            let derived = match verb.value().as_str() {
+                "list" | "detail" | "search" => "any",
+                _ => "admin",
+            };
+            quote! { const REQUIRED_ROLE: &'static str = #derived; }
+        }
     };
 
     // Decide whether to render an args binding `let args = ...` (real ident)
@@ -658,9 +664,25 @@ mod tests {
     }
 
     #[test]
-    fn expand_without_role_does_not_emit_required_role_const() {
+    fn expand_without_role_derives_required_role_from_verb() {
+        // attr_ok = (verb="info") → not a read verb → defaults to "admin".
         let out = expand(attr_ok(), ok_fn()).unwrap().to_string();
-        assert!(!out.contains("REQUIRED_ROLE"), "got: {out}");
+        assert!(
+            out.contains("REQUIRED_ROLE : & 'static str = \"admin\""),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_without_role_derives_any_for_read_verbs() {
+        for verb in ["list", "detail", "search"] {
+            let attr = parse_attr(quote!(domain = "h", verb = #verb)).unwrap();
+            let out = expand(attr, ok_fn()).unwrap().to_string();
+            assert!(
+                out.contains("REQUIRED_ROLE : & 'static str = \"any\""),
+                "verb={verb} got: {out}"
+            );
+        }
     }
 
     #[test]

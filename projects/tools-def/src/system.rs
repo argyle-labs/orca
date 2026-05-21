@@ -47,24 +47,9 @@ pub struct SystemStatusReport {
     pub mcp: McpRegistration,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct SystemActionResult {
-    pub ok: bool,
-    pub done: Vec<String>,
-    pub skipped: Vec<String>,
-    pub errors: Vec<String>,
-}
-
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SystemStatusArgs {}
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct SystemActionArgs {
-    /// `install` or `uninstall`.
-    pub action: String,
-}
 
 #[cfg(feature = "native")]
 fn svc(
@@ -74,21 +59,12 @@ fn svc(
 }
 
 /// Snapshot of orca's installation: binary, ~/.claude/CLAUDE.md, vault dir, agents symlink, PKI init, MCP registration.
-#[orca_tool(domain = "system", verb = "status", remote_ok = true)]
-async fn system_status(
+#[orca_tool(domain = "system", verb = "detail", remote_ok = true)]
+async fn system_detail(
     _args: SystemStatusArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<SystemStatusReport> {
     svc(ctx)?.status().await
-}
-
-/// [MUTATES STATE] Run orca's install or uninstall flow. Returns the per-step report.
-#[orca_tool(domain = "system", verb = "action")]
-async fn system_action(
-    args: SystemActionArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<SystemActionResult> {
-    svc(ctx)?.action(&args.action).await
 }
 
 #[cfg(all(test, feature = "native"))]
@@ -99,7 +75,6 @@ mod tests {
     use anyhow::Result;
     use async_trait::async_trait;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn ok_report() -> SystemStatusReport {
         SystemStatusReport {
@@ -127,87 +102,33 @@ mod tests {
         }
     }
 
-    struct StubSystem {
-        action_calls: Arc<AtomicUsize>,
-        last_action: Arc<std::sync::Mutex<String>>,
-    }
+    struct StubSystem;
     #[async_trait]
     impl SystemService for StubSystem {
         async fn status(&self) -> Result<SystemStatusReport> {
             Ok(ok_report())
         }
-        async fn action(&self, action: &str) -> Result<SystemActionResult> {
-            self.action_calls.fetch_add(1, Ordering::SeqCst);
-            *self.last_action.lock().unwrap() = action.to_string();
-            Ok(SystemActionResult {
-                ok: action == "install",
-                done: vec![action.to_string()],
-                skipped: vec![],
-                errors: vec![],
-            })
-        }
     }
 
-    fn ctx_with_stub() -> (
-        orca_utils::tool::ToolCtx,
-        Arc<AtomicUsize>,
-        Arc<std::sync::Mutex<String>>,
-    ) {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let last = Arc::new(std::sync::Mutex::new(String::new()));
-        let stub: Arc<dyn SystemService> = Arc::new(StubSystem {
-            action_calls: calls.clone(),
-            last_action: last.clone(),
-        });
+    fn ctx_with_stub() -> orca_utils::tool::ToolCtx {
+        let stub: Arc<dyn SystemService> = Arc::new(StubSystem);
         let mut ctx = empty_ctx();
         ctx.register_service(stub);
-        (ctx, calls, last)
+        ctx
     }
 
     #[tokio::test]
-    async fn system_status_returns_service_report() {
-        let (ctx, _, _) = ctx_with_stub();
-        let out = system_status(SystemStatusArgs {}, &ctx).await.unwrap();
+    async fn system_detail_returns_service_report() {
+        let ctx = ctx_with_stub();
+        let out = system_detail(SystemStatusArgs {}, &ctx).await.unwrap();
         assert!(out.binary.installed);
         assert!(out.mcp.registered);
     }
 
     #[tokio::test]
-    async fn system_status_errors_when_service_not_registered() {
+    async fn system_detail_errors_when_service_not_registered() {
         let ctx = empty_ctx();
-        let err = system_status(SystemStatusArgs {}, &ctx).await.err();
+        let err = system_detail(SystemStatusArgs {}, &ctx).await.err();
         assert!(err.is_some(), "expected error when SystemService missing");
-    }
-
-    #[tokio::test]
-    async fn system_action_forwards_install_to_service() {
-        let (ctx, calls, last) = ctx_with_stub();
-        let out = system_action(
-            SystemActionArgs {
-                action: "install".into(),
-            },
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert!(out.ok);
-        assert_eq!(out.done, vec!["install".to_string()]);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(*last.lock().unwrap(), "install");
-    }
-
-    #[tokio::test]
-    async fn system_action_forwards_uninstall_and_reports_not_ok() {
-        let (ctx, _, last) = ctx_with_stub();
-        let out = system_action(
-            SystemActionArgs {
-                action: "uninstall".into(),
-            },
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert!(!out.ok);
-        assert_eq!(*last.lock().unwrap(), "uninstall");
     }
 }

@@ -39,7 +39,7 @@
     try {
       const [health, spec] = await Promise.all([
         callTool('ping', {}),
-        callTool('systemRuntimeSpec', {}),
+        callTool('systemRuntimeDetail', {}),
       ]);
       inst.health = (health as { ok: boolean }).ok ? 'up' : 'down';
       const s = spec as { version: string; target: string; frontend: string };
@@ -67,7 +67,7 @@
         local_secure: boolean;
         peer_secure: boolean;
         addresses?: { kind: string; value: string }[];
-      }[]>('podList', {});
+      }[]>('podPeerList', {});
       const local = instances.find((i) => i.role === 'local');
       const podRows: Instance[] = (peersResult ?? []).map((p) => ({
         id: `pod:${p.peer_id}`,

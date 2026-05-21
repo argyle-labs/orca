@@ -37,9 +37,13 @@ macro_rules! empty_args {
     };
 }
 empty_args!(DbStatusArgs);
-empty_args!(DbMigrateArgs);
-empty_args!(DbUpArgs);
-empty_args!(DbDownArgs);
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DbLifecycleUpdateArgs {
+    /// "migrate" | "up" | "down"
+    pub action: String,
+}
 
 #[cfg(feature = "native")]
 fn db_svc(
@@ -57,31 +61,22 @@ async fn db_detail(
     db_svc(ctx)?.status().await
 }
 
-/// [MUTATES STATE] Apply all pending migrations.
-#[orca_tool(domain = "db", verb = "migrate")]
-async fn db_migrate(
-    _args: DbMigrateArgs,
+/// [MUTATES STATE] Drive the migration runner. `action`:
+/// - `migrate`: apply all pending migrations.
+/// - `up`: apply the next pending migration (one step).
+/// - `down`: revert the most recently applied migration (one step).
+#[orca_tool(domain = "db.lifecycle", verb = "update")]
+async fn db_lifecycle_update(
+    args: DbLifecycleUpdateArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<DbMigrateReport> {
-    db_svc(ctx)?.migrate().await
-}
-
-/// [MUTATES STATE] Apply the next pending migration (one step).
-#[orca_tool(domain = "db", verb = "up")]
-async fn db_up(
-    _args: DbUpArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<DbMigrateReport> {
-    db_svc(ctx)?.up().await
-}
-
-/// [MUTATES STATE] Revert the most recently applied migration (one step).
-#[orca_tool(domain = "db", verb = "down")]
-async fn db_down(
-    _args: DbDownArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<DbMigrateReport> {
-    db_svc(ctx)?.down().await
+    let s = db_svc(ctx)?;
+    match args.action.as_str() {
+        "migrate" => s.migrate().await,
+        "up" => s.up().await,
+        "down" => s.down().await,
+        other => anyhow::bail!("unknown action '{other}' (expected migrate|up|down)"),
+    }
 }
 
 #[cfg(all(test, feature = "native"))]
@@ -160,10 +155,18 @@ mod tests {
         assert_eq!(stub.status_calls.load(Ordering::SeqCst), 1);
     }
 
+    fn migrate_args(action: &str) -> DbLifecycleUpdateArgs {
+        DbLifecycleUpdateArgs {
+            action: action.into(),
+        }
+    }
+
     #[tokio::test]
-    async fn db_migrate_forwards_and_returns_delta() {
+    async fn db_lifecycle_migrate_forwards_and_returns_delta() {
         let (ctx, stub) = ctx_with_stub();
-        let r = db_migrate(DbMigrateArgs {}, &ctx).await.unwrap();
+        let r = db_lifecycle_update(migrate_args("migrate"), &ctx)
+            .await
+            .unwrap();
         assert_eq!(r.before, 42);
         assert_eq!(r.after, 50);
         assert_eq!(r.applied, 8);
@@ -172,28 +175,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn db_up_forwards_single_step() {
+    async fn db_lifecycle_up_forwards_single_step() {
         let (ctx, stub) = ctx_with_stub();
-        let r = db_up(DbUpArgs {}, &ctx).await.unwrap();
+        let r = db_lifecycle_update(migrate_args("up"), &ctx).await.unwrap();
         assert_eq!(r.after - r.before, 1);
         assert_eq!(stub.up_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn db_down_forwards_single_step_back() {
+    async fn db_lifecycle_down_forwards_single_step_back() {
         let (ctx, stub) = ctx_with_stub();
-        let r = db_down(DbDownArgs {}, &ctx).await.unwrap();
+        let r = db_lifecycle_update(migrate_args("down"), &ctx)
+            .await
+            .unwrap();
         assert_eq!(r.direction, "down");
         assert_eq!(r.before - r.after, 1);
         assert_eq!(stub.down_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
+    async fn db_lifecycle_rejects_unknown_action() {
+        let (ctx, _) = ctx_with_stub();
+        assert!(
+            db_lifecycle_update(migrate_args("bogus"), &ctx)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn db_tools_error_when_service_missing() {
         let ctx = empty_ctx();
         assert!(db_detail(DbStatusArgs {}, &ctx).await.is_err());
-        assert!(db_migrate(DbMigrateArgs {}, &ctx).await.is_err());
-        assert!(db_up(DbUpArgs {}, &ctx).await.is_err());
-        assert!(db_down(DbDownArgs {}, &ctx).await.is_err());
+        assert!(
+            db_lifecycle_update(migrate_args("migrate"), &ctx)
+                .await
+                .is_err()
+        );
     }
 }
