@@ -111,7 +111,10 @@ mod inventory_tests {
             .into_iter()
             .map(|e| e.name)
             .collect();
-        assert!(names.contains(&"host.info"), "missing host.info: {names:?}");
+        assert!(
+            names.contains(&"host.detail"),
+            "missing host.detail: {names:?}"
+        );
         assert!(names.contains(&"host.set"), "missing host.set: {names:?}");
         assert!(
             names.contains(&"host.refresh"),
@@ -124,7 +127,7 @@ mod inventory_tests {
         let mut reg = __private::ToolRegistry::new();
         native_register(&mut reg);
         let names = reg.names();
-        assert!(names.contains(&"host.info"));
+        assert!(names.contains(&"host.detail"));
         assert!(names.contains(&"host.set"));
         assert!(names.contains(&"host.refresh"));
     }
