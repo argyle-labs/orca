@@ -33,6 +33,51 @@ use super::{db as pdb, pki_dir};
 
 const POD_OFFER_METHOD: &str = "pod/offer";
 const POD_JOIN_CONFIRM_METHOD: &str = "pod/join-confirm";
+const POD_REQUEST_OFFER_METHOD: &str = "pod/request-offer";
+
+/// Joiner → inviter, sent over an unauthenticated bootstrap TLS session (the
+/// joiner doesn't know the inviter's fp yet — TOFU). The inviter responds
+/// with a `RequestOfferResult` carrying the full signed `pod/offer` payload
+/// the joiner would normally have received via the inviter's auto-offer push.
+///
+/// `joiner_pubkey_fp` lets the inviter pin the joiner's bootstrap pubkey for
+/// the matching `pod/join-confirm` step that follows, without having to
+/// receive an mDNS broadcast first.
+#[derive(Debug, Serialize, Deserialize)]
+struct RequestOfferBody {
+    joiner_peer_id: String,
+    joiner_hostname: String,
+    joiner_pubkey_fp: String,
+    /// Optional human-readable hostname for the inviter's discovery row.
+    #[serde(default)]
+    joiner_display_name: Option<String>,
+}
+
+/// Response to `pod/request-offer`. Returns the same `code_hint` shape as
+/// `pod/offer` plus the raw fields the joiner needs to land an inbound
+/// pending-offer row. The pairing code itself is NOT included — it's printed
+/// on the inviter's CLI per `project_pod_join_ux.md` so the user types it
+/// into `pod accept`.
+#[derive(Debug, Serialize, Deserialize)]
+struct RequestOfferResult {
+    /// Inviter's bootstrap-key fp the joiner just spoke to (TOFU echo so the
+    /// joiner can record it).
+    inviter_pubkey_fp: String,
+    inviter_peer_id: String,
+    inviter_hostname: String,
+    inviter_addr: String,
+    inviter_port: u16,
+    mesh_ca_cert_pem: String,
+    pod_id: String,
+    code_hash: String,
+    expires_at: i64,
+    #[serde(default)]
+    inviter_display_name: Option<String>,
+    /// First 2 chars of the pairing code so the joiner can confirm visually
+    /// the inviter is the one that printed the matching prefix on its CLI.
+    #[serde(default)]
+    code_hint: Option<String>,
+}
 
 /// Signed payload pushed by the inviter. The signing key's fp identifies the
 /// inviter; the joiner cross-checks it against the mDNS-advertised fp before
@@ -145,6 +190,10 @@ async fn dispatch(request: Request, peer: std::net::SocketAddr) -> Response {
             Ok(r) => value_response(id, &r),
             Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
         },
+        POD_REQUEST_OFFER_METHOD => match handle_request_offer(&env, peer) {
+            Ok(r) => value_response(id, &r),
+            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+        },
         other => Response::err(
             id,
             ErrorObject::method_not_found(&format!("bootstrap method '{other}' not supported")),
@@ -245,6 +294,105 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
         ca_cert_pem,
         inviter_peer_id,
         pod_id,
+    })
+}
+
+/// Joiner-initiated handshake (Slice JU-3). Joiner calls this over TOFU TLS
+/// asking "please offer me membership". We treat the request like an mDNS
+/// discovery hit: record the joiner in `pod_discovery`, mint a pairing code,
+/// insert an outbound pending offer keyed by `joiner_pubkey_fp`, and return
+/// the offer details so the joiner can land an inbound pending row in the
+/// same round-trip.
+fn handle_request_offer(
+    env: &SignedEnvelope,
+    peer: std::net::SocketAddr,
+) -> Result<RequestOfferResult> {
+    let (body, signer_vk) = pki::verify_envelope::<RequestOfferBody>(env)?;
+    let signer_fp = pki::bootstrap_pubkey_fingerprint(&signer_vk);
+    // Envelope-signer must match the fp the joiner advertises. Otherwise any
+    // signer could request offers for an arbitrary fp.
+    if signer_fp != body.joiner_pubkey_fp {
+        anyhow::bail!(
+            "envelope signer fp {} does not match advertised joiner_pubkey_fp {}",
+            signer_fp,
+            body.joiner_pubkey_fp
+        );
+    }
+
+    let conn = db::open_default()?;
+    // Inviter must already be a pod member (have a mesh CA) to invite peers.
+    let pki_d = pki_dir();
+    let mesh_ca_cert_pem = std::fs::read_to_string(pki::mesh_ca_cert_path(&pki_d))
+        .context("this host has no mesh CA; run `orca pod init` first")?;
+    let pod_id = pdb::get_pod_id(&conn)?.unwrap_or_else(|| "default".to_string());
+
+    // Record the joiner in discovery (idempotent — same fp = same row).
+    let joiner_label = select_peer_label(
+        &body.joiner_hostname,
+        body.joiner_display_name.as_deref(),
+    );
+    pdb::upsert_discovery(
+        &conn,
+        &body.joiner_pubkey_fp,
+        Some(&body.joiner_peer_id),
+        joiner_label,
+        &peer.ip().to_string(),
+        peer.port(),
+        "unclaimed",
+        true,
+    )?;
+
+    if pdb::has_open_outbound_offer(&conn, &body.joiner_pubkey_fp)? {
+        anyhow::bail!(
+            "an outbound offer to {} is already pending — try `pod accept` with the existing code",
+            joiner_label
+        );
+    }
+
+    let code = crate::pod::scheduler::mint_pairing_code();
+    let code_hash = pdb::hash_code(&code);
+    let offer_id = Uuid::new_v4().to_string();
+    let expires_at = now_secs() + crate::pod::scheduler::OFFER_TTL_SECS;
+    pdb::insert_pending_offer(
+        &conn,
+        &offer_id,
+        "out",
+        &body.joiner_pubkey_fp,
+        joiner_label,
+        &peer.ip().to_string(),
+        peer.port(),
+        &code_hash,
+        None,
+        None,
+        None,
+        crate::pod::scheduler::OFFER_TTL_SECS,
+    )?;
+
+    // Print code on the inviter side so a watching operator can read it.
+    // Matches the auto-offer scheduler's behavior.
+    info!(
+        "[pod-bootstrap] joiner-initiated request from {} ({}, fp {}) — pairing code: {code}",
+        joiner_label, body.joiner_peer_id, body.joiner_pubkey_fp
+    );
+
+    let signing = pki::load_or_init_bootstrap_key(&pki_d)?;
+    let inviter_fp = pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
+    let inviter_hostname = crate::host_identity::hostname().to_string();
+    let inviter_display_name = crate::host_identity::display_hostname().to_string();
+    let inviter_peer_id = format!("peer.{}", crate::host_identity::machine_id_short());
+
+    Ok(RequestOfferResult {
+        inviter_pubkey_fp: inviter_fp,
+        inviter_peer_id,
+        inviter_hostname,
+        inviter_addr: String::new(), // joiner already knows our addr — it dialed us
+        inviter_port: orca_utils::config::APP_PLUGIN_PORT,
+        mesh_ca_cert_pem,
+        pod_id,
+        code_hash,
+        expires_at,
+        inviter_display_name: Some(inviter_display_name),
+        code_hint: Some(code.chars().take(2).collect()),
     })
 }
 

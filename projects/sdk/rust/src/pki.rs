@@ -1094,6 +1094,65 @@ pub fn pinned_bootstrap_verifier(
     std::sync::Arc::new(PinnedFpVerifier { expected_fp })
 }
 
+/// TOFU bootstrap verifier — accepts the FIRST server cert it sees, stores
+/// its SPKI fingerprint into `captured`, and only fails when the cert can't
+/// be parsed. Used by joiner-initiated `pod join` / `pod connect` where the
+/// joiner doesn't yet know the inviter's fp; the captured fp is later
+/// cross-checked against the signed `RequestOfferResult.inviter_pubkey_fp`
+/// echoed back in the JSON-RPC response.
+///
+/// **Not a replacement for pinning.** Callers MUST verify the captured fp
+/// matches the signed echo before persisting state.
+pub fn capturing_bootstrap_verifier(
+    captured: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+) -> std::sync::Arc<dyn rustls::client::danger::ServerCertVerifier> {
+    std::sync::Arc::new(CapturingFpVerifier { captured })
+}
+
+#[derive(Debug)]
+struct CapturingFpVerifier {
+    captured: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl rustls::client::danger::ServerCertVerifier for CapturingFpVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let fp = spki_fingerprint_der(end_entity.as_ref())
+            .map_err(|e| rustls::Error::General(format!("extract SPKI fp from cert: {e}")))?;
+        if let Ok(mut slot) = self.captured.lock() {
+            *slot = Some(fp);
+        }
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        _: &[u8],
+        _: &rustls::pki_types::CertificateDer<'_>,
+        _: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::PeerIncompatible(
+            rustls::PeerIncompatible::Tls12NotOfferedOrEnabled,
+        ))
+    }
+    fn verify_tls13_signature(
+        &self,
+        _: &[u8],
+        _: &rustls::pki_types::CertificateDer<'_>,
+        _: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![rustls::SignatureScheme::ED25519]
+    }
+}
+
 #[derive(Debug)]
 struct PinnedFpVerifier {
     expected_fp: String,

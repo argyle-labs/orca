@@ -223,12 +223,127 @@ pub async fn cmd_pod_connect(addr: &str) -> Result<()> {
 
 // ── pod offer (manual: push to a specific address) ───────────────────────────
 
+/// Outcome of resolving a user-typed `host[:port]` to a known discovery row.
+/// Manual offers need the joiner's pubkey fp for the pinned bootstrap dial;
+/// we read it from the mDNS-populated discovery table rather than asking the
+/// user to copy-paste a fp.
+#[derive(Debug)]
+pub enum OfferTargetResolution {
+    Match(Box<pdb::DiscoveryRow>),
+    NoMatch,
+    /// Multiple discovery rows share the host (different ports / multi-homed).
+    /// Caller prints the candidates so the user can re-run with `:port`.
+    Ambiguous(Vec<pdb::DiscoveryRow>),
+}
+
+/// Pure resolver: given the typed `host[:port]` (already parsed via
+/// `pki::parse_peer_addr`) and the current discovery rows, find the
+/// single row that matches by `addr` or `hostname`. Port narrows when
+/// the user supplied an explicit one — without an explicit port the
+/// `default_port_used` flag tells us to ignore port mismatches.
+pub fn resolve_offer_target(
+    rows: &[pdb::DiscoveryRow],
+    host: &str,
+    port: u16,
+    default_port_used: bool,
+) -> OfferTargetResolution {
+    let host_matches = |r: &pdb::DiscoveryRow| r.addr == host || r.hostname == host;
+    let port_matches = |r: &pdb::DiscoveryRow| default_port_used || r.port == port;
+    let hits: Vec<pdb::DiscoveryRow> = rows
+        .iter()
+        .filter(|r| host_matches(r) && port_matches(r))
+        .cloned()
+        .collect();
+    match hits.len() {
+        0 => OfferTargetResolution::NoMatch,
+        1 => OfferTargetResolution::Match(Box::new(hits.into_iter().next().unwrap())),
+        _ => OfferTargetResolution::Ambiguous(hits),
+    }
+}
+
 pub async fn cmd_pod_offer(addr: &str) -> Result<()> {
+    // `parse_peer_addr` accepts "host" or "host:port"; we lose track of which
+    // form the user typed once parsed, so we redetect here for the port gate.
+    let default_port_used = !addr.contains(':');
     let (host, port) = pki::parse_peer_addr(addr, APP_PLUGIN_PORT)?;
+
+    let conn = db::open_default()?;
+    if pki::load_mesh_client(&pki_dir()).is_err() {
+        bail!(
+            "this host is not a pod member yet — run `orca pod init` (or accept an offer) before inviting peers"
+        );
+    }
+    let discovery = pdb::list_discovery(&conn)?;
+    let target = match resolve_offer_target(&discovery, &host, port, default_port_used) {
+        OfferTargetResolution::Match(t) => *t,
+        OfferTargetResolution::NoMatch => bail!(
+            "no orca discovered at {host}{} — wait for `orca pod discover` to see it on mDNS, \
+             then retry (cross-subnet pairing is on the roadmap)",
+            if default_port_used {
+                String::new()
+            } else {
+                format!(":{port}")
+            }
+        ),
+        OfferTargetResolution::Ambiguous(hits) => {
+            let lines: Vec<String> = hits
+                .iter()
+                .map(|h| format!("  • {}:{} (fp {})", h.addr, h.port, h.pubkey_fp))
+                .collect();
+            bail!(
+                "multiple discovered orcas match {host}; specify a port:\n{}",
+                lines.join("\n")
+            );
+        }
+    };
+
+    let pod_id = pdb::get_pod_id(&conn)?.unwrap_or_else(|| "default".to_string());
+    if pdb::has_open_outbound_offer(&conn, &target.pubkey_fp)? {
+        bail!(
+            "an outbound offer to {} is already pending — wait for it to expire (~10 min) or \
+             have the joiner accept it first",
+            target.hostname
+        );
+    }
+
+    let code = crate::pod::scheduler::mint_pairing_code();
+    let code_hash = pdb::hash_code(&code);
+    let offer_id = uuid::Uuid::new_v4().to_string();
+    pdb::insert_pending_offer(
+        &conn,
+        &offer_id,
+        "out",
+        &target.pubkey_fp,
+        &target.hostname,
+        &target.addr,
+        target.port,
+        &code_hash,
+        None,
+        None,
+        None,
+        crate::pod::scheduler::OFFER_TTL_SECS,
+    )?;
+    drop(conn);
+
+    crate::pod::scheduler::push_offer(
+        &target.hostname,
+        &target.addr,
+        target.port,
+        &target.pubkey_fp,
+        &code,
+        &pod_id,
+    )
+    .await
+    .context("push offer to joiner failed")?;
+
     println!(
-        "Manual `pod offer {host}:{port}` is queued for v1.1 — for now, ensure both hosts can \
-         see each other via mDNS and the daemon's auto-offer scheduler will handle it. \
-         (Cross-subnet support is on the roadmap.)"
+        "✓ offered pod membership to {} ({}:{})",
+        target.hostname, target.addr, target.port
+    );
+    println!("  pairing code: {code}");
+    println!(
+        "  the joiner has {}s to run `orca pod accept {code}`",
+        crate::pod::scheduler::OFFER_TTL_SECS
     );
     Ok(())
 }
@@ -665,6 +780,64 @@ mod tests {
             expires_at,
             created_at: 0,
         }
+    }
+
+    fn mk_disc(addr: &str, hostname: &str, port: u16, fp: &str) -> pdb::DiscoveryRow {
+        pdb::DiscoveryRow {
+            pubkey_fp: fp.into(),
+            peer_id: None,
+            hostname: hostname.into(),
+            addr: addr.into(),
+            port,
+            state: "unclaimed".into(),
+            can_invite: true,
+            first_seen_at: 0,
+            last_seen_at: 0,
+        }
+    }
+
+    #[test]
+    fn resolve_no_match_when_unknown_host() {
+        let rows = vec![mk_disc("10.0.0.5", "thor", 12002, "fp1")];
+        let got = resolve_offer_target(&rows, "loki", 12002, true);
+        assert!(matches!(got, OfferTargetResolution::NoMatch));
+    }
+
+    #[test]
+    fn resolve_matches_by_addr() {
+        let rows = vec![mk_disc("10.0.0.5", "thor", 12002, "fp1")];
+        let got = resolve_offer_target(&rows, "10.0.0.5", 12002, true);
+        assert!(matches!(got, OfferTargetResolution::Match(r) if r.pubkey_fp == "fp1"));
+    }
+
+    #[test]
+    fn resolve_matches_by_hostname() {
+        let rows = vec![mk_disc("10.0.0.5", "thor", 12002, "fp1")];
+        let got = resolve_offer_target(&rows, "thor", 12002, true);
+        assert!(matches!(got, OfferTargetResolution::Match(_)));
+    }
+
+    #[test]
+    fn resolve_ambiguous_when_multihomed_default_port() {
+        let rows = vec![
+            mk_disc("10.0.0.5", "thor", 12002, "fp1"),
+            mk_disc("10.0.0.5", "thor", 12003, "fp2"),
+        ];
+        let got = resolve_offer_target(&rows, "thor", 12002, /* default */ true);
+        match got {
+            OfferTargetResolution::Ambiguous(hits) => assert_eq!(hits.len(), 2),
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_explicit_port_disambiguates() {
+        let rows = vec![
+            mk_disc("10.0.0.5", "thor", 12002, "fp1"),
+            mk_disc("10.0.0.5", "thor", 12003, "fp2"),
+        ];
+        let got = resolve_offer_target(&rows, "thor", 12003, /* explicit */ false);
+        assert!(matches!(got, OfferTargetResolution::Match(r) if r.pubkey_fp == "fp2"));
     }
 
     #[test]
