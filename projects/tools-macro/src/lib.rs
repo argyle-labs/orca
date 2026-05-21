@@ -209,6 +209,10 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     let verb = attr.verb;
     let tool_name = format!("{}.{}", domain.value(), verb.value());
     let remote_ok_lit = attr.remote_ok;
+    // REQUIRED_ROLE: honoured when the author sets `role = "..."`; otherwise
+    // the OrcaToolDef default ("any") wins. Secure-by-default (derive from
+    // verb) is blocked on the CRUD verb unification — see
+    // `feedback_crud_unification_blocks_security`.
     let role_const = match attr.role.as_ref() {
         Some(s) => quote! { const REQUIRED_ROLE: &'static str = #s; },
         None => quote! {},
