@@ -12,6 +12,7 @@ pub mod api_tokens;
 pub mod config_store;
 pub mod docker_runtimes;
 pub mod docs;
+pub mod feature_flags;
 pub mod home_assistant;
 pub mod host_addressing;
 pub mod host_status;
@@ -783,9 +784,17 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             value      TEXT NOT NULL,
             updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         );
-        INSERT OR IGNORE INTO settings (key, value) VALUES
-            ('fs.allow_unrestricted', 'false'),
-            ('ui.enabled',            'true');
+
+        -- Typed boolean toggles. Schema enforces enabled IN (0,1); promoted
+        -- out of settings so readers don't parse free-form TEXT.
+        CREATE TABLE IF NOT EXISTS feature_flags (
+            name       TEXT PRIMARY KEY,
+            enabled    INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        INSERT OR IGNORE INTO feature_flags (name, enabled) VALUES
+            ('fs.allow_unrestricted', 0),
+            ('ui.enabled',            1);
 
         CREATE TABLE IF NOT EXISTS profiles (
             id              TEXT PRIMARY KEY,
@@ -1217,10 +1226,9 @@ pub fn important_events(conn: &Connection, project: &str, limit: usize) -> Resul
 }
 
 pub fn fs_allow_unrestricted(conn: &Connection) -> bool {
-    settings::get_legacy(conn, "fs.allow_unrestricted")
+    feature_flags::get(conn, "fs.allow_unrestricted")
         .ok()
         .flatten()
-        .map(|v| v == "true")
         .unwrap_or(false)
 }
 
@@ -1396,9 +1404,9 @@ mod registry_tests {
     #[test]
     fn fs_allow_unrestricted_seeded_false() {
         let conn = test_conn();
-        // Migration 17 seeds this as 'false'
+        // Seeded as 0 in the feature_flags baseline.
         assert!(!fs_allow_unrestricted(&conn));
-        settings::set_legacy(&conn, "fs.allow_unrestricted", "true").unwrap();
+        feature_flags::set(&conn, "fs.allow_unrestricted", true).unwrap();
         assert!(fs_allow_unrestricted(&conn));
     }
 }

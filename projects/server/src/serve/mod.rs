@@ -668,8 +668,7 @@ fn ui_enabled() -> bool {
         // that supplied an unencrypted DB via task-local.
         let enabled = db::open_default()
             .ok()
-            .and_then(|c| db::settings::get(&c, "ui.enabled").ok().flatten())
-            .map(|v| v != "false")
+            .and_then(|c| db::feature_flags::get(&c, "ui.enabled").ok().flatten())
             .unwrap_or(true);
         tracing::info!("ui.enabled = {enabled}");
         enabled
