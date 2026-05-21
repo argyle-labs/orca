@@ -126,8 +126,8 @@ fn docker_svc(
 }
 
 /// Probe the local docker engine (colima | desktop | none) and whether it is running.
-#[orca_tool(domain = "docker", verb = "engine")]
-async fn get_docker_engine(
+#[orca_tool(domain = "docker.engine", verb = "detail")]
+async fn docker_engine_detail(
     _args: GetDockerEngineArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<DockerEngineStatus> {
@@ -135,8 +135,8 @@ async fn get_docker_engine(
 }
 
 /// [MUTATES STATE] Start the local docker engine. Returns the start-command output.
-#[orca_tool(domain = "docker", verb = "engine-start")]
-async fn start_docker_engine(
+#[orca_tool(domain = "docker.engine", verb = "update")]
+async fn docker_engine_update(
     _args: StartDockerEngineArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<StartDockerEngineOutput> {
@@ -146,8 +146,8 @@ async fn start_docker_engine(
 
 /// List the compose services under `path` with state/health/ports plus the
 /// resolved compose-file path.
-#[orca_tool(domain = "docker", verb = "services")]
-async fn get_docker_services(
+#[orca_tool(domain = "docker.service", verb = "list")]
+async fn docker_service_list(
     args: GetDockerServicesArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<DockerServicesView> {
@@ -156,8 +156,8 @@ async fn get_docker_services(
 
 /// [MUTATES STATE] Run a docker-compose lifecycle action against the compose
 /// project at `project_path`.
-#[orca_tool(domain = "docker", verb = "action")]
-async fn run_docker_action(
+#[orca_tool(domain = "docker.service", verb = "update")]
+async fn docker_service_update(
     args: RunDockerActionArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<DockerActionResult> {
@@ -173,8 +173,8 @@ async fn run_docker_action(
 
 /// Read docker-compose logs from the project at `project` (optionally scoped
 /// to a service).
-#[orca_tool(domain = "docker", verb = "logs")]
-async fn get_logs(
+#[orca_tool(domain = "docker.service", verb = "detail")]
+async fn docker_service_detail(
     args: GetLogsArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<GetLogsOutput> {
@@ -187,8 +187,8 @@ async fn get_logs(
 
 /// List every docker-compose project under the rebuy root with its service
 /// states. Powers the cross-project logs panel.
-#[orca_tool(domain = "docker", verb = "log-services")]
-async fn get_log_services(
+#[orca_tool(domain = "docker.service", verb = "list-logs")]
+async fn docker_service_list_logs(
     _args: GetLogServicesArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<GetLogServicesOutput> {

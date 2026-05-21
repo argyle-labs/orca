@@ -76,8 +76,8 @@ fn infra_svc(
 
 /// List all running docker compose services across all rebuy projects. Returns
 /// project name, path, and per-service state/health/ports.
-#[orca_tool(domain = "infra", verb = "services")]
-async fn list_services(
+#[orca_tool(domain = "infra.service", verb = "list")]
+async fn infra_service_list(
     _args: ListServicesArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<ListServicesOutput> {
@@ -105,8 +105,8 @@ async fn list_services(
 
 /// Fetch docker compose logs for a running rebuy service. Specify the project
 /// path and service name.
-#[orca_tool(domain = "infra", verb = "service-logs")]
-async fn get_service_logs(
+#[orca_tool(domain = "infra.service", verb = "detail")]
+async fn infra_service_detail(
     args: GetServiceLogsArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<GetServiceLogsOutput> {
@@ -123,8 +123,8 @@ async fn get_service_logs(
 
 /// Run the orca project test suite. Returns test output with pass/fail counts.
 /// Suites: rust (cargo test), frontend (vitest), e2e (playwright), all.
-#[orca_tool(domain = "infra", verb = "run-tests")]
-async fn run_tests(
+#[orca_tool(domain = "infra.test", verb = "create")]
+async fn infra_test_create(
     args: RunTestsArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<RunTestsOutput> {
@@ -196,7 +196,7 @@ mod tests {
     #[tokio::test]
     async fn list_services_maps_each_field() {
         let (ctx, _) = ctx_with_stub();
-        let out = list_services(ListServicesArgs {}, &ctx).await.unwrap();
+        let out = infra_service_list(ListServicesArgs {}, &ctx).await.unwrap();
         assert_eq!(out.projects.len(), 1);
         let p = &out.projects[0];
         assert_eq!(p.project, "rebuy");
@@ -211,7 +211,7 @@ mod tests {
     #[tokio::test]
     async fn get_service_logs_default_tail_is_200() {
         let (ctx, stub) = ctx_with_stub();
-        let out = get_service_logs(
+        let out = infra_service_detail(
             GetServiceLogsArgs {
                 project: "/p".into(),
                 service: "api".into(),
@@ -231,7 +231,7 @@ mod tests {
     #[tokio::test]
     async fn get_service_logs_honors_explicit_tail() {
         let (ctx, stub) = ctx_with_stub();
-        get_service_logs(
+        infra_service_detail(
             GetServiceLogsArgs {
                 project: "/p".into(),
                 service: "web".into(),
@@ -247,7 +247,9 @@ mod tests {
     #[tokio::test]
     async fn run_tests_defaults_to_rust_suite() {
         let (ctx, stub) = ctx_with_stub();
-        let out = run_tests(RunTestsArgs { suite: None }, &ctx).await.unwrap();
+        let out = infra_test_create(RunTestsArgs { suite: None }, &ctx)
+            .await
+            .unwrap();
         assert_eq!(out.suite, "rust");
         assert_eq!(out.passed, 3);
         assert_eq!(out.exit_code, 0);
@@ -261,7 +263,7 @@ mod tests {
     #[tokio::test]
     async fn run_tests_honors_explicit_suite() {
         let (ctx, stub) = ctx_with_stub();
-        let out = run_tests(
+        let out = infra_test_create(
             RunTestsArgs {
                 suite: Some("frontend".into()),
             },

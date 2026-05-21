@@ -275,8 +275,8 @@ async fn list_db_specs(
 }
 
 /// [MUTATES STATE] Fetch a JSON OpenAPI spec from `url` and persist it under `name` in orca.db.
-#[orca_tool(domain = "spec", verb = "register")]
-async fn register_spec(
+#[orca_tool(domain = "spec", verb = "create")]
+async fn spec_create(
     args: RegisterSpecArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<RegisterSpecResult> {
@@ -293,8 +293,8 @@ async fn refresh_spec(
 }
 
 /// [MUTATES STATE] Remove a spec from orca.db. Returns `removed: true` when a row was deleted.
-#[orca_tool(domain = "spec", verb = "unregister")]
-async fn unregister_spec(
+#[orca_tool(domain = "spec", verb = "delete")]
+async fn spec_delete(
     args: UnregisterSpecArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<UnregisterSpecOutput> {
@@ -312,8 +312,8 @@ async fn sync_mcp_specs(
 }
 
 /// Parse the local `<repo>.graphql` SDL into a structured types/queries/mutations view.
-#[orca_tool(domain = "spec", verb = "graphql-info")]
-async fn get_spec_graphql_info(
+#[orca_tool(domain = "spec.graphql", verb = "detail")]
+async fn spec_graphql_detail(
     args: GetSpecGraphqlInfoArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<GraphQlInfoData> {
@@ -321,8 +321,8 @@ async fn get_spec_graphql_info(
 }
 
 /// Proxy a GraphQL request to a Shopify shop using the configured shop+token. Returns the raw upstream JSON body.
-#[orca_tool(domain = "spec", verb = "proxy-graphql", cli = skip)]
-async fn proxy_graphql(
+#[orca_tool(domain = "spec.graphql", verb = "update", cli = skip)]
+async fn spec_graphql_update(
     args: ProxyGraphqlArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<GraphqlProxyResult> {

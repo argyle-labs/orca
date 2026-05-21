@@ -18,9 +18,9 @@ import type {
   AgentBackendClearKeyData,
   AgentBackendClearKeyErrors,
   AgentBackendClearKeyResponses,
-  AgentBackendKeyStatusData,
-  AgentBackendKeyStatusErrors,
-  AgentBackendKeyStatusResponses,
+  AgentBackendDetailData,
+  AgentBackendDetailErrors,
+  AgentBackendDetailResponses,
   AgentBackendOverrideData,
   AgentBackendOverrideErrors,
   AgentBackendOverrideResponses,
@@ -30,9 +30,6 @@ import type {
   AgentBackendSetModeData,
   AgentBackendSetModeErrors,
   AgentBackendSetModeResponses,
-  AgentBackendStatusData,
-  AgentBackendStatusErrors,
-  AgentBackendStatusResponses,
   AgentBackendUseServerAnthropicData,
   AgentBackendUseServerAnthropicErrors,
   AgentBackendUseServerAnthropicResponses,
@@ -103,15 +100,15 @@ import type {
   CreateMcpMappingData,
   CreateMcpMappingErrors,
   CreateMcpMappingResponses,
+  DbDetailData,
+  DbDetailErrors,
+  DbDetailResponses,
   DbDownData,
   DbDownErrors,
   DbDownResponses,
   DbMigrateData,
   DbMigrateErrors,
   DbMigrateResponses,
-  DbStatusData,
-  DbStatusErrors,
-  DbStatusResponses,
   DbUpData,
   DbUpErrors,
   DbUpResponses,
@@ -300,9 +297,9 @@ import type {
   HaServiceCallData,
   HaServiceCallErrors,
   HaServiceCallResponses,
-  HostInfoData,
-  HostInfoErrors,
-  HostInfoResponses,
+  HostDetailData,
+  HostDetailErrors,
+  HostDetailResponses,
   HostRefreshData,
   HostRefreshErrors,
   HostRefreshResponses,
@@ -595,12 +592,12 @@ import type {
   SchemaListData,
   SchemaListErrors,
   SchemaListResponses,
-  SchemaViewGetData,
-  SchemaViewGetErrors,
-  SchemaViewGetResponses,
-  SchemaViewListDomainsData,
-  SchemaViewListDomainsErrors,
-  SchemaViewListDomainsResponses,
+  SchemaViewDetailData,
+  SchemaViewDetailErrors,
+  SchemaViewDetailResponses,
+  SchemaViewListData,
+  SchemaViewListErrors,
+  SchemaViewListResponses,
   SearchConfluenceData,
   SearchConfluenceErrors,
   SearchConfluenceResponses,
@@ -612,9 +609,9 @@ import type {
   SecretDeleteData,
   SecretDeleteErrors,
   SecretDeleteResponses,
-  SecretGetData,
-  SecretGetErrors,
-  SecretGetResponses,
+  SecretDetailData,
+  SecretDetailErrors,
+  SecretDetailResponses,
   SecretListData,
   SecretListErrors,
   SecretListResponses,
@@ -1565,19 +1562,19 @@ export const agentBackendClearKey = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * Report whether an Anthropic API key is stored in the encrypted orca DB. Never echoes the raw key — only a masked preview.
+ * Show the current agent backend configuration: mode (local|claude|hybrid), per-agent overrides, whether server-side Anthropic calls are enabled, and a masked preview of the stored API key (when present).
  *
- * Report whether an Anthropic API key is stored in the encrypted orca DB. Never echoes the raw key — only a masked preview.
+ * Show the current agent backend configuration: mode (local|claude|hybrid), per-agent overrides, whether server-side Anthropic calls are enabled, and a masked preview of the stored API key (when present).
  */
-export const agentBackendKeyStatus = <ThrowOnError extends boolean = false>(
-  options: Options<AgentBackendKeyStatusData, ThrowOnError>,
+export const agentBackendDetail = <ThrowOnError extends boolean = false>(
+  options: Options<AgentBackendDetailData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<
-    AgentBackendKeyStatusResponses,
-    AgentBackendKeyStatusErrors,
+    AgentBackendDetailResponses,
+    AgentBackendDetailErrors,
     ThrowOnError
   >({
-    url: '/api/tools/agent-backend.key-status',
+    url: '/api/tools/agent-backend.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1641,27 +1638,6 @@ export const agentBackendSetMode = <ThrowOnError extends boolean = false>(
     ThrowOnError
   >({
     url: '/api/tools/agent-backend.set-mode',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Show the current agent backend configuration: mode (local|claude|hybrid), per-agent overrides, and whether server-side Anthropic calls are enabled.
- *
- * Show the current agent backend configuration: mode (local|claude|hybrid), per-agent overrides, and whether server-side Anthropic calls are enabled.
- */
-export const agentBackendStatus = <ThrowOnError extends boolean = false>(
-  options: Options<AgentBackendStatusData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    AgentBackendStatusResponses,
-    AgentBackendStatusErrors,
-    ThrowOnError
-  >({
-    url: '/api/tools/agent-backend.status',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1946,6 +1922,23 @@ export const configSet = <ThrowOnError extends boolean = false>(
   });
 
 /**
+ * Show current schema version and pending-migration count.
+ *
+ * Show current schema version and pending-migration count.
+ */
+export const dbDetail = <ThrowOnError extends boolean = false>(
+  options: Options<DbDetailData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<DbDetailResponses, DbDetailErrors, ThrowOnError>({
+    url: '/api/tools/db.detail',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
  * [MUTATES STATE] Revert the most recently applied migration (one step).
  *
  * [MUTATES STATE] Revert the most recently applied migration (one step).
@@ -1972,23 +1965,6 @@ export const dbMigrate = <ThrowOnError extends boolean = false>(
 ) =>
   (options.client ?? client).post<DbMigrateResponses, DbMigrateErrors, ThrowOnError>({
     url: '/api/tools/db.migrate',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Show current schema version and pending-migration count.
- *
- * Show current schema version and pending-migration count.
- */
-export const dbStatus = <ThrowOnError extends boolean = false>(
-  options: Options<DbStatusData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<DbStatusResponses, DbStatusErrors, ThrowOnError>({
-    url: '/api/tools/db.status',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2599,11 +2575,11 @@ export const haServiceCall = <ThrowOnError extends boolean = false>(
  *
  * Local host snapshot: display name, machine_id, and every addressing channel.
  */
-export const hostInfo = <ThrowOnError extends boolean = false>(
-  options: Options<HostInfoData, ThrowOnError>,
+export const hostDetail = <ThrowOnError extends boolean = false>(
+  options: Options<HostDetailData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<HostInfoResponses, HostInfoErrors, ThrowOnError>({
-    url: '/api/tools/host.info',
+  (options.client ?? client).post<HostDetailResponses, HostDetailErrors, ThrowOnError>({
+    url: '/api/tools/host.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -3728,11 +3704,11 @@ export const scheduleStatus = <ThrowOnError extends boolean = false>(
  *
  * Return the multi-tab schema view across every configured database. Result is `{ tabs, showTabs, errors? }`.
  */
-export const schemaViewGet = <ThrowOnError extends boolean = false>(
-  options: Options<SchemaViewGetData, ThrowOnError>,
+export const schemaViewDetail = <ThrowOnError extends boolean = false>(
+  options: Options<SchemaViewDetailData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<SchemaViewGetResponses, SchemaViewGetErrors, ThrowOnError>({
-    url: '/api/tools/schema-view.get',
+  (options.client ?? client).post<SchemaViewDetailResponses, SchemaViewDetailErrors, ThrowOnError>({
+    url: '/api/tools/schema-view.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -3745,15 +3721,11 @@ export const schemaViewGet = <ThrowOnError extends boolean = false>(
  *
  * Return the flattened list of domain definitions across every configured database.
  */
-export const schemaViewListDomains = <ThrowOnError extends boolean = false>(
-  options: Options<SchemaViewListDomainsData, ThrowOnError>,
+export const schemaViewList = <ThrowOnError extends boolean = false>(
+  options: Options<SchemaViewListData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<
-    SchemaViewListDomainsResponses,
-    SchemaViewListDomainsErrors,
-    ThrowOnError
-  >({
-    url: '/api/tools/schema-view.list-domains',
+  (options.client ?? client).post<SchemaViewListResponses, SchemaViewListErrors, ThrowOnError>({
+    url: '/api/tools/schema-view.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -3851,11 +3823,11 @@ export const secretDelete = <ThrowOnError extends boolean = false>(
  *
  * [SENSITIVE] Fetch a secret value by name. Resolves via the configured backend.
  */
-export const secretGet = <ThrowOnError extends boolean = false>(
-  options: Options<SecretGetData, ThrowOnError>,
+export const secretDetail = <ThrowOnError extends boolean = false>(
+  options: Options<SecretDetailData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<SecretGetResponses, SecretGetErrors, ThrowOnError>({
-    url: '/api/tools/secret.get',
+  (options.client ?? client).post<SecretDetailResponses, SecretDetailErrors, ThrowOnError>({
+    url: '/api/tools/secret.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',

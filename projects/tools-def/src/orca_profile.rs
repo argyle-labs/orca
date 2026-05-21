@@ -176,8 +176,8 @@ async fn profile_use(
 }
 
 /// [MUTATES STATE] Share a profile with another user.
-#[orca_tool(domain = "profile", verb = "share")]
-async fn profile_share(
+#[orca_tool(domain = "profile.share", verb = "create")]
+async fn profile_share_create(
     args: ProfileShareArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<ProfileMutationResult> {
@@ -187,8 +187,8 @@ async fn profile_share(
 }
 
 /// [MUTATES STATE] Remove a share from a profile.
-#[orca_tool(domain = "profile", verb = "unshare")]
-async fn profile_unshare(
+#[orca_tool(domain = "profile.share", verb = "delete")]
+async fn profile_share_delete(
     args: ProfileUnshareArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<ProfileMutationResult> {
@@ -196,8 +196,8 @@ async fn profile_unshare(
 }
 
 /// List shares on a profile (owner only).
-#[orca_tool(domain = "profile", verb = "shares")]
-async fn profile_shares(
+#[orca_tool(domain = "profile.share", verb = "list")]
+async fn profile_share_list(
     args: ProfileSpecArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<ProfileSharesReport> {

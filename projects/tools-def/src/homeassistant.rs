@@ -63,8 +63,8 @@ fn make_client(name: &str) -> anyhow::Result<orca_integrations::homeassistant::C
 }
 
 /// List Home Assistant entities for a registered endpoint, optionally filtered by domain.
-#[orca_tool(domain = "ha", verb = "entity-list")]
-async fn home_assistant_entity_list(
+#[orca_tool(domain = "ha.entity", verb = "list")]
+async fn ha_entity_list(
     args: HaEntityListArgs,
     _ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<crate::JsonAny> {
@@ -73,8 +73,8 @@ async fn home_assistant_entity_list(
 }
 
 /// Fetch the current state of a single Home Assistant entity.
-#[orca_tool(domain = "ha", verb = "entity-state")]
-async fn home_assistant_entity_state(
+#[orca_tool(domain = "ha.entity", verb = "detail")]
+async fn ha_entity_detail(
     args: HaEntityStateArgs,
     _ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<crate::JsonAny> {
@@ -83,8 +83,8 @@ async fn home_assistant_entity_state(
 }
 
 /// List Home Assistant automations for a registered endpoint.
-#[orca_tool(domain = "ha", verb = "automation-list")]
-async fn home_assistant_automation_list(
+#[orca_tool(domain = "ha.automation", verb = "list")]
+async fn ha_automation_list(
     args: HaAutomationListArgs,
     _ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<crate::JsonAny> {
@@ -93,8 +93,8 @@ async fn home_assistant_automation_list(
 }
 
 /// [MUTATES STATE] Invoke a Home Assistant service (e.g. light.turn_on, switch.toggle). Returns the list of changed entity states.
-#[orca_tool(domain = "ha", verb = "service-call")]
-async fn home_assistant_service_call(
+#[orca_tool(domain = "ha.service", verb = "update")]
+async fn ha_service_update(
     args: HaServiceCallArgs,
     _ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<crate::JsonAny> {

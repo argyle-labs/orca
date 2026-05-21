@@ -3752,19 +3752,19 @@ export type AgentBackendClearKeyResponses = {
 export type AgentBackendClearKeyResponse =
   AgentBackendClearKeyResponses[keyof AgentBackendClearKeyResponses];
 
-export type AgentBackendKeyStatusData = {
+export type AgentBackendDetailData = {
   /**
-   * StatusArgs
+   * AgentBackendStatusArgs
    */
   body: {
     [key: string]: unknown;
   };
   path?: never;
   query?: never;
-  url: '/api/tools/agent-backend.key-status';
+  url: '/api/tools/agent-backend.detail';
 };
 
-export type AgentBackendKeyStatusErrors = {
+export type AgentBackendDetailErrors = {
   /**
    * Unknown tool
    */
@@ -3779,26 +3779,28 @@ export type AgentBackendKeyStatusErrors = {
   };
 };
 
-export type AgentBackendKeyStatusError =
-  AgentBackendKeyStatusErrors[keyof AgentBackendKeyStatusErrors];
+export type AgentBackendDetailError = AgentBackendDetailErrors[keyof AgentBackendDetailErrors];
 
-export type AgentBackendKeyStatusResponses = {
+export type AgentBackendDetailResponses = {
   /**
-   * ApiKeyStatus
+   * AgentBackendStatusOutput
    *
-   * Whether a stored API key exists.
+   * Tool result
    */
   200: {
+    api_key_in_db: boolean;
     /**
-     * Masked preview if present (e.g. "sk-ant-…ABCD").
+     * Masked preview of the stored Anthropic key (e.g. "sk-ant-…ABCD"), when present.
      */
-    masked?: string | null;
-    present: boolean;
+    api_key_masked?: string | null;
+    mode: string;
+    overrides: Array<AgentBackendOverrideEntry>;
+    use_server_anthropic: boolean;
   };
 };
 
-export type AgentBackendKeyStatusResponse =
-  AgentBackendKeyStatusResponses[keyof AgentBackendKeyStatusResponses];
+export type AgentBackendDetailResponse =
+  AgentBackendDetailResponses[keyof AgentBackendDetailResponses];
 
 export type AgentBackendOverrideData = {
   /**
@@ -3959,52 +3961,6 @@ export type AgentBackendSetModeResponses = {
 
 export type AgentBackendSetModeResponse =
   AgentBackendSetModeResponses[keyof AgentBackendSetModeResponses];
-
-export type AgentBackendStatusData = {
-  /**
-   * AgentBackendStatusArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/agent-backend.status';
-};
-
-export type AgentBackendStatusErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type AgentBackendStatusError = AgentBackendStatusErrors[keyof AgentBackendStatusErrors];
-
-export type AgentBackendStatusResponses = {
-  /**
-   * AgentBackendStatusOutput
-   *
-   * Tool result
-   */
-  200: {
-    api_key_in_db: boolean;
-    mode: string;
-    overrides: Array<AgentBackendOverrideEntry>;
-    use_server_anthropic: boolean;
-  };
-};
-
-export type AgentBackendStatusResponse =
-  AgentBackendStatusResponses[keyof AgentBackendStatusResponses];
 
 export type AgentBackendUseServerAnthropicData = {
   /**
@@ -4782,6 +4738,60 @@ export type ConfigSetResponses = {
 
 export type ConfigSetResponse = ConfigSetResponses[keyof ConfigSetResponses];
 
+export type DbDetailData = {
+  /**
+   * DbStatusArgs
+   */
+  body: {
+    [key: string]: unknown;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/tools/db.detail';
+};
+
+export type DbDetailErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type DbDetailError = DbDetailErrors[keyof DbDetailErrors];
+
+export type DbDetailResponses = {
+  /**
+   * DbStatusReport
+   *
+   * Tool result
+   */
+  200: {
+    /**
+     * Highest applied migration version (YYYYMMDDHHMMSS timestamp, or 0 if
+     * only the apply_schema baseline has run).
+     */
+    current: number;
+    /**
+     * Pending migration count (total - applied).
+     */
+    pending: number;
+    /**
+     * Total migrations compiled into this orca binary.
+     */
+    total: number;
+  };
+};
+
+export type DbDetailResponse = DbDetailResponses[keyof DbDetailResponses];
+
 export type DbDownData = {
   /**
    * DbDownArgs
@@ -4877,60 +4887,6 @@ export type DbMigrateResponses = {
 };
 
 export type DbMigrateResponse = DbMigrateResponses[keyof DbMigrateResponses];
-
-export type DbStatusData = {
-  /**
-   * DbStatusArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/db.status';
-};
-
-export type DbStatusErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type DbStatusError = DbStatusErrors[keyof DbStatusErrors];
-
-export type DbStatusResponses = {
-  /**
-   * DbStatusReport
-   *
-   * Tool result
-   */
-  200: {
-    /**
-     * Highest applied migration version (YYYYMMDDHHMMSS timestamp, or 0 if
-     * only the apply_schema baseline has run).
-     */
-    current: number;
-    /**
-     * Pending migration count (total - applied).
-     */
-    pending: number;
-    /**
-     * Total migrations compiled into this orca binary.
-     */
-    total: number;
-  };
-};
-
-export type DbStatusResponse = DbStatusResponses[keyof DbStatusResponses];
 
 export type DbUpData = {
   /**
@@ -6500,7 +6456,7 @@ export type HaServiceCallResponses = {
   200: unknown;
 };
 
-export type HostInfoData = {
+export type HostDetailData = {
   /**
    * EmptyArgs
    */
@@ -6509,10 +6465,10 @@ export type HostInfoData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/host.info';
+  url: '/api/tools/host.detail';
 };
 
-export type HostInfoErrors = {
+export type HostDetailErrors = {
   /**
    * Unknown tool
    */
@@ -6527,9 +6483,9 @@ export type HostInfoErrors = {
   };
 };
 
-export type HostInfoError = HostInfoErrors[keyof HostInfoErrors];
+export type HostDetailError = HostDetailErrors[keyof HostDetailErrors];
 
-export type HostInfoResponses = {
+export type HostDetailResponses = {
   /**
    * HostInfoOutput
    *
@@ -6542,7 +6498,7 @@ export type HostInfoResponses = {
   };
 };
 
-export type HostInfoResponse = HostInfoResponses[keyof HostInfoResponses];
+export type HostDetailResponse = HostDetailResponses[keyof HostDetailResponses];
 
 export type HostRefreshData = {
   /**
@@ -9521,7 +9477,7 @@ export type ScheduleStatusResponses = {
 
 export type ScheduleStatusResponse = ScheduleStatusResponses[keyof ScheduleStatusResponses];
 
-export type SchemaViewGetData = {
+export type SchemaViewDetailData = {
   /**
    * GetSchemaArgs
    */
@@ -9530,10 +9486,10 @@ export type SchemaViewGetData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/schema-view.get';
+  url: '/api/tools/schema-view.detail';
 };
 
-export type SchemaViewGetErrors = {
+export type SchemaViewDetailErrors = {
   /**
    * Unknown tool
    */
@@ -9548,9 +9504,9 @@ export type SchemaViewGetErrors = {
   };
 };
 
-export type SchemaViewGetError = SchemaViewGetErrors[keyof SchemaViewGetErrors];
+export type SchemaViewDetailError = SchemaViewDetailErrors[keyof SchemaViewDetailErrors];
 
-export type SchemaViewGetResponses = {
+export type SchemaViewDetailResponses = {
   /**
    * GetSchemaOutput
    *
@@ -9563,9 +9519,9 @@ export type SchemaViewGetResponses = {
   };
 };
 
-export type SchemaViewGetResponse = SchemaViewGetResponses[keyof SchemaViewGetResponses];
+export type SchemaViewDetailResponse = SchemaViewDetailResponses[keyof SchemaViewDetailResponses];
 
-export type SchemaViewListDomainsData = {
+export type SchemaViewListData = {
   /**
    * GetSchemaDomainsArgs
    */
@@ -9574,10 +9530,10 @@ export type SchemaViewListDomainsData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/schema-view.list-domains';
+  url: '/api/tools/schema-view.list';
 };
 
-export type SchemaViewListDomainsErrors = {
+export type SchemaViewListErrors = {
   /**
    * Unknown tool
    */
@@ -9592,10 +9548,9 @@ export type SchemaViewListDomainsErrors = {
   };
 };
 
-export type SchemaViewListDomainsError =
-  SchemaViewListDomainsErrors[keyof SchemaViewListDomainsErrors];
+export type SchemaViewListError = SchemaViewListErrors[keyof SchemaViewListErrors];
 
-export type SchemaViewListDomainsResponses = {
+export type SchemaViewListResponses = {
   /**
    * GetSchemaDomainsOutput
    *
@@ -9606,8 +9561,7 @@ export type SchemaViewListDomainsResponses = {
   };
 };
 
-export type SchemaViewListDomainsResponse =
-  SchemaViewListDomainsResponses[keyof SchemaViewListDomainsResponses];
+export type SchemaViewListResponse = SchemaViewListResponses[keyof SchemaViewListResponses];
 
 export type SchemaCreateData = {
   /**
@@ -9829,7 +9783,7 @@ export type SecretDeleteResponses = {
 
 export type SecretDeleteResponse = SecretDeleteResponses[keyof SecretDeleteResponses];
 
-export type SecretGetData = {
+export type SecretDetailData = {
   /**
    * SecretGetArgs
    */
@@ -9838,10 +9792,10 @@ export type SecretGetData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/secret.get';
+  url: '/api/tools/secret.detail';
 };
 
-export type SecretGetErrors = {
+export type SecretDetailErrors = {
   /**
    * Unknown tool
    */
@@ -9856,9 +9810,9 @@ export type SecretGetErrors = {
   };
 };
 
-export type SecretGetError = SecretGetErrors[keyof SecretGetErrors];
+export type SecretDetailError = SecretDetailErrors[keyof SecretDetailErrors];
 
-export type SecretGetResponses = {
+export type SecretDetailResponses = {
   /**
    * SecretGetReport
    *
@@ -9871,7 +9825,7 @@ export type SecretGetResponses = {
   };
 };
 
-export type SecretGetResponse = SecretGetResponses[keyof SecretGetResponses];
+export type SecretDetailResponse = SecretDetailResponses[keyof SecretDetailResponses];
 
 export type SecretListData = {
   /**

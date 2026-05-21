@@ -2042,18 +2042,21 @@ export const zAgentBackendClearKeyResponse = z.object({
 });
 
 /**
- * StatusArgs
+ * AgentBackendStatusArgs
  */
-export const zAgentBackendKeyStatusBody = z.record(z.string(), z.unknown());
+export const zAgentBackendDetailBody = z.record(z.string(), z.unknown());
 
 /**
- * ApiKeyStatus
+ * AgentBackendStatusOutput
  *
- * Whether a stored API key exists.
+ * Tool result
  */
-export const zAgentBackendKeyStatusResponse = z.object({
-  masked: z.string().nullish(),
-  present: z.boolean(),
+export const zAgentBackendDetailResponse = z.object({
+  api_key_in_db: z.boolean(),
+  api_key_masked: z.string().nullish(),
+  mode: z.string(),
+  overrides: z.array(zAgentBackendOverrideEntry),
+  use_server_anthropic: z.boolean(),
 });
 
 /**
@@ -2107,23 +2110,6 @@ export const zAgentBackendSetModeBody = z.object({
  */
 export const zAgentBackendSetModeResponse = z.object({
   mode: z.string(),
-});
-
-/**
- * AgentBackendStatusArgs
- */
-export const zAgentBackendStatusBody = z.record(z.string(), z.unknown());
-
-/**
- * AgentBackendStatusOutput
- *
- * Tool result
- */
-export const zAgentBackendStatusResponse = z.object({
-  api_key_in_db: z.boolean(),
-  mode: z.string(),
-  overrides: z.array(zAgentBackendOverrideEntry),
-  use_server_anthropic: z.boolean(),
 });
 
 /**
@@ -2405,6 +2391,35 @@ export const zConfigSetResponse = z.object({
 });
 
 /**
+ * DbStatusArgs
+ */
+export const zDbDetailBody = z.record(z.string(), z.unknown());
+
+/**
+ * DbStatusReport
+ *
+ * Tool result
+ */
+export const zDbDetailResponse = z.object({
+  current: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  pending: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+  total: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+});
+
+/**
  * DbDownArgs
  */
 export const zDbDownBody = z.record(z.string(), z.unknown());
@@ -2470,35 +2485,6 @@ export const zDbMigrateResponse = z.object({
       error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
     }),
   direction: z.string(),
-});
-
-/**
- * DbStatusArgs
- */
-export const zDbStatusBody = z.record(z.string(), z.unknown());
-
-/**
- * DbStatusReport
- *
- * Tool result
- */
-export const zDbStatusResponse = z.object({
-  current: z.coerce
-    .bigint()
-    .min(BigInt('-9223372036854775808'), {
-      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
-    })
-    .max(BigInt('9223372036854775807'), {
-      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
-    }),
-  pending: z
-    .int()
-    .gte(0)
-    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
-  total: z
-    .int()
-    .gte(0)
-    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
 });
 
 /**
@@ -3059,14 +3045,14 @@ export const zHaServiceCallBody = z.object({
 /**
  * EmptyArgs
  */
-export const zHostInfoBody = z.record(z.string(), z.unknown());
+export const zHostDetailBody = z.record(z.string(), z.unknown());
 
 /**
  * HostInfoOutput
  *
  * Tool result
  */
-export const zHostInfoResponse = z.object({
+export const zHostDetailResponse = z.object({
   channels: z.array(zHostChannel),
   display_name: z.string(),
   machine_id: z.string(),
@@ -4208,14 +4194,14 @@ export const zScheduleStatusResponse = z.object({
 /**
  * GetSchemaArgs
  */
-export const zSchemaViewGetBody = z.record(z.string(), z.unknown());
+export const zSchemaViewDetailBody = z.record(z.string(), z.unknown());
 
 /**
  * GetSchemaOutput
  *
  * Tool result
  */
-export const zSchemaViewGetResponse = z.object({
+export const zSchemaViewDetailResponse = z.object({
   errors: z.array(z.string()).nullish(),
   showTabs: z.boolean(),
   tabs: z.array(zSchemaTab),
@@ -4224,14 +4210,14 @@ export const zSchemaViewGetResponse = z.object({
 /**
  * GetSchemaDomainsArgs
  */
-export const zSchemaViewListDomainsBody = z.record(z.string(), z.unknown());
+export const zSchemaViewListBody = z.record(z.string(), z.unknown());
 
 /**
  * GetSchemaDomainsOutput
  *
  * Tool result
  */
-export const zSchemaViewListDomainsResponse = z.object({
+export const zSchemaViewListResponse = z.object({
   domains: z.array(zSchemaDomain),
 });
 
@@ -4324,7 +4310,7 @@ export const zSecretDeleteResponse = z.object({
 /**
  * SecretGetArgs
  */
-export const zSecretGetBody = z.object({
+export const zSecretDetailBody = z.object({
   name: z.string(),
 });
 
@@ -4333,7 +4319,7 @@ export const zSecretGetBody = z.object({
  *
  * Tool result
  */
-export const zSecretGetResponse = z.object({
+export const zSecretDetailResponse = z.object({
   backend: z.string(),
   name: z.string(),
   value: z.string(),

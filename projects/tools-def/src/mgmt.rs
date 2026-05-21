@@ -750,8 +750,8 @@ async fn remove_mcp_server(
 }
 
 /// [MUTATES STATE] Map an orca tool name to a specific tool on a registered MCP server.
-#[orca_tool(domain = "mcp", verb = "map")]
-async fn map_tool(
+#[orca_tool(domain = "mcp.mapping", verb = "create")]
+async fn mcp_mapping_create(
     args: MapToolArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<MapToolResult> {
@@ -766,8 +766,8 @@ async fn map_tool(
 }
 
 /// [MUTATES STATE] Remove a tool mapping from orca.db.
-#[orca_tool(domain = "mcp", verb = "unmap")]
-async fn unmap_tool(
+#[orca_tool(domain = "mcp.mapping", verb = "delete")]
+async fn mcp_mapping_delete(
     args: UnmapToolArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<UnmapToolResult> {
@@ -800,8 +800,8 @@ async fn sync_tools(
 }
 
 /// List all tool mappings in orca.db, optionally filtered by server name.
-#[orca_tool(domain = "mcp", verb = "list-mappings")]
-async fn list_tool_mappings(
+#[orca_tool(domain = "mcp.mapping", verb = "list")]
+async fn mcp_mapping_list(
     args: ListToolMappingsArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<ListToolMappingsOutput> {

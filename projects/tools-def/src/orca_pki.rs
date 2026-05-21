@@ -60,8 +60,8 @@ fn pki_svc(
 }
 
 /// [MUTATES STATE] Initialize the orca CA and server cert. Safe to re-run; skips if CA exists.
-#[orca_tool(domain = "pki", verb = "ca-init")]
-async fn pki_ca_init(
+#[orca_tool(domain = "pki.ca", verb = "create")]
+async fn pki_ca_create(
     _args: PkiCaInitArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<PkiInitReport> {
@@ -69,8 +69,8 @@ async fn pki_ca_init(
 }
 
 /// [MUTATES STATE] Issue a cert for a plugin.
-#[orca_tool(domain = "pki", verb = "cert-issue")]
-async fn pki_cert_issue(
+#[orca_tool(domain = "pki.cert", verb = "create")]
+async fn pki_cert_create(
     args: PkiCertIssueArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<PkiCertReport> {

@@ -362,8 +362,8 @@ async fn projects_list(
 }
 
 /// Dump orca's own OpenAPI JSON document. Used by build pipelines that don't want to spin up the HTTP server.
-#[orca_tool(domain = "spec", verb = "dump")]
-async fn spec_dump(
+#[orca_tool(domain = "spec", verb = "detail")]
+async fn spec_detail(
     _args: SpecDumpArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<SpecDumpReport> {
@@ -629,7 +629,7 @@ mod tests {
     #[tokio::test]
     async fn spec_dump_returns_service_spec() {
         let (ctx, _) = ctx_with_stub();
-        let r = spec_dump(SpecDumpArgs {}, &ctx).await.unwrap();
+        let r = spec_detail(SpecDumpArgs {}, &ctx).await.unwrap();
         assert_eq!(r.spec, "{}");
     }
 

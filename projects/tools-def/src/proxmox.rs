@@ -92,8 +92,8 @@ mod native_support {
 }
 
 /// List Proxmox VE cluster nodes for a registered endpoint.
-#[orca_tool(domain = "proxmox", verb = "nodes")]
-async fn proxmox_list_nodes(
+#[orca_tool(domain = "proxmox.node", verb = "list")]
+async fn proxmox_node_list(
     args: ProxmoxListNodesArgs,
     _ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<crate::JsonAny> {
@@ -102,8 +102,8 @@ async fn proxmox_list_nodes(
 }
 
 /// List QEMU VMs on a Proxmox node.
-#[orca_tool(domain = "proxmox", verb = "vms")]
-async fn proxmox_list_vms(
+#[orca_tool(domain = "proxmox.vm", verb = "list")]
+async fn proxmox_vm_list(
     args: ProxmoxListVmsArgs,
     _ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<crate::JsonAny> {
@@ -112,8 +112,8 @@ async fn proxmox_list_vms(
 }
 
 /// List LXC containers on a Proxmox node.
-#[orca_tool(domain = "proxmox", verb = "containers")]
-async fn proxmox_list_containers(
+#[orca_tool(domain = "proxmox.container", verb = "list")]
+async fn proxmox_container_list(
     args: ProxmoxListContainersArgs,
     _ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<crate::JsonAny> {
@@ -122,8 +122,8 @@ async fn proxmox_list_containers(
 }
 
 /// [MUTATES STATE] Run a lifecycle action on a Proxmox VM (start/stop/shutdown/reboot).
-#[orca_tool(domain = "proxmox", verb = "vm-action")]
-async fn proxmox_vm_action(
+#[orca_tool(domain = "proxmox.vm", verb = "update")]
+async fn proxmox_vm_update(
     args: ProxmoxVmActionArgs,
     _ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<ProxmoxActionResult> {
@@ -136,8 +136,8 @@ async fn proxmox_vm_action(
 }
 
 /// [MUTATES STATE] Run a lifecycle action on a Proxmox LXC container.
-#[orca_tool(domain = "proxmox", verb = "container-action")]
-async fn proxmox_container_action(
+#[orca_tool(domain = "proxmox.container", verb = "update")]
+async fn proxmox_container_update(
     args: ProxmoxContainerActionArgs,
     _ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<ProxmoxActionResult> {

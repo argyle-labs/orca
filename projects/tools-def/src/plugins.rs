@@ -199,8 +199,8 @@ async fn disable_plugin(
 }
 
 /// List all stored credentials for a plugin (keys only — values are never returned).
-#[orca_tool(domain = "plugin", verb = "list-creds")]
-async fn list_plugin_creds(
+#[orca_tool(domain = "plugin.cred", verb = "list")]
+async fn plugin_cred_list(
     args: ListPluginCredsArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<ListPluginCredsOutput> {
@@ -221,8 +221,8 @@ async fn list_plugin_creds(
 }
 
 /// [MUTATES STATE] Store a credential value for a plugin in orca.db.
-#[orca_tool(domain = "plugin", verb = "set-cred")]
-async fn set_plugin_cred(
+#[orca_tool(domain = "plugin.cred", verb = "create")]
+async fn plugin_cred_create(
     args: SetPluginCredArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<PluginCredMutationResult> {
@@ -237,8 +237,8 @@ async fn set_plugin_cred(
 }
 
 /// [MUTATES STATE] Remove a stored credential for a plugin from orca.db.
-#[orca_tool(domain = "plugin", verb = "remove-cred")]
-async fn remove_plugin_cred(
+#[orca_tool(domain = "plugin.cred", verb = "delete")]
+async fn plugin_cred_delete(
     args: RemovePluginCredArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<PluginCredMutationResult> {
@@ -253,8 +253,8 @@ async fn remove_plugin_cred(
 }
 
 /// [MUTATES STATE] Sync stored credentials for a plugin to its runtime environment.
-#[orca_tool(domain = "plugin", verb = "sync-creds")]
-async fn sync_plugin_creds(
+#[orca_tool(domain = "plugin.cred", verb = "sync")]
+async fn plugin_cred_sync(
     args: SyncPluginCredsArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<SyncPluginCredsOutput> {
