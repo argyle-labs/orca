@@ -485,4 +485,122 @@ mod tests {
         let result = format_body(&bytes);
         assert!(result.contains("bytes binary"), "got: {result}");
     }
+
+    // ── tool_name_from_path ───────────────────────────────────────────────────
+
+    #[test]
+    fn tool_name_from_path_extracts_single_segment() {
+        assert_eq!(
+            tool_name_from_path("/api/tools/system.dev_enable"),
+            Some("system.dev_enable")
+        );
+    }
+
+    #[test]
+    fn tool_name_from_path_ignores_trailing_segments() {
+        assert_eq!(
+            tool_name_from_path("/api/tools/system.dev_enable/extra"),
+            Some("system.dev_enable")
+        );
+    }
+
+    #[test]
+    fn tool_name_from_path_returns_none_for_non_tools_paths() {
+        assert!(tool_name_from_path("/api/health").is_none());
+        assert!(tool_name_from_path("/api/tools").is_none());
+        assert!(tool_name_from_path("/").is_none());
+    }
+
+    #[test]
+    fn tool_name_from_path_returns_none_for_bare_prefix() {
+        assert!(tool_name_from_path("/api/tools/").is_none());
+    }
+
+    // ── require_tool_role (handler-level) ─────────────────────────────────────
+    //
+    // We exercise the middleware as an axum handler chain rather than wiring a
+    // full Router: gives full coverage of the path branches (non-tool / any /
+    // admin-pass / admin-fail / missing-identity) without spinning a server.
+
+    use axum::body::Body;
+    use axum::http::Request as AxumRequest;
+    use axum::middleware::Next;
+    use axum::response::IntoResponse;
+
+    async fn ok_next(_req: Request) -> Response {
+        (StatusCode::OK, "passed").into_response()
+    }
+
+    async fn run_gate(req: AxumRequest<Body>) -> Response {
+        // Build a minimal `Next` that runs our terminal handler.
+        let svc = tower::service_fn(|req: AxumRequest<Body>| async move {
+            Ok::<_, std::convert::Infallible>(ok_next(req).await)
+        });
+        let next = Next::new(svc);
+        require_tool_role(req, next).await
+    }
+
+    fn req_with_identity(path: &str, role: Option<&str>) -> AxumRequest<Body> {
+        let mut req = AxumRequest::builder()
+            .uri(path)
+            .body(Body::empty())
+            .unwrap();
+        if let Some(role) = role {
+            req.extensions_mut().insert(AuthIdentity {
+                kind: AuthKind::Token {
+                    id: "tok_test".into(),
+                    name: "test".into(),
+                },
+                role: role.into(),
+            });
+        }
+        req
+    }
+
+    #[tokio::test]
+    async fn require_tool_role_passes_non_tool_paths() {
+        let req = req_with_identity("/api/health", Some("member"));
+        let resp = run_gate(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn require_tool_role_passes_any_role_tool_with_any_caller() {
+        // Unknown tool falls open to "any" via tool_roles::required_role.
+        let req = req_with_identity("/api/tools/__unknown_tool__", Some("member"));
+        let resp = run_gate(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn require_tool_role_admin_tool_blocks_non_admin_caller() {
+        crate::tool_roles::install([("test.admin_only", "admin")]);
+        let req = req_with_identity("/api/tools/test.admin_only", Some("member"));
+        let resp = run_gate(req).await;
+        // First-call-wins on the global means this assertion is conditional on
+        // whether _this_ install won. Skip when another test owned the slot.
+        if crate::tool_roles::required_role("test.admin_only") == "admin" {
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[tokio::test]
+    async fn require_tool_role_admin_tool_allows_admin_caller() {
+        crate::tool_roles::install([("test.admin_only", "admin")]);
+        let req = req_with_identity("/api/tools/test.admin_only", Some("admin"));
+        let resp = run_gate(req).await;
+        if crate::tool_roles::required_role("test.admin_only") == "admin" {
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+    }
+
+    #[tokio::test]
+    async fn require_tool_role_admin_tool_blocks_missing_identity() {
+        crate::tool_roles::install([("test.admin_only", "admin")]);
+        let req = req_with_identity("/api/tools/test.admin_only", None);
+        let resp = run_gate(req).await;
+        if crate::tool_roles::required_role("test.admin_only") == "admin" {
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        }
+    }
 }

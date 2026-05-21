@@ -231,6 +231,7 @@ mod tests {
     impl OrcaToolDef for EchoTool {
         const NAME: &'static str = "echo";
         const DESCRIPTION: &'static str = "Echoes a message.";
+        const REQUIRED_ROLE: &'static str = "admin";
         type Args = EchoArgs;
         type Output = String;
     }
@@ -457,6 +458,26 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("expected key=value"), "got: {err}");
+    }
+
+    // ── role_table / required_role ────────────────────────────────────────────
+
+    #[test]
+    fn role_table_reports_per_tool_required_role() {
+        let mut reg = ToolRegistry::new();
+        reg.register::<EchoTool>().register::<AddTool>();
+        let table: std::collections::HashMap<_, _> = reg.role_table().into_iter().collect();
+        assert_eq!(table.get("echo").copied(), Some("admin"));
+        // AddTool doesn't override REQUIRED_ROLE; default is "any".
+        assert_eq!(table.get("add").copied(), Some("any"));
+    }
+
+    #[test]
+    fn required_role_returns_some_for_registered_and_none_for_unknown() {
+        let mut reg = ToolRegistry::new();
+        reg.register::<EchoTool>();
+        assert_eq!(reg.required_role("echo"), Some("admin"));
+        assert_eq!(reg.required_role("ghost"), None);
     }
 
     #[tokio::test]

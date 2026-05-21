@@ -381,7 +381,12 @@ async fn system_runtime_spec(
 
 /// Clone the orca repo (if not present) and start cargo watch, parking the production daemon.
 /// Idempotent — safe to call if dev mode is already active.
-#[orca_tool(domain = "system", verb = "dev_enable", remote_ok = true)]
+#[orca_tool(
+    domain = "system",
+    verb = "dev_enable",
+    remote_ok = true,
+    role = "admin"
+)]
 async fn system_dev_enable(
     _args: SystemDevEnableArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -390,7 +395,7 @@ async fn system_dev_enable(
 }
 
 /// Stop cargo watch and let the production daemon reclaim the port.
-#[orca_tool(domain = "system", verb = "dev_disable")]
+#[orca_tool(domain = "system", verb = "dev_disable", role = "admin")]
 async fn system_dev_disable(
     _args: SystemDevDisableArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -400,7 +405,7 @@ async fn system_dev_disable(
 
 /// git pull in the dev checkout; cargo watch detects the changes and restarts automatically.
 /// No-op (returns already_up_to_date) if dev mode is not active.
-#[orca_tool(domain = "system", verb = "dev_sync", remote_ok = true)]
+#[orca_tool(domain = "system", verb = "dev_sync", remote_ok = true, role = "admin")]
 async fn system_dev_sync(
     _args: SystemDevSyncArgs,
     ctx: &orca_utils::tool::ToolCtx,

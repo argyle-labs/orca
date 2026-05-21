@@ -565,7 +565,7 @@ async fn pod_cert_status(
 
 /// git pull on every active peer running in dev mode; cargo watch auto-restarts.
 /// Peers not in dev mode are skipped (not an error).
-#[orca_tool(domain = "pod", verb = "dev_sync")]
+#[orca_tool(domain = "pod", verb = "dev_sync", role = "admin")]
 async fn pod_dev_sync(
     _args: EmptyArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -575,7 +575,7 @@ async fn pod_dev_sync(
 
 /// Flip dev mode ON across the mesh. Empty `peers` = local + every paired
 /// peer. Each peer clones the repo if needed and spawns cargo-watch.
-#[orca_tool(domain = "pod", verb = "dev_enable")]
+#[orca_tool(domain = "pod", verb = "dev_enable", role = "admin")]
 async fn pod_dev_enable(
     args: PodDevFanoutArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -587,7 +587,7 @@ async fn pod_dev_enable(
 
 /// Flip dev mode OFF across the mesh. Empty `peers` = local + every paired
 /// peer. Each peer stops cargo-watch and the production daemon reclaims.
-#[orca_tool(domain = "pod", verb = "dev_disable")]
+#[orca_tool(domain = "pod", verb = "dev_disable", role = "admin")]
 async fn pod_dev_disable(
     args: PodDevFanoutArgs,
     ctx: &orca_utils::tool::ToolCtx,
