@@ -26,14 +26,16 @@
 //! ctx: &ToolCtx) -> Result<O>` form. Named-parameter expansion can be added
 //! later by destructuring `args` inside the thunk.
 
+#[cfg(not(test))]
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
+#[cfg(not(test))]
+use syn::parse_macro_input;
 use syn::{
     Attribute, Expr, ExprLit, FnArg, Ident, ItemFn, Lit, LitStr, Meta, MetaNameValue, Pat, PatType,
     ReturnType, Token, Type,
     parse::{Parse, ParseStream},
-    parse_macro_input,
     punctuated::Punctuated,
 };
 
@@ -382,6 +384,22 @@ fn collect_doc(attrs: &[Attribute]) -> Option<String> {
     if out.is_empty() { None } else { Some(out) }
 }
 
+fn snake_to_pascal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut cap = true;
+    for c in s.chars() {
+        if c == '_' {
+            cap = true;
+        } else if cap {
+            out.extend(c.to_uppercase());
+            cap = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -666,7 +684,7 @@ mod tests {
         let item: ItemFn = parse_quote! {
             fn host_info(args: A, ctx: &ToolCtx) -> anyhow::Result<O> { unimplemented!() }
         };
-        let err = expand(attr_ok(), item).err().expect("expected parse error");
+        let err = expand(attr_ok(), item).expect_err("expected parse error");
         assert!(err.to_string().contains("async fn"));
     }
 
@@ -675,7 +693,7 @@ mod tests {
         let item: ItemFn = parse_quote! {
             async fn host_info() -> anyhow::Result<O> { unimplemented!() }
         };
-        let err = expand(attr_ok(), item).err().expect("expected parse error");
+        let err = expand(attr_ok(), item).expect_err("expected parse error");
         assert!(err.to_string().contains("expected first param"));
     }
 
@@ -684,7 +702,7 @@ mod tests {
         let item: ItemFn = parse_quote! {
             async fn host_info(args: A, ctx: &ToolCtx) -> Option<O> { unimplemented!() }
         };
-        let err = expand(attr_ok(), item).err().expect("expected parse error");
+        let err = expand(attr_ok(), item).expect_err("expected parse error");
         assert!(err.to_string().contains("Result"));
     }
 
@@ -777,20 +795,4 @@ mod tests {
         let out = expand(attr_ok(), item).unwrap().to_string();
         assert!(out.contains("\"host_info\""), "got: {out}");
     }
-}
-
-fn snake_to_pascal(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut cap = true;
-    for c in s.chars() {
-        if c == '_' {
-            cap = true;
-        } else if cap {
-            out.extend(c.to_uppercase());
-            cap = false;
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
