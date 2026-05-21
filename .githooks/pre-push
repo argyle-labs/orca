@@ -15,9 +15,16 @@ RUSTFLAGS="-D warnings" cargo clippy --tests -- -D warnings
 echo "==> cargo test"
 cargo test
 
+echo "==> coverage gate (mirrors CI ci.yml: coverage-rust)"
+# Floor must match .github/workflows/ci.yml. Raise both together; never lower.
+cargo llvm-cov --workspace --no-fail-fast --fail-under-lines 47
+
 echo "==> frontend check"
 cd "$ROOT/projects/frontend"
 npm run check
+
+echo "==> frontend format"
+npm run format:check
 
 echo "==> frontend test"
 npm run test:run

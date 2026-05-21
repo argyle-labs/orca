@@ -172,12 +172,14 @@ fn handle_offer(env: &SignedEnvelope, peer: std::net::SocketAddr) -> Result<Offe
     } else {
         &body.inviter_addr
     };
+    let inviter_label =
+        select_peer_label(&body.inviter_hostname, body.inviter_display_name.as_deref());
     pdb::insert_pending_offer(
         &conn,
         &offer_id,
         "in",
         &signer_fp,
-        &body.inviter_hostname,
+        inviter_label,
         inviter_addr,
         body.inviter_port,
         &body.code_hash,
@@ -216,13 +218,7 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
     )?;
 
     let joiner_peer_id = format!("peer.{}", body.joiner_hostname);
-    // Prefer the explicit display name if the joiner sent one (rc.25+);
-    // fall back to the CN-shaped `joiner_hostname` for rc.≤24 compat so
-    // existing peers don't go nameless mid-rollout.
-    let peer_label = body
-        .joiner_display_name
-        .as_deref()
-        .unwrap_or(&body.joiner_hostname);
+    let peer_label = select_peer_label(&body.joiner_hostname, body.joiner_display_name.as_deref());
     pdb::upsert_peer(
         &conn,
         &joiner_peer_id,
@@ -264,4 +260,99 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Pick the human-readable label to store in `pod_peers.peer_hostname` (or
+/// `pending_offers.peer_hostname`) for a peer that's announcing itself.
+///
+/// rc.25+ peers send both an identity CN (`*_hostname` = `machine_id_short`)
+/// and an optional `*_display_name`. We prefer the display name when present
+/// and non-blank; otherwise fall back to the CN so rc.≤24 peers don't go
+/// nameless mid-rollout.
+fn select_peer_label<'a>(cn_hostname: &'a str, display_name: Option<&'a str>) -> &'a str {
+    match display_name {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => cn_hostname,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn select_peer_label_prefers_display_name() {
+        assert_eq!(select_peer_label("abc123", Some("thor")), "thor");
+    }
+
+    #[test]
+    fn select_peer_label_falls_back_when_none() {
+        assert_eq!(select_peer_label("abc123", None), "abc123");
+    }
+
+    #[test]
+    fn select_peer_label_falls_back_when_blank() {
+        assert_eq!(select_peer_label("abc123", Some("")), "abc123");
+        assert_eq!(select_peer_label("abc123", Some("   ")), "abc123");
+    }
+
+    #[test]
+    fn offer_body_deserializes_rc24_without_display_name() {
+        let json = serde_json::json!({
+            "inviter_peer_id": "peer.abc",
+            "inviter_hostname": "abc123",
+            "inviter_addr": "10.0.0.1",
+            "inviter_port": 12002,
+            "mesh_ca_cert_pem": "",
+            "pod_id": "p1",
+            "code_hash": "h",
+            "expires_at": 0,
+        });
+        let body: OfferBody = serde_json::from_value(json).unwrap();
+        assert_eq!(body.inviter_hostname, "abc123");
+        assert!(body.inviter_display_name.is_none());
+    }
+
+    #[test]
+    fn offer_body_roundtrip_rc25_with_display_name() {
+        let json = serde_json::json!({
+            "inviter_peer_id": "peer.abc",
+            "inviter_hostname": "abc123",
+            "inviter_addr": "10.0.0.1",
+            "inviter_port": 12002,
+            "mesh_ca_cert_pem": "",
+            "pod_id": "p1",
+            "code_hash": "h",
+            "expires_at": 0,
+            "inviter_display_name": "thor",
+        });
+        let body: OfferBody = serde_json::from_value(json).unwrap();
+        assert_eq!(body.inviter_display_name.as_deref(), Some("thor"));
+    }
+
+    #[test]
+    fn join_confirm_body_deserializes_rc24_without_display_name() {
+        let json = serde_json::json!({
+            "code": "ABC123",
+            "joiner_hostname": "xyz789",
+            "csr_client_pem": "",
+            "csr_server_pem": "",
+        });
+        let body: JoinConfirmBody = serde_json::from_value(json).unwrap();
+        assert_eq!(body.joiner_hostname, "xyz789");
+        assert!(body.joiner_display_name.is_none());
+    }
+
+    #[test]
+    fn join_confirm_body_roundtrip_rc25_with_display_name() {
+        let json = serde_json::json!({
+            "code": "ABC123",
+            "joiner_hostname": "xyz789",
+            "csr_client_pem": "",
+            "csr_server_pem": "",
+            "joiner_display_name": "loki",
+        });
+        let body: JoinConfirmBody = serde_json::from_value(json).unwrap();
+        assert_eq!(body.joiner_display_name.as_deref(), Some("loki"));
+    }
 }
