@@ -103,6 +103,39 @@ pub fn upsert_peer_address(
     Ok(())
 }
 
+/// Atomically replace the set of `pod_peer_addresses` rows for
+/// `(peer_id, source)` with `entries` (`(kind, value)` pairs).
+///
+/// Used by the ping-driven refresh path: every successful `pod/ping` carries
+/// the peer's full addressing snapshot from one source (`autodetect`), and we
+/// want stale rows (addresses the peer no longer reports) to disappear. Other
+/// sources (e.g. `manual`, `caddy:*`) are untouched.
+pub fn replace_peer_addresses_from_source(
+    conn: &mut Connection,
+    peer_id: &str,
+    source: &str,
+    entries: &[(&str, &str)],
+) -> Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM pod_peer_addresses WHERE peer_id = ?1 AND source = ?2",
+        params![peer_id, source],
+    )?;
+    let now = now_secs();
+    for (kind, value) in entries {
+        tx.execute(
+            "INSERT INTO pod_peer_addresses (peer_id, kind, value, source, last_seen_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(peer_id, kind, value) DO UPDATE SET
+                 source       = excluded.source,
+                 last_seen_at = excluded.last_seen_at",
+            params![peer_id, kind, value, source, now],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn list_peer_addresses(conn: &Connection, peer_id: &str) -> Result<Vec<PodPeerAddress>> {
     let mut stmt = conn.prepare(
         "SELECT peer_id, kind, value, source, last_seen_at
@@ -169,5 +202,64 @@ mod tests {
         assert_eq!(rows.len(), 2);
         let lan = rows.iter().find(|r| r.kind == "lan_v4").unwrap();
         assert_eq!(lan.source, "manual");
+    }
+
+    #[test]
+    fn replace_peer_addresses_replaces_only_matching_source() {
+        let mut conn = test_conn();
+        conn.execute(
+            "INSERT INTO pod_peers (peer_id, peer_hostname, peer_addr, peer_port,
+                                    ca_cert_pem, first_seen_at, last_seen_at)
+             VALUES ('p1', 'thor', '10.0.0.6', 9100, '', 0, 0)",
+            [],
+        )
+        .unwrap();
+
+        // Seed: 2 autodetect rows + 1 manual row.
+        upsert_peer_address(&conn, "p1", "lan_v4", "10.0.0.6", "autodetect").unwrap();
+        upsert_peer_address(&conn, "p1", "lan_v4", "10.0.0.7", "autodetect").unwrap();
+        upsert_peer_address(&conn, "p1", "fqdn", "thor.lan", "manual").unwrap();
+
+        // Replace autodetect rows with a single fresh entry; manual row must survive.
+        replace_peer_addresses_from_source(
+            &mut conn,
+            "p1",
+            "autodetect",
+            &[("lan_v4", "10.0.0.8"), ("tailscale_v4", "100.64.1.2")],
+        )
+        .unwrap();
+
+        let rows = list_peer_addresses(&conn, "p1").unwrap();
+        assert_eq!(rows.len(), 3);
+        // Manual row preserved
+        assert!(
+            rows.iter()
+                .any(|r| r.kind == "fqdn" && r.source == "manual")
+        );
+        // Old autodetect row gone (10.0.0.6 and 10.0.0.7 both removed)
+        assert!(
+            !rows
+                .iter()
+                .any(|r| r.source == "autodetect" && r.value == "10.0.0.6")
+        );
+        // New autodetect rows present
+        assert!(rows.iter().any(|r| r.value == "10.0.0.8"));
+        assert!(rows.iter().any(|r| r.value == "100.64.1.2"));
+    }
+
+    #[test]
+    fn replace_peer_addresses_with_empty_entries_clears_source() {
+        let mut conn = test_conn();
+        conn.execute(
+            "INSERT INTO pod_peers (peer_id, peer_hostname, peer_addr, peer_port,
+                                    ca_cert_pem, first_seen_at, last_seen_at)
+             VALUES ('p2', 'loki', '10.0.0.9', 9100, '', 0, 0)",
+            [],
+        )
+        .unwrap();
+        upsert_peer_address(&conn, "p2", "lan_v4", "10.0.0.9", "autodetect").unwrap();
+        replace_peer_addresses_from_source(&mut conn, "p2", "autodetect", &[]).unwrap();
+        let rows = list_peer_addresses(&conn, "p2").unwrap();
+        assert!(rows.is_empty());
     }
 }

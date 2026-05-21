@@ -17,6 +17,7 @@
 mod bootstrap;
 pub mod cert_rotation;
 pub mod db;
+pub mod dialer;
 mod listener;
 pub mod mdns;
 pub mod scheduler;
@@ -328,6 +329,9 @@ mod tests {
             addressing: None,
         };
         let v = serde_json::to_value(&r).unwrap();
-        assert!(v.get("addressing").is_none(), "None must be skipped on wire");
+        assert!(
+            v.get("addressing").is_none(),
+            "None must be skipped on wire"
+        );
     }
 }

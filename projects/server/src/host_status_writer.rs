@@ -132,15 +132,37 @@ async fn pull_one_peer(peer_id: String, addr: String) {
 }
 
 async fn pull_one_peer_inner(peer_id: &str, addr: &str) -> Result<()> {
-    // Refresh peer_hostname opportunistically — pod/ping always returns the
-    // OS hostname even on peers that don't have host_status code yet.
+    // Refresh peer_hostname + addressing opportunistically — pod/ping always
+    // returns the OS hostname, and rc.25+ peers also include a full addressing
+    // snapshot (display_name + per-channel addresses). Display name from the
+    // snapshot wins; fall back to OS hostname for rc.≤24 peers.
     if let Ok(Ok(pong)) = tokio::time::timeout(Duration::from_secs(5), crate::pod::ping(addr)).await
     {
         let pid = peer_id.to_string();
-        let host = pong.hostname.clone();
+        let host = pong
+            .addressing
+            .as_ref()
+            .map(|a| a.display_name.clone())
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| pong.hostname.clone());
+        let addressing = pong.addressing.clone();
         let _ = tokio::task::spawn_blocking(move || -> Result<()> {
-            let conn = db::open_default()?;
-            db::pod::update_hostname(&conn, &pid, &host)
+            let mut conn = db::open_default()?;
+            db::pod::update_hostname(&conn, &pid, &host)?;
+            if let Some(snap) = addressing {
+                let entries: Vec<(&str, &str)> = snap
+                    .channels
+                    .iter()
+                    .map(|c| (c.kind.as_str(), c.value.as_str()))
+                    .collect();
+                db::host_addressing::replace_peer_addresses_from_source(
+                    &mut conn,
+                    &pid,
+                    "autodetect",
+                    &entries,
+                )?;
+            }
+            Ok(())
         })
         .await;
     }
