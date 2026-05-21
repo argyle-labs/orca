@@ -398,26 +398,47 @@ fn tool_name_from_path(path: &str) -> Option<&str> {
 /// `tool_roles::satisfies`.
 pub async fn require_tool_role(req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
-    let Some(tool) = tool_name_from_path(&path) else {
-        return next.run(req).await;
-    };
-    let required = crate::tool_roles::required_role(tool);
-    if required == "any" {
-        return next.run(req).await;
-    }
     let caller_role = req
         .extensions()
         .get::<AuthIdentity>()
-        .map(|i| i.role.as_str())
-        .unwrap_or("");
-    if crate::tool_roles::satisfies(caller_role, required) {
-        return next.run(req).await;
+        .map(|i| i.role.clone());
+    match check_tool_role(&path, caller_role.as_deref()) {
+        ToolRoleCheck::Pass => next.run(req).await,
+        ToolRoleCheck::Forbidden { tool, required } => (
+            StatusCode::FORBIDDEN,
+            format!("tool '{tool}' requires role '{required}'"),
+        )
+            .into_response(),
     }
-    (
-        StatusCode::FORBIDDEN,
-        format!("tool '{tool}' requires role '{required}'"),
-    )
-        .into_response()
+}
+
+/// Pure decision function for `require_tool_role`. Split out so the branching
+/// logic is testable without spinning up an axum middleware harness — axum
+/// 0.8 made `Next::new` private, so we can't fabricate one in a unit test.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ToolRoleCheck {
+    Pass,
+    Forbidden {
+        tool: String,
+        required: &'static str,
+    },
+}
+
+pub(crate) fn check_tool_role(path: &str, caller_role: Option<&str>) -> ToolRoleCheck {
+    let Some(tool) = tool_name_from_path(path) else {
+        return ToolRoleCheck::Pass;
+    };
+    let required = crate::tool_roles::required_role(tool);
+    if required == "any" {
+        return ToolRoleCheck::Pass;
+    }
+    if crate::tool_roles::satisfies(caller_role.unwrap_or(""), required) {
+        return ToolRoleCheck::Pass;
+    }
+    ToolRoleCheck::Forbidden {
+        tool: tool.to_string(),
+        required,
+    }
 }
 
 #[cfg(test)]
