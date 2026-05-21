@@ -179,8 +179,15 @@ impl PodService for ServerPod {
             }
         };
 
+        let targets = crate::pod::dialer::dial_targets_for_peer(&conn, peer_id, &peer.peer_addr)
+            .unwrap_or_else(|_| vec![peer.peer_addr.clone()]);
         let start = Instant::now();
-        match crate::pod::ping(&peer.peer_addr).await {
+        match crate::pod::dialer::try_targets(
+            &targets,
+            |t| async move { crate::pod::ping(&t).await },
+        )
+        .await
+        {
             Ok(r) => PodPingOutput {
                 ok: true,
                 latency_ms: start.elapsed().as_millis() as u32,
