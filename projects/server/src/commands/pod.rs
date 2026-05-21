@@ -74,10 +74,46 @@ pub fn cmd_pod_pending() -> Result<()> {
 
 // ── pod accept ───────────────────────────────────────────────────────────────
 
+/// Result of looking up an inbound pending offer by pairing code. Lets the
+/// CLI tell the user *why* an accept failed instead of dumping the same
+/// "no offer matches that code" line for every failure mode (the symptom
+/// flagged in `project_pod_join_ux.md`).
+#[derive(Debug, PartialEq)]
+pub enum AcceptLookup {
+    /// Live offer, ready to dial.
+    Active(pdb::PendingOffer),
+    /// Code matched but the offer's TTL elapsed; `expired_secs_ago` is the
+    /// gap from the offer's `expires_at` to `now`.
+    Expired { expired_secs_ago: i64 },
+    /// No row whose `code_hash` matches the typed code.
+    NotFound,
+}
+
+pub fn classify_accept_lookup(
+    maybe_offer: Option<pdb::PendingOffer>,
+    now: i64,
+) -> AcceptLookup {
+    match maybe_offer {
+        None => AcceptLookup::NotFound,
+        Some(o) if o.expires_at >= now => AcceptLookup::Active(o),
+        Some(o) => AcceptLookup::Expired {
+            expired_secs_ago: now - o.expires_at,
+        },
+    }
+}
+
 pub async fn cmd_pod_accept(code: &str) -> Result<()> {
     let conn = db::open_default()?;
-    let offer = pdb::find_pending_offer_by_code(&conn, code)?
-        .context("no pending offer matches that code (mistyped, expired, or already used?)")?;
+    let maybe = pdb::find_pending_offer_by_code_any_expiry(&conn, code)?;
+    let offer = match classify_accept_lookup(maybe, now_secs()) {
+        AcceptLookup::Active(o) => o,
+        AcceptLookup::NotFound => bail!(
+            "pairing code not recognized — double-check the 6 chars the inviter showed (no matching offer on this host)"
+        ),
+        AcceptLookup::Expired { expired_secs_ago } => bail!(
+            "this offer expired {expired_secs_ago}s ago — ask the inviter to push a fresh one (offer TTL is 600s)"
+        ),
+    };
     drop(conn);
 
     let pki_d = pki_dir();
