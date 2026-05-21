@@ -208,16 +208,143 @@ pub async fn cmd_pod_accept(code: &str) -> Result<()> {
 
 // ── pod connect (manual fallback when mDNS is blocked) ───────────────────────
 
+/// Joiner-initiated bootstrap (`pod connect` / `pod join`). Dials the inviter's
+/// bootstrap SNI with a TOFU verifier, sends a signed `pod/request-offer`,
+/// validates the inviter's pubkey echo against the captured TLS fp, and lands
+/// the resulting offer as an inbound pending row so `pod accept <code>` can
+/// finish the handshake.
 pub async fn cmd_pod_connect(addr: &str) -> Result<()> {
+    cmd_pod_join(addr).await
+}
+
+pub async fn cmd_pod_join(addr: &str) -> Result<()> {
     let (host, port) = pki::parse_peer_addr(addr, APP_PLUGIN_PORT)?;
+
+    let pki_d = pki_dir();
+    let signing = pki::load_or_init_bootstrap_key(&pki_d)?;
+    let joiner_fp = pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
+    let joiner_peer_id = format!("peer.{}", crate::host_identity::machine_id_short());
+    let joiner_hostname = crate::host_identity::machine_id_short().to_string();
+    let joiner_display_name = crate::host_identity::display_hostname().to_string();
+
+    #[derive(serde::Serialize)]
+    struct RequestBody<'a> {
+        joiner_peer_id: &'a str,
+        joiner_hostname: &'a str,
+        joiner_pubkey_fp: &'a str,
+        joiner_display_name: &'a str,
+    }
+    let body = RequestBody {
+        joiner_peer_id: &joiner_peer_id,
+        joiner_hostname: &joiner_hostname,
+        joiner_pubkey_fp: &joiner_fp,
+        joiner_display_name: &joiner_display_name,
+    };
+    let env = pki::sign_envelope(&signing, &body)?;
+
+    // TOFU dial — capture the inviter's bootstrap fp; we'll cross-check it
+    // against the signed echo below before persisting anything.
+    let captured: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let verifier = pki::capturing_bootstrap_verifier(captured.clone());
+    let client_config = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(client_config));
+    let target = format!("{host}:{port}");
+    let tcp = TcpStream::connect(&target)
+        .await
+        .with_context(|| format!("connect {target}"))?;
+    let sni = ServerName::try_from(pki::POD_BOOTSTRAP_SAN)?.to_owned();
+    let mut tls = connector
+        .connect(sni, tcp)
+        .await
+        .context("bootstrap TLS handshake (is the inviter's daemon running?)")?;
+
+    write_frame(
+        &mut tls,
+        &serde_json::to_vec(&Request::new(
+            1,
+            "pod/request-offer",
+            Some(serde_json::to_value(&env)?),
+        ))?,
+    )
+    .await?;
+    let raw = tokio::time::timeout(Duration::from_secs(10), read_frame(&mut tls))
+        .await
+        .context("pod/request-offer timed out (inviter unreachable or wrong port?)")??;
+    let resp_value = parse_resp(&raw)?;
+
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        inviter_pubkey_fp: String,
+        inviter_peer_id: String,
+        inviter_hostname: String,
+        inviter_port: u16,
+        mesh_ca_cert_pem: String,
+        pod_id: String,
+        code_hash: String,
+        expires_at: i64,
+        #[serde(default)]
+        inviter_display_name: Option<String>,
+        #[serde(default)]
+        code_hint: Option<String>,
+    }
+    let r: Resp = serde_json::from_value(resp_value)?;
+
+    // The signed response says "I'm fp X". The TOFU TLS layer captured "this
+    // cert has fp Y". X must equal Y, otherwise we're talking to a MITM that
+    // presented its own cert and forwarded the envelope along.
+    let observed_fp = captured
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .context("TLS verifier did not capture a server cert fp")?;
+    if observed_fp != r.inviter_pubkey_fp {
+        bail!(
+            "TOFU fp mismatch: TLS cert fp {observed_fp} != signed response fp {} (possible MITM)",
+            r.inviter_pubkey_fp
+        );
+    }
+
+    let label = r
+        .inviter_display_name
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| r.inviter_hostname.clone());
+
+    let conn = db::open_default()?;
+    let offer_id = uuid::Uuid::new_v4().to_string();
+    let ttl = r.expires_at - now_secs();
+    if ttl <= 0 {
+        bail!("inviter returned an already-expired offer (clock skew between hosts?)");
+    }
+    pdb::insert_pending_offer(
+        &conn,
+        &offer_id,
+        "in",
+        &r.inviter_pubkey_fp,
+        &label,
+        &host,
+        r.inviter_port,
+        &r.code_hash,
+        Some(&r.mesh_ca_cert_pem),
+        Some(&r.inviter_peer_id),
+        Some(&r.pod_id),
+        ttl,
+    )?;
+
     println!(
-        "⚠ `pod connect {host}:{port}` is a manual fallback. Run this on the joiner. \
-         For automatic pairing on a shared LAN, just wait for `orca pod pending` to populate."
+        "✓ requested offer from {label} ({}, fp {})",
+        r.inviter_peer_id, r.inviter_pubkey_fp
     );
-    // v1 manual flow: surface a hint. Full reverse-discovery handshake (joiner
-    // asks "is there an offer for me?") is a follow-up — currently the inviter
-    // must push via `orca pod offer <joiner-addr>` from its side.
-    println!("Ask a secure peer on {host} to run: `orca pod offer <this-host>`.");
+    if let Some(hint) = &r.code_hint {
+        println!("  inviter will print a 6-char code starting with: {hint}");
+    }
+    println!(
+        "  run `orca pod accept <code>` within {}s, using the code from the inviter's CLI",
+        ttl
+    );
     Ok(())
 }
 

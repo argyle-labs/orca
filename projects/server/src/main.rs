@@ -185,8 +185,12 @@ enum PodAction {
     /// Accept an inbound offer by pairing code (printed on the inviter's CLI).
     Accept { code: String },
     /// Manual fallback when mDNS doesn't see the inviter — point at a
-    /// specific addr `host[:port]`.
+    /// specific addr `host[:port]`. Alias for `pod join`.
     Connect { addr: String },
+    /// Joiner-initiated handshake. Dials the inviter over the bootstrap
+    /// channel (TOFU first contact, then signed-echo fp check) and lands a
+    /// pending inbound offer ready for `pod accept`.
+    Join { addr: String },
     /// Manually push an offer to a known address (inviter side, when
     /// mDNS doesn't see the joiner).
     Offer { addr: String },
@@ -457,6 +461,7 @@ async fn main() -> Result<()> {
             PodAction::Pending => cmd::pod::cmd_pod_pending(),
             PodAction::Accept { code } => cmd::pod::cmd_pod_accept(&code).await,
             PodAction::Connect { addr } => cmd::pod::cmd_pod_connect(&addr).await,
+            PodAction::Join { addr } => cmd::pod::cmd_pod_join(&addr).await,
             PodAction::Offer { addr } => cmd::pod::cmd_pod_offer(&addr).await,
             PodAction::List => cmd::pod::cmd_pod_list(),
             PodAction::Trust { peer_id, state } => {

@@ -327,10 +327,8 @@ fn handle_request_offer(
     let pod_id = pdb::get_pod_id(&conn)?.unwrap_or_else(|| "default".to_string());
 
     // Record the joiner in discovery (idempotent — same fp = same row).
-    let joiner_label = select_peer_label(
-        &body.joiner_hostname,
-        body.joiner_display_name.as_deref(),
-    );
+    let joiner_label =
+        select_peer_label(&body.joiner_hostname, body.joiner_display_name.as_deref());
     pdb::upsert_discovery(
         &conn,
         &body.joiner_pubkey_fp,
@@ -489,6 +487,52 @@ mod tests {
         let body: JoinConfirmBody = serde_json::from_value(json).unwrap();
         assert_eq!(body.joiner_hostname, "xyz789");
         assert!(body.joiner_display_name.is_none());
+    }
+
+    #[test]
+    fn request_offer_body_roundtrip() {
+        let json = serde_json::json!({
+            "joiner_peer_id": "peer.abc",
+            "joiner_hostname": "abc123",
+            "joiner_pubkey_fp": "fp-deadbeef",
+            "joiner_display_name": "loki",
+        });
+        let body: RequestOfferBody = serde_json::from_value(json).unwrap();
+        assert_eq!(body.joiner_pubkey_fp, "fp-deadbeef");
+        assert_eq!(body.joiner_display_name.as_deref(), Some("loki"));
+    }
+
+    #[test]
+    fn request_offer_body_optional_display_name() {
+        let json = serde_json::json!({
+            "joiner_peer_id": "peer.abc",
+            "joiner_hostname": "abc123",
+            "joiner_pubkey_fp": "fp-deadbeef",
+        });
+        let body: RequestOfferBody = serde_json::from_value(json).unwrap();
+        assert!(body.joiner_display_name.is_none());
+    }
+
+    #[test]
+    fn request_offer_result_roundtrip() {
+        let r = RequestOfferResult {
+            inviter_pubkey_fp: "fp-inviter".into(),
+            inviter_peer_id: "peer.thor".into(),
+            inviter_hostname: "thor".into(),
+            inviter_addr: String::new(),
+            inviter_port: 12002,
+            mesh_ca_cert_pem: "ca".into(),
+            pod_id: "p1".into(),
+            code_hash: "h".into(),
+            expires_at: 1234,
+            inviter_display_name: Some("thor.local".into()),
+            code_hint: Some("AB".into()),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let back: RequestOfferResult = serde_json::from_value(v).unwrap();
+        assert_eq!(back.inviter_pubkey_fp, "fp-inviter");
+        assert_eq!(back.code_hint.as_deref(), Some("AB"));
+        assert_eq!(back.expires_at, 1234);
     }
 
     #[test]
