@@ -104,8 +104,8 @@ async fn engine_list(
 }
 
 /// Register a new LLM backend. Kind auto-inferred from URL if not supplied.
-#[orca_tool(domain = "engine", verb = "add", cli = manual)]
-async fn engine_add(
+#[orca_tool(domain = "engine", verb = "create", cli = manual)]
+async fn engine_create(
     args: AddArgs,
     _ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<EngineOpResult> {
@@ -118,8 +118,8 @@ async fn engine_add(
 }
 
 /// Remove a registered LLM backend.
-#[orca_tool(domain = "engine", verb = "remove", cli = manual)]
-async fn engine_remove(
+#[orca_tool(domain = "engine", verb = "delete", cli = manual)]
+async fn engine_delete(
     args: NameArgs,
     _ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<EngineOpResult> {
@@ -219,7 +219,7 @@ mod tests {
             assert!(list0.0.is_empty());
 
             // add
-            let r = engine_add(
+            let r = engine_create(
                 AddArgs {
                     name: "local".into(),
                     url: "http://localhost:1234".into(),
@@ -261,7 +261,7 @@ mod tests {
             assert!(list3.0[0].enabled);
 
             // remove
-            engine_remove(
+            engine_delete(
                 NameArgs {
                     name: "local".into(),
                 },
@@ -276,11 +276,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn engine_remove_unknown_errors() {
+    async fn engine_delete_unknown_errors() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = empty_ctx();
         orca_db::with_db_path(tmp.path().to_path_buf(), async move {
-            let e = engine_remove(
+            let e = engine_delete(
                 NameArgs {
                     name: "ghost".into(),
                 },
@@ -324,11 +324,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn engine_add_rejects_unknown_kind() {
+    async fn engine_create_rejects_unknown_kind() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = empty_ctx();
         orca_db::with_db_path(tmp.path().to_path_buf(), async move {
-            let e = engine_add(
+            let e = engine_create(
                 AddArgs {
                     name: "x".into(),
                     url: "http://x".into(),
@@ -361,7 +361,7 @@ mod cli_register {
                 println!("{}", "no LLM backends registered".dimmed());
                 println!(
                     "{}",
-                    "  use `orca engine add <name> <url> [lmstudio|ollama]` to add one".dimmed()
+                    "  use `orca engine create <name> <url> [lmstudio|ollama]` to add one".dimmed()
                 );
                 return Ok(());
             }
@@ -377,17 +377,17 @@ mod cli_register {
     }
 
     crate::register_op! {
-        tool: EngineAdd,
+        tool: EngineCreate,
         domain: "engine",
-        verb: "add",
+        verb: "create",
         summary: "Register an LLM backend",
         render: |out| { println!("{}", out.message); }
     }
 
     crate::register_op! {
-        tool: EngineRemove,
+        tool: EngineDelete,
         domain: "engine",
-        verb: "remove",
+        verb: "delete",
         summary: "Remove a registered LLM backend",
         render: |out| { println!("{}", out.message); }
     }

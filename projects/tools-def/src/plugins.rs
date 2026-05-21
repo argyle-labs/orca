@@ -146,7 +146,7 @@ async fn list_plugins(
 }
 
 /// [MUTATES STATE] Install an orca plugin from a manifest path or URL.
-#[orca_tool(domain = "plugin", verb = "add")]
+#[orca_tool(domain = "plugin", verb = "create")]
 async fn add_plugin(
     args: AddPluginArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -158,7 +158,7 @@ async fn add_plugin(
 }
 
 /// [MUTATES STATE] Remove an installed orca plugin by ID.
-#[orca_tool(domain = "plugin", verb = "remove")]
+#[orca_tool(domain = "plugin", verb = "delete")]
 async fn remove_plugin(
     args: PluginIdArgs,
     ctx: &orca_utils::tool::ToolCtx,

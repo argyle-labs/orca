@@ -10,7 +10,8 @@
 use super::prelude::*;
 use axum::response::IntoResponse;
 use orca_tools_def::engine::{
-    AddArgs, EmptyArgs, EngineAdd, EngineDisable, EngineEnable, EngineList, EngineRemove, NameArgs,
+    AddArgs, EmptyArgs, EngineCreate, EngineDelete, EngineDisable, EngineEnable, EngineList,
+    NameArgs,
 };
 use orca_utils::config::Config;
 use orca_utils::tool::{OrcaTool, ToolCtx};
@@ -91,7 +92,7 @@ pub async fn engines_add_handler(
         url: body.url,
         kind: body.kind.unwrap_or_default(),
     };
-    match EngineAdd::run(args, &ctx).await {
+    match EngineCreate::run(args, &ctx).await {
         Ok(_) => axum::Json(OkResponse { ok: true }).into_response(),
         Err(e) => err(axum::http::StatusCode::BAD_REQUEST, &e.to_string()),
     }
@@ -117,7 +118,7 @@ pub async fn engines_remove_handler(
         Ok(c) => c,
         Err(r) => return r,
     };
-    match EngineRemove::run(NameArgs { name }, &ctx).await {
+    match EngineDelete::run(NameArgs { name }, &ctx).await {
         Ok(_) => axum::Json(OkResponse { ok: true }).into_response(),
         Err(e) => err(axum::http::StatusCode::NOT_FOUND, &e.to_string()),
     }

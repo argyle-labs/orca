@@ -46,25 +46,45 @@ pub fn ops() -> impl Iterator<Item = &'static CliOp> {
 }
 
 /// Build the top-level `orca` clap command from every registered op.
-/// Domains become subcommands; verbs become sub-subcommands.
+/// Domains become subcommands; verbs become sub-subcommands. A dotted domain
+/// (`"pod.peer"`) nests further: `orca pod peer list` rather than the literal
+/// `orca pod.peer list`. The dotted form remains the canonical tool NAME on
+/// REST/MCP/WASM (`pod.peer.list`); only the CLI surface splits on the dots.
 pub fn build_root(mut root: Command) -> Command {
     use std::collections::BTreeMap;
 
-    let mut by_domain: BTreeMap<&'static str, Vec<&'static CliOp>> = BTreeMap::new();
-    for op in ops() {
-        by_domain.entry(op.domain).or_default().push(op);
+    #[derive(Default)]
+    struct Node {
+        children: BTreeMap<&'static str, Node>,
+        ops: Vec<&'static CliOp>,
     }
 
-    for (domain, mut ops) in by_domain {
-        ops.sort_by_key(|o| o.verb);
-        let mut dom = Command::new(domain)
-            .about(format!("Manage {domain}"))
+    let mut tree = Node::default();
+    for op in ops() {
+        let mut cur = &mut tree;
+        for seg in op.domain.split('.') {
+            cur = cur.children.entry(seg).or_default();
+        }
+        cur.ops.push(op);
+    }
+
+    fn materialize(name: &'static str, mut node: Node) -> Command {
+        let mut cmd = Command::new(name)
+            .about(format!("Manage {name}"))
             .subcommand_required(true)
             .arg_required_else_help(true);
-        for op in ops {
-            dom = dom.subcommand((op.build)());
+        node.ops.sort_by_key(|o| o.verb);
+        for op in node.ops {
+            cmd = cmd.subcommand((op.build)());
         }
-        root = root.subcommand(dom);
+        for (child_name, child) in node.children {
+            cmd = cmd.subcommand(materialize(child_name, child));
+        }
+        cmd
+    }
+
+    for (name, node) in tree.children {
+        root = root.subcommand(materialize(name, node));
     }
     root
 }
@@ -99,10 +119,90 @@ pub async fn exec_remote<T: crate::OrcaToolDef>(
 /// Returns `Some(result)` if the (domain, verb) pair was found and ran;
 /// `None` if no match — caller should fall through to legacy dispatch.
 pub async fn try_dispatch(matches: &ArgMatches, ctx: Arc<ToolCtx>) -> Option<Result<()>> {
-    let (domain, dom_matches) = matches.subcommand()?;
-    let (verb, op_matches) = dom_matches.subcommand()?;
-    let op = ops().find(|o| o.domain == domain && o.verb == verb)?;
+    let (domain, verb, op_matches) = walk_to_verb(matches)?;
+    let op = ops().find(|o| o.domain == domain.as_str() && o.verb == verb)?;
     Some((op.run)(op_matches, ctx).await)
+}
+
+/// Walk nested subcommands to the verb leaf. A node whose `.subcommand()` is
+/// `Some` is treated as a domain segment (`pod` → `peer`); the first node
+/// without a further subcommand is the verb. Returns `(domain, verb,
+/// verb_matches)`, where `domain` is the dotted concat of the traversed
+/// segments. `None` when no subcommand was selected.
+fn walk_to_verb(matches: &ArgMatches) -> Option<(String, &str, &ArgMatches)> {
+    let mut domain_parts: Vec<&str> = Vec::new();
+    let mut cur = matches.subcommand()?;
+    let (verb, op_matches) = loop {
+        let (name, sub) = cur;
+        if sub.subcommand().is_some() {
+            domain_parts.push(name);
+            cur = sub.subcommand()?;
+        } else {
+            break (name, sub);
+        }
+    };
+    Some((domain_parts.join("."), verb, op_matches))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Command;
+
+    fn flat_root() -> Command {
+        Command::new("orca").subcommand(
+            Command::new("engine")
+                .subcommand_required(true)
+                .subcommand(Command::new("list")),
+        )
+    }
+
+    fn nested_root() -> Command {
+        Command::new("orca").subcommand(
+            Command::new("pod")
+                .subcommand_required(true)
+                .subcommand(
+                    Command::new("peer")
+                        .subcommand_required(true)
+                        .subcommand(Command::new("list")),
+                )
+                .subcommand(Command::new("list")), // pod.list lives alongside pod.peer.*
+        )
+    }
+
+    #[test]
+    fn walk_to_verb_flat_domain() {
+        let m = flat_root().get_matches_from(["orca", "engine", "list"]);
+        let (domain, verb, _) = walk_to_verb(&m).unwrap();
+        assert_eq!(domain, "engine");
+        assert_eq!(verb, "list");
+    }
+
+    #[test]
+    fn walk_to_verb_nested_domain() {
+        let m = nested_root().get_matches_from(["orca", "pod", "peer", "list"]);
+        let (domain, verb, _) = walk_to_verb(&m).unwrap();
+        assert_eq!(domain, "pod.peer");
+        assert_eq!(verb, "list");
+    }
+
+    #[test]
+    fn walk_to_verb_mixed_tree_resolves_shallow_verb() {
+        // `pod.list` must still resolve when `pod.peer.*` exists as a sibling
+        // branch under the same `pod` segment.
+        let m = nested_root().get_matches_from(["orca", "pod", "list"]);
+        let (domain, verb, _) = walk_to_verb(&m).unwrap();
+        assert_eq!(domain, "pod");
+        assert_eq!(verb, "list");
+    }
+
+    #[test]
+    fn walk_to_verb_no_subcommand_returns_none() {
+        let m = Command::new("orca")
+            .subcommand(Command::new("engine"))
+            .get_matches_from(["orca"]);
+        assert!(walk_to_verb(&m).is_none());
+    }
 }
 
 /// Register one op with the unified CLI surface.
