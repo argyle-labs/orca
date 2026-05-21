@@ -93,7 +93,7 @@ impl LifecycleService for ServerLifecycle {
             "ok",
             format!("{} embedded agents available via MCP", embedded.len()),
         );
-        for profile_dir in crate::mcp::agent_resolve::agent_search_dirs(cfg) {
+        for profile_dir in crate::services::agent_resolve::agent_search_dirs(cfg) {
             if !profile_dir.exists() {
                 continue;
             }

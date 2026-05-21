@@ -25,7 +25,7 @@ impl AgentsService for ServerAgents {
     }
 
     async fn get_agent_prompt(&self, name: &str) -> Result<Option<String>> {
-        Ok(crate::mcp::agent_resolve::load_agent_prompt(
+        Ok(crate::services::agent_resolve::load_agent_prompt(
             name,
             &self.config,
         ))

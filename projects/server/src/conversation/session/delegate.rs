@@ -19,16 +19,17 @@ impl Session {
             };
         }
 
-        let agent_prompt = match crate::mcp::agent_resolve::load_agent_prompt(agent, &self.config) {
-            Some(prompt) => prompt,
-            None => {
-                return ToolResult {
-                    tool_use_id: String::new(),
-                    content: format!("error: agent @{agent} not found"),
-                    is_error: true,
-                };
-            }
-        };
+        let agent_prompt =
+            match crate::services::agent_resolve::load_agent_prompt(agent, &self.config) {
+                Some(prompt) => prompt,
+                None => {
+                    return ToolResult {
+                        tool_use_id: String::new(),
+                        content: format!("error: agent @{agent} not found"),
+                        is_error: true,
+                    };
+                }
+            };
 
         let agent_icon = util::agent_emoji(agent);
         if self.narration {

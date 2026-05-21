@@ -64,7 +64,7 @@ async fn run_session(
 /// Build the structured envelope the caller (a Claude Code session) consumes
 /// to run the agent itself via `get_agent` + `Agent(general-purpose)`.
 fn delegate_envelope(agent: &str, prompt: &str, config: &Config) -> Result<String> {
-    let agent_prompt = crate::mcp::agent_resolve::load_agent_prompt(agent, config)
+    let agent_prompt = crate::services::agent_resolve::load_agent_prompt(agent, config)
         .ok_or_else(|| anyhow::anyhow!("agent not found: {agent}"))?;
     let envelope = json!({
         "action": "delegate_to_claude_code",

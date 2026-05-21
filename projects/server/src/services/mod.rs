@@ -1,0 +1,25 @@
+//! Server-side implementations of the `orca_tools_def::services::*` traits.
+//!
+//! Every channel (REST, MCP stdio, CLI, WASM client) dispatches tool calls
+//! through the same `ToolRegistry`; this module supplies the concrete
+//! `Server*` impls that back the registry. Previously lived in
+//! `crate::mcp::*_service` — that path conflated "MCP protocol" with
+//! "server-side tool plumbing"; only the former belongs in `mcp/`.
+
+pub mod agent_resolve;
+pub mod agents;
+pub mod auth;
+pub mod db_admin;
+pub mod docker;
+pub mod docs;
+pub mod infra;
+pub mod lifecycle;
+pub mod mgmt;
+pub mod pki;
+pub mod plugin_runtime;
+pub mod plugins;
+pub mod pod;
+pub mod profile;
+pub mod secrets;
+pub mod spec_registry;
+pub mod system;
