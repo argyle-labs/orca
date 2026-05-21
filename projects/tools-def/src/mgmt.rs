@@ -506,7 +506,7 @@ pub use mcp_fed::{
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Schema view — get_schema / get_schema_domains
+// Schema view — schema_view_detail / schema_view_list
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -672,8 +672,8 @@ async fn run_mcp_tool(
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Return the multi-tab schema view across every configured database. Result is `{ tabs, showTabs, errors? }`.
-#[orca_tool(domain = "schema-view", verb = "get")]
-async fn get_schema(
+#[orca_tool(domain = "schema-view", verb = "detail")]
+async fn schema_view_detail(
     _args: GetSchemaArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<GetSchemaOutput> {
@@ -681,8 +681,8 @@ async fn get_schema(
 }
 
 /// Return the flattened list of domain definitions across every configured database.
-#[orca_tool(domain = "schema-view", verb = "list-domains")]
-async fn get_schema_domains(
+#[orca_tool(domain = "schema-view", verb = "list")]
+async fn schema_view_list(
     _args: GetSchemaDomainsArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<GetSchemaDomainsOutput> {

@@ -49,8 +49,8 @@ fn db_svc(
 }
 
 /// Show current schema version and pending-migration count.
-#[orca_tool(domain = "db", verb = "status")]
-async fn db_status(
+#[orca_tool(domain = "db", verb = "detail")]
+async fn db_detail(
     _args: DbStatusArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<DbStatusReport> {
@@ -151,9 +151,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn db_status_forwards_to_service() {
+    async fn db_detail_forwards_to_service() {
         let (ctx, stub) = ctx_with_stub();
-        let r = db_status(DbStatusArgs {}, &ctx).await.unwrap();
+        let r = db_detail(DbStatusArgs {}, &ctx).await.unwrap();
         assert_eq!(r.current, 42);
         assert_eq!(r.total, 50);
         assert_eq!(r.pending, 8);
@@ -191,7 +191,7 @@ mod tests {
     #[tokio::test]
     async fn db_tools_error_when_service_missing() {
         let ctx = empty_ctx();
-        assert!(db_status(DbStatusArgs {}, &ctx).await.is_err());
+        assert!(db_detail(DbStatusArgs {}, &ctx).await.is_err());
         assert!(db_migrate(DbMigrateArgs {}, &ctx).await.is_err());
         assert!(db_up(DbUpArgs {}, &ctx).await.is_err());
         assert!(db_down(DbDownArgs {}, &ctx).await.is_err());

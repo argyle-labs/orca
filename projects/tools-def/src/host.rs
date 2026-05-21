@@ -120,8 +120,8 @@ pub fn register_host_refresh(ctx: &mut orca_utils::tool::ToolCtx, p: &impl Provi
 }
 
 /// Local host snapshot: display name, machine_id, and every addressing channel.
-#[orca_tool(domain = "host", verb = "info", remote_ok = true)]
-async fn host_info(
+#[orca_tool(domain = "host", verb = "detail", remote_ok = true)]
+async fn host_detail(
     _args: EmptyArgs,
     _ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<HostInfoOutput> {
@@ -261,7 +261,7 @@ mod tests {
             .unwrap();
             drop(conn);
 
-            let out = host_info(EmptyArgs {}, &ctx).await.unwrap();
+            let out = host_detail(EmptyArgs {}, &ctx).await.unwrap();
             assert_eq!(out.display_name, "testbox");
             assert_eq!(out.channels.len(), 2);
         })
@@ -273,7 +273,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = make_ctx();
         orca_db::with_db_path(tmp.path().to_path_buf(), async move {
-            let out = host_info(EmptyArgs {}, &ctx).await.unwrap();
+            let out = host_detail(EmptyArgs {}, &ctx).await.unwrap();
             assert!(!out.display_name.is_empty());
             assert_eq!(out.channels.len(), 0);
         })

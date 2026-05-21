@@ -135,8 +135,8 @@ async fn secret_list(
 }
 
 /// [SENSITIVE] Fetch a secret value by name. Resolves via the configured backend.
-#[orca_tool(domain = "secret", verb = "get")]
-async fn secret_get(
+#[orca_tool(domain = "secret", verb = "detail")]
+async fn secret_detail(
     args: SecretGetArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<SecretGetReport> {

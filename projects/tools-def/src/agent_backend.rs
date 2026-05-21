@@ -21,25 +21,12 @@ pub struct ApiKeyMutationResult {
     pub masked: Option<String>,
 }
 
-/// Whether a stored API key exists.
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct ApiKeyStatus {
-    pub present: bool,
-    /// Masked preview if present (e.g. "sk-ant-…ABCD").
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub masked: Option<String>,
-}
-
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SetArgs {
     /// Anthropic API key (sk-ant-...)
     pub key: String,
 }
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct StatusArgs {}
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -98,6 +85,9 @@ pub struct AgentBackendStatusOutput {
     pub mode: String,
     pub use_server_anthropic: bool,
     pub api_key_in_db: bool,
+    /// Masked preview of the stored Anthropic key (e.g. "sk-ant-…ABCD"), when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_masked: Option<String>,
     pub overrides: Vec<AgentBackendOverrideEntry>,
 }
 
@@ -144,25 +134,6 @@ async fn agent_backend_set_api_key(
         message: format!("stored Anthropic API key in encrypted orca DB ({masked})"),
         masked: Some(masked),
     })
-}
-
-/// Report whether an Anthropic API key is stored in the encrypted orca DB. Never echoes the raw key — only a masked preview.
-#[orca_tool(domain = "agent-backend", verb = "key-status")]
-async fn agent_backend_api_key_status(
-    _args: StatusArgs,
-    _ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<ApiKeyStatus> {
-    let conn = orca_db::open_default()?;
-    match orca_db::settings::secret_get(&conn, "anthropic_api_key")? {
-        Some(k) => Ok(ApiKeyStatus {
-            present: true,
-            masked: Some(orca_db::settings::mask_key(&k)),
-        }),
-        None => Ok(ApiKeyStatus {
-            present: false,
-            masked: None,
-        }),
-    }
 }
 
 /// [MUTATES STATE] Set the global agent backend mode. local = always LM Studio. claude = always route to Claude (server-side if enabled, else delegate to caller). hybrid = check per-agent override; default is Claude when no override is set.
@@ -213,9 +184,9 @@ async fn agent_backend_use_server_anthropic(
     })
 }
 
-/// Show the current agent backend configuration: mode (local|claude|hybrid), per-agent overrides, and whether server-side Anthropic calls are enabled.
-#[orca_tool(domain = "agent-backend", verb = "status")]
-async fn agent_backend_status(
+/// Show the current agent backend configuration: mode (local|claude|hybrid), per-agent overrides, whether server-side Anthropic calls are enabled, and a masked preview of the stored API key (when present).
+#[orca_tool(domain = "agent-backend", verb = "detail")]
+async fn agent_backend_detail(
     _args: AgentBackendStatusArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<AgentBackendStatusOutput> {
@@ -223,6 +194,14 @@ async fn agent_backend_status(
     let mode = s.current_mode().await?;
     let use_server_anthropic = s.use_server_anthropic().await?;
     let api_key_in_db = s.api_key_present().await?;
+    let api_key_masked = if api_key_in_db {
+        let conn = orca_db::open_default()?;
+        orca_db::settings::secret_get(&conn, "anthropic_api_key")?
+            .as_deref()
+            .map(orca_db::settings::mask_key)
+    } else {
+        None
+    };
     let overrides = s
         .list_overrides()
         .await?
@@ -233,6 +212,7 @@ async fn agent_backend_status(
         mode,
         use_server_anthropic,
         api_key_in_db,
+        api_key_masked,
         overrides,
     })
 }
