@@ -19,9 +19,9 @@ use tokio_rustls::server::TlsStream;
 use tracing::warn;
 
 use super::{
-    POD_DEV_DISABLE_METHOD, POD_DEV_ENABLE_METHOD, POD_DEV_SYNC_METHOD, POD_EXEC_METHOD,
-    POD_PING_METHOD, PodDevDisableResult, PodDevEnableResult, PodDevSyncResult, PodExecParams,
-    PodExecResult, PodPingResult, db as pdb, pki_dir,
+    AddressChannel, HostAddressingSnapshot, POD_DEV_DISABLE_METHOD, POD_DEV_ENABLE_METHOD,
+    POD_DEV_SYNC_METHOD, POD_EXEC_METHOD, POD_PING_METHOD, PodDevDisableResult, PodDevEnableResult,
+    PodDevSyncResult, PodExecParams, PodExecResult, PodPingResult, db as pdb, pki_dir,
 };
 
 const POD_NOTIFY_TRUST_METHOD: &str = "pod/notify-trust";
@@ -126,6 +126,7 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
                 peer_id: peer_cn.to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 hostname: crate::host_identity::hostname().to_string(),
+                addressing: build_addressing_snapshot(),
             };
             value_response(id, &result)
         }
@@ -453,4 +454,35 @@ fn value_response<T: Serialize>(id: Value, v: &T) -> Response {
         Ok(val) => Response::ok(id, val),
         Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
     }
+}
+
+/// Read the local host's addressing rows and shape them for the
+/// `pod/ping` wire. Returns `None` if the DB is unreachable or empty —
+/// callers fall back to the legacy single-address path on the receiver
+/// side (Slice 4b will start consuming this snapshot).
+fn build_addressing_snapshot() -> Option<HostAddressingSnapshot> {
+    let conn = db::open_default().ok()?;
+    let rows = db::host_addressing::list_host_addressing(&conn).ok()?;
+    if rows.is_empty() {
+        return None;
+    }
+    let mut display_name = String::new();
+    let mut channels = Vec::with_capacity(rows.len());
+    for r in rows {
+        if r.key == "display_name" {
+            display_name = r.value;
+        } else {
+            channels.push(AddressChannel {
+                kind: r.key,
+                value: r.value,
+            });
+        }
+    }
+    if display_name.is_empty() {
+        display_name = crate::host_identity::display_hostname().to_string();
+    }
+    Some(HostAddressingSnapshot {
+        display_name,
+        channels,
+    })
 }

@@ -49,6 +49,28 @@ pub struct PodPingResult {
     pub peer_id: String,
     pub version: String,
     pub hostname: String,
+    /// Addressing snapshot of the responding peer (rc.25+). Optional +
+    /// `#[serde(default)]` so rc.≤24 daemons that omit the field still
+    /// deserialize cleanly. Callers use this to refresh
+    /// `pod_peer_addresses` without requiring a re-pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addressing: Option<HostAddressingSnapshot>,
+}
+
+/// Peer-to-peer addressing snapshot carried on `pod/ping`. `display_name` is
+/// the human label; `channels` is the per-channel address list (`lan_v4`,
+/// `lan_v6`, `tailscale_v4`, `tailscale_v6`, `fqdn`). Source + detected_at
+/// stay local to the responding peer and are not propagated.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostAddressingSnapshot {
+    pub display_name: String,
+    pub channels: Vec<AddressChannel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddressChannel {
+    pub kind: String,
+    pub value: String,
 }
 
 /// Result of `pod/dev-sync`. `status` is one of:
@@ -256,4 +278,56 @@ where
     }
     let result = resp.result.context("peer response had no result")?;
     serde_json::from_value(result).with_context(|| format!("parse {method} result"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ping_result_deserializes_rc24_without_addressing() {
+        let json = serde_json::json!({
+            "peer_id": "abc",
+            "version": "0.0.3",
+            "hostname": "abc123",
+        });
+        let r: PodPingResult = serde_json::from_value(json).unwrap();
+        assert_eq!(r.peer_id, "abc");
+        assert!(r.addressing.is_none());
+    }
+
+    #[test]
+    fn ping_result_roundtrip_rc25_with_addressing() {
+        let json = serde_json::json!({
+            "peer_id": "abc",
+            "version": "0.0.4",
+            "hostname": "abc123",
+            "addressing": {
+                "display_name": "thor",
+                "channels": [
+                    { "kind": "lan_v4", "value": "10.0.0.8" },
+                    { "kind": "tailscale_v4", "value": "100.96.1.2" },
+                ],
+            },
+        });
+        let r: PodPingResult = serde_json::from_value(json).unwrap();
+        let a = r.addressing.expect("addressing populated");
+        assert_eq!(a.display_name, "thor");
+        assert_eq!(a.channels.len(), 2);
+        assert_eq!(a.channels[0].kind, "lan_v4");
+        assert_eq!(a.channels[0].value, "10.0.0.8");
+        assert_eq!(a.channels[1].kind, "tailscale_v4");
+    }
+
+    #[test]
+    fn ping_result_serialize_omits_none_addressing() {
+        let r = PodPingResult {
+            peer_id: "abc".into(),
+            version: "0.0.4".into(),
+            hostname: "abc123".into(),
+            addressing: None,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert!(v.get("addressing").is_none(), "None must be skipped on wire");
+    }
 }
