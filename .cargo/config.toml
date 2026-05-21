@@ -68,3 +68,11 @@ LIBSQLITE3_FLAGS = """
 -DSQLITE_ENABLE_UPDATE_DELETE_LIMIT
 -DSQLITE_ENABLE_COLUMN_METADATA
 """
+
+# ── Local build speedups ───────────────────────────────────────────────────
+# sccache wraps rustc and caches compiled artifacts keyed by inputs+flags.
+# Survives `cargo clean`, branch switches, and separate target dirs (the
+# CI runner-cache only survives within one job). Binary already installed
+# at ~/.cargo/bin/sccache; this line is what activates it.
+[build]
+rustc-wrapper = "sccache"

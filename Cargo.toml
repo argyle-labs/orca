@@ -202,6 +202,13 @@ opt-level = 3
 
 [profile.dev]
 opt-level = 0
+# Keep file:line in backtraces but drop full DWARF type info — cuts macOS
+# link time ~20-40% on the edit-compile loop. Bump back to 2 if you need
+# struct field inspection in lldb.
+debug = "line-tables-only"
+# macOS default already, but pin it: keep dSYM out of the executable so
+# relinking doesn't have to splice debuginfo back into the binary.
+split-debuginfo = "unpacked"
 
 # Proc-macro crates run AT compile time — optimizing them speeds up every
 # incremental build even after sccache has them cached, because the proc-macro
