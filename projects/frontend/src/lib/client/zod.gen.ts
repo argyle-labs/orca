@@ -1038,12 +1038,9 @@ export const zTestRunQuery = z.object({
 });
 
 export const zTestRunResponse = z.object({
-  duration_ms: z.coerce
-    .bigint()
-    .gte(BigInt(0))
-    .max(BigInt('9223372036854775807'), {
-      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
-    }),
+  duration_ms: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), {
+    error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+  }),
   exit_code: z
     .int()
     .min(-2147483648, { error: 'Invalid value: Expected int32 to be >= -2147483648' })
@@ -2703,12 +2700,9 @@ export const zInfraRunTestsBody = z.object({
  * Tool result
  */
 export const zInfraRunTestsResponse = z.object({
-  duration_ms: z.coerce
-    .bigint()
-    .gte(BigInt(0))
-    .max(BigInt('18446744073709551615'), {
-      error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
-    }),
+  duration_ms: z.coerce.bigint().gte(BigInt(0)).max(BigInt('18446744073709551615'), {
+    error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
+  }),
   exit_code: z
     .int()
     .min(-2147483648, { error: 'Invalid value: Expected int32 to be >= -2147483648' })
@@ -3640,12 +3634,9 @@ export const zProxmoxContainerActionBody = z.object({
   action: z.string(),
   endpoint: z.string(),
   node: z.string(),
-  vmid: z.coerce
-    .bigint()
-    .gte(BigInt(0))
-    .max(BigInt('18446744073709551615'), {
-      error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
-    }),
+  vmid: z.coerce.bigint().gte(BigInt(0)).max(BigInt('18446744073709551615'), {
+    error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
+  }),
 });
 
 /**
@@ -3658,12 +3649,9 @@ export const zProxmoxContainerActionResponse = z.object({
   node: z.string(),
   status: z.int().gte(0).lte(65535),
   upid: z.string().nullish(),
-  vmid: z.coerce
-    .bigint()
-    .gte(BigInt(0))
-    .max(BigInt('18446744073709551615'), {
-      error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
-    }),
+  vmid: z.coerce.bigint().gte(BigInt(0)).max(BigInt('18446744073709551615'), {
+    error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
+  }),
 });
 
 /**
@@ -3688,12 +3676,9 @@ export const zProxmoxVmActionBody = z.object({
   action: z.string(),
   endpoint: z.string(),
   node: z.string(),
-  vmid: z.coerce
-    .bigint()
-    .gte(BigInt(0))
-    .max(BigInt('18446744073709551615'), {
-      error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
-    }),
+  vmid: z.coerce.bigint().gte(BigInt(0)).max(BigInt('18446744073709551615'), {
+    error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
+  }),
 });
 
 /**
@@ -3706,12 +3691,9 @@ export const zProxmoxVmActionResponse = z.object({
   node: z.string(),
   status: z.int().gte(0).lte(65535),
   upid: z.string().nullish(),
-  vmid: z.coerce
-    .bigint()
-    .gte(BigInt(0))
-    .max(BigInt('18446744073709551615'), {
-      error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
-    }),
+  vmid: z.coerce.bigint().gte(BigInt(0)).max(BigInt('18446744073709551615'), {
+    error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
+  }),
 });
 
 /**

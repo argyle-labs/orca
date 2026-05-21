@@ -19,7 +19,14 @@ mapfile -t STAGED < <(git diff --cached --name-only --diff-filter=ACMR)
 has_ext() {
   local pat=$1
   for f in "${STAGED[@]}"; do
-    [[ $f == $pat ]] && return 0
+    # `==` in [[ ]] uses non-recursive glob — `projects/frontend/src/*` would
+    # miss `projects/frontend/src/lib/foo.ts`. For path patterns ending in
+    # `/*`, treat them as a prefix match instead.
+    if [[ $pat == */\* ]]; then
+      [[ $f == "${pat%/\*}"/* ]] && return 0
+    else
+      [[ $f == $pat ]] && return 0
+    fi
   done
   return 1
 }

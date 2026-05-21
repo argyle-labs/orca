@@ -13,10 +13,7 @@ import {
 } from '$lib/client/sdk.gen';
 import type { MeOk, SignupStatus } from '$lib/client/types.gen';
 
-type State =
-  | { kind: 'loading' }
-  | { kind: 'anonymous' }
-  | { kind: 'signed-in'; user: MeOk };
+type State = { kind: 'loading' } | { kind: 'anonymous' } | { kind: 'signed-in'; user: MeOk };
 
 let state = $state<State>({ kind: 'loading' });
 
@@ -47,8 +44,7 @@ export async function signupStatus(): Promise<SignupStatus | null> {
 export async function signIn(username: string, password: string): Promise<void> {
   const res = await authSignin({ body: { username, password } });
   if (!res.response?.ok || !res.data) {
-    const msg =
-      (res.error as { error?: string } | undefined)?.error ?? 'sign-in failed';
+    const msg = (res.error as { error?: string } | undefined)?.error ?? 'sign-in failed';
     throw new Error(msg);
   }
   await refreshSession();
@@ -57,8 +53,7 @@ export async function signIn(username: string, password: string): Promise<void> 
 export async function signUp(username: string, password: string): Promise<void> {
   const res = await authSignup({ body: { username, password } });
   if (!res.response?.ok || !res.data) {
-    const msg =
-      (res.error as { error?: string } | undefined)?.error ?? 'sign-up failed';
+    const msg = (res.error as { error?: string } | undefined)?.error ?? 'sign-up failed';
     throw new Error(msg);
   }
   await refreshSession();
@@ -72,9 +67,7 @@ export async function changePassword(
     body: { current_password, new_password },
   });
   if (!res.response?.ok) {
-    const msg =
-      (res.error as { error?: string } | undefined)?.error ??
-      'change password failed';
+    const msg = (res.error as { error?: string } | undefined)?.error ?? 'change password failed';
     throw new Error(msg);
   }
 }

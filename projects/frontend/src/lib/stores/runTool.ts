@@ -74,7 +74,7 @@ export async function callTool<T = unknown>(
 /** Names of every callable tool — used by the command palette. */
 export function allToolNames(): ToolName[] {
   return (Object.keys(sdk) as ToolName[])
-    .filter((k) => typeof (sdk as Record<string, unknown>)[k as string] === 'function')
+    .filter(k => typeof (sdk as Record<string, unknown>)[k as string] === 'function')
     .sort();
 }
 
