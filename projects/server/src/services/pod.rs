@@ -555,6 +555,7 @@ impl PodService for ServerPod {
         Ok(PodDevDisableOutput { results })
     }
 
+    #[allow(clippy::disallowed_types)] // mirrors PodService::exec — peer-mesh wire payload
     async fn exec(
         &self,
         peer: &str,

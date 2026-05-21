@@ -615,6 +615,9 @@ mod tests {
         last_join: Mutex<Option<(String, Option<u16>)>>,
         last_leave_peer: Mutex<Option<String>>,
         last_fanout_peers: Mutex<Option<Vec<String>>>,
+        // Mirrors PodService::exec — peer-mesh wire payload is type-erased
+        // at the dispatch boundary. Same justification as the trait method.
+        #[allow(clippy::disallowed_types)]
         last_exec: Mutex<Option<(String, String, serde_json::Value)>>,
     }
 
@@ -744,6 +747,7 @@ mod tests {
             *self.last_fanout_peers.lock().unwrap() = Some(peers.to_vec());
             Ok(PodDevDisableOutput { results: vec![] })
         }
+        #[allow(clippy::disallowed_types)] // mirrors trait — peer-mesh wire payload
         async fn exec(
             &self,
             peer: &str,

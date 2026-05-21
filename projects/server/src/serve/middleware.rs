@@ -1193,7 +1193,7 @@ mod tests {
         // If another test set the loopback first, the comparison fails and we
         // get 401. In that case the fast-path branch is still exercised; we
         // just can't assert success.
-        if crate::loopback_token::get().as_deref() == Some("x-lb-fixture") {
+        if crate::loopback_token::get() == Some("x-lb-fixture") {
             assert_eq!(resp.status(), axum::http::StatusCode::OK);
         }
     }
