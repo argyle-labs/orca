@@ -1,4 +1,4 @@
-.PHONY: build install install-hooks deploy dev run watch clean check release rc promote audit lint format format-check test daemon-install daemon-uninstall kill-dev migrate up down init doctor \
+.PHONY: build install install-hooks deploy dev run watch watch-server watch-test watch-wasm clean check release rc promote audit lint format format-check test test-changed cache-stats daemon-install daemon-uninstall kill-dev migrate up down init doctor \
   ci release-build release-build-host release-frontend release-sdk-ts release-sdk-kotlin release-checksums release-stage release-publish release-clean
 
 INSTALL_PATH := $(HOME)/.local/bin/orca
@@ -25,6 +25,27 @@ doctor:
 # Resolve the host triple once. Both `build` and `deploy` use it so they
 # agree on where scripts/build-host.sh wrote the binary.
 HOST_TARGET := $(shell rustc -vV | awk '/^host:/ {print $$2}')
+
+# ── Local incremental-build knobs ──────────────────────────────────────────
+# Keep native / wasm / mobile cargo target dirs separate so switching
+# `--target` doesn't thrash the incremental cache. CI is unaffected — each
+# matrix job builds a single target into the default target/.
+TARGET_DIR_NATIVE  := target/native
+TARGET_DIR_WASM    := target/wasm
+TARGET_DIR_IOS     := target/ios
+TARGET_DIR_ANDROID := target/android
+
+# sccache as the rustc wrapper — shared object cache across surfaces, and
+# across hosts if SCCACHE_DIR is pointed at a mesh-synced path.
+# Local-only: never set in CI (mozilla-actions/sccache-action would compete
+# with Swatinem/rust-cache for the 10 GB GHA cache pool — see CI workflows).
+# Only export when the binary actually exists, otherwise `cargo install sccache`
+# (in `make install`) can't bootstrap itself.
+SCCACHE_BIN := $(shell command -v sccache 2>/dev/null)
+ifneq ($(SCCACHE_BIN),)
+export RUSTC_WRAPPER ?= sccache
+export SCCACHE_DIR   ?= $(HOME)/.cache/sccache
+endif
 
 # Build frontend + release binary (single self-contained binary with embedded assets).
 # OpenAPI→TS codegen is gone — the frontend now talks to orca exclusively through
@@ -79,13 +100,27 @@ install-dev:
 
 # Watch for changes and rebuild+install on save (requires cargo-watch).
 # Install cargo-watch with: cargo install cargo-watch
-watch:
-	cargo watch -C projects/server -x 'build' \
-	  -s 'bash $(CURDIR)/scripts/install-binary.sh $(CURDIR)/target/debug/orca $(INSTALL_PATH)'
+watch: watch-server
+
+watch-server:
+	CARGO_TARGET_DIR=$(TARGET_DIR_NATIVE) \
+	  cargo watch -C projects/server -x 'build' \
+	  -s 'bash $(CURDIR)/scripts/install-binary.sh $(CURDIR)/$(TARGET_DIR_NATIVE)/debug/orca $(INSTALL_PATH)'
+
+watch-test:
+	CARGO_TARGET_DIR=$(TARGET_DIR_NATIVE) \
+	  cargo watch -x 'nextest run --workspace --no-fail-fast'
+
+watch-wasm:
+	CARGO_TARGET_DIR=$(TARGET_DIR_WASM) \
+	  cargo watch -C projects/app-kit -x 'build --target wasm32-unknown-unknown'
 
 # Just check for compile errors without linking
 check:
-	cargo check --manifest-path projects/server/Cargo.toml
+	CARGO_TARGET_DIR=$(TARGET_DIR_NATIVE) cargo check --workspace
+
+cache-stats:
+	@sccache --show-stats
 
 # Dev mode — Rust API :12000 + Vite :12001 + hot reload, secrets injected from 1Password
 # Secrets live in the account set by OP_ACCOUNT (.env.local overrides .zshrc default)
@@ -165,7 +200,9 @@ endif
 
 clean:
 	cargo clean --manifest-path projects/server/Cargo.toml
+	rm -rf target/native target/wasm target/ios target/android
 	rm -rf projects/frontend/dist projects/frontend/node_modules
+	@sccache --zero-stats 2>/dev/null || true
 
 audit:
 	@echo "→ npm audit..."
@@ -214,8 +251,21 @@ format-check:
 test:
 	@echo "→ vitest..."
 	@cd projects/frontend && npx vitest run
-	@echo "→ cargo test..."
-	@cargo test --manifest-path projects/server/Cargo.toml
+	@echo "→ cargo nextest..."
+	@CARGO_TARGET_DIR=$(TARGET_DIR_NATIVE) \
+	  cargo nextest run --workspace --no-fail-fast \
+	  || CARGO_TARGET_DIR=$(TARGET_DIR_NATIVE) cargo test --workspace
+	@echo "→ doctests..."
+	@CARGO_TARGET_DIR=$(TARGET_DIR_NATIVE) cargo test --workspace --doc --no-fail-fast
+
+# Re-run nextest scoped to crates with uncommitted changes.
+test-changed:
+	@CARGO_TARGET_DIR=$(TARGET_DIR_NATIVE) cargo nextest run --workspace \
+	  $$(git status --porcelain | awk '{print $$2}' | grep -E '\.rs$$' \
+	     | xargs -I{} dirname {} | sort -u \
+	     | xargs -I{} sh -c 'p=$$(cargo metadata --no-deps --format-version=1 \
+	         | jq -r --arg d {} ".packages[] | select(.manifest_path | startswith(\"$(CURDIR)/\" + \$$d)) | .name" \
+	         | head -1); [ -n "$$p" ] && echo "-p $$p"')
 
 # Local release pipeline (used when GitHub Actions minutes are exhausted).
 # Builds host target only (aarch64-apple-darwin) and pushes to GitHub releases.
@@ -290,6 +340,10 @@ install: install-hooks
 	@cargo install --list 2>/dev/null | grep -q "^cargo-watch" || cargo install cargo-watch
 	@echo "→ cargo-audit..."
 	@cargo install --list 2>/dev/null | grep -q "^cargo-audit" || cargo install cargo-audit
+	@echo "→ sccache..."
+	@cargo install --list 2>/dev/null | grep -q "^sccache" || cargo install sccache --locked
+	@echo "→ cargo-nextest..."
+	@cargo install --list 2>/dev/null | grep -q "^cargo-nextest" || cargo install cargo-nextest --locked
 	@echo "→ frontend deps..."
 	@cd projects/frontend && npm install
 	@echo "→ shopify admin graphql schema (2026-04)..."

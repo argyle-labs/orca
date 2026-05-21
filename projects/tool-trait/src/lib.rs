@@ -19,6 +19,15 @@ pub trait OrcaToolDef: Send + Sync + 'static {
     /// Default is **off** — opt in per-tool. Destructive or identity-tied ops
     /// (uninstall, dev_disable, key rotation) MUST stay false.
     const REMOTE_OK: bool = false;
+    /// Minimum role required to invoke this tool via authenticated surfaces
+    /// (REST, MCP-over-HTTP). `"any"` (default) means any authenticated identity
+    /// passes; `"admin"` requires the caller's `AuthIdentity::role == "admin"`.
+    ///
+    /// Enforcement points: REST middleware on `/api/tools/*`, and `pod/exec`
+    /// (which has no human identity and therefore refuses any admin-role tool).
+    /// CLI / loopback / MCP-stdio run in-process as the daemon owner and are
+    /// not gated here.
+    const REQUIRED_ROLE: &'static str = "any";
 
     type Args: DeserializeOwned + Serialize + JsonSchema + Send;
     type Output: Serialize + DeserializeOwned + JsonSchema + Send + 'static;

@@ -372,6 +372,54 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
     (StatusCode::UNAUTHORIZED, "auth required").into_response()
 }
 
+/// Prefix under which `/api/tools/<tool_name>` is mounted. The role gate parses
+/// the tool name off the tail of the path.
+const TOOLS_PREFIX: &str = "/api/tools/";
+
+/// Extract the tool name from a `/api/tools/<name>` path, if any. Returns None
+/// for non-tools paths or the bare `/api/tools/` prefix with no name.
+fn tool_name_from_path(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix(TOOLS_PREFIX)?;
+    if rest.is_empty() {
+        return None;
+    }
+    // Tool names live in a single path segment; if anything trails a `/` we
+    // ignore it (no current tool registers a multi-segment name).
+    Some(rest.split('/').next().unwrap_or(rest))
+}
+
+/// Authorization layer for `/api/tools/*` that enforces per-tool role
+/// requirements declared via `#[orca_tool(role = "admin")]`. Runs INSIDE
+/// `require_auth`, so an `AuthIdentity` is always present for tool paths that
+/// reach it.
+///
+/// Non-tool paths pass through unchanged. Unknown tool names fall open here
+/// (registry's own 404 wins downstream). Caller role is compared via
+/// `tool_roles::satisfies`.
+pub async fn require_tool_role(req: Request, next: Next) -> Response {
+    let path = req.uri().path().to_string();
+    let Some(tool) = tool_name_from_path(&path) else {
+        return next.run(req).await;
+    };
+    let required = crate::tool_roles::required_role(tool);
+    if required == "any" {
+        return next.run(req).await;
+    }
+    let caller_role = req
+        .extensions()
+        .get::<AuthIdentity>()
+        .map(|i| i.role.as_str())
+        .unwrap_or("");
+    if crate::tool_roles::satisfies(caller_role, required) {
+        return next.run(req).await;
+    }
+    (
+        StatusCode::FORBIDDEN,
+        format!("tool '{tool}' requires role '{required}'"),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

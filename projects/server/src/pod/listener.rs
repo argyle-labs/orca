@@ -340,6 +340,19 @@ async fn handle_exec(request: Request) -> Result<PodExecResult> {
         );
     }
 
+    // Belt-and-suspenders: peers have no human identity, so admin-role tools
+    // are refused at this gate even if (mis)configured as `remote_ok = true`.
+    // The REST gate downstream would let the loopback admin token through, so
+    // we must stop it here.
+    let required = crate::tool_roles::required_role(&params.tool);
+    if required != "any" {
+        anyhow::bail!(
+            "pod/exec refused: tool '{}' requires role '{}' which paired peers cannot satisfy",
+            params.tool,
+            required
+        );
+    }
+
     let token = crate::loopback_token::get()
         .map(|s| s.to_string())
         .or_else(crate::loopback_token::read_from_disk)

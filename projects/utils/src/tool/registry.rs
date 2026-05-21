@@ -151,6 +151,24 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// `(name, required_role)` pairs for every registered tool. Used to install
+    /// the process-global role lookup the REST middleware consults to gate
+    /// `/api/tools/*` invocations.
+    pub fn role_table(&self) -> Vec<(&'static str, &'static str)> {
+        self.tools
+            .iter()
+            .map(|t| (t.name(), t.required_role()))
+            .collect()
+    }
+
+    /// Required role for a single tool, or `None` if no such tool is registered.
+    pub fn required_role(&self, name: &str) -> Option<&'static str> {
+        self.tools
+            .iter()
+            .find(|t| t.name() == name)
+            .map(|t| t.required_role())
+    }
+
     /// Execute a tool by name, accepting args as a JSON string or `key=value` pairs.
     ///
     /// Used by `orca exec <name> [--json '{...}' | key=value ...]`.

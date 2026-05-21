@@ -45,6 +45,11 @@ struct ToolAttr {
     /// Opt-in: `#[orca_tool(..., remote_ok = true)]` makes this tool callable
     /// by paired pod peers via `pod/exec`. Default false.
     remote_ok: bool,
+    /// Minimum role required to invoke this tool via authenticated surfaces.
+    /// `"any"` (default) means any authenticated identity passes; `"admin"`
+    /// requires `AuthIdentity::role == "admin"`. Set via
+    /// `#[orca_tool(..., role = "admin")]`.
+    role: Option<LitStr>,
 }
 
 impl Parse for ToolAttr {
@@ -54,6 +59,7 @@ impl Parse for ToolAttr {
         let mut verb = None;
         let mut cli_mode = None;
         let mut remote_ok = false;
+        let mut role: Option<LitStr> = None;
         for nv in items {
             let key = nv
                 .path
@@ -75,6 +81,19 @@ impl Parse for ToolAttr {
                             ));
                         }
                     };
+                }
+                "role" => {
+                    let s = lit_str(&nv.value)?;
+                    match s.value().as_str() {
+                        "any" | "admin" => {}
+                        other => {
+                            return Err(syn::Error::new_spanned(
+                                &nv.value,
+                                format!("role must be \"any\" or \"admin\", got {other:?}"),
+                            ));
+                        }
+                    }
+                    role = Some(s);
                 }
                 "cli" => {
                     // accept either an ident (cli = manual) or a string ("manual")
@@ -105,6 +124,7 @@ impl Parse for ToolAttr {
                 .ok_or_else(|| syn::Error::new(Span::call_site(), "missing `verb = \"…\"`"))?,
             cli_mode,
             remote_ok,
+            role,
         })
     }
 }
@@ -177,6 +197,10 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     let verb = attr.verb;
     let tool_name = format!("{}.{}", domain.value(), verb.value());
     let remote_ok_lit = attr.remote_ok;
+    let role_const = match attr.role.as_ref() {
+        Some(s) => quote! { const REQUIRED_ROLE: &'static str = #s; },
+        None => quote! {},
+    };
 
     // Decide whether to render an args binding `let args = ...` (real ident)
     // or just discard (underscored).
@@ -264,6 +288,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             const NAME: &'static str = #tool_name;
             const DESCRIPTION: &'static str = #description;
             const REMOTE_OK: bool = #remote_ok_lit;
+            #role_const
             type Args = #args_ty;
             type Output = #output_ty;
         }

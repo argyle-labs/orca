@@ -962,6 +962,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
     // require_auth → handler. Logging sits OUTSIDE auth so 401s are still
     // logged — otherwise rejected requests vanish silently from the log.
     let api = api
+        .layer(axum::middleware::from_fn(middleware::require_tool_role))
         .layer(axum::middleware::from_fn(middleware::require_auth))
         .layer(axum::middleware::from_fn(middleware::log_requests))
         .layer(cors);
