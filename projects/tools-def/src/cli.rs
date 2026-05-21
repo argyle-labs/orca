@@ -144,67 +144,6 @@ fn walk_to_verb(matches: &ArgMatches) -> Option<(String, &str, &ArgMatches)> {
     Some((domain_parts.join("."), verb, op_matches))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Command;
-
-    fn flat_root() -> Command {
-        Command::new("orca").subcommand(
-            Command::new("engine")
-                .subcommand_required(true)
-                .subcommand(Command::new("list")),
-        )
-    }
-
-    fn nested_root() -> Command {
-        Command::new("orca").subcommand(
-            Command::new("pod")
-                .subcommand_required(true)
-                .subcommand(
-                    Command::new("peer")
-                        .subcommand_required(true)
-                        .subcommand(Command::new("list")),
-                )
-                .subcommand(Command::new("list")), // pod.list lives alongside pod.peer.*
-        )
-    }
-
-    #[test]
-    fn walk_to_verb_flat_domain() {
-        let m = flat_root().get_matches_from(["orca", "engine", "list"]);
-        let (domain, verb, _) = walk_to_verb(&m).unwrap();
-        assert_eq!(domain, "engine");
-        assert_eq!(verb, "list");
-    }
-
-    #[test]
-    fn walk_to_verb_nested_domain() {
-        let m = nested_root().get_matches_from(["orca", "pod", "peer", "list"]);
-        let (domain, verb, _) = walk_to_verb(&m).unwrap();
-        assert_eq!(domain, "pod.peer");
-        assert_eq!(verb, "list");
-    }
-
-    #[test]
-    fn walk_to_verb_mixed_tree_resolves_shallow_verb() {
-        // `pod.list` must still resolve when `pod.peer.*` exists as a sibling
-        // branch under the same `pod` segment.
-        let m = nested_root().get_matches_from(["orca", "pod", "list"]);
-        let (domain, verb, _) = walk_to_verb(&m).unwrap();
-        assert_eq!(domain, "pod");
-        assert_eq!(verb, "list");
-    }
-
-    #[test]
-    fn walk_to_verb_no_subcommand_returns_none() {
-        let m = Command::new("orca")
-            .subcommand(Command::new("engine"))
-            .get_matches_from(["orca"]);
-        assert!(walk_to_verb(&m).is_none());
-    }
-}
-
 /// Register one op with the unified CLI surface.
 ///
 /// ```ignore
@@ -302,4 +241,65 @@ macro_rules! register_op {
             }
         };
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Command;
+
+    fn flat_root() -> Command {
+        Command::new("orca").subcommand(
+            Command::new("engine")
+                .subcommand_required(true)
+                .subcommand(Command::new("list")),
+        )
+    }
+
+    fn nested_root() -> Command {
+        Command::new("orca").subcommand(
+            Command::new("pod")
+                .subcommand_required(true)
+                .subcommand(
+                    Command::new("peer")
+                        .subcommand_required(true)
+                        .subcommand(Command::new("list")),
+                )
+                .subcommand(Command::new("list")), // pod.list lives alongside pod.peer.*
+        )
+    }
+
+    #[test]
+    fn walk_to_verb_flat_domain() {
+        let m = flat_root().get_matches_from(["orca", "engine", "list"]);
+        let (domain, verb, _) = walk_to_verb(&m).unwrap();
+        assert_eq!(domain, "engine");
+        assert_eq!(verb, "list");
+    }
+
+    #[test]
+    fn walk_to_verb_nested_domain() {
+        let m = nested_root().get_matches_from(["orca", "pod", "peer", "list"]);
+        let (domain, verb, _) = walk_to_verb(&m).unwrap();
+        assert_eq!(domain, "pod.peer");
+        assert_eq!(verb, "list");
+    }
+
+    #[test]
+    fn walk_to_verb_mixed_tree_resolves_shallow_verb() {
+        // `pod.list` must still resolve when `pod.peer.*` exists as a sibling
+        // branch under the same `pod` segment.
+        let m = nested_root().get_matches_from(["orca", "pod", "list"]);
+        let (domain, verb, _) = walk_to_verb(&m).unwrap();
+        assert_eq!(domain, "pod");
+        assert_eq!(verb, "list");
+    }
+
+    #[test]
+    fn walk_to_verb_no_subcommand_returns_none() {
+        let m = Command::new("orca")
+            .subcommand(Command::new("engine"))
+            .get_matches_from(["orca"]);
+        assert!(walk_to_verb(&m).is_none());
+    }
 }
