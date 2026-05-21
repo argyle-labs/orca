@@ -220,6 +220,44 @@ pub fn list_pending_offers(conn: &Connection, direction: &str) -> Result<Vec<Pen
 
 /// Find an inbound pending offer by code (joiner side). Returns None if no
 /// non-expired offer matches.
+/// Look up an inbound pending offer by raw pairing code, regardless of
+/// expiry. Returns `None` only when the code doesn't match any offer at all,
+/// so callers can distinguish "wrong code" from "expired offer" and surface
+/// the right CLI message (per `project_pod_join_ux.md`: silent-on-failure is
+/// the symptom we're fixing).
+pub fn find_pending_offer_by_code_any_expiry(
+    conn: &Connection,
+    code: &str,
+) -> Result<Option<PendingOffer>> {
+    let code_hash = hash_code(code);
+    let row = conn
+        .query_row(
+            "SELECT offer_id, direction, peer_pubkey_fp, peer_hostname, peer_addr, peer_port,
+                    code_hash, mesh_ca_cert_pem, inviter_peer_id, pod_id, expires_at, created_at
+             FROM pod_pending_offers
+             WHERE direction = 'in' AND code_hash = ?",
+            params![code_hash],
+            |r| {
+                Ok(PendingOffer {
+                    offer_id: r.get(0)?,
+                    direction: r.get(1)?,
+                    peer_pubkey_fp: r.get(2)?,
+                    peer_hostname: r.get(3)?,
+                    peer_addr: r.get(4)?,
+                    peer_port: r.get::<_, i64>(5)? as u16,
+                    code_hash: r.get(6)?,
+                    mesh_ca_cert_pem: r.get(7)?,
+                    inviter_peer_id: r.get(8)?,
+                    pod_id: r.get(9)?,
+                    expires_at: r.get(10)?,
+                    created_at: r.get(11)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(row)
+}
+
 pub fn find_pending_offer_by_code(conn: &Connection, code: &str) -> Result<Option<PendingOffer>> {
     let code_hash = hash_code(code);
     let now = now_secs();
