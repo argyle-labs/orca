@@ -78,10 +78,11 @@ pub fn cmd_pod_pending() -> Result<()> {
 /// CLI tell the user *why* an accept failed instead of dumping the same
 /// "no offer matches that code" line for every failure mode (the symptom
 /// flagged in `project_pod_join_ux.md`).
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub enum AcceptLookup {
-    /// Live offer, ready to dial.
-    Active(pdb::PendingOffer),
+    /// Live offer, ready to dial. Boxed to keep the enum lean — `PendingOffer`
+    /// is ~240 bytes while the other variants are tiny.
+    Active(Box<pdb::PendingOffer>),
     /// Code matched but the offer's TTL elapsed; `expired_secs_ago` is the
     /// gap from the offer's `expires_at` to `now`.
     Expired { expired_secs_ago: i64 },
@@ -89,13 +90,10 @@ pub enum AcceptLookup {
     NotFound,
 }
 
-pub fn classify_accept_lookup(
-    maybe_offer: Option<pdb::PendingOffer>,
-    now: i64,
-) -> AcceptLookup {
+pub fn classify_accept_lookup(maybe_offer: Option<pdb::PendingOffer>, now: i64) -> AcceptLookup {
     match maybe_offer {
         None => AcceptLookup::NotFound,
-        Some(o) if o.expires_at >= now => AcceptLookup::Active(o),
+        Some(o) if o.expires_at >= now => AcceptLookup::Active(Box::new(o)),
         Some(o) => AcceptLookup::Expired {
             expired_secs_ago: now - o.expires_at,
         },
@@ -106,7 +104,7 @@ pub async fn cmd_pod_accept(code: &str) -> Result<()> {
     let conn = db::open_default()?;
     let maybe = pdb::find_pending_offer_by_code_any_expiry(&conn, code)?;
     let offer = match classify_accept_lookup(maybe, now_secs()) {
-        AcceptLookup::Active(o) => o,
+        AcceptLookup::Active(o) => *o,
         AcceptLookup::NotFound => bail!(
             "pairing code not recognized — double-check the 6 chars the inviter showed (no matching offer on this host)"
         ),
@@ -646,4 +644,61 @@ fn parse_resp(raw: &[u8]) -> Result<serde_json::Value> {
         bail!("peer returned error: {}", err.message);
     }
     resp.result.context("response had no result")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mk_offer(expires_at: i64) -> pdb::PendingOffer {
+        pdb::PendingOffer {
+            offer_id: "o1".into(),
+            direction: "in".into(),
+            peer_pubkey_fp: "fp".into(),
+            peer_hostname: "thor".into(),
+            peer_addr: "10.0.0.1".into(),
+            peer_port: 12002,
+            code_hash: "h".into(),
+            mesh_ca_cert_pem: None,
+            inviter_peer_id: None,
+            pod_id: None,
+            expires_at,
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn classify_not_found_when_none() {
+        assert!(matches!(
+            classify_accept_lookup(None, 1_000),
+            AcceptLookup::NotFound
+        ));
+    }
+
+    #[test]
+    fn classify_active_when_within_ttl() {
+        let o = mk_offer(1_500);
+        let got = classify_accept_lookup(Some(o), 1_000);
+        assert!(matches!(got, AcceptLookup::Active(p) if p.offer_id == "o1"));
+    }
+
+    #[test]
+    fn classify_active_at_exact_boundary() {
+        // expires_at == now should still count as active (>= in SQL query too).
+        let o = mk_offer(1_000);
+        let got = classify_accept_lookup(Some(o), 1_000);
+        assert!(matches!(got, AcceptLookup::Active(_)));
+    }
+
+    #[test]
+    fn classify_expired_reports_seconds_ago() {
+        let o = mk_offer(900);
+        let got = classify_accept_lookup(Some(o), 1_042);
+        assert!(matches!(
+            got,
+            AcceptLookup::Expired {
+                expired_secs_ago: 142
+            }
+        ));
+    }
 }
