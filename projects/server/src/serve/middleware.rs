@@ -537,91 +537,65 @@ mod tests {
         assert!(tool_name_from_path("/api/tools/").is_none());
     }
 
-    // ── require_tool_role (handler-level) ─────────────────────────────────────
+    // ── check_tool_role (pure decision) ───────────────────────────────────────
     //
-    // We exercise the middleware as an axum handler chain rather than wiring a
-    // full Router: gives full coverage of the path branches (non-tool / any /
-    // admin-pass / admin-fail / missing-identity) without spinning a server.
+    // The middleware itself is a thin wrapper over `check_tool_role`. Testing
+    // the pure function gives full branch coverage without an axum harness
+    // (Next::new is private in 0.8) and without depending on the global
+    // tool_roles map — we install our own keys and inspect what survived
+    // first-call-wins.
 
-    use axum::body::Body;
-    use axum::http::Request as AxumRequest;
-    use axum::middleware::Next;
-    use axum::response::IntoResponse;
-
-    async fn ok_next(_req: Request) -> Response {
-        (StatusCode::OK, "passed").into_response()
+    #[test]
+    fn check_tool_role_passes_non_tool_paths() {
+        assert_eq!(
+            check_tool_role("/api/health", Some("member")),
+            ToolRoleCheck::Pass
+        );
+        assert_eq!(check_tool_role("/", None), ToolRoleCheck::Pass);
+        // Bare /api/tools/ with no name is non-routable; treat as pass and
+        // let the registry's own 404 handle it downstream.
+        assert_eq!(check_tool_role("/api/tools/", None), ToolRoleCheck::Pass);
     }
 
-    async fn run_gate(req: AxumRequest<Body>) -> Response {
-        // Build a minimal `Next` that runs our terminal handler.
-        let svc = tower::service_fn(|req: AxumRequest<Body>| async move {
-            Ok::<_, std::convert::Infallible>(ok_next(req).await)
-        });
-        let next = Next::new(svc);
-        require_tool_role(req, next).await
+    #[test]
+    fn check_tool_role_passes_unknown_tool_under_any_caller() {
+        // Unknown tool name → required_role falls open to "any".
+        assert_eq!(
+            check_tool_role("/api/tools/__no_such_tool__", Some("member")),
+            ToolRoleCheck::Pass
+        );
+        assert_eq!(
+            check_tool_role("/api/tools/__no_such_tool__", None),
+            ToolRoleCheck::Pass
+        );
     }
 
-    fn req_with_identity(path: &str, role: Option<&str>) -> AxumRequest<Body> {
-        let mut req = AxumRequest::builder()
-            .uri(path)
-            .body(Body::empty())
-            .unwrap();
-        if let Some(role) = role {
-            req.extensions_mut().insert(AuthIdentity {
-                kind: AuthKind::Token {
-                    id: "tok_test".into(),
-                    name: "test".into(),
-                },
-                role: role.into(),
-            });
+    #[test]
+    fn check_tool_role_admin_branches() {
+        // Best-effort install; first-call-wins across the test binary.
+        crate::tool_roles::install([("check_tool_role_test.admin_only", "admin")]);
+        if crate::tool_roles::required_role("check_tool_role_test.admin_only") != "admin" {
+            // Another test owned the global before us; can't drive the admin
+            // branches deterministically. Pure-function correctness for the
+            // admin paths is still covered via tool_roles::satisfies in
+            // tool_roles.rs.
+            return;
         }
-        req
-    }
-
-    #[tokio::test]
-    async fn require_tool_role_passes_non_tool_paths() {
-        let req = req_with_identity("/api/health", Some("member"));
-        let resp = run_gate(req).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn require_tool_role_passes_any_role_tool_with_any_caller() {
-        // Unknown tool falls open to "any" via tool_roles::required_role.
-        let req = req_with_identity("/api/tools/__unknown_tool__", Some("member"));
-        let resp = run_gate(req).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn require_tool_role_admin_tool_blocks_non_admin_caller() {
-        crate::tool_roles::install([("test.admin_only", "admin")]);
-        let req = req_with_identity("/api/tools/test.admin_only", Some("member"));
-        let resp = run_gate(req).await;
-        // First-call-wins on the global means this assertion is conditional on
-        // whether _this_ install won. Skip when another test owned the slot.
-        if crate::tool_roles::required_role("test.admin_only") == "admin" {
-            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-        }
-    }
-
-    #[tokio::test]
-    async fn require_tool_role_admin_tool_allows_admin_caller() {
-        crate::tool_roles::install([("test.admin_only", "admin")]);
-        let req = req_with_identity("/api/tools/test.admin_only", Some("admin"));
-        let resp = run_gate(req).await;
-        if crate::tool_roles::required_role("test.admin_only") == "admin" {
-            assert_eq!(resp.status(), StatusCode::OK);
-        }
-    }
-
-    #[tokio::test]
-    async fn require_tool_role_admin_tool_blocks_missing_identity() {
-        crate::tool_roles::install([("test.admin_only", "admin")]);
-        let req = req_with_identity("/api/tools/test.admin_only", None);
-        let resp = run_gate(req).await;
-        if crate::tool_roles::required_role("test.admin_only") == "admin" {
-            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-        }
+        let path = "/api/tools/check_tool_role_test.admin_only";
+        assert_eq!(check_tool_role(path, Some("admin")), ToolRoleCheck::Pass);
+        assert_eq!(
+            check_tool_role(path, Some("member")),
+            ToolRoleCheck::Forbidden {
+                tool: "check_tool_role_test.admin_only".into(),
+                required: "admin"
+            }
+        );
+        assert_eq!(
+            check_tool_role(path, None),
+            ToolRoleCheck::Forbidden {
+                tool: "check_tool_role_test.admin_only".into(),
+                required: "admin"
+            }
+        );
     }
 }
