@@ -352,6 +352,38 @@ html.no-transitions * {
   box-sizing: border-box;
 }
 
+/* ── Cursor discipline ───────────────────────────────────────────────────── */
+/* Opt everything into default cursor; only true interactive elements get    */
+/* pointer. This prevents Firefox (and extensions) from showing stray        */
+/* hand/I-beam cursors on non-interactive content.                            */
+*,
+*::before,
+*::after {
+  cursor: default;
+  user-select: none;
+}
+a,
+button,
+[role='button'],
+[role='switch'],
+[role='tab'],
+[role='menuitem'],
+[role='option'],
+select,
+label {
+  cursor: pointer;
+}
+input,
+textarea,
+[contenteditable='true'] {
+  cursor: text;
+  user-select: text;
+}
+[disabled],
+:disabled {
+  cursor: not-allowed !important;
+}
+
 html,
 body {
   margin: 0;

@@ -77,7 +77,14 @@ fn own_peer_id() -> String {
 }
 
 async fn persist_local_snapshot() -> Result<()> {
-    let snap = tokio::task::spawn_blocking(crate::system_info::collect_blocking).await?;
+    // Prefer the in-memory cache so cpu_usage_percent is a real delta (not the
+    // first-call zero that collect_blocking() always returns). Fall back to a
+    // fresh collect only when the background refresher hasn't run yet.
+    let snap = if let Some(cached) = crate::system_info::current() {
+        (*cached).clone()
+    } else {
+        tokio::task::spawn_blocking(crate::system_info::collect_blocking).await?
+    };
     let payload = serde_json::to_string(&snap).context("serialise SystemInfoReport")?;
     let snapshot_at = snap
         .snapshot_at_unix

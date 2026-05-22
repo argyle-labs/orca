@@ -44,7 +44,9 @@ pub fn retention_seconds(conn: &Connection) -> i64 {
             row.json.trim_matches('"').parse::<f64>().ok()
         })
         .map(|days| (days * 86_400.0) as i64)
-        .filter(|&s| s > 0)
+        // 0 = "no history" — keep only the snapshot just inserted; negative is
+        // invalid and falls back to the default.
+        .filter(|&s| s >= 0)
         .unwrap_or(DEFAULT_RETENTION_SECS)
 }
 

@@ -215,6 +215,16 @@ pub struct GpuInfo {
     /// GPU temperature in °C.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature_c: Option<f32>,
+    /// Driver/tool availability: `"ok"` when metrics are live, `"no_driver"`
+    /// when the GPU was detected via sysfs/PCI but the user-space driver or
+    /// query tool is absent, `"no_metrics"` when the driver is loaded but
+    /// doesn't expose utilization (e.g. Intel iGPU without `intel_gpu_top`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_status: Option<String>,
+    /// Suggested package to install to get full metrics. Distro-specific;
+    /// only populated when `driver_status = "no_driver"` or `"no_metrics"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_install_hint: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]

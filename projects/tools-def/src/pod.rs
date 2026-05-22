@@ -149,6 +149,12 @@ pub struct PodAcceptOutput {
 pub struct PodTrustArgs {
     pub peer_id: String,
     pub on: bool,
+    /// When `true`, execute the trust update on the remote peer so THEY trust
+    /// US rather than updating our local trust of them. Requires the peer to
+    /// be reachable via mTLS and the caller to hold admin role.
+    #[serde(default)]
+    #[cfg_attr(feature = "cli", clap(long))]
+    pub push: bool,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -156,6 +162,8 @@ pub struct PodTrustOutput {
     pub peer_id: String,
     pub local_secure: bool,
     pub peer_secure: bool,
+    /// True when both sides trust each other. Secure peers can sync
+    /// credentials; non-mutual peers only retain their own credentials.
     pub mutual: bool,
     pub notify_result: String,
 }
@@ -381,7 +389,12 @@ pub mod native_support {
         /// because a peer is unreachable.
         async fn list_enriched(&self) -> Result<Vec<PodPeerDto>>;
         async fn accept(&self, code: &str) -> Result<PodAcceptOutput>;
+        /// Update our local trust of a peer. Sets `local_secure`.
         async fn trust(&self, peer_id: &str, on: bool) -> Result<PodTrustOutput>;
+        /// Push a trust update to a remote peer over mTLS, making THEM trust
+        /// US. Executes `pod.peer.update` on the remote host with our own
+        /// peer_id. Returns the merged trust state after the push.
+        async fn push_trust(&self, peer_id: &str, on: bool) -> Result<PodTrustOutput>;
         async fn ping(&self, peer_id: &str) -> PodPingOutput;
         fn discover(&self) -> Result<Vec<PodDiscoveryRowDto>>;
         fn pending(&self) -> Result<Vec<PodPendingOfferDto>>;
@@ -457,15 +470,20 @@ async fn pod_handshake_create(
     native_support::svc(ctx)?.accept(&args.code).await
 }
 
-/// Toggle local trust for a paired peer; replicates CA key on mutual-secure.
+/// Update trust for a paired peer.
+/// Without `push`: sets OUR local trust of the peer (`local_secure`).
+/// With `push: true`: executes the update on the remote peer over mTLS so
+/// THEY trust US (`peer_secure` from our perspective).
 #[orca_tool(domain = "pod.peer", verb = "update")]
 async fn pod_peer_update(
     args: PodTrustArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<PodTrustOutput> {
-    native_support::svc(ctx)?
-        .trust(&args.peer_id, args.on)
-        .await
+    let svc = native_support::svc(ctx)?;
+    if args.push {
+        return svc.push_trust(&args.peer_id, args.on).await;
+    }
+    svc.trust(&args.peer_id, args.on).await
 }
 
 /// mTLS ping a paired peer; returns latency + their self-reported identity.
@@ -628,6 +646,15 @@ mod tests {
                 peer_secure: true,
                 mutual: on,
                 notify_result: "ok".into(),
+            })
+        }
+        async fn push_trust(&self, peer_id: &str, on: bool) -> Result<PodTrustOutput> {
+            Ok(PodTrustOutput {
+                peer_id: peer_id.into(),
+                local_secure: false,
+                peer_secure: on,
+                mutual: on,
+                notify_result: "pushed".into(),
             })
         }
         async fn ping(&self, peer_id: &str) -> PodPingOutput {
@@ -801,6 +828,7 @@ mod tests {
             PodTrustArgs {
                 peer_id: "peer.t".into(),
                 on: true,
+                push: false,
             },
             &ctx,
         )
@@ -809,6 +837,25 @@ mod tests {
         assert!(out.mutual);
         let g = stub.last_trust.lock().unwrap();
         assert_eq!(g.as_ref().unwrap(), &("peer.t".to_string(), true));
+    }
+
+    #[tokio::test]
+    async fn pod_trust_push_routes_to_push_trust() {
+        let (ctx, _) = ctx_with_stub();
+        let out = pod_peer_update(
+            PodTrustArgs {
+                peer_id: "peer.t".into(),
+                on: true,
+                push: true,
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        // StubPod::push_trust returns peer_secure=on (true), local_secure=false.
+        assert!(out.peer_secure);
+        assert!(!out.local_secure);
+        assert_eq!(out.notify_result, "pushed");
     }
 
     #[tokio::test]

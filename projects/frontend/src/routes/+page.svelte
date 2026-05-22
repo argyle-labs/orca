@@ -1,8 +1,13 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { callTool } from '$lib/stores/runTool';
+  import { notifications } from '$lib/stores/notifications';
   import StatusDot from '$lib/components/StatusDot.svelte';
+  import Popover from '$lib/components/Popover.svelte';
   import type { GpuInfo, SystemInfoReport } from '$lib/client/types.gen';
+  import { env } from '$env/dynamic/public';
+
+  const DEV_MODE_UI = env.PUBLIC_DEV_MODE === 'true';
 
   interface Instance {
     id: string;
@@ -15,6 +20,8 @@
     target: string | null;
     mode: string | null;
     channel: string | null;
+    updateAvailable: boolean;
+    updateLatest: string | null;
     health: 'up' | 'down' | 'unknown';
     error: string | null;
     lastChecked: number | null;
@@ -27,7 +34,11 @@
   let instances = $state<Instance[]>([]);
   let selectedInstId = $state<string | null>(null);
   let trustPending = $state(false);
+  let pushTrustPending = $state(false);
   let retentionDays = $state(1);
+  let customPopoverOpen = $state(false);
+  let customDaysInput = $state('');
+  let retentionSaving = $state(false);
   let pollHandle: ReturnType<typeof setInterval> | null = null;
 
   // Drawer update controls — reset only when the SELECTED INSTANCE changes,
@@ -46,11 +57,20 @@
   // 1-second live poll; DB writes happen every 10 s (host_status_writer)
   const POLL_MS = 1000;
 
-  const RETENTION_OPTIONS = [
+  // Preset segments (Custom is always index 3)
+  const RETENTION_PRESETS = [
+    { label: 'No history', value: 0 },
     { label: '1 day', value: 1 },
     { label: '7 days', value: 7 },
-    { label: '30 days', value: 30 },
+    { label: 'Custom', value: -1 },
   ];
+
+  let activeSegment = $derived(
+    RETENTION_PRESETS.findIndex((p) => p.value === retentionDays) >= 0 &&
+    RETENTION_PRESETS.findIndex((p) => p.value === retentionDays) < 3
+      ? RETENTION_PRESETS.findIndex((p) => p.value === retentionDays)
+      : 3,
+  );
 
   let selectedInst = $derived(instances.find((i) => i.id === selectedInstId) ?? null);
 
@@ -116,8 +136,11 @@
           peer_secure: boolean;
           local: boolean;
           version?: string | null;
+          target?: string | null;
           mode?: string | null;
           channel?: string | null;
+          update_available?: boolean | null;
+          update_latest?: string | null;
           addresses?: { kind: string; value: string }[];
           system?: SystemInfoReport | null;
         }[]>('podPeerList', {}),
@@ -146,11 +169,12 @@
             origin: `${p.addr}:${p.port}`,
             port: p.port,
             role: 'system' as const,
-            // Probe version first; fall back to the version field in the stored snapshot.
-            version: p.version ?? sys?.version ?? null,
+            version: p.version ?? null,
             target: p.target ?? null,
             mode: p.mode ?? null,
             channel: p.channel ?? null,
+            updateAvailable: p.update_available ?? false,
+            updateLatest: p.update_latest ?? null,
             health: p.status === 'active' ? 'up' : 'down',
             error: null,
             lastChecked: Date.now(),
@@ -176,12 +200,25 @@
     if (!inst.secure || trustPending) return;
     trustPending = true;
     try {
-      await callTool('podPeerUpdate', { peer_id: inst.peerId, on: !inst.secure.local });
+      await callTool('podPeerUpdate', { peer_id: inst.peerId, on: !inst.secure.local, push: false });
       await refreshPodPeers();
     } catch (e) {
       console.warn('trust toggle failed:', e);
     } finally {
       trustPending = false;
+    }
+  }
+
+  async function pushTrust(inst: Instance, on: boolean) {
+    if (!inst.secure || pushTrustPending) return;
+    pushTrustPending = true;
+    try {
+      await callTool('podPeerUpdate', { peer_id: inst.peerId, on, push: true });
+      await refreshPodPeers();
+    } catch (e) {
+      console.warn('push trust failed:', e);
+    } finally {
+      pushTrustPending = false;
     }
   }
 
@@ -191,23 +228,38 @@
         noun: 'host_status',
         name: 'retention_days',
       });
-      if (data?.row) retentionDays = parseFloat(data.row.json) || 1;
+      if (data?.row) retentionDays = parseFloat(data.row.json) ?? 1;
     } catch {
       // default 1 day
     }
   }
 
   async function setRetention(days: number) {
-    retentionDays = days;
+    retentionSaving = true;
     try {
       await callTool('configSet', {
         noun: 'host_status',
         name: 'retention_days',
         json: String(days),
       });
+      retentionDays = days;
     } catch (e) {
       console.warn('retention set failed:', e);
+    } finally {
+      retentionSaving = false;
     }
+  }
+
+  async function applyCustomRetention() {
+    const days = parseInt(customDaysInput, 10);
+    if (!Number.isFinite(days) || days < 1) return;
+    customPopoverOpen = false;
+    await setRetention(days);
+  }
+
+  function customBtnLabel(): string {
+    if (activeSegment === 3 && retentionDays > 0) return `${retentionDays}d`;
+    return 'Custom';
   }
 
   function closeDrawer() {
@@ -270,6 +322,20 @@
     }
   }
 
+  async function toggleDevMode(inst: Instance) {
+    if (!inst.peerId) return;
+    const action = inst.mode !== 'dev' ? 'enable' : 'disable';
+    try {
+      await callTool('podDevUpdate', {
+        action,
+        peers: inst.role === 'system' ? [inst.peerId] : [],
+      });
+      await (inst.role === 'local' ? refreshLocal(inst) : refreshPodPeers());
+    } catch (e) {
+      console.warn('dev mode toggle failed:', e);
+    }
+  }
+
   onMount(() => {
     const local: Instance = {
       id: 'local',
@@ -282,6 +348,8 @@
       target: null,
       mode: null,
       channel: null,
+      updateAvailable: false,
+      updateLatest: null,
       health: 'unknown',
       error: null,
       lastChecked: null,
@@ -302,6 +370,20 @@
     if (pollHandle) clearInterval(pollHandle);
   });
 
+  // Track which instances we've already notified so we don't spam on every poll.
+  const notifiedUpdates = new Set<string>();
+
+  $effect(() => {
+    for (const inst of instances) {
+      if (inst.updateAvailable && !notifiedUpdates.has(inst.id)) {
+        notifiedUpdates.add(inst.id);
+        const name = inst.sys?.hostname ?? inst.label;
+        const ver = inst.updateLatest ? ` (${inst.updateLatest})` : '';
+        notifications.info(`${name} has an update available${ver}`);
+      }
+    }
+  });
+
   function relTime(ts: number | null): string {
     if (!ts) return '—';
     const sec = Math.round((Date.now() - ts) / 1000);
@@ -318,12 +400,28 @@
   }
 
   function memPct(sys: SystemInfoReport | null | undefined): number {
-    if (!sys?.mem_total_mb || !sys?.mem_used_mb) return 0;
+    if (!sys?.mem_total_mb || sys?.mem_used_mb == null) return 0;
     return Math.min(100, (sys.mem_used_mb / sys.mem_total_mb) * 100);
+  }
+
+  function loadPct(sys: SystemInfoReport | null | undefined): number | null {
+    if (sys?.load_avg_1 == null || !sys?.cpu_logical) return null;
+    return Math.min(100, (sys.load_avg_1 / sys.cpu_logical) * 100);
   }
 
   function cpuPct(sys: SystemInfoReport | null | undefined): number | null {
     return sys?.cpu_usage_percent ?? null;
+  }
+
+  async function copyText(text: string) {
+    await navigator.clipboard.writeText(text);
+    notifications.info('Copied');
+  }
+
+  function fmtUptime(secs: number): string {
+    if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+    if (secs < 86400) return `${Math.floor(secs / 3600)}h`;
+    return `${Math.floor(secs / 86400)}d`;
   }
 
   function fmtGpu(g: GpuInfo): string {
@@ -336,16 +434,58 @@
   <header>
     <div class="title-row">
       <h1>Systems</h1>
-      <div class="retention-picker">
-        <span class="retention-label">History</span>
-        <select
-          value={retentionDays}
-          onchange={(e) => setRetention(Number((e.target as HTMLSelectElement).value))}
-        >
-          {#each RETENTION_OPTIONS as opt}
-            <option value={opt.value} selected={opt.value === retentionDays}>{opt.label}</option>
+      <div
+        class="retention-picker"
+        title="Storage setting — controls how many days of metrics are kept on disk"
+      >
+        <span class="retention-label">Keep history</span>
+        <div class="retention-segment">
+          <div
+            class="segment-pill"
+            style="left: calc({activeSegment} * 25%)"
+          ></div>
+          {#each RETENTION_PRESETS as preset, i}
+            {#if i < 3}
+              <button
+                class="segment-btn"
+                disabled={retentionSaving}
+                onclick={() => setRetention(preset.value)}
+              >{preset.label}</button>
+            {:else}
+              <Popover bind:open={customPopoverOpen} align="end" width={200}>
+                {#snippet trigger()}
+                  <button
+                    class="segment-btn segment-btn-custom"
+                    disabled={retentionSaving}
+                    onclick={() => {
+                      customDaysInput = activeSegment === 3 ? String(retentionDays) : '';
+                      customPopoverOpen = true;
+                    }}
+                  >{customBtnLabel()}</button>
+                {/snippet}
+                {#snippet children()}
+                  <div class="custom-popover">
+                    <p class="custom-popover-label">Days to keep</p>
+                    <input
+                      type="number"
+                      min="1"
+                      max="365"
+                      placeholder="e.g. 14"
+                      bind:value={customDaysInput}
+                      class="custom-days-input"
+                      onkeydown={(e) => e.key === 'Enter' && applyCustomRetention()}
+                    />
+                    <button
+                      class="custom-apply-btn"
+                      onclick={applyCustomRetention}
+                      disabled={!customDaysInput || parseInt(customDaysInput) < 1}
+                    >Apply</button>
+                  </div>
+                {/snippet}
+              </Popover>
+            {/if}
           {/each}
-        </select>
+        </div>
       </div>
     </div>
     <p class="lede">Connected orca instances.</p>
@@ -365,6 +505,9 @@
           <div class="ident">
             <StatusDot ok={inst.health === 'up' ? true : inst.health === 'down' ? false : null} />
             <span class="hostname">{inst.sys?.hostname ?? inst.label}</span>
+            {#if inst.updateAvailable}
+              <span class="update-badge" title="Update available: {inst.updateLatest ?? 'newer version'}">↑ {inst.updateLatest ?? 'update'}</span>
+            {/if}
           </div>
           <button class="icon-btn" onclick={(e) => refresh(inst, e)} title="Refresh">↻</button>
         </div>
@@ -372,7 +515,12 @@
         {#if inst.sys}
           <div class="metrics">
             <div class="metric-row">
-              <span class="metric-label">CPU</span>
+              <div class="metric-head">
+                <span class="metric-label">CPU</span>
+                <span class="metric-val">
+                  {cpuPct(inst.sys) != null ? `${cpuPct(inst.sys)!.toFixed(1)}%` : '—'}
+                </span>
+              </div>
               <div class="bar-wrap">
                 <div
                   class="bar"
@@ -381,12 +529,14 @@
                   class:crit={(cpuPct(inst.sys) ?? 0) > 90}
                 ></div>
               </div>
-              <span class="metric-val">
-                {cpuPct(inst.sys) != null ? `${cpuPct(inst.sys)!.toFixed(1)}%` : '—'}
-              </span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">RAM</span>
+              <div class="metric-head">
+                <span class="metric-label">RAM</span>
+                <span class="metric-val">
+                  {memPct(inst.sys).toFixed(1)}% <span class="dim">{fmtMb(inst.sys.mem_used_mb)} / {fmtMb(inst.sys.mem_total_mb)}</span>
+                </span>
+              </div>
               <div class="bar-wrap">
                 <div
                   class="bar"
@@ -395,24 +545,35 @@
                   class:crit={memPct(inst.sys) > 90}
                 ></div>
               </div>
-              <span class="metric-val">
-                {memPct(inst.sys).toFixed(1)}% <span class="dim">{fmtMb(inst.sys.mem_used_mb)} / {fmtMb(inst.sys.mem_total_mb)}</span>
-              </span>
             </div>
             {#if inst.sys.load_avg_1 != null}
-              <div class="metric-row load-row">
-                <span class="metric-label">Load</span>
-                <span class="load-val">
-                  {inst.sys.load_avg_1.toFixed(2)}<span class="dim">
-                    &nbsp;/ {inst.sys.load_avg_5?.toFixed(2) ?? '—'} / {inst.sys.load_avg_15?.toFixed(2) ?? '—'}&nbsp;<span class="load-legend">1m/5m/15m</span>
+              {@const lp = loadPct(inst.sys)}
+              <div class="metric-row">
+                <div class="metric-head">
+                  <span class="metric-label" title="Unix run-queue depth (processes waiting for CPU), normalized by core count">CPU Q</span>
+                  <span class="metric-val">
+                    {inst.sys.load_avg_1.toFixed(2)}<span class="dim">/{inst.sys.cpu_logical ?? '?'} <span class="load-legend">1m avg</span></span>
                   </span>
-                </span>
+                </div>
+                <div class="bar-wrap">
+                  <div
+                    class="bar"
+                    style="width:{lp ?? 0}%"
+                    class:warn={(lp ?? 0) > 70}
+                    class:crit={(lp ?? 0) > 90}
+                  ></div>
+                </div>
               </div>
             {/if}
             {#if inst.sys.gpus?.length}
               {#each inst.sys.gpus as g}
                 <div class="metric-row">
-                  <span class="metric-label">GPU</span>
+                  <div class="metric-head">
+                    <span class="metric-label">GPU</span>
+                    <span class="metric-val gpu-val">
+                      {g.utilization_percent != null ? `${g.utilization_percent.toFixed(0)}%` : '—'} <span class="dim gpu-name">{g.name}</span>
+                    </span>
+                  </div>
                   <div class="bar-wrap">
                     <div
                       class="bar"
@@ -421,13 +582,19 @@
                       class:crit={(g.utilization_percent ?? 0) > 90}
                     ></div>
                   </div>
-                  <span class="metric-val gpu-val">
-                    {g.utilization_percent != null ? `${g.utilization_percent.toFixed(0)}%` : '—'} <span class="dim gpu-name">{g.name}</span>
-                  </span>
                 </div>
               {/each}
             {/if}
           </div>
+          {@const rawStats = [
+            inst.sys.cpu_usage_percent != null ? `cpu ${inst.sys.cpu_usage_percent.toFixed(0)}%` : null,
+            inst.sys.mem_used_mb != null ? `mem ${fmtMb(inst.sys.mem_used_mb)}/${fmtMb(inst.sys.mem_total_mb)}` : null,
+            inst.sys.load_avg_1 != null ? `load ${inst.sys.load_avg_1.toFixed(2)}` : null,
+            inst.sys.system_uptime_secs != null ? `up ${fmtUptime(inst.sys.system_uptime_secs)}` : null,
+          ].filter((x): x is string => x != null)}
+          {#if rawStats.length > 0}
+            <p class="stat-raw">{rawStats.join(' · ')}</p>
+          {/if}
         {/if}
 
         <div class="card-footer">
@@ -535,36 +702,89 @@
       {/if}
 
       {#if selectedInst.role === 'system' && selectedInst.secure}
-        <div class="section-head">Trust</div>
-        <div class="trust-row">
-          <span class="trust-label">Local</span>
-          <div class="trust-toggles">
-            <button
-              class="trust-btn"
-              class:active={selectedInst.secure.local}
-              disabled={trustPending}
-              onclick={() => toggleLocalTrust(selectedInst!)}
-            >
-              {selectedInst.secure.local ? 'Trusted' : 'Not trusted'}
-            </button>
-          </div>
+        {@const peerName = selectedInst.sys?.hostname ?? selectedInst.label}
+        {@const mutual = selectedInst.secure.local && selectedInst.secure.peer}
+        {@const localHostname = instances.find((i) => i.role === 'local')?.sys?.hostname ?? 'local'}
+        <div class="section-head trust-head">
+          <span>Trust</span>
+          {#if mutual}<span class="secure-badge" title="Both sides trust each other — credential sync enabled">Secure</span>{/if}
         </div>
-        <div class="trust-row">
-          <span class="trust-label">Peer</span>
-          <span class="trust-readonly">
-            {selectedInst.secure.peer ? 'trusts us' : 'does not trust us'}
-          </span>
+        <div class="cert-toggles">
+          <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+          <div
+            class="cert-toggle"
+            class:disabled={trustPending || pushTrustPending}
+            onclick={() => !(trustPending || pushTrustPending) && toggleLocalTrust(selectedInst!)}
+            role="button"
+            tabindex="0"
+          >
+            <span class="cert-toggle-label">Trust {peerName} Cert</span>
+            <div
+              class="toggle-switch"
+              class:on={selectedInst.secure.local}
+              aria-label="Trust {peerName} cert"
+            ><span class="toggle-thumb"></span></div>
+          </div>
+          {#if selectedInst.secure.peer}
+            <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+            <div
+              class="cert-toggle"
+              class:disabled={trustPending || pushTrustPending}
+              onclick={() => !(trustPending || pushTrustPending) && pushTrust(selectedInst!, false)}
+              role="button"
+              tabindex="0"
+            >
+              <span class="cert-toggle-label">Send {peerName} Cert</span>
+              <div class="toggle-switch on" aria-label="Send cert to {peerName}"><span class="toggle-thumb"></span></div>
+            </div>
+          {:else}
+            <div class="cert-toggle cert-toggle-blocked">
+              <span class="cert-toggle-label">Send {peerName} Cert</span>
+              <div class="toggle-switch" aria-label="Send cert to {peerName}"><span class="toggle-thumb"></span></div>
+              <p class="cert-blocked-hint">Run on {peerName}:</p>
+              <button
+                class="cert-cmd"
+                title="Click to copy"
+                onclick={() => copyText(`orca pod peer update ${localHostname} --on`)}
+              >orca pod peer update {localHostname} --on</button>
+            </div>
+          {/if}
         </div>
       {/if}
 
       <div class="section-head">Update</div>
       <div class="update-controls">
-        <div class="update-row">
-          <select bind:value={drawerChannel} class="channel-select">
-            <option value="stable">stable</option>
-            <option value="rc">rc</option>
-            <option value="beta">beta</option>
-          </select>
+        <div class="update-setting-row">
+          <span class="update-setting-label">Channel</span>
+          <div class="channel-segment">
+            {#each ['stable', 'rc', 'beta'] as ch, i}
+              {@const active = drawerChannel === ch}
+              <button
+                class="channel-btn"
+                class:active
+                onclick={() => { drawerChannel = ch; updateCheckResult = null; }}
+                disabled={checkPending || updatePending}
+              >{ch}</button>
+            {/each}
+          </div>
+        </div>
+
+        {#if DEV_MODE_UI}
+          <div class="update-setting-row">
+            <span class="update-setting-label">Dev mode</span>
+            <button
+              class="toggle-switch"
+              class:on={selectedInst.mode === 'dev'}
+              disabled={checkPending || updatePending}
+              onclick={() => toggleDevMode(selectedInst!)}
+              aria-label="Toggle dev mode"
+              role="switch"
+              aria-checked={selectedInst.mode === 'dev'}
+            ><span class="toggle-thumb"></span></button>
+          </div>
+        {/if}
+
+        <div class="update-action-row">
           <button class="ctrl-btn" onclick={checkUpdate} disabled={checkPending || updatePending}>
             {checkPending ? '…' : 'Check'}
           </button>
@@ -641,15 +861,93 @@
     color: var(--color-text-dim);
     text-transform: uppercase;
     letter-spacing: 0.06em;
+    white-space: nowrap;
   }
-  .retention-picker select {
-    background: var(--color-surface);
+  .retention-segment {
+    position: relative;
+    display: flex;
+    background: var(--color-bg-2, color-mix(in srgb, var(--color-bg) 60%, #000));
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .segment-pill {
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    width: calc(25% - 4px);
+    margin: 0 2px;
+    background: color-mix(in srgb, var(--color-accent, #4f86f7) 18%, transparent);
+    border: 1px solid var(--color-accent, #4f86f7);
+    border-radius: 4px;
+    transition: left 0.2s ease;
+    pointer-events: none;
+  }
+  .segment-btn {
+    position: relative;
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+    padding: 4px 6px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: color 0.15s;
+    z-index: 1;
+  }
+  .segment-btn:hover:not(:disabled) {
+    color: var(--color-text);
+  }
+  .segment-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .custom-popover {
+    padding: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .custom-popover-label {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--color-text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .custom-days-input {
+    background: var(--color-bg);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm, 4px);
     color: var(--color-text);
+    font-size: var(--text-sm);
+    padding: 4px 8px;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .custom-days-input:focus {
+    outline: none;
+    border-color: var(--color-accent, #4f86f7);
+  }
+  .custom-apply-btn {
+    background: color-mix(in srgb, var(--color-accent, #4f86f7) 15%, transparent);
+    border: 1px solid var(--color-accent, #4f86f7);
+    border-radius: 4px;
+    color: var(--color-accent, #4f86f7);
     font-size: var(--text-xs);
-    padding: 2px 6px;
+    padding: 4px 12px;
     cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+    align-self: flex-end;
+  }
+  .custom-apply-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--color-accent, #4f86f7) 25%, transparent);
+    color: var(--color-text);
+  }
+  .custom-apply-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
 
   /* ── grid ─────────────────────────────────────────────────────────────── */
@@ -693,6 +991,18 @@
     display: inline-flex;
     align-items: center;
     gap: 8px;
+    min-width: 0;
+  }
+  .update-badge {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 10px;
+    background: color-mix(in srgb, #f59e0b 15%, transparent);
+    color: #f59e0b;
+    border: 1px solid color-mix(in srgb, #f59e0b 40%, transparent);
+    white-space: nowrap;
+    flex-shrink: 0;
   }
   .hostname {
     font-weight: var(--weight-semibold);
@@ -720,24 +1030,32 @@
   }
   .metric-row {
     display: flex;
-    align-items: center;
-    gap: 8px;
+    flex-direction: column;
+    gap: 3px;
     font-size: var(--text-xs);
   }
-  .load-row {
+  .metric-head {
+    display: flex;
     align-items: baseline;
+    justify-content: space-between;
+    gap: 4px;
   }
   .metric-label {
-    width: 36px;
-    flex-shrink: 0;
     color: var(--color-text-dim);
     text-transform: uppercase;
     font-size: 10px;
     letter-spacing: 0.06em;
+    flex-shrink: 0;
+  }
+  .metric-val {
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    font-size: var(--text-xs);
+    text-align: right;
   }
   .bar-wrap {
-    flex: 1;
-    height: 6px;
+    width: 100%;
+    height: 5px;
     background: var(--color-bg);
     border: 1px solid var(--color-border);
     border-radius: 3px;
@@ -755,20 +1073,10 @@
   .bar.crit {
     background: var(--color-error);
   }
-  .metric-val {
-    width: 120px;
-    flex-shrink: 0;
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-  }
-  .load-val {
-    width: auto;
-    font-variant-numeric: tabular-nums;
-  }
   .load-legend {
     font-size: 9px;
     letter-spacing: 0.04em;
-    opacity: 0.6;
+    opacity: 0.7;
   }
   .gpu-val {
     display: flex;
@@ -889,46 +1197,114 @@
   }
 
   /* ── trust ────────────────────────────────────────────────────────────── */
-  .trust-row {
+  .trust-head {
     display: flex;
     align-items: center;
-    gap: var(--space-3);
-    font-size: var(--text-xs);
+    justify-content: space-between;
   }
-  .trust-label {
-    width: 48px;
-    flex-shrink: 0;
-    color: var(--color-text-dim);
-    text-transform: uppercase;
+  .secure-badge {
     font-size: 10px;
-    letter-spacing: 0.06em;
+    font-weight: 600;
+    padding: 1px 7px;
+    border-radius: 10px;
+    background: color-mix(in srgb, #22c55e 15%, transparent);
+    color: #22c55e;
+    border: 1px solid color-mix(in srgb, #22c55e 40%, transparent);
   }
-  .trust-btn {
+  .cert-toggles {
+    display: flex;
+    justify-content: center;
+    gap: var(--space-3);
+  }
+  .cert-toggle {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    background: color-mix(in srgb, var(--color-surface, #1a1a2e) 80%, transparent);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md, 8px);
+    cursor: pointer;
+    width: fit-content;
+    min-width: 100px;
+    transition: border-color 0.15s, background 0.15s;
+    user-select: none;
+  }
+  .cert-toggle:hover:not(.disabled) {
+    border-color: color-mix(in srgb, var(--color-accent, #4f86f7) 50%, transparent);
+    background: color-mix(in srgb, var(--color-accent, #4f86f7) 5%, var(--color-surface, #1a1a2e));
+  }
+  .cert-toggle.disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .cert-toggle-blocked {
+    cursor: default;
+    opacity: 1;
+  }
+  .cert-toggle-blocked .toggle-switch {
+    opacity: 0.35;
+  }
+  .cert-blocked-hint {
+    margin: var(--space-1) 0 2px;
+    font-size: 9px;
+    color: var(--color-text-dim);
+  }
+  .cert-cmd {
+    font-size: 9px;
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
     background: var(--color-bg);
     border: 1px solid var(--color-border);
-    border-radius: 4px;
-    color: var(--color-text-muted);
-    font-size: var(--text-xs);
-    padding: 2px 10px;
-    cursor: pointer;
-    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    border-radius: 3px;
+    padding: 2px 5px;
+    cursor: copy;
+    word-break: break-all;
+    display: block;
   }
-  .trust-btn.active {
-    background: color-mix(in srgb, var(--color-accent, #4f86f7) 15%, transparent);
-    border-color: var(--color-accent, #4f86f7);
-    color: var(--color-accent, #4f86f7);
-  }
-  .trust-btn:hover:not(:disabled) {
+  .cert-cmd:hover {
     border-color: var(--color-accent, #4f86f7);
     color: var(--color-text);
   }
-  .trust-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
+  .cert-toggle-label {
+    font-size: 10px;
+    color: var(--color-text-dim);
+    line-height: 1.3;
+    text-align: center;
+    white-space: nowrap;
   }
-  .trust-readonly {
-    color: var(--color-text-muted);
-    font-style: italic;
+  .toggle-switch {
+    position: relative;
+    width: 34px;
+    height: 18px;
+    background: var(--color-border);
+    border-radius: 9px;
+    flex-shrink: 0;
+    transition: background 0.2s;
+    pointer-events: none;
+  }
+  .toggle-switch.on {
+    background: var(--color-accent, #4f86f7);
+  }
+  .toggle-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    background: white;
+    border-radius: 50%;
+    transition: left 0.2s;
+  }
+  .toggle-switch.on .toggle-thumb {
+    left: 18px;
+  }
+  .stat-raw {
+    margin: var(--space-1) 0 0;
+    font-size: 10px;
+    color: var(--color-text-dim);
+    font-family: var(--font-mono);
   }
 
   .err {
@@ -949,20 +1325,48 @@
     flex-direction: column;
     gap: var(--space-2);
   }
-  .update-row {
+  .update-setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+  }
+  .update-setting-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-dim);
+    flex-shrink: 0;
+  }
+  .update-action-row {
     display: flex;
     align-items: center;
     gap: var(--space-2);
   }
-  .channel-select {
-    background: var(--color-bg);
+  .channel-segment {
+    display: flex;
+    background: color-mix(in srgb, var(--color-bg) 60%, transparent);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm, 4px);
-    color: var(--color-text);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .channel-btn {
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
     font-size: var(--text-xs);
-    padding: 3px 6px;
+    padding: 3px 10px;
     cursor: pointer;
-    flex-shrink: 0;
+    transition: color 0.15s, background 0.15s;
+  }
+  .channel-btn.active {
+    background: color-mix(in srgb, var(--color-accent, #4f86f7) 18%, transparent);
+    color: var(--color-accent, #4f86f7);
+  }
+  .channel-btn:hover:not(:disabled):not(.active) {
+    color: var(--color-text);
+  }
+  .channel-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
   }
   .ctrl-btn {
     background: var(--color-bg);

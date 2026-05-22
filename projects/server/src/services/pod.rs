@@ -147,6 +147,39 @@ impl PodService for ServerPod {
         })
     }
 
+    async fn push_trust(&self, peer_id: &str, on: bool) -> Result<PodTrustOutput> {
+        // Our own peer_id as the remote knows us.
+        let own_id = format!("peer.{}", crate::host_identity::machine_id_short());
+        // Execute pod.peer.update on the remote host, making THEM set their
+        // local_secure for us. `push: false` prevents recursion.
+        #[allow(clippy::disallowed_types)] // exec is the wire-level dispatch boundary
+        let dispatch = self
+            .exec(
+                peer_id,
+                "pod.peer.update",
+                serde_json::json!({ "peer_id": own_id, "on": on, "push": false }),
+            )
+            .await?;
+        let remote: PodTrustOutput = serde_json::from_value(dispatch.result)?;
+        // remote.local_secure = they now trust us (= our peer_secure for this peer).
+        // Our own local_secure for them is unchanged — read it from DB.
+        let conn = db::open_default()?;
+        let our_local_secure = pdb::list_peers(&conn)?
+            .into_iter()
+            .find(|p| p.peer_id == peer_id)
+            .map(|p| p.local_secure)
+            .unwrap_or(false);
+        drop(conn);
+        let peer_secure = remote.local_secure;
+        Ok(PodTrustOutput {
+            peer_id: peer_id.to_string(),
+            local_secure: our_local_secure,
+            peer_secure,
+            mutual: our_local_secure && peer_secure,
+            notify_result: remote.notify_result,
+        })
+    }
+
     async fn ping(&self, peer_id: &str) -> PodPingOutput {
         let conn = match db::open_default() {
             Ok(c) => c,

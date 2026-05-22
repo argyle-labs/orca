@@ -248,17 +248,16 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
     report
 }
 
-/// Detect GPUs — NVIDIA via `nvidia-smi`, AMD via sysfs.
-/// Returns empty vec if no GPUs or driver absent.
+/// Detect GPUs — NVIDIA via `nvidia-smi`, AMD via sysfs, Intel via sysfs.
+/// Collects from all sources and merges results.
 async fn collect_gpus() -> Vec<GpuInfo> {
-    // Try NVIDIA first (most common in homelab GPU hosts).
-    if let Ok(gpus) = collect_nvidia_gpus().await
-        && !gpus.is_empty()
-    {
-        return gpus;
+    let mut gpus = Vec::new();
+    if let Ok(nvidia) = collect_nvidia_gpus().await {
+        gpus.extend(nvidia);
     }
-    // Fallback: AMD sysfs
-    collect_amd_gpus()
+    gpus.extend(collect_amd_gpus());
+    gpus.extend(collect_intel_gpus());
+    gpus
 }
 
 async fn collect_nvidia_gpus() -> anyhow::Result<Vec<GpuInfo>> {
@@ -286,6 +285,8 @@ async fn collect_nvidia_gpus() -> anyhow::Result<Vec<GpuInfo>> {
             vram_used_mb: parts[2].parse::<u64>().ok(),
             utilization_percent: parts[3].parse::<f32>().ok(),
             temperature_c: parts[4].parse::<f32>().ok(),
+            driver_status: Some("ok".to_string()),
+            driver_install_hint: None,
         });
     }
     Ok(gpus)
@@ -338,6 +339,58 @@ fn collect_amd_gpus() -> Vec<GpuInfo> {
                 vram_used_mb: vram_used,
                 utilization_percent: busy,
                 temperature_c: None,
+                driver_status: Some("ok".to_string()),
+                driver_install_hint: None,
+            });
+        }
+        gpus
+    }
+}
+
+/// Read Intel GPU info from sysfs under `/sys/class/drm/card*/device/`.
+/// iGPUs and Intel Arc discrete GPUs both use vendor `0x8086`. Utilization
+/// is not available via stable sysfs — we report the name only.
+fn collect_intel_gpus() -> Vec<GpuInfo> {
+    #[cfg(not(target_os = "linux"))]
+    return vec![];
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
+            return vec![];
+        };
+        let mut gpus = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !name.starts_with("card") || name.contains('-') {
+                continue;
+            }
+            let dev = path.join("device");
+            let vendor_id = std::fs::read_to_string(dev.join("vendor")).unwrap_or_default();
+            if !vendor_id.trim().eq_ignore_ascii_case("0x8086") {
+                continue;
+            }
+            // Intel GPUs may expose gt_act_freq_mhz but not gpu_busy_percent;
+            // skip utilization rather than report misleading data.
+            let card_name = std::fs::read_to_string(dev.join("product_name")).unwrap_or_default();
+            let display_name = if card_name.trim().is_empty() {
+                format!("Intel GPU ({})", name)
+            } else {
+                card_name.trim().to_string()
+            };
+            gpus.push(GpuInfo {
+                name: display_name,
+                vendor: "intel".to_string(),
+                // iGPUs use shared system RAM; discrete Arc has VRAM but it's
+                // not easily readable from stable sysfs without lspci or i915 debugfs.
+                vram_total_mb: None,
+                vram_used_mb: None,
+                utilization_percent: None,
+                temperature_c: None,
+                // Utilization needs intel-gpu-tools (intel_gpu_top); available
+                // via apt install intel-gpu-tools on Debian/Ubuntu.
+                driver_status: Some("no_metrics".to_string()),
+                driver_install_hint: Some("intel-gpu-tools".to_string()),
             });
         }
         gpus
@@ -483,6 +536,8 @@ mod tests {
             vram_used_mb: Some(1024),
             utilization_percent: Some(42.0),
             temperature_c: Some(65.0),
+            driver_status: Some("ok".into()),
+            driver_install_hint: None,
         };
         let sys = System::new_with_specifics(
             RefreshKind::new()
