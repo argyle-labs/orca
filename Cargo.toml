@@ -20,7 +20,7 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 url = "2"
 urlencoding = "2"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v7"] }
 regex = "1"
 toml = "1"
 serde = { version = "1", features = ["derive"] }

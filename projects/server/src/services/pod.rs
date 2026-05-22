@@ -275,7 +275,7 @@ impl PodService for ServerPod {
         let pod_id = pdb::get_pod_id(&conn)?.unwrap_or_else(|| "default".to_string());
         let code = mint_pairing_code();
         let code_hash = pdb::hash_code(&code);
-        let offer_id = uuid::Uuid::new_v4().to_string();
+        let offer_id = uuid::Uuid::now_v7().to_string();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)

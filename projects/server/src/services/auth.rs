@@ -109,7 +109,7 @@ impl AuthService for ServerAuth {
         let plaintext = format!("orca_{}", hex_lower(&raw));
         let token_hash = sha256_hex(plaintext.as_bytes());
 
-        let id = format!("tok_{}", hex_lower(&random_bytes::<12>()));
+        let id = uuid::Uuid::now_v7().to_string();
         let now = chrono::Utc::now().to_rfc3339();
         let expires_at = expires_in_days
             .map(|d| (chrono::Utc::now() + chrono::Duration::days(d as i64)).to_rfc3339());
@@ -151,12 +151,6 @@ impl AuthService for ServerAuth {
         let conn = db::open_default()?;
         db::api_tokens::revoke(&conn, id)
     }
-}
-
-fn random_bytes<const N: usize>() -> [u8; N] {
-    let mut buf = [0u8; N];
-    rand::rng().fill_bytes(&mut buf);
-    buf
 }
 
 fn hex_lower(bytes: &[u8]) -> String {

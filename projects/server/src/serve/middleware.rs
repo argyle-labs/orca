@@ -37,7 +37,7 @@ pub async fn log_requests(req: Request, next: Next) -> Response {
         .get(CORRELATION_ID_HEADER)
         .and_then(|v| v.to_str().ok())
         .map(String::from)
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+        .unwrap_or_else(|| Uuid::now_v7().to_string());
 
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
@@ -720,21 +720,21 @@ mod tests {
 
     fn insert_user(conn: &db::Conn, role: &str) -> String {
         let now = chrono::Utc::now().to_rfc3339();
-        let id = format!("u_{}", uuid::Uuid::new_v4());
+        let id = uuid::Uuid::now_v7().to_string();
         db::users::insert(conn, &id, "tester", "fake_hash", role, &now).unwrap();
         id
     }
 
     fn insert_session(conn: &db::Conn, user_id: &str, expires_at: &str) -> String {
         let now = chrono::Utc::now().to_rfc3339();
-        let sid = format!("s_{}", uuid::Uuid::new_v4());
+        let sid = uuid::Uuid::now_v7().to_string();
         db::sessions::insert(conn, &sid, user_id, &now, expires_at).unwrap();
         sid
     }
 
     fn insert_token(conn: &db::Conn, role: &str, hash: &str, expires_at: Option<&str>) -> String {
         let now = chrono::Utc::now().to_rfc3339();
-        let id = format!("t_{}", uuid::Uuid::new_v4());
+        let id = uuid::Uuid::now_v7().to_string();
         db::api_tokens::insert(conn, &id, "test-token", hash, role, &now, expires_at).unwrap();
         id
     }

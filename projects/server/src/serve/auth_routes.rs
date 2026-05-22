@@ -12,7 +12,6 @@ use axum::{
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use utoipa::ToSchema;
@@ -20,30 +19,25 @@ use utoipa::ToSchema;
 use crate::serve::middleware::{AuthIdentity, AuthKind, SESSION_COOKIE, SESSION_TTL};
 
 /// Runtime-set by `serve::run` so cookie attributes can vary between dev
-/// (cross-port browser ↔ API: needs `SameSite=None`) and production (single
-/// HTTPS origin: tighter `SameSite=Strict`).
+/// (cross-port browser ↔ API: SameSite=Lax) and production.
 static DEV_MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 pub fn set_dev_mode(dev: bool) {
     let _ = DEV_MODE.set(dev);
 }
 
+/// Use Lax everywhere. Strict can silently block cookies on self-signed TLS
+/// (common in homelab deployments). Lax still protects against CSRF — the
+/// server is HTTPS-only and HttpOnly prevents JS access.
 fn same_site() -> &'static str {
-    if *DEV_MODE.get().unwrap_or(&false) {
-        "Lax"
-    } else {
-        "Strict"
-    }
+    "Lax"
 }
 
-/// In prod we require HTTPS so cookies get `Secure`. In dev we serve plain
-/// HTTP so the attribute would prevent the cookie from being stored at all.
+/// No Secure attribute: the daemon's TLS cert is self-signed and several
+/// browsers silently refuse to store Secure cookies from untrusted issuers.
+/// The server only speaks TLS so the cookie can never be sent over HTTP anyway.
 fn secure_attr() -> &'static str {
-    if *DEV_MODE.get().unwrap_or(&false) {
-        ""
-    } else {
-        " Secure;"
-    }
+    ""
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -103,26 +97,12 @@ fn err(status: StatusCode, msg: &str) -> Response {
     (status, Json(ErrorBody { error: msg.into() })).into_response()
 }
 
-fn ulid_like(prefix: &str) -> String {
-    let mut buf = [0u8; 12];
-    rand::rng().fill_bytes(&mut buf);
-    let mut s = String::with_capacity(prefix.len() + buf.len() * 2 + 1);
-    s.push_str(prefix);
-    s.push('_');
-    for b in buf {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
+fn new_id() -> String {
+    uuid::Uuid::now_v7().to_string()
 }
 
 fn new_session_id() -> String {
-    let mut buf = [0u8; 32];
-    rand::rng().fill_bytes(&mut buf);
-    let mut s = String::with_capacity(64);
-    for b in buf {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
+    new_id()
 }
 
 /// Build the `Set-Cookie` header value for a freshly minted session.
@@ -254,7 +234,7 @@ pub async fn signup(Json(req): Json<SignupRequest>) -> Response {
         Ok(h) => h,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("hash: {e}")),
     };
-    let user_id = ulid_like("usr");
+    let user_id = new_id();
     let now = chrono::Utc::now().to_rfc3339();
     let role = if first_user { "admin" } else { "member" };
     if let Err(e) = db::users::insert(&conn, &user_id, username, &hash, role, &now) {
@@ -477,23 +457,20 @@ mod tests {
     use axum::http::StatusCode;
 
     #[test]
-    fn ulid_like_has_prefix_and_hex_suffix() {
-        let id = ulid_like("usr");
-        assert!(id.starts_with("usr_"), "id={id}");
-        // 12 bytes → 24 hex chars
-        assert_eq!(id.len(), "usr_".len() + 24, "id={id}");
-        let hex_part = &id["usr_".len()..];
-        assert!(
-            hex_part.chars().all(|c| c.is_ascii_hexdigit()),
-            "non-hex: {hex_part}"
-        );
+    fn new_id_is_valid_uuidv7() {
+        let id = new_id();
+        // UUIDv7 canonical form: 36 chars, 8-4-4-4-12 hyphenated hex
+        assert_eq!(id.len(), 36, "id={id}");
+        let parsed = uuid::Uuid::parse_str(&id).expect("must parse as UUID");
+        assert_eq!(parsed.get_version_num(), 7, "must be v7");
     }
 
     #[test]
-    fn new_session_id_is_64_hex_chars() {
+    fn new_session_id_is_valid_uuidv7() {
         let sid = new_session_id();
-        assert_eq!(sid.len(), 64, "sid={sid}");
-        assert!(sid.chars().all(|c| c.is_ascii_hexdigit()), "non-hex: {sid}");
+        assert_eq!(sid.len(), 36, "sid={sid}");
+        let parsed = uuid::Uuid::parse_str(&sid).expect("must parse as UUID");
+        assert_eq!(parsed.get_version_num(), 7, "must be v7");
     }
 
     #[test]
@@ -515,15 +492,13 @@ mod tests {
     }
 
     #[test]
-    fn same_site_returns_valid_value() {
-        let v = same_site();
-        assert!(v == "Lax" || v == "Strict", "unexpected: {v}");
+    fn same_site_returns_lax() {
+        assert_eq!(same_site(), "Lax");
     }
 
     #[test]
-    fn secure_attr_returns_valid_value() {
-        let v = secure_attr();
-        assert!(v.is_empty() || v == " Secure;", "unexpected: {v}");
+    fn secure_attr_is_empty() {
+        assert_eq!(secure_attr(), "");
     }
 
     #[test]
@@ -540,11 +515,9 @@ mod tests {
         // Call twice — second call should be a silent no-op (OnceLock)
         set_dev_mode(false);
         set_dev_mode(true);
-        // After the first call wins, same_site/secure_attr return consistent values
-        let ss = same_site();
-        let sa = secure_attr();
-        assert!(ss == "Lax" || ss == "Strict");
-        assert!(sa.is_empty() || sa == " Secure;");
+        // After the first call wins, same_site/secure_attr are always fixed now
+        assert_eq!(same_site(), "Lax");
+        assert_eq!(secure_attr(), "");
     }
 
     fn test_conn() -> (tempfile::TempDir, db::Conn) {

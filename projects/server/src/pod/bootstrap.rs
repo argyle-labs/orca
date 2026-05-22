@@ -206,7 +206,7 @@ fn handle_offer(env: &SignedEnvelope, peer: std::net::SocketAddr) -> Result<Offe
     let signer_fp = pki::bootstrap_pubkey_fingerprint(&signer_vk);
 
     let conn = db::open_default()?;
-    let offer_id = Uuid::new_v4().to_string();
+    let offer_id = Uuid::now_v7().to_string();
     let ttl = body.expires_at - now_secs();
     if ttl <= 0 {
         anyhow::bail!("offer already expired");
@@ -349,7 +349,7 @@ fn handle_request_offer(
 
     let code = crate::pod::scheduler::mint_pairing_code();
     let code_hash = pdb::hash_code(&code);
-    let offer_id = Uuid::new_v4().to_string();
+    let offer_id = Uuid::now_v7().to_string();
     let expires_at = now_secs() + crate::pod::scheduler::OFFER_TTL_SECS;
     pdb::insert_pending_offer(
         &conn,

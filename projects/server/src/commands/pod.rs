@@ -314,7 +314,7 @@ pub async fn cmd_pod_join(addr: &str) -> Result<()> {
         .unwrap_or_else(|| r.inviter_hostname.clone());
 
     let conn = db::open_default()?;
-    let offer_id = uuid::Uuid::new_v4().to_string();
+    let offer_id = uuid::Uuid::now_v7().to_string();
     let ttl = r.expires_at - now_secs();
     if ttl <= 0 {
         bail!("inviter returned an already-expired offer (clock skew between hosts?)");
@@ -435,7 +435,7 @@ pub async fn cmd_pod_offer(addr: &str) -> Result<()> {
 
     let code = crate::pod::scheduler::mint_pairing_code();
     let code_hash = pdb::hash_code(&code);
-    let offer_id = uuid::Uuid::new_v4().to_string();
+    let offer_id = uuid::Uuid::now_v7().to_string();
     pdb::insert_pending_offer(
         &conn,
         &offer_id,

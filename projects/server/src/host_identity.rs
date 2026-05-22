@@ -119,7 +119,7 @@ fn load_or_generate_machine_id(app_dir: &Path) -> Result<String> {
         }
     }
     std::fs::create_dir_all(app_dir).with_context(|| format!("create {}", app_dir.display()))?;
-    let id = uuid::Uuid::new_v4().to_string();
+    let id = uuid::Uuid::now_v7().to_string();
     std::fs::write(&path, format!("{id}\n"))
         .with_context(|| format!("write {}", path.display()))?;
     Ok(id)

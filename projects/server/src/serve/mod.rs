@@ -18,7 +18,7 @@ use axum::Router;
 use axum::routing::get;
 use axum_server::tls_rustls::RustlsConfig;
 use orca_utils::state::{DaemonMode, DaemonState};
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::info;
 
 /// Guard for `--dev`: refuse if more than one user is registered.
@@ -904,12 +904,13 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
     // in dev (cross-port) and SameSite=Strict in prod (same-origin).
     auth_routes::set_dev_mode(dev);
 
-    // In dev the browser may load the page from vite (:12001) while the API
-    // lives on :12000 — that's cross-origin, so we mirror the request origin
-    // and enable credentials. In prod the UI is same-origin (Caddy / orca
-    // proxy), so we keep the tighter `Allow-Origin: *` with no credentials.
-    let cors = if dev {
+    // Always mirror the requesting origin so cookie-bearing credentialed
+    // fetches work in all access patterns: Vite dev server (:12001 → :12000
+    // cross-port), direct embedded UI (same-origin), and remote browser
+    // access from another machine on the LAN.
+    let cors = {
         use axum::http::{HeaderName, Method};
+        let _ = dev; // suppress unused warning if cfg changes
         CorsLayer::new()
             .allow_origin(AllowOrigin::mirror_request())
             .allow_methods([
@@ -926,11 +927,6 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
                 HeaderName::from_static("x-correlation-id"),
             ])
             .allow_credentials(true)
-    } else {
-        CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any)
     };
 
     let mcp_pool = Arc::new(mcp_client::McpPool::new_with_db(db_path));

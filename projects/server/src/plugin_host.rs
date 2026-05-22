@@ -1363,7 +1363,7 @@ fn handle_context_subscribe(
         }
     };
 
-    let subscription_id = uuid::Uuid::new_v4().to_string();
+    let subscription_id = uuid::Uuid::now_v7().to_string();
     let mut rx = state.registry.channel(&params.context_id).subscribe();
     let notify_tx = state.notify_tx.clone();
     let filter = params.type_filter;

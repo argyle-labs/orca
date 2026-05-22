@@ -164,7 +164,7 @@ impl ProfileManager {
         {
             return Err(ProfileError::NameTaken(name.to_string()));
         }
-        let id = Uuid::new_v4().to_string();
+        let id = Uuid::now_v7().to_string();
         let row = db::profiles::create(conn, &id, name, owner_user_id, description)
             .map_err(ProfileError::Other)?;
         let profile = Profile::from_row(row, &self.profiles_root);

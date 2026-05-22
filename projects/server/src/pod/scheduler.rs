@@ -70,7 +70,7 @@ async fn tick() -> Result<()> {
         }
         let code = mint_pairing_code();
         let code_hash = pdb::hash_code(&code);
-        let offer_id = uuid::Uuid::new_v4().to_string();
+        let offer_id = uuid::Uuid::now_v7().to_string();
         pdb::insert_pending_offer(
             &conn,
             &offer_id,
