@@ -4,6 +4,7 @@
 
 # Worktrees
 .worktrees/
+.claude/
 
 # Rust
 target/
