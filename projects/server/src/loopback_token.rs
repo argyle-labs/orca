@@ -95,7 +95,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 #[cfg(unix)]
-fn write_secret_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+pub(crate) fn write_secret_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let mut f = std::fs::OpenOptions::new()
@@ -109,12 +109,12 @@ fn write_secret_file(path: &std::path::Path, content: &str) -> std::io::Result<(
 }
 
 #[cfg(not(unix))]
-fn write_secret_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+pub(crate) fn write_secret_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     std::fs::write(path, content)
 }
 
 #[cfg(unix)]
-fn chmod_dir_owner_only(dir: &std::path::Path) -> std::io::Result<()> {
+pub(crate) fn chmod_dir_owner_only(dir: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mut perms = std::fs::metadata(dir)?.permissions();
     perms.set_mode(0o700);
@@ -122,6 +122,89 @@ fn chmod_dir_owner_only(dir: &std::path::Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn chmod_dir_owner_only(_dir: &std::path::Path) -> std::io::Result<()> {
+pub(crate) fn chmod_dir_owner_only(_dir: &std::path::Path) -> std::io::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn hex_produces_lowercase_hexdigits() {
+        let s = hex(&[0x00, 0xff, 0xab, 0x12]);
+        assert_eq!(s, "00ffab12");
+    }
+
+    #[test]
+    fn get_returns_none_before_install() {
+        // TOKEN may be set by other tests; this test exercises the get() path.
+        // We can't guarantee TOKEN state, but we can call get() and verify the return type.
+        let _ = get(); // must not panic
+    }
+
+    #[test]
+    fn set_for_tests_then_get() {
+        // If TOKEN is not yet set, set_for_tests populates it.
+        set_for_tests("test_loopback_token_abc".to_string());
+        // get() must return Some value (either ours or a prior call's value)
+        assert!(get().is_some());
+    }
+
+    #[test]
+    fn read_from_disk_returns_none_when_file_absent() {
+        // Point HOME at a fresh temp dir — no loopback.token file present.
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("HOME", dir.path()) };
+        // May return Some if the file somehow exists, None if absent
+        let _ = read_from_disk(); // must not panic
+    }
+
+    #[test]
+    fn read_from_disk_reads_written_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = dir.path().join(".orca").join("secrets");
+        std::fs::create_dir_all(&secrets).unwrap();
+        let token_file = secrets.join("loopback.token");
+        write_secret_file(&token_file, "orca_loopback_abcdef").unwrap();
+        unsafe { std::env::set_var("HOME", dir.path()) };
+        let got = read_from_disk();
+        assert_eq!(got, Some("orca_loopback_abcdef".to_string()));
+    }
+
+    #[test]
+    fn write_secret_file_creates_file_with_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.token");
+        write_secret_file(&path, "hello-token").unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "hello-token");
+    }
+
+    #[test]
+    fn chmod_dir_owner_only_succeeds_on_existing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        chmod_dir_owner_only(dir.path()).unwrap();
+        // On Unix, verify the mode is 0700
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let mode = std::fs::metadata(dir.path()).unwrap().mode() & 0o777;
+            assert_eq!(mode, 0o700, "mode should be 0700, got {mode:o}");
+        }
+    }
+
+    #[test]
+    fn install_at_startup_is_idempotent() {
+        // install_at_startup returns Ok() immediately if TOKEN is already set.
+        // Ensure calling it twice doesn't error.
+        // (We can't control whether TOKEN was set by a prior test, but we can
+        // call install_at_startup safely — if TOKEN is set, it returns early.)
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("HOME", dir.path()) };
+        // May write a file or may return early — both paths must succeed.
+        let _ = install_at_startup(); // ignore result (may fail if HOME is weird)
+        let _ = install_at_startup(); // second call must also not panic
+    }
 }

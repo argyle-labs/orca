@@ -234,4 +234,19 @@ mod tests {
             CheckOutcome::Throttled { .. }
         ));
     }
+
+    #[test]
+    fn public_wrappers_delegate_correctly() {
+        let _g = test_guard();
+        reset_for_tests();
+        // record_failure delegates to record_failure_at
+        for _ in 0..MAX_FAILURES {
+            record_failure("7.7.7.7", "frank");
+        }
+        // check delegates to check_at
+        assert!(matches!(
+            check("7.7.7.7", "frank"),
+            CheckOutcome::Throttled { .. }
+        ));
+    }
 }

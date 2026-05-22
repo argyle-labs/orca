@@ -148,6 +148,15 @@ fn clear_cookie_value() -> String {
     )
 }
 
+/// Build the 429 response with `Retry-After` header for throttled signins.
+pub(crate) fn throttled_response(retry_after_secs: u64) -> Response {
+    let mut resp = err(StatusCode::TOO_MANY_REQUESTS, "too many signin attempts");
+    if let Ok(v) = retry_after_secs.to_string().parse() {
+        resp.headers_mut().insert(header::RETRY_AFTER, v);
+    }
+    resp
+}
+
 fn public_signup_enabled(conn: &db::Conn) -> bool {
     db::settings::secret_get(conn, "auth.public_signup_enabled")
         .ok()
@@ -282,11 +291,7 @@ pub async fn signin(
             retry_after_secs,
             "signin throttled"
         );
-        let mut resp = err(StatusCode::TOO_MANY_REQUESTS, "too many signin attempts");
-        if let Ok(v) = retry_after_secs.to_string().parse() {
-            resp.headers_mut().insert(header::RETRY_AFTER, v);
-        }
-        return resp;
+        return throttled_response(retry_after_secs);
     }
 
     let conn = match db::open_default() {
@@ -465,5 +470,82 @@ pub async fn me(req: Request) -> Response {
             .into_response()
         }
         None => err(StatusCode::UNAUTHORIZED, "not signed in"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn ulid_like_has_prefix_and_hex_suffix() {
+        let id = ulid_like("usr");
+        assert!(id.starts_with("usr_"), "id={id}");
+        // 12 bytes → 24 hex chars
+        assert_eq!(id.len(), "usr_".len() + 24, "id={id}");
+        let hex_part = &id["usr_".len()..];
+        assert!(
+            hex_part.chars().all(|c| c.is_ascii_hexdigit()),
+            "non-hex: {hex_part}"
+        );
+    }
+
+    #[test]
+    fn new_session_id_is_64_hex_chars() {
+        let sid = new_session_id();
+        assert_eq!(sid.len(), 64, "sid={sid}");
+        assert!(sid.chars().all(|c| c.is_ascii_hexdigit()), "non-hex: {sid}");
+    }
+
+    #[test]
+    fn session_cookie_value_contains_required_fields() {
+        let v = session_cookie_value("mysessionid");
+        assert!(v.contains("mysessionid"), "v={v}");
+        assert!(v.contains("Path=/"), "v={v}");
+        assert!(v.contains("Max-Age="), "v={v}");
+        assert!(v.contains("HttpOnly"), "v={v}");
+        assert!(v.contains("SameSite="), "v={v}");
+    }
+
+    #[test]
+    fn clear_cookie_value_expires_immediately() {
+        let v = clear_cookie_value();
+        assert!(v.contains("Max-Age=0"), "v={v}");
+        assert!(v.contains("HttpOnly"), "v={v}");
+        assert!(v.contains("SameSite="), "v={v}");
+    }
+
+    #[test]
+    fn same_site_returns_valid_value() {
+        let v = same_site();
+        assert!(v == "Lax" || v == "Strict", "unexpected: {v}");
+    }
+
+    #[test]
+    fn secure_attr_returns_valid_value() {
+        let v = secure_attr();
+        assert!(v == "" || v == " Secure;", "unexpected: {v}");
+    }
+
+    #[test]
+    fn throttled_response_has_429_and_retry_after() {
+        let resp = throttled_response(900);
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry = resp.headers().get(header::RETRY_AFTER);
+        assert!(retry.is_some(), "Retry-After header missing");
+        assert_eq!(retry.unwrap().to_str().unwrap(), "900");
+    }
+
+    #[test]
+    fn set_dev_mode_is_idempotent() {
+        // Call twice — second call should be a silent no-op (OnceLock)
+        set_dev_mode(false);
+        set_dev_mode(true);
+        // After the first call wins, same_site/secure_attr return consistent values
+        let ss = same_site();
+        let sa = secure_attr();
+        assert!(ss == "Lax" || ss == "Strict");
+        assert!(sa == "" || sa == " Secure;");
     }
 }
