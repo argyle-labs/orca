@@ -42,7 +42,7 @@ export const NAV_SECTIONS: NavSection[] = [
   {
     label: 'Infra',
     items: [
-      { label: 'Docker', href: '/docker', icon: '⊞' },
+      { label: 'Docker', href: '/docker', icon: '⊞', enabled: true },
       { label: 'Proxmox', href: '/proxmox', icon: '⊟' },
       { label: 'Home Assistant', href: '/ha', icon: '⌂' },
       { label: 'PKI', href: '/pki', icon: '⌽' },
