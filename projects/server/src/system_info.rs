@@ -6,7 +6,7 @@
 //! never blocks on sysinfo. Bootstrapping callers that race the first refresh
 //! get `None`; the first snapshot lands ~immediately after `spawn_refresher`.
 
-use orca_tools_def::orca_lifecycle::{NetIfaceDto, SystemInfoReport};
+use orca_tools_def::orca_lifecycle::{GpuInfo, NetIfaceDto, SystemInfoReport};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -45,27 +45,59 @@ pub fn current_or_collect() -> Arc<SystemInfoReport> {
 }
 
 /// Spawn the background refresher. Idempotent: subsequent calls do nothing.
+///
+/// Keeps a single `sysinfo::System` alive between ticks so CPU usage is
+/// measured as a delta between refreshes rather than always returning 0 %.
 pub fn spawn_refresher() {
     static SPAWNED: OnceLock<()> = OnceLock::new();
     if SPAWNED.set(()).is_err() {
         return;
     }
     tokio::spawn(async move {
+        let mut sys = System::new_with_specifics(
+            RefreshKind::new()
+                .with_memory(sysinfo::MemoryRefreshKind::everything())
+                .with_cpu(sysinfo::CpuRefreshKind::everything())
+                .with_processes(ProcessRefreshKind::everything()),
+        );
+        // Prime first tick — CPU usage will be 0 on this pass.
+        sys.refresh_memory();
+        sys.refresh_cpu_all();
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+
         loop {
-            let snap = tokio::task::spawn_blocking(collect_blocking)
-                .await
-                .unwrap_or_default();
-            if let Ok(mut g) = cache().lock() {
-                *g = Some(Arc::new(snap));
-            }
             tokio::time::sleep(REFRESH_INTERVAL).await;
+            sys.refresh_memory();
+            sys.refresh_cpu_all();
+            sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+
+            let gpus = collect_gpus().await;
+            let snap = Arc::new(snapshot_from_sys(&sys, gpus));
+            if let Ok(mut g) = cache().lock() {
+                *g = Some(snap);
+            }
         }
     });
 }
 
-/// Synchronously collect a fresh snapshot. Used by the refresher and by
-/// tests; production callers should use [`current`].
+/// Synchronously collect a fresh snapshot (no prior `System` state — CPU
+/// usage will be 0). Used by tests and by `current_or_collect` for CLI paths.
 pub fn collect_blocking() -> SystemInfoReport {
+    let mut sys = System::new_with_specifics(
+        RefreshKind::new()
+            .with_memory(sysinfo::MemoryRefreshKind::everything())
+            .with_cpu(sysinfo::CpuRefreshKind::everything())
+            .with_processes(ProcessRefreshKind::everything()),
+    );
+    sys.refresh_memory();
+    sys.refresh_cpu_all();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    snapshot_from_sys(&sys, vec![])
+}
+
+/// Build a `SystemInfoReport` from a live (already-refreshed) `System`.
+/// `gpus` is pre-collected by the async caller so this stays sync.
+fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
     let (virt, dmi_vendor, dmi_product) = detect_virtualization();
     let mut report = SystemInfoReport {
         snapshot_at_unix: Some(chrono::Utc::now().timestamp()),
@@ -81,29 +113,30 @@ pub fn collect_blocking() -> SystemInfoReport {
         dmi_vendor,
         dmi_product,
         proxmox_role: detect_proxmox_role(),
+        gpus,
         ..Default::default()
     };
-
-    // CPU + memory + process. RefreshKind narrows the work so we don't pay
-    // for sysinfo's full process scan on every tick.
-    let mut sys = System::new_with_specifics(
-        RefreshKind::new()
-            .with_memory(sysinfo::MemoryRefreshKind::everything())
-            .with_cpu(sysinfo::CpuRefreshKind::everything())
-            .with_processes(ProcessRefreshKind::everything()),
-    );
-    sys.refresh_memory();
-    sys.refresh_cpu_all();
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
     report.cpu_logical = Some(sys.cpus().len() as u32);
     report.cpu_physical = sys.physical_core_count().map(|c| c as u32);
     if let Some(c) = sys.cpus().first() {
         report.cpu_model = Some(c.brand().to_string());
     }
-    report.mem_total_mb = Some(sys.total_memory() / 1024 / 1024);
-    report.mem_available_mb = Some(sys.available_memory() / 1024 / 1024);
-    report.swap_total_mb = Some(sys.total_swap() / 1024 / 1024);
+    // global_cpu_usage() requires two refreshes (delta); first call → 0.
+    let usage = sys.global_cpu_usage();
+    if usage > 0.0 {
+        report.cpu_usage_percent = Some(usage);
+    }
+
+    let total_mem = sys.total_memory();
+    let avail_mem = sys.available_memory();
+    report.mem_total_mb = Some(total_mem / 1024 / 1024);
+    report.mem_used_mb = Some(total_mem.saturating_sub(avail_mem) / 1024 / 1024);
+    report.mem_available_mb = Some(avail_mem / 1024 / 1024);
+
+    let total_swap = sys.total_swap();
+    report.swap_total_mb = Some(total_swap / 1024 / 1024);
+    report.swap_used_mb = Some(total_swap.saturating_sub(sys.free_swap()) / 1024 / 1024);
 
     let la = System::load_average();
     // Windows reports zeros for the load average; treat that as "absent".
@@ -124,8 +157,8 @@ pub fn collect_blocking() -> SystemInfoReport {
     }
 
     // Storage — the filesystem hosting ~/.orca. Pick the longest mount-point
-    // prefix that contains the orca dir so we report the right volume on
-    // hosts with separate /home or /var partitions.
+    // prefix so we report the right volume on hosts with separate /home or
+    // /var partitions.
     let orca_dir = orca_dir();
     if let Some(ref dir) = orca_dir {
         report.orca_dir = Some(dir.display().to_string());
@@ -213,6 +246,102 @@ pub fn collect_blocking() -> SystemInfoReport {
     }
 
     report
+}
+
+/// Detect GPUs — NVIDIA via `nvidia-smi`, AMD via sysfs.
+/// Returns empty vec if no GPUs or driver absent.
+async fn collect_gpus() -> Vec<GpuInfo> {
+    // Try NVIDIA first (most common in homelab GPU hosts).
+    if let Ok(gpus) = collect_nvidia_gpus().await {
+        if !gpus.is_empty() {
+            return gpus;
+        }
+    }
+    // Fallback: AMD sysfs
+    collect_amd_gpus()
+}
+
+async fn collect_nvidia_gpus() -> anyhow::Result<Vec<GpuInfo>> {
+    let out = tokio::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=name,memory.total,memory.used,utilization.gpu,temperature.gpu",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .await?;
+    if !out.status.success() {
+        return Ok(vec![]);
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut gpus = Vec::new();
+    for line in text.lines() {
+        let parts: Vec<&str> = line.splitn(5, ',').map(str::trim).collect();
+        if parts.len() < 5 {
+            continue;
+        }
+        gpus.push(GpuInfo {
+            name: parts[0].to_string(),
+            vendor: "nvidia".to_string(),
+            vram_total_mb: parts[1].parse::<u64>().ok(),
+            vram_used_mb: parts[2].parse::<u64>().ok(),
+            utilization_percent: parts[3].parse::<f32>().ok(),
+            temperature_c: parts[4].parse::<f32>().ok(),
+        });
+    }
+    Ok(gpus)
+}
+
+/// Read AMD GPU info from sysfs under `/sys/class/drm/card*/device/`.
+fn collect_amd_gpus() -> Vec<GpuInfo> {
+    #[cfg(not(target_os = "linux"))]
+    return vec![];
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
+            return vec![];
+        };
+        let mut gpus = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            // Only top-level card* (not renderD*, card*-*)
+            if !name.starts_with("card") || name.contains('-') {
+                continue;
+            }
+            let dev = path.join("device");
+            // Must have amdgpu vendor marker
+            let vendor_id = std::fs::read_to_string(dev.join("vendor")).unwrap_or_default();
+            if !vendor_id.trim().eq_ignore_ascii_case("0x1002") {
+                continue;
+            }
+            let busy: Option<f32> = std::fs::read_to_string(dev.join("gpu_busy_percent"))
+                .ok()
+                .and_then(|s| s.trim().parse().ok());
+            let vram_total: Option<u64> = std::fs::read_to_string(dev.join("mem_info_vram_total"))
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .map(|b| b / 1024 / 1024);
+            let vram_used: Option<u64> = std::fs::read_to_string(dev.join("mem_info_vram_used"))
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .map(|b| b / 1024 / 1024);
+            let card_name = std::fs::read_to_string(dev.join("product_name")).unwrap_or_default();
+            let display_name = if card_name.trim().is_empty() {
+                format!("AMD GPU ({})", name)
+            } else {
+                card_name.trim().to_string()
+            };
+            gpus.push(GpuInfo {
+                name: display_name,
+                vendor: "amd".to_string(),
+                vram_total_mb: vram_total,
+                vram_used_mb: vram_used,
+                utilization_percent: busy,
+                temperature_c: None,
+            });
+        }
+        gpus
+    }
 }
 
 fn orca_dir() -> Option<PathBuf> {

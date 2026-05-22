@@ -106,12 +106,23 @@ pub struct SystemInfoReport {
     pub cpu_physical: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_model: Option<String>,
+    /// Aggregate CPU utilisation 0–100 %. Requires two sysinfo refreshes;
+    /// always `None` on the very first CLI snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_usage_percent: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mem_total_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_used_mb: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mem_available_mb: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swap_total_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap_used_mb: Option<u64>,
+    /// GPUs detected on this host (NVIDIA via nvidia-smi; AMD via sysfs).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gpus: Vec<GpuInfo>,
 
     // ── Host / uptime ──
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -185,6 +196,25 @@ pub struct NetIfaceDto {
     /// True for loopback interfaces (lo / lo0).
     #[serde(default)]
     pub loopback: bool,
+}
+
+/// One GPU detected on the host.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Default)]
+pub struct GpuInfo {
+    /// Display name from driver (e.g. `NVIDIA GeForce RTX 4090`).
+    pub name: String,
+    /// Source driver: `"nvidia"`, `"amd"`, `"intel"`.
+    pub vendor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vram_total_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vram_used_mb: Option<u64>,
+    /// GPU core utilisation 0–100 %.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utilization_percent: Option<f32>,
+    /// GPU temperature in °C.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature_c: Option<f32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]

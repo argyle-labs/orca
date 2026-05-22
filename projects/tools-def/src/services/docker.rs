@@ -9,7 +9,10 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::docker::{DockerActionResult, DockerEngineStatus, DockerLogProject, DockerServicesView};
+use crate::docker::{
+    DockerActionResult, DockerContainerStats, DockerEngineStatus, DockerLogProject,
+    DockerServicesView,
+};
 
 #[async_trait]
 pub trait DockerService: Send + Sync {
@@ -39,6 +42,9 @@ pub trait DockerService: Send + Sync {
     /// Walk the rebuy root and return every compose project + its service
     /// state. Used by the cross-project logs panel.
     async fn log_services(&self) -> Result<Vec<DockerLogProject>>;
+
+    /// Live CPU/memory stats for all running containers via `docker stats --no-stream`.
+    async fn container_stats(&self) -> Result<Vec<DockerContainerStats>>;
 }
 
 /// Embedder hook — see `services::mod` doc.

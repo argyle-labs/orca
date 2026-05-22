@@ -116,6 +116,36 @@ pub struct GetLogServicesOutput {
     pub projects: Vec<DockerLogProject>,
 }
 
+/// Live CPU/memory stats for one running container.
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+pub struct DockerContainerStats {
+    pub id: String,
+    pub name: String,
+    /// CPU usage as a percentage of total host capacity (all cores).
+    pub cpu_percent: f64,
+    /// RSS-equivalent working set in MB.
+    pub mem_usage_mb: u64,
+    /// Container memory limit in MB (`0` = unlimited / host RAM).
+    pub mem_limit_mb: u64,
+    /// Block I/O read bytes since container start.
+    pub block_read_bytes: u64,
+    /// Block I/O write bytes since container start.
+    pub block_write_bytes: u64,
+    /// Net rx bytes.
+    pub net_rx_bytes: u64,
+    /// Net tx bytes.
+    pub net_tx_bytes: u64,
+}
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DockerStatsArgs {}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DockerStatsOutput {
+    pub containers: Vec<DockerContainerStats>,
+}
+
 // ── Native dispatch ─────────────────────────────────────────────────────────
 
 #[cfg(feature = "native")]
@@ -194,4 +224,15 @@ async fn docker_service_list_logs(
 ) -> anyhow::Result<GetLogServicesOutput> {
     let projects = docker_svc(ctx)?.log_services().await?;
     Ok(GetLogServicesOutput { projects })
+}
+
+/// Live CPU + memory stats for all running containers (`docker stats --no-stream`).
+/// Returns an empty list when docker is not running or no containers are up.
+#[orca_tool(domain = "docker.service", verb = "list-stats")]
+async fn docker_service_list_stats(
+    _args: DockerStatsArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<DockerStatsOutput> {
+    let containers = docker_svc(ctx)?.container_stats().await?;
+    Ok(DockerStatsOutput { containers })
 }

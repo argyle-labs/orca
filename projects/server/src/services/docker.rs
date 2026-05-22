@@ -6,8 +6,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use orca_integrations::docker::{self, Compose, ComposeError, Engine};
 use orca_tools_def::docker::{
-    DockerActionResult, DockerEngineKind, DockerEngineStatus, DockerLogProject, DockerServiceRow,
-    DockerServicesView,
+    DockerActionResult, DockerContainerStats, DockerEngineKind, DockerEngineStatus,
+    DockerLogProject, DockerServiceRow, DockerServicesView,
 };
 use orca_tools_def::services::docker::DockerService;
 use std::path::{Path, PathBuf};
@@ -89,6 +89,24 @@ impl DockerService for ServerDocker {
             .logs(&services, tail)
             .await
             .map_err(anyhow::Error::from)
+    }
+
+    async fn container_stats(&self) -> Result<Vec<DockerContainerStats>> {
+        let raw = docker::containers::live_stats().await?;
+        Ok(raw
+            .into_iter()
+            .map(|s| DockerContainerStats {
+                id: s.id,
+                name: s.name,
+                cpu_percent: s.cpu_percent,
+                mem_usage_mb: s.mem_usage_mb,
+                mem_limit_mb: s.mem_limit_mb,
+                block_read_bytes: s.block_read_bytes,
+                block_write_bytes: s.block_write_bytes,
+                net_rx_bytes: s.net_rx_bytes,
+                net_tx_bytes: s.net_tx_bytes,
+            })
+            .collect())
     }
 
     async fn log_services(&self) -> Result<Vec<DockerLogProject>> {
