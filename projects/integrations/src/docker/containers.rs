@@ -202,3 +202,176 @@ pub async fn live_stats() -> anyhow::Result<Vec<ContainerLiveStats>> {
     }
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_percent ──────────────────────────────────────────────────────
+    #[test]
+    fn parse_percent_typical() {
+        assert!((parse_percent("12.34%") - 12.34).abs() < 0.001);
+    }
+
+    #[test]
+    fn parse_percent_zero() {
+        assert_eq!(parse_percent("0.00%"), 0.0);
+    }
+
+    #[test]
+    fn parse_percent_no_symbol() {
+        assert!((parse_percent("5.5") - 5.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn parse_percent_garbage() {
+        assert_eq!(parse_percent("--"), 0.0);
+    }
+
+    // ── parse_size_to_mb ──────────────────────────────────────────────────
+    #[test]
+    fn size_mb_gib() {
+        assert_eq!(parse_size_to_mb("1GiB"), 1024);
+    }
+
+    #[test]
+    fn size_mb_mib() {
+        assert_eq!(parse_size_to_mb("512MiB"), 512);
+    }
+
+    #[test]
+    fn size_mb_kib() {
+        assert_eq!(parse_size_to_mb("1024KiB"), 1);
+    }
+
+    #[test]
+    fn size_mb_gb() {
+        assert_eq!(parse_size_to_mb("1GB"), 953);
+    }
+
+    #[test]
+    fn size_mb_mb() {
+        assert_eq!(parse_size_to_mb("1MB"), 0);
+    }
+
+    #[test]
+    fn size_mb_kb() {
+        assert_eq!(parse_size_to_mb("1kB"), 0);
+    }
+
+    #[test]
+    fn size_mb_bytes() {
+        assert_eq!(parse_size_to_mb("1048576B"), 1);
+    }
+
+    #[test]
+    fn size_mb_unknown() {
+        assert_eq!(parse_size_to_mb("??"), 0);
+    }
+
+    // ── parse_size_to_bytes ───────────────────────────────────────────────
+    #[test]
+    fn size_bytes_gib() {
+        assert_eq!(parse_size_to_bytes("1GiB"), 1_073_741_824);
+    }
+
+    #[test]
+    fn size_bytes_mib() {
+        assert_eq!(parse_size_to_bytes("1MiB"), 1_048_576);
+    }
+
+    #[test]
+    fn size_bytes_kib() {
+        assert_eq!(parse_size_to_bytes("1KiB"), 1024);
+    }
+
+    #[test]
+    fn size_bytes_gb() {
+        assert_eq!(parse_size_to_bytes("1GB"), 1_000_000_000);
+    }
+
+    #[test]
+    fn size_bytes_mb_si() {
+        assert_eq!(parse_size_to_bytes("1MB"), 1_000_000);
+    }
+
+    #[test]
+    fn size_bytes_kb() {
+        assert_eq!(parse_size_to_bytes("1kB"), 1_000);
+    }
+
+    #[test]
+    fn size_bytes_b() {
+        assert_eq!(parse_size_to_bytes("42B"), 42);
+    }
+
+    #[test]
+    fn size_bytes_unknown() {
+        assert_eq!(parse_size_to_bytes("??"), 0);
+    }
+
+    // ── parse_mem_pair ─────────────────────────────────────────────────────
+    #[test]
+    fn mem_pair_typical() {
+        let (used, limit) = parse_mem_pair("512MiB / 15GiB");
+        assert_eq!(used, 512);
+        assert_eq!(limit, 15360);
+    }
+
+    #[test]
+    fn mem_pair_zero_limit() {
+        let (used, limit) = parse_mem_pair("256MiB / 0B");
+        assert_eq!(used, 256);
+        assert_eq!(limit, 0);
+    }
+
+    // ── parse_io_pair ──────────────────────────────────────────────────────
+    #[test]
+    fn io_pair_typical() {
+        let (r, w) = parse_io_pair("1MiB / 512kB");
+        assert_eq!(r, 1_048_576);
+        assert_eq!(w, 512_000);
+    }
+
+    // ── live_stats line parser ─────────────────────────────────────────────
+    #[test]
+    fn live_stats_parses_two_rows_skips_bad_line() {
+        let raw = concat!(
+            r#"{"ID":"abc","Name":"web","CPUPerc":"1.23%","MemUsage":"256MiB / 8GiB","BlockIO":"1MiB / 512kB","NetIO":"2MiB / 1MiB"}"#,
+            "\n",
+            "not valid json\n",
+            r#"{"ID":"def","Name":"db","CPUPerc":"0.50%","MemUsage":"512MiB / 8GiB","BlockIO":"0B / 0B","NetIO":"0B / 0B"}"#,
+        );
+
+        let mut result = Vec::new();
+        for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+            let Ok(row) = serde_json::from_str::<RawStatsRow>(line) else {
+                continue;
+            };
+            let cpu_percent = parse_percent(&row.cpu_perc);
+            let (mem_usage_mb, mem_limit_mb) = parse_mem_pair(&row.mem_usage);
+            let (block_read_bytes, block_write_bytes) = parse_io_pair(&row.block_io);
+            let (net_rx_bytes, net_tx_bytes) = parse_io_pair(&row.net_io);
+            result.push(ContainerLiveStats {
+                id: row.id,
+                name: row.name,
+                cpu_percent,
+                mem_usage_mb,
+                mem_limit_mb,
+                block_read_bytes,
+                block_write_bytes,
+                net_rx_bytes,
+                net_tx_bytes,
+            });
+        }
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "web");
+        assert!((result[0].cpu_percent - 1.23).abs() < 0.001);
+        assert_eq!(result[0].mem_usage_mb, 256);
+        assert_eq!(result[0].mem_limit_mb, 8192);
+        assert_eq!(result[0].block_read_bytes, 1_048_576);
+        assert_eq!(result[0].block_write_bytes, 512_000);
+        assert_eq!(result[1].name, "db");
+    }
+}

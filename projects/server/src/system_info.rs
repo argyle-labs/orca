@@ -252,10 +252,10 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
 /// Returns empty vec if no GPUs or driver absent.
 async fn collect_gpus() -> Vec<GpuInfo> {
     // Try NVIDIA first (most common in homelab GPU hosts).
-    if let Ok(gpus) = collect_nvidia_gpus().await {
-        if !gpus.is_empty() {
-            return gpus;
-        }
+    if let Ok(gpus) = collect_nvidia_gpus().await
+        && !gpus.is_empty()
+    {
+        return gpus;
     }
     // Fallback: AMD sysfs
     collect_amd_gpus()
@@ -419,4 +419,91 @@ fn which(name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collect_blocking_populates_hardware_fields() {
+        let snap = collect_blocking();
+        assert!(snap.cpu_logical.is_some_and(|c| c > 0));
+        assert!(snap.mem_total_mb.is_some_and(|m| m > 0));
+        assert!(snap.mem_available_mb.is_some_and(|m| m > 0));
+        // mem_used = total - available; must be non-negative
+        let total = snap.mem_total_mb.unwrap();
+        let used = snap.mem_used_mb.unwrap();
+        let avail = snap.mem_available_mb.unwrap();
+        assert!(
+            used <= total,
+            "mem_used_mb ({used}) > mem_total_mb ({total})"
+        );
+        assert_eq!(used, total - avail, "mem_used_mb mismatch");
+    }
+
+    #[test]
+    fn collect_blocking_swap_fields_consistent() {
+        let snap = collect_blocking();
+        let total = snap.swap_total_mb.unwrap_or(0);
+        let used = snap.swap_used_mb.unwrap_or(0);
+        assert!(
+            used <= total,
+            "swap_used_mb ({used}) > swap_total_mb ({total})"
+        );
+    }
+
+    #[test]
+    fn collect_blocking_os_fields_present() {
+        let snap = collect_blocking();
+        assert!(snap.os_name.is_some());
+        assert!(snap.snapshot_at_unix.is_some_and(|t| t > 0));
+        assert!(snap.arch.is_some());
+    }
+
+    #[test]
+    fn collect_blocking_cpu_usage_absent_on_first_call() {
+        // First call creates a fresh System — no delta, so usage should be None.
+        let snap = collect_blocking();
+        // cpu_usage_percent is None OR 0 on first call (no prior state).
+        let ok =
+            snap.cpu_usage_percent.is_none() || snap.cpu_usage_percent.is_some_and(|u| u == 0.0);
+        assert!(
+            ok,
+            "expected None or 0 on first call, got {:?}",
+            snap.cpu_usage_percent
+        );
+    }
+
+    #[test]
+    fn snapshot_from_sys_with_gpus_propagates() {
+        let gpu = GpuInfo {
+            name: "Test GPU".into(),
+            vendor: "test".into(),
+            vram_total_mb: Some(8192),
+            vram_used_mb: Some(1024),
+            utilization_percent: Some(42.0),
+            temperature_c: Some(65.0),
+        };
+        let sys = System::new_with_specifics(
+            RefreshKind::new()
+                .with_memory(sysinfo::MemoryRefreshKind::everything())
+                .with_cpu(sysinfo::CpuRefreshKind::everything()),
+        );
+        let snap = snapshot_from_sys(&sys, vec![gpu.clone()]);
+        assert_eq!(snap.gpus.len(), 1);
+        assert_eq!(snap.gpus[0].name, "Test GPU");
+        assert_eq!(snap.gpus[0].vram_total_mb, Some(8192));
+    }
+
+    #[test]
+    fn which_finds_existing_binary() {
+        // Any binary guaranteed to exist on CI and developer machines.
+        assert!(which("sh").is_some());
+    }
+
+    #[test]
+    fn which_returns_none_for_nonexistent() {
+        assert!(which("__orca_no_such_binary__").is_none());
+    }
 }
