@@ -1000,6 +1000,26 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
     }
 }
 
+/// Write orca's generated OpenAPI spec to ~/.orca/specs/orca.json so it
+/// lives alongside rebuy's scanner-generated specs and can be compared to them.
+fn write_orca_spec_to_disk() {
+    let dir = crate::scanner::specs_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!("could not create openapi dir {}: {e}", dir.display());
+        return;
+    }
+    let path = dir.join("orca.json");
+    let spec = openapi::orca_spec_json();
+    match serde_json::to_string_pretty(&spec) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                tracing::warn!("could not write orca spec to {}: {e}", path.display());
+            }
+        }
+        Err(e) => tracing::warn!("could not serialize orca spec: {e}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1064,25 +1084,5 @@ mod tests {
     fn resolve_daemon_binary_returns_nonempty_string() {
         let path = resolve_daemon_binary();
         assert!(!path.is_empty());
-    }
-}
-
-/// Write orca's generated OpenAPI spec to ~/.orca/specs/orca.json so it
-/// lives alongside rebuy's scanner-generated specs and can be compared to them.
-fn write_orca_spec_to_disk() {
-    let dir = crate::scanner::specs_dir();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!("could not create openapi dir {}: {e}", dir.display());
-        return;
-    }
-    let path = dir.join("orca.json");
-    let spec = openapi::orca_spec_json();
-    match serde_json::to_string_pretty(&spec) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
-                tracing::warn!("could not write orca spec to {}: {e}", path.display());
-            }
-        }
-        Err(e) => tracing::warn!("could not serialize orca spec: {e}"),
     }
 }

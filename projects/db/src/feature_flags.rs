@@ -42,6 +42,10 @@ mod tests {
         let conn = test_conn();
         assert_eq!(get(&conn, "fs.allow_unrestricted").unwrap(), Some(false));
         assert_eq!(get(&conn, "ui.enabled").unwrap(), Some(true));
+        assert_eq!(
+            get(&conn, "auth.public_signup_enabled").unwrap(),
+            Some(false)
+        );
     }
 
     #[test]

@@ -712,6 +712,10 @@ pub fn cmd_dev_enable() -> Result<DevEnableResult> {
     let cloned = if !repo.exists() {
         if let Some(parent) = repo.parent() {
             std::fs::create_dir_all(parent)?;
+            // Tighten the dev checkout directory to 0700 so other local users
+            // on shared hosts can't enumerate or read the source tree.
+            crate::loopback_token::chmod_dir_owner_only(parent)
+                .with_context(|| format!("chmod 0700 on dev dir {}", parent.display()))?;
         }
         let status = Command::new("git")
             .args([
@@ -1562,6 +1566,22 @@ mod tests {
         let dir = isolated_orca_home("marker_empty");
         std::fs::write(dir.path().join("channel"), "\n").unwrap();
         assert!(read_channel_marker().is_none());
+    }
+
+    // ── dev dir chmod (M5) ───────────────────────────────────────────────────
+
+    #[test]
+    fn dev_repo_parent_is_chmoded_to_0700() {
+        let dir = tempfile::tempdir().unwrap();
+        let dev_dir = dir.path().join("dev");
+        std::fs::create_dir_all(&dev_dir).unwrap();
+        crate::loopback_token::chmod_dir_owner_only(&dev_dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let mode = std::fs::metadata(&dev_dir).unwrap().mode() & 0o777;
+            assert_eq!(mode, 0o700, "dev dir should be 0700, got {mode:o}");
+        }
     }
 
     // ── resolve_github_token env fallback ─────────────────────────────────────
