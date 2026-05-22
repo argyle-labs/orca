@@ -434,7 +434,6 @@ mod tests {
         // mem_used = total - available; must be non-negative
         let total = snap.mem_total_mb.unwrap();
         let used = snap.mem_used_mb.unwrap();
-        let avail = snap.mem_available_mb.unwrap();
         // Integer division means used may differ from (total - avail) by 1 MiB.
         assert!(
             used <= total + 1,
