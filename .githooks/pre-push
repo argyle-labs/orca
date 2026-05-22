@@ -17,7 +17,7 @@ cargo test
 
 echo "==> coverage gate (mirrors CI ci.yml: coverage-rust)"
 # Floor must match .github/workflows/ci.yml. Raise both together; never lower.
-cargo llvm-cov --workspace --no-fail-fast --fail-under-lines 47
+cargo llvm-cov --workspace --no-fail-fast --fail-under-lines 51
 
 echo "==> frontend check"
 cd "$ROOT/projects/frontend"
