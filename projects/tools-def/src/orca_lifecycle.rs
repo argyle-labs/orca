@@ -732,6 +732,13 @@ mod tests {
         async fn trust(&self, _peer_id: &str, _on: bool) -> Result<crate::pod::PodTrustOutput> {
             anyhow::bail!("stub")
         }
+        async fn push_trust(
+            &self,
+            _peer_id: &str,
+            _on: bool,
+        ) -> Result<crate::pod::PodTrustOutput> {
+            anyhow::bail!("stub")
+        }
         async fn ping(&self, peer_id: &str) -> crate::pod::PodPingOutput {
             crate::pod::PodPingOutput {
                 ok: true,
