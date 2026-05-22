@@ -449,7 +449,8 @@
 <!-- Drawer -->
 {#if selectedInst}
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="backdrop" onclick={closeDrawer}></div>
+  <div class="backdrop" role="presentation" onclick={closeDrawer}></div>
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions a11y_click_events_have_key_events -->
   <aside class="drawer" onclick={(e) => e.stopPropagation()}>
     <div class="drawer-header">
       <div class="ident">
@@ -696,16 +697,6 @@
   }
   .hostname {
     font-weight: var(--weight-semibold);
-  }
-  .badge {
-    font-size: 10px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--color-text-dim);
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: 3px;
-    padding: 1px 5px;
   }
   .icon-btn {
     background: transparent;
