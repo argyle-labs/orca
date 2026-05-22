@@ -62,6 +62,36 @@ pub fn get() -> Option<&'static str> {
     TOKEN.get().map(|s| s.as_str())
 }
 
+/// Build a `reqwest::Client` with `danger_accept_invalid_certs(true)` — but
+/// ONLY after asserting that `url` targets a loopback address. Panics (rather
+/// than returning Err) so a mis-configured URL is caught immediately at the
+/// call site and can never silently talk to a non-loopback host with cert
+/// verification disabled.
+pub fn loopback_only_reqwest_client(url: &str) -> anyhow::Result<reqwest::Client> {
+    let after_scheme = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let authority = after_scheme.split('/').next().unwrap_or("");
+    let host = if authority.starts_with('[') {
+        // IPv6 literal: [::1]:port or [::1]
+        &authority[..authority
+            .find(']')
+            .map(|i| i + 1)
+            .unwrap_or(authority.len())]
+    } else {
+        // hostname or hostname:port — drop port
+        authority.split(':').next().unwrap_or("")
+    };
+    assert!(
+        host == "127.0.0.1" || host == "localhost" || host == "[::1]",
+        "loopback_only_reqwest_client called with non-loopback URL '{url}' — \
+         danger_accept_invalid_certs is only safe on the loopback interface"
+    );
+    Ok(reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()?)
+}
+
 /// Test-only seeding hook — installs a deterministic loopback token from
 /// unit tests that need to exercise the loopback fast path without minting
 /// real randomness or writing to disk. First-call-wins, matching the
@@ -205,5 +235,35 @@ mod tests {
         // May write a file or may return early — both paths must succeed.
         let _ = install_at_startup(); // ignore result (may fail if HOME is weird)
         let _ = install_at_startup(); // second call must also not panic
+    }
+
+    #[tokio::test]
+    async fn loopback_only_reqwest_client_accepts_127() {
+        crate::llm::ensure_crypto_provider();
+        loopback_only_reqwest_client("https://127.0.0.1:12000/api/foo").unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_only_reqwest_client_accepts_localhost() {
+        crate::llm::ensure_crypto_provider();
+        loopback_only_reqwest_client("http://localhost:8080/").unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_only_reqwest_client_accepts_ipv6_loopback() {
+        crate::llm::ensure_crypto_provider();
+        loopback_only_reqwest_client("https://[::1]:12000/").unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "non-loopback URL")]
+    fn loopback_only_reqwest_client_panics_on_external_host() {
+        loopback_only_reqwest_client("https://example.com/api").unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "non-loopback URL")]
+    fn loopback_only_reqwest_client_panics_on_192_168() {
+        loopback_only_reqwest_client("https://192.168.1.1/api").unwrap();
     }
 }

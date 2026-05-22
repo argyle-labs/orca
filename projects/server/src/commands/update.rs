@@ -453,6 +453,10 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
 /// (e.g. nohup'd dev runs) — they have to be restarted manually, but at
 /// least we don't keep serving a deleted-inode old binary.
 fn schedule_self_restart() {
+    // `sh -c` is intentional here: we need `sleep N; if ... fi` executed as a
+    // single detached background process. The only dynamic value is `my_pid`
+    // which is a `u32` (no shell-special chars possible). All other content is
+    // a compile-time static.
     let my_pid = std::process::id();
     #[cfg(target_os = "macos")]
     let cmd = format!(

@@ -405,9 +405,7 @@ async fn call_plugin_tool(fq_name: &str, args: &Value) -> Result<Value> {
         .map(|s| s.to_string())
         .or_else(crate::loopback_token::read_from_disk)
         .context("loopback token unavailable — is the daemon running?")?;
-    let resp = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()?
+    let resp = crate::loopback_token::loopback_only_reqwest_client(&url)?
         .post(&url)
         .bearer_auth(token)
         .json(&body)
@@ -454,4 +452,37 @@ fn reply(id: Value, result: Value) -> Value {
 
 fn error_reply(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reply_has_expected_shape() {
+        let v = reply(json!(1), json!({"ok": true}));
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["id"], 1);
+        assert_eq!(v["result"]["ok"], true);
+    }
+
+    #[test]
+    fn error_reply_has_expected_shape() {
+        let v = error_reply(json!("x"), -32601, "method not found");
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["id"], "x");
+        assert_eq!(v["error"]["code"], -32601);
+        assert_eq!(v["error"]["message"], "method not found");
+    }
+
+    #[test]
+    fn plugin_tool_http_is_loopback() {
+        // Verify that PLUGIN_TOOL_HTTP never accidentally gets changed to a non-loopback address.
+        assert!(
+            PLUGIN_TOOL_HTTP.contains("127.0.0.1")
+                || PLUGIN_TOOL_HTTP.contains("localhost")
+                || PLUGIN_TOOL_HTTP.contains("[::1]"),
+            "PLUGIN_TOOL_HTTP must target loopback: {PLUGIN_TOOL_HTTP}"
+        );
+    }
 }

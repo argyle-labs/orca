@@ -793,8 +793,9 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         );
         INSERT OR IGNORE INTO feature_flags (name, enabled) VALUES
-            ('fs.allow_unrestricted', 0),
-            ('ui.enabled',            1);
+            ('fs.allow_unrestricted',      0),
+            ('ui.enabled',                 1),
+            ('auth.public_signup_enabled', 0);
 
         CREATE TABLE IF NOT EXISTS profiles (
             id              TEXT PRIMARY KEY,

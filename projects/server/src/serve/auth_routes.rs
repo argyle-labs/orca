@@ -157,12 +157,10 @@ pub(crate) fn throttled_response(retry_after_secs: u64) -> Response {
     resp
 }
 
-fn public_signup_enabled(conn: &db::Conn) -> bool {
-    db::settings::secret_get(conn, "auth.public_signup_enabled")
+pub(crate) fn public_signup_enabled(conn: &db::Conn) -> bool {
+    db::feature_flags::get(conn, "auth.public_signup_enabled")
         .ok()
         .flatten()
-        .as_deref()
-        .map(|v| matches!(v, "1" | "true" | "yes"))
         .unwrap_or(false)
 }
 
@@ -547,5 +545,26 @@ mod tests {
         let sa = secure_attr();
         assert!(ss == "Lax" || ss == "Strict");
         assert!(sa.is_empty() || sa == " Secure;");
+    }
+
+    fn test_conn() -> (tempfile::TempDir, db::Conn) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let conn = db::open_unencrypted(&dir.path().join("orca.db")).expect("open_unencrypted");
+        (dir, conn)
+    }
+
+    #[test]
+    fn public_signup_enabled_defaults_false() {
+        let (_d, conn) = test_conn();
+        assert!(!public_signup_enabled(&conn));
+    }
+
+    #[test]
+    fn public_signup_enabled_reflects_feature_flag() {
+        let (_d, conn) = test_conn();
+        db::feature_flags::set(&conn, "auth.public_signup_enabled", true).unwrap();
+        assert!(public_signup_enabled(&conn));
+        db::feature_flags::set(&conn, "auth.public_signup_enabled", false).unwrap();
+        assert!(!public_signup_enabled(&conn));
     }
 }

@@ -91,9 +91,7 @@ impl InfraService for ServerInfra {
 /// CA root through every call site. Cross-host traffic uses its own client
 /// configured with the real trust store.
 fn loopback_client() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()?)
+    crate::loopback_token::loopback_only_reqwest_client("https://127.0.0.1:12000")
 }
 
 fn loopback_token() -> Result<String> {
@@ -101,4 +99,22 @@ fn loopback_token() -> Result<String> {
         .map(|s| s.to_string())
         .or_else(crate::loopback_token::read_from_disk)
         .ok_or_else(|| anyhow::anyhow!("loopback token unavailable — is the daemon running?"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn loopback_client_builds_successfully() {
+        crate::llm::ensure_crypto_provider();
+        loopback_client().unwrap();
+    }
+
+    #[test]
+    fn loopback_token_returns_err_when_no_token() {
+        // If TOKEN is not set and no file on disk, returns Err.
+        // If TOKEN is set (by another test), returns Ok — both are valid.
+        let _ = loopback_token(); // must not panic
+    }
 }

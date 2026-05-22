@@ -170,6 +170,26 @@ fn pid_alive(pid: u32) -> bool {
 
 // ── Install / Uninstall ───────────────────────────────────────────────────────
 
+/// Validate that a string is safe to interpolate into a shell script written
+/// to disk (init scripts, go-hooks, plist XML). Accepts Unix username chars
+/// and absolute path chars only; rejects metacharacters that could turn a
+/// written script into an injection vector.
+fn validate_shell_safe(label: &str, s: &str) -> Result<()> {
+    if s.is_empty() {
+        anyhow::bail!("{label} must not be empty");
+    }
+    let ok = s
+        .chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '/' | '.' | '@'));
+    if !ok {
+        anyhow::bail!(
+            "{label} '{s}' contains characters that are not safe to interpolate into a shell \
+             script (allowed: alphanumeric, _, -, /, ., @)"
+        );
+    }
+    Ok(())
+}
+
 fn install(port: u16, service_user: Option<String>) -> Result<()> {
     let binary = resolve_binary()?;
     match service_user {
@@ -183,7 +203,9 @@ fn install(port: u16, service_user: Option<String>) -> Result<()> {
             if !is_root() {
                 anyhow::bail!("--service-user requires running as root");
             }
+            validate_shell_safe("--service-user", &user)?;
             let home = home_dir_of(&user)?;
+            validate_shell_safe("home directory", &home)?;
             ensure_pki_for_home(&home)?;
             // chown the PKI tree to the service user so the daemon can read it.
             let pki_dir = std::path::PathBuf::from(&home)
@@ -628,6 +650,39 @@ fn uninstall_service() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── validate_shell_safe ───────────────────────────────────────────────────
+
+    #[test]
+    fn validate_shell_safe_accepts_valid_identifiers() {
+        validate_shell_safe("user", "orca").unwrap();
+        validate_shell_safe("user", "my-service_user").unwrap();
+        validate_shell_safe("home", "/var/lib/orca").unwrap();
+        validate_shell_safe("home", "/home/orca.user").unwrap();
+    }
+
+    #[test]
+    fn validate_shell_safe_rejects_metacharacters() {
+        for bad in [
+            "orca; rm -rf /",
+            "orca$(whoami)",
+            "orca`id`",
+            "orca | cat /etc/passwd",
+            "orca\nmalicious",
+            "orca user",
+            "orca\"quote",
+        ] {
+            assert!(
+                validate_shell_safe("test", bad).is_err(),
+                "expected Err for: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_shell_safe_rejects_empty() {
+        assert!(validate_shell_safe("field", "").is_err());
+    }
 
     // ── pid_alive ─────────────────────────────────────────────────────────────
 
