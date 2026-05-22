@@ -705,6 +705,9 @@ mod tests {
 
     #[derive(Default)]
     struct StubPod {
+        // serde_json::Value is intentional here: the stub captures the raw
+        // args JSON so tests can assert on whatever shape the caller sent.
+        #[allow(clippy::disallowed_types)]
         last_exec: Mutex<Option<(String, String, serde_json::Value)>>,
     }
 
