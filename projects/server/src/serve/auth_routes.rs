@@ -525,7 +525,7 @@ mod tests {
     #[test]
     fn secure_attr_returns_valid_value() {
         let v = secure_attr();
-        assert!(v == "" || v == " Secure;", "unexpected: {v}");
+        assert!(v.is_empty() || v == " Secure;", "unexpected: {v}");
     }
 
     #[test]
@@ -546,6 +546,6 @@ mod tests {
         let ss = same_site();
         let sa = secure_attr();
         assert!(ss == "Lax" || ss == "Strict");
-        assert!(sa == "" || sa == " Secure;");
+        assert!(sa.is_empty() || sa == " Secure;");
     }
 }

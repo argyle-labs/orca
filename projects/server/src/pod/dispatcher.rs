@@ -61,11 +61,12 @@ pub(crate) fn reset_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::OnceLock;
+    use tokio::sync::Mutex;
 
-    fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+    async fn test_guard() -> tokio::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        LOCK.get_or_init(|| Mutex::new(())).lock().await
     }
 
     fn make_reg_ctx() -> (Arc<ToolRegistry>, Arc<ToolCtx>) {
@@ -90,7 +91,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_before_install_returns_err() {
-        let _g = test_guard();
+        let _g = test_guard().await;
         reset_for_tests();
         let err = dispatch("some.tool", serde_json::json!({}))
             .await
@@ -100,7 +101,7 @@ mod tests {
 
     #[tokio::test]
     async fn install_and_dispatch_unknown_tool_returns_err() {
-        let _g = test_guard();
+        let _g = test_guard().await;
         reset_for_tests();
         let (reg, ctx) = make_reg_ctx();
         install(reg, ctx);
@@ -112,7 +113,7 @@ mod tests {
 
     #[tokio::test]
     async fn install_is_idempotent() {
-        let _g = test_guard();
+        let _g = test_guard().await;
         reset_for_tests();
         let (reg, ctx) = make_reg_ctx();
         install(Arc::clone(&reg), Arc::clone(&ctx));
