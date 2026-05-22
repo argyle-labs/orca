@@ -246,19 +246,48 @@ pub async fn check_for_update_dev(source_url: &str) -> Result<Option<String>> {
     }
 }
 
-/// Download and apply a binary from a local dev-serve endpoint.
+/// Download and apply a binary from a local dev-serve endpoint. Fetches
+/// `/version.json` to pin the expected sha256, then sha256-verifies the
+/// downloaded bytes before writing — fail-closed, no install without match.
 pub async fn apply_update_dev(source_url: &str) -> Result<()> {
-    let url = format!("{}/binary", source_url.trim_end_matches('/'));
+    let base = source_url.trim_end_matches('/');
     let client = orca_utils::http::Client::new();
+
+    // Pin expected sha256 from the dev-serve manifest first.
+    let info: DevVersionInfo = client
+        .get(format!("{base}/version.json"))
+        .send()
+        .await
+        .context("dev-source version check failed")?
+        .json()
+        .context("dev-source returned invalid version.json")?;
+    if info.sha256.is_empty() {
+        bail!("dev-source returned empty sha256 — refusing unverifiable install");
+    }
+
     const MAX: usize = 128 * 1024 * 1024;
     println!("[orca] downloading dev build from {source_url}...");
     let resp = client
-        .get(url)
+        .get(format!("{base}/binary"))
         .max_body(MAX)
         .timeout(std::time::Duration::from_secs(120))
         .send_bytes()
         .await
         .context("dev binary download failed")?;
+
+    use std::fmt::Write;
+    let digest = sha256_bytes(&resp.body);
+    let mut got = String::with_capacity(64);
+    for b in &digest {
+        write!(got, "{b:02x}").unwrap();
+    }
+    if got != info.sha256 {
+        bail!(
+            "dev-source checksum mismatch — expected {}, got {got}",
+            info.sha256
+        );
+    }
+    println!("[orca] dev-source checksum OK");
 
     let current = current_binary_path()?;
     let tmp = current.with_extension("tmp");
@@ -357,7 +386,12 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
         .iter()
         .find(|a| a.name == checksum_name)
         .map(|a| a.url.clone())
-        .unwrap_or_default();
+        .with_context(|| {
+            format!(
+                "no checksum asset '{checksum_name}' in release {} — refusing to advertise an unverifiable update",
+                release.tag_name
+            )
+        })?;
 
     Ok(Some(UpdateInfo {
         version: latest.to_string(),
@@ -374,33 +408,35 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
     }
     let client = orca_utils::http::Client::new();
 
-    // Download the checksum file first
-    let expected_hash = if !info.checksum_url.is_empty() {
-        let cs_bytes = download_asset(&client, &info.checksum_url, token).await?;
-        let cs_str = String::from_utf8_lossy(&cs_bytes);
-        // Format: "<hash>  <filename>"
-        cs_str.split_whitespace().next().map(|s| s.to_string())
-    } else {
-        None
-    };
+    // Checksum is mandatory — no install without verification.
+    if info.checksum_url.is_empty() {
+        bail!(
+            "update refused: no checksum URL on release v{}",
+            info.version
+        );
+    }
+    let cs_bytes = download_asset(&client, &info.checksum_url, token).await?;
+    let cs_str = String::from_utf8_lossy(&cs_bytes);
+    // Format: "<hash>  <filename>"
+    let expected = cs_str
+        .split_whitespace()
+        .next()
+        .map(|s| s.to_string())
+        .with_context(|| format!("checksum file empty at {}", info.checksum_url))?;
 
-    // Download the binary
     println!("[orca] downloading v{}...", info.version);
     let binary = download_asset(&client, &info.asset_url, token).await?;
 
-    // Verify checksum
-    if let Some(expected) = expected_hash {
-        use std::fmt::Write;
-        let digest = sha256_bytes(&binary);
-        let mut got = String::with_capacity(64);
-        for b in &digest {
-            write!(got, "{b:02x}").unwrap();
-        }
-        if got != expected {
-            bail!("checksum mismatch — expected {expected}, got {got}");
-        }
-        println!("[orca] checksum OK");
+    use std::fmt::Write;
+    let digest = sha256_bytes(&binary);
+    let mut got = String::with_capacity(64);
+    for b in &digest {
+        write!(got, "{b:02x}").unwrap();
     }
+    if got != expected {
+        bail!("checksum mismatch — expected {expected}, got {got}");
+    }
+    println!("[orca] checksum OK");
 
     // Write to a temp file beside the current binary, then atomic rename
     let current = current_binary_path()?;
@@ -960,18 +996,15 @@ pub async fn cmd_update_check(channel_arg: &str) -> Result<()> {
             }
             // Pre-fetch the checksum so the subsequent `orca update` (or a
             // separate install.sh push) can verify without a second GH round-trip.
-            if info.checksum_url.is_empty() {
-                println!("[orca] no checksum URL on release — skipping cache");
-            } else {
-                match download_asset(&orca_utils::http::Client::new(), &info.checksum_url, &token)
-                    .await
-                {
-                    Ok(bytes) => match write_cached_sha256(&info.version, &bytes) {
-                        Ok(path) => println!("[orca] cached sha256 → {}", path.display()),
-                        Err(e) => eprintln!("[orca] warning: cache write failed: {e}"),
-                    },
-                    Err(e) => eprintln!("[orca] warning: sha256 download failed: {e}"),
-                }
+            // `check_for_update` already refuses releases that lack a checksum,
+            // so `checksum_url` is guaranteed non-empty here.
+            match download_asset(&orca_utils::http::Client::new(), &info.checksum_url, &token).await
+            {
+                Ok(bytes) => match write_cached_sha256(&info.version, &bytes) {
+                    Ok(path) => println!("[orca] cached sha256 → {}", path.display()),
+                    Err(e) => eprintln!("[orca] warning: cache write failed: {e}"),
+                },
+                Err(e) => eprintln!("[orca] warning: sha256 download failed: {e}"),
             }
         }
     }

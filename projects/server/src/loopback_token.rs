@@ -46,6 +46,9 @@ pub fn install_at_startup() -> Result<()> {
     let dir = secrets_dir()?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("create secrets dir {}", dir.display()))?;
+    // Tighten the dir to 0700: file names under here (loopback token, future
+    // per-secret blobs) shouldn't be enumerable by other users on shared hosts.
+    chmod_dir_owner_only(&dir).with_context(|| format!("chmod 0700 on {}", dir.display()))?;
     let path = token_path()?;
     write_secret_file(&path, &plaintext)
         .with_context(|| format!("write loopback token to {}", path.display()))?;
@@ -108,4 +111,17 @@ fn write_secret_file(path: &std::path::Path, content: &str) -> std::io::Result<(
 #[cfg(not(unix))]
 fn write_secret_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     std::fs::write(path, content)
+}
+
+#[cfg(unix)]
+fn chmod_dir_owner_only(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(dir)?.permissions();
+    perms.set_mode(0o700);
+    std::fs::set_permissions(dir, perms)
+}
+
+#[cfg(not(unix))]
+fn chmod_dir_owner_only(_dir: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
 }

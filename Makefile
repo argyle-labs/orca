@@ -1,4 +1,4 @@
-.PHONY: build install install-hooks deploy dev run watch watch-server watch-test watch-wasm clean check release rc promote audit lint format format-check test test-changed cache-stats daemon-install daemon-uninstall kill-dev migrate up down init doctor \
+.PHONY: build install install-hooks deploy dev run watch watch-server watch-test watch-wasm clean check release rc promote audit lint format format-check test test-changed coverage coverage-html coverage-touched cache-stats daemon-install daemon-uninstall kill-dev migrate up down init doctor \
   ci release-build release-build-host release-frontend release-sdk-ts release-sdk-kotlin release-checksums release-stage release-publish release-clean
 
 INSTALL_PATH := $(HOME)/.local/bin/orca
@@ -257,6 +257,40 @@ test:
 	  || CARGO_TARGET_DIR=$(TARGET_DIR_NATIVE) cargo test --workspace
 	@echo "→ doctests..."
 	@CARGO_TARGET_DIR=$(TARGET_DIR_NATIVE) cargo test --workspace --doc --no-fail-fast
+
+# ── Coverage ───────────────────────────────────────────────────────────────
+# `coverage` mirrors the pre-push hook + CI gate: enforces the workspace
+# floor written in .githooks/pre-push and .github/workflows/ci.yml. Bump both
+# alongside this command — never lower.
+coverage:
+	@CARGO_TARGET_DIR=$(TARGET_DIR_NATIVE) \
+	  cargo llvm-cov --workspace --no-fail-fast --fail-under-lines 47
+
+# Human-readable HTML report. Opens under target/native/llvm-cov/html.
+coverage-html:
+	@CARGO_TARGET_DIR=$(TARGET_DIR_NATIVE) \
+	  cargo llvm-cov --workspace --no-fail-fast --html
+	@echo "→ open $(TARGET_DIR_NATIVE)/llvm-cov/html/index.html"
+
+# Per-file summary filtered to files with uncommitted (or branch-local) Rust
+# changes. Use to verify the HARD RULE: any file touched in a slice reaches
+# 100% line coverage in the same slice.
+coverage-touched:
+	@CARGO_TARGET_DIR=$(TARGET_DIR_NATIVE) \
+	  cargo llvm-cov --workspace --no-fail-fast --summary-only > target/.cov-summary.txt
+	@files=$$(git diff --name-only origin/main...HEAD -- '*.rs'; \
+	          git status --porcelain | awk '{print $$2}' | grep -E '\.rs$$'); \
+	files=$$(echo "$$files" | sort -u | grep -v '^$$'); \
+	if [ -z "$$files" ]; then \
+	  echo "no touched .rs files"; \
+	else \
+	  echo "touched files (line-coverage):"; \
+	  for f in $$files; do \
+	    short=$$(echo "$$f" | sed -E 's|^projects/||'); \
+	    line=$$(grep -E "^$$short[[:space:]]" target/.cov-summary.txt || true); \
+	    [ -n "$$line" ] && echo "  $$line" || echo "  $$short  (no coverage row — generated / not in workspace)"; \
+	  done; \
+	fi
 
 # Re-run nextest scoped to crates with uncommitted changes.
 test-changed:

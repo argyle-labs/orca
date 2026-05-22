@@ -8,12 +8,13 @@
 
 use axum::{
     Json,
-    extract::Request,
+    extract::{ConnectInfo, Request},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use utoipa::ToSchema;
 
 use crate::serve::middleware::{AuthIdentity, AuthKind, SESSION_COOKIE, SESSION_TTL};
@@ -267,7 +268,27 @@ pub async fn signup(Json(req): Json<SignupRequest>) -> Response {
     ),
     tag = "auth"
 )]
-pub async fn signin(Json(req): Json<SigninRequest>) -> Response {
+pub async fn signin(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(req): Json<SigninRequest>,
+) -> Response {
+    let ip = peer.ip().to_string();
+    if let crate::auth_throttle::CheckOutcome::Throttled { retry_after_secs } =
+        crate::auth_throttle::check(&ip, &req.username)
+    {
+        tracing::warn!(
+            ip = %ip,
+            username = %req.username,
+            retry_after_secs,
+            "signin throttled"
+        );
+        let mut resp = err(StatusCode::TOO_MANY_REQUESTS, "too many signin attempts");
+        if let Ok(v) = retry_after_secs.to_string().parse() {
+            resp.headers_mut().insert(header::RETRY_AFTER, v);
+        }
+        return resp;
+    }
+
     let conn = match db::open_default() {
         Ok(c) => c,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("db: {e}")),
@@ -275,9 +296,10 @@ pub async fn signin(Json(req): Json<SigninRequest>) -> Response {
     let row = match db::users::find_auth_by_username(&conn, &req.username) {
         Ok(Some(r)) => r,
         Ok(None) => {
+            crate::auth_throttle::record_failure(&ip, &req.username);
             tracing::warn!(
+                ip = %ip,
                 username = %req.username,
-                pw_len = req.password.len(),
                 "signin failed: no such user"
             );
             return err(StatusCode::UNAUTHORIZED, "invalid credentials");
@@ -287,15 +309,17 @@ pub async fn signin(Json(req): Json<SigninRequest>) -> Response {
     let ok =
         crate::auth_password::verify_password(&req.password, &row.password_hash).unwrap_or(false);
     if !ok {
+        crate::auth_throttle::record_failure(&ip, &req.username);
         tracing::warn!(
+            ip = %ip,
             username = %req.username,
-            pw_len = req.password.len(),
             user_id = %row.id,
             "signin failed: password verify mismatch"
         );
         return err(StatusCode::UNAUTHORIZED, "invalid credentials");
     }
-    tracing::info!(username = %row.username, user_id = %row.id, "signin ok");
+    crate::auth_throttle::record_success(&ip, &req.username);
+    tracing::info!(ip = %ip, username = %row.username, user_id = %row.id, "signin ok");
     issue_session(&conn, &row.id, &row.username, &row.role)
 }
 

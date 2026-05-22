@@ -357,43 +357,17 @@ async fn handle_exec(request: Request) -> Result<PodExecResult> {
         crate::tool_roles::required_role(&params.tool),
     )?;
 
-    let token = crate::loopback_token::get()
-        .map(|s| s.to_string())
-        .or_else(crate::loopback_token::read_from_disk)
-        .context("loopback token unavailable — daemon not fully started?")?;
-
-    let url = format!("https://127.0.0.1:12000/api/tools/{}", params.tool);
-
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .context("build loopback HTTP client")?;
-
-    let resp = client
-        .post(&url)
-        .bearer_auth(&token)
-        .json(&params.args)
-        .send()
+    // Direct in-process dispatch through the shared registry — no HTTPS
+    // loopback, no admin-token impersonation. Authorization is already
+    // enforced by `authorize_exec` above (REMOTE_OK allowlist + REQUIRED_ROLE
+    // must be "any"), so admin-role tools remain unreachable from a peer.
+    let result = crate::pod::dispatcher::dispatch(&params.tool, params.args.clone())
         .await
-        .with_context(|| format!("POST {url}"))?;
-
-    let status = resp.status();
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .with_context(|| format!("decode response body from {url}"))?;
-    if !status.is_success() {
-        anyhow::bail!(
-            "loopback tool '{}' returned HTTP {}: {}",
-            params.tool,
-            status.as_u16(),
-            body
-        );
-    }
+        .with_context(|| format!("dispatch pod-relayed tool '{}'", params.tool))?;
 
     Ok(PodExecResult {
         tool: params.tool,
-        result: body,
+        result,
     })
 }
 

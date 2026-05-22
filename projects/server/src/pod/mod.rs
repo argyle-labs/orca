@@ -18,6 +18,7 @@ mod bootstrap;
 pub mod cert_rotation;
 pub mod db;
 pub mod dialer;
+pub mod dispatcher;
 mod listener;
 pub mod mdns;
 pub mod scheduler;

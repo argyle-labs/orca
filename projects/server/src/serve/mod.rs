@@ -22,6 +22,20 @@ use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::info;
 
 pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()> {
+    // Prod guard for `--dev`: drops `Secure` cookie, serves plain HTTP, and
+    // relaxes SameSite. Safe on a single-user laptop; unsafe the moment a
+    // multi-user host adopts it. Refuse if more than one user exists.
+    if dev {
+        let conn = db::open(&db_path)
+            .with_context(|| format!("open {} for --dev guard", db_path.display()))?;
+        let users = db::users::count(&conn).context("count users for --dev guard")?;
+        drop(conn);
+        if users > 1 {
+            anyhow::bail!(
+                "--dev refused: {users} users registered. Plain-HTTP + relaxed cookie attrs are only safe on a single-user host."
+            );
+        }
+    }
     let pki_dir = db_path
         .parent()
         .unwrap_or(std::path::Path::new("."))
@@ -948,7 +962,13 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
             // ToolCtx (lifecycle, profile, pki, etc.) return 500.
             let cfg = Arc::new(cfg);
             let (reg, ctx) = crate::mcp::build_tool_registry(cfg);
-            api.nest("/api/tools", Arc::new(reg).axum_router(Arc::new(ctx)))
+            let reg = Arc::new(reg);
+            let ctx = Arc::new(ctx);
+            // Share the registry+ctx with the pod relay so peer-relayed tool
+            // calls dispatch in-process instead of looping back over HTTPS
+            // with the admin token (M4 in the v1 hardening punch list).
+            crate::pod::dispatcher::install(reg.clone(), ctx.clone());
+            api.nest("/api/tools", reg.axum_router(ctx))
         }
         Err(e) => {
             tracing::warn!("Config::load failed, /api/tools disabled: {e}");
