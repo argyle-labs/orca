@@ -477,6 +477,18 @@ async fn load_rest_tls(pki_dir: &std::path::Path) -> Result<RustlsConfig> {
         || !orca_sdk::pki::server_cert_path(pki_dir).exists()
     {
         orca_sdk::pki::init(pki_dir).context("auto-init core PKI for REST TLS")?;
+    } else {
+        // Pre-upgrade certs only had `core.orca.local` as SAN. Browsers
+        // won't store cookies for `https://localhost:…` with a mismatched
+        // hostname even after bypassing the self-signed-CA warning. Detect
+        // and re-issue automatically so the daemon fixes itself on restart.
+        let cert_pem =
+            std::fs::read_to_string(orca_sdk::pki::server_cert_path(pki_dir)).unwrap_or_default();
+        if !orca_sdk::pki::rest_server_cert_has_localhost_san(&cert_pem) {
+            orca_sdk::pki::refresh_rest_server_cert(pki_dir)
+                .context("refresh REST server cert to add localhost SAN")?;
+            info!("[pki] REST server cert refreshed — localhost SAN added");
+        }
     }
     let bundle = orca_sdk::pki::load_server(pki_dir).context("load REST TLS bundle")?;
     RustlsConfig::from_pem(bundle.cert_pem.into_bytes(), bundle.key_pem.into_bytes())

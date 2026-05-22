@@ -5,15 +5,16 @@
 //!   server/node.cert.pem / node.key.pem — server cert (generated alongside the CA)
 //!   plugins/<id>/node.cert.pem / node.key.pem — per-plugin cert
 //!
-//! Server cert DNS SAN: `core.orca.local`
+//! Server cert DNS SAN: `core.orca.local`, `localhost`, `127.0.0.1`, `::1`
 //! Plugin cert DNS SAN: `<plugin-id>.plugin.orca.local`
 
 use anyhow::{Context, Result};
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
-    Issuer, KeyPair, KeyUsagePurpose, PKCS_ED25519,
+    Issuer, KeyPair, KeyUsagePurpose, PKCS_ED25519, SanType,
 };
 use sha2::{Digest, Sha256};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
 // ── Algorithm + validity policy ──────────────────────────────────────────────
@@ -697,6 +698,87 @@ pub fn cli_client_key_path(pki_dir: &Path) -> PathBuf {
     pki_dir.join("client.key.pem")
 }
 
+// ── REST server cert helpers ──────────────────────────────────────────────────
+
+/// SANs for the REST server cert. Includes `localhost` and loopback IPs so that
+/// browsers accessing `https://localhost:<port>` get a valid hostname match —
+/// required for browsers to store cookies on connections with self-signed CAs.
+fn rest_server_sans() -> Vec<SanType> {
+    vec![
+        SanType::DnsName("core.orca.local".try_into().expect("valid IA5")),
+        SanType::DnsName("localhost".try_into().expect("valid IA5")),
+        SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        SanType::IpAddress(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+    ]
+}
+
+/// True if the REST server cert already has `localhost` as a DNS SAN.
+/// Used at daemon startup to detect pre-upgrade certs that need re-issuance.
+pub fn rest_server_cert_has_localhost_san(cert_pem: &str) -> bool {
+    use rustls_pemfile::certs;
+    let mut reader = cert_pem.as_bytes();
+    let der = match certs(&mut reader).next() {
+        Some(Ok(d)) => d,
+        _ => return false,
+    };
+    let (_, parsed) = match x509_parser::parse_x509_certificate(der.as_ref()) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    parsed
+        .subject_alternative_name()
+        .ok()
+        .flatten()
+        .map(|ext| {
+            ext.value.general_names.iter().any(|n| {
+                matches!(
+                    n,
+                    x509_parser::extensions::GeneralName::DNSName("localhost")
+                )
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Re-issue the REST server cert under the existing CA. Called when the cert
+/// lacks the `localhost` SAN (pre-upgrade cert) so the new SANs take effect
+/// without requiring a full re-init.
+pub fn refresh_rest_server_cert(pki_dir: &Path) -> Result<()> {
+    let ca_cert_pem = std::fs::read_to_string(ca_cert_path(pki_dir))
+        .context("CA cert not found; run `orca install` to initialize PKI")?;
+    let ca_key_pem = std::fs::read_to_string(ca_key_path(pki_dir))
+        .context("CA key not found; run `orca install` to initialize PKI")?;
+    let ca_key = KeyPair::from_pem(&ca_key_pem).context("parse CA key")?;
+    let issuer =
+        Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key).context("build CA issuer for refresh")?;
+    issue_rest_server_cert(pki_dir, &issuer)
+}
+
+/// Issue (or re-issue) the REST server cert under `issuer`. Atomic on disk.
+fn issue_rest_server_cert(pki_dir: &Path, issuer: &Issuer<'_, KeyPair>) -> Result<()> {
+    let server_key = gen_keypair()?;
+    let mut server_params = CertificateParams::default();
+    server_params.subject_alt_names = rest_server_sans();
+    server_params.is_ca = IsCa::NoCa;
+    server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    set_validity_days(&mut server_params, PEER_VALIDITY_DAYS);
+    {
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, "orca-core");
+        dn.push(DnType::OrganizationName, "orca");
+        dn.push(DnType::OrganizationalUnitName, "server");
+        server_params.distinguished_name = dn;
+    }
+    let server_cert = server_params
+        .signed_by(&server_key, issuer)
+        .context("sign REST server cert")?;
+    let server_dir = pki_dir.join("server");
+    std::fs::create_dir_all(&server_dir)?;
+    atomic_write_pem(&server_cert_path(pki_dir), &server_cert.pem())?;
+    atomic_write_pem(&server_key_path(pki_dir), &server_key.serialize_pem())?;
+    Ok(())
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 /// Generate and persist the CA + server cert. Safe to call multiple times —
@@ -729,26 +811,7 @@ pub fn init(pki_dir: &Path) -> Result<()> {
     // rcgen 0.14 split signing into a separate Issuer that owns the key.
     let issuer = Issuer::new(ca_params, ca_key);
 
-    // Server cert
-    let server_dir = pki_dir.join("server");
-    std::fs::create_dir_all(&server_dir)?;
-
-    let server_key = gen_keypair()?;
-    let mut server_params = CertificateParams::new(vec!["core.orca.local".to_string()])?;
-    server_params.is_ca = IsCa::NoCa;
-    server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-    set_validity_days(&mut server_params, PEER_VALIDITY_DAYS);
-    {
-        let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, "orca-core");
-        dn.push(DnType::OrganizationName, "orca");
-        dn.push(DnType::OrganizationalUnitName, "server");
-        server_params.distinguished_name = dn;
-    }
-    let server_cert = server_params.signed_by(&server_key, &issuer)?;
-
-    write_pem(server_cert_path(pki_dir), &server_cert.pem())?;
-    write_pem(server_key_path(pki_dir), &server_key.serialize_pem())?;
+    issue_rest_server_cert(pki_dir, &issuer)?;
 
     Ok(())
 }
