@@ -510,4 +510,16 @@ mod tests {
     fn authorize_exec_passes_remote_ok_and_any_role() {
         authorize_exec("docs.search", true, "any").expect("should pass");
     }
+
+    #[test]
+    fn value_response_ok_serializes_value() {
+        #[derive(Serialize)]
+        struct Simple {
+            x: u32,
+        }
+        let resp = value_response(Value::Number(1.into()), &Simple { x: 42 });
+        // The response must contain the field we serialized
+        let text = serde_json::to_string(&resp).unwrap();
+        assert!(text.contains("42"), "serialized: {text}");
+    }
 }
