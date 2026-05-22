@@ -21,6 +21,17 @@ use orca_utils::state::{DaemonMode, DaemonState};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::info;
 
+/// Guard for `--dev`: refuse if more than one user is registered.
+/// Plain-HTTP + relaxed cookie attrs are only safe on a single-user host.
+pub(crate) fn dev_multi_user_guard(users: i64) -> Result<()> {
+    if users > 1 {
+        anyhow::bail!(
+            "--dev refused: {users} users registered. Plain-HTTP + relaxed cookie attrs are only safe on a single-user host."
+        );
+    }
+    Ok(())
+}
+
 pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()> {
     // Prod guard for `--dev`: drops `Secure` cookie, serves plain HTTP, and
     // relaxes SameSite. Safe on a single-user laptop; unsafe the moment a
@@ -30,11 +41,7 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
             .with_context(|| format!("open {} for --dev guard", db_path.display()))?;
         let users = db::users::count(&conn).context("count users for --dev guard")?;
         drop(conn);
-        if users > 1 {
-            anyhow::bail!(
-                "--dev refused: {users} users registered. Plain-HTTP + relaxed cookie attrs are only safe on a single-user host."
-            );
-        }
+        dev_multi_user_guard(users)?;
     }
     let pki_dir = db_path
         .parent()
@@ -990,6 +997,73 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         api.fallback(dev_proxy_handler)
     } else {
         api.fallback(static_handler)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── M1 guard ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn dev_multi_user_guard_allows_zero_users() {
+        dev_multi_user_guard(0).unwrap();
+    }
+
+    #[test]
+    fn dev_multi_user_guard_allows_one_user() {
+        dev_multi_user_guard(1).unwrap();
+    }
+
+    #[test]
+    fn dev_multi_user_guard_refuses_two_or_more_users() {
+        let err = dev_multi_user_guard(2).unwrap_err();
+        assert!(err.to_string().contains("--dev refused"), "got: {}", err);
+    }
+
+    // ── is_hop_by_hop ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_hop_by_hop_matches_known_headers() {
+        for h in [
+            "connection",
+            "keep-alive",
+            "transfer-encoding",
+            "te",
+            "trailer",
+            "upgrade",
+        ] {
+            assert!(is_hop_by_hop(h), "expected hop-by-hop: {h}");
+        }
+    }
+
+    #[test]
+    fn is_hop_by_hop_does_not_match_end_to_end_headers() {
+        for h in ["content-type", "authorization", "accept", "x-request-id"] {
+            assert!(!is_hop_by_hop(h), "unexpected hop-by-hop: {h}");
+        }
+    }
+
+    // ── pid_alive ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn pid_alive_is_true_for_current_process() {
+        assert!(pid_alive(std::process::id()));
+    }
+
+    #[test]
+    fn pid_alive_is_false_for_impossible_pid() {
+        // PID 4_000_000 is far beyond any real process ID on macOS/Linux.
+        assert!(!pid_alive(4_000_000));
+    }
+
+    // ── resolve_daemon_binary ─────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_daemon_binary_returns_nonempty_string() {
+        let path = resolve_daemon_binary();
+        assert!(!path.is_empty());
     }
 }
 
