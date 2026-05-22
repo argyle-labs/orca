@@ -145,6 +145,9 @@ import type {
   DockerServiceListLogsErrors,
   DockerServiceListLogsResponses,
   DockerServiceListResponses,
+  DockerServiceListStatsData,
+  DockerServiceListStatsErrors,
+  DockerServiceListStatsResponses,
   DockerServiceUpdateData,
   DockerServiceUpdateErrors,
   DockerServiceUpdateResponses,
@@ -2210,6 +2213,27 @@ export const dockerServiceListLogs = <ThrowOnError extends boolean = false>(
     ThrowOnError
   >({
     url: '/api/tools/docker.service.list-logs',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Live CPU + memory stats for all running containers (`docker stats --no-stream`). Returns an empty list when docker is not running or no containers are up.
+ *
+ * Live CPU + memory stats for all running containers (`docker stats --no-stream`). Returns an empty list when docker is not running or no containers are up.
+ */
+export const dockerServiceListStats = <ThrowOnError extends boolean = false>(
+  options: Options<DockerServiceListStatsData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    DockerServiceListStatsResponses,
+    DockerServiceListStatsErrors,
+    ThrowOnError
+  >({
+    url: '/api/tools/docker.service.list-stats',
     ...options,
     headers: {
       'Content-Type': 'application/json',

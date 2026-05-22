@@ -191,6 +191,42 @@ export type DockerActionResponse = {
   output: string;
 };
 
+/**
+ * Live CPU/memory stats for one running container.
+ */
+export type DockerContainerStats = {
+  /**
+   * Block I/O read bytes since container start.
+   */
+  block_read_bytes: number;
+  /**
+   * Block I/O write bytes since container start.
+   */
+  block_write_bytes: number;
+  /**
+   * CPU usage as a percentage of total host capacity (all cores).
+   */
+  cpu_percent: number;
+  id: string;
+  /**
+   * Container memory limit in MB (`0` = unlimited / host RAM).
+   */
+  mem_limit_mb: number;
+  /**
+   * RSS-equivalent working set in MB.
+   */
+  mem_usage_mb: number;
+  name: string;
+  /**
+   * Net rx bytes.
+   */
+  net_rx_bytes: number;
+  /**
+   * Net tx bytes.
+   */
+  net_tx_bytes: number;
+};
+
 export type DockerEngineKind = 'colima' | 'desktop' | 'none';
 
 export type DockerLogProject = {
@@ -283,6 +319,30 @@ export type FsBrowseResponse = {
 export type FsEntry = {
   name: string;
   path: string;
+};
+
+/**
+ * One GPU detected on the host.
+ */
+export type GpuInfo = {
+  /**
+   * Display name from driver (e.g. `NVIDIA GeForce RTX 4090`).
+   */
+  name: string;
+  /**
+   * GPU temperature in °C.
+   */
+  temperature_c?: number | null;
+  /**
+   * GPU core utilisation 0–100 %.
+   */
+  utilization_percent?: number | null;
+  /**
+   * Source driver: `"nvidia"`, `"amd"`, `"intel"`.
+   */
+  vendor: string;
+  vram_total_mb?: number | null;
+  vram_used_mb?: number | null;
 };
 
 export type GraphQlEnum = {
@@ -1332,6 +1392,11 @@ export type SystemInfoReport = {
   cpu_model?: string | null;
   cpu_physical?: number | null;
   /**
+   * Aggregate CPU utilisation 0–100 %. Requires two sysinfo refreshes;
+   * always `None` on the very first CLI snapshot.
+   */
+  cpu_usage_percent?: number | null;
+  /**
    * Linux distro long name (`Ubuntu 24.04.2 LTS`). `None` on macOS.
    */
   distro?: string | null;
@@ -1345,6 +1410,10 @@ export type SystemInfoReport = {
   dmi_vendor?: string | null;
   docker_present?: boolean | null;
   fqdn?: string | null;
+  /**
+   * GPUs detected on this host (NVIDIA via nvidia-smi; AMD via sysfs).
+   */
+  gpus?: Array<GpuInfo>;
   hostname?: string | null;
   interfaces?: Array<NetIfaceDto>;
   kernel_version?: string | null;
@@ -1356,6 +1425,7 @@ export type SystemInfoReport = {
   load_avg_5?: number | null;
   mem_available_mb?: number | null;
   mem_total_mb?: number | null;
+  mem_used_mb?: number | null;
   orca_dir?: string | null;
   orca_fs_avail_gb?: number | null;
   orca_fs_total_gb?: number | null;
@@ -1384,6 +1454,7 @@ export type SystemInfoReport = {
    */
   snapshot_at_unix?: number | null;
   swap_total_mb?: number | null;
+  swap_used_mb?: number | null;
   system_uptime_secs?: number | null;
   /**
    * Hypervisor / container kind: `kvm`, `qemu`, `vmware`, `lxc`,
@@ -5491,6 +5562,50 @@ export type DockerServiceListLogsResponses = {
 
 export type DockerServiceListLogsResponse =
   DockerServiceListLogsResponses[keyof DockerServiceListLogsResponses];
+
+export type DockerServiceListStatsData = {
+  /**
+   * DockerStatsArgs
+   */
+  body: {
+    [key: string]: unknown;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/tools/docker.service.list-stats';
+};
+
+export type DockerServiceListStatsErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type DockerServiceListStatsError =
+  DockerServiceListStatsErrors[keyof DockerServiceListStatsErrors];
+
+export type DockerServiceListStatsResponses = {
+  /**
+   * DockerStatsOutput
+   *
+   * Tool result
+   */
+  200: {
+    containers: Array<DockerContainerStats>;
+  };
+};
+
+export type DockerServiceListStatsResponse =
+  DockerServiceListStatsResponses[keyof DockerServiceListStatsResponses];
 
 export type DockerServiceUpdateData = {
   /**

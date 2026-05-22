@@ -2,13 +2,8 @@
   import { onMount, onDestroy } from 'svelte';
   import { callTool } from '$lib/stores/runTool';
   import StatusDot from '$lib/components/StatusDot.svelte';
+  import type { GpuInfo, SystemInfoReport } from '$lib/client/types.gen';
 
-  /**
-   * Local row is derived from this orca instance via api.health +
-   * system_runtime_spec. Remote rows are paired pod peers (mesh members)
-   * pulled from `pod.list`; their health/version is unknown from this side
-   * until the pod surface exposes per-peer stats.
-   */
   interface Instance {
     id: string;
     label: string;
@@ -24,6 +19,8 @@
     secure?: { local: boolean; peer: boolean } | null;
     status?: string | null;
     addresses?: { kind: string; value: string }[] | null;
+    /** system metrics — populated from SystemInfoReport */
+    sys?: SystemInfoReport | null;
   }
 
   let instances = $state<Instance[]>([]);
@@ -42,10 +39,11 @@
         callTool('systemRuntimeDetail', {}),
       ]);
       inst.health = (health as { ok: boolean }).ok ? 'up' : 'down';
-      const s = spec as { version: string; target: string; frontend: string };
+      const s = spec as { version: string; target: string; frontend: string; system?: SystemInfoReport | null };
       inst.version = s.version;
       inst.target = s.target;
       inst.frontend = s.frontend;
+      inst.sys = s.system ?? null;
       inst.error = null;
     } catch (e) {
       inst.health = 'down';
@@ -58,16 +56,25 @@
 
   async function refreshPodPeers() {
     try {
-      const peersResult = await callTool<{
-        peer_id: string;
-        hostname: string;
-        addr: string;
-        port: number;
-        status: string;
-        local_secure: boolean;
-        peer_secure: boolean;
-        addresses?: { kind: string; value: string }[];
-      }[]>('podPeerList', {});
+      const [peersResult, statusResult] = await Promise.all([
+        callTool<{
+          peer_id: string;
+          hostname: string;
+          addr: string;
+          port: number;
+          status: string;
+          local_secure: boolean;
+          peer_secure: boolean;
+          addresses?: { kind: string; value: string }[];
+        }[]>('podPeerList', {}),
+        callTool<{ peer_id: string; system?: SystemInfoReport | null }[]>('hostStatusList', {}).catch(() => []),
+      ]);
+
+      const sysById = new Map<string, SystemInfoReport | null>();
+      for (const row of statusResult ?? []) {
+        sysById.set(row.peer_id, row.system ?? null);
+      }
+
       const local = instances.find((i) => i.role === 'local');
       const podRows: Instance[] = (peersResult ?? []).map((p) => ({
         id: `pod:${p.peer_id}`,
@@ -83,18 +90,16 @@
         secure: { local: p.local_secure, peer: p.peer_secure },
         status: p.status,
         addresses: (p.addresses ?? []).map((a) => ({ kind: a.kind, value: a.value })),
+        sys: sysById.get(p.peer_id) ?? null,
       }));
       instances = local ? [local, ...podRows] : podRows;
     } catch (e) {
-      // Pod surface may not be initialized (no `orca pod init` run).
-      // Don't blow away the local row — just leave remotes empty.
       console.warn('pod.list failed:', e);
     }
   }
 
   function refresh(inst: Instance) {
     if (inst.role === 'local') return refreshLocal(inst);
-    // pod rows: refreshed by refreshPodPeers (which rebuilds them).
     return refreshPodPeers();
   }
 
@@ -111,6 +116,7 @@
         health: 'unknown',
         error: null,
         lastChecked: null,
+        sys: null,
       },
     ];
     refreshLocal(instances[0]);
@@ -134,6 +140,31 @@
     if (sec < 3600) return `${Math.round(sec / 60)}m ago`;
     return `${Math.round(sec / 3600)}h ago`;
   }
+
+  function fmtMb(mb: number | null | undefined): string {
+    if (mb == null) return '—';
+    if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
+    return `${mb} MB`;
+  }
+
+  function memPct(sys: SystemInfoReport | null | undefined): number {
+    if (!sys?.mem_total_mb || !sys?.mem_used_mb) return 0;
+    return Math.min(100, (sys.mem_used_mb / sys.mem_total_mb) * 100);
+  }
+
+  function cpuPct(sys: SystemInfoReport | null | undefined): number | null {
+    return sys?.cpu_usage_percent ?? null;
+  }
+
+  function fmtGpus(gpus: GpuInfo[] | null | undefined): string {
+    if (!gpus?.length) return '';
+    return gpus
+      .map((g) => {
+        const util = g.utilization_percent != null ? ` ${g.utilization_percent.toFixed(0)}%` : '';
+        return `${g.name}${util}`;
+      })
+      .join(', ');
+  }
 </script>
 
 <section class="page">
@@ -148,18 +179,59 @@
         <div class="row">
           <div class="ident">
             <StatusDot ok={inst.health === 'up' ? true : inst.health === 'down' ? false : null} />
-            <span class="label">{inst.label}</span>
+            <span class="label">{inst.sys?.hostname ?? inst.label}</span>
             <span class="role">{inst.role}</span>
           </div>
           <button class="refresh" onclick={() => refresh(inst)} title="Refresh">↻</button>
         </div>
+
+        {#if inst.sys}
+          <div class="metrics">
+            <div class="metric-row">
+              <span class="metric-label">CPU</span>
+              <div class="bar-wrap">
+                <div class="bar" style="width:{cpuPct(inst.sys) ?? 0}%"
+                  class:warn={( cpuPct(inst.sys) ?? 0) > 70}
+                  class:crit={(cpuPct(inst.sys) ?? 0) > 90}></div>
+              </div>
+              <span class="metric-val">
+                {cpuPct(inst.sys) != null ? `${cpuPct(inst.sys)!.toFixed(1)}%` : '—'}
+              </span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">RAM</span>
+              <div class="bar-wrap">
+                <div class="bar" style="width:{memPct(inst.sys)}%"
+                  class:warn={memPct(inst.sys) > 70}
+                  class:crit={memPct(inst.sys) > 90}></div>
+              </div>
+              <span class="metric-val">
+                {fmtMb(inst.sys.mem_used_mb)} / {fmtMb(inst.sys.mem_total_mb)}
+              </span>
+            </div>
+            {#if inst.sys.load_avg_1 != null}
+              <div class="metric-row">
+                <span class="metric-label">Load</span>
+                <span class="metric-val load-val">
+                  {inst.sys.load_avg_1.toFixed(2)}
+                  <span class="dim">/ {inst.sys.load_avg_5?.toFixed(2) ?? '—'} / {inst.sys.load_avg_15?.toFixed(2) ?? '—'}</span>
+                </span>
+              </div>
+            {/if}
+            {#if inst.sys.gpus?.length}
+              <div class="metric-row gpu-row">
+                <span class="metric-label">GPU</span>
+                <span class="metric-val">{fmtGpus(inst.sys.gpus)}</span>
+              </div>
+            {/if}
+          </div>
+        {/if}
 
         <dl class="meta">
           <dt>origin</dt><dd><code>{inst.origin || '—'}</code></dd>
           {#if inst.role === 'local'}
             <dt>version</dt><dd><code>{inst.version ?? '—'}</code></dd>
             <dt>target</dt><dd><code>{inst.target ?? '—'}</code></dd>
-            <dt>frontend</dt><dd><code>{inst.frontend ?? '—'}</code></dd>
           {:else}
             <dt>status</dt><dd><code>{inst.status ?? '—'}</code></dd>
             <dt>trust</dt><dd>
@@ -172,6 +244,12 @@
                   <code title={a.kind}>{a.kind}={a.value}</code>
                 {/each}
               </dd>
+            {/if}
+          {/if}
+          {#if inst.sys}
+            <dt>os</dt><dd><code>{inst.sys.os_name ?? '—'} {inst.sys.os_version ?? ''}</code></dd>
+            {#if inst.sys.virtualization && inst.sys.virtualization !== 'none'}
+              <dt>virt</dt><dd><code>{inst.sys.virtualization}</code></dd>
             {/if}
           {/if}
           <dt>checked</dt><dd>{relTime(inst.lastChecked)}</dd>
@@ -251,6 +329,54 @@
   }
   .refresh:hover { background: var(--color-surface-2); color: var(--color-text); }
 
+  /* ── metrics ─────────────────────────────────────────────────────────── */
+  .metrics {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .metric-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--text-xs);
+  }
+  .metric-label {
+    width: 36px;
+    flex-shrink: 0;
+    color: var(--color-text-dim);
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.06em;
+  }
+  .bar-wrap {
+    flex: 1;
+    height: 6px;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .bar {
+    height: 100%;
+    background: var(--color-accent, #4f86f7);
+    border-radius: 3px;
+    transition: width 0.4s ease;
+  }
+  .bar.warn { background: #e6a817; }
+  .bar.crit { background: var(--color-error); }
+  .metric-val {
+    width: 120px;
+    flex-shrink: 0;
+    color: var(--color-text);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .load-val { width: auto; }
+  .dim { color: var(--color-text-dim); }
+  .gpu-row .metric-val { width: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* ── meta dl ─────────────────────────────────────────────────────────── */
   dl.meta {
     margin: 0;
     display: grid;
