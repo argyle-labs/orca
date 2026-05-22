@@ -450,8 +450,7 @@
 {#if selectedInst}
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <div class="backdrop" role="presentation" onclick={closeDrawer}></div>
-  <!-- svelte-ignore a11y_no_noninteractive_element_interactions a11y_click_events_have_key_events -->
-  <aside class="drawer" onclick={(e) => e.stopPropagation()}>
+  <aside class="drawer">
     <div class="drawer-header">
       <div class="ident">
         <StatusDot
