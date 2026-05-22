@@ -129,7 +129,6 @@ pub(crate) fn chmod_dir_owner_only(_dir: &std::path::Path) -> std::io::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn hex_produces_lowercase_hexdigits() {
