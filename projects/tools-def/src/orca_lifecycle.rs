@@ -292,6 +292,11 @@ pub struct SystemUpdateArgs {
     #[serde(default = "default_channel")]
     #[cfg_attr(feature = "cli", arg(default_value = "stable"))]
     pub channel: String,
+    /// When set, proxy the call to the named remote peer via the pod mesh
+    /// instead of running on the local host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "cli", arg(long, hide = true))]
+    pub peer_id: Option<String>,
 }
 fn default_channel() -> String {
     "stable".into()
@@ -341,6 +346,13 @@ fn svc(
     ctx.service::<std::sync::Arc<dyn crate::services::lifecycle::LifecycleService>>()
 }
 
+#[cfg(feature = "native")]
+fn pod_svc(
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<std::sync::Arc<dyn crate::pod::PodService>> {
+    ctx.service::<std::sync::Arc<dyn crate::pod::PodService>>()
+}
+
 /// [MUTATES STATE] Drive the system lifecycle. `action`:
 /// - `install`: wire symlinks, register MCP server, install binary.
 /// - `uninstall`: remove binary, MCP registration, and CLAUDE.md symlinks.
@@ -367,20 +379,42 @@ async fn system_diagnostic_list(
 }
 
 /// Probe GitHub releases for a newer version on `channel`. Does not apply anything.
+/// When `peer_id` is set the probe runs on the named peer instead of locally.
 #[orca_tool(domain = "system.update", verb = "detail", remote_ok = true)]
 async fn system_update_detail(
     args: SystemUpdateArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<UpdateCheckReport> {
+    if let Some(ref peer_id) = args.peer_id {
+        let dispatch = pod_svc(ctx)?
+            .exec(
+                peer_id,
+                "system.update.detail",
+                serde_json::json!({ "channel": args.channel }),
+            )
+            .await?;
+        return Ok(serde_json::from_value(dispatch.result)?);
+    }
     svc(ctx)?.update_check(&args.channel).await
 }
 
 /// [MUTATES STATE] Download + install the latest binary on `channel`. No-op if up to date.
+/// When `peer_id` is set the update runs on the named peer instead of locally.
 #[orca_tool(domain = "system.update", verb = "create", remote_ok = true)]
 async fn system_update_create(
     args: SystemUpdateArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<LifecycleReport> {
+    if let Some(ref peer_id) = args.peer_id {
+        let dispatch = pod_svc(ctx)?
+            .exec(
+                peer_id,
+                "system.update.create",
+                serde_json::json!({ "channel": args.channel }),
+            )
+            .await?;
+        return Ok(serde_json::from_value(dispatch.result)?);
+    }
     svc(ctx)?.update_apply(&args.channel).await
 }
 
@@ -641,6 +675,7 @@ mod tests {
         let r = system_update_detail(
             SystemUpdateArgs {
                 channel: "rc".into(),
+                peer_id: None,
             },
             &ctx,
         )
@@ -656,6 +691,7 @@ mod tests {
         let r = system_update_create(
             SystemUpdateArgs {
                 channel: "beta".into(),
+                peer_id: None,
             },
             &ctx,
         )
@@ -663,6 +699,152 @@ mod tests {
         .unwrap();
         assert_eq!(r.done, vec!["update:beta".to_string()]);
         assert_eq!(stub.last_channel.lock().unwrap().as_deref(), Some("beta"));
+    }
+
+    // ── peer proxy tests ─────────────────────────────────────────────────────
+
+    #[derive(Default)]
+    struct StubPod {
+        last_exec: Mutex<Option<(String, String, serde_json::Value)>>,
+    }
+
+    #[async_trait]
+    impl crate::pod::PodService for StubPod {
+        async fn list_enriched(&self) -> Result<Vec<crate::pod::PodPeerDto>> {
+            Ok(vec![])
+        }
+        async fn accept(&self, _code: &str) -> Result<crate::pod::PodAcceptOutput> {
+            anyhow::bail!("stub")
+        }
+        async fn trust(&self, _peer_id: &str, _on: bool) -> Result<crate::pod::PodTrustOutput> {
+            anyhow::bail!("stub")
+        }
+        async fn ping(&self, peer_id: &str) -> crate::pod::PodPingOutput {
+            crate::pod::PodPingOutput {
+                ok: true,
+                latency_ms: 0,
+                error: None,
+                peer_id: Some(peer_id.into()),
+                hostname: None,
+                version: None,
+            }
+        }
+        fn discover(&self) -> Result<Vec<crate::pod::PodDiscoveryRowDto>> {
+            Ok(vec![])
+        }
+        fn pending(&self) -> Result<Vec<crate::pod::PodPendingOfferDto>> {
+            Ok(vec![])
+        }
+        async fn offer(
+            &self,
+            _addr: &str,
+            _port: Option<u16>,
+        ) -> Result<crate::pod::PodOfferOutput> {
+            anyhow::bail!("stub")
+        }
+        async fn join(
+            &self,
+            _inviter_addr: &str,
+            _port: Option<u16>,
+        ) -> Result<crate::pod::PodJoinOutput> {
+            anyhow::bail!("stub")
+        }
+        async fn leave_peer(&self, _peer_id: &str) -> Result<crate::pod::PodLeaveOutput> {
+            anyhow::bail!("stub")
+        }
+        fn cert_status(&self) -> Result<crate::pod::PodCertStatusOutput> {
+            anyhow::bail!("stub")
+        }
+        async fn dev_sync(&self) -> Result<Vec<crate::pod::PodDevPeerResult>> {
+            Ok(vec![])
+        }
+        async fn dev_enable_fanout(
+            &self,
+            _peers: &[String],
+        ) -> Result<Vec<crate::pod::PodDevPeerResult>> {
+            Ok(vec![])
+        }
+        async fn dev_disable_fanout(
+            &self,
+            _peers: &[String],
+        ) -> Result<Vec<crate::pod::PodDevPeerResult>> {
+            Ok(vec![])
+        }
+        #[allow(clippy::disallowed_types)]
+        async fn exec(
+            &self,
+            peer: &str,
+            tool: &str,
+            args: serde_json::Value,
+        ) -> Result<crate::pod::PodExecDispatch> {
+            *self.last_exec.lock().unwrap() = Some((peer.into(), tool.into(), args.clone()));
+            let result = match tool {
+                "system.update.detail" => serde_json::json!({
+                    "channel": args["channel"],
+                    "latest": "v9.9.9",
+                    "up_to_date": false
+                }),
+                "system.update.create" => serde_json::json!({
+                    "done": [format!("update:{}", args["channel"].as_str().unwrap_or(""))],
+                    "skipped": [],
+                    "errors": []
+                }),
+                _ => serde_json::Value::Null,
+            };
+            Ok(crate::pod::PodExecDispatch {
+                peer: peer.into(),
+                tool: tool.into(),
+                result,
+            })
+        }
+    }
+
+    fn ctx_with_lifecycle_and_pod() -> (orca_utils::tool::ToolCtx, Arc<StubLifecycle>, Arc<StubPod>)
+    {
+        let lifecycle = Arc::new(StubLifecycle::default());
+        let pod = Arc::new(StubPod::default());
+        let mut ctx = empty_ctx();
+        ctx.register_service(Arc::clone(&lifecycle) as Arc<dyn LifecycleService>);
+        ctx.register_service(Arc::clone(&pod) as Arc<dyn crate::pod::PodService>);
+        (ctx, lifecycle, pod)
+    }
+
+    #[tokio::test]
+    async fn update_detail_proxies_to_peer_when_peer_id_set() {
+        let (ctx, _, pod) = ctx_with_lifecycle_and_pod();
+        let r = system_update_detail(
+            SystemUpdateArgs {
+                channel: "rc".into(),
+                peer_id: Some("peer.abc".into()),
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.channel, "rc");
+        assert!(!r.up_to_date);
+        let (peer, tool, args) = pod.last_exec.lock().unwrap().clone().unwrap();
+        assert_eq!(peer, "peer.abc");
+        assert_eq!(tool, "system.update.detail");
+        assert_eq!(args["channel"], "rc");
+    }
+
+    #[tokio::test]
+    async fn update_create_proxies_to_peer_when_peer_id_set() {
+        let (ctx, _, pod) = ctx_with_lifecycle_and_pod();
+        let r = system_update_create(
+            SystemUpdateArgs {
+                channel: "stable".into(),
+                peer_id: Some("peer.xyz".into()),
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.done, vec!["update:stable".to_string()]);
+        let (peer, tool, _) = pod.last_exec.lock().unwrap().clone().unwrap();
+        assert_eq!(peer, "peer.xyz");
+        assert_eq!(tool, "system.update.create");
     }
 
     #[tokio::test]

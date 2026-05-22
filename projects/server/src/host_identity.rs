@@ -304,7 +304,7 @@ pub fn spawn_refresh_task() -> tokio::task::JoinHandle<()> {
         crate::periodic::boxed(|| async move {
             let conn = db::open_default()?;
             refresh_and_persist(&conn)?;
-            tracing::debug!("[host-addressing] refreshed");
+            tracing::trace!("[host-addressing] refreshed");
             Ok(())
         }),
     )

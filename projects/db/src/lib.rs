@@ -464,7 +464,7 @@ pub fn migrate(conn: &Connection, direction: MigrateDirection, steps: usize) -> 
                 .collect();
 
             if pending.is_empty() {
-                tracing::debug!("nothing to migrate");
+                tracing::trace!("nothing to migrate");
             }
 
             for m in pending {

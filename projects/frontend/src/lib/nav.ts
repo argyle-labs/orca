@@ -31,7 +31,7 @@ export const NAV_SECTIONS: NavSection[] = [
   {
     label: 'System',
     items: [
-      { label: 'Overview', href: '/', icon: '○', enabled: true },
+      { label: 'Systems', href: '/', icon: '○', enabled: true },
       { label: 'Profile', href: '/profile', icon: '◉' },
       { label: 'Auth', href: '/auth', icon: '⚿' },
       { label: 'Engines', href: '/engines', icon: '◐' },

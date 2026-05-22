@@ -311,17 +311,25 @@ async fn main() -> Result<()> {
     // Require both domain AND verb to be registered (or `--help`) — that way
     // legacy subcommands like `orca spec dump` still fall through to the
     // derive parser when their verb isn't a migrated OrcaOp.
+    //
+    // Try progressively longer domain prefixes so dotted sub-domains (e.g.
+    // "system.dev") work as space-separated CLI args (`orca system dev update`
+    // rather than requiring `orca system.dev update`).
     {
         let argv: Vec<String> = std::env::args().collect();
-        if let Some(dom) = argv.get(1) {
-            let verb_opt = argv.get(2);
-            let is_domain_help =
-                matches!(verb_opt.map(String::as_str), Some("--help") | Some("-h"));
-            let matched = orca_tools_def::cli::ops().any(|o| {
-                o.domain == dom
-                    && (is_domain_help
-                        || verb_opt.is_none()
-                        || verb_opt.is_some_and(|v| o.verb == v))
+        if argv.len() >= 2 {
+            let rest_args = &argv[1..];
+            let matched = (1..=rest_args.len()).any(|depth| {
+                let dom = rest_args[..depth].join(".");
+                let verb_opt = rest_args.get(depth);
+                let is_domain_help =
+                    matches!(verb_opt.map(String::as_str), Some("--help") | Some("-h"));
+                orca_tools_def::cli::ops().any(|o| {
+                    o.domain == dom
+                        && (is_domain_help
+                            || verb_opt.is_none()
+                            || verb_opt.is_some_and(|v| o.verb == v))
+                })
             });
             if matched {
                 let config = Config::load()?;
@@ -329,7 +337,7 @@ async fn main() -> Result<()> {
                 // path's init; do it here so any tool that touches
                 // host_identity (e.g. pod.offer → push_offer) is safe.
                 orca::host_identity::init(&config.app_dir)?;
-                let rest = argv[1..].to_vec();
+                let rest = rest_args.to_vec();
                 return dispatch_op(rest, config).await;
             }
         }
@@ -536,7 +544,7 @@ fn bootstrap_default_profile(config: &Config) -> Result<()> {
             "migrated personal agents into default profile"
         );
     }
-    tracing::debug!(profile_id = %p.id, "active profile resolved");
+    tracing::trace!(profile_id = %p.id, "active profile resolved");
     Ok(())
 }
 

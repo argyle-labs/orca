@@ -21,7 +21,7 @@ use std::time::Duration;
 /// How often each host persists its own snapshot. Decoupled from the
 /// in-memory cache cadence so client polls stay snappy without bloating
 /// the DB.
-const PERSIST_INTERVAL: Duration = Duration::from_secs(60);
+const PERSIST_INTERVAL: Duration = Duration::from_secs(10);
 
 /// How often the sync puller asks each peer for new status rows. Matches
 /// the persist cadence — pulling more often than peers write just burns

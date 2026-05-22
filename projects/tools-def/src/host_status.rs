@@ -98,14 +98,20 @@ mod tests {
     use super::*;
     use crate::test_support::empty_ctx;
 
+    fn now() -> i64 {
+        chrono::Utc::now().timestamp()
+    }
+
     fn seed(conn: &orca_db::Conn) {
         // Two peers, multiple rows each, one with malformed payload to exercise
-        // the `system = None` branch.
-        orca_db::host_status::insert_status(conn, "alpha", 100, "not json at all", 101, "local")
+        // the `system = None` branch. Use recent timestamps so age-based pruning
+        // doesn't evict them.
+        let t = now();
+        orca_db::host_status::insert_status(conn, "alpha", t - 200, "not json at all", t, "local")
             .unwrap();
-        orca_db::host_status::insert_status(conn, "alpha", 200, "not json at all", 201, "local")
+        orca_db::host_status::insert_status(conn, "alpha", t - 100, "not json at all", t, "local")
             .unwrap();
-        orca_db::host_status::insert_status(conn, "beta", 150, "not json at all", 151, "synced")
+        orca_db::host_status::insert_status(conn, "beta", t - 150, "not json at all", t, "synced")
             .unwrap();
     }
 
@@ -114,13 +120,15 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = empty_ctx();
         orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+            let t = now();
             seed(&orca_db::open_default().unwrap());
             let out = host_status_list(HostStatusRowsArgs {}, &ctx).await.unwrap();
             let mut by_peer: std::collections::HashMap<_, _> =
                 out.0.iter().map(|r| (r.peer_id.clone(), r)).collect();
             assert_eq!(by_peer.len(), 2);
-            assert_eq!(by_peer.remove("alpha").unwrap().snapshot_at_unix, 200);
-            assert_eq!(by_peer.remove("beta").unwrap().snapshot_at_unix, 150);
+            // alpha's newest row is t-100; beta's is t-150.
+            assert_eq!(by_peer.remove("alpha").unwrap().snapshot_at_unix, t - 100);
+            assert_eq!(by_peer.remove("beta").unwrap().snapshot_at_unix, t - 150);
         })
         .await;
     }
@@ -130,6 +138,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = empty_ctx();
         orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+            let t = now();
             seed(&orca_db::open_default().unwrap());
             let out = host_status_detail(
                 HostStatusDetailArgs {
@@ -142,8 +151,8 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(out.0.len(), 2);
-            assert_eq!(out.0[0].snapshot_at_unix, 200);
-            assert_eq!(out.0[1].snapshot_at_unix, 100);
+            assert_eq!(out.0[0].snapshot_at_unix, t - 100);
+            assert_eq!(out.0[1].snapshot_at_unix, t - 200);
             assert!(out.0[0].system.is_none(), "unparseable payload → None");
         })
         .await;
@@ -154,11 +163,13 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = empty_ctx();
         orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+            let t = now();
             seed(&orca_db::open_default().unwrap());
+            // watermark between the two alpha rows; only t-100 survives.
             let out = host_status_detail(
                 HostStatusDetailArgs {
                     peer_id: "alpha".into(),
-                    since_unix: Some(150),
+                    since_unix: Some(t - 150),
                     limit: None,
                 },
                 &ctx,
@@ -166,7 +177,7 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(out.0.len(), 1);
-            assert_eq!(out.0[0].snapshot_at_unix, 200);
+            assert_eq!(out.0[0].snapshot_at_unix, t - 100);
         })
         .await;
     }
@@ -176,6 +187,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = empty_ctx();
         orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+            let t = now();
             seed(&orca_db::open_default().unwrap());
             let out = host_status_detail(
                 HostStatusDetailArgs {
@@ -188,7 +200,7 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(out.0.len(), 1);
-            assert_eq!(out.0[0].snapshot_at_unix, 200);
+            assert_eq!(out.0[0].snapshot_at_unix, t - 100);
         })
         .await;
     }

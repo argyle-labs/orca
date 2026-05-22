@@ -1,23 +1,26 @@
-//! Per-peer system snapshot rows + per-peer cap enforcement.
+//! Per-peer system snapshot rows + age-based retention.
 //!
 //! See `migrations/20260517170000__host_status.up.sql` for the schema.
 //!
 //! Authority model:
 //!   * Rows with `source='local'` are owned by the host whose peer_id matches.
-//!     The local persistence task writes these every ~60s.
+//!     The local persistence task writes these every ~10 s.
 //!   * Rows with `source='synced'` are mirrored from a peer's own DB by the
 //!     pull-based sync task. They're read-only from this host's perspective.
 //!
-//! Cap: at most [`MAX_ROWS_PER_PEER`] rows per peer_id. Newer rows displace
-//! older ones (FIFO). Enforced on every insert.
+//! Retention: age-based by default (24 h). Configurable via the `config_store`
+//! key `("host_status", "retention_days")`. A hard row-count cap guards against
+//! unbounded growth if the retention setting is misconfigured.
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
 
-/// Hard cap on snapshot history per peer. Keeps the table bounded regardless
-/// of how aggressively a peer (or the local writer) churns out snapshots.
-/// 1440 rows ≈ 24h at one snapshot per minute.
-pub const MAX_ROWS_PER_PEER: usize = 1440;
+/// Hard row-count cap per peer. Safety guard independent of the age-based
+/// retention policy. 8640 rows ≈ 24 h at one snapshot every 10 s.
+pub const MAX_ROWS_PER_PEER: usize = 8640;
+
+/// Default retention when no explicit config entry exists: 24 hours.
+const DEFAULT_RETENTION_SECS: i64 = 86_400;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HostStatusRow {
@@ -29,9 +32,29 @@ pub struct HostStatusRow {
     pub source: String,
 }
 
-/// Insert one snapshot and prune the per-peer history down to
-/// [`MAX_ROWS_PER_PEER`]. Idempotent on `(peer_id, snapshot_at_unix)` — a
-/// re-import of the same row is a no-op (INSERT OR IGNORE).
+/// Read the configured retention window in seconds from config_store,
+/// falling back to [`DEFAULT_RETENTION_SECS`] on absence or parse error.
+pub fn retention_seconds(conn: &Connection) -> i64 {
+    crate::config_store::get(conn, "host_status", "retention_days")
+        .ok()
+        .flatten()
+        .and_then(|row| {
+            // config_store stores bare numbers or JSON-encoded numbers; strip
+            // surrounding quotes before parsing.
+            row.json.trim_matches('"').parse::<f64>().ok()
+        })
+        .map(|days| (days * 86_400.0) as i64)
+        .filter(|&s| s > 0)
+        .unwrap_or(DEFAULT_RETENTION_SECS)
+}
+
+/// Insert one snapshot, then prune the per-peer history:
+///   1. Age-based: remove rows older than the configured retention window.
+///   2. Count cap: keep at most [`MAX_ROWS_PER_PEER`] newest rows as a
+///      safety guard against misconfigured retention.
+///
+/// Idempotent on `(peer_id, snapshot_at_unix)` — re-importing the same row
+/// is a no-op (INSERT OR IGNORE).
 pub fn insert_status(
     conn: &Connection,
     peer_id: &str,
@@ -55,8 +78,13 @@ pub fn insert_status(
     if inserted == 0 {
         return Ok(false);
     }
-    // Prune. Sub-query gives the cutoff snapshot time; rows older than that
-    // for this peer get deleted. Cheap because the index is on (peer_id, time DESC).
+    // Age-based prune.
+    let cutoff = chrono::Utc::now().timestamp() - retention_seconds(conn);
+    conn.execute(
+        "DELETE FROM host_status WHERE peer_id = ?1 AND snapshot_at_unix < ?2",
+        params![peer_id, cutoff],
+    )?;
+    // Count-cap safety: keep at most MAX_ROWS_PER_PEER newest rows.
     conn.execute(
         "DELETE FROM host_status
          WHERE peer_id = ?1
@@ -93,7 +121,7 @@ pub fn latest_per_peer(conn: &Connection) -> Result<Vec<HostStatusRow>> {
 /// Rows for a single peer, optionally filtered by `since_unix` (exclusive).
 /// Used by both the UI (history scrolling) and the sync puller (watermark
 /// pull). Results are newest-first; cap with `limit` so a misbehaving caller
-/// can't pull the entire 1440-row history if it doesn't need to.
+/// can't pull the entire history if it doesn't need to.
 pub fn rows_for_peer(
     conn: &Connection,
     peer_id: &str,
@@ -144,32 +172,41 @@ mod tests {
     use super::*;
     use crate::testing::test_conn as test_db;
 
+    fn now() -> i64 {
+        chrono::Utc::now().timestamp()
+    }
+
     #[test]
     fn insert_and_latest_per_peer() {
         let conn = test_db();
-        insert_status(&conn, "peer.a", 100, "{}", 100, "local").unwrap();
-        insert_status(&conn, "peer.a", 200, "{}", 200, "local").unwrap();
-        insert_status(&conn, "peer.b", 150, "{}", 150, "synced").unwrap();
+        let t = now();
+        insert_status(&conn, "peer.a", t - 200, "{}", t, "local").unwrap();
+        insert_status(&conn, "peer.a", t - 100, "{}", t, "local").unwrap();
+        insert_status(&conn, "peer.b", t - 150, "{}", t, "synced").unwrap();
         let rows = latest_per_peer(&conn).unwrap();
         assert_eq!(rows.len(), 2);
         let a = rows.iter().find(|r| r.peer_id == "peer.a").unwrap();
-        assert_eq!(a.snapshot_at_unix, 200);
+        assert_eq!(a.snapshot_at_unix, t - 100);
     }
 
     #[test]
     fn insert_ignores_duplicate() {
         let conn = test_db();
-        assert!(insert_status(&conn, "peer.a", 100, "{}", 100, "local").unwrap());
-        assert!(!insert_status(&conn, "peer.a", 100, "{}", 200, "local").unwrap());
+        let t = now();
+        assert!(insert_status(&conn, "peer.a", t - 100, "{}", t, "local").unwrap());
+        assert!(!insert_status(&conn, "peer.a", t - 100, "{}", t, "local").unwrap());
     }
 
     #[test]
-    fn prune_caps_per_peer_history() {
+    fn prune_removes_rows_older_than_retention() {
         let conn = test_db();
-        // Insert MAX + 5 rows, expect history trimmed to MAX.
-        for i in 0..(MAX_ROWS_PER_PEER as i64 + 5) {
-            insert_status(&conn, "peer.a", i, "{}", i, "local").unwrap();
-        }
+        let t = now();
+        // Two recent rows survive.
+        insert_status(&conn, "peer.a", t - 100, "{}", t, "local").unwrap();
+        insert_status(&conn, "peer.a", t - 50, "{}", t, "local").unwrap();
+        // Row older than 24 h gets pruned on the next insert.
+        insert_status(&conn, "peer.a", t - 90_001, "{}", t, "local").unwrap();
+        insert_status(&conn, "peer.a", t - 10, "{}", t, "local").unwrap();
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM host_status WHERE peer_id='peer.a'",
@@ -177,36 +214,30 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(n as usize, MAX_ROWS_PER_PEER);
-        // Oldest 5 rows should be gone; latest preserved.
-        let oldest: i64 = conn
-            .query_row(
-                "SELECT MIN(snapshot_at_unix) FROM host_status WHERE peer_id='peer.a'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(oldest, 5);
+        // 3 recent rows remain; the old one was pruned.
+        assert_eq!(n, 3);
     }
 
     #[test]
     fn rows_for_peer_respects_since() {
         let conn = test_db();
-        insert_status(&conn, "peer.a", 100, "{}", 100, "local").unwrap();
-        insert_status(&conn, "peer.a", 200, "{}", 200, "local").unwrap();
-        insert_status(&conn, "peer.a", 300, "{}", 300, "local").unwrap();
-        let rows = rows_for_peer(&conn, "peer.a", Some(150), 100).unwrap();
+        let t = now();
+        insert_status(&conn, "peer.a", t - 300, "{}", t, "local").unwrap();
+        insert_status(&conn, "peer.a", t - 200, "{}", t, "local").unwrap();
+        insert_status(&conn, "peer.a", t - 100, "{}", t, "local").unwrap();
+        let rows = rows_for_peer(&conn, "peer.a", Some(t - 250), 100).unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].snapshot_at_unix, 300);
+        assert_eq!(rows[0].snapshot_at_unix, t - 100);
     }
 
     #[test]
     fn latest_snapshot_at_works() {
         let conn = test_db();
         assert_eq!(latest_snapshot_at(&conn, "peer.a").unwrap(), None);
-        insert_status(&conn, "peer.a", 100, "{}", 100, "local").unwrap();
-        insert_status(&conn, "peer.a", 300, "{}", 300, "local").unwrap();
-        insert_status(&conn, "peer.a", 200, "{}", 200, "local").unwrap();
-        assert_eq!(latest_snapshot_at(&conn, "peer.a").unwrap(), Some(300));
+        let t = now();
+        insert_status(&conn, "peer.a", t - 300, "{}", t, "local").unwrap();
+        insert_status(&conn, "peer.a", t - 100, "{}", t, "local").unwrap();
+        insert_status(&conn, "peer.a", t - 200, "{}", t, "local").unwrap();
+        assert_eq!(latest_snapshot_at(&conn, "peer.a").unwrap(), Some(t - 100));
     }
 }

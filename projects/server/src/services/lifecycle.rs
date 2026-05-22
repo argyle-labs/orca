@@ -312,14 +312,23 @@ impl LifecycleService for ServerLifecycle {
         } else {
             "disabled"
         };
-        let mode = orca_utils::state::read()
-            .ok()
-            .flatten()
-            .map(|s| match s.mode {
-                orca_utils::state::DaemonMode::Daemon => "daemon".to_string(),
-                orca_utils::state::DaemonMode::Parked => "parked".to_string(),
-                orca_utils::state::DaemonMode::Dev => "dev".to_string(),
-            });
+        // A version string containing "-dev+" means this binary was built from
+        // a git checkout past a release tag — always dev mode regardless of the
+        // state file (which tracks the daemon supervisor's mode, not the binary).
+        let version_str = env!("ORCA_VERSION");
+        let is_dev_build = version_str.contains("-dev+") || version_str.ends_with("+unknown");
+        let mode = if is_dev_build {
+            Some("dev".to_string())
+        } else {
+            orca_utils::state::read()
+                .ok()
+                .flatten()
+                .map(|s| match s.mode {
+                    orca_utils::state::DaemonMode::Daemon => "daemon".to_string(),
+                    orca_utils::state::DaemonMode::Parked => "parked".to_string(),
+                    orca_utils::state::DaemonMode::Dev => "dev".to_string(),
+                })
+        };
         let channel =
             crate::commands::update::read_channel_marker().map(|c| c.as_marker().to_string());
         let pinned_to = crate::commands::update::read_version_pin();
