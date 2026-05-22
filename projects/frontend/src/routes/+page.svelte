@@ -353,7 +353,7 @@
 
   <div class="instances">
     {#each instances as inst (inst.id)}
-      <article
+      <div
         class="instance"
         class:down={inst.health === 'down'}
         onclick={() => (selectedInstId = inst.id)}
@@ -434,7 +434,7 @@
           <span class="primary-url">{primaryUrl(inst)}</span>
           <span class="details-hint">Details →</span>
         </div>
-      </article>
+      </div>
     {/each}
   </div>
 
