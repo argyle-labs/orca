@@ -10,6 +10,12 @@
 //! Authorization still flows through `pod::listener::authorize_exec`, which
 //! enforces both the `REMOTE_OK` allowlist and `REQUIRED_ROLE == "any"`, so
 //! admin-role tools remain unreachable from any paired peer.
+//!
+//! `serde_json::Value` is unavoidable here: `ToolRegistry::dispatch` is the
+//! heterogeneous-tool entry point and takes/returns opaque JSON by contract.
+//! Callers serialize the typed Args before this hop and deserialize the typed
+//! Output immediately after, so opaque JSON never escapes the wire boundary.
+#![allow(clippy::disallowed_types)]
 
 use anyhow::Result;
 use orca_utils::tool::{ToolCtx, ToolRegistry};
