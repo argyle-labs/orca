@@ -326,6 +326,11 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     }
 
     let mut sigterm = signal(SignalKind::terminate())?;
+    // Install SIGUSR1 eagerly — before state.json reaches mode=Daemon —
+    // so an operator (or test) that reads mode=Daemon and immediately
+    // sends USR1 can't race the default-disposition kill. The same
+    // receiver is reused inside the serve loop for park/reclaim.
+    let mut sigusr1 = signal(SignalKind::user_defined1())?;
 
     // Crash-restart recovery: if launchd restarted us while a dev session was active,
     // wait for the dev server to finish rather than immediately fighting it for the port.
@@ -372,7 +377,6 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             tracing::warn!("failed to set active_pid: {e}");
         }
 
-        let mut sigusr1 = signal(SignalKind::user_defined1())?;
         let handle = axum_server::Handle::new();
         let serve = axum_server::bind_rustls(addr, tls)
             .handle(handle.clone())
