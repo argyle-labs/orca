@@ -287,6 +287,26 @@ pub async fn apply_update_dev(source_url: &str) -> Result<()> {
         std::fs::set_permissions(&tmp, perms)?;
     }
     std::fs::rename(&tmp, &current).context("failed to replace binary")?;
+
+    // Mirror to USB on Unraid so the dev binary survives reboot (same contract
+    // as `apply_update`). Best-effort; warn on failure rather than aborting.
+    #[cfg(target_os = "linux")]
+    if is_unraid() {
+        let persist_bin = std::path::Path::new("/boot/config/plugins/orca/bin/orca");
+        if let Some(parent) = persist_bin.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::copy(&current, persist_bin) {
+            tracing::warn!(
+                "unraid USB mirror to {} failed: {e:#} — update will not survive reboot",
+                persist_bin.display()
+            );
+        } else {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(persist_bin, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
     println!("[orca] dev build applied — restarting...");
     Ok(())
 }
@@ -439,9 +459,41 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
             .status();
     }
 
+    // Unraid: also mirror the new binary to /boot (USB), otherwise the update
+    // is wiped on next reboot when the RAM rootfs resets. See
+    // `install_unraid()` in commands/daemon.rs for the persistence contract.
+    #[cfg(target_os = "linux")]
+    if is_unraid() {
+        let persist_bin = std::path::Path::new("/boot/config/plugins/orca/bin/orca");
+        if let Some(parent) = persist_bin.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::copy(&current, persist_bin) {
+            Ok(_) => {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    std::fs::set_permissions(persist_bin, std::fs::Permissions::from_mode(0o755));
+                println!("[orca] mirrored to {} (unraid USB)", persist_bin.display());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "unraid USB mirror to {} failed: {e:#} — update will not survive reboot",
+                    persist_bin.display()
+                );
+            }
+        }
+    }
+
     println!("[orca] updated to v{} — scheduling restart", info.version);
     schedule_self_restart();
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn is_unraid() -> bool {
+    std::fs::read_to_string("/etc/os-release")
+        .map(|s| s.contains("ID=unraid-os") || s.contains("ID=\"unraid-os\""))
+        .unwrap_or(false)
 }
 
 /// Detach a 2s delayed restart of whichever supervisor owns this daemon
