@@ -103,7 +103,7 @@ pub fn cmd_package(action: PackageAction) -> Result<()> {
 fn detect_format() -> Result<PackageFormat> {
     #[cfg(target_os = "macos")]
     {
-        return Ok(PackageFormat::Pkg);
+        Ok(PackageFormat::Pkg)
     }
     #[cfg(target_os = "linux")]
     {
