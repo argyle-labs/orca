@@ -150,7 +150,28 @@ pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
     }
     let conn = ::db::open_default()?;
     self::db::wipe_pod_membership(&conn)?;
-    tracing::warn!("[pod] mesh cert+pod-membership state wiped; daemon will come up unpaired");
+    drop(conn);
+
+    // If this host holds the mesh CA key (founder), self-issue fresh
+    // client/server certs under the new CN immediately so the daemon can
+    // keep operating without an external re-pair. Joiner-only hosts have
+    // to wait for an inviter; log the path so the operator knows.
+    if pki::has_mesh_ca_key(pki_dir) {
+        let host = crate::host_identity::machine_id_short().to_string();
+        pki::reissue_mesh_server_cert(pki_dir).context("self-reissue mesh server cert")?;
+        pki::reissue_mesh_client_cert(pki_dir, &host).context("self-reissue mesh client cert")?;
+        tracing::warn!(
+            "[pod] founder reissued mesh client+server certs under CN peer.{host}; \
+             pod-membership wiped — re-pair joiners as needed"
+        );
+        let conn = ::db::open_default()?;
+        self::db::set_self_secure(&conn, true)?;
+    } else {
+        tracing::warn!(
+            "[pod] mesh cert+pod-membership state wiped; daemon will come up unpaired — \
+             re-pair this host with `orca pod join <inviter>` or wait for an mDNS auto-offer"
+        );
+    }
     Ok(true)
 }
 
