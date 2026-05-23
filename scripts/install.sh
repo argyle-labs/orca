@@ -133,73 +133,15 @@ http_get_asset() {
 }
 
 # ── root-mode bootstrap ─────────────────────────────────────────────────────
-# When running as root we create the `orca` service user and install for them.
-# This is the only branch that mutates /etc/passwd or /var/lib. Idempotent.
+# When running as root we install for the `orca` service user.
+# User creation, group assignment, SSH keys, and linger are handled by
+# `orca system bootstrap` — the binary is the single source of that logic so
+# it stays consistent across install.sh, deploy-host.sh, and package postinst.
 ORCA_USER="orca"
 ORCA_HOME_DIR="/var/lib/orca"
 
-ensure_orca_user() {
-  if id "$ORCA_USER" >/dev/null 2>&1; then
-    return 0
-  fi
-  [ -n "$ADMIN_PUBKEY" ] || die "running as root with no orca user — pass --admin-pubkey \"\$(cat ~/.ssh/id_ed25519.pub)\" so the controller can ssh in later"
-
-  # Pick a shell that actually exists. Alpine/busybox systems often have no
-  # /bin/bash and useradd's default '-s /bin/bash' fails with a warning + the
-  # subsequent `su - orca` blowing up. Prefer bash when present, fall back to sh.
-  ORCA_SHELL=/bin/sh
-  [ -x /bin/bash ] && ORCA_SHELL=/bin/bash
-
-  warn "creating system user '$ORCA_USER' (home $ORCA_HOME_DIR, shell $ORCA_SHELL, no sudo)"
-  if command -v useradd >/dev/null 2>&1; then
-    useradd \
-      --system \
-      --create-home \
-      --home-dir "$ORCA_HOME_DIR" \
-      --shell "$ORCA_SHELL" \
-      "$ORCA_USER"
-  elif command -v adduser >/dev/null 2>&1; then
-    # busybox adduser (Alpine). -S = system user, -D = no password, -H would skip
-    # home creation — we want home, so omit -H. Shell + home-dir are positional flags.
-    adduser -S -D -h "$ORCA_HOME_DIR" -s "$ORCA_SHELL" "$ORCA_USER"
-  else
-    die "neither useradd nor adduser found — cannot create $ORCA_USER"
-  fi
-
-  # Best-effort group adds. Skip silently if the group doesn't exist.
-  for grp in docker systemd-journal; do
-    if getent group "$grp" >/dev/null 2>&1; then
-      if command -v usermod >/dev/null 2>&1; then
-        usermod -aG "$grp" "$ORCA_USER" || warn "could not add $ORCA_USER to $grp"
-      elif command -v addgroup >/dev/null 2>&1; then
-        addgroup "$ORCA_USER" "$grp" || warn "could not add $ORCA_USER to $grp"
-      fi
-    fi
-  done
-
-  # Linger so the user-systemd session survives without an interactive login.
-  # Only meaningful on systemd hosts; harmless to skip elsewhere.
-  if command -v loginctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-    loginctl enable-linger "$ORCA_USER" || warn "loginctl enable-linger failed"
-  fi
-  install_orca_ssh_key
-}
-
-install_orca_ssh_key() {
-  # orca gets its OWN authorized_keys — never inherits root's keys.
-  _ssh_dir="$ORCA_HOME_DIR/.ssh"
-  _auth="$_ssh_dir/authorized_keys"
-  mkdir -p "$_ssh_dir"
-  printf '%s\n' "$ADMIN_PUBKEY" > "$_auth"
-  chmod 700 "$_ssh_dir"
-  chmod 600 "$_auth"
-  chown -R "$ORCA_USER" "$_ssh_dir"
-}
-
-# When we end up running as root, set install paths under orca's home.
 if [ "$(id -u)" = 0 ]; then
-  warn "running as root — installing for service user '$ORCA_USER' instead"
-  ensure_orca_user
+  warn "running as root — installing for service user '$ORCA_USER'"
   INSTALL_DIR="${INSTALL_DIR:-$ORCA_HOME_DIR/.local/bin}"
   ORCA_HOME_TARGET="$ORCA_HOME_DIR/.orca"
   RUN_AS_ORCA=1
@@ -389,6 +331,20 @@ fi
 # inode open. Uses the EXISTING binary's `system kill-stale` so the patterns
 # stay single-source in projects/server/src/commands/system.rs.
 [ -x "${INSTALL_DIR}/orca" ] && "${INSTALL_DIR}/orca" system kill-stale 2>/dev/null || true
+
+# Root-mode: bootstrap the service user (create, groups, linger, SSH key)
+# using the downloaded binary BEFORE it moves to its final path.
+# `system bootstrap` is idempotent — safe on re-installs.
+if [ "$RUN_AS_ORCA" = "1" ]; then
+  chmod +x "${TMP}/orca"
+  if [ -n "$ADMIN_PUBKEY" ]; then
+    "${TMP}/orca" system bootstrap --admin-pubkey "$ADMIN_PUBKEY" \
+      || warn "system bootstrap failed — continuing"
+  else
+    "${TMP}/orca" system bootstrap \
+      || warn "system bootstrap failed — continuing"
+  fi
+fi
 
 mkdir -p "$INSTALL_DIR"
 chmod +x "${TMP}/orca"

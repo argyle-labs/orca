@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use orca::commands::{self as cmd, DaemonAction, HookAction, SpecAction, SystemAction};
+use orca::commands::{
+    self as cmd, DaemonAction, HookAction, PackageAction, SpecAction, SystemAction,
+};
 use orca::context::ProjectContext;
 use orca::conversation::session::Session;
 use orca::llm::{ClaudeBackend, Message, ModelBackend, stdout_sink};
@@ -142,11 +144,19 @@ enum Command {
         action: HookAction,
     },
 
-    /// Host-level lifecycle helpers (kill stale processes, etc.) shared by
-    /// Makefile, install.sh, and deploy-host.sh so behavior stays single-source.
+    /// Host-level lifecycle helpers (kill stale processes, bootstrap service
+    /// user, etc.) shared by Makefile, install.sh, and deploy-host.sh.
     System {
         #[command(subcommand)]
         action: SystemAction,
+    },
+
+    /// Build distributable packages (deb/rpm/apk/PKGBUILD) from the current
+    /// binary. Postinst scripts delegate to `system bootstrap` + `daemon
+    /// install`, so non-systemd init (OpenRC, Unraid) is automatically handled.
+    Package {
+        #[command(subcommand)]
+        action: PackageAction,
     },
 
     /// Emit orca's own OpenAPI 3 spec to stdout as raw JSON. Used by the
@@ -398,6 +408,7 @@ async fn main() -> Result<()> {
         Some(Command::Dev { port }) => cmd_dev(port, &config).await,
         Some(Command::Hook { action }) => cmd::cmd_hook(action),
         Some(Command::System { action }) => cmd::cmd_system(action),
+        Some(Command::Package { action }) => cmd::cmd_package(action),
         Some(Command::Admin { action }) => cmd_admin(action).await,
         Some(Command::Op(argv)) => dispatch_op(argv, config).await,
         Some(Command::Update {

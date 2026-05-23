@@ -35,6 +35,7 @@ pub mod hook_cmd;
 pub mod install;
 pub mod mcp_cmd;
 pub mod oauth;
+pub mod package;
 pub mod plugin_cmd;
 pub mod pod;
 pub mod spec;
@@ -49,6 +50,7 @@ pub use oauth::{
     cmd_logout_atlassian, cmd_logout_github, cmd_oauth_atlassian, cmd_oauth_github,
     load_atlassian_access_token, load_github_token,
 };
+pub use package::{PackageAction, cmd_package};
 pub use plugin_cmd::{install_plugin, remove_plugin};
 pub use spec::{SpecAction, cmd_spec};
 pub use system::{SystemAction, cmd_system};

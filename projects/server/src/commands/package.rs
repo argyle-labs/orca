@@ -1,8 +1,8 @@
 //! `orca package build` — generate distributable packages from the current binary.
 //!
-//! Each format's postinst delegates to `orca system bootstrap` +
-//! `orca daemon install --service-user orca`, so non-systemd support
-//! (OpenRC, Unraid, launchd) is free via the existing detect_linux_init() dispatch.
+//! Each format's postinst/postinstall delegates to `orca system bootstrap` +
+//! `orca daemon install`, so non-systemd init (OpenRC, Unraid, launchd) is
+//! handled automatically by the existing detect_linux_init() dispatch.
 
 use anyhow::Result;
 use clap::{Subcommand, ValueEnum};
@@ -19,7 +19,7 @@ pub enum PackageAction {
     /// Build a distributable package from the current orca binary.
     /// Format is auto-detected from the host OS when --format is omitted.
     Build {
-        /// Package format (deb / rpm / apk / pkgbuild).
+        /// Package format: deb / rpm / apk / pkgbuild / pkg / homebrew.
         #[arg(long, value_enum)]
         format: Option<PackageFormat>,
         /// Write the finished package into this directory.
@@ -31,22 +31,48 @@ pub enum PackageAction {
         /// CPU architecture override for cross-compiled binaries (x86_64 or aarch64).
         #[arg(long)]
         arch: Option<String>,
-        /// Maintainer string embedded in package metadata.
+        /// Maintainer string embedded in deb/rpm package metadata.
         #[arg(long, default_value = "Orca <noreply@orca.local>")]
         maintainer: String,
+        /// macOS Developer ID Application identity for codesign (binary signing).
+        /// e.g. "Developer ID Application: Jane Smith (TEAMID)"
+        /// Omit for ad-hoc signing (local use only).
+        #[arg(long)]
+        codesign_identity: Option<String>,
+        /// macOS Developer ID Installer identity for productsign (.pkg signing).
+        /// e.g. "Developer ID Installer: Jane Smith (TEAMID)"
+        /// Omit to leave the .pkg unsigned.
+        #[arg(long)]
+        pkg_sign_identity: Option<String>,
     },
 }
 
 #[derive(ValueEnum, Clone, Debug)]
 pub enum PackageFormat {
+    /// Debian/Ubuntu — requires dpkg-deb
     Deb,
+    /// RHEL/Fedora/Unraid — requires rpmbuild
     Rpm,
+    /// Alpine — writes APKBUILD, requires abuild
     Apk,
+    /// Arch/AUR — writes PKGBUILD, no build tool required
     Pkgbuild,
+    /// macOS Installer — requires pkgbuild (Xcode CLT), optional productsign
+    Pkg,
+    /// Homebrew — writes a formula .rb file, no build tool required
+    Homebrew,
 }
 
 pub fn cmd_package(action: PackageAction) -> Result<()> {
-    let PackageAction::Build { format, out_dir, binary, arch, maintainer } = action;
+    let PackageAction::Build {
+        format,
+        out_dir,
+        binary,
+        arch,
+        maintainer,
+        codesign_identity,
+        pkg_sign_identity,
+    } = action;
 
     let binary = binary.map(Ok).unwrap_or_else(|| std::env::current_exe())?;
     if !binary.exists() {
@@ -62,10 +88,23 @@ pub fn cmd_package(action: PackageAction) -> Result<()> {
         PackageFormat::Rpm => build_rpm(&binary, VERSION, &arch, &maintainer, &out_dir),
         PackageFormat::Apk => build_apk(&binary, VERSION, &arch, &out_dir),
         PackageFormat::Pkgbuild => build_pkgbuild(VERSION, &arch, &out_dir),
+        PackageFormat::Pkg => build_pkg(
+            &binary,
+            VERSION,
+            &arch,
+            codesign_identity.as_deref(),
+            pkg_sign_identity.as_deref(),
+            &out_dir,
+        ),
+        PackageFormat::Homebrew => build_homebrew(VERSION, &out_dir),
     }
 }
 
 fn detect_format() -> Result<PackageFormat> {
+    #[cfg(target_os = "macos")]
+    {
+        return Ok(PackageFormat::Pkg);
+    }
     #[cfg(target_os = "linux")]
     {
         // Prefer tool presence over OS hints — more reliable on minimal images.
@@ -83,7 +122,9 @@ fn detect_format() -> Result<PackageFormat> {
             return Ok(PackageFormat::Pkgbuild);
         }
     }
-    anyhow::bail!("could not auto-detect package format — pass --format deb|rpm|apk|pkgbuild")
+    anyhow::bail!(
+        "could not auto-detect package format — pass --format deb|rpm|apk|pkgbuild|pkg|homebrew"
+    )
 }
 
 // ── .deb ──────────────────────────────────────────────────────────────────────
@@ -159,7 +200,11 @@ fn build_deb(
         std::fs::remove_dir_all(&keep)?;
     }
     std::fs::rename(&staging, &keep)?;
-    println!("{} dpkg-deb not found — staging: {}", "!".yellow(), keep.display());
+    println!(
+        "{} dpkg-deb not found — staging: {}",
+        "!".yellow(),
+        keep.display()
+    );
     println!(
         "  build: dpkg-deb --build --root-owner-group {} {}",
         keep.display(),
@@ -249,7 +294,11 @@ fn build_rpm(
         std::fs::remove_dir_all(&keep)?;
     }
     std::fs::rename(&staging, &keep)?;
-    println!("{} rpmbuild not found — staging: {}", "!".yellow(), keep.display());
+    println!(
+        "{} rpmbuild not found — staging: {}",
+        "!".yellow(),
+        keep.display()
+    );
     println!(
         "  build: rpmbuild -bb --define '_topdir {}' {}/SPECS/orca.spec",
         keep.display(),
@@ -363,6 +412,211 @@ fn build_pkgbuild(version: &str, arch: &str, out_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+// ── .pkg (macOS Installer) ────────────────────────────────────────────────────
+
+#[cfg(target_os = "macos")]
+fn build_pkg(
+    binary: &Path,
+    version: &str,
+    arch: &str,
+    codesign_identity: Option<&str>,
+    pkg_sign_identity: Option<&str>,
+    out_dir: &Path,
+) -> Result<()> {
+    let staging = out_dir.join(".orca-pkg-staging");
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)?;
+    }
+
+    let root = staging.join("root");
+    let scripts = staging.join("scripts");
+    std::fs::create_dir_all(root.join("usr/local/bin"))?;
+    std::fs::create_dir_all(&scripts)?;
+
+    // Place binary in payload root.
+    let bin = root.join("usr/local/bin/orca");
+    std::fs::copy(binary, &bin)?;
+    set_mode_755(&bin)?;
+
+    // Sign binary: real identity → hardened runtime; ad-hoc for local use.
+    let sign = codesign_identity.unwrap_or("-");
+    let mut codesign_cmd = Command::new("codesign");
+    codesign_cmd.args(["--force", "--sign", sign]);
+    if sign != "-" {
+        codesign_cmd.args(["--options", "runtime"]);
+    }
+    match codesign_cmd.arg(&bin).status() {
+        Ok(s) if s.success() => {
+            if sign == "-" {
+                println!("{} binary: ad-hoc signed (local use only)", "!".yellow());
+            } else {
+                println!("{} binary: codesigned with '{sign}'", "✓".green());
+            }
+        }
+        _ => eprintln!("warn: codesign failed — binary will be unsigned"),
+    }
+
+    // postinstall: install for the logged-in user, not root running the installer.
+    write_script(
+        &scripts.join("postinstall"),
+        "#!/bin/sh
+set -e
+# Detect the actual logged-in user (the installer runs as root).
+REAL_USER=$(stat -f \"%Su\" /dev/console 2>/dev/null || echo \"$USER\")
+if [ -n \"$REAL_USER\" ] && [ \"$REAL_USER\" != \"root\" ]; then
+   sudo -u \"$REAL_USER\" /usr/local/bin/orca daemon install 2>/dev/null || true
+else
+   /usr/local/bin/orca daemon install 2>/dev/null || true
+fi
+",
+    )?;
+
+    let unsigned_pkg = staging.join(format!("orca_{version}_{arch}_unsigned.pkg"));
+    let final_pkg = out_dir.join(format!("orca_{version}_{arch}.pkg"));
+    const IDENTIFIER: &str = "com.orca.daemon";
+
+    if !tool_available("pkgbuild") {
+        let keep = out_dir.join("orca-pkg-staging");
+        if keep.exists() {
+            std::fs::remove_dir_all(&keep)?;
+        }
+        std::fs::rename(&staging, &keep)?;
+        println!(
+            "{} pkgbuild not found — install Xcode CLT: xcode-select --install",
+            "!".yellow()
+        );
+        println!(
+            "  build: pkgbuild --root {keep}/root --scripts {keep}/scripts \
+             --identifier {IDENTIFIER} --version {version} {final}",
+            keep = keep.display(),
+            final = final_pkg.display()
+        );
+        return Ok(());
+    }
+
+    let ok = Command::new("pkgbuild")
+        .arg("--root")
+        .arg(&root)
+        .arg("--scripts")
+        .arg(&scripts)
+        .args(["--identifier", IDENTIFIER])
+        .args(["--version", version])
+        .arg(&unsigned_pkg)
+        .status()?
+        .success();
+
+    if !ok {
+        std::fs::remove_dir_all(&staging)?;
+        anyhow::bail!("pkgbuild failed");
+    }
+
+    // productsign if installer identity provided.
+    if let Some(identity) = pkg_sign_identity {
+        if tool_available("productsign") {
+            let ok = Command::new("productsign")
+                .args(["--sign", identity])
+                .arg(&unsigned_pkg)
+                .arg(&final_pkg)
+                .status()?
+                .success();
+            std::fs::remove_dir_all(&staging)?;
+            if ok {
+                println!("{} {}", "✓".green(), final_pkg.display());
+                println!(
+                    "  notarize: xcrun notarytool submit {} \\\n    --apple-id <id> --team-id <team> --password <app-specific-pwd>\n  staple:   xcrun stapler staple {}",
+                    final_pkg.display(),
+                    final_pkg.display()
+                );
+                return Ok(());
+            }
+            anyhow::bail!("productsign failed");
+        }
+        eprintln!("warn: productsign not found — package will be unsigned");
+    }
+
+    // Move unsigned pkg to final path.
+    std::fs::rename(&unsigned_pkg, &final_pkg)?;
+    std::fs::remove_dir_all(&staging)?;
+    println!("{} {} (unsigned)", "✓".green(), final_pkg.display());
+    if pkg_sign_identity.is_none() {
+        println!(
+            "  sign:  productsign --sign 'Developer ID Installer: Name (TeamID)' \
+             {unsigned} {signed}",
+            unsigned = final_pkg.display(),
+            signed = out_dir
+                .join(format!("orca_{version}_{arch}_signed.pkg"))
+                .display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn build_pkg(
+    _binary: &Path,
+    _version: &str,
+    _arch: &str,
+    _codesign_identity: Option<&str>,
+    _pkg_sign_identity: Option<&str>,
+    _out_dir: &Path,
+) -> Result<()> {
+    anyhow::bail!("--format pkg is macOS-only — use deb/rpm/apk/pkgbuild on Linux")
+}
+
+// ── Homebrew formula ──────────────────────────────────────────────────────────
+
+fn build_homebrew(version: &str, out_dir: &Path) -> Result<()> {
+    // Homebrew formula: uses the `service` block for launchd instead of
+    // `orca daemon install`, which keeps Homebrew as the service manager.
+    let formula = format!(
+        "class Orca < Formula
+  desc \"Orca AI daemon\"
+  homepage \"https://github.com/scottdkey/orca\"
+  version \"{version}\"
+  license \"Proprietary\"
+
+  on_macos do
+    on_intel do
+      url \"https://github.com/scottdkey/orca/releases/download/v{version}/orca-{version}-x86_64-apple-darwin\"
+      sha256 \"FILL_IN_x86_64_sha256\"
+    end
+    on_arm do
+      url \"https://github.com/scottdkey/orca/releases/download/v{version}/orca-{version}-aarch64-apple-darwin\"
+      sha256 \"FILL_IN_aarch64_sha256\"
+    end
+  end
+
+  def install
+    cpu = Hardware::CPU.intel? ? \"x86_64\" : \"aarch64\"
+    bin.install \"orca-{version}-#{{cpu}}-apple-darwin\" => \"orca\"
+  end
+
+  # Homebrew manages the launchd plist via brew services.
+  service do
+    run [opt_bin/\"orca\", \"daemon\", \"start\", \"--port\", \"12000\"]
+    keep_alive true
+    log_path var/\"log/orca.log\"
+    error_log_path var/\"log/orca.log\"
+  end
+
+  def post_install
+    system bin/\"orca\", \"install\"
+  rescue StandardError
+    nil
+  end
+end
+"
+    );
+
+    let path = out_dir.join("orca.rb");
+    std::fs::write(&path, &formula)?;
+    println!("{} {}", "✓".green(), path.display());
+    println!("  note: update sha256 checksums before distributing");
+    println!("  tap:   brew tap scottdkey/orca <path-or-url>");
+    println!("  install: brew install scottdkey/orca/orca");
+    Ok(())
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn tool_available(name: &str) -> bool {
@@ -395,7 +649,8 @@ fn sha512_hex(path: &Path) -> Result<String> {
     let mut f = std::fs::File::open(path)?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf)?;
-    Ok(format!("{:x}", sha2::Sha512::digest(&buf)))
+    let hash = sha2::Sha512::digest(&buf);
+    Ok(hash.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 fn find_file_ext(dir: &Path, ext: &str) -> Result<Option<PathBuf>> {
@@ -427,7 +682,10 @@ mod tests {
         build_pkgbuild("0.0.4-rc.7", "x86_64", dir.path()).unwrap();
         let s = std::fs::read_to_string(dir.path().join("PKGBUILD")).unwrap();
         assert!(s.contains("pkgver=0.0.4.rc.7"), "pkgver must use dots");
-        assert!(!s.contains("pkgver=0.0.4-rc.7"), "pkgver must not contain dashes");
+        assert!(
+            !s.contains("pkgver=0.0.4-rc.7"),
+            "pkgver must not contain dashes"
+        );
         assert!(s.contains("_ver=0.0.4-rc.7"), "raw version kept in _ver");
     }
 
@@ -442,11 +700,22 @@ mod tests {
     }
 
     #[test]
+    fn homebrew_formula_contains_service_block() {
+        let dir = tempfile::tempdir().unwrap();
+        build_homebrew("0.0.4-rc.7", dir.path()).unwrap();
+        let s = std::fs::read_to_string(dir.path().join("orca.rb")).unwrap();
+        assert!(s.contains("class Orca < Formula"));
+        assert!(s.contains("service do"));
+        assert!(s.contains("brew services"));
+        // Formula uses brew services, NOT orca daemon install
+        assert!(!s.contains("daemon install"));
+    }
+
+    #[test]
     fn rpm_splits_version_at_dash() {
         let (ver, rel) = "0.0.4-rc.7".split_once('-').unwrap_or(("0.0.4-rc.7", "1"));
         assert_eq!(ver, "0.0.4");
         assert_eq!(rel, "rc.7");
-        // No dash in version part
         assert!(!ver.contains('-'));
     }
 }
