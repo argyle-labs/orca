@@ -224,6 +224,7 @@ fn install_ssh_key(user: &str, home_dir: &str, pubkey: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn is_root() -> bool {
     Command::new("id")
         .arg("-u")
@@ -233,6 +234,7 @@ fn is_root() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(target_os = "linux")]
 fn tool_present(name: &str) -> bool {
     Command::new("which")
         .arg(name)
@@ -243,6 +245,7 @@ fn tool_present(name: &str) -> bool {
 
 /// Validate that a string is safe to interpolate into shell scripts written
 /// to disk. Accepts Unix username and path chars only.
+#[cfg(target_os = "linux")]
 fn validate_shell_safe(label: &str, s: &str) -> Result<()> {
     if s.is_empty() {
         anyhow::bail!("{label} must not be empty");
@@ -260,6 +263,7 @@ fn validate_shell_safe(label: &str, s: &str) -> Result<()> {
 }
 
 #[cfg(test)]
+#[cfg(target_os = "linux")]
 mod tests {
     use super::*;
 

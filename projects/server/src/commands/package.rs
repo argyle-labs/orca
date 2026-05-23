@@ -74,7 +74,7 @@ pub fn cmd_package(action: PackageAction) -> Result<()> {
         pkg_sign_identity,
     } = action;
 
-    let binary = binary.map(Ok).unwrap_or_else(|| std::env::current_exe())?;
+    let binary = binary.map(Ok).unwrap_or_else(std::env::current_exe)?;
     if !binary.exists() {
         anyhow::bail!("binary not found: {}", binary.display());
     }
@@ -122,6 +122,7 @@ fn detect_format() -> Result<PackageFormat> {
             return Ok(PackageFormat::Pkgbuild);
         }
     }
+    #[cfg(not(target_os = "macos"))]
     anyhow::bail!(
         "could not auto-detect package format — pass --format deb|rpm|apk|pkgbuild|pkg|homebrew"
     )
@@ -277,14 +278,12 @@ fn build_rpm(
             .arg(staging.join("SPECS/orca.spec").to_str().unwrap())
             .status()?
             .success();
-        if ok {
-            if let Some(rpm) = find_file_ext(&staging.join("RPMS"), "rpm")? {
-                let dest = out_dir.join(rpm.file_name().unwrap());
-                std::fs::copy(&rpm, &dest)?;
-                std::fs::remove_dir_all(&staging)?;
-                println!("{} {}", "✓".green(), dest.display());
-                return Ok(());
-            }
+        if ok && let Some(rpm) = find_file_ext(&staging.join("RPMS"), "rpm")? {
+            let dest = out_dir.join(rpm.file_name().unwrap());
+            std::fs::copy(&rpm, &dest)?;
+            std::fs::remove_dir_all(&staging)?;
+            println!("{} {}", "✓".green(), dest.display());
+            return Ok(());
         }
         anyhow::bail!("rpmbuild failed");
     }
@@ -663,10 +662,10 @@ fn find_file_ext(dir: &Path, ext: &str) -> Result<Option<PathBuf>> {
             return Ok(Some(path));
         }
         // rpmbuild puts .rpm files in arch subdirs — recurse one level.
-        if path.is_dir() {
-            if let Some(found) = find_file_ext(&path, ext)? {
-                return Ok(Some(found));
-            }
+        if path.is_dir()
+            && let Some(found) = find_file_ext(&path, ext)?
+        {
+            return Ok(Some(found));
         }
     }
     Ok(None)
