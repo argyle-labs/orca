@@ -111,36 +111,54 @@ pub fn pki_dir() -> PathBuf {
 /// logged at warn and returns `Ok(false)` so daemon startup proceeds.
 pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
     let cert_path = pki::mesh_client_cert_path(pki_dir);
-    if !cert_path.exists() {
-        return Ok(false);
-    }
-    let pem = std::fs::read_to_string(&cert_path)
-        .with_context(|| format!("read {}", cert_path.display()))?;
-    let mut reader = pem.as_bytes();
-    let der = match rustls_pemfile::certs(&mut reader).next() {
-        Some(Ok(d)) => d,
-        Some(Err(e)) => {
-            tracing::warn!("[pod] could not parse mesh client cert: {e}");
-            return Ok(false);
-        }
-        None => return Ok(false),
-    };
-    let cn = match pki::peer_common_name(&der) {
-        Ok(cn) => cn,
-        Err(e) => {
-            tracing::warn!("[pod] could not extract mesh client cert CN: {e}");
-            return Ok(false);
-        }
-    };
     let expected = format!("peer.{}", crate::host_identity::machine_id_short());
-    if cn == expected {
+
+    // Classify current state into one of:
+    //   "ok"     – cert present, CN matches expected. No-op.
+    //   "stale"  – cert present, CN drifted. Wipe + (founder) reissue.
+    //   "missing"– cert absent, founder must reissue from its CA. Wipe
+    //              pod tables in case a prior partial reset left them.
+    //   "none"   – cert absent, no CA. Pre-pod. No-op.
+    let state = if cert_path.exists() {
+        match std::fs::read_to_string(&cert_path)
+            .ok()
+            .and_then(|pem| {
+                rustls_pemfile::certs(&mut pem.as_bytes())
+                    .next()
+                    .and_then(Result::ok)
+            })
+            .and_then(|der| pki::peer_common_name(&der).ok())
+        {
+            Some(cn) if cn == expected => "ok",
+            Some(cn) => {
+                tracing::warn!(
+                    "[pod] mesh client cert CN {cn:?} does not match expected {expected:?} — \
+                     resetting pod identity (cert was issued under an older naming convention)."
+                );
+                "stale"
+            }
+            None => {
+                tracing::warn!(
+                    "[pod] mesh client cert at {} is unreadable — treating as stale",
+                    cert_path.display()
+                );
+                "stale"
+            }
+        }
+    } else if pki::has_mesh_ca_key(pki_dir) {
+        tracing::warn!(
+            "[pod] mesh client cert is missing but this host holds the CA key — \
+             founder will self-reissue client+server certs."
+        );
+        "missing"
+    } else {
+        return Ok(false);
+    };
+
+    if state == "ok" {
         return Ok(false);
     }
-    tracing::warn!(
-        "[pod] mesh client cert CN {cn:?} does not match expected {expected:?} — \
-         resetting pod identity (cert was issued under an older naming convention). \
-         Re-pair this host with `orca pod join <inviter>` or wait for an mDNS auto-offer."
-    );
+
     let mesh = pki::mesh_dir(pki_dir);
     for sub in ["client", "server"] {
         let d = mesh.join(sub);
