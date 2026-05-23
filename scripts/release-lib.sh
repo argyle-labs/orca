@@ -380,7 +380,7 @@ build_orca_targets() {
   [ "${#targets[@]}" -gt 0 ] || die "build_orca_targets: no targets given"
 
   mkdir -p "$DIST_DIR"
-  rm -f "$DIST_DIR"/orca-* "$DIST_DIR"/*.sha256
+  rm -f "$DIST_DIR"/orca-* "$DIST_DIR"/*.sha256 "$DIST_DIR"/*.sha256.bak
 
   local parallel jobs
   parallel=$(release_parallel_targets "${#targets[@]}")
@@ -413,10 +413,11 @@ build_orca_targets() {
 
 # Print asset paths for `gh release create`. Args: target1 target2 ...
 release_asset_paths() {
-  local t
+  local version t
+  version="$(current_cargo_version)"
   for t in "$@"; do
-    echo "${DIST_DIR}/orca-${t}"
-    echo "${DIST_DIR}/orca-${t}.sha256"
+    echo "${DIST_DIR}/orca-${version}-${t}"
+    echo "${DIST_DIR}/orca-${version}-${t}.sha256"
   done
 }
 

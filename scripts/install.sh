@@ -341,7 +341,8 @@ else
     esac
   fi
 
-  ASSET="orca-${TARGET}"
+  _asset_ver="${VERSION#v}"
+  ASSET="orca-${_asset_ver}-${TARGET}"
   ASSET_SUM="${ASSET}.sha256"
 
   echo "→ installing orca ${VERSION} (${TARGET}) to ${INSTALL_DIR}"

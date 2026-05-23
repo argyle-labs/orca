@@ -90,7 +90,8 @@ esac
 
 STAGING="${TMPDIR:-/tmp}/orca-deploy-${VERSION}"
 mkdir -p "$STAGING"
-ASSET="orca-${TARGET}"
+_asset_ver="${VERSION#v}"
+ASSET="orca-${_asset_ver}-${TARGET}"
 ASSET_SHA="${ASSET}.sha256"
 
 # Fetch once on the controller (cached by version).
