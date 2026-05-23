@@ -1881,11 +1881,11 @@ mod tests {
     }
 
     #[test]
-    fn certs_use_ed25519() {
-        // rcgen tags Ed25519 keys with the well-known OID 1.3.101.112. Easiest
-        // signal: the PEM label is "PRIVATE KEY" (PKCS8) and the cert SPKI
-        // contains the Ed25519 OID. We just check the OID is present in the
-        // serialized cert DER via x509-parser.
+    fn rest_server_cert_uses_ecdsa_p256() {
+        // The REST server cert (browser-facing) must be ECDSA P-256 —
+        // browsers (Firefox/Chrome) reject Ed25519 leaf certs in TLS
+        // server auth and surface "Secure Connection Failed" with no
+        // Advanced bypass. ecPublicKey OID: 1.2.840.10045.2.1.
         let dir = tempfile::tempdir().unwrap();
         let pki = dir.path();
         init(pki).unwrap();
@@ -1893,6 +1893,9 @@ mod tests {
         let (chain, _) = parse_cert_and_key(&bundle.cert_pem, &bundle.key_pem).unwrap();
         let (_, parsed) = x509_parser::parse_x509_certificate(&chain[0]).unwrap();
         let oid = parsed.subject_pki.algorithm.algorithm.to_id_string();
-        assert_eq!(oid, "1.3.101.112", "expected Ed25519 OID, got {oid}");
+        assert_eq!(
+            oid, "1.2.840.10045.2.1",
+            "expected ecPublicKey OID, got {oid}"
+        );
     }
 }
