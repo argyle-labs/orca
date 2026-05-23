@@ -17,6 +17,17 @@
 
 set -euo pipefail
 
+# Raise the per-process FD limit before any cross-compile. cargo-zigbuild's
+# linker opens every object file in one invocation (~1000+ for orca on
+# Linux targets); the default macOS interactive ulimit (256) causes
+# `ProcessFdQuotaExceeded` mid-link. Cap at kern.maxfilesperproc.
+if [ "$(uname -s)" = "Darwin" ]; then
+  hard=$(sysctl -n kern.maxfilesperproc 2>/dev/null || echo 65536)
+  ulimit -n "$hard" 2>/dev/null || ulimit -n 65536 2>/dev/null || true
+else
+  ulimit -n 65536 2>/dev/null || true
+fi
+
 # shellcheck source=./release-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/release-lib.sh"
 cd "$REPO_ROOT"
