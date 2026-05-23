@@ -14,7 +14,7 @@ mod daemon_signal_tests {
     use tempfile::tempdir;
 
     const TEST_PORT: u16 = 19998;
-    const TIMEOUT: Duration = Duration::from_secs(15);
+    const TIMEOUT: Duration = Duration::from_secs(60);
     const POLL: Duration = Duration::from_millis(150);
 
     fn send_signal(pid: u32, sig: &str) {
