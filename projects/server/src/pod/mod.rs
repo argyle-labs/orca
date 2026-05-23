@@ -95,6 +95,65 @@ pub fn pki_dir() -> PathBuf {
     PathBuf::from(home).join(APP_STATE_DIR).join(APP_PKI_DIR)
 }
 
+/// Detect a mesh client cert whose CN doesn't match the current naming
+/// convention (`peer.<machine_id_short>`). Stale certs come from hosts
+/// joined under the old `peer.<hostname>` convention; mixing the two
+/// produces duplicate `pod_peers` rows because the TLS-extracted CN keys
+/// `ensure_peer_stub` differ from the CNs minted by `pod/join-confirm`.
+///
+/// When a stale CN is detected we delete the mesh client/server cert+key
+/// pairs and wipe `pod_peers/pod_trust/pod_pending_offers/pod_discovery`
+/// so the daemon comes up unpaired and the operator can re-pair into a
+/// clean mesh. The mesh CA + bootstrap key are preserved (host identity
+/// + founder ability survive).
+///
+/// Returns `Ok(true)` if a reset happened. Best-effort: any error is
+/// logged at warn and returns `Ok(false)` so daemon startup proceeds.
+pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
+    let cert_path = pki::mesh_client_cert_path(pki_dir);
+    if !cert_path.exists() {
+        return Ok(false);
+    }
+    let pem = std::fs::read_to_string(&cert_path)
+        .with_context(|| format!("read {}", cert_path.display()))?;
+    let mut reader = pem.as_bytes();
+    let der = match rustls_pemfile::certs(&mut reader).next() {
+        Some(Ok(d)) => d,
+        Some(Err(e)) => {
+            tracing::warn!("[pod] could not parse mesh client cert: {e}");
+            return Ok(false);
+        }
+        None => return Ok(false),
+    };
+    let cn = match pki::peer_common_name(&der) {
+        Ok(cn) => cn,
+        Err(e) => {
+            tracing::warn!("[pod] could not extract mesh client cert CN: {e}");
+            return Ok(false);
+        }
+    };
+    let expected = format!("peer.{}", crate::host_identity::machine_id_short());
+    if cn == expected {
+        return Ok(false);
+    }
+    tracing::warn!(
+        "[pod] mesh client cert CN {cn:?} does not match expected {expected:?} — \
+         resetting pod identity (cert was issued under an older naming convention). \
+         Re-pair this host with `orca pod join <inviter>` or wait for an mDNS auto-offer."
+    );
+    let mesh = pki::mesh_dir(pki_dir);
+    for sub in ["client", "server"] {
+        let d = mesh.join(sub);
+        if d.exists() {
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+    let conn = ::db::open_default()?;
+    self::db::wipe_pod_membership(&conn)?;
+    tracing::warn!("[pod] mesh cert+pod-membership state wiped; daemon will come up unpaired");
+    Ok(true)
+}
+
 /// Dial `host` over mTLS with SNI=pod.orca.local, send a `pod/ping`, and
 /// return the peer's report. `host` is a bare hostname or IP; the connector
 /// always uses the canonical SNI so the server's resolver returns the

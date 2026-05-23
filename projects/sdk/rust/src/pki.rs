@@ -11,7 +11,7 @@
 use anyhow::{Context, Result};
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
-    Issuer, KeyPair, KeyUsagePurpose, PKCS_ED25519, SanType,
+    Issuer, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, PKCS_ED25519, SanType,
 };
 use sha2::{Digest, Sha256};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -39,9 +39,20 @@ pub const PEER_REFRESH_THRESHOLD_DAYS: i64 = 7;
 pub const BOOTSTRAP_CERT_VALIDITY_DAYS: i64 = 3650;
 
 /// Build a fresh Ed25519 keypair. Single chokepoint so the algorithm choice
-/// is visible in one place.
+/// is visible in one place. Used for everything except the browser-facing REST
+/// server cert (which needs an algorithm browsers will accept — see
+/// `gen_keypair_browser_tls`).
 fn gen_keypair() -> Result<KeyPair> {
     KeyPair::generate_for(&PKCS_ED25519).context("generate Ed25519 keypair")
+}
+
+/// Build a fresh ECDSA P-256 keypair for browser-facing TLS. NSS (Firefox)
+/// and BoringSSL (Chrome) reject Ed25519 leaf certs in TLS server auth even
+/// though they verify Ed25519 chain signatures fine, so the REST server cert
+/// can't share the Ed25519 chokepoint above. P-256 is universally accepted.
+fn gen_keypair_browser_tls() -> Result<KeyPair> {
+    KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
+        .context("generate ECDSA P-256 keypair for REST server cert")
 }
 
 /// Apply `(now-5min, now + days)` to a `CertificateParams`. The 5-minute
@@ -740,6 +751,26 @@ pub fn rest_server_cert_has_localhost_san(cert_pem: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// True if the REST server cert's public key is browser-compatible (currently
+/// ECDSA P-256 or RSA). Pre-rc.9 certs used Ed25519 leaf keys which Firefox
+/// and Chrome reject in TLS server auth (handshake fails with no override).
+/// Detected via the SPKI algorithm OID — Ed25519 is `1.3.101.112`.
+pub fn rest_server_cert_is_browser_compatible(cert_pem: &str) -> bool {
+    use rustls_pemfile::certs;
+    let mut reader = cert_pem.as_bytes();
+    let der = match certs(&mut reader).next() {
+        Some(Ok(d)) => d,
+        _ => return false,
+    };
+    let (_, parsed) = match x509_parser::parse_x509_certificate(der.as_ref()) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    // Ed25519 OID 1.3.101.112 — anything else (ECDSA, RSA) is fine for browsers.
+    let oid = parsed.public_key().algorithm.algorithm.to_string();
+    oid != "1.3.101.112"
+}
+
 /// Re-issue the REST server cert under the existing CA. Called when the cert
 /// lacks the `localhost` SAN (pre-upgrade cert) so the new SANs take effect
 /// without requiring a full re-init.
@@ -756,7 +787,7 @@ pub fn refresh_rest_server_cert(pki_dir: &Path) -> Result<()> {
 
 /// Issue (or re-issue) the REST server cert under `issuer`. Atomic on disk.
 fn issue_rest_server_cert(pki_dir: &Path, issuer: &Issuer<'_, KeyPair>) -> Result<()> {
-    let server_key = gen_keypair()?;
+    let server_key = gen_keypair_browser_tls()?;
     let mut server_params = CertificateParams::default();
     server_params.subject_alt_names = rest_server_sans();
     server_params.is_ca = IsCa::NoCa;

@@ -439,15 +439,14 @@
         title="Storage setting — controls how many days of metrics are kept on disk"
       >
         <span class="retention-label">Keep history</span>
-        <div class="retention-segment">
-          <div
-            class="segment-pill"
-            style="left: calc({activeSegment} * 25%)"
-          ></div>
+        <div class="retention-segment" role="radiogroup" aria-label="Keep history">
           {#each RETENTION_PRESETS as preset, i}
             {#if i < 3}
               <button
                 class="segment-btn"
+                class:is-active={activeSegment === i}
+                role="radio"
+                aria-checked={activeSegment === i}
                 disabled={retentionSaving}
                 onclick={() => setRetention(preset.value)}
               >{preset.label}</button>
@@ -456,6 +455,9 @@
                 {#snippet trigger()}
                   <button
                     class="segment-btn segment-btn-custom"
+                    class:is-active={activeSegment === 3}
+                    aria-haspopup="dialog"
+                    aria-expanded={customPopoverOpen}
                     disabled={retentionSaving}
                     onclick={() => {
                       customDaysInput = activeSegment === 3 ? String(retentionDays) : '';
@@ -678,6 +680,16 @@
           <dd><code>{selectedInst.sys.virtualization}</code></dd>
         {/if}
 
+        {#if selectedInst.sys?.proxmox_role}
+          <dt>Proxmox</dt>
+          <dd><code>{selectedInst.sys.proxmox_role}</code></dd>
+        {/if}
+
+        {#if selectedInst.sys?.docker_present}
+          <dt>Docker</dt>
+          <dd><code>present</code></dd>
+        {/if}
+
         {#if selectedInst.sys?.gpus?.length}
           <dt>GPU</dt>
           <dd>
@@ -864,40 +876,35 @@
     white-space: nowrap;
   }
   .retention-segment {
-    position: relative;
     display: flex;
-    background: var(--color-bg-2, color-mix(in srgb, var(--color-bg) 60%, #000));
+    background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: 6px;
-    overflow: hidden;
-  }
-  .segment-pill {
-    position: absolute;
-    top: 2px;
-    bottom: 2px;
-    width: calc(25% - 4px);
-    margin: 0 2px;
-    background: color-mix(in srgb, var(--color-accent, #4f86f7) 18%, transparent);
-    border: 1px solid var(--color-accent, #4f86f7);
-    border-radius: 4px;
-    transition: left 0.2s ease;
-    pointer-events: none;
+    padding: 3px;
+    gap: 2px;
   }
   .segment-btn {
-    position: relative;
-    flex: 1;
+    flex: 1 1 0;
+    min-width: 0;
     background: transparent;
-    border: none;
+    border: 1px solid transparent;
     color: var(--color-text-muted);
     font-size: var(--text-xs);
-    padding: 4px 6px;
+    padding: 4px 10px;
     cursor: pointer;
     white-space: nowrap;
-    transition: color 0.15s;
-    z-index: 1;
+    border-radius: 4px;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
   }
-  .segment-btn:hover:not(:disabled) {
+  .segment-btn:hover:not(:disabled):not(.is-active) {
+    background: var(--color-surface-2);
     color: var(--color-text);
+  }
+  .segment-btn.is-active {
+    background: color-mix(in srgb, var(--color-accent) 12%, var(--color-surface));
+    color: var(--color-accent);
+    border-color: var(--color-accent);
+    font-weight: 500;
   }
   .segment-btn:disabled {
     opacity: 0.5;

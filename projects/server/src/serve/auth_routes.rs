@@ -320,11 +320,14 @@ fn issue_session(conn: &db::Conn, user_id: &str, username: &str, role: &str) -> 
         role: role.into(),
     });
     let mut resp = body.into_response();
+    let cookie_str = session_cookie_value(&sid);
+    // Temporary: log exact Set-Cookie value so we can diagnose Firefox rejecting
+    // it. Masks the session id but leaves attrs intact.
+    let masked = cookie_str.replacen(&sid, "<sid>", 1);
+    tracing::info!(set_cookie = %masked, "issuing session cookie");
     resp.headers_mut().insert(
         header::SET_COOKIE,
-        session_cookie_value(&sid)
-            .parse()
-            .expect("cookie value is ascii"),
+        cookie_str.parse().expect("cookie value is ascii"),
     );
     resp
 }

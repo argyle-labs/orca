@@ -488,6 +488,12 @@ async fn load_rest_tls(pki_dir: &std::path::Path) -> Result<RustlsConfig> {
             orca_sdk::pki::refresh_rest_server_cert(pki_dir)
                 .context("refresh REST server cert to add localhost SAN")?;
             info!("[pki] REST server cert refreshed — localhost SAN added");
+        } else if !orca_sdk::pki::rest_server_cert_is_browser_compatible(&cert_pem) {
+            // Pre-rc.9 cert used an Ed25519 leaf key. Firefox/Chrome reject
+            // Ed25519 in TLS server auth — re-issue with ECDSA P-256.
+            orca_sdk::pki::refresh_rest_server_cert(pki_dir)
+                .context("refresh REST server cert to ECDSA P-256 for browser compatibility")?;
+            info!("[pki] REST server cert refreshed — Ed25519 → ECDSA P-256 (browser TLS)");
         }
     }
     let bundle = orca_sdk::pki::load_server(pki_dir).context("load REST TLS bundle")?;
@@ -561,6 +567,14 @@ async fn scalar_handler(
 /// scheduler. Returns even if the bootstrap key can't be generated (e.g.
 /// PKI dir unwritable) — pod features are simply unavailable for this run.
 async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
+    // Detect mesh certs issued under the old `peer.<hostname>` CN
+    // convention and reset them. Mixing CN conventions on the same host
+    // produces duplicate pod_peers rows (one keyed on the old CN via the
+    // listener stub, one on the new machine_id_short CN via join-confirm).
+    if let Err(e) = crate::pod::reset_if_stale_mesh_identity(pki_dir) {
+        tracing::warn!("[pod] stale-cert check failed: {e:#}");
+    }
+
     match crate::pod::mdns::build_advertisement(
         pki_dir.to_path_buf(),
         orca_utils::config::APP_PLUGIN_PORT,

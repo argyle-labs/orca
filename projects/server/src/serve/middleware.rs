@@ -210,20 +210,22 @@ fn sha256_hex(input: &[u8]) -> String {
     s
 }
 
-/// Extract a single named cookie value from a `Cookie:` header. Handles
-/// multiple cookies separated by `; ` per RFC 6265.
+/// Extract a single named cookie value from the request's `Cookie:` headers.
+/// HTTP/1.1 sends a single `Cookie:` header with `name=val; name=val` pairs;
+/// HTTP/2 may split into multiple individual `cookie:` headers (RFC 9113 §8.2.3,
+/// "cookie pair concatenation"). We must walk all of them — `headers().get`
+/// returns only the first, so reading a single header silently loses any
+/// cookie that wasn't first on the wire.
 fn extract_cookie<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
-    let header = req
-        .headers()
-        .get(axum::http::header::COOKIE)?
-        .to_str()
-        .ok()?;
-    for kv in header.split(';') {
-        let kv = kv.trim();
-        if let Some((k, v)) = kv.split_once('=')
-            && k == name
-        {
-            return Some(v);
+    for hv in req.headers().get_all(axum::http::header::COOKIE) {
+        let Ok(header) = hv.to_str() else { continue };
+        for kv in header.split(';') {
+            let kv = kv.trim();
+            if let Some((k, v)) = kv.split_once('=')
+                && k == name
+            {
+                return Some(v);
+            }
         }
     }
     None
@@ -344,12 +346,45 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
     }
 
     // Cookie session — first authenticated branch, hot path for browsers.
-    if let Some(sid) = extract_cookie(&req, SESSION_COOKIE)
-        && let Some(ident) = try_session_auth(sid)
-    {
-        let mut req = req;
-        req.extensions_mut().insert(ident);
-        return next.run(req).await;
+    // Join all `cookie:` headers (HTTP/2 may split into multiple) for diagnostics.
+    let raw_cookie_hdr: String = req
+        .headers()
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect::<Vec<_>>()
+        .join("; ");
+    let sid_opt = extract_cookie(&req, SESSION_COOKIE);
+    if let Some(sid) = sid_opt {
+        match try_session_auth(sid) {
+            Some(ident) => {
+                let mut req = req;
+                req.extensions_mut().insert(ident);
+                return next.run(req).await;
+            }
+            None => {
+                tracing::warn!(
+                    path = %path,
+                    sid_prefix = %&sid.chars().take(8).collect::<String>(),
+                    "cookie session present but try_session_auth returned None (revoked, expired, or no matching row)"
+                );
+            }
+        }
+    } else if !raw_cookie_hdr.is_empty() {
+        // Mask cookie values (between '=' and ';') so we don't leak any secrets
+        // into logs — just dump cookie names that are present.
+        let names: Vec<&str> = raw_cookie_hdr
+            .split(';')
+            .filter_map(|p| p.trim().split('=').next())
+            .collect();
+        tracing::warn!(
+            path = %path,
+            cookie_header_len = raw_cookie_hdr.len(),
+            cookie_names = ?names,
+            "cookie header present but no orca_session cookie extracted"
+        );
+    } else {
+        tracing::debug!(path = %path, "no cookie header on auth-required request");
     }
 
     if let Some(token) = extract_bearer(&req) {

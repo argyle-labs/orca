@@ -52,6 +52,15 @@
     })();
   });
 
+  // Mirror image: bounce signed-in users off the public auth routes onto the
+  // dashboard. Without this an authenticated user reloading /signin gets the
+  // login form re-rendered on top of an already-valid session.
+  $effect(() => {
+    if (session.kind === 'signed-in' && onPublicRoute) {
+      goto('/');
+    }
+  });
+
   $effect(() => {
     document.documentElement.setAttribute('data-theme', getPalette());
     document.documentElement.setAttribute('data-mode', getMode());
