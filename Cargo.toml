@@ -209,6 +209,17 @@ debug = "line-tables-only"
 # macOS default already, but pin it: keep dSYM out of the executable so
 # relinking doesn't have to splice debuginfo back into the binary.
 split-debuginfo = "unpacked"
+# sccache (rustc-wrapper in .cargo/config.toml) is the caching layer.
+# Incremental + sccache double-stores artifacts and fills target/ unboundedly.
+# Disabling incremental lets sccache work correctly and keeps target/ lean.
+incremental = false
+
+# Strip debug info from every external dependency. Our packages keep
+# line-tables-only (above) for usable backtraces; deps compiled once and
+# cached by sccache — their debug info would never be used and wastes ~60%
+# of target/debug/deps space.
+[profile.dev.package."*"]
+debug = 0
 
 # Proc-macro crates run AT compile time — optimizing them speeds up every
 # incremental build even after sccache has them cached, because the proc-macro

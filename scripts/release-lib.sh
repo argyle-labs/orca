@@ -299,7 +299,9 @@ cargo_build_target() {
 # called on the release path — `make build` skips this.
 stage_target_asset() {
   local target="$1"
-  local asset="orca-${target}"
+  local version
+  version="$(current_cargo_version)"
+  local asset="orca-${version}-${target}"
   cd "$REPO_ROOT"
   mkdir -p "$DIST_DIR"
   cp "target/${target}/${RELEASE_PROFILE}/orca" "${DIST_DIR}/${asset}"

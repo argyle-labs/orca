@@ -1,4 +1,4 @@
-.PHONY: build install install-hooks deploy dev run watch watch-server watch-test watch-wasm clean check release rc promote audit lint format format-check test test-changed coverage coverage-html coverage-touched cache-stats daemon-install daemon-uninstall kill-dev migrate up down init doctor \
+.PHONY: build install install-hooks deploy dev run watch watch-server watch-test watch-wasm clean prune check release rc promote audit lint format format-check test test-changed coverage coverage-html coverage-touched cache-stats daemon-install daemon-uninstall kill-dev migrate up down init doctor \
   ci release-build release-build-host release-frontend release-sdk-ts release-sdk-kotlin release-checksums release-stage release-publish release-clean
 
 INSTALL_PATH := $(HOME)/.local/bin/orca
@@ -203,6 +203,19 @@ clean:
 	rm -rf target/native target/wasm target/ios target/android
 	rm -rf projects/frontend/dist projects/frontend/node_modules
 	@sccache --zero-stats 2>/dev/null || true
+
+## prune: remove incremental artifacts and stale dep objects without a full clean.
+## Safe to run anytime; does not invalidate sccache. Run when target/ grows large.
+prune:
+	@echo "→ removing incremental artifacts..."
+	@find target -type d -name incremental -exec rm -rf {} + 2>/dev/null || true
+	@echo "→ removing stale .d dependency files..."
+	@find target -name "*.d" -mtime +7 -delete 2>/dev/null || true
+	@echo "→ removing orphaned .rmeta files older than 7 days..."
+	@find target -name "*.rmeta" -mtime +7 -delete 2>/dev/null || true
+	@echo "→ removing debug objects for deps older than 7 days..."
+	@find target -path "*/deps/*.o" -mtime +7 -delete 2>/dev/null || true
+	@du -sh target/ 2>/dev/null || true
 
 audit:
 	@echo "→ npm audit..."
