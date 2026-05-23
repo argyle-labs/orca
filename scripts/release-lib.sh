@@ -289,7 +289,12 @@ cargo_build_target() {
       ;;
     *)
       # Linux and other non-Apple targets: zigbuild for cross-compilation.
-      cargo zigbuild --profile "$RELEASE_PROFILE" --jobs "$jobs" "${features_args[@]}" \
+      # Reduce codegen-units to 4 for cross-compile: the Zig linker opens all
+      # object files simultaneously and hits EMFILE (ProcessFdQuotaExceeded)
+      # with the default 16 units (~2800 objects). 4 units ~= 700 objects,
+      # well under macOS kern.maxfilesperproc. Native macOS builds keep 16.
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4 \
+        cargo zigbuild --profile "$RELEASE_PROFILE" --jobs "$jobs" "${features_args[@]}" \
         --target "$target" --manifest-path "$SERVER_TOML"
       ;;
   esac
