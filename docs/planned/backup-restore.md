@@ -344,7 +344,120 @@ service / integration declares the secrets it needs (`requires =
 ["GITHUB_TOKEN"]`), and `inventory export` collects that list per
 host.
 
-### 4.11 First-install flow
+### 4.11 Non-secret state snapshots → the config repo itself
+
+The config repo (meerkat or equivalent) is git, and git is already
+a versioned store. Use it. Every non-secret artifact orca generates
+on a deploy gets committed back to the repo on a known branch, so
+the repo holds both:
+
+- **Desired state**: operator-authored TOML on `main` (PRs land here).
+- **Realized state**: orca-authored snapshots on `state/` (committed
+  by the daemon after a successful apply).
+
+This makes the repo a complete picture of current deployed state —
+rollback is `git revert`, audit is `git log`, diff-between-deploys
+is `git diff`, no separate state-store to manage.
+
+#### What gets snapshotted
+
+Non-secret only. Anything sensitive (`/etc/shadow` hashes, API
+tokens, the encrypted secrets blob) goes to vault / target, never
+to the repo.
+
+| Artifact | Source | Path in repo |
+|---|---|---|
+| Rendered Caddyfile | caddy plugin reconciler | `state/<host>/caddy/Caddyfile.generated` |
+| Generated systemd units | host service reconciler | `state/<host>/systemd/*.service` |
+| Generated cron / OpenRC scripts | same | `state/<host>/cron.d/` etc. |
+| Resolved per-host package list | docker/nfs/pbs reconcilers | `state/<host>/packages.lock.toml` |
+| Active fstab | NFS reconciler | `state/<host>/fstab` |
+| Effective users (UIDs, groups, **no shadow**) | users reconciler | `state/<host>/users.passwd-like` |
+| Caddy route table (resolved peer addrs) | caddy reconciler | `state/cluster/caddy-routes.toml` |
+| Host inventory (peer_id, IPs, OS, capabilities) | mesh | `state/cluster/inventory.toml` |
+| Per-host applied-config hash + orca version | reconciler | `state/<host>/applied.toml` |
+| Backup manifests (file lists, sizes, hashes — no contents) | backup framework | `state/<host>/backups/<job>.manifest.json` |
+
+Secrets-store inventory (key *names* only, no values — see §4.10)
+also lands here under `state/<host>/secrets.schema.toml` so
+operators can review what's expected without exposing values.
+
+#### Commit behavior
+
+- Orca commits to a `state/auto` branch (or per-host
+  `state/<host>/auto`) — never to `main`. Operators can fast-forward
+  `main` from state if they want the realized state to become
+  desired (rare; usually you want desired ahead of state).
+- Each commit message includes: orca version, peer_id, applied
+  config SHA from `main`, the operation that triggered the commit,
+  duration, outcome.
+- Commits go through the git-provider API per the existing rule
+  ([memory: git provider rule](feedback_git_provider_api.md)).
+- Auto-versioning: commit message format includes a deploy
+  sequence number per host (`baldur/deploy-00742`). Tags optional
+  for milestone deploys.
+- Squash policy: state branches grow forever otherwise. Periodic
+  squash (default: monthly, configurable) collapses old per-deploy
+  commits into a "month rollup" commit while preserving the
+  reachable SHAs for the rollback window.
+
+#### Where do snapshots land — repo, another repo, S3, NFS
+
+The config-repo-as-state target is the **default**. Other targets
+are configurable for ops who want separation of concerns:
+
+```toml
+# config/cluster/state-snapshot.toml
+[snapshot]
+mode = "config_repo"         # config_repo | separate_repo | s3 | nfs
+
+# Default — same repo as config, separate branch namespace
+[snapshot.config_repo]
+branch_prefix = "state/"
+squash_after = "30d"
+
+# Separate state-only repo (sensitive operators who want config
+# and state in different access-controlled repos)
+[snapshot.separate_repo]
+url = "git+github://myorg/orca-state"
+token_ref = "secret:STATE_REPO_TOKEN"
+
+# S3 / object storage
+[snapshot.s3]
+bucket = "orca-state"
+prefix = "scottkey-pod/"
+endpoint = "s3.us-east-1.amazonaws.com"
+
+# NFS share (maple, willow, etc. in the homelab case)
+[snapshot.nfs]
+mount = "/mnt/maple/orca-state"
+layout = "git_bare"          # git_bare | flat
+```
+
+Multiple destinations supported simultaneously — primary +
+mirror. Snapshot failures don't block the deploy (the deploy
+already succeeded by the time we snapshot), but stale-snapshot
+alerts fire if commits stop landing.
+
+#### Why this matters
+
+Combined with the rest of the framework:
+
+| Layer | What | Where it lives |
+|---|---|---|
+| Desired state | Operator-authored TOML | `main` of the config repo |
+| Realized state | Orca-generated snapshots | `state/` branch of the same repo (or alternative target) |
+| Encrypted data stores | Backup blobs (config.db, audit.db, etc.) | PBS / S3 / NFS — never the repo |
+| Keys | Master key, CA key, offsite keys | Vault (1Password / Shamir / YubiKey) |
+| Secret values | Integration credentials | Vault item bodies; never the repo |
+| Secret schema | Key *names* only | `state/<host>/secrets.schema.toml` in the repo |
+
+The repo is now the always-up-to-date, human-readable, git-diffable
+record of "what's deployed where." Vault holds what you can't put
+in git. Backup targets hold what's too big or too sensitive for
+either.
+
+### 4.12 First-install flow
 
 The install script ([install-bootstrap.md](install-bootstrap.md))
 walks new operators through escrow setup at pod creation:
