@@ -87,6 +87,19 @@ pub async fn handle_pod_connection(
         }
     };
 
+    // pod/subscribe takes over the stream for the rest of the connection:
+    // one request → ack → streamed events until close. The normal one-shot
+    // request/response path below is bypassed.
+    if request.method == crate::pod::subscribe_wire::METHOD {
+        let own_peer_id = format!("peer.{}", crate::host_identity::machine_id_short());
+        return crate::pod::subscribe_wire::serve_session_with_request(
+            &mut tls,
+            request,
+            &own_peer_id,
+        )
+        .await;
+    }
+
     let response = dispatch(request, &peer_cn, peer_addr).await;
 
     let envelope = serde_json::to_vec(&response).context("serialize pod response")?;

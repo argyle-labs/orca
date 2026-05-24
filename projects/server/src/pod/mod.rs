@@ -19,10 +19,12 @@ pub mod cert_rotation;
 pub mod db;
 pub mod dialer;
 pub mod dispatcher;
+pub mod host_status_replica;
 mod listener;
 pub mod mdns;
 pub mod scheduler;
 pub mod subscribe;
+pub mod subscribe_client;
 pub mod subscribe_wire;
 
 pub use bootstrap::handle_pod_bootstrap_connection;
@@ -315,20 +317,12 @@ pub async fn dev_disable(host: &str) -> Result<PodDevDisableResult> {
     .await
 }
 
-/// Generic mTLS JSON-RPC roundtrip to a peer over the pod channel. One-shot:
-/// connect → write one request → read one response → return. No pooling yet;
-/// adopters call this directly per peer. Keeping the connection short-lived
-/// matches how `pod/ping` worked previously and avoids leaking sockets.
-async fn call_typed<P, R>(
+/// Open a fresh mTLS client connection to a peer's pod channel. Used by
+/// both one-shot `call_typed` and long-lived streaming dials
+/// (`subscribe_client`). The caller owns the returned stream.
+pub(crate) async fn connect_pod_tls(
     host: &str,
-    method: &str,
-    params: Option<P>,
-    timeout: Duration,
-) -> Result<R>
-where
-    P: Serialize,
-    R: for<'de> Deserialize<'de>,
-{
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
     let pki = pki_dir();
     let bundle =
         pki::load_mesh_client(&pki).context("load mesh client bundle (run `orca pod init`)")?;
@@ -348,10 +342,27 @@ where
     let sni = ServerName::try_from(pki::POD_SERVER_SAN)
         .context("build SNI ServerName")?
         .to_owned();
-    let mut tls = connector
+    connector
         .connect(sni, tcp)
         .await
-        .context("TLS handshake (is the peer's mesh CA the same as ours?)")?;
+        .context("TLS handshake (is the peer's mesh CA the same as ours?)")
+}
+
+/// Generic mTLS JSON-RPC roundtrip to a peer over the pod channel. One-shot:
+/// connect → write one request → read one response → return. No pooling yet;
+/// adopters call this directly per peer. Keeping the connection short-lived
+/// matches how `pod/ping` worked previously and avoids leaking sockets.
+async fn call_typed<P, R>(
+    host: &str,
+    method: &str,
+    params: Option<P>,
+    timeout: Duration,
+) -> Result<R>
+where
+    P: Serialize,
+    R: for<'de> Deserialize<'de>,
+{
+    let mut tls = connect_pod_tls(host).await?;
 
     let params_value = match params {
         Some(p) => Some(serde_json::to_value(p).context("serialize request params")?),

@@ -82,6 +82,20 @@ where
             anyhow::bail!("first frame must be a Request");
         }
     };
+    serve_session_with_request(stream, request, own_peer_id).await
+}
+
+/// Variant of [`serve_session`] for callers that already parsed the first
+/// frame as a `Request` (e.g. the pod listener dispatcher, which peeks the
+/// method to decide whether to take the streaming path).
+pub async fn serve_session_with_request<S>(
+    stream: &mut S,
+    request: Request,
+    own_peer_id: &str,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let id = request.id.clone();
 
     let topic_peer_id = match validate_subscribe(&request, own_peer_id) {
