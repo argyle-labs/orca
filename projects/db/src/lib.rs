@@ -877,7 +877,8 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             inviter_peer_id TEXT,
             pod_id          TEXT,
             expires_at      INTEGER NOT NULL,
-            created_at      INTEGER NOT NULL
+            created_at      INTEGER NOT NULL,
+            code_plain      TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_pod_pending_offers_fp
             ON pod_pending_offers (peer_pubkey_fp, direction);
