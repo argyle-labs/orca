@@ -391,9 +391,11 @@ pub fn resolve_offer_target(
     }
 }
 
-pub async fn cmd_pod_offer(addr: &str) -> Result<()> {
-    // `parse_peer_addr` accepts "host" or "host:port"; we lose track of which
-    // form the user typed once parsed, so we redetect here for the port gate.
+/// Pure I/O side of pairing-as-inviter: discovery lookup → mint code → insert
+/// outbound offer → push to joiner. Returns the resolved target + code so
+/// callers (`cmd_pod_offer`, `cmd_pod_pair`) can choose to print and exit or
+/// poll for completion.
+pub async fn push_pairing_offer(addr: &str) -> Result<(pdb::DiscoveryRow, String)> {
     let default_port_used = !addr.contains(':');
     let (host, port) = pki::parse_peer_addr(addr, APP_PLUGIN_PORT)?;
 
@@ -467,6 +469,11 @@ pub async fn cmd_pod_offer(addr: &str) -> Result<()> {
     .await
     .context("push offer to joiner failed")?;
 
+    Ok((target, code))
+}
+
+pub async fn cmd_pod_offer(addr: &str) -> Result<()> {
+    let (target, code) = push_pairing_offer(addr).await?;
     println!(
         "✓ offered pod membership to {} ({}:{})",
         target.hostname, target.addr, target.port
@@ -477,6 +484,54 @@ pub async fn cmd_pod_offer(addr: &str) -> Result<()> {
         crate::pod::scheduler::OFFER_TTL_SECS
     );
     Ok(())
+}
+
+/// One-shot pairing flow for the inviter: push the offer, print the code, then
+/// poll `pod_peers` for the joiner's row to appear (which only happens after
+/// the joiner runs `orca pod accept <code>` or the orca web UI accepts it).
+/// Exits as soon as the peer lands or the offer's TTL elapses.
+pub async fn cmd_pod_pair(addr: &str) -> Result<()> {
+    let (target, code) = push_pairing_offer(addr).await?;
+    println!(
+        "✓ offered pod membership to {} ({}:{})",
+        target.hostname, target.addr, target.port
+    );
+    println!("  pairing code: {code}");
+    println!(
+        "  waiting up to {}s for the joiner to accept (`orca pod accept {code}` on the other host, \
+         or paste the code into the Orca UI)…",
+        crate::pod::scheduler::OFFER_TTL_SECS
+    );
+
+    let deadline = std::time::Instant::now()
+        + Duration::from_secs(crate::pod::scheduler::OFFER_TTL_SECS as u64);
+    loop {
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "timed out after {}s waiting for {} to accept; the code is still valid until expiry — \
+                 retry `orca pod pair {}` once the joiner is ready, or run `orca pod accept {}` \
+                 directly on the joiner.",
+                crate::pod::scheduler::OFFER_TTL_SECS,
+                target.hostname,
+                addr,
+                code,
+            );
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let conn = db::open_default()?;
+        let peers = pdb::list_peers(&conn)?;
+        drop(conn);
+        if let Some(p) = peers
+            .iter()
+            .find(|p| p.pubkey_fp.as_deref() == Some(target.pubkey_fp.as_str()))
+        {
+            println!(
+                "✓ paired with {} ({}, {}:{})",
+                p.peer_hostname, p.peer_id, p.peer_addr, p.peer_port
+            );
+            return Ok(());
+        }
+    }
 }
 
 // ── pod list ─────────────────────────────────────────────────────────────────

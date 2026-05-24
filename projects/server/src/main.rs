@@ -204,6 +204,10 @@ enum PodAction {
     /// Manually push an offer to a known address (inviter side, when
     /// mDNS doesn't see the joiner).
     Offer { addr: String },
+    /// One-shot inviter flow: push an offer to `addr`, print the pairing code,
+    /// and block until the joiner accepts (or the offer expires). Wraps
+    /// `pod offer` + the wait the operator would otherwise do manually.
+    Pair { addr: String },
     /// List known peers and their trust state.
     List,
     /// Mark a peer as locally trusted (or untrust). Triggers CA-key
@@ -482,6 +486,7 @@ async fn main() -> Result<()> {
             PodAction::Connect { addr } => cmd::pod::cmd_pod_connect(&addr).await,
             PodAction::Join { addr } => cmd::pod::cmd_pod_join(&addr).await,
             PodAction::Offer { addr } => cmd::pod::cmd_pod_offer(&addr).await,
+            PodAction::Pair { addr } => cmd::pod::cmd_pod_pair(&addr).await,
             PodAction::List => cmd::pod::cmd_pod_list(),
             PodAction::Trust { peer_id, state } => {
                 cmd::pod::cmd_pod_trust(&peer_id, state == "on").await

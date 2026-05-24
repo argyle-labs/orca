@@ -637,12 +637,24 @@ impl PodService for ServerPod {
         Ok(PodCertStatusOutput {
             founder,
             member,
+            self_secure: false,
             mesh_ca: parse(pki::mesh_ca_cert_path(&pki_d)),
             leaf_server: parse(pki::mesh_server_cert_path(&pki_d)),
             leaf_client: parse(pki::mesh_client_cert_path(&pki_d)),
             ca_previous: parse(pki::mesh_ca_previous_cert_path(&pki_d)),
             bootstrap: parse(pki::bootstrap_cert_path(&pki_d)),
         })
+    }
+
+    fn get_self_secure(&self) -> Result<bool> {
+        let conn = db::open_default()?;
+        pdb::get_self_secure(&conn)
+    }
+
+    async fn set_self_secure(&self, on: bool) -> Result<bool> {
+        let conn = db::open_default()?;
+        pdb::set_self_secure(&conn, on)?;
+        Ok(on)
     }
 }
 

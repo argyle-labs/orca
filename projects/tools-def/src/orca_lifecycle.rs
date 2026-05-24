@@ -775,6 +775,12 @@ mod tests {
         fn cert_status(&self) -> Result<crate::pod::PodCertStatusOutput> {
             anyhow::bail!("stub")
         }
+        fn get_self_secure(&self) -> Result<bool> {
+            Ok(false)
+        }
+        async fn set_self_secure(&self, on: bool) -> Result<bool> {
+            Ok(on)
+        }
         async fn dev_sync(&self) -> Result<Vec<crate::pod::PodDevPeerResult>> {
             Ok(vec![])
         }

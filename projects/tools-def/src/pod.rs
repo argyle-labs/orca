@@ -364,6 +364,12 @@ pub struct CertInfo {
 pub struct PodCertStatusOutput {
     pub founder: bool,
     pub member: bool,
+    /// Tier-2 secrets-storage permission. When `true`, this host is authorized
+    /// to hold encrypted secrets replicated from other pod members. Independent
+    /// of cert trust — a fully paired host can still refuse to be a secrets
+    /// sink. UI surfaces this as a Secrets-storage toggle distinct from Trust.
+    #[serde(default)]
+    pub self_secure: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mesh_ca: Option<CertInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -374,6 +380,24 @@ pub struct PodCertStatusOutput {
     pub ca_previous: Option<CertInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bootstrap: Option<CertInfo>,
+}
+
+// ── system.pod.update — singleton pod-settings update ───────────────────────
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodUpdateArgs {
+    /// Toggle Tier-2 secrets-storage permission (`self_secure`). `None` leaves
+    /// the current value unchanged so the tool can grow new fields without
+    /// every caller having to opt out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub self_secure: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodUpdateOutput {
+    pub self_secure: bool,
 }
 
 // ── Native support: From impls, PodService trait, svc() helper ──────────────
@@ -453,6 +477,13 @@ pub mod native_support {
         async fn join(&self, inviter_addr: &str, port: Option<u16>) -> Result<PodJoinOutput>;
         async fn leave_peer(&self, peer_id: &str) -> Result<PodLeaveOutput>;
         fn cert_status(&self) -> Result<PodCertStatusOutput>;
+        /// Read `self_secure`. Used by `system.pod.detail` enrichment so the
+        /// UI shows the current Tier-2 secrets-storage state alongside cert
+        /// info.
+        fn get_self_secure(&self) -> Result<bool>;
+        /// Update `self_secure`. Idempotent: passing the current value is a
+        /// no-op. Returns the resulting value.
+        async fn set_self_secure(&self, on: bool) -> Result<bool>;
         async fn dev_sync(&self) -> Result<Vec<PodDevPeerResult>>;
         async fn dev_enable_fanout(&self, peers: &[String]) -> Result<Vec<PodDevPeerResult>>;
         async fn dev_disable_fanout(&self, peers: &[String]) -> Result<Vec<PodDevPeerResult>>;
@@ -658,13 +689,33 @@ async fn pod_peer_delete(
     native_support::svc(ctx)?.leave_peer(&args.peer_id).await
 }
 
-/// Days-remaining + rotation state for every mesh cert on this host.
+/// Days-remaining + rotation state for every mesh cert on this host, plus
+/// the current `self_secure` (Tier-2 secrets-storage) setting.
 #[orca_tool(domain = "system.pod", verb = "detail")]
 async fn pod_detail(
     _args: EmptyArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<PodCertStatusOutput> {
-    native_support::svc(ctx)?.cert_status()
+    let svc = native_support::svc(ctx)?;
+    let mut out = svc.cert_status()?;
+    out.self_secure = svc.get_self_secure().unwrap_or(false);
+    Ok(out)
+}
+
+/// Update pod-level settings on this host. Currently exposes `self_secure`
+/// (Tier-2 secrets-storage permission). Admin-only because flipping it can
+/// authorize secrets replication into this host.
+#[orca_tool(domain = "system.pod", verb = "update", role = "admin")]
+async fn pod_update(
+    args: PodUpdateArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<PodUpdateOutput> {
+    let svc = native_support::svc(ctx)?;
+    let self_secure = match args.self_secure {
+        Some(v) => svc.set_self_secure(v).await?,
+        None => svc.get_self_secure()?,
+    };
+    Ok(PodUpdateOutput { self_secure })
 }
 
 /// Update dev mode across the mesh. `action`:
@@ -707,6 +758,7 @@ mod tests {
         last_join: Mutex<Option<(String, Option<u16>)>>,
         last_leave_peer: Mutex<Option<String>>,
         last_fanout_peers: Mutex<Option<Vec<String>>>,
+        self_secure: Mutex<bool>,
         // Mirrors PodService::exec — peer-mesh wire payload is type-erased
         // at the dispatch boundary. Same justification as the trait method.
         #[allow(clippy::disallowed_types)]
@@ -830,12 +882,20 @@ mod tests {
             Ok(PodCertStatusOutput {
                 founder: true,
                 member: true,
+                self_secure: false,
                 mesh_ca: None,
                 leaf_server: None,
                 leaf_client: None,
                 ca_previous: None,
                 bootstrap: None,
             })
+        }
+        fn get_self_secure(&self) -> Result<bool> {
+            Ok(*self.self_secure.lock().unwrap())
+        }
+        async fn set_self_secure(&self, on: bool) -> Result<bool> {
+            *self.self_secure.lock().unwrap() = on;
+            Ok(on)
         }
         async fn dev_sync(&self) -> Result<Vec<PodDevPeerResult>> {
             Ok(vec![])
@@ -1091,6 +1151,42 @@ mod tests {
         let out = pod_detail(EmptyArgs {}, &ctx).await.unwrap();
         assert!(out.founder);
         assert!(out.member);
+        assert!(!out.self_secure);
+    }
+
+    #[tokio::test]
+    async fn pod_detail_reflects_self_secure() {
+        let (ctx, stub) = ctx_with_stub();
+        *stub.self_secure.lock().unwrap() = true;
+        let out = pod_detail(EmptyArgs {}, &ctx).await.unwrap();
+        assert!(out.self_secure);
+    }
+
+    #[tokio::test]
+    async fn pod_update_sets_self_secure() {
+        let (ctx, stub) = ctx_with_stub();
+        let out = pod_update(
+            PodUpdateArgs {
+                self_secure: Some(true),
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert!(out.self_secure);
+        assert!(*stub.self_secure.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn pod_update_none_is_read_only() {
+        let (ctx, stub) = ctx_with_stub();
+        *stub.self_secure.lock().unwrap() = true;
+        let out = pod_update(PodUpdateArgs { self_secure: None }, &ctx)
+            .await
+            .unwrap();
+        assert!(out.self_secure);
+        // unchanged
+        assert!(*stub.self_secure.lock().unwrap());
     }
 
     #[tokio::test]

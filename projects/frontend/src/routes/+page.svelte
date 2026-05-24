@@ -4,6 +4,7 @@
   import { notifications } from '$lib/stores/notifications';
   import StatusDot from '$lib/components/StatusDot.svelte';
   import Popover from '$lib/components/Popover.svelte';
+  import PairingModal from '$lib/components/PairingModal.svelte';
   import type { GpuInfo, SystemInfoReport } from '$lib/client/types.gen';
   import { env } from '$env/dynamic/public';
 
@@ -39,6 +40,35 @@
   let customPopoverOpen = $state(false);
   let customDaysInput = $state('');
   let retentionSaving = $state(false);
+  let pairModalOpen = $state(false);
+  let pairModalMode = $state<'invite' | 'accept'>('accept');
+  let pairModalInitialCode = $state('');
+
+  type InboundOffer = {
+    offer_id: string;
+    peer_hostname: string;
+    peer_addr: string;
+    peer_port: number;
+    inviter_peer_id?: string | null;
+    expires_at: number;
+    ttl_secs: number;
+  };
+  let inboundOffers = $state<InboundOffer[]>([]);
+
+  async function refreshInboundOffers() {
+    try {
+      const rows = await callTool<InboundOffer[]>('systemPeerHandshakeList', {});
+      inboundOffers = (rows ?? []).filter((r) => r.expires_at > Math.floor(Date.now() / 1000));
+    } catch {
+      // best-effort; this banner is informational
+    }
+  }
+
+  function openPair(mode: 'invite' | 'accept', code = '') {
+    pairModalMode = mode;
+    pairModalInitialCode = code;
+    pairModalOpen = true;
+  }
   let pollHandle: ReturnType<typeof setInterval> | null = null;
 
   // Drawer update controls — reset only when the SELECTED INSTANCE changes,
@@ -143,9 +173,9 @@
           update_latest?: string | null;
           addresses?: { kind: string; value: string }[];
           system?: SystemInfoReport | null;
-        }[]>('podPeerList', {}),
+        }[]>('systemPeerList', {}),
         callTool<{ peer_id: string; system?: SystemInfoReport | null }[]>(
-          'hostStatusList',
+          'systemHostStatusList',
           {},
         ).catch(() => []),
       ]);
@@ -200,7 +230,7 @@
     if (!inst.secure || trustPending) return;
     trustPending = true;
     try {
-      await callTool('podPeerUpdate', { peer_id: inst.peerId, on: !inst.secure.local, push: false });
+      await callTool('systemPeerUpdate', { peer_id: inst.peerId, on: !inst.secure.local, push: false });
       await refreshPodPeers();
     } catch (e) {
       console.warn('trust toggle failed:', e);
@@ -213,7 +243,7 @@
     if (!inst.secure || pushTrustPending) return;
     pushTrustPending = true;
     try {
-      await callTool('podPeerUpdate', { peer_id: inst.peerId, on, push: true });
+      await callTool('systemPeerUpdate', { peer_id: inst.peerId, on, push: true });
       await refreshPodPeers();
     } catch (e) {
       console.warn('push trust failed:', e);
@@ -224,7 +254,7 @@
 
   async function loadRetention() {
     try {
-      const data = await callTool<{ row: { json: string } | null }>('configGet', {
+      const data = await callTool<{ row: { json: string } | null }>('systemConfigGet', {
         noun: 'host_status',
         name: 'retention_days',
       });
@@ -237,7 +267,7 @@
   async function setRetention(days: number) {
     retentionSaving = true;
     try {
-      await callTool('configSet', {
+      await callTool('systemConfigSet', {
         noun: 'host_status',
         name: 'retention_days',
         json: String(days),
@@ -326,7 +356,7 @@
     if (!inst.peerId) return;
     const action = inst.mode !== 'dev' ? 'enable' : 'disable';
     try {
-      await callTool('podDevUpdate', {
+      await callTool('systemPeerDevUpdate', {
         action,
         peers: inst.role === 'system' ? [inst.peerId] : [],
       });
@@ -359,10 +389,12 @@
     refreshLocal(local);
     refreshPodPeers();
     loadRetention();
+    refreshInboundOffers();
     pollHandle = setInterval(() => {
       const loc = instances.find((i) => i.role === 'local');
       if (loc) refreshLocal(loc);
       refreshPodPeers();
+      refreshInboundOffers();
     }, POLL_MS);
   });
 
@@ -434,6 +466,10 @@
   <header>
     <div class="title-row">
       <h1>Systems</h1>
+      <div class="pair-btns">
+        <button class="pair-btn" onclick={() => openPair('invite')}>+ Invite host</button>
+        <button class="pair-btn" onclick={() => openPair('accept')}>+ Pair with code</button>
+      </div>
       <div
         class="retention-picker"
         title="Storage setting — controls how many days of metrics are kept on disk"
@@ -492,6 +528,20 @@
     </div>
     <p class="lede">Connected orca instances.</p>
   </header>
+
+  {#if inboundOffers.length > 0}
+    <div class="inbound-banner" role="status">
+      {#each inboundOffers as o (o.offer_id)}
+        <div class="inbound-row">
+          <div>
+            <strong>{o.peer_hostname}</strong> wants to add this host to a pod.
+            <span class="dim">({o.peer_addr}:{o.peer_port})</span>
+          </div>
+          <button class="btn primary sm" onclick={() => openPair('accept')}>Accept</button>
+        </div>
+      {/each}
+    </div>
+  {/if}
 
   <div class="instances">
     {#each instances as inst (inst.id)}
@@ -610,10 +660,22 @@
   {#if instances.filter((i) => i.role === 'system').length === 0}
     <p class="hint">
       No paired systems yet. Run <code>orca pod init</code> to become a founder,
-      or <code>orca pod accept &lt;code&gt;</code> on a joiner to pair with an existing pod.
+      or click <strong>+ Pair with code</strong> above and paste a code from
+      <code>orca pod pair &lt;this-host&gt;</code> on the inviter.
     </p>
   {/if}
 </section>
+
+<PairingModal
+  open={pairModalOpen}
+  initialMode={pairModalMode}
+  initialCode={pairModalInitialCode}
+  onclose={() => (pairModalOpen = false)}
+  onpaired={() => {
+    refreshPodPeers();
+    refreshInboundOffers();
+  }}
+/>
 
 <!-- Drawer -->
 {#if selectedInst}
@@ -861,6 +923,44 @@
     color: var(--color-text-muted);
     font-size: var(--text-sm);
   }
+
+  .pair-btns {
+    margin-left: auto;
+    display: flex;
+    gap: var(--space-2);
+  }
+  .pair-btn {
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-surface);
+    color: var(--color-text);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .pair-btn:hover { background: var(--color-bg-hover, var(--color-surface)); }
+
+  .inbound-banner {
+    margin: 0 0 var(--space-4);
+    padding: var(--space-3);
+    background: var(--color-accent-subtle, color-mix(in srgb, var(--color-accent) 12%, transparent));
+    border: 1px solid var(--color-accent);
+    border-radius: var(--radius-md);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .inbound-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--space-3);
+    font-size: var(--text-sm);
+  }
+  .inbound-row .dim { color: var(--color-text-dim); font-family: var(--font-mono); margin-left: var(--space-1); }
+  .inbound-row .btn { padding: var(--space-1) var(--space-3); font-size: var(--text-xs); border-radius: var(--radius-md); border: 1px solid var(--color-accent); cursor: pointer; }
+  .inbound-row .btn.primary { background: var(--color-accent); color: var(--color-on-accent, #fff); }
 
   .retention-picker {
     display: flex;
