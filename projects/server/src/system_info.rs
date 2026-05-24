@@ -6,6 +6,8 @@
 //! never blocks on sysinfo. Bootstrapping callers that race the first refresh
 //! get `None`; the first snapshot lands ~immediately after `spawn_refresher`.
 
+pub mod system_type;
+
 use orca_tools_def::orca_lifecycle::{GpuInfo, NetIfaceDto, SystemInfoReport};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -182,6 +184,14 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
     }
 
     report.docker_present = Some(which("docker").is_some());
+
+    // Canonical system_type + observed capabilities. The detector takes the
+    // OS-name strings sysinfo already collected above so it sees the same
+    // values the rest of the report does, and probes the filesystem +
+    // PATH directly for capability markers.
+    let host_fs = system_type::RealHostFs;
+    report.system_type = Some(system_type::detect(&host_fs));
+    report.detected_capabilities = system_type::detect_capabilities(&host_fs);
 
     // Network interfaces via if-addrs (already a dep). sysinfo exposes
     // interface stats but not MAC + ip list cleanly.

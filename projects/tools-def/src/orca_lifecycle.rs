@@ -94,8 +94,30 @@ pub struct SystemInfoReport {
     /// `/etc/pve/` (pmxcfs) is mounted, `"guest"` when the inference
     /// layer matches this VM's MAC to a PVE host's tap interface,
     /// otherwise `None`. NEVER set by user config.
+    ///
+    /// **Deprecated** — folded into `system_type` (a value of `"proxmox-ve"`
+    /// replaces the previous `proxmox_role == "host"` signal). Kept for one
+    /// release so older UIs don't blank out; remove after the host-drawer
+    /// redesign (Slice 5) ships.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxmox_role: Option<String>,
+
+    /// Canonical system-type tag for this host. Exactly one value per host.
+    /// Drives expected-capability lookup and service-discovery class
+    /// selection. Values: `"unraid"`, `"proxmox-ve"`,
+    /// `"proxmox-backup-server"`, `"macos"`, `"debian"`, `"alpine"`,
+    /// `"nixos"`, `"truenas-scale"`, `"truenas-core"`, `"linux"` (fallback).
+    /// `None` only when the detector failed to run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_type: Option<String>,
+
+    /// Capabilities the detector observed on this host (e.g. `"docker"`,
+    /// `"vm-host"`, `"lxc-host"`, `"backup-target"`, `"gpu-nvidia"`).
+    /// Empty when none were detected. Compared against
+    /// `expected_capabilities(system_type)` (a static table in the
+    /// server crate) to produce anomaly badges in the UI.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detected_capabilities: Vec<String>,
 
     // ── Hardware ──
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -162,6 +184,9 @@ pub struct SystemInfoReport {
     pub orca_fs_avail_gb: Option<u64>,
 
     // ── Runtime / integrations ──
+    /// **Deprecated** — folded into `detected_capabilities` as the `"docker"`
+    /// entry. Kept for one release so older UIs don't blank out; remove
+    /// after the host-drawer redesign (Slice 5) ships.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docker_present: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
