@@ -264,50 +264,56 @@ Everything that today is a "first, run this script to set up the
 host" step is also logic that belongs in orca. The scope of "logic"
 includes **provisioning**, not just runtime behavior.
 
-Concretely, the following all move under orca:
+**Bootstrap is minimal.** When orca first lands on a host it does
+only what it needs to be a functioning peer: install the binary,
+create the service user, grant the minimum permissions to run, pair
+into the mesh. Nothing else. See
+[install-bootstrap.md](install-bootstrap.md) for the exact bootstrap
+shape.
 
-- **Host bootstrap** (`setup-host.sh`): admin/svc users, SSH keys,
-  sudo policy, base packages, cron entry for repo sync.
-  → `orca host bootstrap --admin-user X --admin-key-file Y` (rust-native).
-- **Users / SSH keys / sudo / doas**: declarative in the config repo,
-  applied by orca. The repo holds `config/<host>/users.toml` listing
-  users, their public keys, group membership, and sudo/doas policy.
-  Orca reconciles: creates missing users, lays down
+Everything below is **per-host config that the reconciler applies**
+once the host is paired — declarative in the config repo, not flags
+on the bootstrap command. The reconciler picks up the config on the
+GitOps loop (§3.5) and acts on it. Bootstrap never invokes these
+directly.
+
+- **Users / SSH keys / sudo / doas**: `config/<host>/users.toml`
+  lists users, their public keys, group membership, and sudo/doas
+  policy. Orca reconciles: creates missing users, lays down
   `~/.ssh/authorized_keys`, writes `/etc/sudoers.d/<name>` (or
-  `/etc/doas.d/<name>` on Alpine / BSD), removes users that fall out
-  of the file. Same GitOps loop — a key rotation is a PR, not an SSH
-  session. Key removal is the important property: revoking access is
-  a git commit.
-- **Docker install**: install docker engine + compose plugin,
-  enable+start the service, add svc user to `docker` group.
-  → `orca host install docker` (or rolled into bootstrap with
-  `--with docker`). Per-distro logic (apt/apk/pacman) lives in the
-  rust implementation, not in shell.
-- **NFS client/server install + configure**: package install,
-  `/etc/exports` or fstab entries, mount probing.
-  → folds into existing `integrations/nfs` (Prod). Bootstrap calls it.
-- **Tailscale install + up**: package, `tailscale up`, auth key
-  handling.
-  → `orca host install tailscale` + secret-resolved auth key.
-- **PBS client install** (Proxmox Backup Server client): for the
-  hosts that need it. → `orca host install pbs-client`.
-- **systemd unit / Alpine OpenRC / cron entry creation**: anything
-  currently dropped into `/etc/systemd/system/`, `/etc/init.d/`, or
-  `/etc/cron.d/` by hand or by script. → `orca host service install
-  <name>` with the unit body as managed config. Survives reboots and
-  re-runs idempotently.
+  `/etc/doas.d/<name>`), removes users that fall out of the file.
+  Key rotation is a PR. Revoking access is a git commit.
+- **Docker**: `config/<host>/docker.toml` declares the host wants
+  docker. Reconciler installs docker engine + compose plugin via
+  the host's package manager, enables the service, adds svc user to
+  the `docker` group. Per-distro logic (apt/apk/pacman) lives in
+  the rust implementation, not in shell. → `orca host docker reconcile`.
+- **NFS client/server install + configure**: `config/<host>/nfs.toml`
+  declares exports, mounts, and client/server role. Reconciler
+  installs the right packages, writes `/etc/exports` or fstab
+  entries, probes mounts. → `orca host nfs reconcile`. Not invoked
+  by bootstrap.
+- **Tailscale**: `config/<host>/tailscale.toml` declares the auth
+  key reference and tailnet settings. Reconciler installs the
+  package, runs `tailscale up` with the resolved auth key. →
+  `orca host tailscale reconcile`.
+- **PBS client**: declared per-host. → `orca host pbs reconcile`.
+- **systemd unit / Alpine OpenRC / cron entry creation**:
+  `config/<host>/services/*.toml` declares units. Reconciler writes
+  them under `/etc/systemd/system/` (or equivalent) and enables
+  them. Survives reboots and re-runs idempotently.
 - **Proxmox node prep** (autofs, NFS mounts at boot, LXC unpriv UID
-  mapping): each becomes a verb on `orca proxmox host configure`.
-- **OPNsense / OpenWrt setup**: same pattern — even if we shell out
-  via SSH for now (§6), orca owns the *invocation* and the
-  idempotency check, not a hand-run script.
+  mapping): declared in the host's config. → `orca proxmox host reconcile`.
+- **OPNsense / OpenWrt setup**: same pattern — declared in per-host
+  config; orca owns the *invocation* and the idempotency check
+  (even when the underlying call is an SSH shell-out for now), not
+  a hand-run script.
 
 The throughline: **no greenfield host should ever need a shell login
-to reach steady state.** A fresh VM gets one bootstrap command
-(see [install-bootstrap.md](install-bootstrap.md)), pairs into the
-mesh, and from that point everything — package install, service
-config, secrets, schedules — is driven by orca tools that read the
-config repo.
+to reach steady state.** A fresh VM runs the bootstrap command,
+pairs into the mesh, the reconciler picks up its slice of the
+config repo, and from that point everything — package install,
+service config, secrets, schedules — converges on its own.
 
 Implementation principle: per-distro install logic lives in rust
 inside orca, not as shell snippets templated by orca. The shell

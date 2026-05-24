@@ -107,21 +107,28 @@ No `meerkat.sh` style "single sudo-allowlisted entry point" — that
 pattern collapses the privilege boundary. Per-action sudo entries
 or capability grants only.
 
-### 3.2 The install script writes these
+### 3.2 The install script grants only the minimum
 
-For each capability the daemon will actually need on this host,
-the install script emits the corresponding policy file (sudoers
-fragment, polkit rule, capability set via `setcap`). The set is
-determined by which integrations are enabled at install time:
+Bootstrap is minimal. The install script grants **only** the
+permissions orca needs to run as a daemon and join the mesh —
+read `/proc`/`/sys` for self-metrics, bind its mesh + UI ports,
+and write under `${ORCA_DIR}`. Nothing else.
 
 ```sh
-curl … | sh -s -- --pair-token TOK \
-                  --with docker,proxmox,nfs \
-                  --trust secure
+curl … | sh -s -- --pair-token TOK --trust secure
 ```
 
-Untouched capabilities are never granted. Adding `--with` items
-later runs the same logic incrementally.
+Integration-specific capabilities (docker group membership, sudoers
+for `pct`, NFS mount privileges, journal group, etc.) are **not**
+granted at install. They're applied later by the reconciler when a
+per-host config declares the integration is needed. See
+[orca-as-logic-layer.md](orca-as-logic-layer.md) §3.6 — install
+gets the daemon running; per-host config drives everything after.
+
+The reconciler adding a capability is an explicit, auditable step
+(visible in `orca host capabilities`). Bootstrap doesn't pre-grant
+or guess. If a host stops needing an integration, the reconciler
+revokes the capability the same way.
 
 ### 3.3 Permission audit
 
