@@ -222,7 +222,6 @@ pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
         ))
         .routes(routes!(api::system_status_handler))
         .routes(routes!(api::system_action_handler))
-        .routes(routes!(api::system_dev_sync_handler))
         .routes(routes!(api::fs_browse_handler))
         .routes(routes!(auth_routes::signup_status))
         .routes(routes!(auth_routes::signup))
