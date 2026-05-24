@@ -76,7 +76,7 @@ fn infra_svc(
 
 /// List all running docker compose services across all rebuy projects. Returns
 /// project name, path, and per-service state/health/ports.
-#[orca_tool(domain = "infra.service", verb = "list")]
+#[orca_tool(domain = "system.infra.service", verb = "list")]
 async fn infra_service_list(
     _args: ListServicesArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -105,7 +105,7 @@ async fn infra_service_list(
 
 /// Fetch docker compose logs for a running rebuy service. Specify the project
 /// path and service name.
-#[orca_tool(domain = "infra.service", verb = "detail")]
+#[orca_tool(domain = "system.infra.service", verb = "detail")]
 async fn infra_service_detail(
     args: GetServiceLogsArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -123,7 +123,7 @@ async fn infra_service_detail(
 
 /// Run the orca project test suite. Returns test output with pass/fail counts.
 /// Suites: rust (cargo test), frontend (vitest), e2e (playwright), all.
-#[orca_tool(domain = "infra.test", verb = "create")]
+#[orca_tool(domain = "system.infra.test", verb = "create")]
 async fn infra_test_create(
     args: RunTestsArgs,
     ctx: &orca_utils::tool::ToolCtx,

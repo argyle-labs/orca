@@ -255,7 +255,7 @@ fn svc(
 }
 
 /// List every registered OpenAPI / GraphQL spec — filesystem-resident, DB-backed, and plugin-declared — with per-source metadata.
-#[orca_tool(domain = "spec", verb = "list")]
+#[orca_tool(domain = "namespace.spec", verb = "list")]
 async fn list_specs(
     _args: ListSpecsArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -265,7 +265,7 @@ async fn list_specs(
 }
 
 /// List URL-registered + MCP-synced specs from orca.db (the DB-backed slice only).
-#[orca_tool(domain = "spec", verb = "list-db")]
+#[orca_tool(domain = "namespace.spec", verb = "list-db")]
 async fn list_db_specs(
     _args: ListDbSpecsArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -275,7 +275,7 @@ async fn list_db_specs(
 }
 
 /// [MUTATES STATE] Fetch a JSON OpenAPI spec from `url` and persist it under `name` in orca.db.
-#[orca_tool(domain = "spec", verb = "create")]
+#[orca_tool(domain = "namespace.spec", verb = "create")]
 async fn spec_create(
     args: RegisterSpecArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -284,7 +284,7 @@ async fn spec_create(
 }
 
 /// [MUTATES STATE] Re-fetch a previously-registered spec from its stored URL and update orca.db.
-#[orca_tool(domain = "spec", verb = "refresh")]
+#[orca_tool(domain = "namespace.spec", verb = "refresh")]
 async fn refresh_spec(
     args: RefreshSpecArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -293,7 +293,7 @@ async fn refresh_spec(
 }
 
 /// [MUTATES STATE] Remove a spec from orca.db. Returns `removed: true` when a row was deleted.
-#[orca_tool(domain = "spec", verb = "delete")]
+#[orca_tool(domain = "namespace.spec", verb = "delete")]
 async fn spec_delete(
     args: UnregisterSpecArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -303,7 +303,7 @@ async fn spec_delete(
 }
 
 /// [MUTATES STATE] Connect to `server` (an MCP server), call its `{prefix}_spec_list` and `{prefix}_spec_schema` tools, and upsert every advertised repo into orca.db.
-#[orca_tool(domain = "spec", verb = "sync-mcp")]
+#[orca_tool(domain = "namespace.spec", verb = "sync-mcp")]
 async fn sync_mcp_specs(
     args: SyncMcpSpecsArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -312,7 +312,7 @@ async fn sync_mcp_specs(
 }
 
 /// Parse the local `<repo>.graphql` SDL into a structured types/queries/mutations view.
-#[orca_tool(domain = "spec.graphql", verb = "detail")]
+#[orca_tool(domain = "namespace.spec.graphql", verb = "detail")]
 async fn spec_graphql_detail(
     args: GetSpecGraphqlInfoArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -321,7 +321,7 @@ async fn spec_graphql_detail(
 }
 
 /// Proxy a GraphQL request to a Shopify shop using the configured shop+token. Returns the raw upstream JSON body.
-#[orca_tool(domain = "spec.graphql", verb = "update", cli = skip)]
+#[orca_tool(domain = "namespace.spec.graphql", verb = "update", cli = skip)]
 async fn spec_graphql_update(
     args: ProxyGraphqlArgs,
     ctx: &orca_utils::tool::ToolCtx,

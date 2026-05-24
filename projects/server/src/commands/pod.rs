@@ -289,6 +289,8 @@ pub async fn cmd_pod_join(addr: &str) -> Result<()> {
         inviter_display_name: Option<String>,
         #[serde(default)]
         code_hint: Option<String>,
+        #[serde(default)]
+        code_plain: Option<String>,
     }
     let r: Resp = serde_json::from_value(resp_value)?;
 
@@ -332,6 +334,7 @@ pub async fn cmd_pod_join(addr: &str) -> Result<()> {
         Some(&r.inviter_peer_id),
         Some(&r.pod_id),
         ttl,
+        r.code_plain.as_deref(),
     )?;
 
     println!(
@@ -449,6 +452,7 @@ pub async fn cmd_pod_offer(addr: &str) -> Result<()> {
         None,
         None,
         crate::pod::scheduler::OFFER_TTL_SECS,
+        None,
     )?;
     drop(conn);
 
@@ -906,6 +910,7 @@ mod tests {
             pod_id: None,
             expires_at,
             created_at: 0,
+            code_plain: None,
         }
     }
 

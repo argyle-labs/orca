@@ -122,7 +122,7 @@ fn agents_svc(
 }
 
 /// List all available orca agents with their names and descriptions.
-#[orca_tool(domain = "agents", verb = "list")]
+#[orca_tool(domain = "system.agent", verb = "list")]
 async fn list_agents(
     _args: ListAgentsArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -141,7 +141,7 @@ async fn list_agents(
 
 /// Return the full system prompt for a named orca agent. Use this to invoke an
 /// agent programmatically via Agent(general-purpose, prompt=<result>+task).
-#[orca_tool(domain = "agents", verb = "get")]
+#[orca_tool(domain = "system.agent", verb = "get")]
 async fn get_agent(
     args: GetAgentArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -159,7 +159,7 @@ async fn get_agent(
 /// Read an orca configuration/reference document by name (e.g. TOOL_RULES,
 /// DELEGATION, SEVERITY_RUBRIC, CANONICAL_SOURCES, CODING_RULES). Call with no
 /// name to list available files.
-#[orca_tool(domain = "agents", verb = "get-config")]
+#[orca_tool(domain = "system.agent", verb = "get-config")]
 async fn get_config(
     args: GetConfigArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -185,7 +185,7 @@ async fn get_config(
 
 /// Load the memory context for an orca project. Returns the MEMORY.md index
 /// and all memory files for the project.
-#[orca_tool(domain = "agents", verb = "get-context")]
+#[orca_tool(domain = "system.agent", verb = "get-context")]
 async fn get_context(
     args: GetContextArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -215,7 +215,7 @@ async fn get_context(
 
 /// Search orca session history for a keyword. Returns matching log entries
 /// with session ID, role, and content preview.
-#[orca_tool(domain = "agents", verb = "search-logs")]
+#[orca_tool(domain = "system.agent", verb = "search-logs")]
 async fn search_logs(
     args: SearchLogsArgs,
     ctx: &orca_utils::tool::ToolCtx,

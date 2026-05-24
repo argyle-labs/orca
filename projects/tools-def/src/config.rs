@@ -137,7 +137,7 @@ mod native_support {
 // ── Tools ────────────────────────────────────────────────────────────────────
 
 /// List config rows. Optionally filter by noun and/or host_owner.
-#[orca_tool(domain = "config", verb = "list")]
+#[orca_tool(domain = "system.config", verb = "list")]
 async fn config_list(
     args: ConfigListArgs,
     _ctx: &orca_utils::tool::ToolCtx,
@@ -151,7 +151,7 @@ async fn config_list(
 }
 
 /// Fetch a single config row by noun+name.
-#[orca_tool(domain = "config", verb = "get")]
+#[orca_tool(domain = "system.config", verb = "get")]
 async fn config_get(
     args: ConfigGetArgs,
     _ctx: &orca_utils::tool::ToolCtx,
@@ -164,7 +164,7 @@ async fn config_get(
 /// Upsert a config row. Refuses to write rows owned by a different host
 /// — cross-host writes route via the pod mesh once peer-tool dispatch
 /// lands (§3.3).
-#[orca_tool(domain = "config", verb = "set")]
+#[orca_tool(domain = "system.config", verb = "set")]
 async fn config_set(
     args: ConfigSetArgs,
     _ctx: &orca_utils::tool::ToolCtx,
@@ -182,7 +182,7 @@ async fn config_set(
 }
 
 /// Delete a config row owned by the local host.
-#[orca_tool(domain = "config", verb = "delete")]
+#[orca_tool(domain = "system.config", verb = "delete")]
 async fn config_delete(
     args: ConfigDeleteArgs,
     _ctx: &orca_utils::tool::ToolCtx,

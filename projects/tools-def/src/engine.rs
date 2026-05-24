@@ -31,6 +31,15 @@ pub struct NameArgs {
     pub name: String,
 }
 
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct UpdateArgs {
+    /// Backend name.
+    pub name: String,
+    /// true = enable for model discovery, false = disable without removing.
+    pub enabled: bool,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ProviderDto {
     pub name: String,
@@ -89,7 +98,7 @@ fn infer_kind(url: &str, supplied: &str) -> anyhow::Result<String> {
 // ── Tools ───────────────────────────────────────────────────────────────────
 
 /// List registered LLM backends (LM Studio, Ollama).
-#[orca_tool(domain = "engine", verb = "list", cli = manual)]
+#[orca_tool(domain = "system.engine", verb = "list", cli = manual)]
 async fn engine_list(
     _args: EmptyArgs,
     _ctx: &orca_utils::tool::ToolCtx,
@@ -104,7 +113,7 @@ async fn engine_list(
 }
 
 /// Register a new LLM backend. Kind auto-inferred from URL if not supplied.
-#[orca_tool(domain = "engine", verb = "create", cli = manual)]
+#[orca_tool(domain = "system.engine", verb = "create", cli = manual)]
 async fn engine_create(
     args: AddArgs,
     _ctx: &orca_utils::tool::ToolCtx,
@@ -118,7 +127,7 @@ async fn engine_create(
 }
 
 /// Remove a registered LLM backend.
-#[orca_tool(domain = "engine", verb = "delete", cli = manual)]
+#[orca_tool(domain = "system.engine", verb = "delete", cli = manual)]
 async fn engine_delete(
     args: NameArgs,
     _ctx: &orca_utils::tool::ToolCtx,
@@ -133,32 +142,17 @@ async fn engine_delete(
     }
 }
 
-/// Enable a backend for model discovery.
-#[orca_tool(domain = "engine", verb = "enable", cli = manual)]
-async fn engine_enable(
-    args: NameArgs,
+/// Enable or disable a backend without removing it.
+#[orca_tool(domain = "system.engine", verb = "update", cli = manual)]
+async fn engine_update(
+    args: UpdateArgs,
     _ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<EngineOpResult> {
     let conn = orca_db::open_default()?;
-    if orca_db::llm::set_enabled(&conn, &args.name, true)? {
+    if orca_db::llm::set_enabled(&conn, &args.name, args.enabled)? {
+        let state = if args.enabled { "enabled" } else { "disabled" };
         Ok(EngineOpResult {
-            message: format!("{} enabled", args.name),
-        })
-    } else {
-        anyhow::bail!("no backend named '{}'", args.name)
-    }
-}
-
-/// Disable a backend without removing it.
-#[orca_tool(domain = "engine", verb = "disable", cli = manual)]
-async fn engine_disable(
-    args: NameArgs,
-    _ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<EngineOpResult> {
-    let conn = orca_db::open_default()?;
-    if orca_db::llm::set_enabled(&conn, &args.name, false)? {
-        Ok(EngineOpResult {
-            message: format!("{} disabled", args.name),
+            message: format!("{} {state}", args.name),
         })
     } else {
         anyhow::bail!("no backend named '{}'", args.name)
@@ -236,9 +230,10 @@ mod tests {
             assert!(list1.0[0].enabled);
 
             // disable
-            let d = engine_disable(
-                NameArgs {
+            let d = engine_update(
+                UpdateArgs {
                     name: "local".into(),
+                    enabled: false,
                 },
                 &ctx,
             )
@@ -249,9 +244,10 @@ mod tests {
             assert!(!list2.0[0].enabled);
 
             // enable
-            engine_enable(
-                NameArgs {
+            engine_update(
+                UpdateArgs {
                     name: "local".into(),
+                    enabled: true,
                 },
                 &ctx,
             )
@@ -300,9 +296,10 @@ mod tests {
         let ctx = empty_ctx();
         orca_db::with_db_path(tmp.path().to_path_buf(), async move {
             assert!(
-                engine_enable(
-                    NameArgs {
-                        name: "ghost".into()
+                engine_update(
+                    UpdateArgs {
+                        name: "ghost".into(),
+                        enabled: true,
                     },
                     &ctx,
                 )
@@ -310,9 +307,10 @@ mod tests {
                 .is_err()
             );
             assert!(
-                engine_disable(
-                    NameArgs {
-                        name: "ghost".into()
+                engine_update(
+                    UpdateArgs {
+                        name: "ghost".into(),
+                        enabled: false,
                     },
                     &ctx,
                 )
@@ -393,18 +391,10 @@ mod cli_register {
     }
 
     crate::register_op! {
-        tool: EngineEnable,
+        tool: EngineUpdate,
         domain: "engine",
-        verb: "enable",
-        summary: "Enable a backend for model discovery",
-        render: |out| { println!("{}", out.message); }
-    }
-
-    crate::register_op! {
-        tool: EngineDisable,
-        domain: "engine",
-        verb: "disable",
-        summary: "Disable a backend without removing it",
+        verb: "update",
+        summary: "Enable or disable a backend without removing it",
         render: |out| { println!("{}", out.message); }
     }
 }

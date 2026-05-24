@@ -717,6 +717,7 @@ mod tests {
             Some("peer.mint"),
             Some("pod-1"),
             300,
+            None,
         )
         .unwrap();
         let found = find_pending_offer_by_code(&c, code).unwrap().unwrap();
@@ -741,6 +742,7 @@ mod tests {
             None,
             None,
             -1,
+            None,
         )
         .unwrap();
         assert!(find_pending_offer_by_code(&c, "X").unwrap().is_none());

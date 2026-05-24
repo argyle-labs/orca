@@ -63,6 +63,14 @@ pub struct PluginIdArgs {
     pub id: String,
 }
 
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct UpdatePluginArgs {
+    pub id: String,
+    /// true = enable the plugin, false = disable without removing.
+    pub enabled: bool,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PluginMutationResult {
     pub id: String,
@@ -125,7 +133,7 @@ fn plugins_svc(
 }
 
 /// List all orca plugins registered in orca.db.
-#[orca_tool(domain = "plugin", verb = "list")]
+#[orca_tool(domain = "system.plugin", verb = "list")]
 async fn list_plugins(
     args: ListPluginsArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -146,7 +154,7 @@ async fn list_plugins(
 }
 
 /// [MUTATES STATE] Install an orca plugin from a manifest path or URL.
-#[orca_tool(domain = "plugin", verb = "create")]
+#[orca_tool(domain = "system.plugin", verb = "create")]
 async fn add_plugin(
     args: AddPluginArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -158,7 +166,7 @@ async fn add_plugin(
 }
 
 /// [MUTATES STATE] Remove an installed orca plugin by ID.
-#[orca_tool(domain = "plugin", verb = "delete")]
+#[orca_tool(domain = "system.plugin", verb = "delete")]
 async fn remove_plugin(
     args: PluginIdArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -170,27 +178,14 @@ async fn remove_plugin(
     })
 }
 
-/// [MUTATES STATE] Enable a registered orca plugin.
-#[orca_tool(domain = "plugin", verb = "enable")]
-async fn enable_plugin(
-    args: PluginIdArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<PluginMutationResult> {
-    let changed = plugins_svc(ctx)?.set_plugin_enabled(&args.id, true).await?;
-    Ok(PluginMutationResult {
-        id: args.id,
-        changed,
-    })
-}
-
-/// [MUTATES STATE] Disable a registered orca plugin.
-#[orca_tool(domain = "plugin", verb = "disable")]
-async fn disable_plugin(
-    args: PluginIdArgs,
+/// [MUTATES STATE] Enable or disable a registered orca plugin.
+#[orca_tool(domain = "system.plugin", verb = "update")]
+async fn update_plugin(
+    args: UpdatePluginArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<PluginMutationResult> {
     let changed = plugins_svc(ctx)?
-        .set_plugin_enabled(&args.id, false)
+        .set_plugin_enabled(&args.id, args.enabled)
         .await?;
     Ok(PluginMutationResult {
         id: args.id,
@@ -199,7 +194,7 @@ async fn disable_plugin(
 }
 
 /// List all stored credentials for a plugin (keys only — values are never returned).
-#[orca_tool(domain = "plugin.cred", verb = "list")]
+#[orca_tool(domain = "system.plugin.cred", verb = "list")]
 async fn plugin_cred_list(
     args: ListPluginCredsArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -221,7 +216,7 @@ async fn plugin_cred_list(
 }
 
 /// [MUTATES STATE] Store a credential value for a plugin in orca.db.
-#[orca_tool(domain = "plugin.cred", verb = "create")]
+#[orca_tool(domain = "system.plugin.cred", verb = "create")]
 async fn plugin_cred_create(
     args: SetPluginCredArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -237,7 +232,7 @@ async fn plugin_cred_create(
 }
 
 /// [MUTATES STATE] Remove a stored credential for a plugin from orca.db.
-#[orca_tool(domain = "plugin.cred", verb = "delete")]
+#[orca_tool(domain = "system.plugin.cred", verb = "delete")]
 async fn plugin_cred_delete(
     args: RemovePluginCredArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -253,7 +248,7 @@ async fn plugin_cred_delete(
 }
 
 /// [MUTATES STATE] Sync stored credentials for a plugin to its runtime environment.
-#[orca_tool(domain = "plugin.cred", verb = "sync")]
+#[orca_tool(domain = "system.plugin.cred", verb = "sync")]
 async fn plugin_cred_sync(
     args: SyncPluginCredsArgs,
     ctx: &orca_utils::tool::ToolCtx,

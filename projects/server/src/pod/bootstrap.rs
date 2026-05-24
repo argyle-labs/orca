@@ -102,6 +102,10 @@ struct OfferBody {
     /// rc.25 daemon can parse an rc.24 OfferBody that omits the field.
     #[serde(default)]
     inviter_display_name: Option<String>,
+    /// Plaintext pairing code — included by rc.12+ inviters on mDNS-verified
+    /// LAN peers so the joiner can auto-accept without out-of-band code entry.
+    #[serde(default)]
+    code_plain: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -153,15 +157,27 @@ pub async fn handle_pod_bootstrap_connection(
         }
     };
 
-    let response = dispatch(request, peer).await;
+    let (response, auto_accept_code) = dispatch(request, peer).await;
     let envelope = serde_json::to_vec(&response).context("serialize bootstrap response")?;
     write_frame(&mut tls, &envelope)
         .await
         .context("write bootstrap response")?;
+
+    // Ack is on the wire — now safe to dial back for auto-accept.
+    if let Some(code) = auto_accept_code {
+        tokio::spawn(async move {
+            if let Err(e) = crate::commands::pod::cmd_pod_accept(&code).await {
+                warn!("[pod-bootstrap] auto-accept failed: {e:#}");
+            } else {
+                info!("[pod-bootstrap] auto-accept succeeded");
+            }
+        });
+    }
+
     Ok(())
 }
 
-async fn dispatch(request: Request, peer: std::net::SocketAddr) -> Response {
+async fn dispatch(request: Request, peer: std::net::SocketAddr) -> (Response, Option<String>) {
     let id = request.id.clone();
     let method = request.method.as_str();
 
@@ -169,41 +185,62 @@ async fn dispatch(request: Request, peer: std::net::SocketAddr) -> Response {
         Some(v) => match serde_json::from_value(v) {
             Ok(e) => e,
             Err(e) => {
-                return Response::err(
-                    id,
-                    ErrorObject::internal(&format!("parse signed envelope: {e}")),
+                return (
+                    Response::err(
+                        id,
+                        ErrorObject::internal(&format!("parse signed envelope: {e}")),
+                    ),
+                    None,
                 );
             }
         },
         None => {
-            return Response::err(
-                id,
-                ErrorObject::internal("bootstrap requires signed params"),
+            return (
+                Response::err(
+                    id,
+                    ErrorObject::internal("bootstrap requires signed params"),
+                ),
+                None,
             );
         }
     };
 
     match method {
         POD_OFFER_METHOD => match handle_offer(&env, peer) {
-            Ok(ack) => value_response(id, &ack),
-            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+            Ok((ack, auto_accept_code)) => (value_response(id, &ack), auto_accept_code),
+            Err(e) => (
+                Response::err(id, ErrorObject::internal(&e.to_string())),
+                None,
+            ),
         },
         POD_JOIN_CONFIRM_METHOD => match handle_join_confirm(&env) {
-            Ok(r) => value_response(id, &r),
-            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+            Ok(r) => (value_response(id, &r), None),
+            Err(e) => (
+                Response::err(id, ErrorObject::internal(&e.to_string())),
+                None,
+            ),
         },
         POD_REQUEST_OFFER_METHOD => match handle_request_offer(&env, peer) {
-            Ok(r) => value_response(id, &r),
-            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+            Ok(r) => (value_response(id, &r), None),
+            Err(e) => (
+                Response::err(id, ErrorObject::internal(&e.to_string())),
+                None,
+            ),
         },
-        other => Response::err(
-            id,
-            ErrorObject::method_not_found(&format!("bootstrap method '{other}' not supported")),
+        other => (
+            Response::err(
+                id,
+                ErrorObject::method_not_found(&format!("bootstrap method '{other}' not supported")),
+            ),
+            None,
         ),
     }
 }
 
-fn handle_offer(env: &SignedEnvelope, peer: std::net::SocketAddr) -> Result<OfferAck> {
+fn handle_offer(
+    env: &SignedEnvelope,
+    peer: std::net::SocketAddr,
+) -> Result<(OfferAck, Option<String>)> {
     let (body, signer_vk) = pki::verify_envelope::<OfferBody>(env)?;
     let signer_fp = pki::bootstrap_pubkey_fingerprint(&signer_vk);
 
@@ -240,9 +277,10 @@ fn handle_offer(env: &SignedEnvelope, peer: std::net::SocketAddr) -> Result<Offe
         ttl,
         body.code_plain.as_deref(),
     )?;
-    if body.code_plain.is_some() {
+    let auto_accept_code = body.code_plain.clone();
+    if auto_accept_code.is_some() {
         info!(
-            "[pod-bootstrap] received auto-pair offer from {} ({}@{}:{})",
+            "[pod-bootstrap] received auto-pair offer from {} ({}@{}:{}) — accepting",
             body.inviter_hostname, body.inviter_peer_id, inviter_addr, body.inviter_port
         );
     } else {
@@ -251,7 +289,7 @@ fn handle_offer(env: &SignedEnvelope, peer: std::net::SocketAddr) -> Result<Offe
             body.inviter_hostname, body.inviter_peer_id, signer_fp, inviter_addr, body.inviter_port
         );
     }
-    Ok(OfferAck { code_hint: None })
+    Ok((OfferAck { code_hint: None }, auto_accept_code))
 }
 
 fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
@@ -374,6 +412,7 @@ fn handle_request_offer(
         None,
         None,
         crate::pod::scheduler::OFFER_TTL_SECS,
+        None,
     )?;
 
     // Print code on the inviter side so a watching operator can read it.
@@ -401,6 +440,7 @@ fn handle_request_offer(
         expires_at,
         inviter_display_name: Some(inviter_display_name),
         code_hint: Some(code.chars().take(2).collect()),
+        code_plain: None, // joiner-initiated request: inviter doesn't know joiner's mDNS fp
     })
 }
 
@@ -537,12 +577,14 @@ mod tests {
             expires_at: 1234,
             inviter_display_name: Some("thor.local".into()),
             code_hint: Some("AB".into()),
+            code_plain: None,
         };
         let v = serde_json::to_value(&r).unwrap();
         let back: RequestOfferResult = serde_json::from_value(v).unwrap();
         assert_eq!(back.inviter_pubkey_fp, "fp-inviter");
         assert_eq!(back.code_hint.as_deref(), Some("AB"));
         assert_eq!(back.expires_at, 1234);
+        assert!(back.code_plain.is_none());
     }
 
     #[test]
@@ -556,5 +598,79 @@ mod tests {
         });
         let body: JoinConfirmBody = serde_json::from_value(json).unwrap();
         assert_eq!(body.joiner_display_name.as_deref(), Some("loki"));
+    }
+
+    #[test]
+    fn offer_body_deserializes_rc11_without_code_plain() {
+        // rc.≤11 inviters don't send code_plain; must default to None.
+        let json = serde_json::json!({
+            "inviter_peer_id": "peer.abc",
+            "inviter_hostname": "abc123",
+            "inviter_addr": "10.0.0.1",
+            "inviter_port": 12002,
+            "mesh_ca_cert_pem": "",
+            "pod_id": "p1",
+            "code_hash": "h",
+            "expires_at": 0,
+        });
+        let body: OfferBody = serde_json::from_value(json).unwrap();
+        assert!(body.code_plain.is_none());
+    }
+
+    #[test]
+    fn offer_body_deserializes_rc12_with_code_plain() {
+        let json = serde_json::json!({
+            "inviter_peer_id": "peer.abc",
+            "inviter_hostname": "abc123",
+            "inviter_addr": "10.0.0.1",
+            "inviter_port": 12002,
+            "mesh_ca_cert_pem": "",
+            "pod_id": "p1",
+            "code_hash": "h",
+            "expires_at": 0,
+            "code_plain": "ABCDEF",
+        });
+        let body: OfferBody = serde_json::from_value(json).unwrap();
+        assert_eq!(body.code_plain.as_deref(), Some("ABCDEF"));
+    }
+
+    #[test]
+    fn request_offer_result_code_plain_defaults_none() {
+        // Older inviters omit code_plain; must not break deserialization.
+        let json = serde_json::json!({
+            "inviter_pubkey_fp": "fp",
+            "inviter_peer_id": "peer.x",
+            "inviter_hostname": "x",
+            "inviter_addr": "",
+            "inviter_port": 12002,
+            "mesh_ca_cert_pem": "",
+            "pod_id": "p",
+            "code_hash": "h",
+            "expires_at": 0,
+        });
+        let r: RequestOfferResult = serde_json::from_value(json).unwrap();
+        assert!(r.code_plain.is_none());
+        assert!(r.code_hint.is_none());
+    }
+
+    #[test]
+    fn request_offer_result_roundtrip_with_code_plain() {
+        let r = RequestOfferResult {
+            inviter_pubkey_fp: "fp".into(),
+            inviter_peer_id: "peer.x".into(),
+            inviter_hostname: "x".into(),
+            inviter_addr: String::new(),
+            inviter_port: 12002,
+            mesh_ca_cert_pem: String::new(),
+            pod_id: "p".into(),
+            code_hash: "h".into(),
+            expires_at: 0,
+            inviter_display_name: None,
+            code_hint: Some("AB".into()),
+            code_plain: Some("ABCDEF".into()),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let back: RequestOfferResult = serde_json::from_value(v).unwrap();
+        assert_eq!(back.code_plain.as_deref(), Some("ABCDEF"));
     }
 }

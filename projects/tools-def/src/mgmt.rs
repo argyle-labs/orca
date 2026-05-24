@@ -633,7 +633,7 @@ fn ha(
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// List every tool advertised by every registered MCP server (connects on demand).
-#[orca_tool(domain = "mcp-federation", verb = "list-tools")]
+#[orca_tool(domain = "system.mcp.federation", verb = "list-tools")]
 async fn list_mcp_tools(
     _args: ListMcpToolsArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -653,7 +653,7 @@ async fn list_mcp_tools(
 }
 
 /// [MUTATES STATE] Invoke a tool on a registered MCP server. Returns the typed `tools/call` envelope (`{ content, isError, structuredContent? }`).
-#[orca_tool(domain = "mcp-federation", verb = "run", cli = skip)]
+#[orca_tool(domain = "system.mcp.federation", verb = "run", cli = skip)]
 async fn run_mcp_tool(
     args: RunMcpToolArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -672,7 +672,7 @@ async fn run_mcp_tool(
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Return the multi-tab schema view across every configured database. Result is `{ tabs, showTabs, errors? }`.
-#[orca_tool(domain = "schema-view", verb = "detail")]
+#[orca_tool(domain = "namespace.schema.view", verb = "detail")]
 async fn schema_view_detail(
     _args: GetSchemaArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -681,7 +681,7 @@ async fn schema_view_detail(
 }
 
 /// Return the flattened list of domain definitions across every configured database.
-#[orca_tool(domain = "schema-view", verb = "list")]
+#[orca_tool(domain = "namespace.schema.view", verb = "list")]
 async fn schema_view_list(
     _args: GetSchemaDomainsArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -696,7 +696,7 @@ async fn schema_view_list(
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// List all MCP servers registered in orca.db (orca's own managed registry). Does not include ~/.claude.json servers managed by Claude Code directly.
-#[orca_tool(domain = "mcp", verb = "list")]
+#[orca_tool(domain = "system.mcp", verb = "list")]
 async fn list_mcp_servers(
     _args: ListMcpServersArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -717,7 +717,7 @@ async fn list_mcp_servers(
 }
 
 /// [MUTATES STATE] Add or update an MCP server in orca.db. Use when registering a new MCP server for orca to federate.
-#[orca_tool(domain = "mcp", verb = "create")]
+#[orca_tool(domain = "system.mcp", verb = "create")]
 async fn add_mcp_server(
     args: AddMcpServerArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -737,7 +737,7 @@ async fn add_mcp_server(
 }
 
 /// [MUTATES STATE] Remove an MCP server from orca.db by name.
-#[orca_tool(domain = "mcp", verb = "delete")]
+#[orca_tool(domain = "system.mcp", verb = "delete")]
 async fn remove_mcp_server(
     args: RemoveMcpServerArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -750,7 +750,7 @@ async fn remove_mcp_server(
 }
 
 /// [MUTATES STATE] Map an orca tool name to a specific tool on a registered MCP server.
-#[orca_tool(domain = "mcp.mapping", verb = "create")]
+#[orca_tool(domain = "system.mcp.mapping", verb = "create")]
 async fn mcp_mapping_create(
     args: MapToolArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -766,7 +766,7 @@ async fn mcp_mapping_create(
 }
 
 /// [MUTATES STATE] Remove a tool mapping from orca.db.
-#[orca_tool(domain = "mcp.mapping", verb = "delete")]
+#[orca_tool(domain = "system.mcp.mapping", verb = "delete")]
 async fn mcp_mapping_delete(
     args: UnmapToolArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -779,7 +779,7 @@ async fn mcp_mapping_delete(
 }
 
 /// [MUTATES STATE] Auto-discover and map tools from registered MCP servers. Provide name or set all=true.
-#[orca_tool(domain = "mcp", verb = "sync")]
+#[orca_tool(domain = "system.mcp", verb = "sync")]
 async fn sync_tools(
     args: SyncToolsArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -800,7 +800,7 @@ async fn sync_tools(
 }
 
 /// List all tool mappings in orca.db, optionally filtered by server name.
-#[orca_tool(domain = "mcp.mapping", verb = "list")]
+#[orca_tool(domain = "system.mcp.mapping", verb = "list")]
 async fn mcp_mapping_list(
     args: ListToolMappingsArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -826,7 +826,7 @@ async fn mcp_mapping_list(
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// List all MySQL/MariaDB schema databases registered in orca.db.
-#[orca_tool(domain = "schema", verb = "list")]
+#[orca_tool(domain = "namespace.schema", verb = "list")]
 async fn list_schemas(
     _args: ListSchemasArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -851,7 +851,7 @@ async fn list_schemas(
 }
 
 /// [MUTATES STATE] Add or update a schema database in orca.db. Use container OR host/port, not both.
-#[orca_tool(domain = "schema", verb = "create")]
+#[orca_tool(domain = "namespace.schema", verb = "create")]
 async fn add_schema(
     args: AddSchemaArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -875,7 +875,7 @@ async fn add_schema(
 }
 
 /// [MUTATES STATE] Remove a schema database from orca.db by name.
-#[orca_tool(domain = "schema", verb = "delete")]
+#[orca_tool(domain = "namespace.schema", verb = "delete")]
 async fn remove_schema(
     args: RemoveSchemaArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -892,7 +892,7 @@ async fn remove_schema(
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// List all Docker runtimes registered in orca.db.
-#[orca_tool(domain = "docker-runtime", verb = "list")]
+#[orca_tool(domain = "docker.runtime", verb = "list")]
 async fn list_docker_runtimes(
     _args: ListDockerRuntimesArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -913,7 +913,7 @@ async fn list_docker_runtimes(
 }
 
 /// [MUTATES STATE] Register a Docker runtime in orca.db. Provide socketPath, host, or url.
-#[orca_tool(domain = "docker-runtime", verb = "create")]
+#[orca_tool(domain = "docker.runtime", verb = "create")]
 async fn add_docker_runtime(
     args: AddDockerRuntimeArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -933,7 +933,7 @@ async fn add_docker_runtime(
 }
 
 /// [MUTATES STATE] Remove a Docker runtime from orca.db by name.
-#[orca_tool(domain = "docker-runtime", verb = "delete")]
+#[orca_tool(domain = "docker.runtime", verb = "delete")]
 async fn remove_docker_runtime(
     args: RemoveDockerRuntimeArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -950,7 +950,7 @@ async fn remove_docker_runtime(
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// List all documentation roots registered in orca.db.
-#[orca_tool(domain = "doc-root", verb = "list")]
+#[orca_tool(domain = "namespace.doc.root", verb = "list")]
 async fn list_doc_roots(
     _args: ListDocRootsArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -970,7 +970,7 @@ async fn list_doc_roots(
 }
 
 /// [MUTATES STATE] Register a documentation root directory in orca.db.
-#[orca_tool(domain = "doc-root", verb = "create")]
+#[orca_tool(domain = "namespace.doc.root", verb = "create")]
 async fn add_doc_root(
     args: AddDocRootArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -989,7 +989,7 @@ async fn add_doc_root(
 }
 
 /// [MUTATES STATE] Remove a documentation root from orca.db by name.
-#[orca_tool(domain = "doc-root", verb = "delete")]
+#[orca_tool(domain = "namespace.doc.root", verb = "delete")]
 async fn remove_doc_root(
     args: RemoveDocRootArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -1002,7 +1002,7 @@ async fn remove_doc_root(
 }
 
 /// List directory names excluded from all doc roots (e.g. node_modules, .git).
-#[orca_tool(domain = "doc-pattern", verb = "list")]
+#[orca_tool(domain = "namespace.doc.pattern", verb = "list")]
 async fn list_doc_ignore_patterns(
     _args: ListDocIgnorePatternsArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -1012,7 +1012,7 @@ async fn list_doc_ignore_patterns(
 }
 
 /// [MUTATES STATE] Add a directory name to the global doc ignore list.
-#[orca_tool(domain = "doc-pattern", verb = "create")]
+#[orca_tool(domain = "namespace.doc.pattern", verb = "create")]
 async fn add_doc_ignore_pattern(
     args: DocIgnorePatternArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -1025,7 +1025,7 @@ async fn add_doc_ignore_pattern(
 }
 
 /// [MUTATES STATE] Remove a directory name from the global doc ignore list.
-#[orca_tool(domain = "doc-pattern", verb = "delete")]
+#[orca_tool(domain = "namespace.doc.pattern", verb = "delete")]
 async fn remove_doc_ignore_pattern(
     args: DocIgnorePatternArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -1042,7 +1042,7 @@ async fn remove_doc_ignore_pattern(
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// List all Proxmox VE endpoints registered in orca.db (token secrets are redacted).
-#[orca_tool(domain = "proxmox-endpoint", verb = "list")]
+#[orca_tool(domain = "proxmox.endpoint", verb = "list")]
 async fn list_proxmox_endpoints(
     _args: ListProxmoxEndpointsArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -1063,7 +1063,7 @@ async fn list_proxmox_endpoints(
 }
 
 /// [MUTATES STATE] Register or update a Proxmox VE endpoint in orca.db. Auth uses an API token (PVEAPIToken header).
-#[orca_tool(domain = "proxmox-endpoint", verb = "create")]
+#[orca_tool(domain = "proxmox.endpoint", verb = "create")]
 async fn add_proxmox_endpoint(
     args: AddProxmoxEndpointArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -1084,7 +1084,7 @@ async fn add_proxmox_endpoint(
 }
 
 /// [MUTATES STATE] Remove a Proxmox VE endpoint from orca.db by name.
-#[orca_tool(domain = "proxmox-endpoint", verb = "delete")]
+#[orca_tool(domain = "proxmox.endpoint", verb = "delete")]
 async fn remove_proxmox_endpoint(
     args: RemoveProxmoxEndpointArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -1101,7 +1101,7 @@ async fn remove_proxmox_endpoint(
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// List all Home Assistant endpoints registered in orca.db (tokens are redacted).
-#[orca_tool(domain = "ha-endpoint", verb = "list")]
+#[orca_tool(domain = "ha.endpoint", verb = "list")]
 async fn list_home_assistant_endpoints(
     _args: ListHomeAssistantEndpointsArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -1120,7 +1120,7 @@ async fn list_home_assistant_endpoints(
 }
 
 /// [MUTATES STATE] Register or update a Home Assistant endpoint in orca.db. Auth uses a long-lived access token (Bearer header).
-#[orca_tool(domain = "ha-endpoint", verb = "create")]
+#[orca_tool(domain = "ha.endpoint", verb = "create")]
 async fn add_home_assistant_endpoint(
     args: AddHomeAssistantEndpointArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -1139,7 +1139,7 @@ async fn add_home_assistant_endpoint(
 }
 
 /// [MUTATES STATE] Remove a Home Assistant endpoint from orca.db by name.
-#[orca_tool(domain = "ha-endpoint", verb = "delete")]
+#[orca_tool(domain = "ha.endpoint", verb = "delete")]
 async fn remove_home_assistant_endpoint(
     args: RemoveHomeAssistantEndpointArgs,
     ctx: &orca_utils::tool::ToolCtx,

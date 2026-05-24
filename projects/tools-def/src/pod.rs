@@ -121,15 +121,68 @@ pub struct PodDevUpdateOutput {
     pub results: Vec<PodDevPeerResult>,
 }
 
-// ── pod.handshake.create (was pod.accept) ────────────────────────────────────
+// ── system.peer.create — unified pairing entry point ─────────────────────────
+//
+// `action` selects the pairing role:
+//   "invite"  — inviter pushes offer to a discovered joiner  (needs `addr`)
+//   "join"    — joiner pulls offer from an out-of-mDNS host  (needs `addr`)
+//   "accept"  — joiner accepts a pending inbound offer        (needs `code`)
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodAcceptArgs {
-    /// 6-char pairing code shown on the inviter's screen.
-    pub code: String,
+pub struct PeerCreateArgs {
+    /// "invite" | "join" | "accept"
+    pub action: String,
+    /// Target address (host or host:port). Required for "invite" and "join".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub addr: Option<String>,
+    /// Override port. Defaults to `APP_PLUGIN_PORT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub port: Option<u16>,
+    /// 6-char pairing code. Required for "accept".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub code: Option<String>,
 }
 
+/// Unified output for all three pairing roles. Only the fields relevant to
+/// the chosen `action` are populated; the rest are omitted.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PeerCreateOutput {
+    pub action: String,
+    // invite fields
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pairing_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub joiner_hostname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub joiner_addr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub joiner_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub joiner_pubkey_fp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offer_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    // accept fields
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pod_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inviter_peer_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inviter_hostname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inviter_addr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inviter_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub self_secure: Option<bool>,
+}
+
+// kept for internal use by accept path
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodAcceptOutput {
     pub pod_id: String,
@@ -137,8 +190,6 @@ pub struct PodAcceptOutput {
     pub inviter_hostname: String,
     pub inviter_addr: String,
     pub inviter_port: u16,
-    /// `self_secure` flag after accept. Always false at this point — operator
-    /// flips it on after verifying the join.
     pub self_secure: bool,
 }
 
@@ -451,7 +502,7 @@ pub fn register_pod(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvidePod) {
 // ── Tools ───────────────────────────────────────────────────────────────────
 
 /// List paired pod peers (mesh members).
-#[orca_tool(domain = "pod.peer", verb = "list", remote_ok = true)]
+#[orca_tool(domain = "system.peer", verb = "list", remote_ok = true)]
 async fn pod_peer_list(
     _args: EmptyArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -461,20 +512,103 @@ async fn pod_peer_list(
     ))
 }
 
-/// Accept a pending pod-membership offer by pairing code.
-#[orca_tool(domain = "pod.handshake", verb = "create")]
-async fn pod_handshake_create(
-    args: PodAcceptArgs,
+/// Initiate or complete a peer pairing.
+///
+/// `action`:
+/// - `"invite"` — inviter pushes an offer to a discovered joiner. Requires
+///   `addr` (joiner's host or host:port from mDNS discovery). Returns a
+///   pairing code to show the operator; the joiner auto-accepts if its daemon
+///   received the code in-band.
+/// - `"join"` — joiner requests an offer from an inviter not yet in mDNS.
+///   Requires `addr` (inviter's host or host:port). Returns the code the
+///   inviter will display.
+/// - `"accept"` — joiner accepts a pending inbound offer by its 6-char code.
+///   Requires `code`. Returns the inviter identity after join.
+#[orca_tool(domain = "system.peer", verb = "create")]
+async fn peer_create(
+    args: PeerCreateArgs,
     ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<PodAcceptOutput> {
-    native_support::svc(ctx)?.accept(&args.code).await
+) -> anyhow::Result<PeerCreateOutput> {
+    let svc = native_support::svc(ctx)?;
+    match args.action.as_str() {
+        "invite" => {
+            let addr = args
+                .addr
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("invite requires addr"))?;
+            let out = svc.offer(addr, args.port).await?;
+            Ok(PeerCreateOutput {
+                action: "invite".into(),
+                pairing_code: Some(out.code),
+                joiner_hostname: Some(out.joiner_hostname),
+                joiner_addr: Some(out.joiner_addr),
+                joiner_port: Some(out.joiner_port),
+                joiner_pubkey_fp: Some(out.joiner_pubkey_fp),
+                offer_id: Some(out.offer_id),
+                expires_at: Some(out.expires_at),
+                pod_id: None,
+                inviter_peer_id: None,
+                inviter_hostname: None,
+                inviter_addr: None,
+                inviter_port: None,
+                self_secure: None,
+            })
+        }
+        "join" => {
+            let addr = args
+                .addr
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("join requires addr"))?;
+            let out = svc.join(addr, args.port).await?;
+            Ok(PeerCreateOutput {
+                action: "join".into(),
+                pairing_code: Some(out.code),
+                joiner_hostname: None,
+                joiner_addr: None,
+                joiner_port: None,
+                joiner_pubkey_fp: None,
+                offer_id: None,
+                expires_at: None,
+                pod_id: None,
+                inviter_peer_id: None,
+                inviter_hostname: None,
+                inviter_addr: Some(out.inviter_addr),
+                inviter_port: Some(out.inviter_port),
+                self_secure: None,
+            })
+        }
+        "accept" => {
+            let code = args
+                .code
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("accept requires code"))?;
+            let out = svc.accept(code).await?;
+            Ok(PeerCreateOutput {
+                action: "accept".into(),
+                pairing_code: None,
+                joiner_hostname: None,
+                joiner_addr: None,
+                joiner_port: None,
+                joiner_pubkey_fp: None,
+                offer_id: None,
+                expires_at: None,
+                pod_id: Some(out.pod_id),
+                inviter_peer_id: Some(out.inviter_peer_id),
+                inviter_hostname: Some(out.inviter_hostname),
+                inviter_addr: Some(out.inviter_addr),
+                inviter_port: Some(out.inviter_port),
+                self_secure: Some(out.self_secure),
+            })
+        }
+        other => anyhow::bail!("unknown action '{other}' (expected invite|join|accept)"),
+    }
 }
 
 /// Update trust for a paired peer.
 /// Without `push`: sets OUR local trust of the peer (`local_secure`).
 /// With `push: true`: executes the update on the remote peer over mTLS so
 /// THEY trust US (`peer_secure` from our perspective).
-#[orca_tool(domain = "pod.peer", verb = "update")]
+#[orca_tool(domain = "system.peer", verb = "update")]
 async fn pod_peer_update(
     args: PodTrustArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -487,7 +621,7 @@ async fn pod_peer_update(
 }
 
 /// mTLS ping a paired peer; returns latency + their self-reported identity.
-#[orca_tool(domain = "pod.peer", verb = "detail")]
+#[orca_tool(domain = "system.peer", verb = "detail")]
 async fn pod_peer_detail(
     args: PodPingArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -496,7 +630,7 @@ async fn pod_peer_detail(
 }
 
 /// List orcas seen on the network via mDNS (paired + unclaimed).
-#[orca_tool(domain = "pod.discovery", verb = "list")]
+#[orca_tool(domain = "system.peer.discovery", verb = "list")]
 async fn pod_discovery_list(
     _args: EmptyArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -507,7 +641,7 @@ async fn pod_discovery_list(
 }
 
 /// List pending inbound pod-membership offers.
-#[orca_tool(domain = "pod.handshake", verb = "list")]
+#[orca_tool(domain = "system.peer.handshake", verb = "list")]
 async fn pod_handshake_list(
     _args: EmptyArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -515,28 +649,8 @@ async fn pod_handshake_list(
     Ok(PodPendingListOutput(native_support::svc(ctx)?.pending()?))
 }
 
-/// Push a pod-membership offer to a discovered joiner.
-#[orca_tool(domain = "pod.invite", verb = "create")]
-async fn pod_invite_create(
-    args: PodOfferArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<PodOfferOutput> {
-    native_support::svc(ctx)?.offer(&args.addr, args.port).await
-}
-
-/// Joiner-initiated pair: request an offer from an out-of-mDNS inviter.
-#[orca_tool(domain = "pod.join", verb = "create")]
-async fn pod_join_create(
-    args: PodJoinArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<PodJoinOutput> {
-    native_support::svc(ctx)?
-        .join(&args.inviter_addr, args.port)
-        .await
-}
-
 /// Best-effort notify a peer we're leaving, then drop pod_peers + pod_trust rows for it.
-#[orca_tool(domain = "pod.peer", verb = "delete")]
+#[orca_tool(domain = "system.peer", verb = "delete")]
 async fn pod_peer_delete(
     args: PodLeaveArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -545,7 +659,7 @@ async fn pod_peer_delete(
 }
 
 /// Days-remaining + rotation state for every mesh cert on this host.
-#[orca_tool(domain = "pod", verb = "detail")]
+#[orca_tool(domain = "system.pod", verb = "detail")]
 async fn pod_detail(
     _args: EmptyArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -557,7 +671,7 @@ async fn pod_detail(
 /// - `sync`: git pull on every active dev peer (cargo watch auto-restarts).
 /// - `enable`: flip dev mode ON for `peers` (or local + every paired peer if empty).
 /// - `disable`: flip dev mode OFF for `peers` (or local + every paired peer if empty).
-#[orca_tool(domain = "pod.dev", verb = "update", role = "admin")]
+#[orca_tool(domain = "system.peer.dev", verb = "update", role = "admin")]
 async fn pod_dev_update(
     args: PodDevUpdateArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -806,15 +920,19 @@ mod tests {
     #[tokio::test]
     async fn pod_accept_forwards_code() {
         let (ctx, stub) = ctx_with_stub();
-        let out = pod_handshake_create(
-            PodAcceptArgs {
-                code: "code1".into(),
+        let out = peer_create(
+            PeerCreateArgs {
+                action: "accept".into(),
+                addr: None,
+                port: None,
+                code: Some("code1".into()),
             },
             &ctx,
         )
         .await
         .unwrap();
-        assert_eq!(out.pod_id, "pod-1");
+        assert_eq!(out.action, "accept");
+        assert_eq!(out.pod_id.as_deref(), Some("pod-1"));
         assert_eq!(
             stub.last_accept_code.lock().unwrap().as_deref(),
             Some("code1")
@@ -894,16 +1012,19 @@ mod tests {
     #[tokio::test]
     async fn pod_offer_forwards_addr_and_port() {
         let (ctx, stub) = ctx_with_stub();
-        let out = pod_invite_create(
-            PodOfferArgs {
-                addr: "1.2.3.4".into(),
+        let out = peer_create(
+            PeerCreateArgs {
+                action: "invite".into(),
+                addr: Some("1.2.3.4".into()),
                 port: Some(9999),
+                code: None,
             },
             &ctx,
         )
         .await
         .unwrap();
-        assert_eq!(out.joiner_port, 9999);
+        assert_eq!(out.action, "invite");
+        assert_eq!(out.joiner_port, Some(9999));
         let g = stub.last_offer.lock().unwrap();
         assert_eq!(g.as_ref().unwrap(), &("1.2.3.4".to_string(), Some(9999)));
     }
@@ -911,18 +1032,39 @@ mod tests {
     #[tokio::test]
     async fn pod_join_forwards_inviter_and_port() {
         let (ctx, stub) = ctx_with_stub();
-        let out = pod_join_create(
-            PodJoinArgs {
-                inviter_addr: "host.local".into(),
+        let out = peer_create(
+            PeerCreateArgs {
+                action: "join".into(),
+                addr: Some("host.local".into()),
                 port: None,
+                code: None,
             },
             &ctx,
         )
         .await
         .unwrap();
-        assert_eq!(out.inviter_addr, "host.local");
+        assert_eq!(out.action, "join");
+        assert_eq!(out.inviter_addr.as_deref(), Some("host.local"));
         let g = stub.last_join.lock().unwrap();
         assert_eq!(g.as_ref().unwrap(), &("host.local".to_string(), None));
+    }
+
+    #[tokio::test]
+    async fn peer_create_rejects_unknown_action() {
+        let (ctx, _) = ctx_with_stub();
+        let e = peer_create(
+            PeerCreateArgs {
+                action: "bogus".into(),
+                addr: None,
+                port: None,
+                code: None,
+            },
+            &ctx,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(e.to_string().contains("unknown action"));
     }
 
     #[tokio::test]

@@ -120,7 +120,7 @@ fn profile_svc(
 }
 
 /// List all profiles the current user can access (owned + shared).
-#[orca_tool(domain = "profile", verb = "list")]
+#[orca_tool(domain = "namespace", verb = "list")]
 async fn profile_list(
     _args: ProfileListArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -129,7 +129,7 @@ async fn profile_list(
 }
 
 /// Show details of a profile (defaults to the active one).
-#[orca_tool(domain = "profile", verb = "show")]
+#[orca_tool(domain = "namespace", verb = "show")]
 async fn profile_show(
     args: ProfileShowArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -138,7 +138,7 @@ async fn profile_show(
 }
 
 /// Show the currently active profile (or None).
-#[orca_tool(domain = "profile", verb = "current")]
+#[orca_tool(domain = "namespace", verb = "current")]
 async fn profile_current(
     _args: ProfileCurrentArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -147,7 +147,7 @@ async fn profile_current(
 }
 
 /// [MUTATES STATE] Create a new profile owned by the current user.
-#[orca_tool(domain = "profile", verb = "create")]
+#[orca_tool(domain = "namespace", verb = "create")]
 async fn profile_create(
     args: ProfileCreateArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -158,7 +158,7 @@ async fn profile_create(
 }
 
 /// [MUTATES STATE] Delete a profile (owner only).
-#[orca_tool(domain = "profile", verb = "delete")]
+#[orca_tool(domain = "namespace", verb = "delete")]
 async fn profile_delete(
     args: ProfileSpecArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -167,7 +167,7 @@ async fn profile_delete(
 }
 
 /// [MUTATES STATE] Set the active profile for the current user.
-#[orca_tool(domain = "profile", verb = "use")]
+#[orca_tool(domain = "namespace", verb = "use")]
 async fn profile_use(
     args: ProfileSpecArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -176,7 +176,7 @@ async fn profile_use(
 }
 
 /// [MUTATES STATE] Share a profile with another user.
-#[orca_tool(domain = "profile.share", verb = "create")]
+#[orca_tool(domain = "namespace.share", verb = "create")]
 async fn profile_share_create(
     args: ProfileShareArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -187,7 +187,7 @@ async fn profile_share_create(
 }
 
 /// [MUTATES STATE] Remove a share from a profile.
-#[orca_tool(domain = "profile.share", verb = "delete")]
+#[orca_tool(domain = "namespace.share", verb = "delete")]
 async fn profile_share_delete(
     args: ProfileUnshareArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -196,7 +196,7 @@ async fn profile_share_delete(
 }
 
 /// List shares on a profile (owner only).
-#[orca_tool(domain = "profile.share", verb = "list")]
+#[orca_tool(domain = "namespace.share", verb = "list")]
 async fn profile_share_list(
     args: ProfileSpecArgs,
     ctx: &orca_utils::tool::ToolCtx,

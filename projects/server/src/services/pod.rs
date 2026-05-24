@@ -156,7 +156,7 @@ impl PodService for ServerPod {
         let dispatch = self
             .exec(
                 peer_id,
-                "pod.peer.update",
+                "system.peer.update",
                 serde_json::json!({ "peer_id": own_id, "on": on, "push": false }),
             )
             .await?;
@@ -326,6 +326,7 @@ impl PodService for ServerPod {
             None,
             None,
             OFFER_TTL_SECS,
+            None,
         )?;
         drop(conn);
 

@@ -53,7 +53,7 @@ fn db_svc(
 }
 
 /// Show current schema version and pending-migration count.
-#[orca_tool(domain = "db", verb = "detail")]
+#[orca_tool(domain = "system.db", verb = "detail")]
 async fn db_detail(
     _args: DbStatusArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -65,7 +65,7 @@ async fn db_detail(
 /// - `migrate`: apply all pending migrations.
 /// - `up`: apply the next pending migration (one step).
 /// - `down`: revert the most recently applied migration (one step).
-#[orca_tool(domain = "db.lifecycle", verb = "update")]
+#[orca_tool(domain = "system.db.lifecycle", verb = "update")]
 async fn db_lifecycle_update(
     args: DbLifecycleUpdateArgs,
     ctx: &orca_utils::tool::ToolCtx,

@@ -447,7 +447,7 @@ async fn system_update_delete(
 }
 
 /// List projects (memory directories under the orca vault root).
-#[orca_tool(domain = "projects", verb = "list")]
+#[orca_tool(domain = "namespace.project", verb = "list")]
 async fn projects_list(
     _args: ProjectsListArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -456,7 +456,7 @@ async fn projects_list(
 }
 
 /// Dump orca's own OpenAPI JSON document. Used by build pipelines that don't want to spin up the HTTP server.
-#[orca_tool(domain = "spec", verb = "detail")]
+#[orca_tool(domain = "namespace.spec", verb = "detail")]
 async fn spec_detail(
     _args: SpecDumpArgs,
     ctx: &orca_utils::tool::ToolCtx,

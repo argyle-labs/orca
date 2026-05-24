@@ -496,7 +496,7 @@ mod tests {
 
     #[test]
     fn authorize_exec_passes_remote_ok_and_any_role() {
-        authorize_exec("docs.search", true, "any").expect("should pass");
+        authorize_exec("namespace.doc.search", true, "any").expect("should pass");
     }
 
     #[test]

@@ -110,7 +110,7 @@ pub struct DenyReport {
 /// cargo-udeps) and advisory check (cargo-deny). Each sub-tool reports
 /// independently; missing binaries surface as `not_installed` rather than
 /// erroring the whole sweep.
-#[orca_tool(domain = "sweep", verb = "organization")]
+#[orca_tool(domain = "system.sweep", verb = "organization")]
 async fn sweep_organization(
     args: SweepOrganizationArgs,
     _ctx: &orca_utils::tool::ToolCtx,

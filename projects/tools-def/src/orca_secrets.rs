@@ -125,7 +125,7 @@ fn secrets_svc(
 }
 
 /// List configured secrets (names + backends + metadata). Never returns values.
-#[orca_tool(domain = "secret", verb = "list")]
+#[orca_tool(domain = "system.secret", verb = "list")]
 async fn secret_list(
     _args: SecretListArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -135,7 +135,7 @@ async fn secret_list(
 }
 
 /// [SENSITIVE] Fetch a secret value by name. Resolves via the configured backend.
-#[orca_tool(domain = "secret", verb = "detail")]
+#[orca_tool(domain = "system.secret", verb = "detail")]
 async fn secret_detail(
     args: SecretGetArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -150,7 +150,7 @@ async fn secret_detail(
 
 /// [MUTATES STATE] Create or update a secret. For 'inline' backend, `value` is required;
 /// for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field').
-#[orca_tool(domain = "secret", verb = "set")]
+#[orca_tool(domain = "system.secret", verb = "set")]
 async fn secret_set(
     args: SecretSetArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -160,7 +160,7 @@ async fn secret_set(
 
 /// [MUTATES STATE] Remove a secret. The inline value is zeroed; for external backends
 /// only the orca registration is removed (the upstream vault is untouched).
-#[orca_tool(domain = "secret", verb = "delete")]
+#[orca_tool(domain = "system.secret", verb = "delete")]
 async fn secret_delete(
     args: SecretDeleteArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -173,7 +173,7 @@ async fn secret_delete(
 }
 
 /// List backend kinds available on this host (lets the UI render a backend picker).
-#[orca_tool(domain = "secret", verb = "backends")]
+#[orca_tool(domain = "system.secret", verb = "backends")]
 async fn secret_backends(
     _args: SecretBackendsArgs,
     ctx: &orca_utils::tool::ToolCtx,

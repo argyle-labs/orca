@@ -120,7 +120,7 @@ pub fn register_host_refresh(ctx: &mut orca_utils::tool::ToolCtx, p: &impl Provi
 }
 
 /// Local host snapshot: display name, machine_id, and every addressing channel.
-#[orca_tool(domain = "host", verb = "detail", remote_ok = true)]
+#[orca_tool(domain = "system.host", verb = "detail", remote_ok = true)]
 async fn host_detail(
     _args: EmptyArgs,
     _ctx: &orca_utils::tool::ToolCtx,
@@ -149,7 +149,7 @@ async fn host_detail(
 }
 
 /// Write a manual host addressing override (display_name, fqdn, or a channel value).
-#[orca_tool(domain = "host", verb = "set")]
+#[orca_tool(domain = "system.host", verb = "set")]
 async fn host_set(
     args: HostSetArgs,
     _ctx: &orca_utils::tool::ToolCtx,
@@ -179,7 +179,7 @@ async fn host_set(
 }
 
 /// Re-detect every host addressing channel (LAN + Tailscale + settings overrides).
-#[orca_tool(domain = "host", verb = "refresh")]
+#[orca_tool(domain = "system.host", verb = "refresh")]
 async fn host_refresh(
     _args: EmptyArgs,
     ctx: &orca_utils::tool::ToolCtx,

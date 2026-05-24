@@ -66,7 +66,7 @@ fn auth_svc(
 }
 
 /// Snapshot every configured credential the host knows about (Anthropic key + OAuth tokens).
-#[orca_tool(domain = "auth.session", verb = "detail")]
+#[orca_tool(domain = "system.auth.session", verb = "detail")]
 async fn auth_session_detail(
     _args: AuthStatusArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -75,7 +75,7 @@ async fn auth_session_detail(
 }
 
 /// [MUTATES STATE] Remove a stored credential. `removed=false` if nothing was stored.
-#[orca_tool(domain = "auth.session", verb = "delete")]
+#[orca_tool(domain = "system.auth.session", verb = "delete")]
 async fn auth_session_delete(
     args: AuthLogoutArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -88,7 +88,7 @@ async fn auth_session_delete(
 }
 
 /// [MUTATES STATE] Authenticate with a provider. Anthropic: pass `key`. GitHub: device-flow. Atlassian: PKCE.
-#[orca_tool(domain = "auth.session", verb = "create")]
+#[orca_tool(domain = "system.auth.session", verb = "create")]
 async fn auth_session_create(
     args: AuthLoginArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -157,7 +157,7 @@ pub struct TokenRevokeOutput {
 /// [MUTATES STATE] Mint a new REST/MCP bearer token on THIS host. Plaintext is
 /// returned exactly once and cannot be recovered from the DB. Token only
 /// authenticates calls to this host's `:12000` — not to other peers.
-#[orca_tool(domain = "auth.token", verb = "create")]
+#[orca_tool(domain = "system.auth.token", verb = "create")]
 async fn auth_token_create(
     args: TokenCreateArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -168,7 +168,7 @@ async fn auth_token_create(
 }
 
 /// List all REST/MCP bearer tokens registered on this host. Token hashes are not returned.
-#[orca_tool(domain = "auth.token", verb = "list")]
+#[orca_tool(domain = "system.auth.token", verb = "list")]
 async fn auth_token_list(
     _args: TokenListArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -178,7 +178,7 @@ async fn auth_token_list(
 }
 
 /// [MUTATES STATE] Revoke a token by id. Returns `revoked=false` if the id wasn't found.
-#[orca_tool(domain = "auth.token", verb = "delete")]
+#[orca_tool(domain = "system.auth.token", verb = "delete")]
 async fn auth_token_delete(
     args: TokenRevokeArgs,
     ctx: &orca_utils::tool::ToolCtx,

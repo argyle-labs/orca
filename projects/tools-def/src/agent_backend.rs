@@ -99,7 +99,7 @@ fn svc(
 }
 
 /// [MUTATES STATE] Remove the stored Anthropic API key from the encrypted orca DB.
-#[orca_tool(domain = "agent-backend", verb = "clear-key")]
+#[orca_tool(domain = "system.agent.backend", verb = "clear-key")]
 async fn agent_backend_clear_api_key(
     _args: ClearArgs,
     _ctx: &orca_utils::tool::ToolCtx,
@@ -118,7 +118,7 @@ async fn agent_backend_clear_api_key(
 }
 
 /// [MUTATES STATE] Store an Anthropic API key in the encrypted orca DB (settings table, key 'secrets.anthropic_api_key'). The DB is SQLCipher-encrypted at rest. Required for server-side Anthropic calls.
-#[orca_tool(domain = "agent-backend", verb = "set-key")]
+#[orca_tool(domain = "system.agent.backend", verb = "set-key")]
 async fn agent_backend_set_api_key(
     args: SetArgs,
     _ctx: &orca_utils::tool::ToolCtx,
@@ -137,7 +137,7 @@ async fn agent_backend_set_api_key(
 }
 
 /// [MUTATES STATE] Set the global agent backend mode. local = always LM Studio. claude = always route to Claude (server-side if enabled, else delegate to caller). hybrid = check per-agent override; default is Claude when no override is set.
-#[orca_tool(domain = "agent-backend", verb = "set-mode")]
+#[orca_tool(domain = "system.agent.backend", verb = "set-mode")]
 async fn agent_backend_set_mode(
     args: SetModeArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -147,7 +147,7 @@ async fn agent_backend_set_mode(
 }
 
 /// [MUTATES STATE] Set, change, or clear a per-agent backend override (only consulted in hybrid mode). backend=clear deletes the override.
-#[orca_tool(domain = "agent-backend", verb = "override")]
+#[orca_tool(domain = "system.agent.backend", verb = "override")]
 async fn agent_backend_override(
     args: OverrideArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -173,7 +173,7 @@ async fn agent_backend_override(
 }
 
 /// [MUTATES STATE] Toggle whether the orca server makes Anthropic API calls directly when the resolver picks Claude. When false (default), Claude-routed agents return a delegate-to-claude-code envelope instead. Requires a stored API key when true.
-#[orca_tool(domain = "agent-backend", verb = "use-server-anthropic")]
+#[orca_tool(domain = "system.agent.backend", verb = "use-server-anthropic")]
 async fn agent_backend_use_server_anthropic(
     args: UseServerAnthropicArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -185,7 +185,7 @@ async fn agent_backend_use_server_anthropic(
 }
 
 /// Show the current agent backend configuration: mode (local|claude|hybrid), per-agent overrides, whether server-side Anthropic calls are enabled, and a masked preview of the stored API key (when present).
-#[orca_tool(domain = "agent-backend", verb = "detail")]
+#[orca_tool(domain = "system.agent.backend", verb = "detail")]
 async fn agent_backend_detail(
     _args: AgentBackendStatusArgs,
     ctx: &orca_utils::tool::ToolCtx,

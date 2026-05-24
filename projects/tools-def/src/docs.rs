@@ -172,7 +172,7 @@ fn data_to_node(d: crate::services::docs::DocTreeNodeData) -> DocTreeNode {
 }
 
 /// List available documentation roots (rebuy, orca) with file counts and paths.
-#[orca_tool(domain = "docs", verb = "list-roots")]
+#[orca_tool(domain = "namespace.doc", verb = "list-roots")]
 async fn list_roots(
     _args: ListRootsArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -193,7 +193,7 @@ async fn list_roots(
 
 /// Get the compacted documentation tree for a root, optionally scoped to a
 /// subpath. Returns a typed tree of .md files.
-#[orca_tool(domain = "docs", verb = "tree")]
+#[orca_tool(domain = "namespace.doc", verb = "tree")]
 async fn get_tree(
     args: GetTreeArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -210,7 +210,7 @@ async fn get_tree(
 
 /// Multi-root documentation tree — every registered root in one call. When
 /// `raw` is true, returns the uncompacted filesystem layout.
-#[orca_tool(domain = "docs", verb = "full-tree")]
+#[orca_tool(domain = "namespace.doc", verb = "full-tree")]
 async fn get_full_tree(
     args: GetFullTreeArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -229,7 +229,7 @@ async fn get_full_tree(
 
 /// Read a documentation file by root and relative path (e.g. root=rebuy,
 /// path=admin-api/README).
-#[orca_tool(domain = "docs", verb = "read")]
+#[orca_tool(domain = "namespace.doc", verb = "read")]
 async fn read_doc(
     args: ReadDocArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -244,7 +244,7 @@ async fn read_doc(
 }
 
 /// Search documentation files for a keyword across one or all roots.
-#[orca_tool(domain = "docs", verb = "search")]
+#[orca_tool(domain = "namespace.doc", verb = "search")]
 async fn search_docs(
     args: SearchDocsArgs,
     ctx: &orca_utils::tool::ToolCtx,
@@ -276,7 +276,7 @@ async fn search_docs(
 }
 
 /// List all Claude slash commands and skills from the orca vault.
-#[orca_tool(domain = "docs", verb = "list-commands")]
+#[orca_tool(domain = "namespace.doc", verb = "list-commands")]
 async fn list_commands(
     _args: ListCommandsArgs,
     ctx: &orca_utils::tool::ToolCtx,

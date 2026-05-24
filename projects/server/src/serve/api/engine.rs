@@ -10,8 +10,7 @@
 use super::prelude::*;
 use axum::response::IntoResponse;
 use orca_tools_def::engine::{
-    AddArgs, EmptyArgs, EngineCreate, EngineDelete, EngineDisable, EngineEnable, EngineList,
-    NameArgs,
+    AddArgs, EmptyArgs, EngineCreate, EngineDelete, EngineList, EngineUpdate, NameArgs, UpdateArgs,
 };
 use orca_utils::config::Config;
 use orca_utils::tool::{OrcaTool, ToolCtx};
@@ -144,7 +143,15 @@ pub async fn engines_enable_handler(
         Ok(c) => c,
         Err(r) => return r,
     };
-    match EngineEnable::run(NameArgs { name }, &ctx).await {
+    match EngineUpdate::run(
+        UpdateArgs {
+            name,
+            enabled: true,
+        },
+        &ctx,
+    )
+    .await
+    {
         Ok(_) => axum::Json(OkResponse { ok: true }).into_response(),
         Err(e) => err(axum::http::StatusCode::NOT_FOUND, &e.to_string()),
     }
@@ -170,7 +177,15 @@ pub async fn engines_disable_handler(
         Ok(c) => c,
         Err(r) => return r,
     };
-    match EngineDisable::run(NameArgs { name }, &ctx).await {
+    match EngineUpdate::run(
+        UpdateArgs {
+            name,
+            enabled: false,
+        },
+        &ctx,
+    )
+    .await
+    {
         Ok(_) => axum::Json(OkResponse { ok: true }).into_response(),
         Err(e) => err(axum::http::StatusCode::NOT_FOUND, &e.to_string()),
     }

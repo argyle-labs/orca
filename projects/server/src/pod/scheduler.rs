@@ -217,3 +217,57 @@ fn now_secs() -> i64 {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTVWXYZ23456789";
+
+    #[test]
+    fn mint_pairing_code_length() {
+        assert_eq!(mint_pairing_code().len(), PAIRING_CODE_LEN);
+    }
+
+    #[test]
+    fn mint_pairing_code_only_valid_chars() {
+        for _ in 0..50 {
+            let code = mint_pairing_code();
+            for ch in code.chars() {
+                assert!(
+                    ALPHABET.contains(&(ch as u8)),
+                    "unexpected char '{ch}' in code"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mint_pairing_code_excludes_confusable_chars() {
+        // I, L, O, U are excluded from the alphabet to avoid visual confusion.
+        for _ in 0..200 {
+            let code = mint_pairing_code();
+            assert!(!code.contains('I'), "I found in code: {code}");
+            assert!(!code.contains('L'), "L found in code: {code}");
+            assert!(!code.contains('O'), "O found in code: {code}");
+            assert!(!code.contains('U'), "U found in code: {code}");
+        }
+    }
+
+    #[test]
+    fn mint_pairing_code_is_uppercase_ascii() {
+        for _ in 0..50 {
+            let code = mint_pairing_code();
+            assert!(code.is_ascii());
+            assert_eq!(code, code.to_uppercase());
+        }
+    }
+
+    #[test]
+    fn mint_pairing_code_produces_distinct_values() {
+        let codes: std::collections::HashSet<String> =
+            (0..20).map(|_| mint_pairing_code()).collect();
+        // Extremely unlikely to collide even once with a 30^6 space.
+        assert!(codes.len() > 15, "suspiciously many collisions");
+    }
+}

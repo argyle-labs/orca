@@ -112,13 +112,16 @@ mod inventory_tests {
             .map(|e| e.name)
             .collect();
         assert!(
-            names.contains(&"host.detail"),
-            "missing host.detail: {names:?}"
+            names.contains(&"system.host.detail"),
+            "missing system.host.detail: {names:?}"
         );
-        assert!(names.contains(&"host.set"), "missing host.set: {names:?}");
         assert!(
-            names.contains(&"host.refresh"),
-            "missing host.refresh: {names:?}"
+            names.contains(&"system.host.set"),
+            "missing system.host.set: {names:?}"
+        );
+        assert!(
+            names.contains(&"system.host.refresh"),
+            "missing system.host.refresh: {names:?}"
         );
     }
 
@@ -127,9 +130,9 @@ mod inventory_tests {
         let mut reg = __private::ToolRegistry::new();
         native_register(&mut reg);
         let names = reg.names();
-        assert!(names.contains(&"host.detail"));
-        assert!(names.contains(&"host.set"));
-        assert!(names.contains(&"host.refresh"));
+        assert!(names.contains(&"system.host.detail"));
+        assert!(names.contains(&"system.host.set"));
+        assert!(names.contains(&"system.host.refresh"));
     }
 
     #[test]
@@ -139,12 +142,12 @@ mod inventory_tests {
             .map(|e| e.name)
             .collect();
         assert!(
-            names.contains(&"pod.peer.list"),
-            "missing pod.peer.list: {names:?}"
+            names.contains(&"system.peer.list"),
+            "missing system.peer.list: {names:?}"
         );
         assert!(
-            names.contains(&"pod.handshake.create"),
-            "missing pod.handshake.create: {names:?}"
+            names.contains(&"system.peer.create"),
+            "missing system.peer.create: {names:?}"
         );
     }
 
