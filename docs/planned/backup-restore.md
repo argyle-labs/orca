@@ -152,20 +152,215 @@ Ships with orca, auto-enabled at install if a target is configured.
 Source: `kind = "orca_state"` (collects the above). Default cadence:
 hourly for config + secrets, daily for everything else.
 
-### 4.4 Master-key + CA-key escrow
+### 4.4 Key inventory + escrow
 
-These two are special: lose them, you cannot restore. The escrow
-plan:
+**Hard rule**: every encryption key orca generates is exportable
+to a recovery vault. If something is encrypted, there is a known
+recovery path to decrypt it that doesn't depend on the originating
+host being alive.
 
-- **Master key** (for secrets DB): printed at first orca init
-  (Shamir-shared into N parts), each part stored separately
-  (password manager, paper in a safe, second operator). Re-entered
-  on restore.
-- **CA key**: same Shamir-shared model on the founding peer. Plus
-  hardware-token storage when available.
+The keys orca tracks:
+
+| Key | Purpose | Lost = |
+|---|---|---|
+| Secrets-store master key | Encrypts the secrets SQLite | Every integration credential lost — unrecoverable without escrow |
+| Pod CA private key | Signs peer certs | Cannot pair new peers or rotate certs; pod must be rebuilt |
+| Revocation-signing key | Signs the revocation set | Manageable — re-issued by CA |
+| Per-job offsite encryption keys | Encrypts backups before they leave the host | Every offsite backup unreadable — unrecoverable without escrow |
+| Per-host disk-encryption passphrase (if managed) | Unlocks LUKS / equivalent on managed hosts | Host requires manual unlock at boot — recoverable but disruptive |
+| TLS server keys (Caddy, etc.) | Public-facing TLS | Re-issued by ACME; not escrowed |
+
+### 4.5 Escrow targets
+
+The default and recommended target for single-operator pods is
+**1Password**, accessed via the `op` CLI. Other targets are
+supported for ops who want them.
+
+| Target | When | How |
+|---|---|---|
+| **1Password** (default) | Single operator, 1P already in use | `op item create` per key, stored in a designated vault (`Private/orca-keys` by default). `orca` shells out to `op` with a short-lived service-account token. |
+| Bitwarden | Same as 1P, different password manager | `bw` CLI equivalent. |
+| Shamir secret share | Multi-operator pod, no shared password manager, or extra paranoia | Key split into N shares, M required to reconstitute. Shares written to physical media / distributed to operators. |
+| Hardware token (YubiKey) | CA key especially | Key generated on-device where possible; otherwise key encrypted to a PIV slot. Pair with an escrow target above for the "lost the YubiKey" case. |
+| Air-gapped encrypted file | Cold-storage fallback | Written to a USB drive, kept somewhere offline. Bootstrap an escrow even for keys that have other targets. |
+
+**Multiple targets are encouraged.** A key escrowed only in 1P
+fails if you lose 1P access. A key escrowed only on a YubiKey fails
+if you lose the token. Default policy: at least two independent
+targets per key, where one of them is an offline fallback.
+
+### 4.6 Escrow operations
+
+```sh
+# Manual export of a single key
+orca pki key export --key secrets-master --to op://Private/orca-keys/secrets-master
+orca pki key export --key pod-ca         --to op://Private/orca-keys/pod-ca
+
+# Bulk export of all tracked keys
+orca pki key export --all --to op://Private/orca-keys
+
+# Import / restore from escrow
+orca pki key import --key secrets-master --from op://Private/orca-keys/secrets-master
+
+# Verify every tracked key has a current escrow entry
+orca pki key audit
+```
+
+`audit` walks the key inventory and confirms each key has at least
+one valid escrow entry that was last verified within a configurable
+window (default 30 days). Stale or missing escrows fail loudly:
+
+```
+orca pki key audit
+  ✓ secrets-master    op://Private/orca-keys/secrets-master   (verified 3d ago)
+                      shamir://operators/3-of-5                (verified 14d ago)
+  ✗ pod-ca            op://Private/orca-keys/pod-ca            MISSING
+                      yubikey://serial-12345/piv-slot-9c       (verified 31d ago, STALE)
+  ✓ offsite/baldur    op://Private/orca-keys/offsite-baldur    (verified 1h ago)
+exit 1: 1 key has no valid escrow, 1 key has stale escrow
+```
+
+This is one of the checks the GitOps reconciler runs on every
+apply; key-escrow gaps surface as alerts the same way overdue
+backups do.
+
+### 4.7 Re-encryption on key rotation
+
+When a key rotates, the escrowed copy must update at the same
+time. The rotation flow is:
+
+1. Generate new key.
+2. Re-encrypt the data the key protects with the new key.
+3. **Update every escrow target** with the new key.
+4. Verify escrow targets read back correctly.
+5. Destroy old key.
+
+A rotation that completes step 1-2 but fails step 3 leaves the
+system unrecoverable. Rotation aborts on escrow-write failure and
+rolls back to the previous key.
+
+### 4.8 Per-store, independently backed up
+
+The `orca_state` source breaks down into **independent data stores**,
+each addressable by name. Backups, restores, and vault sync all
+operate per-store; you can restore the secrets DB without touching
+the config DB, push only a specific store to a vault, etc.
+
+| Store | Default vault path | Notes |
+|---|---|---|
+| `config` | `op://Private/orca-keys/<host>/config.db.enc` | Encrypted blob. |
+| `secrets/store` | `op://Private/orca-keys/<host>/secrets.db.enc` | Encrypted blob (master key escrowed separately, §4.4). |
+| `secrets/items` | `op://Private/orca-keys/<host>/secrets/` | Per-secret items (see §4.9). |
+| `audit` | `op://Private/orca-keys/<host>/audit.db.enc` | 1-year retention floor. |
+| `pki/ca` | `op://Private/orca-keys/<host>/ca-key` | Founding peer only. |
+| `pki/revocation` | `op://Private/orca-keys/<host>/revocation.signed` | Replicated via mesh; vault copy is the fallback. |
+| `repos/<id>` | (not vault) | Materialized config repo — recoverable from git, not escrowed. |
+| `metrics`, `logs` | (not escrowed) | Time-series; expendable. |
+
+Verbs operate per-store:
+
+```sh
+orca backup push  --store secrets/store --target op://Private/orca-keys
+orca backup pull  --store secrets/store --from   op://Private/orca-keys
+orca backup list  --store secrets/store
+orca backup verify --store secrets/store
+```
+
+A `--store all` form bulk-applies for full-system DR.
+
+### 4.9 Vault as a backup destination (not just escrow)
+
+Vaults (1Password, Bitwarden) are first-class **backup targets**, not
+only key-escrow targets. The same backend serves both concerns; the
+distinction is just what gets written:
+
+- **Escrow** writes a key (binary blob in an `op` item field).
+- **Backup** writes an encrypted store blob (binary blob in a
+  larger `op` item with metadata, manifest, timestamp).
+- **Inventory export** (new, see §4.10) writes a *schema only* —
+  the list of secret keys a host needs, no values.
+
+A backup target is configured per host or per pod:
+
+```toml
+# config/<host>/backup.toml
+[target.vault]
+kind        = "1password"
+vault       = "Private"
+item_prefix = "orca-keys/maple"
+mode        = "automatic"        # automatic | manual | inventory-only
+on_change   = true               # push when source store changes (with debounce)
+schedule    = "0 */6 * * *"      # plus a periodic full push every 6h
+```
+
+`mode = "automatic"` means orca pushes encrypted blobs on its own
+schedule. `mode = "manual"` requires `orca backup push` to fire.
+`mode = "inventory-only"` is §4.10.
+
+### 4.10 Inventory-only export — bootstrap an empty vault
+
+The case the operator described: stand up a new host (e.g., maple)
+that needs secrets, but the secret *values* don't exist yet. Orca
+writes a **schema** to the vault listing every secret the host
+needs, with empty placeholder values. Operator fills in the
+values in 1Password. Orca then pulls back the filled-in values
+into the local secrets store.
+
+```sh
+# 1. Orca writes the inventory schema to the vault
+orca backup inventory export --host maple --to op://Private/orca-keys/maple
+
+# Created in 1Password:
+#   maple/secrets/GITHUB_TOKEN          (empty)
+#   maple/secrets/CF_API_TOKEN          (empty)
+#   maple/secrets/UNRAID_API_KEY        (empty)
+#   maple/secrets/PIA_USERNAME          (empty)
+#   maple/secrets/PIA_PASSWORD          (empty)
+#   maple/secrets/SMB_GUEST_PASSWORD    (empty)
+
+# 2. Operator fills in values in 1Password by hand.
+
+# 3. Orca pulls populated values into the local secrets store
+orca backup inventory import --host maple --from op://Private/orca-keys/maple
+
+# Verifies each declared secret now has a value; reports gaps.
+orca backup inventory verify --host maple
+  ✓ GITHUB_TOKEN
+  ✓ CF_API_TOKEN
+  ✗ UNRAID_API_KEY    (empty in vault)
+  ✓ PIA_USERNAME
+  ✓ PIA_PASSWORD
+  ✗ SMB_GUEST_PASSWORD (empty in vault)
+exit 1: 2 secrets missing values
+```
+
+This is also the **bootstrap flow** for a fresh host: install
+orca, point it at a vault, run `inventory export` once, fill the
+values, run `inventory import`. Host is fully populated without
+ever copying secrets via the shell.
+
+The secret inventory is derived from the config repo: each
+service / integration declares the secrets it needs (`requires =
+["GITHUB_TOKEN"]`), and `inventory export` collects that list per
+host.
+
+### 4.11 First-install flow
 
 The install script ([install-bootstrap.md](install-bootstrap.md))
-walks new operators through this exactly once at pod creation.
+walks new operators through escrow setup at pod creation:
+
+1. Choose primary escrow target (1Password / Bitwarden / Shamir).
+2. Authenticate to the target (1P sign-in, etc.).
+3. Choose a secondary fallback (defaults to air-gapped file the
+   operator copies to USB).
+4. Orca generates the master key + CA key, writes them to both
+   targets, verifies readback.
+5. Operator confirms they can read each back before the install
+   script returns success.
+
+No install completes without the escrow round-trip succeeding.
+This is the moment the operator most needs to think about
+recovery, and the install script is the natural enforcement point.
 
 ---
 
@@ -278,8 +473,16 @@ exposing backup contents.
 | BK5 | Retention policies (keep-daily/weekly/monthly) | S |
 | BK6 | `orca backup restore` + `--dry-run` | M |
 | BK7 | `orca_state` source: config + secrets + audit DBs (SQLite-safe) | M |
-| BK8 | Master-key Shamir share at install + restore prompt | M |
-| BK9 | CA-key escrow + restore for founding-peer recovery | L |
+| BK8 | Key inventory + escrow framework (multi-target) | M |
+| BK8a | 1Password target via `op` CLI | S |
+| BK8b | Bitwarden target via `bw` CLI | S |
+| BK8c | Shamir target (split + reconstitute) | M |
+| BK8d | YubiKey / PIV target | M |
+| BK8e | Air-gapped file target + USB workflow | S |
+| BK8f | `orca pki key audit` + GitOps gate on missing/stale escrow | S |
+| BK9 | First-install escrow round-trip enforcement | S |
+| BK9a | Per-key rotation flow with escrow update + rollback | M |
+| BK9b | Restore: import keys from escrow at recovery time | M |
 | BK10 | Additional sources: `nfs_share`, `directory`, `proxmox_guest_via_pbs`, `unraid_share`, `sqlite_db`, `config_snapshot` | L |
 | BK11 | Additional targets: `local`, `nfs`, `s3`, `rsync_net`, `restic`, `borg` | L |
 | BK12 | Deep verify + bitrot detection | M |
