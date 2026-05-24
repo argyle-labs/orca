@@ -195,7 +195,7 @@ fn handle_notify_trust(
         &conn,
         peer_cn,
         &peer_addr.ip().to_string(),
-        peer_addr.port(),
+        orca_utils::config::APP_PLUGIN_PORT,
     )?;
     pdb::set_trust(&conn, peer_cn, None, Some(params.trust))?;
     Ok(())

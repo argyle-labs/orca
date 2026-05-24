@@ -71,6 +71,7 @@ async fn tick() -> Result<()> {
         let code = mint_pairing_code();
         let code_hash = pdb::hash_code(&code);
         let offer_id = uuid::Uuid::now_v7().to_string();
+        let inviter_peer_id = format!("peer.{}", crate::host_identity::machine_id_short());
         pdb::insert_pending_offer(
             &conn,
             &offer_id,
@@ -81,7 +82,7 @@ async fn tick() -> Result<()> {
             d.port,
             &code_hash,
             None,
-            None,
+            Some(&inviter_peer_id),
             None,
             OFFER_TTL_SECS,
         )?;
