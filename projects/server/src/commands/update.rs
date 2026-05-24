@@ -769,15 +769,30 @@ pub fn cmd_dev_enable() -> Result<DevEnableResult> {
             crate::loopback_token::chmod_dir_owner_only(parent)
                 .with_context(|| format!("chmod 0700 on dev dir {}", parent.display()))?;
         }
+        // Private repo — clone via HTTPS with the github_token secret injected
+        // as basic-auth (`x-access-token:<pat>@`). Falls back to the plain URL
+        // only when no token is configured so unauthenticated public clones
+        // still work in CI/test contexts.
+        let token = resolve_github_token();
+        let clone_url = if token.is_empty() {
+            APP_REPO_URL.to_string()
+        } else if let Some(rest) = APP_REPO_URL.strip_prefix("https://") {
+            format!("https://x-access-token:{token}@{rest}")
+        } else {
+            APP_REPO_URL.to_string()
+        };
         let status = Command::new("git")
             .args([
                 "clone",
                 "--depth=1",
-                APP_REPO_URL,
+                &clone_url,
                 repo.to_str().unwrap_or("."),
             ])
             .status()?;
-        anyhow::ensure!(status.success(), "git clone failed");
+        anyhow::ensure!(
+            status.success(),
+            "git clone failed (private repo — ensure `github_token` secret is set on this host)"
+        );
         true
     } else {
         false
