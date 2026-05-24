@@ -240,6 +240,9 @@ B1+B2+B7 unblock the rest. B4 is needed before any host pairs.
 
 - [orca-as-logic-layer.md](orca-as-logic-layer.md) §3.6 — provisioning
   framework; this doc is the first step of that.
+- [host-lifecycle.md](host-lifecycle.md) — what happens after install:
+  drivers (NVIDIA/AMD/Intel), OS updates, reboots, UPS-coordinated
+  shutdowns.
 - [pki-lifecycle.md](pki-lifecycle.md) — what the cert exchange
   during pairing looks like.
 - [caddy-plugin-scope.md](caddy-plugin-scope.md) — hosts install.orca.sh.

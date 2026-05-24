@@ -262,6 +262,12 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         crate::host_status_writer::spawn_sync_puller();
         crate::pod::host_status_replica::spawn_fleet_replicator();
 
+        // Pod-mesh runtime parity with the production daemon path: dev
+        // builds must also arm mDNS + auto-offer + cert-rotation +
+        // roster-sync, otherwise a fleet sitting in dev mode degrades
+        // silently (no auto-mesh, certs expire, etc.).
+        spawn_pod_runtime(&pki_dir).await;
+
         let mut sigterm = signal(SignalKind::terminate())?;
         let handle = axum_server::Handle::new();
         let serve = axum_server::bind_rustls(addr, tls)
