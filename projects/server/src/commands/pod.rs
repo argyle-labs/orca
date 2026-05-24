@@ -194,6 +194,14 @@ pub async fn cmd_pod_accept(code: &str) -> Result<()> {
         Some(&offer.peer_pubkey_fp),
         &r.ca_cert_pem,
     )?;
+    // Accepting an offer IS the local trust signal — without flipping this
+    // the new pairing stays untrusted forever and roster-sync can't see it
+    // as a usable source.
+    pdb::set_trust(&conn, &r.inviter_peer_id, Some(true), None)?;
+    // Same legacy `"unknown"` stub cleanup as the inviter side: drop the
+    // pre-rc.25 row at this peer's addr so the host_status puller stops
+    // chasing a peer_id that means nothing.
+    pdb::cleanup_unknown_stub_at(&conn, &offer.peer_addr)?;
     pdb::delete_pending_offer(&conn, &offer.offer_id)?;
 
     println!(

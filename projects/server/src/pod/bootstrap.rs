@@ -325,12 +325,25 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
         Some(&signer_fp),
         &ca_cert_pem,
     )?;
+    // The inviter just chose to sign this joiner's CSR — that IS the local
+    // trust signal. Without this the trust flag stays false even after a
+    // successful pairing, which blocks every downstream mutual-trust gate
+    // (CA-key replication, secrets sync).
+    pdb::set_trust(&conn, &joiner_peer_id, Some(true), None)?;
+    // Drop any legacy `"unknown"` stub that points at the same joiner. These
+    // were materialized by `ensure_peer_stub` for pre-rc.25 mTLS clients
+    // whose CN was literally the string `"unknown"`; they're dead weight
+    // once the real peer_id row exists at the same address.
+    pdb::cleanup_unknown_stub_at(&conn, &offer.peer_addr)?;
     pdb::delete_pending_offer(&conn, &offer.offer_id)?;
 
+    // Defensive: any pending offer that survived migration without an
+    // inviter_peer_id field should still resolve to *this host's* identity,
+    // not the string "unknown". The offer is on OUR side; we know who we are.
     let inviter_peer_id = offer
         .inviter_peer_id
         .clone()
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_else(|| format!("peer.{}", crate::host_identity::machine_id_short()));
     let pod_id = offer
         .pod_id
         .clone()
@@ -431,7 +444,6 @@ fn handle_request_offer(
     let inviter_fp = pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
     let inviter_hostname = crate::host_identity::hostname().to_string();
     let inviter_display_name = crate::host_identity::display_hostname().to_string();
-    let inviter_peer_id = format!("peer.{}", crate::host_identity::machine_id_short());
 
     Ok(RequestOfferResult {
         inviter_pubkey_fp: inviter_fp,

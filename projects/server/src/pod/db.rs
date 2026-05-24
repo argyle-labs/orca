@@ -418,6 +418,29 @@ pub fn upsert_peer(
     Ok(())
 }
 
+/// Delete any legacy `pod_peers` row keyed by `"unknown"` that points at the
+/// same `peer_addr` as a freshly-paired real peer. Pre-rc.25 mTLS clients
+/// landed CN=`"unknown"` rows via `ensure_peer_stub`, and the
+/// `host_status` puller still polls them forever even though they have no
+/// usable identity. Call right after a successful pairing so the legacy row
+/// doesn't linger as a parallel sibling next to the real one.
+///
+/// Best-effort: no error if nothing matched. Also cascades to `pod_trust`
+/// via FK so we don't leave dangling trust rows.
+pub fn cleanup_unknown_stub_at(conn: &Connection, peer_addr: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM pod_trust WHERE peer_id = 'unknown' AND EXISTS (
+             SELECT 1 FROM pod_peers WHERE peer_id = 'unknown' AND peer_addr = ?
+         )",
+        params![peer_addr],
+    )?;
+    conn.execute(
+        "DELETE FROM pod_peers WHERE peer_id = 'unknown' AND peer_addr = ?",
+        params![peer_addr],
+    )?;
+    Ok(())
+}
+
 /// Self-heal upsert: ensure a `pod_peers` row exists for `peer_cn` so trust
 /// inserts don't trip the FK on `pod_trust.peer_id`. Only inserts when no row
 /// is present — existing rows are left untouched so an admin-set hostname or
@@ -799,6 +822,67 @@ mod tests {
         assert!(t.local_secure && !t.peer_secure && !is_mutual_secure(t));
         set_trust(&c, "peer.thor", None, Some(true)).unwrap();
         assert!(is_mutual_secure(get_trust(&c, "peer.thor").unwrap()));
+    }
+
+    #[test]
+    fn cleanup_unknown_stub_removes_matching_row_and_trust() {
+        let (_d, c) = test_conn();
+        upsert_peer(&c, "unknown", "mint", "10.0.0.1", 12002, None, "").unwrap();
+        set_trust(&c, "unknown", Some(true), None).unwrap();
+        upsert_peer(
+            &c,
+            "peer.real",
+            "mint",
+            "10.0.0.1",
+            12002,
+            Some("fp"),
+            "ca-pem",
+        )
+        .unwrap();
+        cleanup_unknown_stub_at(&c, "10.0.0.1").unwrap();
+        let peers = list_peers(&c).unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].peer_id, "peer.real");
+        // Trust row for the stub must be gone too — no dangling FK ghost.
+        let trust_count: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM pod_trust WHERE peer_id = 'unknown'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(trust_count, 0);
+    }
+
+    #[test]
+    fn cleanup_unknown_stub_at_different_addr_is_noop() {
+        let (_d, c) = test_conn();
+        upsert_peer(&c, "unknown", "mint", "10.0.0.1", 12002, None, "").unwrap();
+        // Caller passes the addr of a NEW peer we just paired with — if that
+        // addr doesn't match the stub, the stub stays (other host's leftover).
+        cleanup_unknown_stub_at(&c, "10.0.0.2").unwrap();
+        let peers = list_peers(&c).unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].peer_id, "unknown");
+    }
+
+    #[test]
+    fn cleanup_unknown_stub_when_no_stub_present_is_noop() {
+        let (_d, c) = test_conn();
+        upsert_peer(
+            &c,
+            "peer.real",
+            "mint",
+            "10.0.0.1",
+            12002,
+            Some("fp"),
+            "ca-pem",
+        )
+        .unwrap();
+        cleanup_unknown_stub_at(&c, "10.0.0.1").unwrap();
+        let peers = list_peers(&c).unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].peer_id, "peer.real");
     }
 
     #[test]
