@@ -69,6 +69,7 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     crate::system_info::spawn_refresher();
     crate::host_status_writer::spawn_local_writer();
     crate::host_status_writer::spawn_sync_puller();
+    crate::pod::host_status_replica::spawn_fleet_replicator();
     info!(
         "[orca] binding {} ({})...",
         addr,
@@ -259,6 +260,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         crate::system_info::spawn_refresher();
         crate::host_status_writer::spawn_local_writer();
         crate::host_status_writer::spawn_sync_puller();
+        crate::pod::host_status_replica::spawn_fleet_replicator();
 
         let mut sigterm = signal(SignalKind::terminate())?;
         let handle = axum_server::Handle::new();
@@ -301,6 +303,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     crate::system_info::spawn_refresher();
     crate::host_status_writer::spawn_local_writer();
     crate::host_status_writer::spawn_sync_puller();
+    crate::pod::host_status_replica::spawn_fleet_replicator();
 
     // Dev-source auto-poll (same as run() path).
     if let Some(src) = crate::commands::update::read_dev_source() {

@@ -10,8 +10,11 @@
 //! shims are thin wrappers so the testable surface stays in one file.
 
 use anyhow::{Context, Result};
+use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
+use tokio::task::JoinHandle;
 
 use super::subscribe::HostStatusEvent;
 use super::subscribe_client::{Forever, dial_subscribe_host_status, subscribe_with_reconnect};
@@ -25,21 +28,24 @@ const PEER_CHANNEL_CAPACITY: usize = 128;
 /// (see `subscribe_client::next_backoff`).
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 
-/// Spawn the long-lived subscription task for a single peer. The daemon
-/// startup is intentionally NOT touched in this slice; a per-peer registry
-/// plus fleet-wide spawner that diffs paired peers will land with the
-/// wire-up step. Callers today are expected to dedupe peer_ids themselves.
-pub fn spawn_for_peer(peer_id: String, host_addr: String) {
+/// How often the fleet replicator reconciles its per-peer subscription set
+/// against the paired-peer table. Subscriptions for newly-paired peers
+/// start within this window; subscriptions for departed peers are aborted
+/// on the next tick.
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Spawn the long-lived subscription task for a single peer. Returns the
+/// producer task's JoinHandle so the fleet replicator can abort it when
+/// the peer is unpaired or departs. Aborting the producer drops `tx`,
+/// which makes the consumer task exit naturally.
+pub fn spawn_for_peer(peer_id: String, host_addr: String) -> JoinHandle<()> {
     let (tx, rx) = mpsc::channel::<HostStatusEvent>(PEER_CHANNEL_CAPACITY);
 
-    // Consumer task: drain events into the DB.
     let consumer_peer = peer_id.clone();
     tokio::spawn(async move {
         run_event_consumer(rx, consumer_peer).await;
     });
 
-    // Producer task: reconnect loop, dialing `host_addr` and asking for
-    // `host:<peer_id>:status`.
     tokio::spawn(async move {
         let dialer = |host: String, topic: String, tx: mpsc::Sender<HostStatusEvent>| async move {
             dial_subscribe_host_status(&host, &topic, tx).await
@@ -47,7 +53,7 @@ pub fn spawn_for_peer(peer_id: String, host_addr: String) {
         let _stats =
             subscribe_with_reconnect(host_addr, peer_id, tx, dialer, Forever, INITIAL_BACKOFF)
                 .await;
-    });
+    })
 }
 
 /// Drain `rx`, validate each event, and write accepted ones into
@@ -75,6 +81,78 @@ fn validate_event<'a>(event: &'a HostStatusEvent, expected_peer_id: &str) -> Opt
         return None;
     }
     Some(event.payload.as_str())
+}
+
+/// Decide which peer subscriptions to start and which to stop, given the
+/// currently-managed set and the desired set. Pure helper — the actual
+/// spawn/abort lives in the tick loop.
+fn diff_peer_sets(
+    current: &HashSet<String>,
+    desired: &HashSet<String>,
+) -> (Vec<String>, Vec<String>) {
+    let to_add: Vec<String> = desired.difference(current).cloned().collect();
+    let to_remove: Vec<String> = current.difference(desired).cloned().collect();
+    (to_add, to_remove)
+}
+
+/// Spawn the fleet-wide replicator: every [`RECONCILE_INTERVAL`], list
+/// active paired peers and reconcile the per-peer subscription registry.
+/// Idempotent: only the first invocation starts a task.
+///
+/// Runs alongside the existing pull-based `host_status_writer::spawn_sync_puller`.
+/// `INSERT OR IGNORE` semantics in `host_status::insert_status` make the
+/// overlap safe — whichever path lands a `(peer_id, snapshot_at)` row first
+/// wins; the other no-ops.
+pub fn spawn_fleet_replicator() {
+    static SPAWNED: OnceLock<()> = OnceLock::new();
+    if SPAWNED.set(()).is_err() {
+        return;
+    }
+    tokio::spawn(async move {
+        // Stagger the first tick so we don't race the daemon startup that
+        // brings the pod listener up.
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        let registry: Mutex<HashMap<String, JoinHandle<()>>> = Mutex::new(HashMap::new());
+        loop {
+            if let Err(e) = reconcile_once(&registry).await {
+                tracing::debug!("host_status replica reconcile: {e:#}");
+            }
+            tokio::time::sleep(RECONCILE_INTERVAL).await;
+        }
+    });
+}
+
+async fn reconcile_once(registry: &Mutex<HashMap<String, JoinHandle<()>>>) -> Result<()> {
+    let own = format!("peer.{}", crate::host_identity::machine_id_short());
+    let peers = tokio::task::spawn_blocking(move || -> Result<Vec<(String, String)>> {
+        let conn = ::db::open_default()?;
+        let rows = ::db::pod::list_peers(&conn)?;
+        Ok(rows
+            .into_iter()
+            .filter(|p| p.status == "active" && p.peer_id != own)
+            .map(|p| (p.peer_id, p.addr))
+            .collect())
+    })
+    .await??;
+
+    let desired: HashSet<String> = peers.iter().map(|(p, _)| p.clone()).collect();
+    let addr_lookup: HashMap<String, String> = peers.into_iter().collect();
+    let current: HashSet<String> = registry.lock().await.keys().cloned().collect();
+    let (to_add, to_remove) = diff_peer_sets(&current, &desired);
+
+    let mut reg = registry.lock().await;
+    for pid in to_remove {
+        if let Some(handle) = reg.remove(&pid) {
+            handle.abort();
+        }
+    }
+    for pid in to_add {
+        if let Some(addr) = addr_lookup.get(&pid).cloned() {
+            let handle = spawn_for_peer(pid.clone(), addr);
+            reg.insert(pid, handle);
+        }
+    }
+    Ok(())
 }
 
 async fn insert_synced_row(owner: String, snapshot_at: i64, payload: &str) -> Result<()> {
@@ -111,6 +189,45 @@ mod tests {
     fn validate_rejects_foreign_peer_id() {
         let e = ev("peer.evil", 1, "snap");
         assert!(validate_event(&e, "peer.alpha").is_none());
+    }
+
+    #[test]
+    fn diff_finds_only_new_peers_when_current_is_empty() {
+        let current: HashSet<String> = HashSet::new();
+        let mut desired = HashSet::new();
+        desired.insert("a".to_string());
+        desired.insert("b".to_string());
+        let (add, remove) = diff_peer_sets(&current, &desired);
+        let mut add = add;
+        add.sort();
+        assert_eq!(add, vec!["a", "b"]);
+        assert!(remove.is_empty());
+    }
+
+    #[test]
+    fn diff_finds_only_departed_when_desired_is_empty() {
+        let mut current = HashSet::new();
+        current.insert("a".to_string());
+        current.insert("b".to_string());
+        let desired = HashSet::new();
+        let (add, remove) = diff_peer_sets(&current, &desired);
+        assert!(add.is_empty());
+        let mut remove = remove;
+        remove.sort();
+        assert_eq!(remove, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn diff_handles_partial_overlap() {
+        let mut current = HashSet::new();
+        current.insert("keep".into());
+        current.insert("drop".into());
+        let mut desired = HashSet::new();
+        desired.insert("keep".into());
+        desired.insert("add".into());
+        let (add, remove) = diff_peer_sets(&current, &desired);
+        assert_eq!(add, vec!["add"]);
+        assert_eq!(remove, vec!["drop"]);
     }
 
     #[tokio::test]
