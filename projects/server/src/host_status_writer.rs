@@ -92,12 +92,29 @@ async fn persist_local_snapshot() -> Result<()> {
     let now = chrono::Utc::now().timestamp();
     let peer_id = own_peer_id();
 
+    let peer_id_for_insert = peer_id.clone();
+    let payload_for_insert = payload.clone();
     tokio::task::spawn_blocking(move || -> Result<()> {
         let conn = db::open_default()?;
-        db::host_status::insert_status(&conn, &peer_id, snapshot_at, &payload, now, "local")?;
+        db::host_status::insert_status(
+            &conn,
+            &peer_id_for_insert,
+            snapshot_at,
+            &payload_for_insert,
+            now,
+            "local",
+        )?;
         Ok(())
     })
     .await??;
+
+    // Fan out to in-process subscribers (UI sessions, mesh forwarder).
+    // Best-effort: failures here don't roll back the DB write.
+    crate::pod::subscribe::publish_host_status(crate::pod::subscribe::HostStatusEvent {
+        peer_id,
+        snapshot_at_unix: snapshot_at,
+        payload,
+    });
     Ok(())
 }
 

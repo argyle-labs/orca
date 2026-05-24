@@ -5,8 +5,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use orca_tools_def::orca_lifecycle::{
     DoctorEntry, DoctorReport, LifecycleReport, ProjectsListReport, RuntimeSpecReport,
-    SpecDumpReport, SystemDevDisableOutput, SystemDevEnableOutput, SystemDevSyncOutput,
-    UpdateCheckReport, UpdatePinReport,
+    SpecDumpReport,
 };
 use orca_tools_def::services::lifecycle::LifecycleService;
 use orca_tools_def::services::secrets::SecretsService;
@@ -15,9 +14,8 @@ use std::sync::Arc;
 
 use crate::commands::install::{InstallReport, cmd_install_report, cmd_uninstall_report};
 use crate::commands::update::{
-    apply_update, check_for_update, clear_version_pin, cmd_dev_disable, cmd_dev_enable,
-    cmd_dev_sync, cmd_update_pin, read_version_pin, resolve_channel, resolve_pin_veto,
-    write_channel_marker,
+    apply_update, check_for_update, clear_version_pin, cmd_dev_enable, cmd_update_pin,
+    resolve_channel, resolve_pin_veto, write_channel_marker,
 };
 
 /// Resolve the GitHub bearer token: prefer the `github_token` secret managed
@@ -178,26 +176,29 @@ impl LifecycleService for ServerLifecycle {
         Ok(DoctorReport { entries })
     }
 
-    async fn update_check(&self, channel: &str) -> Result<UpdateCheckReport> {
-        let ch = resolve_channel(channel);
-        let token = resolve_github_token(&self.secrets).await.ok_or_else(|| {
-            anyhow::anyhow!(
-                "no github token — set secret 'github_token' (`orca secret set github_token --value ...`) or export GITHUB_TOKEN"
-            )
-        })?;
-        let info = check_for_update(&ch, &token).await?;
-        let pinned_to = info.as_ref().and_then(resolve_pin_veto);
-        Ok(UpdateCheckReport {
-            channel: ch.as_marker().into(),
-            up_to_date: info.is_none(),
-            latest: info.as_ref().map(|i| i.version.clone()),
-            asset_url: info.as_ref().map(|i| i.asset_url.clone()),
-            pinned_to,
-        })
+    async fn set_version(&self, version: &str) -> Result<()> {
+        match version {
+            "dev" => {
+                // Switch to dev channel: park the daemon and start cargo-watch.
+                tokio::task::spawn_blocking(cmd_dev_enable).await??;
+            }
+            "stable" | "rc" => {
+                let ch = resolve_channel(version);
+                write_channel_marker(&ch)?;
+                // Clear any semver pin so the channel takes effect.
+                let _ = clear_version_pin();
+            }
+            v => {
+                // Treat as a semver pin.
+                cmd_update_pin(v)?;
+            }
+        }
+        Ok(())
     }
 
-    async fn update_apply(&self, channel: &str) -> Result<LifecycleReport> {
-        let ch = resolve_channel(channel);
+    async fn update_apply_current(&self) -> Result<LifecycleReport> {
+        let ch = crate::commands::update::read_channel_marker()
+            .unwrap_or_else(|| resolve_channel("stable"));
         let resolved = ch.as_marker();
         let mut report = LifecycleReport {
             done: vec![],
@@ -220,7 +221,7 @@ impl LifecycleService for ServerLifecycle {
             Some(info) => {
                 if let Some(pin) = resolve_pin_veto(&info) {
                     report.skipped.push(format!(
-                        "pinned to {pin}; available v{} — run `orca update --unpin` to upgrade",
+                        "pinned to {pin}; available v{} — run `orca system update --version stable` to unpin",
                         info.version
                     ));
                 } else {
@@ -231,31 +232,7 @@ impl LifecycleService for ServerLifecycle {
                 }
             }
         }
-        // Persist the resolved channel so future invocations (CLI no-args,
-        // startup_update_check) stay on the same channel even if the caller
-        // passed it explicitly this time.
-        if let Err(e) = write_channel_marker(&ch) {
-            report
-                .errors
-                .push(format!("channel marker write failed: {e}"));
-        }
         Ok(report)
-    }
-
-    async fn update_pin(&self, version: &str) -> Result<UpdatePinReport> {
-        let pinned = cmd_update_pin(version)?;
-        Ok(UpdatePinReport {
-            pinned_to: Some(pinned),
-            cleared: false,
-        })
-    }
-
-    async fn update_unpin(&self) -> Result<UpdatePinReport> {
-        clear_version_pin()?;
-        Ok(UpdatePinReport {
-            pinned_to: read_version_pin(),
-            cleared: true,
-        })
     }
 
     async fn projects_list(&self) -> Result<ProjectsListReport> {
@@ -277,32 +254,6 @@ impl LifecycleService for ServerLifecycle {
         let spec = crate::serve::openapi_spec_json();
         Ok(SpecDumpReport {
             spec: serde_json::to_string_pretty(&spec)?,
-        })
-    }
-
-    async fn dev_enable(&self) -> Result<SystemDevEnableOutput> {
-        let r = tokio::task::spawn_blocking(cmd_dev_enable).await??;
-        Ok(SystemDevEnableOutput {
-            repo_path: r.repo_path,
-            cloned: r.cloned,
-            daemon_parked: r.daemon_parked,
-        })
-    }
-
-    async fn dev_disable(&self) -> Result<SystemDevDisableOutput> {
-        let r = tokio::task::spawn_blocking(cmd_dev_disable).await??;
-        Ok(SystemDevDisableOutput {
-            dev_process_stopped: r.dev_process_stopped,
-            daemon_reclaimed: r.daemon_reclaimed,
-        })
-    }
-
-    async fn dev_sync(&self) -> Result<SystemDevSyncOutput> {
-        let r = tokio::task::spawn_blocking(cmd_dev_sync).await??;
-        Ok(SystemDevSyncOutput {
-            commits_pulled: r.commits_pulled,
-            already_up_to_date: r.already_up_to_date,
-            detail: r.detail,
         })
     }
 

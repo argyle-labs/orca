@@ -22,6 +22,8 @@ pub mod dispatcher;
 mod listener;
 pub mod mdns;
 pub mod scheduler;
+pub mod subscribe;
+pub mod subscribe_wire;
 
 pub use bootstrap::handle_pod_bootstrap_connection;
 pub use listener::handle_pod_connection;

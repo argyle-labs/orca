@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use orca_sdk::pki;
 use orca_tools_def::pod::{
-    CertInfo, PodAcceptOutput, PodCertStatusOutput, PodDevPeerResult, PodDiscoveryRowDto,
-    PodExecDispatch, PodJoinOutput, PodLeaveOutput, PodOfferOutput, PodPeerAddressDto, PodPeerDto,
+    CertInfo, PodAcceptOutput, PodCertStatusOutput, PodDiscoveryRowDto, PodExecDispatch,
+    PodJoinOutput, PodLeaveOutput, PodOfferOutput, PodPeerAddressDto, PodPeerDto,
     PodPendingOfferDto, PodPingOutput, PodService, PodTrustOutput,
 };
 use std::time::Instant;
@@ -384,210 +384,6 @@ impl PodService for ServerPod {
         })
     }
 
-    async fn dev_sync(&self) -> Result<Vec<PodDevPeerResult>> {
-        use crate::commands::update::cmd_dev_sync;
-        use orca_utils::state::DaemonMode;
-
-        let conn = db::open_default()?;
-        let peers = pdb::list_peers(&conn)?;
-        drop(conn);
-
-        // Peer dev-sync now rides the existing pod mTLS channel (`:12002`,
-        // SNI=pod.orca.local). Identity is proven by the mesh-CA-signed client
-        // cert — no bearer tokens, no plaintext HTTP, no cert-distribution
-        // problem. Peers not in dev mode reply with status="skipped".
-        let mut results: Vec<PodDevPeerResult> = Vec::new();
-
-        let handles: Vec<_> = peers
-            .into_iter()
-            .filter(|p| p.departed_at.is_none())
-            .map(|peer| {
-                let addr = peer.peer_addr.clone();
-                let peer_id = peer.peer_id.clone();
-                let hostname = peer.peer_hostname.clone();
-                tokio::spawn(async move {
-                    match crate::pod::dev_sync(&addr).await {
-                        Ok(r) => PodDevPeerResult {
-                            peer_id,
-                            hostname,
-                            status: r.status,
-                            detail: r.detail,
-                        },
-                        Err(e) => PodDevPeerResult {
-                            peer_id,
-                            hostname,
-                            status: "error".into(),
-                            detail: Some(e.to_string()),
-                        },
-                    }
-                })
-            })
-            .collect();
-
-        for handle in handles {
-            if let Ok(result) = handle.await {
-                results.push(result);
-            }
-        }
-
-        // Also sync this host if it's in dev mode
-        if matches!(
-            orca_utils::state::read().ok().flatten().map(|s| s.mode),
-            Some(DaemonMode::Dev) | Some(DaemonMode::Parked)
-        ) {
-            match tokio::task::spawn_blocking(cmd_dev_sync).await? {
-                Ok(r) => results.push(PodDevPeerResult {
-                    peer_id: "local".into(),
-                    hostname: "localhost".into(),
-                    status: if r.already_up_to_date {
-                        "skipped".into()
-                    } else {
-                        "synced".into()
-                    },
-                    detail: if r.already_up_to_date {
-                        None
-                    } else {
-                        Some(r.detail)
-                    },
-                }),
-                Err(e) => results.push(PodDevPeerResult {
-                    peer_id: "local".into(),
-                    hostname: "localhost".into(),
-                    status: "error".into(),
-                    detail: Some(e.to_string()),
-                }),
-            }
-        }
-
-        Ok(results)
-    }
-
-    async fn dev_enable_fanout(&self, peers: &[String]) -> Result<Vec<PodDevPeerResult>> {
-        use crate::commands::update::cmd_dev_enable;
-
-        let all_targets = select_peer_targets(peers)?;
-        let include_local = peers_includes_local(peers);
-        let exclude = load_dev_exclude_set()?;
-        let (targets, excluded) = partition_dev_targets(all_targets, &exclude);
-
-        let handles: Vec<_> = targets
-            .into_iter()
-            .map(|(peer_id, hostname, addr)| {
-                tokio::spawn(async move {
-                    match crate::pod::dev_enable(&addr).await {
-                        Ok(r) => PodDevPeerResult {
-                            peer_id,
-                            hostname,
-                            status: r.status,
-                            detail: r.detail,
-                        },
-                        Err(e) => PodDevPeerResult {
-                            peer_id,
-                            hostname,
-                            status: "error".into(),
-                            detail: Some(e.to_string()),
-                        },
-                    }
-                })
-            })
-            .collect();
-
-        let mut results: Vec<PodDevPeerResult> = Vec::new();
-        for (peer_id, hostname, _addr) in excluded {
-            results.push(PodDevPeerResult {
-                peer_id,
-                hostname,
-                status: "skipped".into(),
-                detail: Some("excluded by pod.dev_exclude_peers".into()),
-            });
-        }
-        for h in handles {
-            if let Ok(r) = h.await {
-                results.push(r);
-            }
-        }
-
-        if include_local {
-            match tokio::task::spawn_blocking(cmd_dev_enable).await? {
-                Ok(r) => results.push(PodDevPeerResult {
-                    peer_id: "local".into(),
-                    hostname: "localhost".into(),
-                    status: "enabled".into(),
-                    detail: Some(format!(
-                        "repo={} cloned={} parked={}",
-                        r.repo_path, r.cloned, r.daemon_parked
-                    )),
-                }),
-                Err(e) => results.push(PodDevPeerResult {
-                    peer_id: "local".into(),
-                    hostname: "localhost".into(),
-                    status: "error".into(),
-                    detail: Some(e.to_string()),
-                }),
-            }
-        }
-
-        Ok(results)
-    }
-
-    async fn dev_disable_fanout(&self, peers: &[String]) -> Result<Vec<PodDevPeerResult>> {
-        use crate::commands::update::cmd_dev_disable;
-
-        let targets = select_peer_targets(peers)?;
-        let include_local = peers_includes_local(peers);
-
-        let handles: Vec<_> = targets
-            .into_iter()
-            .map(|(peer_id, hostname, addr)| {
-                tokio::spawn(async move {
-                    match crate::pod::dev_disable(&addr).await {
-                        Ok(r) => PodDevPeerResult {
-                            peer_id,
-                            hostname,
-                            status: r.status,
-                            detail: r.detail,
-                        },
-                        Err(e) => PodDevPeerResult {
-                            peer_id,
-                            hostname,
-                            status: "error".into(),
-                            detail: Some(e.to_string()),
-                        },
-                    }
-                })
-            })
-            .collect();
-
-        let mut results: Vec<PodDevPeerResult> = Vec::new();
-        for h in handles {
-            if let Ok(r) = h.await {
-                results.push(r);
-            }
-        }
-
-        if include_local {
-            match tokio::task::spawn_blocking(cmd_dev_disable).await? {
-                Ok(r) => results.push(PodDevPeerResult {
-                    peer_id: "local".into(),
-                    hostname: "localhost".into(),
-                    status: "disabled".into(),
-                    detail: Some(format!(
-                        "dev_stopped={} reclaimed={}",
-                        r.dev_process_stopped, r.daemon_reclaimed
-                    )),
-                }),
-                Err(e) => results.push(PodDevPeerResult {
-                    peer_id: "local".into(),
-                    hostname: "localhost".into(),
-                    status: "error".into(),
-                    detail: Some(e.to_string()),
-                }),
-            }
-        }
-
-        Ok(results)
-    }
-
     #[allow(clippy::disallowed_types)] // mirrors PodService::exec — peer-mesh wire payload
     async fn exec(
         &self,
@@ -656,45 +452,6 @@ impl PodService for ServerPod {
         pdb::set_self_secure(&conn, on)?;
         Ok(on)
     }
-}
-
-/// Resolve the peer fan-out target set. `filter` empty = every non-departed
-/// paired peer. Otherwise, only peers whose `peer_id`, `peer_hostname`, or
-/// `peer_addr` matches an entry in `filter` (case-insensitive). The special
-/// value `"local"` (and `"localhost"`) is consumed by `peers_includes_local`
-/// and ignored here.
-fn select_peer_targets(filter: &[String]) -> Result<Vec<(String, String, String)>> {
-    let conn = db::open_default()?;
-    let peers = pdb::list_peers(&conn)?;
-    drop(conn);
-
-    let filter_lc: Vec<String> = filter
-        .iter()
-        .map(|s| s.to_ascii_lowercase())
-        .filter(|s| s != "local" && s != "localhost")
-        .collect();
-
-    let want_all = filter.is_empty()
-        || filter
-            .iter()
-            .all(|s| matches!(s.to_ascii_lowercase().as_str(), "local" | "localhost"));
-
-    Ok(peers
-        .into_iter()
-        .filter(|p| p.departed_at.is_none())
-        .filter(|p| {
-            if want_all {
-                return true;
-            }
-            let id_lc = p.peer_id.to_ascii_lowercase();
-            let host_lc = p.peer_hostname.to_ascii_lowercase();
-            let addr_lc = p.peer_addr.to_ascii_lowercase();
-            filter_lc
-                .iter()
-                .any(|f| f == &id_lc || f == &host_lc || f == &addr_lc)
-        })
-        .map(|p| (p.peer_id, p.peer_hostname, p.peer_addr))
-        .collect())
 }
 
 /// Build the local-host row for `pod.list`. Uses the in-process lifecycle
@@ -807,17 +564,6 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
     Ok(out)
 }
 
-/// Whether the fan-out should also flip the local host. Empty filter = yes;
-/// otherwise only when `"local"` or `"localhost"` appears explicitly.
-fn peers_includes_local(filter: &[String]) -> bool {
-    if filter.is_empty() {
-        return true;
-    }
-    filter
-        .iter()
-        .any(|s| matches!(s.to_ascii_lowercase().as_str(), "local" | "localhost"))
-}
-
 /// Resolve a user-supplied peer selector (peer_id, hostname, or addr) to a
 /// concrete dial address. Match is case-insensitive across all three fields;
 /// departed peers are skipped. Ambiguity (e.g. two paired peers with the same
@@ -846,59 +592,6 @@ fn resolve_peer_addr(peers: &[pdb::PeerRow], input: &str) -> Result<String> {
             )
         }
     }
-}
-
-/// Settings key holding the comma-separated peer_id / hostname exclusion list
-/// for `pod dev_enable`. Operator-controlled — never auto-populated. Set via
-/// `orca config set pod.dev_exclude_peers "<csv>"`. Hosts named here are
-/// reported as `status="skipped"` with detail `"excluded by …"` rather than
-/// being dialled, so a disk-constrained box (loki: 54 GB root, can't hold the
-/// ~20 GB cargo + target tree) doesn't get pulled into dev mode on a fanout.
-const DEV_EXCLUDE_KEY: &str = "pod.dev_exclude_peers";
-
-/// Read the dev-mode exclusion set from settings. Tokens are
-/// comma-separated, case-insensitive; whitespace + empty entries are
-/// ignored. Returns an empty set when the key is unset.
-fn load_dev_exclude_set() -> Result<std::collections::HashSet<String>> {
-    let conn = db::open_default()?;
-    let raw = db::settings::get(&conn, DEV_EXCLUDE_KEY)?;
-    drop(conn);
-    Ok(parse_exclude_set(raw.as_deref()))
-}
-
-fn parse_exclude_set(raw: Option<&str>) -> std::collections::HashSet<String> {
-    raw.unwrap_or("")
-        .split(',')
-        .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
-/// Split fanout targets into (kept, excluded). A target is excluded when its
-/// peer_id, hostname, or addr (case-insensitive) appears in the exclude set.
-type DevTarget = (String, String, String);
-fn partition_dev_targets(
-    targets: Vec<DevTarget>,
-    exclude: &std::collections::HashSet<String>,
-) -> (Vec<DevTarget>, Vec<DevTarget>) {
-    if exclude.is_empty() {
-        return (targets, Vec::new());
-    }
-    let mut kept = Vec::with_capacity(targets.len());
-    let mut skipped = Vec::new();
-    for t in targets {
-        let (id_lc, host_lc, addr_lc) = (
-            t.0.to_ascii_lowercase(),
-            t.1.to_ascii_lowercase(),
-            t.2.to_ascii_lowercase(),
-        );
-        if exclude.contains(&id_lc) || exclude.contains(&host_lc) || exclude.contains(&addr_lc) {
-            skipped.push(t);
-        } else {
-            kept.push(t);
-        }
-    }
-    (kept, skipped)
 }
 
 #[cfg(test)]
@@ -963,62 +656,6 @@ mod tests {
         assert!(msg.contains("ambiguous"), "got: {msg}");
         assert!(msg.contains("peer.abc"), "got: {msg}");
         assert!(msg.contains("peer.def"), "got: {msg}");
-    }
-
-    #[test]
-    fn parse_exclude_set_handles_unset_empty_whitespace_and_case() {
-        assert!(parse_exclude_set(None).is_empty());
-        assert!(parse_exclude_set(Some("")).is_empty());
-        assert!(parse_exclude_set(Some(" , ,")).is_empty());
-        let s = parse_exclude_set(Some("Loki, peer.ABC ,, willow"));
-        assert!(s.contains("loki"));
-        assert!(s.contains("peer.abc"));
-        assert!(s.contains("willow"));
-        assert_eq!(s.len(), 3);
-    }
-
-    fn t(id: &str, h: &str, a: &str) -> DevTarget {
-        (id.into(), h.into(), a.into())
-    }
-
-    #[test]
-    fn partition_with_empty_exclude_keeps_everything() {
-        let targets = vec![t("peer.a", "willow", "10.0.0.1")];
-        let (kept, skipped) = partition_dev_targets(targets.clone(), &Default::default());
-        assert_eq!(kept, targets);
-        assert!(skipped.is_empty());
-    }
-
-    #[test]
-    fn partition_excludes_by_hostname() {
-        let targets = vec![
-            t("peer.a", "willow", "10.0.0.1"),
-            t("peer.b", "loki", "10.0.0.2"),
-        ];
-        let exclude = parse_exclude_set(Some("loki"));
-        let (kept, skipped) = partition_dev_targets(targets, &exclude);
-        assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].1, "willow");
-        assert_eq!(skipped.len(), 1);
-        assert_eq!(skipped[0].1, "loki");
-    }
-
-    #[test]
-    fn partition_excludes_by_peer_id_case_insensitive() {
-        let targets = vec![t("peer.1a068644-54a", "loki", "10.0.0.2")];
-        let exclude = parse_exclude_set(Some("PEER.1a068644-54a"));
-        let (kept, skipped) = partition_dev_targets(targets, &exclude);
-        assert!(kept.is_empty());
-        assert_eq!(skipped.len(), 1);
-    }
-
-    #[test]
-    fn partition_excludes_by_addr() {
-        let targets = vec![t("peer.a", "willow", "10.0.0.99")];
-        let exclude = parse_exclude_set(Some("10.0.0.99"));
-        let (kept, skipped) = partition_dev_targets(targets, &exclude);
-        assert!(kept.is_empty());
-        assert_eq!(skipped.len(), 1);
     }
 
     #[test]

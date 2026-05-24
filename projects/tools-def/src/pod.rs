@@ -92,35 +92,6 @@ pub struct PodPeerDto {
 #[serde(transparent)]
 pub struct PodPeerListOutput(pub Vec<PodPeerDto>);
 
-// ── pod.dev.update (unified sync/enable/disable) ────────────────────────────
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodDevUpdateArgs {
-    /// "sync" | "enable" | "disable"
-    pub action: String,
-    /// Target peers (used by enable/disable; empty for sync).
-    #[cfg_attr(feature = "cli", clap(long))]
-    #[serde(default)]
-    pub peers: Vec<String>,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodDevPeerResult {
-    pub peer_id: String,
-    pub hostname: String,
-    /// Action-dependent: "synced"|"skipped"|"enabled"|"disabled"|"error"
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodDevUpdateOutput {
-    pub action: String,
-    pub results: Vec<PodDevPeerResult>,
-}
-
 // ── system.peer.create — unified pairing entry point ─────────────────────────
 //
 // `action` selects the pairing role:
@@ -484,9 +455,6 @@ pub mod native_support {
         /// Update `self_secure`. Idempotent: passing the current value is a
         /// no-op. Returns the resulting value.
         async fn set_self_secure(&self, on: bool) -> Result<bool>;
-        async fn dev_sync(&self) -> Result<Vec<PodDevPeerResult>>;
-        async fn dev_enable_fanout(&self, peers: &[String]) -> Result<Vec<PodDevPeerResult>>;
-        async fn dev_disable_fanout(&self, peers: &[String]) -> Result<Vec<PodDevPeerResult>>;
         // Wire-level JSON-RPC dispatch — Value here is the on-wire payload,
         // narrowed back to the tool's typed `OrcaToolDef::Output` inside
         // [`crate::cli::exec_remote`] before reaching any user code.
@@ -718,28 +686,6 @@ async fn pod_update(
     Ok(PodUpdateOutput { self_secure })
 }
 
-/// Update dev mode across the mesh. `action`:
-/// - `sync`: git pull on every active dev peer (cargo watch auto-restarts).
-/// - `enable`: flip dev mode ON for `peers` (or local + every paired peer if empty).
-/// - `disable`: flip dev mode OFF for `peers` (or local + every paired peer if empty).
-#[orca_tool(domain = "system.peer.dev", verb = "update", role = "admin")]
-async fn pod_dev_update(
-    args: PodDevUpdateArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<PodDevUpdateOutput> {
-    let s = native_support::svc(ctx)?;
-    let results = match args.action.as_str() {
-        "sync" => s.dev_sync().await?,
-        "enable" => s.dev_enable_fanout(&args.peers).await?,
-        "disable" => s.dev_disable_fanout(&args.peers).await?,
-        other => anyhow::bail!("unknown action '{other}' (expected sync|enable|disable)"),
-    };
-    Ok(PodDevUpdateOutput {
-        action: args.action,
-        results,
-    })
-}
-
 #[cfg(all(test, feature = "native"))]
 mod tests {
     use super::native_support::PodExecDispatch;
@@ -757,7 +703,6 @@ mod tests {
         last_offer: Mutex<Option<(String, Option<u16>)>>,
         last_join: Mutex<Option<(String, Option<u16>)>>,
         last_leave_peer: Mutex<Option<String>>,
-        last_fanout_peers: Mutex<Option<Vec<String>>>,
         self_secure: Mutex<bool>,
         // Mirrors PodService::exec — peer-mesh wire payload is type-erased
         // at the dispatch boundary. Same justification as the trait method.
@@ -896,17 +841,6 @@ mod tests {
         async fn set_self_secure(&self, on: bool) -> Result<bool> {
             *self.self_secure.lock().unwrap() = on;
             Ok(on)
-        }
-        async fn dev_sync(&self) -> Result<Vec<PodDevPeerResult>> {
-            Ok(vec![])
-        }
-        async fn dev_enable_fanout(&self, peers: &[String]) -> Result<Vec<PodDevPeerResult>> {
-            *self.last_fanout_peers.lock().unwrap() = Some(peers.to_vec());
-            Ok(vec![])
-        }
-        async fn dev_disable_fanout(&self, peers: &[String]) -> Result<Vec<PodDevPeerResult>> {
-            *self.last_fanout_peers.lock().unwrap() = Some(peers.to_vec());
-            Ok(vec![])
         }
         #[allow(clippy::disallowed_types)] // mirrors trait — peer-mesh wire payload
         async fn exec(
@@ -1187,69 +1121,6 @@ mod tests {
         assert!(out.self_secure);
         // unchanged
         assert!(*stub.self_secure.lock().unwrap());
-    }
-
-    #[tokio::test]
-    async fn pod_dev_update_sync_passthrough() {
-        let (ctx, _) = ctx_with_stub();
-        let out = pod_dev_update(
-            PodDevUpdateArgs {
-                action: "sync".into(),
-                peers: vec![],
-            },
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert_eq!(out.action, "sync");
-        assert!(out.results.is_empty());
-    }
-
-    #[tokio::test]
-    async fn pod_dev_update_enable_forwards_peers() {
-        let (ctx, stub) = ctx_with_stub();
-        let _ = pod_dev_update(
-            PodDevUpdateArgs {
-                action: "enable".into(),
-                peers: vec!["a".into(), "b".into()],
-            },
-            &ctx,
-        )
-        .await
-        .unwrap();
-        let g = stub.last_fanout_peers.lock().unwrap();
-        assert_eq!(g.as_ref().unwrap(), &vec!["a".to_string(), "b".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn pod_dev_update_disable_forwards_peers() {
-        let (ctx, stub) = ctx_with_stub();
-        let _ = pod_dev_update(
-            PodDevUpdateArgs {
-                action: "disable".into(),
-                peers: vec!["solo".into()],
-            },
-            &ctx,
-        )
-        .await
-        .unwrap();
-        let g = stub.last_fanout_peers.lock().unwrap();
-        assert_eq!(g.as_ref().unwrap(), &vec!["solo".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn pod_dev_update_rejects_unknown_action() {
-        let (ctx, _) = ctx_with_stub();
-        let err = pod_dev_update(
-            PodDevUpdateArgs {
-                action: "bogus".into(),
-                peers: vec![],
-            },
-            &ctx,
-        )
-        .await
-        .err();
-        assert!(err.is_some());
     }
 
     #[tokio::test]

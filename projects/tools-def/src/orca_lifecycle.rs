@@ -265,86 +265,22 @@ empty_args!(SystemDoctorArgs);
 empty_args!(EmptyDeleteArgs);
 empty_args!(ProjectsListArgs);
 empty_args!(SpecDumpArgs);
-empty_args!(SystemRuntimeSpecArgs);
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct SystemLifecycleUpdateArgs {
-    /// "install" | "uninstall"
-    pub action: String,
-}
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct SystemDevUpdateArgs {
-    /// "enable" | "disable" | "sync"
-    pub action: String,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct SystemDevUpdateOutput {
-    pub action: String,
-    /// `dev_enable` result (when action == "enable").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enable: Option<SystemDevEnableOutput>,
-    /// `dev_disable` result (when action == "disable").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disable: Option<SystemDevDisableOutput>,
-    /// `dev_sync` result (when action == "sync").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sync: Option<SystemDevSyncOutput>,
-}
-
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SystemUpdateArgs {
-    /// "stable" (default) | "rc" | "beta" | "alpha".
-    #[serde(default = "default_channel")]
-    #[cfg_attr(feature = "cli", arg(default_value = "stable"))]
-    pub channel: String,
+    /// Version or channel to switch to, then apply.
+    /// Channels: "stable" | "rc" | "dev".
+    /// Pinned version: "0.0.4-rc.11" (leading "v" optional).
+    /// "dev" tracks GitHub HEAD via cargo-watch; others pull release binaries.
+    /// Omit to apply the latest on the current channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub version: Option<String>,
     /// When set, proxy the call to the named remote peer via the pod mesh
     /// instead of running on the local host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "cli", arg(long, hide = true))]
     pub peer_id: Option<String>,
-}
-fn default_channel() -> String {
-    "stable".into()
-}
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct SystemUpdatePinArgs {
-    /// Version to pin to, e.g. "v0.0.4-rc.1". A leading `v` is optional.
-    pub version: String,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct SystemDevEnableOutput {
-    /// Path to the git checkout used as the dev source.
-    pub repo_path: String,
-    /// Whether the repo was freshly cloned (true) or already present (false).
-    pub cloned: bool,
-    /// Whether the production daemon was parked as part of this call.
-    pub daemon_parked: bool,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct SystemDevDisableOutput {
-    /// Whether the dev process was running and was killed.
-    pub dev_process_stopped: bool,
-    /// Whether the production daemon reclaimed the port.
-    pub daemon_reclaimed: bool,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct SystemDevSyncOutput {
-    /// Number of commits pulled.
-    pub commits_pulled: u32,
-    /// Whether the repo was already up to date.
-    pub already_up_to_date: bool,
-    /// Raw output from git pull for diagnostics.
-    pub detail: String,
 }
 
 // ── Tools ───────────────────────────────────────────────────────────────────
@@ -363,20 +299,49 @@ fn pod_svc(
     ctx.service::<std::sync::Arc<dyn crate::pod::PodService>>()
 }
 
-/// [MUTATES STATE] Drive the system lifecycle. `action`:
-/// - `install`: wire symlinks, register MCP server, install binary.
-/// - `uninstall`: remove binary, MCP registration, and CLAUDE.md symlinks.
-#[orca_tool(domain = "system.lifecycle", verb = "update")]
-async fn system_lifecycle_update(
-    args: SystemLifecycleUpdateArgs,
+/// [MUTATES STATE] Install orca on this host: wire symlinks, register MCP server, install binary.
+#[orca_tool(domain = "system", verb = "create")]
+async fn system_create(
+    _args: EmptyDeleteArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<LifecycleReport> {
-    let s = svc(ctx)?;
-    match args.action.as_str() {
-        "install" => s.install().await,
-        "uninstall" => s.uninstall().await,
-        other => anyhow::bail!("unknown action '{other}' (expected install|uninstall)"),
+    svc(ctx)?.install().await
+}
+
+/// [MUTATES STATE] Update orca on this host.
+/// Optionally pass `version` to switch channel or pin before applying:
+/// "stable" | "rc" | "dev" | "<semver>". "dev" tracks GitHub HEAD via
+/// cargo-watch. Omit to apply the latest on the current channel.
+/// When `peer_id` is set the update runs on the named peer instead of locally.
+#[orca_tool(domain = "system", verb = "update", remote_ok = true)]
+async fn system_update(
+    args: SystemUpdateArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<LifecycleReport> {
+    if let Some(ref peer_id) = args.peer_id {
+        let dispatch = pod_svc(ctx)?
+            .exec(
+                peer_id,
+                "system.update",
+                serde_json::json!({ "version": args.version }),
+            )
+            .await?;
+        return Ok(serde_json::from_value(dispatch.result)?);
     }
+    let s = svc(ctx)?;
+    if let Some(ref v) = args.version {
+        s.set_version(v).await?;
+    }
+    s.update_apply_current().await
+}
+
+/// [MUTATES STATE] Uninstall orca from this host: remove binary, MCP registration, and CLAUDE.md symlinks.
+#[orca_tool(domain = "system", verb = "delete")]
+async fn system_delete(
+    _args: EmptyDeleteArgs,
+    ctx: &orca_utils::tool::ToolCtx,
+) -> anyhow::Result<LifecycleReport> {
+    svc(ctx)?.uninstall().await
 }
 
 /// Validate agent files, symlinks, config, tool availability — returns ok/warn/error entries.
@@ -386,64 +351,6 @@ async fn system_diagnostic_list(
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<DoctorReport> {
     svc(ctx)?.doctor().await
-}
-
-/// Probe GitHub releases for a newer version on `channel`. Does not apply anything.
-/// When `peer_id` is set the probe runs on the named peer instead of locally.
-#[orca_tool(domain = "system.update", verb = "detail", remote_ok = true)]
-async fn system_update_detail(
-    args: SystemUpdateArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<UpdateCheckReport> {
-    if let Some(ref peer_id) = args.peer_id {
-        let dispatch = pod_svc(ctx)?
-            .exec(
-                peer_id,
-                "system.update.detail",
-                serde_json::json!({ "channel": args.channel }),
-            )
-            .await?;
-        return Ok(serde_json::from_value(dispatch.result)?);
-    }
-    svc(ctx)?.update_check(&args.channel).await
-}
-
-/// [MUTATES STATE] Download + install the latest binary on `channel`. No-op if up to date.
-/// When `peer_id` is set the update runs on the named peer instead of locally.
-#[orca_tool(domain = "system.update", verb = "create", remote_ok = true)]
-async fn system_update_create(
-    args: SystemUpdateArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<LifecycleReport> {
-    if let Some(ref peer_id) = args.peer_id {
-        let dispatch = pod_svc(ctx)?
-            .exec(
-                peer_id,
-                "system.update.create",
-                serde_json::json!({ "channel": args.channel }),
-            )
-            .await?;
-        return Ok(serde_json::from_value(dispatch.result)?);
-    }
-    svc(ctx)?.update_apply(&args.channel).await
-}
-
-/// [MUTATES STATE] Pin orca to a specific version. Future `orca update` runs will not upgrade past this version.
-#[orca_tool(domain = "system.update", verb = "update")]
-async fn system_update_update(
-    args: SystemUpdatePinArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<UpdatePinReport> {
-    svc(ctx)?.update_pin(&args.version).await
-}
-
-/// [MUTATES STATE] Clear the version pin. `orca update` will resume upgrading to the latest on the configured channel.
-#[orca_tool(domain = "system.update", verb = "delete")]
-async fn system_update_delete(
-    _args: EmptyDeleteArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<UpdatePinReport> {
-    svc(ctx)?.update_unpin().await
 }
 
 /// List projects (memory directories under the orca vault root).
@@ -467,40 +374,10 @@ async fn spec_detail(
 /// Report this binary's runtime composition: whether the web UI is embedded, build target triple. Used by installers to decide whether to fetch a JS runtime alongside the binary.
 #[orca_tool(domain = "system.runtime", verb = "detail", remote_ok = true)]
 async fn system_runtime_detail(
-    _args: SystemRuntimeSpecArgs,
+    _args: EmptyDeleteArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<RuntimeSpecReport> {
     svc(ctx)?.runtime_spec().await
-}
-
-/// Drive this host's dev mode. `action`:
-/// - `enable`: clone the orca repo if needed, start cargo watch, park the production daemon. Idempotent.
-/// - `disable`: stop cargo watch and let the production daemon reclaim the port.
-/// - `sync`: git pull in the dev checkout; cargo watch restarts automatically. No-op when dev mode is inactive.
-#[orca_tool(
-    domain = "system.dev",
-    verb = "update",
-    remote_ok = true,
-    role = "admin"
-)]
-async fn system_dev_update(
-    args: SystemDevUpdateArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<SystemDevUpdateOutput> {
-    let s = svc(ctx)?;
-    let mut out = SystemDevUpdateOutput {
-        action: args.action.clone(),
-        enable: None,
-        disable: None,
-        sync: None,
-    };
-    match args.action.as_str() {
-        "enable" => out.enable = Some(s.dev_enable().await?),
-        "disable" => out.disable = Some(s.dev_disable().await?),
-        "sync" => out.sync = Some(s.dev_sync().await?),
-        other => anyhow::bail!("unknown action '{other}' (expected enable|disable|sync)"),
-    }
-    Ok(out)
 }
 
 #[cfg(all(test, feature = "native"))]
@@ -515,7 +392,6 @@ mod tests {
 
     #[derive(Default)]
     struct StubLifecycle {
-        last_channel: Mutex<Option<String>>,
         last_version: Mutex<Option<String>>,
     }
 
@@ -544,35 +420,21 @@ mod tests {
                 }],
             })
         }
-        async fn update_check(&self, channel: &str) -> Result<UpdateCheckReport> {
-            *self.last_channel.lock().unwrap() = Some(channel.to_string());
-            Ok(UpdateCheckReport {
-                channel: channel.to_string(),
-                latest: Some("v9.9.9".into()),
-                up_to_date: false,
-                asset_url: None,
-                pinned_to: None,
-            })
+        async fn set_version(&self, version: &str) -> Result<()> {
+            *self.last_version.lock().unwrap() = Some(version.to_string());
+            Ok(())
         }
-        async fn update_apply(&self, channel: &str) -> Result<LifecycleReport> {
-            *self.last_channel.lock().unwrap() = Some(channel.to_string());
+        async fn update_apply_current(&self) -> Result<LifecycleReport> {
+            let v = self
+                .last_version
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| "stable".into());
             Ok(LifecycleReport {
-                done: vec![format!("update:{channel}")],
+                done: vec![format!("update:{v}")],
                 skipped: vec![],
                 errors: vec![],
-            })
-        }
-        async fn update_pin(&self, version: &str) -> Result<UpdatePinReport> {
-            *self.last_version.lock().unwrap() = Some(version.to_string());
-            Ok(UpdatePinReport {
-                pinned_to: Some(version.to_string()),
-                cleared: false,
-            })
-        }
-        async fn update_unpin(&self) -> Result<UpdatePinReport> {
-            Ok(UpdatePinReport {
-                pinned_to: None,
-                cleared: true,
             })
         }
         async fn projects_list(&self) -> Result<ProjectsListReport> {
@@ -594,26 +456,6 @@ mod tests {
                 system: None,
             })
         }
-        async fn dev_enable(&self) -> Result<SystemDevEnableOutput> {
-            Ok(SystemDevEnableOutput {
-                repo_path: "/tmp/orca".into(),
-                cloned: true,
-                daemon_parked: true,
-            })
-        }
-        async fn dev_disable(&self) -> Result<SystemDevDisableOutput> {
-            Ok(SystemDevDisableOutput {
-                dev_process_stopped: true,
-                daemon_reclaimed: true,
-            })
-        }
-        async fn dev_sync(&self) -> Result<SystemDevSyncOutput> {
-            Ok(SystemDevSyncOutput {
-                commits_pulled: 3,
-                already_up_to_date: false,
-                detail: "pulled".into(),
-            })
-        }
     }
 
     fn ctx_with_stub() -> (orca_utils::tool::ToolCtx, Arc<StubLifecycle>) {
@@ -624,49 +466,49 @@ mod tests {
         (ctx, stub)
     }
 
-    #[test]
-    fn default_channel_is_stable() {
-        assert_eq!(default_channel(), "stable");
-    }
-
-    fn lifecycle_args(action: &str) -> SystemLifecycleUpdateArgs {
-        SystemLifecycleUpdateArgs {
-            action: action.into(),
-        }
-    }
-
-    fn dev_args(action: &str) -> SystemDevUpdateArgs {
-        SystemDevUpdateArgs {
-            action: action.into(),
-        }
-    }
-
     #[tokio::test]
-    async fn lifecycle_install_forwards_to_service() {
+    async fn system_create_forwards_to_install() {
         let (ctx, _) = ctx_with_stub();
-        let r = system_lifecycle_update(lifecycle_args("install"), &ctx)
-            .await
-            .unwrap();
+        let r = system_create(EmptyDeleteArgs {}, &ctx).await.unwrap();
         assert_eq!(r.done, vec!["install".to_string()]);
     }
 
     #[tokio::test]
-    async fn lifecycle_uninstall_forwards_to_service() {
+    async fn system_delete_forwards_to_uninstall() {
         let (ctx, _) = ctx_with_stub();
-        let r = system_lifecycle_update(lifecycle_args("uninstall"), &ctx)
-            .await
-            .unwrap();
+        let r = system_delete(EmptyDeleteArgs {}, &ctx).await.unwrap();
         assert_eq!(r.done, vec!["uninstall".to_string()]);
     }
 
     #[tokio::test]
-    async fn lifecycle_rejects_unknown_action() {
+    async fn system_update_no_version_applies_current() {
         let (ctx, _) = ctx_with_stub();
-        assert!(
-            system_lifecycle_update(lifecycle_args("bogus"), &ctx)
-                .await
-                .is_err()
-        );
+        let r = system_update(
+            SystemUpdateArgs {
+                version: None,
+                peer_id: None,
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.done, vec!["update:stable".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn system_update_with_version_sets_then_applies() {
+        let (ctx, stub) = ctx_with_stub();
+        let r = system_update(
+            SystemUpdateArgs {
+                version: Some("rc".into()),
+                peer_id: None,
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.done, vec!["update:rc".to_string()]);
+        assert_eq!(stub.last_version.lock().unwrap().as_deref(), Some("rc"));
     }
 
     #[tokio::test]
@@ -677,38 +519,6 @@ mod tests {
             .unwrap();
         assert_eq!(r.entries.len(), 1);
         assert_eq!(r.entries[0].status, "ok");
-    }
-
-    #[tokio::test]
-    async fn update_detail_forwards_channel() {
-        let (ctx, stub) = ctx_with_stub();
-        let r = system_update_detail(
-            SystemUpdateArgs {
-                channel: "rc".into(),
-                peer_id: None,
-            },
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert_eq!(r.channel, "rc");
-        assert_eq!(stub.last_channel.lock().unwrap().as_deref(), Some("rc"));
-    }
-
-    #[tokio::test]
-    async fn update_create_forwards_channel() {
-        let (ctx, stub) = ctx_with_stub();
-        let r = system_update_create(
-            SystemUpdateArgs {
-                channel: "beta".into(),
-                peer_id: None,
-            },
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert_eq!(r.done, vec!["update:beta".to_string()]);
-        assert_eq!(stub.last_channel.lock().unwrap().as_deref(), Some("beta"));
     }
 
     // ── peer proxy tests ─────────────────────────────────────────────────────
@@ -781,21 +591,6 @@ mod tests {
         async fn set_self_secure(&self, on: bool) -> Result<bool> {
             Ok(on)
         }
-        async fn dev_sync(&self) -> Result<Vec<crate::pod::PodDevPeerResult>> {
-            Ok(vec![])
-        }
-        async fn dev_enable_fanout(
-            &self,
-            _peers: &[String],
-        ) -> Result<Vec<crate::pod::PodDevPeerResult>> {
-            Ok(vec![])
-        }
-        async fn dev_disable_fanout(
-            &self,
-            _peers: &[String],
-        ) -> Result<Vec<crate::pod::PodDevPeerResult>> {
-            Ok(vec![])
-        }
         #[allow(clippy::disallowed_types)]
         async fn exec(
             &self,
@@ -804,19 +599,11 @@ mod tests {
             args: serde_json::Value,
         ) -> Result<crate::pod::PodExecDispatch> {
             *self.last_exec.lock().unwrap() = Some((peer.into(), tool.into(), args.clone()));
-            let result = match tool {
-                "system.update.detail" => serde_json::json!({
-                    "channel": args["channel"],
-                    "latest": "v9.9.9",
-                    "up_to_date": false
-                }),
-                "system.update.create" => serde_json::json!({
-                    "done": [format!("update:{}", args["channel"].as_str().unwrap_or(""))],
-                    "skipped": [],
-                    "errors": []
-                }),
-                _ => serde_json::Value::Null,
-            };
+            let result = serde_json::json!({
+                "done": [format!("update:{}", args["version"].as_str().unwrap_or(""))],
+                "skipped": [],
+                "errors": []
+            });
             Ok(crate::pod::PodExecDispatch {
                 peer: peer.into(),
                 tool: tool.into(),
@@ -836,67 +623,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_detail_proxies_to_peer_when_peer_id_set() {
+    async fn system_update_proxies_to_peer_when_peer_id_set() {
         let (ctx, _, pod) = ctx_with_lifecycle_and_pod();
-        let r = system_update_detail(
+        let r = system_update(
             SystemUpdateArgs {
-                channel: "rc".into(),
+                version: Some("rc".into()),
                 peer_id: Some("peer.abc".into()),
             },
             &ctx,
         )
         .await
         .unwrap();
-        assert_eq!(r.channel, "rc");
-        assert!(!r.up_to_date);
+        assert_eq!(r.done, vec!["update:rc".to_string()]);
         let (peer, tool, args) = pod.last_exec.lock().unwrap().clone().unwrap();
         assert_eq!(peer, "peer.abc");
-        assert_eq!(tool, "system.update.detail");
-        assert_eq!(args["channel"], "rc");
-    }
-
-    #[tokio::test]
-    async fn update_create_proxies_to_peer_when_peer_id_set() {
-        let (ctx, _, pod) = ctx_with_lifecycle_and_pod();
-        let r = system_update_create(
-            SystemUpdateArgs {
-                channel: "stable".into(),
-                peer_id: Some("peer.xyz".into()),
-            },
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert_eq!(r.done, vec!["update:stable".to_string()]);
-        let (peer, tool, _) = pod.last_exec.lock().unwrap().clone().unwrap();
-        assert_eq!(peer, "peer.xyz");
-        assert_eq!(tool, "system.update.create");
-    }
-
-    #[tokio::test]
-    async fn update_update_forwards_version() {
-        let (ctx, stub) = ctx_with_stub();
-        let r = system_update_update(
-            SystemUpdatePinArgs {
-                version: "v1.2.3".into(),
-            },
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert_eq!(r.pinned_to.as_deref(), Some("v1.2.3"));
-        assert!(!r.cleared);
-        assert_eq!(stub.last_version.lock().unwrap().as_deref(), Some("v1.2.3"));
-    }
-
-    #[tokio::test]
-    async fn update_delete_clears() {
-        let (ctx, _) = ctx_with_stub();
-        let r = system_update_delete(EmptyDeleteArgs {}, &ctx)
-            .await
-            .unwrap();
-        assert!(r.cleared);
-        assert!(r.pinned_to.is_none());
+        assert_eq!(tool, "system.update");
+        assert_eq!(args["version"], "rc");
     }
 
     #[tokio::test]
@@ -914,54 +656,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_spec_returns_service_report() {
+    async fn runtime_detail_returns_service_report() {
         let (ctx, _) = ctx_with_stub();
-        let r = system_runtime_detail(SystemRuntimeSpecArgs {}, &ctx)
+        let r = system_runtime_detail(EmptyDeleteArgs {}, &ctx)
             .await
             .unwrap();
         assert_eq!(r.frontend, "disabled");
     }
 
     #[tokio::test]
-    async fn dev_update_enable_forwards_to_service() {
-        let (ctx, _) = ctx_with_stub();
-        let r = system_dev_update(dev_args("enable"), &ctx).await.unwrap();
-        let e = r.enable.expect("enable variant populated");
-        assert!(e.cloned);
-        assert!(e.daemon_parked);
-    }
-
-    #[tokio::test]
-    async fn dev_update_disable_forwards_to_service() {
-        let (ctx, _) = ctx_with_stub();
-        let r = system_dev_update(dev_args("disable"), &ctx).await.unwrap();
-        let d = r.disable.expect("disable variant populated");
-        assert!(d.dev_process_stopped);
-        assert!(d.daemon_reclaimed);
-    }
-
-    #[tokio::test]
-    async fn dev_update_sync_forwards_to_service() {
-        let (ctx, _) = ctx_with_stub();
-        let r = system_dev_update(dev_args("sync"), &ctx).await.unwrap();
-        let s = r.sync.expect("sync variant populated");
-        assert_eq!(s.commits_pulled, 3);
-    }
-
-    #[tokio::test]
-    async fn dev_update_rejects_unknown_action() {
-        let (ctx, _) = ctx_with_stub();
-        assert!(system_dev_update(dev_args("bogus"), &ctx).await.is_err());
-    }
-
-    #[tokio::test]
     async fn svc_errors_when_service_not_registered() {
         let ctx = empty_ctx();
-        let err = system_lifecycle_update(lifecycle_args("install"), &ctx)
-            .await
-            .err();
         assert!(
-            err.is_some(),
+            system_create(EmptyDeleteArgs {}, &ctx).await.is_err(),
             "expected error when LifecycleService missing"
         );
     }
