@@ -73,10 +73,12 @@ struct RequestOfferResult {
     expires_at: i64,
     #[serde(default)]
     inviter_display_name: Option<String>,
-    /// First 2 chars of the pairing code so the joiner can confirm visually
-    /// the inviter is the one that printed the matching prefix on its CLI.
     #[serde(default)]
     code_hint: Option<String>,
+    /// Plaintext pairing code — included when both sides are mDNS-verified LAN
+    /// peers so the joiner can auto-accept without out-of-band code entry.
+    #[serde(default)]
+    code_plain: Option<String>,
 }
 
 /// Signed payload pushed by the inviter. The signing key's fp identifies the
@@ -236,11 +238,19 @@ fn handle_offer(env: &SignedEnvelope, peer: std::net::SocketAddr) -> Result<Offe
         Some(&body.inviter_peer_id),
         Some(&body.pod_id),
         ttl,
+        body.code_plain.as_deref(),
     )?;
-    info!(
-        "[pod-bootstrap] received offer from {} ({}, {}@{}:{}); run `orca pod pending` to view",
-        body.inviter_hostname, body.inviter_peer_id, signer_fp, inviter_addr, body.inviter_port
-    );
+    if body.code_plain.is_some() {
+        info!(
+            "[pod-bootstrap] received auto-pair offer from {} ({}@{}:{})",
+            body.inviter_hostname, body.inviter_peer_id, inviter_addr, body.inviter_port
+        );
+    } else {
+        info!(
+            "[pod-bootstrap] received offer from {} ({}, {}@{}:{}); run `orca pod pending` to view",
+            body.inviter_hostname, body.inviter_peer_id, signer_fp, inviter_addr, body.inviter_port
+        );
+    }
     Ok(OfferAck { code_hint: None })
 }
 

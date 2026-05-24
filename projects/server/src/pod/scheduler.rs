@@ -85,6 +85,7 @@ async fn tick() -> Result<()> {
             Some(&inviter_peer_id),
             None,
             OFFER_TTL_SECS,
+            None,
         )?;
         drop(conn);
 
@@ -154,6 +155,10 @@ pub async fn push_offer(
         code_hash: String,
         expires_at: i64,
         inviter_display_name: &'a str,
+        /// Plaintext code — included so the joiner can auto-accept without
+        /// out-of-band code entry. Safe over the bootstrap TLS channel where
+        /// both sides verified each other's pubkey fingerprint via mDNS.
+        code_plain: &'a str,
     }
     let body = OfferBody {
         inviter_peer_id: &inviter_peer_id,
@@ -165,6 +170,7 @@ pub async fn push_offer(
         code_hash: pdb::hash_code(code),
         expires_at: now_secs() + OFFER_TTL_SECS,
         inviter_display_name: &inviter_hostname,
+        code_plain: code,
     };
     let env = pki::sign_envelope(&signing, &body)?;
 

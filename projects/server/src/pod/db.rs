@@ -168,13 +168,15 @@ pub fn insert_pending_offer(
     inviter_peer_id: Option<&str>,
     pod_id: Option<&str>,
     ttl_secs: i64,
+    code_plain: Option<&str>,
 ) -> Result<()> {
     let now = now_secs();
     conn.execute(
         "INSERT INTO pod_pending_offers
              (offer_id, direction, peer_pubkey_fp, peer_hostname, peer_addr, peer_port,
-              code_hash, mesh_ca_cert_pem, inviter_peer_id, pod_id, expires_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              code_hash, mesh_ca_cert_pem, inviter_peer_id, pod_id, expires_at, created_at,
+              code_plain)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             offer_id,
             direction,
@@ -188,6 +190,7 @@ pub fn insert_pending_offer(
             pod_id,
             now + ttl_secs,
             now,
+            code_plain,
         ],
     )?;
     Ok(())
@@ -239,7 +242,8 @@ pub fn find_pending_offer_by_code_any_expiry(
     let row = conn
         .query_row(
             "SELECT offer_id, direction, peer_pubkey_fp, peer_hostname, peer_addr, peer_port,
-                    code_hash, mesh_ca_cert_pem, inviter_peer_id, pod_id, expires_at, created_at
+                    code_hash, mesh_ca_cert_pem, inviter_peer_id, pod_id, expires_at, created_at,
+                    code_plain
              FROM pod_pending_offers
              WHERE direction = 'in' AND code_hash = ?",
             params![code_hash],
@@ -257,6 +261,7 @@ pub fn find_pending_offer_by_code_any_expiry(
                     pod_id: r.get(9)?,
                     expires_at: r.get(10)?,
                     created_at: r.get(11)?,
+                    code_plain: r.get(12)?,
                 })
             },
         )
@@ -270,7 +275,8 @@ pub fn find_pending_offer_by_code(conn: &Connection, code: &str) -> Result<Optio
     let row = conn
         .query_row(
             "SELECT offer_id, direction, peer_pubkey_fp, peer_hostname, peer_addr, peer_port,
-                    code_hash, mesh_ca_cert_pem, inviter_peer_id, pod_id, expires_at, created_at
+                    code_hash, mesh_ca_cert_pem, inviter_peer_id, pod_id, expires_at, created_at,
+                    code_plain
              FROM pod_pending_offers
              WHERE direction = 'in' AND code_hash = ? AND expires_at >= ?",
             params![code_hash, now],
@@ -288,6 +294,7 @@ pub fn find_pending_offer_by_code(conn: &Connection, code: &str) -> Result<Optio
                     pod_id: r.get(9)?,
                     expires_at: r.get(10)?,
                     created_at: r.get(11)?,
+                    code_plain: r.get(12).unwrap_or(None),
                 })
             },
         )
@@ -307,7 +314,8 @@ pub fn find_outbound_offer_by_code_and_fp(
     let row = conn
         .query_row(
             "SELECT offer_id, direction, peer_pubkey_fp, peer_hostname, peer_addr, peer_port,
-                    code_hash, mesh_ca_cert_pem, inviter_peer_id, pod_id, expires_at, created_at
+                    code_hash, mesh_ca_cert_pem, inviter_peer_id, pod_id, expires_at, created_at,
+                    code_plain
              FROM pod_pending_offers
              WHERE direction = 'out'
                AND code_hash = ?
@@ -328,6 +336,7 @@ pub fn find_outbound_offer_by_code_and_fp(
                     pod_id: r.get(9)?,
                     expires_at: r.get(10)?,
                     created_at: r.get(11)?,
+                    code_plain: r.get(12).unwrap_or(None),
                 })
             },
         )
