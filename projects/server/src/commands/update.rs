@@ -378,15 +378,27 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
         return Ok(None);
     }
 
-    let asset_name = format!("{APP_NAME}-{BUILD_TARGET}");
-    let checksum_name = format!("{asset_name}.sha256");
+    // Release-asset naming schemes accepted, in order of preference:
+    //   1. versioned   — `orca-0.0.4-x86_64-unknown-linux-gnu` (current pipeline, v0.0.4+)
+    //   2. legacy      — `orca-x86_64-unknown-linux-gnu`       (pipeline ≤ v0.0.3)
+    // Try versioned first so a re-issued release that includes both still
+    // resolves to the canonical name.
+    let versioned_name = format!("{APP_NAME}-{latest}-{BUILD_TARGET}");
+    let legacy_name = format!("{APP_NAME}-{BUILD_TARGET}");
 
-    let asset_url = release
+    let asset = release
         .assets
         .iter()
-        .find(|a| a.name == asset_name)
-        .map(|a| a.url.clone())
-        .with_context(|| format!("no asset '{asset_name}' in release {}", release.tag_name))?;
+        .find(|a| a.name == versioned_name)
+        .or_else(|| release.assets.iter().find(|a| a.name == legacy_name))
+        .with_context(|| {
+            format!(
+                "no asset '{versioned_name}' or '{legacy_name}' in release {}",
+                release.tag_name
+            )
+        })?;
+    let checksum_name = format!("{}.sha256", asset.name);
+    let asset_url = asset.url.clone();
 
     let checksum_url = release
         .assets

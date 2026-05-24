@@ -324,6 +324,14 @@ stage_target_asset() {
       ;;
   esac
   ( cd "$DIST_DIR" && shasum -a 256 "$asset" > "${asset}.sha256" )
+
+  # Legacy unversioned alias (`orca-<target>` + `.sha256`). Hosts on a binary
+  # built before commands/update.rs learned the versioned naming look up the
+  # unversioned form. Keep shipping both until the entire fleet is past v0.0.4;
+  # remove this block after that point.
+  local legacy="orca-${target}"
+  cp "${DIST_DIR}/${asset}" "${DIST_DIR}/${legacy}"
+  ( cd "$DIST_DIR" && shasum -a 256 "$legacy" > "${legacy}.sha256" )
 }
 
 # Compile + stage. The unit of work for one matrix runner in CI and for one
@@ -417,12 +425,16 @@ build_orca_targets() {
 }
 
 # Print asset paths for `gh release create`. Args: target1 target2 ...
+# Emits both the versioned and legacy unversioned aliases (see stage_target_asset
+# for the transition rationale).
 release_asset_paths() {
   local version t
   version="$(current_cargo_version)"
   for t in "$@"; do
     echo "${DIST_DIR}/orca-${version}-${t}"
     echo "${DIST_DIR}/orca-${version}-${t}.sha256"
+    echo "${DIST_DIR}/orca-${t}"
+    echo "${DIST_DIR}/orca-${t}.sha256"
   done
 }
 
