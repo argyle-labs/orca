@@ -15,9 +15,10 @@ RUSTFLAGS="-D warnings" cargo clippy --tests -- -D warnings
 echo "==> cargo test"
 cargo test
 
-echo "==> coverage gate (mirrors CI ci.yml: coverage-rust)"
-# Floor must match .github/workflows/ci.yml. Raise both together; never lower.
-cargo llvm-cov --workspace --no-fail-fast --fail-under-lines 51
+# Coverage gate removed from pre-push 2026-05-24 — `cargo llvm-cov` adds
+# ~3-4 min of instrumentation overhead on every push and is already enforced
+# in CI (.github/workflows/ci.yml: coverage-rust). For the inner dev loop,
+# use `./scripts/check-fast.sh` (fmt+clippy+tests scoped to changed crates).
 
 echo "==> frontend check"
 cd "$ROOT/projects/frontend"

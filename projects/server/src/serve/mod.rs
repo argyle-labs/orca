@@ -604,6 +604,9 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
     std::mem::drop(crate::pod::cert_rotation::spawn());
     info!("[pod] cert-rotation scheduler armed (daily)");
 
+    std::mem::drop(crate::pod::roster_sync::spawn());
+    info!("[pod] roster-sync armed (60s) — auto-fills pod_peers from any paired peer");
+
     std::mem::drop(crate::host_identity::spawn_refresh_task());
     info!("[host-addressing] refresh task armed (5m)");
 }
