@@ -18,12 +18,6 @@ use orca_tools_def::orca_lifecycle::SystemInfoReport;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-/// Fallback cadence used at first tick (before [`subscribe_demand`] has
-/// observed any heartbeats). Once the daemon is running the cadence is
-/// adaptive: fast while any peer's UI is watching this host, slow
-/// otherwise. See `crate::pod::subscribe_demand`.
-const PERSIST_INTERVAL: Duration = Duration::from_secs(10);
-
 /// How often the sync puller asks each peer for new status rows. Matches
 /// the persist cadence — pulling more often than peers write just burns
 /// the network.
