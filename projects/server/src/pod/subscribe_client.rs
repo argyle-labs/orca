@@ -27,8 +27,8 @@ pub async fn dial_subscribe_host_status(
     topic_peer_id: &str,
     tx: mpsc::Sender<HostStatusEvent>,
 ) -> Result<()> {
-    let mut tls = super::connect_pod_tls(host).await?;
-    subscribe_wire::run_client(&mut tls, topic_peer_id, tx).await
+    let tls = super::connect_pod_tls(host).await?;
+    subscribe_wire::run_client(tls, topic_peer_id, tx).await
 }
 
 /// Backoff schedule for the reconnect loop. Capped so a long-dead peer

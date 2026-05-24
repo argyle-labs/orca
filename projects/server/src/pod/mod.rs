@@ -25,6 +25,7 @@ pub mod mdns;
 pub mod scheduler;
 pub mod subscribe;
 pub mod subscribe_client;
+pub mod subscribe_demand;
 pub mod subscribe_wire;
 
 pub use bootstrap::handle_pod_bootstrap_connection;

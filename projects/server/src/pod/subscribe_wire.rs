@@ -23,14 +23,22 @@ use orca_sdk::framing::{read_frame, write_frame};
 use orca_sdk::jsonrpc::{ErrorObject, Message, Notification, Request, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 
 use super::subscribe::{HostStatusEvent, subscribe_host_status};
+use super::subscribe_demand;
 
 pub const METHOD: &str = "pod/subscribe";
 pub const EVENT_METHOD: &str = "pod/subscribe.event";
+pub const HEARTBEAT_METHOD: &str = "pod/subscribe.heartbeat";
+
+/// Client-side cadence for heartbeat frames. Sized to land well inside
+/// the server's [`subscribe_demand::DEMAND_WINDOW`] so a single dropped
+/// heartbeat doesn't flip the publisher into slow mode.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SubscribeParams {
@@ -68,13 +76,17 @@ pub fn parse_host_status_topic(topic: &str) -> Result<&str> {
 }
 
 /// Server-side session: read the subscribe request, validate that the
-/// requested topic is owned by this daemon, then forward matching bus
-/// events as Notifications until either side closes.
-pub async fn serve_session<S>(stream: &mut S, own_peer_id: &str) -> Result<()>
+/// requested topic is owned by this daemon, then bidirectionally forward
+/// matching bus events as Notifications while processing client
+/// heartbeats. Takes the stream by value so [`tokio::io::split`] can be
+/// applied for the bidirectional phase.
+pub async fn serve_session<S>(mut stream: S, own_peer_id: &str) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let raw = read_frame(stream).await.context("read subscribe request")?;
+    let raw = read_frame(&mut stream)
+        .await
+        .context("read subscribe request")?;
     let msg: Message = serde_json::from_slice(&raw).context("parse subscribe request")?;
     let request = match msg {
         Message::Request(r) => r,
@@ -89,7 +101,7 @@ where
 /// frame as a `Request` (e.g. the pod listener dispatcher, which peeks the
 /// method to decide whether to take the streaming path).
 pub async fn serve_session_with_request<S>(
-    stream: &mut S,
+    mut stream: S,
     request: Request,
     own_peer_id: &str,
 ) -> Result<()>
@@ -103,7 +115,7 @@ where
         Err(e) => {
             let resp = Response::err(id, ErrorObject::invalid_params(&e.to_string()));
             let bytes = serde_json::to_vec(&resp).context("serialize error response")?;
-            let _ = write_frame(stream, &bytes).await;
+            let _ = write_frame(&mut stream, &bytes).await;
             return Err(e);
         }
     };
@@ -114,36 +126,59 @@ where
     let ok_value = serde_json::to_value(&ok).context("serialize SubscribeOk value")?;
     let resp = Response::ok(id, ok_value);
     let bytes = serde_json::to_vec(&resp).context("serialize SubscribeOk frame")?;
-    write_frame(stream, &bytes)
+    write_frame(&mut stream, &bytes)
         .await
         .context("write SubscribeOk")?;
 
+    let (mut read_half, mut write_half) = tokio::io::split(stream);
     let mut rx = subscribe_host_status();
     loop {
-        match rx.recv().await {
-            Ok(ev) => {
-                if ev.peer_id != topic_peer_id {
-                    // Bus is global; other producers' events get filtered out.
-                    continue;
+        tokio::select! {
+            ev = rx.recv() => match ev {
+                Ok(ev) => {
+                    if ev.peer_id != topic_peer_id {
+                        // Bus is global; filter out other producers.
+                        continue;
+                    }
+                    let frame = EventFrame {
+                        peer_id: ev.peer_id,
+                        snapshot_at_unix: ev.snapshot_at_unix,
+                        payload: ev.payload,
+                    };
+                    let params_value =
+                        serde_json::to_value(&frame).context("serialize EventFrame")?;
+                    let notif = Notification::new(EVENT_METHOD, Some(params_value));
+                    let nbytes = serde_json::to_vec(&notif).context("serialize event notif")?;
+                    if write_frame(&mut write_half, &nbytes).await.is_err() {
+                        return Ok(());
+                    }
                 }
-                let frame = EventFrame {
-                    peer_id: ev.peer_id,
-                    snapshot_at_unix: ev.snapshot_at_unix,
-                    payload: ev.payload,
-                };
-                let params_value = serde_json::to_value(&frame).context("serialize EventFrame")?;
-                let notif = Notification::new(EVENT_METHOD, Some(params_value));
-                let nbytes = serde_json::to_vec(&notif).context("serialize event notif")?;
-                if write_frame(stream, &nbytes).await.is_err() {
-                    return Ok(());
+                Err(RecvError::Lagged(n)) => {
+                    tracing::warn!("pod/subscribe session lagged by {n} events; continuing");
                 }
-            }
-            Err(RecvError::Lagged(n)) => {
-                tracing::warn!("pod/subscribe session lagged by {n} events; continuing");
-            }
-            Err(RecvError::Closed) => return Ok(()),
+                Err(RecvError::Closed) => return Ok(()),
+            },
+            frame = read_frame(&mut read_half) => match frame {
+                Ok(bytes) => {
+                    if is_heartbeat_frame(&bytes) {
+                        subscribe_demand::touch();
+                    }
+                    // Silently ignore non-heartbeat client frames.
+                }
+                Err(_) => return Ok(()), // client closed
+            },
         }
     }
+}
+
+/// True iff the bytes parse as a `Notification` whose method is
+/// [`HEARTBEAT_METHOD`]. Bad/unrelated frames silently return false so
+/// the server treats unknown traffic as "ignore, but don't disconnect".
+pub fn is_heartbeat_frame(bytes: &[u8]) -> bool {
+    matches!(
+        serde_json::from_slice::<Message>(bytes),
+        Ok(Message::Notification(n)) if n.method == HEARTBEAT_METHOD
+    )
 }
 
 /// Validate a subscribe Request and return the topic's peer_id.
@@ -167,15 +202,16 @@ fn validate_subscribe(request: &Request, own_peer_id: &str) -> Result<String> {
 }
 
 /// Client-side: send the subscribe request, await the ack, then forward
-/// streamed events into `tx`. Exits cleanly when the consumer drops `tx`
-/// or the server closes the stream.
+/// streamed events into `tx` while a background task sends heartbeats at
+/// [`HEARTBEAT_INTERVAL`]. Exits cleanly when the consumer drops `tx` or
+/// the server closes the stream; the heartbeat task is aborted on exit.
 pub async fn run_client<S>(
-    stream: &mut S,
+    mut stream: S,
     topic_peer_id: &str,
     tx: mpsc::Sender<HostStatusEvent>,
 ) -> Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let params = SubscribeParams {
         topic: host_status_topic(topic_peer_id),
@@ -183,11 +219,13 @@ where
     let params_value = serde_json::to_value(&params).context("serialize SubscribeParams")?;
     let req = Request::new(1, METHOD, Some(params_value));
     let bytes = serde_json::to_vec(&req).context("serialize subscribe request")?;
-    write_frame(stream, &bytes)
+    write_frame(&mut stream, &bytes)
         .await
         .context("write subscribe request")?;
 
-    let raw = read_frame(stream).await.context("read subscribe ack")?;
+    let raw = read_frame(&mut stream)
+        .await
+        .context("read subscribe ack")?;
     let msg: Message = serde_json::from_slice(&raw).context("parse subscribe ack")?;
     let response = match msg {
         Message::Response(r) => r,
@@ -197,8 +235,39 @@ where
         anyhow::bail!("subscribe rejected: {}", err.message);
     }
 
+    let (mut read_half, write_half) = tokio::io::split(stream);
+    let heartbeat_task = tokio::spawn(send_heartbeats(write_half, HEARTBEAT_INTERVAL));
+
+    let result = run_event_loop(&mut read_half, tx).await;
+    heartbeat_task.abort();
+    result
+}
+
+/// Background task: send a heartbeat notification every `interval` until
+/// the write half errors (server closed) or the task is aborted.
+async fn send_heartbeats<W>(mut write_half: W, interval: Duration)
+where
+    W: AsyncWrite + Unpin,
+{
+    let notif = Notification::new(HEARTBEAT_METHOD, None);
+    let bytes = match serde_json::to_vec(&notif) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
     loop {
-        let raw = match read_frame(stream).await {
+        tokio::time::sleep(interval).await;
+        if write_frame(&mut write_half, &bytes).await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn run_event_loop<R>(read_half: &mut R, tx: mpsc::Sender<HostStatusEvent>) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+{
+    loop {
+        let raw = match read_frame(read_half).await {
             Ok(r) => r,
             Err(_) => return Ok(()),
         };
@@ -376,9 +445,9 @@ mod tests {
 
         let server = tokio::spawn(async move {
             // own_peer_id mismatches the client's request → rejection.
-            serve_session(&mut server_io, "peer.server-owns-this").await
+            serve_session(server_io, "peer.server-owns-this").await
         });
-        let client_err = run_client(&mut client_io, "peer.something-else", tx)
+        let client_err = run_client(client_io, "peer.something-else", tx)
             .await
             .expect_err("client should see rejection");
         assert!(
@@ -399,7 +468,7 @@ mod tests {
         let notif = Notification::new("pod/ping", None);
         let bytes = serde_json::to_vec(&notif).unwrap();
         write_frame(&mut client_io, &bytes).await.unwrap();
-        let err = serve_session(&mut server_io, "peer.any").await.unwrap_err();
+        let err = serve_session(server_io, "peer.any").await.unwrap_err();
         assert!(err.to_string().contains("first frame must be a Request"));
     }
 
@@ -432,7 +501,7 @@ mod tests {
                 .unwrap();
         });
 
-        let err = run_client(&mut client_io, "peer.bad-payload", tx)
+        let err = run_client(client_io, "peer.bad-payload", tx)
             .await
             .expect_err("expected EventFrame parse error");
         assert!(err.to_string().contains("EventFrame"), "got: {err}");
@@ -466,7 +535,7 @@ mod tests {
                 .unwrap();
         });
 
-        let err = run_client(&mut client_io, "peer.no-params", tx)
+        let err = run_client(client_io, "peer.no-params", tx)
             .await
             .expect_err("expected EventFrame parse error from Null");
         assert!(err.to_string().contains("EventFrame"), "got: {err}");
@@ -497,7 +566,7 @@ mod tests {
             write_frame(&mut server_io, b"not json").await.unwrap();
         });
 
-        let err = run_client(&mut client_io, "peer.garbage", tx)
+        let err = run_client(client_io, "peer.garbage", tx)
             .await
             .expect_err("expected parse error");
         assert!(err.to_string().contains("parse event frame"), "got: {err}");
@@ -519,7 +588,7 @@ mod tests {
             write_frame(&mut server_io, &bytes).await.unwrap();
         });
 
-        let err = run_client(&mut client_io, "peer.x", tx).await.unwrap_err();
+        let err = run_client(client_io, "peer.x", tx).await.unwrap_err();
         assert!(err.to_string().contains("expected Response ack"));
         let _ = server.await;
     }
@@ -574,7 +643,7 @@ mod tests {
         });
 
         let client = tokio::spawn(async move {
-            let _ = run_client(&mut client_io, "peer.skip-test", tx).await;
+            let _ = run_client(client_io, "peer.skip-test", tx).await;
         });
 
         let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())
