@@ -293,7 +293,10 @@ where
 }
 
 #[cfg(test)]
+#[allow(unused_mut)]
 mod tests {
+    // `unused_mut` is allowed because several duplex bindings need `mut` only
+    // inside a `tokio::spawn`-moved closure; clippy can't see across the move.
     use super::*;
     use crate::pod::subscribe::publish_host_status;
     use std::time::Duration;
@@ -376,6 +379,29 @@ mod tests {
     }
 
     #[test]
+    fn is_heartbeat_frame_recognizes_heartbeat_notification() {
+        let bytes = serde_json::to_vec(&Notification::new(HEARTBEAT_METHOD, None)).unwrap();
+        assert!(is_heartbeat_frame(&bytes));
+    }
+
+    #[test]
+    fn is_heartbeat_frame_rejects_other_notifications() {
+        let bytes = serde_json::to_vec(&Notification::new("pod/something.else", None)).unwrap();
+        assert!(!is_heartbeat_frame(&bytes));
+    }
+
+    #[test]
+    fn is_heartbeat_frame_rejects_non_notifications() {
+        let bytes = serde_json::to_vec(&Request::new(1, HEARTBEAT_METHOD, None)).unwrap();
+        assert!(!is_heartbeat_frame(&bytes));
+    }
+
+    #[test]
+    fn is_heartbeat_frame_rejects_garbage() {
+        assert!(!is_heartbeat_frame(b"not json at all"));
+    }
+
+    #[test]
     fn validate_accepts_matching_topic() {
         let r = req(
             METHOD,
@@ -391,18 +417,16 @@ mod tests {
     #[tokio::test]
     async fn end_to_end_subscribe_streams_matching_events() {
         let own = "peer.e2e-happy";
-        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (mut client_io, mut server_io) = tokio::io::duplex(64 * 1024);
         let (tx, mut rx) = mpsc::channel::<HostStatusEvent>(8);
 
         let own_for_server = own.to_string();
         let server = tokio::spawn(async move {
-            let mut s = server_io;
-            let _ = serve_session(&mut s, &own_for_server).await;
+            let _ = serve_session(server_io, &own_for_server).await;
         });
         let own_for_client = own.to_string();
         let client = tokio::spawn(async move {
-            let mut c = client_io;
-            let _ = run_client(&mut c, &own_for_client, tx).await;
+            let _ = run_client(client_io, &own_for_client, tx).await;
         });
 
         // Let the handshake (subscribe → ack) complete before publishing.
@@ -433,6 +457,59 @@ mod tests {
         // the duplex makes serve_session's next write fail and exit.
         drop(rx);
         let _ = tokio::time::timeout(Duration::from_secs(2), client).await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
+    }
+
+    /// End-to-end: client's auto-heartbeat reaches the server. Drive the
+    /// loop with a short heartbeat interval so we don't have to wait 5s.
+    #[tokio::test]
+    async fn server_observes_client_heartbeats() {
+        let own = "peer.e2e-heartbeat";
+        let (mut client_io, mut server_io) = tokio::io::duplex(64 * 1024);
+        let (tx, _rx) = mpsc::channel::<HostStatusEvent>(8);
+
+        let own_for_server = own.to_string();
+        let server = tokio::spawn(async move {
+            let _ = serve_session(server_io, &own_for_server).await;
+        });
+        // Manually drive the subscribe handshake on the client side, then
+        // inject a heartbeat frame so the test doesn't have to wait for
+        // the production 5s interval.
+        let driver = tokio::spawn(async move {
+            let mut s = client_io;
+            // Subscribe.
+            let req = Request::new(
+                1,
+                METHOD,
+                Some(subscribe_params_value("host:peer.e2e-heartbeat:status")),
+            );
+            write_frame(&mut s, &serde_json::to_vec(&req).unwrap())
+                .await
+                .unwrap();
+            // Read ack.
+            let _ = read_frame(&mut s).await.unwrap();
+            // Send a single heartbeat.
+            let hb = Notification::new(HEARTBEAT_METHOD, None);
+            write_frame(&mut s, &serde_json::to_vec(&hb).unwrap())
+                .await
+                .unwrap();
+            // Keep the connection open briefly so the server has time to
+            // observe and touch the demand counter.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            s
+        });
+
+        let before = crate::pod::subscribe_demand::heartbeats_seen();
+        let _client_io = driver.await.unwrap();
+        // Give the server task a tick to process the heartbeat.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let after = crate::pod::subscribe_demand::heartbeats_seen();
+        assert!(
+            after > before,
+            "expected heartbeats_seen to advance; before={before} after={after}"
+        );
+
+        drop(tx);
         let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
     }
 

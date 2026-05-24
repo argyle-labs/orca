@@ -18,9 +18,10 @@ use orca_tools_def::orca_lifecycle::SystemInfoReport;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-/// How often each host persists its own snapshot. Decoupled from the
-/// in-memory cache cadence so client polls stay snappy without bloating
-/// the DB.
+/// Fallback cadence used at first tick (before [`subscribe_demand`] has
+/// observed any heartbeats). Once the daemon is running the cadence is
+/// adaptive: fast while any peer's UI is watching this host, slow
+/// otherwise. See `crate::pod::subscribe_demand`.
 const PERSIST_INTERVAL: Duration = Duration::from_secs(10);
 
 /// How often the sync puller asks each peer for new status rows. Matches
@@ -47,7 +48,12 @@ pub fn spawn_local_writer() {
             if let Err(e) = persist_local_snapshot().await {
                 tracing::warn!("host_status local writer: {e:#}");
             }
-            tokio::time::sleep(PERSIST_INTERVAL).await;
+            let next = crate::pod::subscribe_demand::choose_cadence(
+                crate::pod::subscribe_demand::is_live(),
+                crate::pod::subscribe_demand::FAST_CADENCE,
+                crate::pod::subscribe_demand::SLOW_CADENCE,
+            );
+            tokio::time::sleep(next).await;
         }
     });
 }
