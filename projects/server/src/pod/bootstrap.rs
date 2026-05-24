@@ -399,6 +399,11 @@ fn handle_request_offer(
     let code_hash = pdb::hash_code(&code);
     let offer_id = Uuid::now_v7().to_string();
     let expires_at = now_secs() + crate::pod::scheduler::OFFER_TTL_SECS;
+    // Persist the inviter's own peer_id on the pending offer so the matching
+    // `pod/join-confirm` step can echo it back to the joiner. Without this
+    // the joiner records the inviter as `"unknown"` and roster-sync skips
+    // every row that references it.
+    let inviter_peer_id = format!("peer.{}", crate::host_identity::machine_id_short());
     pdb::insert_pending_offer(
         &conn,
         &offer_id,
@@ -409,7 +414,7 @@ fn handle_request_offer(
         peer.port(),
         &code_hash,
         None,
-        None,
+        Some(&inviter_peer_id),
         None,
         crate::pod::scheduler::OFFER_TTL_SECS,
         None,
