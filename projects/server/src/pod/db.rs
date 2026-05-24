@@ -148,6 +148,10 @@ pub struct PendingOffer {
     pub pod_id: Option<String>,
     pub expires_at: i64,
     pub created_at: i64,
+    /// Plaintext pairing code — present on inbound offers when the inviter
+    /// included it (mDNS-verified LAN peers). Allows auto-accept without
+    /// out-of-band code entry.
+    pub code_plain: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -193,7 +197,8 @@ pub fn list_pending_offers(conn: &Connection, direction: &str) -> Result<Vec<Pen
     let now = now_secs();
     let mut stmt = conn.prepare(
         "SELECT offer_id, direction, peer_pubkey_fp, peer_hostname, peer_addr, peer_port,
-                code_hash, mesh_ca_cert_pem, inviter_peer_id, pod_id, expires_at, created_at
+                code_hash, mesh_ca_cert_pem, inviter_peer_id, pod_id, expires_at, created_at,
+                code_plain
          FROM pod_pending_offers
          WHERE direction = ? AND expires_at >= ?
          ORDER BY created_at DESC",
@@ -212,6 +217,7 @@ pub fn list_pending_offers(conn: &Connection, direction: &str) -> Result<Vec<Pen
             pod_id: r.get(9)?,
             expires_at: r.get(10)?,
             created_at: r.get(11)?,
+            code_plain: r.get(12)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
