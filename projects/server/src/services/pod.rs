@@ -529,12 +529,21 @@ fn enrich_from_local_db(base: &mut PodPeerDto, latest: &db::host_status::HostSta
     base.latency_ms = Some(u32::try_from(age).unwrap_or(u32::MAX));
 }
 
+/// Canonical peer-id for the local host. Mirrors the value the listener
+/// publishes in its mTLS CN and on the wire (`peer.<machine_id_short>`), so
+/// any DB row matching this id is unambiguously a self-reference (e.g. mDNS
+/// discovered us at our own LAN IP and stub'd us in via `ensure_peer_stub`).
+pub fn local_peer_id() -> String {
+    format!("peer.{}", crate::host_identity::machine_id_short())
+}
+
 /// Read pod_peers + local host_status; merge into enriched DTOs.
 /// No RPC fanout — every cross-host field comes from the locally-mirrored
 /// status table, which the sync puller keeps fresh in the background.
 async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
+    let own = local_peer_id();
     let (active, inactive, status_by_peer) =
-        tokio::task::spawn_blocking(|| -> Result<(_, _, _)> {
+        tokio::task::spawn_blocking(move || -> Result<(_, _, _)> {
             let conn = db::open_default()?;
             let peers = db::pod::list_peers(&conn)?;
             let status_rows = db::host_status::latest_per_peer(&conn)?;
@@ -543,8 +552,14 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
             for r in status_rows {
                 map.insert(r.peer_id.clone(), r);
             }
+            // Drop any DB row that points back at THIS host — the synthetic
+            // local_peer_row() (pushed below) is the canonical local entry,
+            // and a stub'd self-row would render as a duplicate card in the
+            // dashboard. Filter at read time so we don't depend on the
+            // insert paths having been corrected yet.
             let (active, inactive): (Vec<PodPeerDto>, Vec<PodPeerDto>) = peers
                 .into_iter()
+                .filter(|p| p.peer_id != own)
                 .map(PodPeerDto::from)
                 .partition(|p| p.status == "active");
             Ok((active, inactive, map))

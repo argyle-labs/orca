@@ -22,6 +22,7 @@ pub mod dispatcher;
 pub mod host_status_replica;
 mod listener;
 pub mod mdns;
+pub mod roster_sync;
 pub mod scheduler;
 pub mod subscribe;
 pub mod subscribe_client;
