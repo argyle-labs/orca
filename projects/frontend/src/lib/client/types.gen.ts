@@ -812,16 +812,6 @@ export type PluginToolInfo = {
   sensitivity: string;
 };
 
-export type PodDevPeerResult = {
-  detail?: string | null;
-  hostname: string;
-  peer_id: string;
-  /**
-   * Action-dependent: "synced"|"skipped"|"enabled"|"disabled"|"error"
-   */
-  status: string;
-};
-
 export type PodDiscoveryRowDto = {
   addr: string;
   can_invite: boolean;
@@ -1344,53 +1334,6 @@ export type SystemActionResponse = {
   skipped: Array<string>;
 };
 
-export type SystemDevDisableOutput = {
-  /**
-   * Whether the production daemon reclaimed the port.
-   */
-  daemon_reclaimed: boolean;
-  /**
-   * Whether the dev process was running and was killed.
-   */
-  dev_process_stopped: boolean;
-};
-
-export type SystemDevEnableOutput = {
-  /**
-   * Whether the repo was freshly cloned (true) or already present (false).
-   */
-  cloned: boolean;
-  /**
-   * Whether the production daemon was parked as part of this call.
-   */
-  daemon_parked: boolean;
-  /**
-   * Path to the git checkout used as the dev source.
-   */
-  repo_path: string;
-};
-
-export type SystemDevSyncOutput = {
-  /**
-   * Whether the repo was already up to date.
-   */
-  already_up_to_date: boolean;
-  /**
-   * Number of commits pulled.
-   */
-  commits_pulled: number;
-  /**
-   * Raw output from git pull for diagnostics.
-   */
-  detail: string;
-};
-
-export type SystemDevSyncResponse = {
-  already_up_to_date: boolean;
-  commits_pulled: number;
-  detail: string;
-};
-
 /**
  * Cross-platform OS / hardware / process / network snapshot. Every field
  * is optional so the same shape works on macOS, Linux, and (eventually)
@@ -1409,6 +1352,14 @@ export type SystemInfoReport = {
    */
   cpu_usage_percent?: number | null;
   /**
+   * Capabilities the detector observed on this host (e.g. `"docker"`,
+   * `"vm-host"`, `"lxc-host"`, `"backup-target"`, `"gpu-nvidia"`).
+   * Empty when none were detected. Compared against
+   * `expected_capabilities(system_type)` (a static table in the
+   * server crate) to produce anomaly badges in the UI.
+   */
+  detected_capabilities?: Array<string>;
+  /**
    * Linux distro long name (`Ubuntu 24.04.2 LTS`). `None` on macOS.
    */
   distro?: string | null;
@@ -1420,6 +1371,11 @@ export type SystemInfoReport = {
    * DMI system vendor (`QEMU`, `Dell Inc.`, `LENOVO`, ...). Linux-only.
    */
   dmi_vendor?: string | null;
+  /**
+   * **Deprecated** — folded into `detected_capabilities` as the `"docker"`
+   * entry. Kept for one release so older UIs don't blank out; remove
+   * after the host-drawer redesign (Slice 5) ships.
+   */
   docker_present?: boolean | null;
   fqdn?: string | null;
   /**
@@ -1457,6 +1413,11 @@ export type SystemInfoReport = {
    * `/etc/pve/` (pmxcfs) is mounted, `"guest"` when the inference
    * layer matches this VM's MAC to a PVE host's tap interface,
    * otherwise `None`. NEVER set by user config.
+   *
+   * **Deprecated** — folded into `system_type` (a value of `"proxmox-ve"`
+   * replaces the previous `proxmox_role == "host"` signal). Kept for one
+   * release so older UIs don't blank out; remove after the host-drawer
+   * redesign (Slice 5) ships.
    */
   proxmox_role?: string | null;
   /**
@@ -1467,6 +1428,15 @@ export type SystemInfoReport = {
   snapshot_at_unix?: number | null;
   swap_total_mb?: number | null;
   swap_used_mb?: number | null;
+  /**
+   * Canonical system-type tag for this host. Exactly one value per host.
+   * Drives expected-capability lookup and service-discovery class
+   * selection. Values: `"unraid"`, `"proxmox-ve"`,
+   * `"proxmox-backup-server"`, `"macos"`, `"debian"`, `"alpine"`,
+   * `"nixos"`, `"truenas-scale"`, `"truenas-core"`, `"linux"` (fallback).
+   * `None` only when the detector failed to run.
+   */
+  system_type?: string | null;
   system_uptime_secs?: number | null;
   /**
    * Hypervisor / container kind: `kvm`, `qemu`, `vmware`, `lxc`,
@@ -3716,37 +3686,6 @@ export type SystemActionHandlerResponses = {
 
 export type SystemActionHandlerResponse =
   SystemActionHandlerResponses[keyof SystemActionHandlerResponses];
-
-export type SystemDevSyncHandlerData = {
-  body?: never;
-  path?: never;
-  query?: never;
-  url: '/api/system/dev-sync';
-};
-
-export type SystemDevSyncHandlerErrors = {
-  /**
-   * Not in dev mode
-   */
-  409: ErrorResponse;
-  /**
-   * Error
-   */
-  500: ErrorResponse;
-};
-
-export type SystemDevSyncHandlerError =
-  SystemDevSyncHandlerErrors[keyof SystemDevSyncHandlerErrors];
-
-export type SystemDevSyncHandlerResponses = {
-  /**
-   * Sync result
-   */
-  200: SystemDevSyncResponse;
-};
-
-export type SystemDevSyncHandlerResponse =
-  SystemDevSyncHandlerResponses[keyof SystemDevSyncHandlerResponses];
 
 export type SystemStatusHandlerData = {
   body?: never;
@@ -7726,6 +7665,50 @@ export type SystemConfigSetResponses = {
 
 export type SystemConfigSetResponse = SystemConfigSetResponses[keyof SystemConfigSetResponses];
 
+export type SystemCreateData = {
+  /**
+   * EmptyDeleteArgs
+   */
+  body: {
+    [key: string]: unknown;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/tools/system.create';
+};
+
+export type SystemCreateErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type SystemCreateError = SystemCreateErrors[keyof SystemCreateErrors];
+
+export type SystemCreateResponses = {
+  /**
+   * LifecycleReport
+   *
+   * Tool result
+   */
+  200: {
+    done: Array<string>;
+    errors: Array<string>;
+    skipped: Array<string>;
+  };
+};
+
+export type SystemCreateResponse = SystemCreateResponses[keyof SystemCreateResponses];
+
 export type SystemDbDetailData = {
   /**
    * DbStatusArgs
@@ -7833,6 +7816,50 @@ export type SystemDbLifecycleUpdateResponses = {
 export type SystemDbLifecycleUpdateResponse =
   SystemDbLifecycleUpdateResponses[keyof SystemDbLifecycleUpdateResponses];
 
+export type SystemDeleteData = {
+  /**
+   * EmptyDeleteArgs
+   */
+  body: {
+    [key: string]: unknown;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/tools/system.delete';
+};
+
+export type SystemDeleteErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type SystemDeleteError = SystemDeleteErrors[keyof SystemDeleteErrors];
+
+export type SystemDeleteResponses = {
+  /**
+   * LifecycleReport
+   *
+   * Tool result
+   */
+  200: {
+    done: Array<string>;
+    errors: Array<string>;
+    skipped: Array<string>;
+  };
+};
+
+export type SystemDeleteResponse = SystemDeleteResponses[keyof SystemDeleteResponses];
+
 export type SystemDetailData = {
   /**
    * SystemStatusArgs
@@ -7879,63 +7906,6 @@ export type SystemDetailResponses = {
 };
 
 export type SystemDetailResponse = SystemDetailResponses[keyof SystemDetailResponses];
-
-export type SystemDevUpdateData = {
-  /**
-   * SystemDevUpdateArgs
-   */
-  body: {
-    /**
-     * "enable" | "disable" | "sync"
-     */
-    action: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/system.dev.update';
-};
-
-export type SystemDevUpdateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemDevUpdateError = SystemDevUpdateErrors[keyof SystemDevUpdateErrors];
-
-export type SystemDevUpdateResponses = {
-  /**
-   * SystemDevUpdateOutput
-   *
-   * Tool result
-   */
-  200: {
-    action: string;
-    /**
-     * `dev_disable` result (when action == "disable").
-     */
-    disable?: SystemDevDisableOutput | null;
-    /**
-     * `dev_enable` result (when action == "enable").
-     */
-    enable?: SystemDevEnableOutput | null;
-    /**
-     * `dev_sync` result (when action == "sync").
-     */
-    sync?: SystemDevSyncOutput | null;
-  };
-};
-
-export type SystemDevUpdateResponse = SystemDevUpdateResponses[keyof SystemDevUpdateResponses];
 
 export type SystemDiagnosticListData = {
   /**
@@ -8607,55 +8577,6 @@ export type SystemInfraTestCreateResponses = {
 export type SystemInfraTestCreateResponse =
   SystemInfraTestCreateResponses[keyof SystemInfraTestCreateResponses];
 
-export type SystemLifecycleUpdateData = {
-  /**
-   * SystemLifecycleUpdateArgs
-   */
-  body: {
-    /**
-     * "install" | "uninstall"
-     */
-    action: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/system.lifecycle.update';
-};
-
-export type SystemLifecycleUpdateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemLifecycleUpdateError =
-  SystemLifecycleUpdateErrors[keyof SystemLifecycleUpdateErrors];
-
-export type SystemLifecycleUpdateResponses = {
-  /**
-   * LifecycleReport
-   *
-   * Tool result
-   */
-  200: {
-    done: Array<string>;
-    errors: Array<string>;
-    skipped: Array<string>;
-  };
-};
-
-export type SystemLifecycleUpdateResponse =
-  SystemLifecycleUpdateResponses[keyof SystemLifecycleUpdateResponses];
-
 export type SystemMcpCreateData = {
   /**
    * AddMcpServerArgs
@@ -9256,57 +9177,6 @@ export type SystemPeerDetailResponses = {
 };
 
 export type SystemPeerDetailResponse = SystemPeerDetailResponses[keyof SystemPeerDetailResponses];
-
-export type SystemPeerDevUpdateData = {
-  /**
-   * PodDevUpdateArgs
-   */
-  body: {
-    /**
-     * "sync" | "enable" | "disable"
-     */
-    action: string;
-    /**
-     * Target peers (used by enable/disable; empty for sync).
-     */
-    peers?: Array<string>;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/system.peer.dev.update';
-};
-
-export type SystemPeerDevUpdateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemPeerDevUpdateError = SystemPeerDevUpdateErrors[keyof SystemPeerDevUpdateErrors];
-
-export type SystemPeerDevUpdateResponses = {
-  /**
-   * PodDevUpdateOutput
-   *
-   * Tool result
-   */
-  200: {
-    action: string;
-    results: Array<PodDevPeerResult>;
-  };
-};
-
-export type SystemPeerDevUpdateResponse =
-  SystemPeerDevUpdateResponses[keyof SystemPeerDevUpdateResponses];
 
 export type SystemPeerDiscoveryListData = {
   /**
@@ -10203,7 +10073,7 @@ export type SystemPodUpdateResponse = SystemPodUpdateResponses[keyof SystemPodUp
 
 export type SystemRuntimeDetailData = {
   /**
-   * SystemRuntimeSpecArgs
+   * EmptyDeleteArgs
    */
   body: {
     [key: string]: unknown;
@@ -10700,27 +10570,31 @@ export type SystemSweepOrganizationResponses = {
 export type SystemSweepOrganizationResponse =
   SystemSweepOrganizationResponses[keyof SystemSweepOrganizationResponses];
 
-export type SystemUpdateCreateData = {
+export type SystemUpdateData = {
   /**
    * SystemUpdateArgs
    */
   body: {
     /**
-     * "stable" (default) | "rc" | "beta" | "alpha".
-     */
-    channel?: string;
-    /**
      * When set, proxy the call to the named remote peer via the pod mesh
      * instead of running on the local host.
      */
     peer_id?: string | null;
+    /**
+     * Version or channel to switch to, then apply.
+     * Channels: "stable" | "rc" | "dev".
+     * Pinned version: "0.0.4-rc.11" (leading "v" optional).
+     * "dev" tracks GitHub HEAD via cargo-watch; others pull release binaries.
+     * Omit to apply the latest on the current channel.
+     */
+    version?: string | null;
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.update.create';
+  url: '/api/tools/system.update';
 };
 
-export type SystemUpdateCreateErrors = {
+export type SystemUpdateErrors = {
   /**
    * Unknown tool
    */
@@ -10735,9 +10609,9 @@ export type SystemUpdateCreateErrors = {
   };
 };
 
-export type SystemUpdateCreateError = SystemUpdateCreateErrors[keyof SystemUpdateCreateErrors];
+export type SystemUpdateError = SystemUpdateErrors[keyof SystemUpdateErrors];
 
-export type SystemUpdateCreateResponses = {
+export type SystemUpdateResponses = {
   /**
    * LifecycleReport
    *
@@ -10750,170 +10624,7 @@ export type SystemUpdateCreateResponses = {
   };
 };
 
-export type SystemUpdateCreateResponse =
-  SystemUpdateCreateResponses[keyof SystemUpdateCreateResponses];
-
-export type SystemUpdateDeleteData = {
-  /**
-   * EmptyDeleteArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/system.update.delete';
-};
-
-export type SystemUpdateDeleteErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemUpdateDeleteError = SystemUpdateDeleteErrors[keyof SystemUpdateDeleteErrors];
-
-export type SystemUpdateDeleteResponses = {
-  /**
-   * UpdatePinReport
-   *
-   * Tool result
-   */
-  200: {
-    /**
-     * True if this was an unpin operation.
-     */
-    cleared: boolean;
-    /**
-     * The active pin after this operation, or None if the pin was cleared.
-     */
-    pinned_to?: string | null;
-  };
-};
-
-export type SystemUpdateDeleteResponse =
-  SystemUpdateDeleteResponses[keyof SystemUpdateDeleteResponses];
-
-export type SystemUpdateDetailData = {
-  /**
-   * SystemUpdateArgs
-   */
-  body: {
-    /**
-     * "stable" (default) | "rc" | "beta" | "alpha".
-     */
-    channel?: string;
-    /**
-     * When set, proxy the call to the named remote peer via the pod mesh
-     * instead of running on the local host.
-     */
-    peer_id?: string | null;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/system.update.detail';
-};
-
-export type SystemUpdateDetailErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemUpdateDetailError = SystemUpdateDetailErrors[keyof SystemUpdateDetailErrors];
-
-export type SystemUpdateDetailResponses = {
-  /**
-   * UpdateCheckReport
-   *
-   * Tool result
-   */
-  200: {
-    asset_url?: string | null;
-    channel: string;
-    latest?: string | null;
-    /**
-     * Set when an update is available but blocked by a version pin.
-     * The user must run `orca update --unpin` to proceed.
-     */
-    pinned_to?: string | null;
-    up_to_date: boolean;
-  };
-};
-
-export type SystemUpdateDetailResponse =
-  SystemUpdateDetailResponses[keyof SystemUpdateDetailResponses];
-
-export type SystemUpdateUpdateData = {
-  /**
-   * SystemUpdatePinArgs
-   */
-  body: {
-    /**
-     * Version to pin to, e.g. "v0.0.4-rc.1". A leading `v` is optional.
-     */
-    version: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/system.update.update';
-};
-
-export type SystemUpdateUpdateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemUpdateUpdateError = SystemUpdateUpdateErrors[keyof SystemUpdateUpdateErrors];
-
-export type SystemUpdateUpdateResponses = {
-  /**
-   * UpdatePinReport
-   *
-   * Tool result
-   */
-  200: {
-    /**
-     * True if this was an unpin operation.
-     */
-    cleared: boolean;
-    /**
-     * The active pin after this operation, or None if the pin was cleared.
-     */
-    pinned_to?: string | null;
-  };
-};
-
-export type SystemUpdateUpdateResponse =
-  SystemUpdateUpdateResponses[keyof SystemUpdateUpdateResponses];
+export type SystemUpdateResponse = SystemUpdateResponses[keyof SystemUpdateResponses];
 
 export type GetTreeData = {
   body?: never;

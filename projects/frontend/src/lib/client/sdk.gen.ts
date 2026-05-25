@@ -482,21 +482,21 @@ import type {
   SystemConfigSetData,
   SystemConfigSetErrors,
   SystemConfigSetResponses,
+  SystemCreateData,
+  SystemCreateErrors,
+  SystemCreateResponses,
   SystemDbDetailData,
   SystemDbDetailErrors,
   SystemDbDetailResponses,
   SystemDbLifecycleUpdateData,
   SystemDbLifecycleUpdateErrors,
   SystemDbLifecycleUpdateResponses,
+  SystemDeleteData,
+  SystemDeleteErrors,
+  SystemDeleteResponses,
   SystemDetailData,
   SystemDetailErrors,
   SystemDetailResponses,
-  SystemDevSyncHandlerData,
-  SystemDevSyncHandlerErrors,
-  SystemDevSyncHandlerResponses,
-  SystemDevUpdateData,
-  SystemDevUpdateErrors,
-  SystemDevUpdateResponses,
   SystemDiagnosticListData,
   SystemDiagnosticListErrors,
   SystemDiagnosticListResponses,
@@ -539,9 +539,6 @@ import type {
   SystemInfraTestCreateData,
   SystemInfraTestCreateErrors,
   SystemInfraTestCreateResponses,
-  SystemLifecycleUpdateData,
-  SystemLifecycleUpdateErrors,
-  SystemLifecycleUpdateResponses,
   SystemMcpCreateData,
   SystemMcpCreateErrors,
   SystemMcpCreateResponses,
@@ -578,9 +575,6 @@ import type {
   SystemPeerDetailData,
   SystemPeerDetailErrors,
   SystemPeerDetailResponses,
-  SystemPeerDevUpdateData,
-  SystemPeerDevUpdateErrors,
-  SystemPeerDevUpdateResponses,
   SystemPeerDiscoveryListData,
   SystemPeerDiscoveryListErrors,
   SystemPeerDiscoveryListResponses,
@@ -671,18 +665,9 @@ import type {
   SystemSweepOrganizationData,
   SystemSweepOrganizationErrors,
   SystemSweepOrganizationResponses,
-  SystemUpdateCreateData,
-  SystemUpdateCreateErrors,
-  SystemUpdateCreateResponses,
-  SystemUpdateDeleteData,
-  SystemUpdateDeleteErrors,
-  SystemUpdateDeleteResponses,
-  SystemUpdateDetailData,
-  SystemUpdateDetailErrors,
-  SystemUpdateDetailResponses,
-  SystemUpdateUpdateData,
-  SystemUpdateUpdateErrors,
-  SystemUpdateUpdateResponses,
+  SystemUpdateData,
+  SystemUpdateErrors,
+  SystemUpdateResponses,
   TransitionJiraIssueData,
   TransitionJiraIssueErrors,
   TransitionJiraIssueResponses,
@@ -1476,19 +1461,6 @@ export const systemActionHandler = <ThrowOnError extends boolean = false>(
       ...options.headers,
     },
   });
-
-/**
- * POST /api/system/dev-sync — git pull in the dev checkout; cargo watch restarts automatically.
- * Returns 409 if this host is not in dev mode.
- */
-export const systemDevSyncHandler = <ThrowOnError extends boolean = false>(
-  options?: Options<SystemDevSyncHandlerData, ThrowOnError>,
-) =>
-  (options?.client ?? client).post<
-    SystemDevSyncHandlerResponses,
-    SystemDevSyncHandlerErrors,
-    ThrowOnError
-  >({ url: '/api/system/dev-sync', ...options });
 
 /**
  * GET /api/system/status — installation status for the web UI
@@ -3141,6 +3113,23 @@ export const systemConfigSet = <ThrowOnError extends boolean = false>(
   });
 
 /**
+ * [MUTATES STATE] Install orca on this host: wire symlinks, register MCP server, install binary.
+ *
+ * [MUTATES STATE] Install orca on this host: wire symlinks, register MCP server, install binary.
+ */
+export const systemCreate = <ThrowOnError extends boolean = false>(
+  options: Options<SystemCreateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SystemCreateResponses, SystemCreateErrors, ThrowOnError>({
+    url: '/api/tools/system.create',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
  * Show current schema version and pending-migration count.
  *
  * Show current schema version and pending-migration count.
@@ -3179,6 +3168,23 @@ export const systemDbLifecycleUpdate = <ThrowOnError extends boolean = false>(
   });
 
 /**
+ * [MUTATES STATE] Uninstall orca from this host: remove binary, MCP registration, and CLAUDE.md symlinks.
+ *
+ * [MUTATES STATE] Uninstall orca from this host: remove binary, MCP registration, and CLAUDE.md symlinks.
+ */
+export const systemDelete = <ThrowOnError extends boolean = false>(
+  options: Options<SystemDeleteData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SystemDeleteResponses, SystemDeleteErrors, ThrowOnError>({
+    url: '/api/tools/system.delete',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
  * Snapshot of orca's installation: binary, ~/.claude/CLAUDE.md, vault dir, agents symlink, PKI init, MCP registration.
  *
  * Snapshot of orca's installation: binary, ~/.claude/CLAUDE.md, vault dir, agents symlink, PKI init, MCP registration.
@@ -3188,23 +3194,6 @@ export const systemDetail = <ThrowOnError extends boolean = false>(
 ) =>
   (options.client ?? client).post<SystemDetailResponses, SystemDetailErrors, ThrowOnError>({
     url: '/api/tools/system.detail',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Drive this host's dev mode. `action`: - `enable`: clone the orca repo if needed, start cargo watch, park the production daemon. Idempotent. - `disable`: stop cargo watch and let the production daemon reclaim the port. - `sync`: git pull in the dev checkout; cargo watch restarts automatically. No-op when dev mode is inactive.
- *
- * Drive this host's dev mode. `action`: - `enable`: clone the orca repo if needed, start cargo watch, park the production daemon. Idempotent. - `disable`: stop cargo watch and let the production daemon reclaim the port. - `sync`: git pull in the dev checkout; cargo watch restarts automatically. No-op when dev mode is inactive.
- */
-export const systemDevUpdate = <ThrowOnError extends boolean = false>(
-  options: Options<SystemDevUpdateData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<SystemDevUpdateResponses, SystemDevUpdateErrors, ThrowOnError>({
-    url: '/api/tools/system.dev.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -3491,27 +3480,6 @@ export const systemInfraTestCreate = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * [MUTATES STATE] Drive the system lifecycle. `action`: - `install`: wire symlinks, register MCP server, install binary. - `uninstall`: remove binary, MCP registration, and CLAUDE.md symlinks.
- *
- * [MUTATES STATE] Drive the system lifecycle. `action`: - `install`: wire symlinks, register MCP server, install binary. - `uninstall`: remove binary, MCP registration, and CLAUDE.md symlinks.
- */
-export const systemLifecycleUpdate = <ThrowOnError extends boolean = false>(
-  options: Options<SystemLifecycleUpdateData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemLifecycleUpdateResponses,
-    SystemLifecycleUpdateErrors,
-    ThrowOnError
-  >({
-    url: '/api/tools/system.lifecycle.update',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
  * [MUTATES STATE] Add or update an MCP server in orca.db. Use when registering a new MCP server for orca to federate.
  *
  * [MUTATES STATE] Add or update an MCP server in orca.db. Use when registering a new MCP server for orca to federate.
@@ -3728,27 +3696,6 @@ export const systemPeerDetail = <ThrowOnError extends boolean = false>(
 ) =>
   (options.client ?? client).post<SystemPeerDetailResponses, SystemPeerDetailErrors, ThrowOnError>({
     url: '/api/tools/system.peer.detail',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Update dev mode across the mesh. `action`: - `sync`: git pull on every active dev peer (cargo watch auto-restarts). - `enable`: flip dev mode ON for `peers` (or local + every paired peer if empty). - `disable`: flip dev mode OFF for `peers` (or local + every paired peer if empty).
- *
- * Update dev mode across the mesh. `action`: - `sync`: git pull on every active dev peer (cargo watch auto-restarts). - `enable`: flip dev mode ON for `peers` (or local + every paired peer if empty). - `disable`: flip dev mode OFF for `peers` (or local + every paired peer if empty).
- */
-export const systemPeerDevUpdate = <ThrowOnError extends boolean = false>(
-  options: Options<SystemPeerDevUpdateData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemPeerDevUpdateResponses,
-    SystemPeerDevUpdateErrors,
-    ThrowOnError
-  >({
-    url: '/api/tools/system.peer.dev.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -4334,82 +4281,15 @@ export const systemSweepOrganization = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * [MUTATES STATE] Download + install the latest binary on `channel`. No-op if up to date. When `peer_id` is set the update runs on the named peer instead of locally.
+ * [MUTATES STATE] Update orca on this host. Optionally pass `version` to switch channel or pin before applying: "stable" | "rc" | "dev" | "<semver>". "dev" tracks GitHub HEAD via cargo-watch. Omit to apply the latest on the current channel. When `peer_id` is set the update runs on the named peer instead of locally.
  *
- * [MUTATES STATE] Download + install the latest binary on `channel`. No-op if up to date. When `peer_id` is set the update runs on the named peer instead of locally.
+ * [MUTATES STATE] Update orca on this host. Optionally pass `version` to switch channel or pin before applying: "stable" | "rc" | "dev" | "<semver>". "dev" tracks GitHub HEAD via cargo-watch. Omit to apply the latest on the current channel. When `peer_id` is set the update runs on the named peer instead of locally.
  */
-export const systemUpdateCreate = <ThrowOnError extends boolean = false>(
-  options: Options<SystemUpdateCreateData, ThrowOnError>,
+export const systemUpdate = <ThrowOnError extends boolean = false>(
+  options: Options<SystemUpdateData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<
-    SystemUpdateCreateResponses,
-    SystemUpdateCreateErrors,
-    ThrowOnError
-  >({
-    url: '/api/tools/system.update.create',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Clear the version pin. `orca update` will resume upgrading to the latest on the configured channel.
- *
- * [MUTATES STATE] Clear the version pin. `orca update` will resume upgrading to the latest on the configured channel.
- */
-export const systemUpdateDelete = <ThrowOnError extends boolean = false>(
-  options: Options<SystemUpdateDeleteData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemUpdateDeleteResponses,
-    SystemUpdateDeleteErrors,
-    ThrowOnError
-  >({
-    url: '/api/tools/system.update.delete',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Probe GitHub releases for a newer version on `channel`. Does not apply anything. When `peer_id` is set the probe runs on the named peer instead of locally.
- *
- * Probe GitHub releases for a newer version on `channel`. Does not apply anything. When `peer_id` is set the probe runs on the named peer instead of locally.
- */
-export const systemUpdateDetail = <ThrowOnError extends boolean = false>(
-  options: Options<SystemUpdateDetailData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemUpdateDetailResponses,
-    SystemUpdateDetailErrors,
-    ThrowOnError
-  >({
-    url: '/api/tools/system.update.detail',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Pin orca to a specific version. Future `orca update` runs will not upgrade past this version.
- *
- * [MUTATES STATE] Pin orca to a specific version. Future `orca update` runs will not upgrade past this version.
- */
-export const systemUpdateUpdate = <ThrowOnError extends boolean = false>(
-  options: Options<SystemUpdateUpdateData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemUpdateUpdateResponses,
-    SystemUpdateUpdateErrors,
-    ThrowOnError
-  >({
-    url: '/api/tools/system.update.update',
+  (options.client ?? client).post<SystemUpdateResponses, SystemUpdateErrors, ThrowOnError>({
+    url: '/api/tools/system.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',
