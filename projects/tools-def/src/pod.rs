@@ -368,6 +368,11 @@ pub struct PodUpdateArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "cli", arg(long))]
     pub self_secure: Option<bool>,
+    /// When set, proxy the call to the named remote peer via the pod mesh
+    /// instead of running on the local host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "cli", arg(long, hide = true))]
+    pub peer_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -674,14 +679,30 @@ async fn pod_detail(
     Ok(out)
 }
 
-/// Update pod-level settings on this host. Currently exposes `self_secure`
-/// (Tier-2 secrets-storage permission). Admin-only because flipping it can
-/// authorize secrets replication into this host.
-#[orca_tool(domain = "system.pod", verb = "update", role = "admin")]
+/// Update pod-level settings on this host or — when `peer_id` is set —
+/// on the named remote peer over the pod mesh. Currently exposes
+/// `self_secure` (Tier-2 secrets-storage permission). Admin-only because
+/// flipping it can authorize secrets replication into this host.
+#[orca_tool(
+    domain = "system.pod",
+    verb = "update",
+    role = "admin",
+    remote_ok = true
+)]
 async fn pod_update(
     args: PodUpdateArgs,
     ctx: &orca_utils::tool::ToolCtx,
 ) -> anyhow::Result<PodUpdateOutput> {
+    if let Some(ref peer_id) = args.peer_id {
+        let dispatch = native_support::svc(ctx)?
+            .exec(
+                peer_id,
+                "system.pod.update",
+                serde_json::json!({ "self_secure": args.self_secure }),
+            )
+            .await?;
+        return Ok(serde_json::from_value(dispatch.result)?);
+    }
     let svc = native_support::svc(ctx)?;
     let self_secure = match args.self_secure {
         Some(v) => svc.set_self_secure(v).await?,

@@ -193,6 +193,12 @@ pub struct SystemInfoReport {
     pub pod_peer_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pod_paired_count: Option<u32>,
+    /// Tier-2 secrets-storage permission (`self_secure`) for this host.
+    /// `true` = this host is authorized to hold encrypted secrets replicated
+    /// from other pod members. Surfaced in the host drawer as a SECURE
+    /// toggle, independent of cert trust.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_secure: Option<bool>,
 
     // ── Network interfaces ──
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
