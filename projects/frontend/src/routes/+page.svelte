@@ -68,12 +68,14 @@
 
   // Drawer update controls — reset only when the SELECTED INSTANCE changes,
   // not on every poll tick that updates instance data.
-  let drawerChannel = $state('stable');
   let drawerVersionInput = $state('');
   let drawerOpenedForId = $state<string | null>(null);
   let updateResult = $state<{ done: string[]; errors: string[] } | null>(null);
   let updatePending = $state(false);
   let secureToggling = $state(false);
+  // One popover per channel button. Bound via `popoverOpen[ch]` in the loop;
+  // only one is open at a time (each opener closes the others first).
+  let popoverOpen = $state<Record<string, boolean>>({ stable: false, rc: false, dev: false });
 
   // 1-second live poll; DB writes happen every 10 s (host_status_writer)
   const POLL_MS = 1000;
@@ -300,25 +302,29 @@
     // clobber the user's channel selection on every tick.
     if (selectedInst && selectedInst.id !== drawerOpenedForId) {
       drawerOpenedForId = selectedInst.id;
-      drawerChannel = selectedInst.channel ?? 'stable';
       drawerVersionInput = selectedInst.pinnedTo ?? '';
       updateResult = null;
+      popoverOpen = { stable: false, rc: false, dev: false };
     }
   });
 
-  async function applyUpdate() {
+  async function applyChannelUpdate(channel: string) {
     if (!selectedInst) return;
     updatePending = true;
     updateResult = null;
+    popoverOpen = { stable: false, rc: false, dev: false };
     try {
-      const args: Record<string, unknown> = { version: drawerChannel };
+      const args: Record<string, unknown> = { version: channel };
       if (selectedInst.role === 'system') args.peer_id = selectedInst.peerId;
       const r = await callTool<{ done: string[]; skipped: string[]; errors: string[] }>(
         'systemUpdate',
         args,
       );
       updateResult = { done: r.done, errors: r.errors };
-      await (selectedInst.role === 'local' ? refreshLocal(selectedInst) : refreshPodPeers());
+      // Optimistic: assume the requested channel applied; puller will reconcile.
+      if (selectedInst) selectedInst.channel = channel;
+      instances = [...instances];
+      void (selectedInst.role === 'local' ? refreshLocal(selectedInst) : refreshPodPeers());
     } catch (e) {
       console.warn('update failed:', e);
       updateResult = { done: [], errors: [e instanceof Error ? e.message : String(e)] };
