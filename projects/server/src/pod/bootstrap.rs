@@ -457,7 +457,13 @@ fn handle_request_offer(
         expires_at,
         inviter_display_name: Some(inviter_display_name),
         code_hint: Some(code.chars().take(2).collect()),
-        code_plain: None, // joiner-initiated request: inviter doesn't know joiner's mDNS fp
+        // S1: ship the plaintext code alongside the offer so `pod join`
+        // can finish in one command. Authenticity is already covered by
+        // the TOFU pubkey pin + signed-envelope echo the joiner verifies;
+        // the code's prior role was only operator transcription. Keeping
+        // `code_hint` populated so manual `pod accept` still works for
+        // out-of-band flows.
+        code_plain: Some(code.clone()),
     })
 }
 

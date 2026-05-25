@@ -540,8 +540,16 @@ pub fn local_peer_id() -> String {
 /// Read pod_peers + local host_status; merge into enriched DTOs.
 /// No RPC fanout — every cross-host field comes from the locally-mirrored
 /// status table, which the sync puller keeps fresh in the background.
+///
+/// S4: the host's own row lives in `pod_peers` like any other peer (mDNS
+/// stubs it in via `ensure_peer_stub`). We flag it with `local=true` so
+/// UIs can highlight "this is me" without a divergent synthetic entry.
+/// First-boot fallback: when nothing in `pod_peers` matches the canonical
+/// local peer-id, prepend a synthesized row so the dashboard isn't blank
+/// before mDNS / pairing populates the table.
 async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
     let own = local_peer_id();
+    let own_for_blocking = own.clone();
     let (active, inactive, status_by_peer) =
         tokio::task::spawn_blocking(move || -> Result<(_, _, _)> {
             let conn = db::open_default()?;
@@ -552,24 +560,27 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
             for r in status_rows {
                 map.insert(r.peer_id.clone(), r);
             }
-            // Drop any DB row that points back at THIS host — the synthetic
-            // local_peer_row() (pushed below) is the canonical local entry,
-            // and a stub'd self-row would render as a duplicate card in the
-            // dashboard. Filter at read time so we don't depend on the
-            // insert paths having been corrected yet.
             let (active, inactive): (Vec<PodPeerDto>, Vec<PodPeerDto>) = peers
                 .into_iter()
-                .filter(|p| p.peer_id != own)
-                .map(PodPeerDto::from)
+                .map(|p| {
+                    let mut dto: PodPeerDto = p.into();
+                    if dto.peer_id == own_for_blocking {
+                        dto.local = true;
+                    }
+                    dto
+                })
                 .partition(|p| p.status == "active");
             Ok((active, inactive, map))
         })
         .await??;
 
     let mut out: Vec<PodPeerDto> = Vec::with_capacity(active.len() + inactive.len() + 1);
-    out.push(local_peer_row().await);
+    let mut saw_self = false;
 
     for mut p in active {
+        if p.local {
+            saw_self = true;
+        }
         if let Some(latest) = status_by_peer.get(&p.peer_id) {
             enrich_from_local_db(&mut p, latest);
         }
@@ -583,7 +594,19 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
         }
         out.push(p);
     }
+    for p in &inactive {
+        if p.local {
+            saw_self = true;
+        }
+    }
     out.extend(inactive);
+
+    // First-boot fallback only — once mDNS / pairing populates pod_peers
+    // the DB row carries the canonical identity and this branch never
+    // fires again.
+    if !saw_self {
+        out.insert(0, local_peer_row().await);
+    }
     Ok(out)
 }
 

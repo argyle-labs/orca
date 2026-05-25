@@ -369,6 +369,17 @@ pub async fn cmd_pod_join(addr: &str) -> Result<()> {
         "✓ requested offer from {label} ({}, fp {})",
         r.inviter_peer_id, r.inviter_pubkey_fp
     );
+
+    // S1 auto-accept: the inviter embeds `code_plain` in the request-offer
+    // response on joiner-initiated handshakes. Security unchanged — the
+    // TOFU pubkey pin + signed envelope already authenticated this exchange,
+    // and the code's only purpose was operator transcription. Skip straight
+    // to `pod accept <code>` so one command finishes the join.
+    if let Some(code) = r.code_plain.as_deref() {
+        println!("  auto-accepting via offer-embedded code…");
+        return cmd_pod_accept(code).await;
+    }
+
     if let Some(hint) = &r.code_hint {
         println!("  inviter will print a 6-char code starting with: {hint}");
     }
