@@ -31,6 +31,34 @@ fn field_bool(v: &Value, k: &str, prop: &str) -> bool {
 impl SystemService for ServerSystem {
     async fn status(&self) -> Result<SystemStatusReport> {
         let v = crate::commands::install_status();
+
+        // Runtime block (formerly system.runtime.detail). Mirrors
+        // `LifecycleService::runtime_spec` — folded in here so callers get
+        // installation + runtime in one round trip.
+        let frontend = if cfg!(feature = "ui") {
+            "embedded"
+        } else {
+            "disabled"
+        };
+        let version_str = env!("ORCA_VERSION");
+        let is_dev_build = version_str.contains("-dev+") || version_str.ends_with("+unknown");
+        let mode = if is_dev_build {
+            Some("dev".to_string())
+        } else {
+            orca_utils::state::read()
+                .ok()
+                .flatten()
+                .map(|s| match s.mode {
+                    orca_utils::state::DaemonMode::Daemon => "daemon".to_string(),
+                    orca_utils::state::DaemonMode::Parked => "parked".to_string(),
+                    orca_utils::state::DaemonMode::Dev => "dev".to_string(),
+                })
+        };
+        let channel =
+            crate::commands::update::read_channel_marker().map(|c| c.as_marker().to_string());
+        let pinned_to = crate::commands::update::read_version_pin();
+        let system = Some((*crate::system_info::current_or_collect()).clone());
+
         Ok(SystemStatusReport {
             binary: PathInstalled {
                 installed: field_bool(&v, "binary", "installed"),
@@ -55,6 +83,13 @@ impl SystemService for ServerSystem {
             mcp: McpRegistration {
                 registered: field_bool(&v, "mcp", "registered"),
             },
+            version: env!("ORCA_VERSION").into(),
+            target: env!("ORCA_BUILD_TARGET").into(),
+            frontend: frontend.into(),
+            mode,
+            channel,
+            pinned_to,
+            system,
         })
     }
 }

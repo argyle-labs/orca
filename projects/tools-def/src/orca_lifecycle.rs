@@ -402,15 +402,6 @@ async fn spec_detail(
     svc(ctx)?.spec_dump().await
 }
 
-/// Report this binary's runtime composition: whether the web UI is embedded, build target triple. Used by installers to decide whether to fetch a JS runtime alongside the binary.
-#[orca_tool(domain = "system.runtime", verb = "detail", remote_ok = true)]
-async fn system_runtime_detail(
-    _args: EmptyDeleteArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<RuntimeSpecReport> {
-    svc(ctx)?.runtime_spec().await
-}
-
 #[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
@@ -684,15 +675,6 @@ mod tests {
         let (ctx, _) = ctx_with_stub();
         let r = spec_detail(SpecDumpArgs {}, &ctx).await.unwrap();
         assert_eq!(r.spec, "{}");
-    }
-
-    #[tokio::test]
-    async fn runtime_detail_returns_service_report() {
-        let (ctx, _) = ctx_with_stub();
-        let r = system_runtime_detail(EmptyDeleteArgs {}, &ctx)
-            .await
-            .unwrap();
-        assert_eq!(r.frontend, "disabled");
     }
 
     #[tokio::test]

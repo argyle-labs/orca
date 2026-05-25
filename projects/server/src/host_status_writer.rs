@@ -14,7 +14,8 @@
 
 use anyhow::{Context, Result};
 use orca_tools_def::host_status::HostStatusRows;
-use orca_tools_def::orca_lifecycle::{RuntimeSpecReport, SystemInfoReport};
+use orca_tools_def::orca_lifecycle::SystemInfoReport;
+use orca_tools_def::system::SystemStatusReport;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -228,27 +229,27 @@ async fn pull_one_peer_inner(peer_id: &str, addr: &str) -> Result<()> {
     .await
     .context("pod/exec timeout")??;
 
-    // Best-effort runtime-detail fetch: gives the dashboard live version /
+    // Best-effort system.detail fetch: gives the dashboard live version /
     // target / mode / channel / pinned_to fields without waiting for the
     // peer's next SystemInfoReport snapshot. Failures here are intentionally
-    // ignored — the status fetch above is the load-bearing call, the cache
-    // entry is a UI nicety.
-    if let Ok(Ok(runtime_res)) = tokio::time::timeout(
+    // ignored — the status fetch above is the load-bearing call; the runtime
+    // cache entry is a UI nicety.
+    if let Ok(Ok(detail_res)) = tokio::time::timeout(
         Duration::from_secs(5),
-        crate::pod::exec(addr, "system.runtime.detail", serde_json::Value::Null),
+        crate::pod::exec(addr, "system.detail", serde_json::json!({})),
     )
     .await
-        && let Ok(spec) = serde_json::from_value::<RuntimeSpecReport>(runtime_res.result)
+        && let Ok(detail) = serde_json::from_value::<SystemStatusReport>(detail_res.result)
     {
         runtime_cache::put(
             peer_id,
             runtime_cache::RuntimeFields {
-                version: Some(spec.version),
-                target: Some(spec.target),
-                frontend: Some(spec.frontend),
-                mode: spec.mode,
-                channel: spec.channel,
-                pinned_to: spec.pinned_to,
+                version: Some(detail.version),
+                target: Some(detail.target),
+                frontend: Some(detail.frontend),
+                mode: detail.mode,
+                channel: detail.channel,
+                pinned_to: detail.pinned_to,
             },
         );
     }

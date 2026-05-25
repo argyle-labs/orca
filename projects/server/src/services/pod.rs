@@ -573,6 +573,14 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
         if let Some(latest) = status_by_peer.get(&p.peer_id) {
             enrich_from_local_db(&mut p, latest);
         }
+        if let Some(rt) = crate::pod::runtime_cache::get(&p.peer_id) {
+            p.version = rt.version;
+            p.target = rt.target;
+            p.frontend = rt.frontend;
+            p.mode = rt.mode;
+            p.channel = rt.channel;
+            p.pinned_to = rt.pinned_to;
+        }
         out.push(p);
     }
     out.extend(inactive);

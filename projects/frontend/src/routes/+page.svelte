@@ -118,23 +118,25 @@
 
   async function refreshLocal(inst: Instance) {
     try {
-      const [health, spec] = await Promise.all([
+      const [health, detail] = await Promise.all([
         callTool('ping', {}),
-        callTool('systemRuntimeDetail', {}),
+        callTool('systemDetail', {}),
       ]);
       inst.health = (health as { ok: boolean }).ok ? 'up' : 'down';
-      const s = spec as {
+      const s = detail as {
         version: string;
         target: string;
         frontend: string;
         mode?: string;
         channel?: string;
+        pinned_to?: string;
         system?: SystemInfoReport | null;
       };
       inst.version = s.version ?? null;
       inst.target = s.target ?? null;
       inst.mode = s.mode ?? null;
       inst.channel = s.channel ?? null;
+      inst.pinnedTo = s.pinned_to ?? null;
       inst.sys = s.system ?? null;
       inst.error = null;
     } catch (e) {
