@@ -383,19 +383,6 @@
     }
   }
 
-  async function toggleDevMode(inst: Instance) {
-    if (!inst.peerId) return;
-    const version = inst.mode === 'dev' ? 'stable' : 'dev';
-    try {
-      const args: Record<string, unknown> = { version };
-      if (inst.role === 'system') args.peer_id = inst.peerId;
-      await callTool('systemUpdate', args);
-      await (inst.role === 'local' ? refreshLocal(inst) : refreshPodPeers());
-    } catch (e) {
-      console.warn('dev mode toggle failed:', e);
-    }
-  }
-
   onMount(() => {
     const local: Instance = {
       id: 'local',
@@ -839,28 +826,66 @@
           <span class="update-setting-label">Channel</span>
           <div class="channel-segment">
             {#each ['stable', 'rc', 'dev'] as ch}
-              {@const active = drawerChannel === ch}
-              <button
-                class="channel-btn"
-                class:active
-                onclick={() => { drawerChannel = ch; }}
-                disabled={updatePending}
-              >{ch}</button>
+              {@const isCurrent = (selectedInst.channel ?? 'stable') === ch}
+              {@const upToDate = isCurrent && !selectedInst.updateAvailable && selectedInst.version}
+              <Popover bind:open={popoverOpen[ch]} align="end" width={260}>
+                {#snippet trigger()}
+                  <button
+                    class="channel-btn"
+                    class:active={isCurrent}
+                    aria-haspopup="dialog"
+                    aria-expanded={popoverOpen[ch]}
+                    disabled={updatePending}
+                    onclick={() => {
+                      popoverOpen = {
+                        stable: false, rc: false, dev: false, [ch]: !popoverOpen[ch],
+                      };
+                    }}
+                  >{ch}</button>
+                {/snippet}
+                {#snippet children()}
+                  <div class="channel-confirm">
+                    {#if isCurrent}
+                      {#if selectedInst.updateAvailable && selectedInst.updateLatest}
+                        <p class="channel-confirm-title">Update on <strong>{ch}</strong>?</p>
+                        <p class="version-diff">
+                          <code>{selectedInst.version ?? '—'}</code>
+                          <span class="arrow">→</span>
+                          <code class="next">{selectedInst.updateLatest}</code>
+                        </p>
+                      {:else if upToDate}
+                        <p class="channel-confirm-title">Already on latest <strong>{ch}</strong>.</p>
+                        <p class="version-diff"><code>{selectedInst.version}</code></p>
+                      {:else}
+                        <p class="channel-confirm-title">Re-check <strong>{ch}</strong>?</p>
+                      {/if}
+                    {:else}
+                      <p class="channel-confirm-title">Switch to <strong>{ch}</strong> + update?</p>
+                      <p class="version-diff">
+                        <code>{selectedInst.version ?? '—'}</code>
+                        <span class="muted">({selectedInst.channel ?? 'stable'})</span>
+                        <span class="arrow">→</span>
+                        <code class="next">latest {ch}</code>
+                      </p>
+                    {/if}
+                    <div class="confirm-actions">
+                      <button
+                        class="ctrl-btn"
+                        onclick={() => { popoverOpen[ch] = false; }}
+                      >Cancel</button>
+                      {#if !(isCurrent && upToDate)}
+                        <button
+                          class="ctrl-btn primary"
+                          disabled={updatePending}
+                          onclick={() => applyChannelUpdate(ch)}
+                        >{updatePending ? 'Updating…' : (isCurrent ? 'Update' : 'Switch')}</button>
+                      {/if}
+                    </div>
+                  </div>
+                {/snippet}
+              </Popover>
             {/each}
           </div>
-        </div>
-
-        <div class="update-setting-row">
-          <span class="update-setting-label">Dev mode</span>
-          <button
-            class="toggle-switch"
-            class:on={selectedInst.mode === 'dev'}
-            disabled={updatePending}
-            onclick={() => toggleDevMode(selectedInst!)}
-            aria-label="Toggle dev mode"
-            role="switch"
-            aria-checked={selectedInst.mode === 'dev'}
-          ><span class="toggle-thumb"></span></button>
         </div>
 
         <div class="update-setting-row">
@@ -880,16 +905,6 @@
               title="Pin and apply this specific version"
             >Pin</button>
           </div>
-        </div>
-
-        <div class="update-action-row">
-          <button
-            class="ctrl-btn primary"
-            onclick={applyUpdate}
-            disabled={updatePending}
-          >
-            {updatePending ? 'Updating…' : `Update to latest ${drawerChannel}`}
-          </button>
         </div>
 
         {#if updateResult}
@@ -1492,6 +1507,40 @@
   }
   .version-pick {
     width: 100%;
+  }
+  .channel-confirm {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-3);
+  }
+  .channel-confirm-title {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text);
+  }
+  .version-diff {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: var(--text-xs);
+  }
+  .version-diff .arrow {
+    color: var(--color-text-dim);
+  }
+  .version-diff .next {
+    color: var(--color-accent, #4f86f7);
+  }
+  .version-diff .muted {
+    color: var(--color-text-dim);
+  }
+  .confirm-actions {
+    display: flex;
+    gap: var(--space-2);
+    justify-content: flex-end;
+    margin-top: var(--space-1);
   }
   .version-input:focus {
     outline: none;
