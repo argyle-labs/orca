@@ -1327,6 +1327,35 @@
     color: #c084fc;
     border-color: color-mix(in srgb, #a855f7 35%, transparent);
   }
+  .secure-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-3);
+    margin: var(--space-3) 0;
+    background: color-mix(in srgb, var(--color-surface, #1a1a2e) 80%, transparent);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md, 8px);
+  }
+  .secure-row-text {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    flex: 1;
+  }
+  .secure-label {
+    font-size: var(--text-xs);
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: var(--color-text);
+  }
+  .secure-hint {
+    font-size: var(--text-xs);
+    color: var(--color-text-dim);
+    line-height: 1.3;
+  }
   .paired-line {
     display: flex;
     align-items: center;
@@ -1341,13 +1370,26 @@
   }
   .toggle-switch {
     position: relative;
-    width: 34px;
-    height: 18px;
+    width: 44px;
+    height: 24px;
+    padding: 0;
     background: var(--color-border);
-    border-radius: 9px;
+    border: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent);
+    border-radius: 12px;
     flex-shrink: 0;
-    transition: background 0.2s;
-    pointer-events: none;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .toggle-switch:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--color-border) 60%, var(--color-accent, #4f86f7));
+  }
+  .toggle-switch:focus-visible {
+    outline: 2px solid var(--color-accent, #4f86f7);
+    outline-offset: 2px;
+  }
+  .toggle-switch:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
   .toggle-switch.on {
     background: var(--color-accent, #4f86f7);
@@ -1356,14 +1398,16 @@
     position: absolute;
     top: 2px;
     left: 2px;
-    width: 14px;
-    height: 14px;
+    width: 18px;
+    height: 18px;
     background: white;
     border-radius: 50%;
-    transition: left 0.2s;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+    transition: left 0.15s;
+    pointer-events: none;
   }
   .toggle-switch.on .toggle-thumb {
-    left: 18px;
+    left: 22px;
   }
   .stat-raw {
     margin: var(--space-1) 0 0;
@@ -1426,7 +1470,11 @@
     color: inherit;
     font-family: var(--font-mono, monospace);
     font-size: var(--text-sm);
-    width: 14ch;
+    flex: 1;
+    min-width: 22ch;
+  }
+  .version-pick {
+    width: 100%;
   }
   .version-input:focus {
     outline: none;

@@ -379,6 +379,20 @@ textarea,
   cursor: text;
   user-select: text;
 }
+/* Default to a comfortably-wide input. Specific call sites can override
+   with width:100% (modals/popovers) or a precise px/ch value. Numeric
+   inputs are usually short — keep them narrower by default. */
+input[type='text'],
+input[type='search'],
+input[type='url'],
+input[type='email'],
+input[type='password'],
+input:not([type]) {
+  min-width: 24ch;
+}
+input[type='number'] {
+  min-width: 8ch;
+}
 [disabled],
 :disabled {
   cursor: not-allowed !important;
