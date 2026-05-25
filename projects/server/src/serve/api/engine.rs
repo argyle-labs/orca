@@ -9,11 +9,11 @@
 
 use super::prelude::*;
 use axum::response::IntoResponse;
+use orca_tool::{OrcaTool, ToolCtx};
 use orca_tools_def::engine::{
     AddArgs, EmptyArgs, EngineCreate, EngineDelete, EngineList, EngineUpdate, NameArgs, UpdateArgs,
 };
 use orca_utils::config::Config;
-use orca_utils::tool::{OrcaTool, ToolCtx};
 use std::sync::Arc;
 
 fn ctx() -> Result<ToolCtx, String> {

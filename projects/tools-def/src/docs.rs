@@ -150,7 +150,7 @@ pub struct ListCommandsOutput {
 
 #[cfg(feature = "native")]
 fn docs_svc(
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<std::sync::Arc<dyn crate::services::docs::DocsService>> {
     ctx.service::<std::sync::Arc<dyn crate::services::docs::DocsService>>()
 }
@@ -175,7 +175,7 @@ fn data_to_node(d: crate::services::docs::DocTreeNodeData) -> DocTreeNode {
 #[orca_tool(domain = "namespace.doc", verb = "list-roots")]
 async fn list_roots(
     _args: ListRootsArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ListRootsOutput> {
     let roots = docs_svc(ctx)?
         .list_roots()
@@ -194,10 +194,7 @@ async fn list_roots(
 /// Get the compacted documentation tree for a root, optionally scoped to a
 /// subpath. Returns a typed tree of .md files.
 #[orca_tool(domain = "namespace.doc", verb = "tree")]
-async fn get_tree(
-    args: GetTreeArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<GetTreeOutput> {
+async fn get_tree(args: GetTreeArgs, ctx: &orca_tool::ToolCtx) -> anyhow::Result<GetTreeOutput> {
     let data = docs_svc(ctx)?
         .get_tree(&args.root, args.path.as_deref())
         .await?;
@@ -213,7 +210,7 @@ async fn get_tree(
 #[orca_tool(domain = "namespace.doc", verb = "full-tree")]
 async fn get_full_tree(
     args: GetFullTreeArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<GetFullTreeOutput> {
     let raw = args.raw.unwrap_or(false);
     let data = docs_svc(ctx)?.get_full_tree(raw).await?;
@@ -230,10 +227,7 @@ async fn get_full_tree(
 /// Read a documentation file by root and relative path (e.g. root=rebuy,
 /// path=admin-api/README).
 #[orca_tool(domain = "namespace.doc", verb = "read")]
-async fn read_doc(
-    args: ReadDocArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<ReadDocOutput> {
+async fn read_doc(args: ReadDocArgs, ctx: &orca_tool::ToolCtx) -> anyhow::Result<ReadDocOutput> {
     let llm = args.format.as_deref() == Some("llm");
     let content = docs_svc(ctx)?.read_doc(&args.root, &args.path, llm).await?;
     Ok(ReadDocOutput {
@@ -247,7 +241,7 @@ async fn read_doc(
 #[orca_tool(domain = "namespace.doc", verb = "search")]
 async fn search_docs(
     args: SearchDocsArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SearchDocsOutput> {
     let filter = args.root.as_deref().unwrap_or("all");
     let llm = args.format.as_deref() == Some("llm");
@@ -279,7 +273,7 @@ async fn search_docs(
 #[orca_tool(domain = "namespace.doc", verb = "list-commands")]
 async fn list_commands(
     _args: ListCommandsArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ListCommandsOutput> {
     let commands = docs_svc(ctx)?.list_commands().await?;
     Ok(ListCommandsOutput { commands })

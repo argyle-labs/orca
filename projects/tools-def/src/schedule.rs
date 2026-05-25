@@ -131,7 +131,7 @@ mod native_support {
 #[orca_tool(domain = "system.schedule", verb = "list")]
 async fn schedule_list(
     args: ScheduleListArgs,
-    _ctx: &orca_utils::tool::ToolCtx,
+    _ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ScheduleListOutput> {
     let conn = orca_db::open_default()?;
     let rows = orca_db::config_store::list(&conn, Some("schedule"), args.host.as_deref())?;
@@ -156,7 +156,7 @@ async fn schedule_list(
 #[orca_tool(domain = "system.schedule", verb = "status")]
 async fn schedule_status(
     args: ScheduleStatusArgs,
-    _ctx: &orca_utils::tool::ToolCtx,
+    _ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ScheduleStatusOutput> {
     let conn = orca_db::open_default()?;
     let runs = match args.job {
@@ -184,7 +184,7 @@ async fn schedule_status(
 #[orca_tool(domain = "system.schedule", verb = "run")]
 async fn schedule_run(
     args: ScheduleRunArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ScheduleRunOutput> {
     let conn = orca_db::open_default()?;
     let row = orca_db::config_store::get(&conn, "schedule", &args.name)?
@@ -197,8 +197,8 @@ async fn schedule_run(
     // Pull the registry off the ToolCtx services. Daemon registers it on
     // startup (see scheduler wiring); CLI invocations have no daemon, so
     // we surface a clear error.
-    let registry: std::sync::Arc<orca_utils::tool::ToolRegistry> = ctx
-        .service::<std::sync::Arc<orca_utils::tool::ToolRegistry>>()
+    let registry: std::sync::Arc<orca_tool::ToolRegistry> = ctx
+        .service::<std::sync::Arc<orca_tool::ToolRegistry>>()
         .map_err(|_| {
             anyhow::anyhow!(
                 "schedule.run requires daemon mode (registry-in-ctx not available from CLI)"

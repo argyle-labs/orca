@@ -17,6 +17,7 @@ path = "src/lib.rs"
 [features]
 default = []
 native = [
+    "orca-tool/native",
     "dep:orca-utils",
     "dep:orca-db",
     "dep:orca-integrations",
@@ -33,7 +34,7 @@ cli = [
 ]
 
 [dependencies]
-orca-tool-trait  = { path = "../tool-trait" }
+orca-tool        = { path = "../orca-tool" }
 orca-tools-macro = { path = "../tools-macro" }
 schemars         = { workspace = true }
 serde            = { workspace = true }

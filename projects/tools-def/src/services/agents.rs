@@ -70,6 +70,6 @@ pub trait ProvideAgents {
 }
 
 /// Register an `AgentsService` into `ToolCtx`.
-pub fn register_agents(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideAgents) {
+pub fn register_agents(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideAgents) {
     ctx.register_service(p.agents());
 }

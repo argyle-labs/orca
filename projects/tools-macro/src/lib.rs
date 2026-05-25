@@ -250,7 +250,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     };
 
     let ctx_param_name = Ident::new("ctx", Span::call_site());
-    let ctx_param = quote! { #ctx_param_name: &::orca_utils::tool::ToolCtx };
+    let ctx_param = quote! { #ctx_param_name: &::orca_tool::ToolCtx };
 
     // Doc string keeps the original — we just relocate the description into
     // the const.
@@ -267,7 +267,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
                     tool: #zst_ident,
                     domain: #domain,
                     verb: #verb,
-                    summary: <#zst_ident as ::orca_tools_def::OrcaToolDef>::DESCRIPTION,
+                    summary: <#zst_ident as ::orca_tool::OrcaToolDef>::DESCRIPTION,
                 }
             };
         },
@@ -284,12 +284,12 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
                 domain: #domain,
                 args_schema: || {
                     ::serde_json::to_value(
-                        ::schemars::schema_for!(<#zst_ident as ::orca_tools_def::OrcaToolDef>::Args)
+                        ::schemars::schema_for!(<#zst_ident as ::orca_tool::OrcaToolDef>::Args)
                     ).unwrap_or(::serde_json::Value::Object(::serde_json::Map::new()))
                 },
                 output_schema: || {
                     ::serde_json::to_value(
-                        ::schemars::schema_for!(<#zst_ident as ::orca_tools_def::OrcaToolDef>::Output)
+                        ::schemars::schema_for!(<#zst_ident as ::orca_tool::OrcaToolDef>::Output)
                     ).unwrap_or(::serde_json::Value::Object(::serde_json::Map::new()))
                 },
             }
@@ -306,7 +306,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
         #[allow(non_camel_case_types)]
         pub struct #zst_ident;
 
-        impl ::orca_tools_def::OrcaToolDef for #zst_ident {
+        impl ::orca_tool::OrcaToolDef for #zst_ident {
             const NAME: &'static str = #tool_name;
             const DESCRIPTION: &'static str = #description;
             const REMOTE_OK: bool = #remote_ok_lit;
@@ -315,14 +315,14 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             type Output = #output_ty;
         }
 
-        impl ::orca_tools_def::OrcaOp for #zst_ident {
+        impl ::orca_tool::OrcaOp for #zst_ident {
             const DOMAIN: &'static str = #domain;
             const VERB: &'static str = #verb;
         }
 
         #[cfg(feature = "native")]
         #[::async_trait::async_trait]
-        impl ::orca_utils::tool::OrcaTool for #zst_ident {
+        impl ::orca_tool::OrcaTool for #zst_ident {
             async fn run(
                 #args_param,
                 #ctx_param,

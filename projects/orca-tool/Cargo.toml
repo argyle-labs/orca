@@ -1,0 +1,44 @@
+[package]
+name = "orca-tool"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "orca_tool"
+path = "src/lib.rs"
+
+# Feature flavors:
+#   - default (none): wasm-safe metadata only — OrcaToolDef + OrcaOp.
+#   - native:         pulls the runtime (OrcaTool runner, ToolRegistry, ToolCtx,
+#                     ErasedTool, axum router, CLI dispatcher). Brings
+#                     orca-utils for Config.
+
+[features]
+default = []
+native = [
+    "dep:orca-utils",
+    "dep:anyhow",
+    "dep:async-trait",
+    "dep:axum",
+    "dep:futures",
+    "dep:tokio",
+    "dep:tower",
+]
+
+[dependencies]
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# native-only
+orca-utils  = { path = "../utils", optional = true }
+anyhow      = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+axum        = { workspace = true, optional = true }
+futures     = { version = "0.3", optional = true }
+tokio       = { workspace = true, optional = true }
+tower       = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+tower = { workspace = true }

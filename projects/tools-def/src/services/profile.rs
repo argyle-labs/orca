@@ -29,6 +29,6 @@ pub trait ProvideProfile {
 }
 
 /// Register a `ProfileService` into `ToolCtx`.
-pub fn register_profile(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideProfile) {
+pub fn register_profile(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideProfile) {
     ctx.register_service(p.profile());
 }

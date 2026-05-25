@@ -42,6 +42,6 @@ pub trait ProvideInfra {
 }
 
 /// Register a `InfraService` into `ToolCtx`.
-pub fn register_infra(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideInfra) {
+pub fn register_infra(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideInfra) {
     ctx.register_service(p.infra());
 }

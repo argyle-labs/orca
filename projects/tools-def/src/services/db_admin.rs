@@ -22,6 +22,6 @@ pub trait ProvideDbAdmin {
 }
 
 /// Register a `DbAdminService` into `ToolCtx`.
-pub fn register_db_admin(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideDbAdmin) {
+pub fn register_db_admin(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideDbAdmin) {
     ctx.register_service(p.db_admin());
 }

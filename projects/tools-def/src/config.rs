@@ -140,7 +140,7 @@ mod native_support {
 #[orca_tool(domain = "system.config", verb = "list")]
 async fn config_list(
     args: ConfigListArgs,
-    _ctx: &orca_utils::tool::ToolCtx,
+    _ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ConfigListOutput> {
     let conn = orca_db::open_default()?;
     let rows = orca_db::config_store::list(&conn, args.noun.as_deref(), args.host.as_deref())?
@@ -154,7 +154,7 @@ async fn config_list(
 #[orca_tool(domain = "system.config", verb = "get")]
 async fn config_get(
     args: ConfigGetArgs,
-    _ctx: &orca_utils::tool::ToolCtx,
+    _ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ConfigGetOutput> {
     let conn = orca_db::open_default()?;
     let row = orca_db::config_store::get(&conn, &args.noun, &args.name)?.map(Into::into);
@@ -167,7 +167,7 @@ async fn config_get(
 #[orca_tool(domain = "system.config", verb = "set")]
 async fn config_set(
     args: ConfigSetArgs,
-    _ctx: &orca_utils::tool::ToolCtx,
+    _ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ConfigSetOutput> {
     let conn = orca_db::open_default()?;
     let local = native_support::local_host(&conn);
@@ -185,7 +185,7 @@ async fn config_set(
 #[orca_tool(domain = "system.config", verb = "delete")]
 async fn config_delete(
     args: ConfigDeleteArgs,
-    _ctx: &orca_utils::tool::ToolCtx,
+    _ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ConfigDeleteOutput> {
     let conn = orca_db::open_default()?;
     let local = native_support::local_host(&conn);

@@ -55,6 +55,6 @@ pub trait ProvideSpecRegistry {
 }
 
 /// Register a `SpecRegistryService` into `ToolCtx`.
-pub fn register_spec_registry(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideSpecRegistry) {
+pub fn register_spec_registry(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideSpecRegistry) {
     ctx.register_service(p.spec_registry());
 }

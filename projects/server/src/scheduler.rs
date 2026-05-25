@@ -42,7 +42,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use cron::Schedule;
-use orca_utils::tool::{ToolCtx, ToolRegistry};
+use orca_tool::{ToolCtx, ToolRegistry};
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::{info, warn};

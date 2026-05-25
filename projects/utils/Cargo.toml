@@ -8,9 +8,6 @@ name = "orca_utils"
 path = "src/lib.rs"
 
 [dependencies]
-# Local
-orca-tool-trait = { path = "../tool-trait" }
-
 # Standard
 anyhow     = { workspace = true }
 thiserror  = { workspace = true }
@@ -26,19 +23,9 @@ tempfile   = { workspace = true }
 # Async
 tokio = { workspace = true }
 
-# Async traits / futures (tool module)
-async-trait = { workspace = true }
-futures     = "0.3"
-
 # HTTP/TLS (http module)
 reqwest = { workspace = true }
 rustls  = { workspace = true }
-
-# Schema (tool module)
-schemars = { workspace = true }
-
-# Axum (tool module → HTTP surface)
-axum = { workspace = true }
 
 # Embedded assets (config module)
 rust-embed = { workspace = true }
@@ -56,4 +43,3 @@ git2 = { version = "0.20", default-features = false, features = ["vendored-libgi
 tokio    = { workspace = true }
 tempfile = { workspace = true }
 wiremock = "0.6"
-tower    = { workspace = true }

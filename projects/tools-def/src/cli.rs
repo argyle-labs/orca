@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::{ArgMatches, Command};
-use orca_utils::tool::ToolCtx;
+use orca_tool::ToolCtx;
 
 /// Erased CLI dispatch closure: parses matches into the op's Args struct,
 /// invokes `OrcaTool::run`, formats Output to stdout.
@@ -100,7 +100,7 @@ pub fn build_root(mut root: Command) -> Command {
 pub async fn exec_remote<T: crate::OrcaToolDef>(
     peer: &str,
     args: T::Args,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> Result<T::Output> {
     // Wire-only serialization: Value lives entirely behind the
     // PodService::exec trait boundary, never on a public type.
@@ -193,7 +193,7 @@ macro_rules! register_op {
         const _: () = {
             use $crate::cli::{CliOp, CliBuildFn, CliRunFn};
             use $crate::OrcaToolDef;
-            use ::orca_utils::tool::OrcaTool;
+            use ::orca_tool::OrcaTool;
 
             fn build() -> clap::Command {
                 let cmd = clap::Command::new($verb).about($summary);
@@ -213,7 +213,7 @@ macro_rules! register_op {
 
             fn run(
                 m: &clap::ArgMatches,
-                ctx: ::std::sync::Arc<::orca_utils::tool::ToolCtx>,
+                ctx: ::std::sync::Arc<::orca_tool::ToolCtx>,
             ) -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = ::anyhow::Result<()>> + Send>> {
                 let m = m.clone();
                 Box::pin(async move {

@@ -53,6 +53,6 @@ pub trait ProvideDocker {
 }
 
 /// Register a `DockerService` into `ToolCtx`.
-pub fn register_docker(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideDocker) {
+pub fn register_docker(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideDocker) {
     ctx.register_service(p.docker());
 }

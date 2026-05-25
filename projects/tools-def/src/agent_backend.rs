@@ -93,7 +93,7 @@ pub struct AgentBackendStatusOutput {
 
 #[cfg(feature = "native")]
 fn svc(
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<std::sync::Arc<dyn crate::services::agent_backend::AgentBackendService>> {
     ctx.service::<std::sync::Arc<dyn crate::services::agent_backend::AgentBackendService>>()
 }
@@ -102,7 +102,7 @@ fn svc(
 #[orca_tool(domain = "system.agent.backend", verb = "clear-key")]
 async fn agent_backend_clear_api_key(
     _args: ClearArgs,
-    _ctx: &orca_utils::tool::ToolCtx,
+    _ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ApiKeyMutationResult> {
     let conn = orca_db::open_default()?;
     let removed = orca_db::settings::secret_delete(&conn, "anthropic_api_key")?;
@@ -121,7 +121,7 @@ async fn agent_backend_clear_api_key(
 #[orca_tool(domain = "system.agent.backend", verb = "set-key")]
 async fn agent_backend_set_api_key(
     args: SetArgs,
-    _ctx: &orca_utils::tool::ToolCtx,
+    _ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ApiKeyMutationResult> {
     if args.key.trim().is_empty() {
         anyhow::bail!("key must not be empty");
@@ -140,7 +140,7 @@ async fn agent_backend_set_api_key(
 #[orca_tool(domain = "system.agent.backend", verb = "set-mode")]
 async fn agent_backend_set_mode(
     args: SetModeArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SetModeResult> {
     let mode = svc(ctx)?.set_mode(&args.mode).await?;
     Ok(SetModeResult { mode })
@@ -150,7 +150,7 @@ async fn agent_backend_set_mode(
 #[orca_tool(domain = "system.agent.backend", verb = "override")]
 async fn agent_backend_override(
     args: OverrideArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<OverrideResult> {
     let s = svc(ctx)?;
     if args.backend == "clear" {
@@ -176,7 +176,7 @@ async fn agent_backend_override(
 #[orca_tool(domain = "system.agent.backend", verb = "use-server-anthropic")]
 async fn agent_backend_use_server_anthropic(
     args: UseServerAnthropicArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<UseServerAnthropicResult> {
     svc(ctx)?.set_use_server_anthropic(args.enabled).await?;
     Ok(UseServerAnthropicResult {
@@ -188,7 +188,7 @@ async fn agent_backend_use_server_anthropic(
 #[orca_tool(domain = "system.agent.backend", verb = "detail")]
 async fn agent_backend_detail(
     _args: AgentBackendStatusArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<AgentBackendStatusOutput> {
     let s = svc(ctx)?;
     let mode = s.current_mode().await?;

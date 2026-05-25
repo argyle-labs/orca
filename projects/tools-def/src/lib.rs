@@ -20,7 +20,7 @@
 // in-crate macro invocations.
 extern crate self as orca_tools_def;
 
-pub use orca_tool_trait::{OrcaOp, OrcaToolDef};
+pub use orca_tool::{OrcaOp, OrcaToolDef};
 
 /// `#[orca_tool(domain = "...", verb = "...")]` proc-macro re-export.
 ///
@@ -83,7 +83,7 @@ pub mod cli;
 #[doc(hidden)]
 #[cfg(feature = "native")]
 pub mod __private {
-    pub use orca_utils::tool::ToolRegistry;
+    pub use orca_tool::ToolRegistry;
 }
 
 /// Walk the `inventory::iter::<ToolRegistration>` slice — populated by every

@@ -116,7 +116,7 @@ pub struct SearchLogsOutput {
 
 #[cfg(feature = "native")]
 fn agents_svc(
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<std::sync::Arc<dyn crate::services::agents::AgentsService>> {
     ctx.service::<std::sync::Arc<dyn crate::services::agents::AgentsService>>()
 }
@@ -125,7 +125,7 @@ fn agents_svc(
 #[orca_tool(domain = "system.agent", verb = "list")]
 async fn list_agents(
     _args: ListAgentsArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ListAgentsOutput> {
     let agents = agents_svc(ctx)?
         .list_agents()
@@ -142,10 +142,7 @@ async fn list_agents(
 /// Return the full system prompt for a named orca agent. Use this to invoke an
 /// agent programmatically via Agent(general-purpose, prompt=<result>+task).
 #[orca_tool(domain = "system.agent", verb = "get")]
-async fn get_agent(
-    args: GetAgentArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<GetAgentOutput> {
+async fn get_agent(args: GetAgentArgs, ctx: &orca_tool::ToolCtx) -> anyhow::Result<GetAgentOutput> {
     let prompt = agents_svc(ctx)?
         .get_agent_prompt(&args.name)
         .await?
@@ -162,7 +159,7 @@ async fn get_agent(
 #[orca_tool(domain = "system.agent", verb = "get-config")]
 async fn get_config(
     args: GetConfigArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<GetConfigOutput> {
     let s = agents_svc(ctx)?;
     let available = s.list_config_docs().await?;
@@ -188,7 +185,7 @@ async fn get_config(
 #[orca_tool(domain = "system.agent", verb = "get-context")]
 async fn get_context(
     args: GetContextArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<GetContextOutput> {
     match agents_svc(ctx)?.read_project_memory(&args.project).await? {
         Some(mem) => Ok(GetContextOutput {
@@ -218,7 +215,7 @@ async fn get_context(
 #[orca_tool(domain = "system.agent", verb = "search-logs")]
 async fn search_logs(
     args: SearchLogsArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SearchLogsOutput> {
     let data = agents_svc(ctx)?.search_logs(&args.query, 20).await?;
     let matches = data

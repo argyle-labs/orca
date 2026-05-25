@@ -14,8 +14,8 @@ mod specs;
 mod tools;
 
 use anyhow::Result;
+use orca_tool::{ToolCtx, ToolRegistry};
 use orca_utils::config::Config;
-use orca_utils::tool::{ToolCtx, ToolRegistry};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,13 +27,7 @@ use handlers::run;
 /// truth — called by MCP stdio, the HTTP /api/tools router, and (eventually)
 /// the WASM client surface.
 pub fn register_all_tools(reg: &mut ToolRegistry) {
-    // First-party tools that live in the neutral `orca-tools` crate. The
-    // `orca_tools!` macro there is the single enrollment point; new tools
-    // should land in `projects/tools/` and join that macro.
-    orca_tools::register_all(reg);
-
-    // Server-coupled tools that still live here pending service-trait
-    // abstractions so they can move to projects/tools/ too.
+    orca_tools_def::native_register(reg);
     spec_tools::register(reg);
 }
 

@@ -48,6 +48,6 @@ pub trait ProvidePlugins {
 }
 
 /// Register a `PluginsService` into `ToolCtx`.
-pub fn register_plugins(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvidePlugins) {
+pub fn register_plugins(ctx: &mut orca_tool::ToolCtx, p: &impl ProvidePlugins) {
     ctx.register_service(p.plugins());
 }

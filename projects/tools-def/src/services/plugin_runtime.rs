@@ -29,6 +29,6 @@ pub trait ProvidePluginRuntime {
 }
 
 /// Register a `PluginRuntimeService` into `ToolCtx`.
-pub fn register_plugin_runtime(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvidePluginRuntime) {
+pub fn register_plugin_runtime(ctx: &mut orca_tool::ToolCtx, p: &impl ProvidePluginRuntime) {
     ctx.register_service(p.plugin_runtime());
 }

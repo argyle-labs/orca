@@ -115,7 +115,7 @@ pub trait ProvideHostRefresh {
 }
 
 #[cfg(feature = "native")]
-pub fn register_host_refresh(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideHostRefresh) {
+pub fn register_host_refresh(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideHostRefresh) {
     ctx.register_service(p.host_refresh());
 }
 
@@ -123,7 +123,7 @@ pub fn register_host_refresh(ctx: &mut orca_utils::tool::ToolCtx, p: &impl Provi
 #[orca_tool(domain = "system.host", verb = "detail", remote_ok = true)]
 async fn host_detail(
     _args: EmptyArgs,
-    _ctx: &orca_utils::tool::ToolCtx,
+    _ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<HostInfoOutput> {
     let conn = orca_db::open_default()?;
     let channels: Vec<HostChannel> = orca_db::host_addressing::list_host_addressing(&conn)?
@@ -150,10 +150,7 @@ async fn host_detail(
 
 /// Write a manual host addressing override (display_name, fqdn, or a channel value).
 #[orca_tool(domain = "system.host", verb = "set")]
-async fn host_set(
-    args: HostSetArgs,
-    _ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<HostSetOutput> {
+async fn host_set(args: HostSetArgs, _ctx: &orca_tool::ToolCtx) -> anyhow::Result<HostSetOutput> {
     if !ALLOWED_HOST_KEYS.contains(&args.key.as_str()) {
         anyhow::bail!(
             "host.set: key '{}' is not in the allowlist ({:?})",
@@ -182,7 +179,7 @@ async fn host_set(
 #[orca_tool(domain = "system.host", verb = "refresh")]
 async fn host_refresh(
     _args: EmptyArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<HostRefreshOutput> {
     let conn = orca_db::open_default()?;
     if let Ok(hook) = ctx.service::<std::sync::Arc<dyn HostRefreshHook + Send + Sync>>() {

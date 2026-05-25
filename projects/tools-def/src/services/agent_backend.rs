@@ -42,6 +42,6 @@ pub trait ProvideAgentBackend {
 
 /// Register an `AgentBackendService` into `ToolCtx` from any embedder that
 /// implements `ProvideAgentBackend`.
-pub fn register_agent_backend(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideAgentBackend) {
+pub fn register_agent_backend(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideAgentBackend) {
     ctx.register_service(p.agent_backend());
 }

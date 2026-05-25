@@ -491,7 +491,7 @@ async fn lmstudio_tool_call_round_trip() {
         return;
     }
 
-    use orca_utils::tool::ToolDef;
+    use orca_tool::ToolDef;
     let tools = vec![ToolDef {
         name: "get_weather".into(),
         description: "Get the current weather for a location.".into(),

@@ -12,12 +12,12 @@ use std::sync::Arc;
 /// instead of calling server-internal modules directly — keeps tool
 /// definitions wasm-safe.
 pub struct ToolCtx {
-    pub config: Arc<crate::config::Config>,
+    pub config: Arc<orca_utils::config::Config>,
     services: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
 }
 
 impl ToolCtx {
-    pub fn new(config: Arc<crate::config::Config>) -> Self {
+    pub fn new(config: Arc<orca_utils::config::Config>) -> Self {
         Self {
             config,
             services: HashMap::new(),

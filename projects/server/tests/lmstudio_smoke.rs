@@ -15,7 +15,7 @@
 /// and the models referenced below available on disk.
 use orca::llm::backend::{LMStudioBackend, ModelBackend, buffer_sink};
 use orca::llm::{Message, StopReason};
-use orca_utils::tool::ToolDef;
+use orca_tool::ToolDef;
 use serde_json::json;
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -235,7 +235,7 @@ async fn lmstudio_tool_call_then_answer() {
     let tc = &r1.tool_calls[0];
 
     // Round 2: provide tool result, expect final text answer
-    use orca_utils::tool::ToolResult;
+    use orca_tool::ToolResult;
     let round2_messages = vec![
         Message::user("What is the capital of France? Use the lookup_capital tool."),
         Message::Assistant {
@@ -365,7 +365,7 @@ async fn lmstudio_cancellation() {
 fn serialize_tool_call_content_is_null() {
     use orca::llm::Message;
     use orca::llm::backend::serialize::openai_messages;
-    use orca_utils::tool::ToolCall;
+    use orca_tool::ToolCall;
     use serde_json::Value;
 
     let messages = vec![Message::Assistant {
@@ -395,7 +395,7 @@ fn serialize_tool_call_content_is_null() {
 fn serialize_tool_call_with_text_keeps_content() {
     use orca::llm::Message;
     use orca::llm::backend::serialize::openai_messages;
-    use orca_utils::tool::ToolCall;
+    use orca_tool::ToolCall;
 
     let messages = vec![Message::Assistant {
         text: Some("Thinking…".into()),
@@ -445,7 +445,7 @@ fn serialize_empty_system_prompt_omitted() {
 #[test]
 fn serialize_tool_results_role_and_id() {
     use orca::llm::backend::serialize::openai_messages;
-    use orca_utils::tool::ToolResult;
+    use orca_tool::ToolResult;
 
     let messages = vec![Message::ToolResults(vec![
         ToolResult {
@@ -490,7 +490,7 @@ fn serialize_assistant_empty_is_empty_string() {
 #[test]
 fn serialize_conversation_order() {
     use orca::llm::backend::serialize::openai_messages;
-    use orca_utils::tool::{ToolCall, ToolResult};
+    use orca_tool::{ToolCall, ToolResult};
 
     let messages = vec![
         Message::User {
@@ -604,7 +604,7 @@ async fn lmstudio_tool_error_handled() {
     }
 
     let tc = &r1.tool_calls[0];
-    use orca_utils::tool::ToolResult;
+    use orca_tool::ToolResult;
 
     // Round 2: return an error result
     let (sink2, _buf2) = buffer_sink();

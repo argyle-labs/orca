@@ -54,7 +54,7 @@ pub struct PkiListArgs {}
 
 #[cfg(feature = "native")]
 fn pki_svc(
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<std::sync::Arc<dyn crate::services::pki::PkiService>> {
     ctx.service::<std::sync::Arc<dyn crate::services::pki::PkiService>>()
 }
@@ -63,7 +63,7 @@ fn pki_svc(
 #[orca_tool(domain = "system.pki.ca", verb = "create")]
 async fn pki_ca_create(
     _args: PkiCaInitArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<PkiInitReport> {
     pki_svc(ctx)?.ca_init().await
 }
@@ -72,7 +72,7 @@ async fn pki_ca_create(
 #[orca_tool(domain = "system.pki.cert", verb = "create")]
 async fn pki_cert_create(
     args: PkiCertIssueArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<PkiCertReport> {
     pki_svc(ctx)?
         .cert_issue(&args.plugin_id, &args.capability)
@@ -81,9 +81,6 @@ async fn pki_cert_create(
 
 /// List all issued plugin certs.
 #[orca_tool(domain = "system.pki", verb = "list")]
-async fn pki_list(
-    _args: PkiListArgs,
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<PkiListReport> {
+async fn pki_list(_args: PkiListArgs, ctx: &orca_tool::ToolCtx) -> anyhow::Result<PkiListReport> {
     pki_svc(ctx)?.list().await
 }

@@ -113,7 +113,7 @@ pub struct DenyReport {
 #[orca_tool(domain = "system.sweep", verb = "organization")]
 async fn sweep_organization(
     args: SweepOrganizationArgs,
-    _ctx: &orca_utils::tool::ToolCtx,
+    _ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SweepOrganizationOutput> {
     let start = std::time::Instant::now();
     let workspace_root = native::resolve_workspace_root(args.workspace_root.as_deref())?;

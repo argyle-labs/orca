@@ -318,15 +318,13 @@ pub struct SystemUpdateArgs {
 
 #[cfg(feature = "native")]
 fn svc(
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<std::sync::Arc<dyn crate::services::lifecycle::LifecycleService>> {
     ctx.service::<std::sync::Arc<dyn crate::services::lifecycle::LifecycleService>>()
 }
 
 #[cfg(feature = "native")]
-fn pod_svc(
-    ctx: &orca_utils::tool::ToolCtx,
-) -> anyhow::Result<std::sync::Arc<dyn crate::pod::PodService>> {
+fn pod_svc(ctx: &orca_tool::ToolCtx) -> anyhow::Result<std::sync::Arc<dyn crate::pod::PodService>> {
     ctx.service::<std::sync::Arc<dyn crate::pod::PodService>>()
 }
 
@@ -334,7 +332,7 @@ fn pod_svc(
 #[orca_tool(domain = "system", verb = "create")]
 async fn system_create(
     _args: EmptyDeleteArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<LifecycleReport> {
     svc(ctx)?.install().await
 }
@@ -347,7 +345,7 @@ async fn system_create(
 #[orca_tool(domain = "system", verb = "update", remote_ok = true)]
 async fn system_update(
     args: SystemUpdateArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<LifecycleReport> {
     if let Some(ref peer_id) = args.peer_id {
         let dispatch = pod_svc(ctx)?
@@ -370,7 +368,7 @@ async fn system_update(
 #[orca_tool(domain = "system", verb = "delete")]
 async fn system_delete(
     _args: EmptyDeleteArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<LifecycleReport> {
     svc(ctx)?.uninstall().await
 }
@@ -379,7 +377,7 @@ async fn system_delete(
 #[orca_tool(domain = "system.diagnostic", verb = "list")]
 async fn system_diagnostic_list(
     _args: SystemDoctorArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<DoctorReport> {
     svc(ctx)?.doctor().await
 }
@@ -388,7 +386,7 @@ async fn system_diagnostic_list(
 #[orca_tool(domain = "namespace.project", verb = "list")]
 async fn projects_list(
     _args: ProjectsListArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ProjectsListReport> {
     svc(ctx)?.projects_list().await
 }
@@ -397,7 +395,7 @@ async fn projects_list(
 #[orca_tool(domain = "namespace.spec", verb = "detail")]
 async fn spec_detail(
     _args: SpecDumpArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SpecDumpReport> {
     svc(ctx)?.spec_dump().await
 }
@@ -480,7 +478,7 @@ mod tests {
         }
     }
 
-    fn ctx_with_stub() -> (orca_utils::tool::ToolCtx, Arc<StubLifecycle>) {
+    fn ctx_with_stub() -> (orca_tool::ToolCtx, Arc<StubLifecycle>) {
         let stub = Arc::new(StubLifecycle::default());
         let svc: Arc<dyn LifecycleService> = stub.clone();
         let mut ctx = empty_ctx();
@@ -634,8 +632,7 @@ mod tests {
         }
     }
 
-    fn ctx_with_lifecycle_and_pod() -> (orca_utils::tool::ToolCtx, Arc<StubLifecycle>, Arc<StubPod>)
-    {
+    fn ctx_with_lifecycle_and_pod() -> (orca_tool::ToolCtx, Arc<StubLifecycle>, Arc<StubPod>) {
         let lifecycle = Arc::new(StubLifecycle::default());
         let pod = Arc::new(StubPod::default());
         let mut ctx = empty_ctx();

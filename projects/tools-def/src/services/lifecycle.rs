@@ -29,6 +29,6 @@ pub trait ProvideLifecycle {
 }
 
 /// Register a `LifecycleService` into `ToolCtx`.
-pub fn register_lifecycle(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideLifecycle) {
+pub fn register_lifecycle(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideLifecycle) {
     ctx.register_service(p.lifecycle());
 }

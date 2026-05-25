@@ -22,8 +22,8 @@ use serde_json::{Value, json};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use super::erased::{ErasedTool, ToolWrapper, value_to_text};
-use super::{OrcaTool, ToolCtx};
+use crate::erased::{ErasedTool, ToolWrapper, value_to_text};
+use crate::{OrcaTool, ToolCtx};
 
 pub struct ToolRegistry {
     tools: Vec<Box<dyn ErasedTool>>,
@@ -212,7 +212,7 @@ pub enum CliArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool::{OrcaTool, OrcaToolDef, ToolCtx};
+    use crate::{OrcaTool, OrcaToolDef, ToolCtx};
     use anyhow::Result;
     use async_trait::async_trait;
     use schemars::JsonSchema;
@@ -266,7 +266,7 @@ mod tests {
     }
 
     fn make_ctx() -> ToolCtx {
-        use crate::config::{Config, Model};
+        use orca_utils::config::{Config, Model};
         use std::path::PathBuf;
         ToolCtx::new(Arc::new(Config {
             anthropic_api_key: None,

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use orca_utils::tool::{OrcaTool, OrcaToolDef, ToolCtx};
+use orca_tool::{OrcaTool, OrcaToolDef, ToolCtx};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -131,7 +131,7 @@ impl OrcaTool for GetGraphqlInfo {
 }
 // ── register ──────────────────────────────────────────────────────────────────
 
-pub fn register(reg: &mut orca_utils::tool::ToolRegistry) {
+pub fn register(reg: &mut orca_tool::ToolRegistry) {
     reg.register::<ListRebuySpecs>()
         .register::<GetRebuySpec>()
         .register::<GetRebuySpecPublic>()

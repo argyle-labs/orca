@@ -47,7 +47,7 @@ pub struct DbLifecycleUpdateArgs {
 
 #[cfg(feature = "native")]
 fn db_svc(
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<std::sync::Arc<dyn crate::services::db_admin::DbAdminService>> {
     ctx.service::<std::sync::Arc<dyn crate::services::db_admin::DbAdminService>>()
 }
@@ -56,7 +56,7 @@ fn db_svc(
 #[orca_tool(domain = "system.db", verb = "detail")]
 async fn db_detail(
     _args: DbStatusArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<DbStatusReport> {
     db_svc(ctx)?.status().await
 }
@@ -68,7 +68,7 @@ async fn db_detail(
 #[orca_tool(domain = "system.db.lifecycle", verb = "update")]
 async fn db_lifecycle_update(
     args: DbLifecycleUpdateArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<DbMigrateReport> {
     let s = db_svc(ctx)?;
     match args.action.as_str() {
@@ -137,7 +137,7 @@ mod tests {
         }
     }
 
-    fn ctx_with_stub() -> (orca_utils::tool::ToolCtx, Arc<Stub>) {
+    fn ctx_with_stub() -> (orca_tool::ToolCtx, Arc<Stub>) {
         let stub = Stub::new();
         let svc: Arc<dyn DbAdminService> = stub.clone();
         let mut ctx = empty_ctx();

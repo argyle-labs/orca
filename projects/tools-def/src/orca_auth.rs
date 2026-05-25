@@ -60,7 +60,7 @@ pub struct AuthLoginOutput {
 
 #[cfg(feature = "native")]
 fn auth_svc(
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<std::sync::Arc<dyn crate::services::auth::AuthService>> {
     ctx.service::<std::sync::Arc<dyn crate::services::auth::AuthService>>()
 }
@@ -69,7 +69,7 @@ fn auth_svc(
 #[orca_tool(domain = "system.auth.session", verb = "detail")]
 async fn auth_session_detail(
     _args: AuthStatusArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<AuthStatusReport> {
     auth_svc(ctx)?.status().await
 }
@@ -78,7 +78,7 @@ async fn auth_session_detail(
 #[orca_tool(domain = "system.auth.session", verb = "delete")]
 async fn auth_session_delete(
     args: AuthLogoutArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<AuthLogoutOutput> {
     let removed = auth_svc(ctx)?.logout(&args.provider).await?;
     Ok(AuthLogoutOutput {
@@ -91,7 +91,7 @@ async fn auth_session_delete(
 #[orca_tool(domain = "system.auth.session", verb = "create")]
 async fn auth_session_create(
     args: AuthLoginArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<AuthLoginOutput> {
     auth_svc(ctx)?
         .login(&args.provider, args.key.as_deref())
@@ -160,7 +160,7 @@ pub struct TokenRevokeOutput {
 #[orca_tool(domain = "system.auth.token", verb = "create")]
 async fn auth_token_create(
     args: TokenCreateArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<TokenCreateOutput> {
     auth_svc(ctx)?
         .token_create(&args.name, &args.role, args.expires_in_days)
@@ -171,7 +171,7 @@ async fn auth_token_create(
 #[orca_tool(domain = "system.auth.token", verb = "list")]
 async fn auth_token_list(
     _args: TokenListArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<TokenListOutput> {
     let tokens = auth_svc(ctx)?.token_list().await?;
     Ok(TokenListOutput { tokens })
@@ -181,7 +181,7 @@ async fn auth_token_list(
 #[orca_tool(domain = "system.auth.token", verb = "delete")]
 async fn auth_token_delete(
     args: TokenRevokeArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<TokenRevokeOutput> {
     let revoked = auth_svc(ctx)?.token_revoke(&args.id).await?;
     Ok(TokenRevokeOutput { revoked })

@@ -41,7 +41,7 @@ pub struct SetPluginDataOutput {
 
 #[cfg(feature = "native")]
 fn pr(
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<std::sync::Arc<dyn crate::services::plugin_runtime::PluginRuntimeService>> {
     ctx.service::<std::sync::Arc<dyn crate::services::plugin_runtime::PluginRuntimeService>>()
 }
@@ -50,7 +50,7 @@ fn pr(
 #[orca_tool(domain = "system.plugin.data", verb = "get")]
 async fn get_plugin_data(
     args: GetPluginDataArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<GetPluginDataOutput> {
     let value = pr(ctx)?.get(&args.plugin, &args.key).await?;
     Ok(GetPluginDataOutput { value })
@@ -60,7 +60,7 @@ async fn get_plugin_data(
 #[orca_tool(domain = "system.plugin.data", verb = "set", cli = skip)]
 async fn set_plugin_data(
     args: SetPluginDataArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SetPluginDataOutput> {
     pr(ctx)?.set(&args.plugin, &args.key, &args.value).await?;
     Ok(SetPluginDataOutput { ok: true })
@@ -99,7 +99,7 @@ mod tests {
         }
     }
 
-    fn ctx_with_stub() -> orca_utils::tool::ToolCtx {
+    fn ctx_with_stub() -> orca_tool::ToolCtx {
         let svc: Arc<dyn PluginRuntimeService> = Arc::new(StubKv::default());
         let mut ctx = empty_ctx();
         ctx.register_service(svc);

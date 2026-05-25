@@ -249,7 +249,7 @@ pub use proxy_graphql_args_mod::ProxyGraphqlArgs;
 
 #[cfg(feature = "native")]
 fn svc(
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<std::sync::Arc<dyn crate::services::spec_registry::SpecRegistryService>> {
     ctx.service::<std::sync::Arc<dyn crate::services::spec_registry::SpecRegistryService>>()
 }
@@ -258,7 +258,7 @@ fn svc(
 #[orca_tool(domain = "namespace.spec", verb = "list")]
 async fn list_specs(
     _args: ListSpecsArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ListSpecsOutput> {
     let specs = svc(ctx)?.list_specs().await?;
     Ok(ListSpecsOutput { specs })
@@ -268,7 +268,7 @@ async fn list_specs(
 #[orca_tool(domain = "namespace.spec", verb = "list-db")]
 async fn list_db_specs(
     _args: ListDbSpecsArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ListDbSpecsOutput> {
     let specs = svc(ctx)?.list_db_specs().await?;
     Ok(ListDbSpecsOutput { specs })
@@ -278,7 +278,7 @@ async fn list_db_specs(
 #[orca_tool(domain = "namespace.spec", verb = "create")]
 async fn spec_create(
     args: RegisterSpecArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<RegisterSpecResult> {
     svc(ctx)?.register_spec(&args.name, &args.url).await
 }
@@ -287,7 +287,7 @@ async fn spec_create(
 #[orca_tool(domain = "namespace.spec", verb = "refresh")]
 async fn refresh_spec(
     args: RefreshSpecArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<RegisterSpecResult> {
     svc(ctx)?.refresh_spec(&args.name).await
 }
@@ -296,7 +296,7 @@ async fn refresh_spec(
 #[orca_tool(domain = "namespace.spec", verb = "delete")]
 async fn spec_delete(
     args: UnregisterSpecArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<UnregisterSpecOutput> {
     let removed = svc(ctx)?.unregister_spec(&args.name).await?;
     Ok(UnregisterSpecOutput { removed })
@@ -306,7 +306,7 @@ async fn spec_delete(
 #[orca_tool(domain = "namespace.spec", verb = "sync-mcp")]
 async fn sync_mcp_specs(
     args: SyncMcpSpecsArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SyncMcpSpecsResult> {
     svc(ctx)?.sync_mcp_specs(&args.server).await
 }
@@ -315,7 +315,7 @@ async fn sync_mcp_specs(
 #[orca_tool(domain = "namespace.spec.graphql", verb = "detail")]
 async fn spec_graphql_detail(
     args: GetSpecGraphqlInfoArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<GraphQlInfoData> {
     svc(ctx)?.graphql_info(&args.repo).await
 }
@@ -324,7 +324,7 @@ async fn spec_graphql_detail(
 #[orca_tool(domain = "namespace.spec.graphql", verb = "update", cli = skip)]
 async fn spec_graphql_update(
     args: ProxyGraphqlArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<GraphqlProxyResult> {
     svc(ctx)?
         .proxy_graphql(

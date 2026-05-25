@@ -19,6 +19,6 @@ pub trait ProvideSystem {
 }
 
 /// Register a `SystemService` into `ToolCtx`.
-pub fn register_system(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideSystem) {
+pub fn register_system(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideSystem) {
     ctx.register_service(p.system());
 }

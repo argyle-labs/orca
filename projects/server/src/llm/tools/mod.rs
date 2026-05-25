@@ -5,8 +5,8 @@ pub mod bash;
 use crate::llm::backend::{OutputSink, stdout_sink};
 use anyhow::Result;
 use bash::BashPermissions;
+use orca_tool::{ToolDef, ToolResult};
 use orca_utils::fs::{ops, search};
-use orca_utils::tool::{ToolDef, ToolResult};
 use serde_json::{Value, json};
 
 pub struct ToolRegistry {

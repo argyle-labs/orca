@@ -114,7 +114,7 @@ pub struct ProfileUnshareArgs {
 
 #[cfg(feature = "native")]
 fn profile_svc(
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<std::sync::Arc<dyn crate::services::profile::ProfileService>> {
     ctx.service::<std::sync::Arc<dyn crate::services::profile::ProfileService>>()
 }
@@ -123,7 +123,7 @@ fn profile_svc(
 #[orca_tool(domain = "namespace", verb = "list")]
 async fn profile_list(
     _args: ProfileListArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ProfileListReport> {
     profile_svc(ctx)?.list().await
 }
@@ -132,7 +132,7 @@ async fn profile_list(
 #[orca_tool(domain = "namespace", verb = "show")]
 async fn profile_show(
     args: ProfileShowArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ProfileDetail> {
     profile_svc(ctx)?.show(args.spec.as_deref()).await
 }
@@ -141,7 +141,7 @@ async fn profile_show(
 #[orca_tool(domain = "namespace", verb = "current")]
 async fn profile_current(
     _args: ProfileCurrentArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ProfileCurrentReport> {
     profile_svc(ctx)?.current().await
 }
@@ -150,7 +150,7 @@ async fn profile_current(
 #[orca_tool(domain = "namespace", verb = "create")]
 async fn profile_create(
     args: ProfileCreateArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ProfileDetail> {
     profile_svc(ctx)?
         .create(&args.name, args.description.as_deref())
@@ -161,7 +161,7 @@ async fn profile_create(
 #[orca_tool(domain = "namespace", verb = "delete")]
 async fn profile_delete(
     args: ProfileSpecArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ProfileMutationResult> {
     profile_svc(ctx)?.delete(&args.spec).await
 }
@@ -170,7 +170,7 @@ async fn profile_delete(
 #[orca_tool(domain = "namespace", verb = "use")]
 async fn profile_use(
     args: ProfileSpecArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ProfileMutationResult> {
     profile_svc(ctx)?.use_profile(&args.spec).await
 }
@@ -179,7 +179,7 @@ async fn profile_use(
 #[orca_tool(domain = "namespace.share", verb = "create")]
 async fn profile_share_create(
     args: ProfileShareArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ProfileMutationResult> {
     profile_svc(ctx)?
         .share(&args.spec, &args.user, &args.role)
@@ -190,7 +190,7 @@ async fn profile_share_create(
 #[orca_tool(domain = "namespace.share", verb = "delete")]
 async fn profile_share_delete(
     args: ProfileUnshareArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ProfileMutationResult> {
     profile_svc(ctx)?.unshare(&args.spec, &args.user).await
 }
@@ -199,7 +199,7 @@ async fn profile_share_delete(
 #[orca_tool(domain = "namespace.share", verb = "list")]
 async fn profile_share_list(
     args: ProfileSpecArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ProfileSharesReport> {
     profile_svc(ctx)?.shares(&args.spec).await
 }

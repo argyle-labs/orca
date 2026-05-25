@@ -242,44 +242,41 @@ pub trait HaEndpointService: Send + Sync {
 pub trait ProvideMcpRegistry {
     fn mcp_registry(&self) -> std::sync::Arc<dyn McpRegistryService>;
 }
-pub fn register_mcp_registry(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideMcpRegistry) {
+pub fn register_mcp_registry(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideMcpRegistry) {
     ctx.register_service(p.mcp_registry());
 }
 
 pub trait ProvideSchemaDb {
     fn schema_db(&self) -> std::sync::Arc<dyn SchemaDbService>;
 }
-pub fn register_schema_db(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideSchemaDb) {
+pub fn register_schema_db(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideSchemaDb) {
     ctx.register_service(p.schema_db());
 }
 
 pub trait ProvideDockerRuntime {
     fn docker_runtime(&self) -> std::sync::Arc<dyn DockerRuntimeService>;
 }
-pub fn register_docker_runtime(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideDockerRuntime) {
+pub fn register_docker_runtime(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideDockerRuntime) {
     ctx.register_service(p.docker_runtime());
 }
 
 pub trait ProvideDocRoot {
     fn doc_root(&self) -> std::sync::Arc<dyn DocRootService>;
 }
-pub fn register_doc_root(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideDocRoot) {
+pub fn register_doc_root(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideDocRoot) {
     ctx.register_service(p.doc_root());
 }
 
 pub trait ProvideProxmoxEndpoint {
     fn proxmox_endpoint(&self) -> std::sync::Arc<dyn ProxmoxEndpointService>;
 }
-pub fn register_proxmox_endpoint(
-    ctx: &mut orca_utils::tool::ToolCtx,
-    p: &impl ProvideProxmoxEndpoint,
-) {
+pub fn register_proxmox_endpoint(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideProxmoxEndpoint) {
     ctx.register_service(p.proxmox_endpoint());
 }
 
 pub trait ProvideHaEndpoint {
     fn ha_endpoint(&self) -> std::sync::Arc<dyn HaEndpointService>;
 }
-pub fn register_ha_endpoint(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideHaEndpoint) {
+pub fn register_ha_endpoint(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideHaEndpoint) {
     ctx.register_service(p.ha_endpoint());
 }

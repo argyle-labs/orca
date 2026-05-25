@@ -83,7 +83,7 @@ pub struct SystemStatusArgs {}
 
 #[cfg(feature = "native")]
 fn svc(
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<std::sync::Arc<dyn crate::services::system::SystemService>> {
     ctx.service::<std::sync::Arc<dyn crate::services::system::SystemService>>()
 }
@@ -92,7 +92,7 @@ fn svc(
 #[orca_tool(domain = "system", verb = "detail", remote_ok = true)]
 async fn system_detail(
     _args: SystemStatusArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SystemStatusReport> {
     svc(ctx)?.status().await
 }
@@ -147,7 +147,7 @@ mod tests {
         }
     }
 
-    fn ctx_with_stub() -> orca_utils::tool::ToolCtx {
+    fn ctx_with_stub() -> orca_tool::ToolCtx {
         let stub: Arc<dyn SystemService> = Arc::new(StubSystem);
         let mut ctx = empty_ctx();
         ctx.register_service(stub);

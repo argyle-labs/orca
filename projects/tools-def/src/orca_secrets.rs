@@ -119,7 +119,7 @@ pub struct SecretBackendsReport {
 
 #[cfg(feature = "native")]
 fn secrets_svc(
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<std::sync::Arc<dyn crate::services::secrets::SecretsService>> {
     ctx.service::<std::sync::Arc<dyn crate::services::secrets::SecretsService>>()
 }
@@ -128,7 +128,7 @@ fn secrets_svc(
 #[orca_tool(domain = "system.secret", verb = "list")]
 async fn secret_list(
     _args: SecretListArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SecretListReport> {
     let secrets = secrets_svc(ctx)?.list().await?;
     Ok(SecretListReport { secrets })
@@ -138,7 +138,7 @@ async fn secret_list(
 #[orca_tool(domain = "system.secret", verb = "detail")]
 async fn secret_detail(
     args: SecretGetArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SecretGetReport> {
     let (backend, value) = secrets_svc(ctx)?.get(&args.name).await?;
     Ok(SecretGetReport {
@@ -153,7 +153,7 @@ async fn secret_detail(
 #[orca_tool(domain = "system.secret", verb = "set")]
 async fn secret_set(
     args: SecretSetArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SecretMutationReport> {
     secrets_svc(ctx)?.set(args).await
 }
@@ -163,7 +163,7 @@ async fn secret_set(
 #[orca_tool(domain = "system.secret", verb = "delete")]
 async fn secret_delete(
     args: SecretDeleteArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SecretDeleteReport> {
     let removed = secrets_svc(ctx)?.delete(&args.name).await?;
     Ok(SecretDeleteReport {
@@ -176,7 +176,7 @@ async fn secret_delete(
 #[orca_tool(domain = "system.secret", verb = "backends")]
 async fn secret_backends(
     _args: SecretBackendsArgs,
-    ctx: &orca_utils::tool::ToolCtx,
+    ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SecretBackendsReport> {
     let backends = secrets_svc(ctx)?.backends().await;
     Ok(SecretBackendsReport { backends })

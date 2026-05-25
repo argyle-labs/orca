@@ -10,8 +10,8 @@
 use crate::llm::types::{BackendResponse, Message};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use orca_tool::ToolDef;
 use orca_utils::config::{Config, Model};
-use orca_utils::tool::ToolDef;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;

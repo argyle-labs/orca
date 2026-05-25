@@ -18,6 +18,6 @@ pub trait ProvidePki {
 }
 
 /// Register a `PkiService` into `ToolCtx`.
-pub fn register_pki(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvidePki) {
+pub fn register_pki(ctx: &mut orca_tool::ToolCtx, p: &impl ProvidePki) {
     ctx.register_service(p.pki());
 }

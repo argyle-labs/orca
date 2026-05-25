@@ -89,6 +89,6 @@ pub trait ProvideDocs {
 }
 
 /// Register a `DocsService` into `ToolCtx`.
-pub fn register_docs(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideDocs) {
+pub fn register_docs(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideDocs) {
     ctx.register_service(p.docs());
 }

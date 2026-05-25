@@ -50,6 +50,6 @@ pub trait ProvideAuth {
 }
 
 /// Register a `AuthService` into `ToolCtx`.
-pub fn register_auth(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideAuth) {
+pub fn register_auth(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideAuth) {
     ctx.register_service(p.auth());
 }

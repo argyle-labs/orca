@@ -79,6 +79,6 @@ pub trait ProvideSecrets {
 }
 
 /// Register a `SecretsService` into `ToolCtx`.
-pub fn register_secrets(ctx: &mut orca_utils::tool::ToolCtx, p: &impl ProvideSecrets) {
+pub fn register_secrets(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideSecrets) {
     ctx.register_service(p.secrets());
 }

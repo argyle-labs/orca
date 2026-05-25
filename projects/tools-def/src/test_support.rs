@@ -3,8 +3,8 @@
 //! `native`+`test` only — keeps domain test modules from each rebuilding the
 //! same boilerplate ToolCtx.
 
+use orca_tool::ToolCtx;
 use orca_utils::config::{Config, Model};
-use orca_utils::tool::ToolCtx;
 use std::path::PathBuf;
 use std::sync::Arc;
 

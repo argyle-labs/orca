@@ -48,6 +48,7 @@ path = "bin/uniffi-bindgen.rs"
 # orca core in-process — peer/HTTP transports are not used; UI ↔ core is a
 # direct UniFFI call (see project_mobile_as_standalone_orca.md).
 orca-tools-def = { path = "../tools-def", features = ["native"] }
+orca-tool      = { path = "../orca-tool", features = ["native"] }
 orca-utils     = { path = "../utils" }
 
 uniffi    = { workspace = true, features = ["cli"] }

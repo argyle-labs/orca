@@ -30,9 +30,9 @@ php-ast = ["dep:tree-sitter", "dep:tree-sitter-php"]
 # Workspace crates
 orca-sdk           = { path = "../sdk/rust" }
 orca-utils         = { path = "../utils" }
+orca-tool          = { path = "../orca-tool", features = ["native"] }
 db                 = { package = "orca-db", path = "../db" }
 orca-integrations  = { path = "../integrations" }
-orca-tools         = { path = "../tools" }
 orca-tools-def     = { path = "../tools-def", features = ["native", "cli"] }
 
 # CLI
