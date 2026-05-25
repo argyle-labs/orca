@@ -203,6 +203,26 @@ pub async fn cmd_pod_accept(code: &str) -> Result<()> {
     // chasing a peer_id that means nothing.
     pdb::cleanup_unknown_stub_at(&conn, &offer.peer_addr)?;
     pdb::delete_pending_offer(&conn, &offer.offer_id)?;
+    drop(conn);
+
+    // Notify the inviter so THEIR peer_secure for us flips to true. Without
+    // this the inviter sees mutual=false forever after auto-accept — the
+    // initial DB write is local-only and roster-sync only carries identity,
+    // not trust state.
+    if let Err(e) = call_pod_method_pub(
+        &offer.peer_addr,
+        offer.peer_port,
+        "pod/notify-trust",
+        serde_json::json!({ "trust": true }),
+    )
+    .await
+    {
+        tracing::warn!(
+            "pod/notify-trust to {}:{} after accept failed: {e:#} — inviter will see peer_secure=false until next manual `orca system peer update <peer> true`",
+            offer.peer_addr,
+            offer.peer_port
+        );
+    }
 
     println!(
         "✓ joined pod {} via {} ({}, {}:{})",

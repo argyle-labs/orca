@@ -170,6 +170,10 @@ pub struct PodAcceptOutput {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PodTrustArgs {
     pub peer_id: String,
+    // Bare `bool` derives as a flag (`--on`) under clap, which leaves no way
+    // to express the positional `[ON]` shown in --help. Force value parsing
+    // so `orca system peer update <peer> true|false` works.
+    #[cfg_attr(feature = "cli", clap(action = clap::ArgAction::Set))]
     pub on: bool,
     /// When `true`, execute the trust update on the remote peer so THEY trust
     /// US rather than updating our local trust of them. Requires the peer to
