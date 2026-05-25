@@ -37,6 +37,8 @@ pub use orca_tools_macro::orca_tool;
 // invocations and server consumers (`orca_tools_def::native_register`,
 // `orca_tools_def::openapi::inject_tool_paths`, etc.) working unchanged.
 
+#[allow(clippy::disallowed_types)]
+// Re-export of the escape hatch itself for downstream tools (homeassistant, proxmox) with genuinely free-form upstream payloads.
 pub use orca_tool::JsonAny;
 pub use orca_tool::openapi;
 
