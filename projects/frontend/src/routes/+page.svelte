@@ -73,13 +73,7 @@
   // not on every poll tick that updates instance data.
   let drawerChannel = $state('stable');
   let drawerOpenedForId = $state<string | null>(null);
-  let updateCheckResult = $state<{
-    channel: string;
-    latest: string | null;
-    up_to_date: boolean;
-  } | null>(null);
   let updateResult = $state<{ done: string[]; errors: string[] } | null>(null);
-  let checkPending = $state(false);
   let updatePending = $state(false);
 
   // 1-second live poll; DB writes happen every 10 s (host_status_writer)
