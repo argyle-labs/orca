@@ -1129,13 +1129,13 @@
     min-width: 0;
   }
   .update-badge {
-    font-size: 10px;
+    font-size: var(--text-xs);
     font-weight: 600;
-    padding: 1px 6px;
-    border-radius: 10px;
-    background: color-mix(in srgb, #f59e0b 15%, transparent);
-    color: #f59e0b;
-    border: 1px solid color-mix(in srgb, #f59e0b 40%, transparent);
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, #f59e0b 25%, transparent);
+    color: #f5a623;
+    border: 1px solid color-mix(in srgb, #f59e0b 60%, transparent);
     white-space: nowrap;
     flex-shrink: 0;
   }
@@ -1556,11 +1556,6 @@
     font-size: var(--text-xs);
     color: var(--color-text-dim);
     flex-shrink: 0;
-  }
-  .update-action-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
   }
   .channel-segment {
     display: flex;
