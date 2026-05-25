@@ -63,13 +63,6 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     } else {
         Some(load_rest_tls(&pki_dir).await?)
     };
-    if let Err(e) = crate::loopback_token::install_at_startup() {
-        tracing::warn!("loopback token install failed: {e:#}");
-    }
-    crate::system_info::spawn_refresher();
-    crate::host_status_writer::spawn_local_writer();
-    crate::host_status_writer::spawn_sync_puller();
-    crate::pod::host_status_replica::spawn_fleet_replicator();
     info!(
         "[orca] binding {} ({})...",
         addr,
@@ -93,46 +86,7 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
         }
     }
 
-    // Non-blocking update check — prints a notice if a newer version is available.
-    tokio::spawn(crate::commands::startup_update_check());
-
-    // Dev-source auto-poll: if ~/.orca/dev-source is set, check for a newer
-    // binary every 10 s and self-restart after applying so the service manager
-    // picks up the new binary immediately.
-    if let Some(src) = crate::commands::update::read_dev_source() {
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
-            interval.tick().await; // skip immediate tick
-            loop {
-                interval.tick().await;
-                match crate::commands::update::check_for_update_dev(&src).await {
-                    Ok(Some(_)) => {
-                        tracing::info!("[dev] new build detected — applying and restarting");
-                        if let Err(e) = crate::commands::update::apply_update_dev(&src).await {
-                            tracing::warn!("[dev] apply failed: {e}");
-                        } else {
-                            std::process::exit(0);
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(e) => tracing::debug!("[dev] update check: {e}"),
-                }
-            }
-        });
-    }
-
-    // Plugin host: TCP + mTLS on APP_PLUGIN_PORT. Skips gracefully if PKI not initialized.
-    crate::plugin_host::start(
-        &pki_dir,
-        orca_utils::config::APP_PLUGIN_PORT,
-        crate::plugin_host::PluginRegistry::new(),
-    );
-
-    // Pod mesh: mDNS responder + auto-offer scheduler. Both are best-effort:
-    // failures are logged and do not abort the daemon (a host without pod
-    // material can still serve plugins and the HTTP API).
-    spawn_pod_runtime(&pki_dir).await;
-    spawn_scheduler_runtime();
+    spawn_all_runtime_tasks(&pki_dir).await;
 
     let scheme = if dev { "http" } else { "https" };
     info!("[orca] listening on {scheme}://localhost:{port}");
@@ -245,28 +199,9 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         // Simple dev-binary serve loop: bind, serve, exit on SIGTERM.
         // Production daemon will reclaim port when we exit.
         let tls = load_rest_tls(&pki_dir).await?;
-        if let Err(e) = crate::loopback_token::install_at_startup() {
-            tracing::warn!("loopback token install failed: {e:#}");
-        }
         info!("[orca] dev binary listening on https://localhost:{port}");
 
-        // Best-effort plugin host (may fail if production daemon still owns the port)
-        crate::plugin_host::start(
-            &pki_dir,
-            orca_utils::config::APP_PLUGIN_PORT,
-            crate::plugin_host::PluginRegistry::new(),
-        );
-
-        crate::system_info::spawn_refresher();
-        crate::host_status_writer::spawn_local_writer();
-        crate::host_status_writer::spawn_sync_puller();
-        crate::pod::host_status_replica::spawn_fleet_replicator();
-
-        // Pod-mesh runtime parity with the production daemon path: dev
-        // builds must also arm mDNS + auto-offer + cert-rotation +
-        // roster-sync, otherwise a fleet sitting in dev mode degrades
-        // silently (no auto-mesh, certs expire, etc.).
-        spawn_pod_runtime(&pki_dir).await;
+        spawn_all_runtime_tasks(&pki_dir).await;
 
         let mut sigterm = signal(SignalKind::terminate())?;
         let handle = axum_server::Handle::new();
@@ -292,47 +227,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         tracing::warn!("failed to write initial daemon state: {e}");
     }
 
-    // Plugin host: TCP + mTLS. Skips gracefully if PKI not initialized.
-    crate::plugin_host::start(
-        &pki_dir,
-        orca_utils::config::APP_PLUGIN_PORT,
-        crate::plugin_host::PluginRegistry::new(),
-    );
-
-    // Pod mesh: mDNS responder + auto-offer scheduler (best-effort).
-    spawn_pod_runtime(&pki_dir).await;
-    spawn_scheduler_runtime();
-
-    // Per-host status snapshots + mesh-pull replication. Cheap idempotent
-    // spawns — both `serve --dev` and `daemon start` need them so every host
-    // contributes rows to the mesh.
-    crate::system_info::spawn_refresher();
-    crate::host_status_writer::spawn_local_writer();
-    crate::host_status_writer::spawn_sync_puller();
-    crate::pod::host_status_replica::spawn_fleet_replicator();
-
-    // Dev-source auto-poll (same as run() path).
-    if let Some(src) = crate::commands::update::read_dev_source() {
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                match crate::commands::update::check_for_update_dev(&src).await {
-                    Ok(Some(_)) => {
-                        tracing::info!("[dev] new build detected — applying and restarting");
-                        if let Err(e) = crate::commands::update::apply_update_dev(&src).await {
-                            tracing::warn!("[dev] apply failed: {e}");
-                        } else {
-                            std::process::exit(0);
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(e) => tracing::debug!("[dev] update check: {e}"),
-                }
-            }
-        });
-    }
+    spawn_all_runtime_tasks(&pki_dir).await;
 
     let mut sigterm = signal(SignalKind::terminate())?;
     // Install SIGUSR1 eagerly — before state.json reaches mode=Daemon —
@@ -574,6 +469,54 @@ async fn scalar_handler(
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .body(Body::from(html))
         .expect("hardcoded headers are valid")
+}
+
+/// Single source of truth for all background runtime tasks. Called from
+/// every serve path (run, run_daemon dev_spawn, run_daemon production) so
+/// dev/stable can never silently diverge — adding a new background task
+/// here arms it everywhere.
+async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
+    if let Err(e) = crate::loopback_token::install_at_startup() {
+        tracing::warn!("loopback token install failed: {e:#}");
+    }
+    crate::system_info::spawn_refresher();
+    crate::host_status_writer::spawn_local_writer();
+    crate::host_status_writer::spawn_sync_puller();
+    crate::pod::host_status_replica::spawn_fleet_replicator();
+    crate::plugin_host::start(
+        pki_dir,
+        orca_utils::config::APP_PLUGIN_PORT,
+        crate::plugin_host::PluginRegistry::new(),
+    );
+    spawn_pod_runtime(pki_dir).await;
+    spawn_scheduler_runtime();
+    tokio::spawn(crate::commands::startup_update_check());
+    if let Some(src) = crate::commands::update::read_dev_source() {
+        tokio::spawn(dev_source_auto_poll(src));
+    }
+}
+
+/// Watches `~/.orca/dev-source` every 10 s; when a newer locally-built
+/// binary appears, applies it and self-exits so the service manager
+/// respawns into the new binary.
+async fn dev_source_auto_poll(src: String) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+    interval.tick().await; // skip immediate tick
+    loop {
+        interval.tick().await;
+        match crate::commands::update::check_for_update_dev(&src).await {
+            Ok(Some(_)) => {
+                tracing::info!("[dev] new build detected — applying and restarting");
+                if let Err(e) = crate::commands::update::apply_update_dev(&src).await {
+                    tracing::warn!("[dev] apply failed: {e}");
+                } else {
+                    std::process::exit(0);
+                }
+            }
+            Ok(None) => {}
+            Err(e) => tracing::debug!("[dev] update check: {e}"),
+        }
+    }
 }
 
 /// Best-effort startup of the pod-mesh runtime: mDNS responder + auto-offer
