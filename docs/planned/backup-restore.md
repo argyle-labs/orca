@@ -98,6 +98,100 @@ Failures at any step: post-hook still runs (cleanup is not
 optional), manifest marked failed, alert fires, **previous successful
 backup is not touched**.
 
+### 2.1 Source kinds — native APIs first
+
+**Rule**: where a service exposes a native backup API, use it.
+Don't tar the docker volume. Native backups are app-consistent
+(the service flushes its own buffers, closes its own write
+transactions, knows which paths are throwaway caches), produce a
+clean restorable archive, and are the path the upstream maintainers
+actually test against. Falling back to volume-tar gives you a
+crash-consistent snapshot of half-written SQLite WAL files and a
+restore procedure nobody has rehearsed.
+
+Hierarchy of source kinds, in priority order:
+
+| Tier | Kind | When to use |
+|---|---|---|
+| 1 — Native API | Service has its own backup endpoint that produces a restorable archive | Always prefer when available |
+| 2 — DB dump | Service uses Postgres/MySQL/SQLite and exposes credentials | Use when no native API but the DB is the only stateful surface |
+| 3 — App-aware filesystem | Service documents which paths must be backed up consistent (e.g., quiesce-then-snapshot) | When neither of the above and the service docs are explicit |
+| 4 — Volume tar | Everything else | Last resort. Stop the container first; back up; start. |
+
+#### Native API sources to implement
+
+| Source kind | Services | API shape |
+|---|---|---|
+| `arr_native` | sonarr, radarr, lidarr, prowlarr, readarr, whisparr | `POST /api/v3/system/backup`, then `GET /api/v3/system/backup` to list, `GET /api/v3/system/backup/<id>/download` to fetch. Returns a zip. |
+| `home_assistant_snapshot` | Home Assistant (Supervised / OS) | `POST /api/hassio/backups/new/full` (or partial), poll `GET /api/hassio/backups/<slug>` for ready, download `GET /api/hassio/backups/<slug>/download`. |
+| `zwave_js_dump` | zwave-js-ui, zwave2mqtt | NVM backup endpoint; produces a binary blob restorable to a fresh controller. |
+| `zigbee2mqtt_backup` | zigbee2mqtt | MQTT request `zigbee2mqtt/bridge/request/backup`; response carries a base64 payload of the coordinator NVRAM + config. |
+| `unifi_controller_backup` | UniFi network controller | `POST /api/s/<site>/cmd/backup`, fetch the generated `.unf` file. |
+| `pbs_remote` | Proxmox Backup Server itself | PBS already produces the backups; this source copies snapshots between PBS datastores via the native sync-job API. Don't tar the PBS datastore. |
+| `proxmox_vzdump` | Proxmox VMs / LXCs without PBS | `POST /nodes/<node>/vzdump` with target storage; pulls a `.vma` / `.tar` per guest. |
+| `unraid_flash_backup` | Unraid OS itself (USB flash config) | Unraid GraphQL exposes the flash backup endpoint; produces a zip of `/boot/config`. |
+| `paperless_export` | Paperless-ngx | `document_exporter` management command; produces a restore-via-`document_importer` archive that survives major-version bumps. |
+| `vaultwarden_export` | Vaultwarden | `db.sqlite3` + attachments dir, but the supported path is the export endpoint that handles WAL checkpoint. |
+| `gitea_dump` / `forgejo_dump` | Gitea, Forgejo | `gitea dump` (or REST equivalent) emits a single tarball with DB + repos + LFS. |
+| `nextcloud_occ_export` | Nextcloud | `occ maintenance:mode --on` → DB dump + data dir → `occ maintenance:mode --off`. |
+| `audiobookshelf_backup` | audiobookshelf | Has a native backup endpoint that emits a zip of the SQLite DB + metadata; user libraries stay on disk. |
+| `immich_db_dump` | immich | Documented procedure: `pg_dump` the immich DB + filesystem snapshot of upload paths. (Native one-shot backup endpoint hasn't landed upstream as of last check — track and migrate when it does.) |
+| `pg_dump` / `mysql_dump` / `sqlite_backup` | Generic DB sources | For any service whose only state is "the DB" and which doesn't ship a higher-level backup endpoint. |
+
+#### When native APIs aren't enough
+
+Some services keep state outside the API's reach: large media
+libraries, user-uploaded blobs, generated thumbnails. A complete
+backup is usually **native API archive + an asset-tree backup** of
+the data the API doesn't cover. The job model handles this as two
+sources in one job:
+
+```toml
+[[job]]
+name = "immich-full"
+host = "baldur"
+schedule = "0 3 * * *"
+
+[[job.source]]
+kind = "immich_db_dump"           # tier 1: native DB dump
+
+[[job.source]]
+kind = "directory"                # tier 4: complement for asset blobs
+path = "/srv/immich/library"
+exclude_glob = ["*/thumbs/*", "*/encoded-video/*"]
+
+[job.target]
+kind = "replicated_nfs"
+storage = "primary-nas"
+```
+
+Restore reverses the order: DB first, then asset tree, then service start.
+
+#### Per-service plugins, not a giant match statement
+
+Each native-API source is implemented as a small adapter behind
+the `Source` trait. They live in `integrations/<service>/backup.rs`
+co-located with the rest of that service's integration code, not
+in a single mega-module. This keeps the surface manageable as new
+services land and means a service's backup logic is owned by
+whoever owns its integration.
+
+#### Restore parity is mandatory
+
+A native-API backup is only worth taking if you've **proven you
+can restore it**. Each native source ships with:
+
+1. The complement restore verb that consumes its archive shape.
+2. A restore drill fixture (per §7) that creates a minimal target,
+   restores, and asserts a known invariant (count of items, hash
+   of a known record, smoke-test of an endpoint).
+3. Documentation of the restore prerequisites (target service
+   version compatibility — most native restores are
+   forward-compatible within a major version but not always).
+
+A source kind that produces an archive nobody knows how to restore
+is worse than no backup at all; it gives false confidence.
+
 ---
 
 ## 3. Concern 1: managed-service backups (meerkat scripts → orca verbs)
@@ -401,43 +495,90 @@ operators can review what's expected without exposing values.
   commits into a "month rollup" commit while preserving the
   reachable SHAs for the rollback window.
 
-#### Where do snapshots land — repo, another repo, S3, NFS
+#### Where snapshots land — storage abstraction + git mirror
 
-The config-repo-as-state target is the **default**. Other targets
-are configurable for ops who want separation of concerns:
+There are two kinds of artifact, and they go to different places:
+
+1. **Lightweight non-secret configs** (rendered Caddyfile, generated
+   systemd units, host inventory, applied-config hashes — the small
+   text artifacts in the table above) → committed to the **config
+   repo itself** on a `state/` branch. Git is the right tool for
+   diff-able, versioned text.
+2. **Bulk state** (encrypted data-store blobs, manifests with file
+   hashes, larger generated artifacts) → written to a **storage
+   target**, which is an abstract destination with replication
+   enforced by orca.
+
+Storage is the target. Hosts that provide storage (willow, maple,
+…) are providers behind the abstraction, not direct targets — orca
+picks where to write based on the storage definition and replicates
+between replicas on its own. Switching from one provider to another
+should not require touching every snapshot config.
 
 ```toml
-# config/cluster/state-snapshot.toml
-[snapshot]
-mode = "config_repo"         # config_repo | separate_repo | s3 | nfs
+# config/cluster/storage.toml
+# Define logical storage pools once; everything else references them.
 
-# Default — same repo as config, separate branch namespace
-[snapshot.config_repo]
+[[storage]]
+name        = "primary-nas"
+kind        = "replicated_nfs"
+primary     = { provider = "willow", export = "/mnt/user/orca-state" }
+replicas    = [
+  { provider = "maple", export = "/mnt/user/orca-state" },
+]
+sync        = "continuous"        # continuous | scheduled
+sync_rpo    = "60s"               # max staleness between primary + replicas
+fail_over   = "automatic"         # if primary unreachable, promote a replica
+verify      = "daily"             # checksum-compare primary vs replicas
+
+[[storage]]
+name        = "offsite"
+kind        = "s3"
+endpoint    = "s3.us-east-1.amazonaws.com"
+bucket      = "orca-state"
+prefix      = "scottkey-pod/"
+encryption  = "per_object"        # uses the per-job offsite keys, §4.4
+
+# Snapshot policy references storage pools by name.
+
+[snapshot.lightweight]
+target = "config_repo"            # always the config repo
 branch_prefix = "state/"
 squash_after = "30d"
 
-# Separate state-only repo (sensitive operators who want config
-# and state in different access-controlled repos)
-[snapshot.separate_repo]
-url = "git+github://myorg/orca-state"
-token_ref = "secret:STATE_REPO_TOKEN"
-
-# S3 / object storage
-[snapshot.s3]
-bucket = "orca-state"
-prefix = "scottkey-pod/"
-endpoint = "s3.us-east-1.amazonaws.com"
-
-# NFS share (maple, willow, etc. in the homelab case)
-[snapshot.nfs]
-mount = "/mnt/maple/orca-state"
-layout = "git_bare"          # git_bare | flat
+[snapshot.bulk]
+primary  = "primary-nas"          # name from the [[storage]] table above
+mirrors  = ["offsite"]            # additional destinations kept in sync
 ```
 
-Multiple destinations supported simultaneously — primary +
-mirror. Snapshot failures don't block the deploy (the deploy
-already succeeded by the time we snapshot), but stale-snapshot
-alerts fire if commits stop landing.
+#### Replication semantics
+
+When storage is `kind = "replicated_nfs"` (or any other replicated
+kind), orca owns the replication. Writes go to `primary`; orca
+streams the same write to each `replicas` entry. The replication
+target — RPO — is `sync_rpo`. If a write to a replica is delayed
+beyond that, alerts fire.
+
+Verification (`verify = "daily"`) is the trust check: orca walks
+primary + replicas and compares hashes. Drift between copies is
+treated as a hard failure — silent divergence between copies you
+*think* are mirrors is worse than no replication at all.
+
+Failover (`fail_over = "automatic"`): if the primary becomes
+unreachable, orca promotes the most-recently-verified replica to
+primary and keeps serving writes. When the old primary returns,
+it becomes a replica and resyncs from the new primary. No host
+names are baked into snapshot configs — only the storage pool
+name — so failover is transparent to snapshot consumers.
+
+#### Multiple destinations
+
+`mirrors` keeps additional storage pools in sync with primary. The
+default homelab shape is "replicated NFS as primary, S3 as the
+offsite mirror," giving on-site fast access plus offsite
+durability. Snapshot failures on a mirror don't block the deploy
+or the primary write, but stale-mirror alerts fire if the mirror
+falls behind.
 
 #### Why this matters
 
