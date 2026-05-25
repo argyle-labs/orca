@@ -14,9 +14,11 @@
 
 use anyhow::{Context, Result};
 use orca_tools_def::host_status::HostStatusRows;
-use orca_tools_def::orca_lifecycle::SystemInfoReport;
+use orca_tools_def::orca_lifecycle::{RuntimeSpecReport, SystemInfoReport};
 use std::sync::OnceLock;
 use std::time::Duration;
+
+use crate::pod::runtime_cache;
 
 /// How often the sync puller asks each peer for new status rows. Matches
 /// the persist cadence — pulling more often than peers write just burns
@@ -225,6 +227,31 @@ async fn pull_one_peer_inner(peer_id: &str, addr: &str) -> Result<()> {
     )
     .await
     .context("pod/exec timeout")??;
+
+    // Best-effort runtime-detail fetch: gives the dashboard live version /
+    // target / mode / channel / pinned_to fields without waiting for the
+    // peer's next SystemInfoReport snapshot. Failures here are intentionally
+    // ignored — the status fetch above is the load-bearing call, the cache
+    // entry is a UI nicety.
+    if let Ok(Ok(runtime_res)) = tokio::time::timeout(
+        Duration::from_secs(5),
+        crate::pod::exec(addr, "system.runtime.detail", serde_json::Value::Null),
+    )
+    .await
+        && let Ok(spec) = serde_json::from_value::<RuntimeSpecReport>(runtime_res.result)
+    {
+        runtime_cache::put(
+            peer_id,
+            runtime_cache::RuntimeFields {
+                version: Some(spec.version),
+                target: Some(spec.target),
+                frontend: Some(spec.frontend),
+                mode: spec.mode,
+                channel: spec.channel,
+                pinned_to: spec.pinned_to,
+            },
+        );
+    }
 
     let rows: HostStatusRows =
         serde_json::from_value(exec_res.result).context("decode host_status.detail response")?;
