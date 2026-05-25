@@ -6,10 +6,6 @@
   import Popover from '$lib/components/Popover.svelte';
   import PairingModal from '$lib/components/PairingModal.svelte';
   import type { GpuInfo, SystemInfoReport } from '$lib/client/types.gen';
-  import { env } from '$env/dynamic/public';
-
-  const DEV_MODE_UI = env.PUBLIC_DEV_MODE === 'true';
-
   interface Instance {
     id: string;
     peerId: string;
@@ -711,16 +707,6 @@
           <dd><code>{selectedInst.target}</code></dd>
         {/if}
 
-        {#if selectedInst.mode}
-          <dt>Mode</dt>
-          <dd><code>{selectedInst.mode}</code></dd>
-        {/if}
-
-        {#if selectedInst.channel}
-          <dt>Channel</dt>
-          <dd><code>{selectedInst.channel}</code></dd>
-        {/if}
-
         {#if selectedInst.sys?.gpus?.length}
           <dt>GPU</dt>
           <dd>
@@ -753,6 +739,16 @@
 
       <div class="section-head">Update</div>
       <div class="update-controls">
+        <div class="version-line">
+          <span class="version-label">Current</span>
+          <code>{selectedInst.version ?? '—'}</code>
+          {#if selectedInst.updateAvailable && selectedInst.updateLatest}
+            <span class="update-pill avail">→ {selectedInst.updateLatest}</span>
+          {:else if selectedInst.version}
+            <span class="update-pill ok">up to date</span>
+          {/if}
+        </div>
+
         <div class="update-setting-row">
           <span class="update-setting-label">Channel</span>
           <div class="channel-segment">
@@ -768,20 +764,18 @@
           </div>
         </div>
 
-        {#if DEV_MODE_UI}
-          <div class="update-setting-row">
-            <span class="update-setting-label">Dev mode</span>
-            <button
-              class="toggle-switch"
-              class:on={selectedInst.mode === 'dev'}
-              disabled={updatePending}
-              onclick={() => toggleDevMode(selectedInst!)}
-              aria-label="Toggle dev mode"
-              role="switch"
-              aria-checked={selectedInst.mode === 'dev'}
-            ><span class="toggle-thumb"></span></button>
-          </div>
-        {/if}
+        <div class="update-setting-row">
+          <span class="update-setting-label">Dev mode</span>
+          <button
+            class="toggle-switch"
+            class:on={selectedInst.mode === 'dev'}
+            disabled={updatePending}
+            onclick={() => toggleDevMode(selectedInst!)}
+            aria-label="Toggle dev mode"
+            role="switch"
+            aria-checked={selectedInst.mode === 'dev'}
+          ><span class="toggle-thumb"></span></button>
+        </div>
 
         <div class="update-action-row">
           <button
@@ -1307,6 +1301,29 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
+  }
+  .version-line {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+  }
+  .version-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-dim);
+  }
+  .update-pill {
+    font-size: var(--text-xs);
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--color-border);
+  }
+  .update-pill.ok {
+    color: var(--color-text-dim);
+  }
+  .update-pill.avail {
+    color: var(--color-accent, #4ea1ff);
+    border-color: var(--color-accent, #4ea1ff);
   }
   .update-setting-row {
     display: flex;
