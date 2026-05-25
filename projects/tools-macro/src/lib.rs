@@ -263,7 +263,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
         _ => quote! {
             #[cfg(feature = "cli")]
             const _: () = {
-                ::orca_tools_def::register_op! {
+                ::orca_tool::register_op! {
                     tool: #zst_ident,
                     domain: #domain,
                     verb: #verb,
@@ -278,7 +278,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     // injected into the spec at runtime.
     let openapi_block = quote! {
         ::inventory::submit! {
-            ::orca_tools_def::openapi::OpenApiToolRegistration {
+            ::orca_tool::openapi::OpenApiToolRegistration {
                 name: #tool_name,
                 description: #description,
                 domain: #domain,
@@ -333,7 +333,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
 
         #[cfg(feature = "native")]
         ::inventory::submit! {
-            ::orca_tools_def::ToolRegistration {
+            ::orca_tool::ToolRegistration {
                 name: #tool_name,
                 register: |reg| {
                     reg.register::<#zst_ident>();

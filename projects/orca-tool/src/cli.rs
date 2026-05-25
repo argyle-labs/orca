@@ -15,7 +15,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::{ArgMatches, Command};
-use orca_tool::ToolCtx;
+
+use crate::ToolCtx;
 
 /// Erased CLI dispatch closure: parses matches into the op's Args struct,
 /// invokes `OrcaTool::run`, formats Output to stdout.
@@ -89,28 +90,48 @@ pub fn build_root(mut root: Command) -> Command {
     root
 }
 
+/// Trait the host registers on `ToolCtx` to enable `--peer <PEER>` remote
+/// dispatch. Decouples `exec_remote` from the concrete `PodService` so this
+/// CLI module can live in `orca-tool` without dragging in tools-def.
+///
+/// The host (server) registers an adapter that delegates to its `PodService`.
+#[async_trait::async_trait]
+pub trait RemoteExec: Send + Sync {
+    /// Dispatch one tool call to `peer` over the host's mesh transport.
+    /// Args/output are JSON-RPC wire payloads; `exec_remote` deserializes
+    /// the typed `OrcaToolDef::Output` immediately on receipt so opaque
+    /// values never reach user code.
+    #[allow(clippy::disallowed_types)]
+    async fn exec(
+        &self,
+        peer: &str,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value>;
+}
+
 /// Run an OrcaTool on a paired peer with end-to-end typed Args/Output. The
 /// JSON serialization happens internally — the call site, the trait API, and
 /// the rendered output all stay typed. JsonAny / Value never appear.
 ///
-/// Peer dispatch goes through the `PodService::exec` wire method (mTLS over
-/// the existing pod channel). The remote allowlist (`REMOTE_OK = true` on
-/// the tool) is enforced on the peer side; calls to non-remote-ok tools
-/// surface here as an error.
+/// Peer dispatch goes through whatever `RemoteExec` the host registered on
+/// the `ToolCtx`. The remote allowlist (`REMOTE_OK = true` on the tool) is
+/// enforced on the peer side; calls to non-remote-ok tools surface here as
+/// an error.
 pub async fn exec_remote<T: crate::OrcaToolDef>(
     peer: &str,
     args: T::Args,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &ToolCtx,
 ) -> Result<T::Output> {
     // Wire-only serialization: Value lives entirely behind the
-    // PodService::exec trait boundary, never on a public type.
+    // RemoteExec trait boundary, never on a public type.
     #[allow(clippy::disallowed_types)]
     let args_value =
         serde_json::to_value(&args).map_err(|e| anyhow::anyhow!("serialize args: {e}"))?;
-    let svc = crate::pod::native_support::svc(ctx)?;
-    let dispatch = svc.exec(peer, T::NAME, args_value).await?;
+    let svc = ctx.service::<Arc<dyn RemoteExec>>()?;
+    let result = svc.exec(peer, T::NAME, args_value).await?;
     #[allow(clippy::disallowed_types)]
-    let out: T::Output = serde_json::from_value(dispatch.result)
+    let out: T::Output = serde_json::from_value(result)
         .map_err(|e| anyhow::anyhow!("decode {} output from peer {peer}: {e}", T::NAME))?;
     Ok(out)
 }
@@ -192,8 +213,7 @@ macro_rules! register_op {
     ) => {
         const _: () = {
             use $crate::cli::{CliOp, CliBuildFn, CliRunFn};
-            use $crate::OrcaToolDef;
-            use ::orca_tool::OrcaTool;
+            use $crate::{OrcaTool, OrcaToolDef};
 
             fn build() -> clap::Command {
                 let cmd = clap::Command::new($verb).about($summary);
@@ -213,7 +233,7 @@ macro_rules! register_op {
 
             fn run(
                 m: &clap::ArgMatches,
-                ctx: ::std::sync::Arc<::orca_tool::ToolCtx>,
+                ctx: ::std::sync::Arc<$crate::ToolCtx>,
             ) -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = ::anyhow::Result<()>> + Send>> {
                 let m = m.clone();
                 Box::pin(async move {

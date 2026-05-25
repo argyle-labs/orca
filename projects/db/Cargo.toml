@@ -7,19 +7,39 @@ edition.workspace = true
 name = "db"
 path = "src/lib.rs"
 
-[dependencies]
-orca-utils = { path = "../utils" }
+[features]
+# Always-on in practice — exists to silence the `cfg(feature = "native")`
+# guards that the `#[orca_tool]` macro emits around the function body and
+# inventory submission. db has no wasm flavour; everything compiled here
+# is native.
+default = ["native"]
+native = []
+# Enables clap::Args derives on Args structs so tool-defined types can be
+# pulled into the unified CLI surface (`register_op!`) by upstream binaries
+# linking db with the cli flavour.
+cli = ["dep:clap"]
 
-anyhow     = { workspace = true }
-tracing    = { workspace = true }
-serde      = { workspace = true }
-serde_json = { workspace = true }
-chrono     = { workspace = true }
-rusqlite   = { workspace = true }
+[dependencies]
+orca-utils       = { path = "../utils" }
+orca-tool        = { path = "../orca-tool", features = ["native"] }
+orca-tools-macro = { path = "../tools-macro" }
+
+anyhow      = { workspace = true }
+tracing     = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+chrono      = { workspace = true }
+rusqlite    = { workspace = true }
 include_dir = "0.7"
-getrandom  = "0.3"
-dirs       = { workspace = true }
-toml       = { workspace = true }
+getrandom   = "0.3"
+dirs        = { workspace = true }
+toml        = { workspace = true }
+schemars    = { workspace = true }
+async-trait = { workspace = true }
+cron        = { workspace = true }
+inventory   = { workspace = true }
+
+clap        = { workspace = true, optional = true }
 # Used only for `task_local!` — the right primitive for scoping a DB path
 # override across `.await` points and worker threads. Cheap: `rt` feature
 # alone, no runtime is constructed in this crate.

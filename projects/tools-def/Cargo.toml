@@ -29,6 +29,7 @@ native = [
 ]
 cli = [
     "native",
+    "orca-tool/cli",
     "dep:clap",
     "dep:colored",
 ]

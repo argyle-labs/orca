@@ -6,11 +6,15 @@
 //!
 //! No `install` verb: schedules are in-process. Setting a `schedule` row
 //! via `orca config set schedule …` is the install step.
+//!
+//! Lives in `db` (not `tools-def`) — proof-of-shape for content crates
+//! carrying their own tools. The body calls `crate::config_store` /
+//! `crate::scheduler_runs` directly without going through any service
+//! trait.
 
+use orca_tools_macro::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-use crate::orca_tool;
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ScheduleEntry {
@@ -81,11 +85,10 @@ pub struct ScheduleRunOutput {
 
 // ── Native support ───────────────────────────────────────────────────────────
 
-#[cfg(feature = "native")]
 // Scheduler args are intentionally opaque: each scheduled tool has its own
 // typed Args struct. The schedule row routes a payload to the canonical
 // tool, where validation happens. JsonAny is the established passthrough
-// for this case (see `json_any.rs`).
+// for this case.
 #[allow(clippy::disallowed_types)]
 mod native_support {
     use std::str::FromStr;
@@ -94,7 +97,7 @@ mod native_support {
     use cron::Schedule;
     use serde::Deserialize;
 
-    use crate::JsonAny;
+    use orca_tool::JsonAny;
 
     #[derive(Deserialize)]
     pub(super) struct ScheduleRow {
@@ -133,8 +136,8 @@ async fn schedule_list(
     args: ScheduleListArgs,
     _ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ScheduleListOutput> {
-    let conn = orca_db::open_default()?;
-    let rows = orca_db::config_store::list(&conn, Some("schedule"), args.host.as_deref())?;
+    let conn = crate::open_default()?;
+    let rows = crate::config_store::list(&conn, Some("schedule"), args.host.as_deref())?;
     let schedules = rows
         .into_iter()
         .filter_map(|row| {
@@ -158,12 +161,12 @@ async fn schedule_status(
     args: ScheduleStatusArgs,
     _ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ScheduleStatusOutput> {
-    let conn = orca_db::open_default()?;
+    let conn = crate::open_default()?;
     let runs = match args.job {
-        Some(job) => orca_db::scheduler_runs::last(&conn, &job)?
+        Some(job) => crate::scheduler_runs::last(&conn, &job)?
             .into_iter()
             .collect::<Vec<_>>(),
-        None => orca_db::scheduler_runs::last_per_job(&conn)?,
+        None => crate::scheduler_runs::last_per_job(&conn)?,
     };
     let jobs = runs
         .into_iter()
@@ -186,8 +189,8 @@ async fn schedule_run(
     args: ScheduleRunArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ScheduleRunOutput> {
-    let conn = orca_db::open_default()?;
-    let row = orca_db::config_store::get(&conn, "schedule", &args.name)?
+    let conn = crate::open_default()?;
+    let row = crate::config_store::get(&conn, "schedule", &args.name)?
         .ok_or_else(|| anyhow::anyhow!("no schedule named '{}'", args.name))?;
     drop(conn);
 
@@ -221,4 +224,19 @@ async fn schedule_run(
         duration_ms,
         error,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use orca_tool::{ToolRegistry, native_register};
+
+    #[test]
+    fn schedule_tools_register_from_db_crate() {
+        let mut reg = ToolRegistry::new();
+        native_register(&mut reg);
+        let names = reg.names();
+        assert!(names.contains(&"system.schedule.list"), "got: {names:?}");
+        assert!(names.contains(&"system.schedule.status"), "got: {names:?}");
+        assert!(names.contains(&"system.schedule.run"), "got: {names:?}");
+    }
 }

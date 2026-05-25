@@ -8,10 +8,13 @@ name = "orca_tool"
 path = "src/lib.rs"
 
 # Feature flavors:
-#   - default (none): wasm-safe metadata only — OrcaToolDef + OrcaOp.
+#   - default (none): wasm-safe metadata only — OrcaToolDef + OrcaOp + JsonAny
+#                     + the `openapi` spec injector (pure JSON schema munging).
 #   - native:         pulls the runtime (OrcaTool runner, ToolRegistry, ToolCtx,
-#                     ErasedTool, axum router, CLI dispatcher). Brings
-#                     orca-utils for Config.
+#                     ErasedTool, axum router, inventory-driven
+#                     `native_register`). Brings orca-utils for Config.
+#   - cli:            unified clap-driven CLI surface (`register_op!` macro +
+#                     `CliOp` inventory + dispatcher). Implies `native`.
 
 [features]
 default = []
@@ -24,11 +27,21 @@ native = [
     "dep:tokio",
     "dep:tower",
 ]
+cli = [
+    "native",
+    "dep:clap",
+    "dep:colored",
+]
 
 [dependencies]
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# `inventory` powers the cross-crate `#[orca_tool]` registration slice — used
+# by `inventory.rs`, `openapi.rs`, and (under `cli`) `cli.rs`. Default-feature
+# so the OpenAPI spec injector works in wasm builds too.
+inventory = { workspace = true }
 
 # native-only
 orca-utils  = { path = "../utils", optional = true }
@@ -38,6 +51,10 @@ axum        = { workspace = true, optional = true }
 futures     = { version = "0.3", optional = true }
 tokio       = { workspace = true, optional = true }
 tower       = { workspace = true, optional = true }
+
+# cli-only
+clap        = { workspace = true, optional = true }
+colored     = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

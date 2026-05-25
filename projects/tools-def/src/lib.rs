@@ -10,13 +10,16 @@
 //!   - `#[cfg(feature = "cli")]` a `register_op!` CLI entry (skippable via
 //!     `cli = manual` / `cli = skip`).
 //!
-//! `native_register` walks `inventory::iter::<ToolRegistration>` to populate
-//! the `ToolRegistry` that drives MCP + REST + CLI at startup. Adding a tool
-//! is one `#[orca_tool]` annotation — no central enrollment list to edit.
+//! The registration framework itself (`ToolRegistration` inventory slice,
+//! `native_register`, `OpenApiToolRegistration`, the `register_op!` macro,
+//! `JsonAny`) lives in `orca-tool` so any crate can define its own tools
+//! without depending on this "kitchen-sink" crate. This crate is now just
+//! one of many content crates that carry `#[orca_tool]` annotations — the
+//! `tools/schedule.rs` migration into `db` is the proof-of-shape for that.
 
 // The `#[orca_tool]` proc-macro emits absolute paths like
-// `::orca_tools_def::OrcaToolDef`. Inside this crate the implicit name is
-// `crate`, so add a self-alias to resolve those absolute paths during
+// `::orca_tools_def::ToolRegistration`. Inside this crate the implicit name
+// is `crate`, so add a self-alias to resolve those absolute paths during
 // in-crate macro invocations.
 extern crate self as orca_tools_def;
 
@@ -28,17 +31,22 @@ pub use orca_tool::{OrcaOp, OrcaToolDef};
 /// inventory slice and are picked up by `native_register` at startup.
 pub use orca_tools_macro::orca_tool;
 
-/// One entry per `#[orca_tool]`-annotated function. The native registry
-/// walks `inventory::iter::<ToolRegistration>` to enroll them all.
-pub struct ToolRegistration {
-    pub name: &'static str,
-    #[cfg(feature = "native")]
-    pub register: fn(&mut __private::ToolRegistry),
-}
+// ── Back-compat re-exports of the registration framework ────────────────────
+//
+// The framework lives in `orca-tool`; these re-exports keep existing macro
+// invocations and server consumers (`orca_tools_def::native_register`,
+// `orca_tools_def::openapi::inject_tool_paths`, etc.) working unchanged.
 
-inventory::collect!(ToolRegistration);
+pub use orca_tool::JsonAny;
+pub use orca_tool::openapi;
 
-pub mod openapi;
+#[cfg(feature = "native")]
+pub use orca_tool::{ToolRegistration, native_register};
+
+#[cfg(feature = "cli")]
+pub use orca_tool::cli;
+#[cfg(feature = "cli")]
+pub use orca_tool::register_op;
 
 pub mod agent_backend;
 pub mod agents;
@@ -50,7 +58,6 @@ pub mod homeassistant;
 pub mod host;
 pub mod host_status;
 pub mod infra;
-pub mod json_any;
 pub mod json_schema;
 pub mod meta;
 pub mod mgmt;
@@ -64,7 +71,6 @@ pub mod plugin_runtime;
 pub mod plugins;
 pub mod pod;
 pub mod proxmox;
-pub mod schedule;
 pub mod services;
 pub mod spec_registry;
 pub mod sweep;
@@ -73,36 +79,12 @@ pub mod system;
 #[cfg(all(test, feature = "native"))]
 pub(crate) mod test_support;
 
-/// Re-export of the opaque JSON passthrough wrapper — see `json_any` module for policy.
-#[allow(clippy::disallowed_types)]
-pub use json_any::JsonAny;
-
-#[cfg(feature = "cli")]
-pub mod cli;
-
-#[doc(hidden)]
-#[cfg(feature = "native")]
-pub mod __private {
-    pub use orca_tool::ToolRegistry;
-}
-
-/// Walk the `inventory::iter::<ToolRegistration>` slice — populated by every
-/// `#[orca_tool]` annotation in this crate — and enroll each tool into the
-/// supplied `ToolRegistry`. Drives MCP + REST + CLI surface registration at
-/// startup. `ToolRegistry::register` panics on duplicates so name collisions
-/// surface immediately.
-#[cfg(feature = "native")]
-pub fn native_register(reg: &mut __private::ToolRegistry) {
-    for entry in inventory::iter::<ToolRegistration> {
-        (entry.register)(reg);
-    }
-}
-
 #[cfg(all(test, feature = "native"))]
 mod inventory_tests {
     //! Inventory-slice smoke test for the `#[orca_tool]` proof-of-shape.
-    //! Asserts that the three migrated host tools land in `ORCA_TOOLS` and
-    //! that `native_register` enrolls them into a `ToolRegistry`.
+    //! Asserts that the migrated host + pod tools land in the
+    //! `ToolRegistration` slice and that `native_register` enrolls them
+    //! into a `ToolRegistry`.
     use super::*;
 
     #[test]
@@ -127,7 +109,7 @@ mod inventory_tests {
 
     #[test]
     fn native_register_enrolls_host_tools() {
-        let mut reg = __private::ToolRegistry::new();
+        let mut reg = orca_tool::ToolRegistry::new();
         native_register(&mut reg);
         let names = reg.names();
         assert!(names.contains(&"system.host.detail"));

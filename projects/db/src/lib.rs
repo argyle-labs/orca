@@ -37,6 +37,7 @@ pub mod sessions;
 pub mod settings;
 pub mod startup;
 pub mod tool_mappings;
+pub mod tools;
 pub mod users;
 
 use anyhow::{Context, Result};
