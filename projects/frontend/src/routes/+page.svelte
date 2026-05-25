@@ -357,8 +357,19 @@
       const next = !(inst.sys?.self_secure ?? false);
       const args: Record<string, unknown> = { self_secure: next };
       if (inst.role === 'system') args.peer_id = inst.peerId;
-      await callTool('systemPodUpdate', args);
-      await (inst.role === 'local' ? refreshLocal(inst) : refreshPodPeers());
+      const result = await callTool<{ self_secure: boolean }>('systemPodUpdate', args);
+      // Optimistically apply the authoritative response from the tool. The
+      // background puller only refreshes host_status every 60 s, so without
+      // this patch the UI would lag a full sync tick before reflecting the
+      // change (and the user assumes the click did nothing).
+      if (inst.sys) {
+        inst.sys = { ...inst.sys, self_secure: result.self_secure };
+      } else {
+        inst.sys = { self_secure: result.self_secure } as SystemInfoReport;
+      }
+      instances = [...instances];
+      // Kick off a background refresh to reconcile with the source of truth.
+      void (inst.role === 'local' ? refreshLocal(inst) : refreshPodPeers());
     } catch (e) {
       console.warn('self_secure toggle failed:', e);
     } finally {
