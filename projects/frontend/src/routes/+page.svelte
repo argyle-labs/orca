@@ -19,6 +19,7 @@
     channel: string | null;
     updateAvailable: boolean;
     updateLatest: string | null;
+    pinnedTo: string | null;
     health: 'up' | 'down' | 'unknown';
     error: string | null;
     lastChecked: number | null;
@@ -68,9 +69,11 @@
   // Drawer update controls — reset only when the SELECTED INSTANCE changes,
   // not on every poll tick that updates instance data.
   let drawerChannel = $state('stable');
+  let drawerVersionInput = $state('');
   let drawerOpenedForId = $state<string | null>(null);
   let updateResult = $state<{ done: string[]; errors: string[] } | null>(null);
   let updatePending = $state(false);
+  let secureToggling = $state(false);
 
   // 1-second live poll; DB writes happen every 10 s (host_status_writer)
   const POLL_MS = 1000;
@@ -159,6 +162,7 @@
           channel?: string | null;
           update_available?: boolean | null;
           update_latest?: string | null;
+          pinned_to?: string | null;
           addresses?: { kind: string; value: string }[];
           system?: SystemInfoReport | null;
         }[]>('systemPeerList', {}),
@@ -193,6 +197,7 @@
             channel: p.channel ?? null,
             updateAvailable: p.update_available ?? false,
             updateLatest: p.update_latest ?? null,
+            pinnedTo: p.pinned_to ?? null,
             health: p.status === 'active' ? 'up' : 'down',
             error: null,
             lastChecked: Date.now(),
@@ -296,6 +301,7 @@
     if (selectedInst && selectedInst.id !== drawerOpenedForId) {
       drawerOpenedForId = selectedInst.id;
       drawerChannel = selectedInst.channel ?? 'stable';
+      drawerVersionInput = selectedInst.pinnedTo ?? '';
       updateResult = null;
     }
   });
@@ -318,6 +324,45 @@
       updateResult = { done: [], errors: [e instanceof Error ? e.message : String(e)] };
     } finally {
       updatePending = false;
+    }
+  }
+
+  async function applyVersion() {
+    if (!selectedInst) return;
+    const v = drawerVersionInput.trim();
+    if (!v) return;
+    updatePending = true;
+    updateResult = null;
+    try {
+      const args: Record<string, unknown> = { version: v };
+      if (selectedInst.role === 'system') args.peer_id = selectedInst.peerId;
+      const r = await callTool<{ done: string[]; skipped: string[]; errors: string[] }>(
+        'systemUpdate',
+        args,
+      );
+      updateResult = { done: r.done, errors: r.errors };
+      await (selectedInst.role === 'local' ? refreshLocal(selectedInst) : refreshPodPeers());
+    } catch (e) {
+      console.warn('version apply failed:', e);
+      updateResult = { done: [], errors: [e instanceof Error ? e.message : String(e)] };
+    } finally {
+      updatePending = false;
+    }
+  }
+
+  async function toggleSecure(inst: Instance) {
+    if (secureToggling) return;
+    secureToggling = true;
+    try {
+      const next = !(inst.sys?.self_secure ?? false);
+      const args: Record<string, unknown> = { self_secure: next };
+      if (inst.role === 'system') args.peer_id = inst.peerId;
+      await callTool('systemPodUpdate', args);
+      await (inst.role === 'local' ? refreshLocal(inst) : refreshPodPeers());
+    } catch (e) {
+      console.warn('self_secure toggle failed:', e);
+    } finally {
+      secureToggling = false;
     }
   }
 
@@ -348,6 +393,7 @@
       channel: null,
       updateAvailable: false,
       updateLatest: null,
+      pinnedTo: null,
       health: 'unknown',
       error: null,
       lastChecked: null,
@@ -730,6 +776,22 @@
         </dl>
       {/if}
 
+      <div class="secure-row" title="When on, this host is authorized to receive encrypted secrets replicated from other pod members. Independent of pairing.">
+        <div class="secure-row-text">
+          <span class="secure-label">SECURE</span>
+          <span class="secure-hint">Can accept secrets from other systems</span>
+        </div>
+        <button
+          class="toggle-switch"
+          class:on={selectedInst.sys?.self_secure}
+          disabled={secureToggling}
+          onclick={() => toggleSecure(selectedInst!)}
+          aria-label="Toggle SECURE (self_secure)"
+          role="switch"
+          aria-checked={!!selectedInst.sys?.self_secure}
+        ><span class="toggle-thumb"></span></button>
+      </div>
+
       {#if selectedInst.role === 'system'}
         <div class="paired-line" title="Paired peers in the pod automatically exchange mesh certs. Use Unpair to revoke.">
           <span class="paired-check">✓</span>
@@ -749,10 +811,17 @@
           {/if}
         </div>
 
+        {#if selectedInst.pinnedTo}
+          <div class="version-line">
+            <span class="version-label">Pinned</span>
+            <code>{selectedInst.pinnedTo}</code>
+          </div>
+        {/if}
+
         <div class="update-setting-row">
           <span class="update-setting-label">Channel</span>
           <div class="channel-segment">
-            {#each ['stable', 'rc', 'beta'] as ch}
+            {#each ['stable', 'rc', 'dev'] as ch}
               {@const active = drawerChannel === ch}
               <button
                 class="channel-btn"
@@ -777,13 +846,32 @@
           ><span class="toggle-thumb"></span></button>
         </div>
 
+        <div class="update-setting-row">
+          <span class="update-setting-label">Version</span>
+          <div class="version-pick">
+            <input
+              type="text"
+              class="version-input"
+              placeholder="e.g. 0.0.5-rc.1"
+              bind:value={drawerVersionInput}
+              disabled={updatePending}
+            />
+            <button
+              class="ctrl-btn"
+              onclick={applyVersion}
+              disabled={updatePending || !drawerVersionInput.trim()}
+              title="Pin and apply this specific version"
+            >Pin</button>
+          </div>
+        </div>
+
         <div class="update-action-row">
           <button
             class="ctrl-btn primary"
             onclick={applyUpdate}
             disabled={updatePending}
           >
-            {updatePending ? 'Updating…' : 'Update'}
+            {updatePending ? 'Updating…' : `Update to latest ${drawerChannel}`}
           </button>
         </div>
 
@@ -1323,6 +1411,25 @@
   }
   .update-pill.avail {
     color: var(--color-accent, #4ea1ff);
+    border-color: var(--color-accent, #4ea1ff);
+  }
+  .version-pick {
+    display: flex;
+    gap: var(--space-2);
+    align-items: center;
+  }
+  .version-input {
+    background: color-mix(in srgb, var(--color-bg) 60%, transparent);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    padding: 4px 8px;
+    color: inherit;
+    font-family: var(--font-mono, monospace);
+    font-size: var(--text-sm);
+    width: 14ch;
+  }
+  .version-input:focus {
+    outline: none;
     border-color: var(--color-accent, #4ea1ff);
   }
   .update-setting-row {

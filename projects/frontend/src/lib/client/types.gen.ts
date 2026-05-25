@@ -1421,6 +1421,13 @@ export type SystemInfoReport = {
    */
   proxmox_role?: string | null;
   /**
+   * Tier-2 secrets-storage permission (`self_secure`) for this host.
+   * `true` = this host is authorized to hold encrypted secrets replicated
+   * from other pod members. Surfaced in the host drawer as a SECURE
+   * toggle, independent of cert trust.
+   */
+  self_secure?: boolean | null;
+  /**
    * Wall-clock when this snapshot was collected. Cached snapshots may be
    * up to ~30s stale; consumers use this to decide whether to trust a
    * metric like load average.
@@ -10029,6 +10036,11 @@ export type SystemPodUpdateData = {
    * PodUpdateArgs
    */
   body: {
+    /**
+     * When set, proxy the call to the named remote peer via the pod mesh
+     * instead of running on the local host.
+     */
+    peer_id?: string | null;
     /**
      * Toggle Tier-2 secrets-storage permission (`self_secure`). `None` leaves
      * the current value unchanged so the tool can grow new fields without

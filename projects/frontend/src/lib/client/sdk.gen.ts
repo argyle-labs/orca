@@ -4062,9 +4062,9 @@ export const systemPodDetail = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * Update pod-level settings on this host. Currently exposes `self_secure` (Tier-2 secrets-storage permission). Admin-only because flipping it can authorize secrets replication into this host.
+ * Update pod-level settings on this host or — when `peer_id` is set — on the named remote peer over the pod mesh. Currently exposes `self_secure` (Tier-2 secrets-storage permission). Admin-only because flipping it can authorize secrets replication into this host.
  *
- * Update pod-level settings on this host. Currently exposes `self_secure` (Tier-2 secrets-storage permission). Admin-only because flipping it can authorize secrets replication into this host.
+ * Update pod-level settings on this host or — when `peer_id` is set — on the named remote peer over the pod mesh. Currently exposes `self_secure` (Tier-2 secrets-storage permission). Admin-only because flipping it can authorize secrets replication into this host.
  */
 export const systemPodUpdate = <ThrowOnError extends boolean = false>(
   options: Options<SystemPodUpdateData, ThrowOnError>,
