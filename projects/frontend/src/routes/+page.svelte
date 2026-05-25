@@ -34,8 +34,6 @@
 
   let instances = $state<Instance[]>([]);
   let selectedInstId = $state<string | null>(null);
-  let trustPending = $state(false);
-  let pushTrustPending = $state(false);
   let retentionDays = $state(1);
   let customPopoverOpen = $state(false);
   let customDaysInput = $state('');
@@ -226,29 +224,34 @@
     return refreshPodPeers();
   }
 
-  async function toggleLocalTrust(inst: Instance) {
-    if (!inst.secure || trustPending) return;
-    trustPending = true;
-    try {
-      await callTool('systemPeerUpdate', { peer_id: inst.peerId, on: !inst.secure.local, push: false });
-      await refreshPodPeers();
-    } catch (e) {
-      console.warn('trust toggle failed:', e);
-    } finally {
-      trustPending = false;
+  // Friendly label for the canonical system_type tag. Every detected host
+  // gets a badge — the OS row still carries the version string.
+  function systemTypeLabel(t: string): string {
+    switch (t) {
+      case 'unraid': return 'Unraid';
+      case 'proxmox-ve': return 'Proxmox VE';
+      case 'proxmox-backup-server': return 'Proxmox Backup Server';
+      case 'truenas-scale': return 'TrueNAS Scale';
+      case 'truenas-core': return 'TrueNAS Core';
+      case 'macos': return 'macOS';
+      case 'debian': return 'Debian';
+      case 'alpine': return 'Alpine';
+      case 'nixos': return 'NixOS';
+      case 'linux': return 'Linux';
+      default: return t;
     }
   }
 
-  async function pushTrust(inst: Instance, on: boolean) {
-    if (!inst.secure || pushTrustPending) return;
-    pushTrustPending = true;
-    try {
-      await callTool('systemPeerUpdate', { peer_id: inst.peerId, on, push: true });
-      await refreshPodPeers();
-    } catch (e) {
-      console.warn('push trust failed:', e);
-    } finally {
-      pushTrustPending = false;
+  function capabilityLabel(c: string): string {
+    switch (c) {
+      case 'docker': return 'Docker';
+      case 'vm-host': return 'VM host';
+      case 'lxc-host': return 'LXC host';
+      case 'backup-target': return 'Backup target';
+      case 'gpu-nvidia': return 'NVIDIA GPU';
+      case 'gpu-amd': return 'AMD GPU';
+      case 'gpu-intel': return 'Intel GPU';
+      default: return c;
     }
   }
 
@@ -697,6 +700,18 @@
     </div>
 
     <div class="drawer-body">
+      {@const sys = selectedInst.sys}
+      {@const typeBadge = sys?.system_type ? systemTypeLabel(sys.system_type) : ''}
+      {@const virtBadge = sys?.virtualization && sys.virtualization !== 'none' ? sys.virtualization : ''}
+      {@const capBadges = (sys?.detected_capabilities ?? []).map(capabilityLabel)}
+      {#if typeBadge || virtBadge || capBadges.length}
+        <div class="badges">
+          {#if typeBadge}<span class="badge type-badge">{typeBadge}</span>{/if}
+          {#if virtBadge}<span class="badge virt-badge">{virtBadge}</span>{/if}
+          {#each capBadges as cap}<span class="badge cap-badge">{cap}</span>{/each}
+        </div>
+      {/if}
+
       <dl class="detail-grid">
         <dt>Origin</dt>
         <dd><code>{selectedInst.origin}</code></dd>
@@ -737,21 +752,6 @@
           <dd><code>{selectedInst.channel}</code></dd>
         {/if}
 
-        {#if selectedInst.sys?.virtualization && selectedInst.sys.virtualization !== 'none'}
-          <dt>Virt</dt>
-          <dd><code>{selectedInst.sys.virtualization}</code></dd>
-        {/if}
-
-        {#if selectedInst.sys?.proxmox_role}
-          <dt>Proxmox</dt>
-          <dd><code>{selectedInst.sys.proxmox_role}</code></dd>
-        {/if}
-
-        {#if selectedInst.sys?.docker_present}
-          <dt>Docker</dt>
-          <dd><code>present</code></dd>
-        {/if}
-
         {#if selectedInst.sys?.gpus?.length}
           <dt>GPU</dt>
           <dd>
@@ -775,54 +775,10 @@
         </dl>
       {/if}
 
-      {#if selectedInst.role === 'system' && selectedInst.secure}
-        {@const peerName = selectedInst.sys?.hostname ?? selectedInst.label}
-        {@const mutual = selectedInst.secure.local && selectedInst.secure.peer}
-        {@const localHostname = instances.find((i) => i.role === 'local')?.sys?.hostname ?? 'local'}
-        <div class="section-head trust-head">
-          <span>Trust</span>
-          {#if mutual}<span class="secure-badge" title="Both sides trust each other — credential sync enabled">Secure</span>{/if}
-        </div>
-        <div class="cert-toggles">
-          <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-          <div
-            class="cert-toggle"
-            class:disabled={trustPending || pushTrustPending}
-            onclick={() => !(trustPending || pushTrustPending) && toggleLocalTrust(selectedInst!)}
-            role="button"
-            tabindex="0"
-          >
-            <span class="cert-toggle-label">Trust {peerName} Cert</span>
-            <div
-              class="toggle-switch"
-              class:on={selectedInst.secure.local}
-              aria-label="Trust {peerName} cert"
-            ><span class="toggle-thumb"></span></div>
-          </div>
-          {#if selectedInst.secure.peer}
-            <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-            <div
-              class="cert-toggle"
-              class:disabled={trustPending || pushTrustPending}
-              onclick={() => !(trustPending || pushTrustPending) && pushTrust(selectedInst!, false)}
-              role="button"
-              tabindex="0"
-            >
-              <span class="cert-toggle-label">Send {peerName} Cert</span>
-              <div class="toggle-switch on" aria-label="Send cert to {peerName}"><span class="toggle-thumb"></span></div>
-            </div>
-          {:else}
-            <div class="cert-toggle cert-toggle-blocked">
-              <span class="cert-toggle-label">Send {peerName} Cert</span>
-              <div class="toggle-switch" aria-label="Send cert to {peerName}"><span class="toggle-thumb"></span></div>
-              <p class="cert-blocked-hint">Run on {peerName}:</p>
-              <button
-                class="cert-cmd"
-                title="Click to copy"
-                onclick={() => copyText(`orca pod peer update ${localHostname} --on`)}
-              >orca pod peer update {localHostname} --on</button>
-            </div>
-          {/if}
+      {#if selectedInst.role === 'system'}
+        <div class="paired-line" title="Paired peers in the pod automatically exchange mesh certs. Use Unpair to revoke.">
+          <span class="paired-check">✓</span>
+          <span>Paired</span>
         </div>
       {/if}
 
@@ -1303,83 +1259,45 @@
     padding-bottom: var(--space-1);
   }
 
-  /* ── trust ────────────────────────────────────────────────────────────── */
-  .trust-head {
+  /* ── badges + paired line ─────────────────────────────────────────────── */
+  .badges {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3);
   }
-  .secure-badge {
+  .badge {
     font-size: 10px;
     font-weight: 600;
-    padding: 1px 7px;
+    padding: 2px 8px;
     border-radius: 10px;
-    background: color-mix(in srgb, #22c55e 15%, transparent);
-    color: #22c55e;
-    border: 1px solid color-mix(in srgb, #22c55e 40%, transparent);
-  }
-  .cert-toggles {
-    display: flex;
-    justify-content: center;
-    gap: var(--space-3);
-  }
-  .cert-toggle {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-3);
-    background: color-mix(in srgb, var(--color-surface, #1a1a2e) 80%, transparent);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md, 8px);
-    cursor: pointer;
-    width: fit-content;
-    min-width: 100px;
-    transition: border-color 0.15s, background 0.15s;
-    user-select: none;
-  }
-  .cert-toggle:hover:not(.disabled) {
-    border-color: color-mix(in srgb, var(--color-accent, #4f86f7) 50%, transparent);
-    background: color-mix(in srgb, var(--color-accent, #4f86f7) 5%, var(--color-surface, #1a1a2e));
-  }
-  .cert-toggle.disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-  .cert-toggle-blocked {
-    cursor: default;
-    opacity: 1;
-  }
-  .cert-toggle-blocked .toggle-switch {
-    opacity: 0.35;
-  }
-  .cert-blocked-hint {
-    margin: var(--space-1) 0 2px;
-    font-size: 9px;
-    color: var(--color-text-dim);
-  }
-  .cert-cmd {
-    font-size: 9px;
-    font-family: var(--font-mono);
-    color: var(--color-text-muted);
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: 3px;
-    padding: 2px 5px;
-    cursor: copy;
-    word-break: break-all;
-    display: block;
-  }
-  .cert-cmd:hover {
-    border-color: var(--color-accent, #4f86f7);
-    color: var(--color-text);
-  }
-  .cert-toggle-label {
-    font-size: 10px;
-    color: var(--color-text-dim);
-    line-height: 1.3;
-    text-align: center;
+    line-height: 1.4;
     white-space: nowrap;
+    border: 1px solid var(--color-border);
+    background: color-mix(in srgb, var(--color-surface, #1a1a2e) 80%, transparent);
+    color: var(--color-text-dim);
+  }
+  .badge.type-badge {
+    background: color-mix(in srgb, var(--color-accent, #4f86f7) 15%, transparent);
+    color: var(--color-accent, #4f86f7);
+    border-color: color-mix(in srgb, var(--color-accent, #4f86f7) 40%, transparent);
+  }
+  .badge.virt-badge {
+    background: color-mix(in srgb, #a855f7 12%, transparent);
+    color: #c084fc;
+    border-color: color-mix(in srgb, #a855f7 35%, transparent);
+  }
+  .paired-line {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: var(--space-3) 0;
+    font-size: 11px;
+    color: var(--color-text-dim);
+  }
+  .paired-check {
+    color: #22c55e;
+    font-weight: 700;
   }
   .toggle-switch {
     position: relative;
