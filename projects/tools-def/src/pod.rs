@@ -1127,6 +1127,7 @@ mod tests {
         let out = pod_update(
             PodUpdateArgs {
                 self_secure: Some(true),
+                peer_id: None,
             },
             &ctx,
         )
@@ -1140,9 +1141,15 @@ mod tests {
     async fn pod_update_none_is_read_only() {
         let (ctx, stub) = ctx_with_stub();
         *stub.self_secure.lock().unwrap() = true;
-        let out = pod_update(PodUpdateArgs { self_secure: None }, &ctx)
-            .await
-            .unwrap();
+        let out = pod_update(
+            PodUpdateArgs {
+                self_secure: None,
+                peer_id: None,
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
         assert!(out.self_secure);
         // unchanged
         assert!(*stub.self_secure.lock().unwrap());
