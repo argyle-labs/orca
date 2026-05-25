@@ -300,47 +300,23 @@
     if (selectedInst && selectedInst.id !== drawerOpenedForId) {
       drawerOpenedForId = selectedInst.id;
       drawerChannel = selectedInst.channel ?? 'stable';
-      updateCheckResult = null;
       updateResult = null;
     }
   });
-
-  async function checkUpdate() {
-    if (!selectedInst) return;
-    checkPending = true;
-    updateCheckResult = null;
-    try {
-      const args: Record<string, unknown> = { channel: drawerChannel };
-      if (selectedInst.role === 'system') args.peer_id = selectedInst.peerId;
-      const r = await callTool<{
-        channel: string;
-        latest?: string | null;
-        up_to_date: boolean;
-      }>('systemUpdateDetail', args);
-      updateCheckResult = {
-        channel: r.channel,
-        latest: r.latest ?? null,
-        up_to_date: r.up_to_date,
-      };
-    } catch (e) {
-      console.warn('update check failed:', e);
-    } finally {
-      checkPending = false;
-    }
-  }
 
   async function applyUpdate() {
     if (!selectedInst) return;
     updatePending = true;
     updateResult = null;
     try {
-      const args: Record<string, unknown> = { channel: drawerChannel };
+      const args: Record<string, unknown> = { version: drawerChannel };
       if (selectedInst.role === 'system') args.peer_id = selectedInst.peerId;
       const r = await callTool<{ done: string[]; skipped: string[]; errors: string[] }>(
-        'systemUpdateCreate',
+        'systemUpdate',
         args,
       );
       updateResult = { done: r.done, errors: r.errors };
+      await (selectedInst.role === 'local' ? refreshLocal(selectedInst) : refreshPodPeers());
     } catch (e) {
       console.warn('update failed:', e);
       updateResult = { done: [], errors: [e instanceof Error ? e.message : String(e)] };
@@ -351,12 +327,11 @@
 
   async function toggleDevMode(inst: Instance) {
     if (!inst.peerId) return;
-    const action = inst.mode !== 'dev' ? 'enable' : 'disable';
+    const version = inst.mode === 'dev' ? 'stable' : 'dev';
     try {
-      await callTool('systemPeerDevUpdate', {
-        action,
-        peers: inst.role === 'system' ? [inst.peerId] : [],
-      });
+      const args: Record<string, unknown> = { version };
+      if (inst.role === 'system') args.peer_id = inst.peerId;
+      await callTool('systemUpdate', args);
       await (inst.role === 'local' ? refreshLocal(inst) : refreshPodPeers());
     } catch (e) {
       console.warn('dev mode toggle failed:', e);
@@ -676,6 +651,10 @@
 
 <!-- Drawer -->
 {#if selectedInst}
+  {@const sys = selectedInst.sys}
+  {@const typeBadge = sys?.system_type ? systemTypeLabel(sys.system_type) : ''}
+  {@const virtBadge = sys?.virtualization && sys.virtualization !== 'none' ? sys.virtualization : ''}
+  {@const capBadges = (sys?.detected_capabilities ?? []).map(capabilityLabel)}
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <div class="backdrop" role="presentation" onclick={closeDrawer}></div>
   <aside class="drawer">
@@ -694,10 +673,6 @@
     </div>
 
     <div class="drawer-body">
-      {@const sys = selectedInst.sys}
-      {@const typeBadge = sys?.system_type ? systemTypeLabel(sys.system_type) : ''}
-      {@const virtBadge = sys?.virtualization && sys.virtualization !== 'none' ? sys.virtualization : ''}
-      {@const capBadges = (sys?.detected_capabilities ?? []).map(capabilityLabel)}
       {#if typeBadge || virtBadge || capBadges.length}
         <div class="badges">
           {#if typeBadge}<span class="badge type-badge">{typeBadge}</span>{/if}
@@ -781,13 +756,13 @@
         <div class="update-setting-row">
           <span class="update-setting-label">Channel</span>
           <div class="channel-segment">
-            {#each ['stable', 'rc', 'beta'] as ch, i}
+            {#each ['stable', 'rc', 'beta'] as ch}
               {@const active = drawerChannel === ch}
               <button
                 class="channel-btn"
                 class:active
-                onclick={() => { drawerChannel = ch; updateCheckResult = null; }}
-                disabled={checkPending || updatePending}
+                onclick={() => { drawerChannel = ch; }}
+                disabled={updatePending}
               >{ch}</button>
             {/each}
           </div>
@@ -799,7 +774,7 @@
             <button
               class="toggle-switch"
               class:on={selectedInst.mode === 'dev'}
-              disabled={checkPending || updatePending}
+              disabled={updatePending}
               onclick={() => toggleDevMode(selectedInst!)}
               aria-label="Toggle dev mode"
               role="switch"
@@ -809,25 +784,14 @@
         {/if}
 
         <div class="update-action-row">
-          <button class="ctrl-btn" onclick={checkUpdate} disabled={checkPending || updatePending}>
-            {checkPending ? '…' : 'Check'}
-          </button>
           <button
             class="ctrl-btn primary"
             onclick={applyUpdate}
-            disabled={updatePending || checkPending}
+            disabled={updatePending}
           >
             {updatePending ? 'Updating…' : 'Update'}
           </button>
         </div>
-
-        {#if updateCheckResult}
-          <p class="update-status" class:ok={updateCheckResult.up_to_date}>
-            {updateCheckResult.up_to_date
-              ? `Up to date${updateCheckResult.latest ? ` (${updateCheckResult.latest})` : ''}`
-              : `Available: ${updateCheckResult.latest ?? '?'}`}
-          </p>
-        {/if}
 
         {#if updateResult}
           {#if updateResult.done.length > 0}
