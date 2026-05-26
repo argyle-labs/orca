@@ -91,11 +91,12 @@ fn migrate_colima_runtime(db_path: &std::path::Path) {
     if count > 0 {
         return;
     }
-    let _ = conn.execute(
+    conn.execute(
         "INSERT OR IGNORE INTO docker_runtimes (name, socket_path, host, enabled)
          VALUES ('colima', ?1, NULL, 1)",
         rusqlite::params![format!("~/.colima/default/docker.sock")],
-    );
+    )
+    .ok();
     tracing::info!("auto-registered colima docker runtime in orca.db");
 }
 
@@ -150,7 +151,7 @@ fn migrate_toml_schema_databases_to_db(toml_path: &std::path::Path, db_path: &st
         } else {
             Some(d.port as i64)
         };
-        let _ = conn.execute(
+        conn.execute(
             "INSERT OR IGNORE INTO schema_databases
                 (name, host, port, user, password, database, container, domains_file, enabled)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)",
@@ -164,7 +165,8 @@ fn migrate_toml_schema_databases_to_db(toml_path: &std::path::Path, db_path: &st
                 d.container,
                 d.domains_file,
             ],
-        );
+        )
+        .ok();
     }
     tracing::info!(
         "migrated {} schema database(s) from orca.toml to orca.db",

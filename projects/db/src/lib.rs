@@ -49,6 +49,7 @@ use rusqlite::Connection;
 // taking a direct rusqlite dep.
 pub use rusqlite::Connection as Conn;
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -1076,8 +1077,7 @@ fn load_or_create_key() -> Result<String> {
     getrandom::fill(&mut bytes)
         .map_err(|e| anyhow::anyhow!("OS RNG failure generating db key: {e}"))?;
     let hex: String = bytes.iter().fold(String::new(), |mut s, b| {
-        use std::fmt::Write;
-        let _ = write!(s, "{b:02x}");
+        write!(s, "{b:02x}").unwrap();
         s
     });
 
