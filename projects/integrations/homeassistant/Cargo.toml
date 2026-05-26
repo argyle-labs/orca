@@ -7,16 +7,16 @@ edition.workspace = true
 name = "homeassistant"
 path = "src/lib.rs"
 
-# Feature flavors mirror orca-tool's tiers:
+# Feature flavors:
 #   - default (none): wasm-safe — HA REST client + Arg/Output metadata structs.
-#   - native:         pulls runtime — orca-tool/native + orca-db lookup of
+#   - native:         pulls runtime — orca-contract/native + orca-db lookup of
 #                     registered HA endpoints, anyhow for tool body errors.
+#                     orca-dispatch (always native) provides the inventory slice.
 #   - cli:            adds clap derives on Args so the tools surface in the
 #                     unified `orca` CLI binary. Implies `native`.
 [features]
 default = []
 native = [
-    "orca-tool/native",
     "orca-contract/native",
     "dep:orca-db",
     "dep:anyhow",
@@ -24,7 +24,6 @@ native = [
 ]
 cli = [
     "native",
-    "orca-tool/cli",
     "dep:clap",
 ]
 
@@ -38,7 +37,7 @@ orca-utils  = { path = "../../utils" }
 # `#[orca_tool]` machinery — default tier carries the wasm-safe metadata
 # impls so anyone consuming this crate gets the tool Args/Output schema even
 # without the runtime.
-orca-tool        = { path = "../../orca-tool", default-features = false }
+orca-dispatch        = { path = "../../orca-dispatch" }
 orca-contract    = { path = "../../orca-contract", default-features = false }
 orca-macro       = { path = "../../orca-macro" }
 schemars         = { workspace = true }

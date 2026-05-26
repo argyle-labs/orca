@@ -10,7 +10,6 @@ path = "src/lib.rs"
 [features]
 default = []
 native = [
-    "orca-tool/native",
     "orca-contract/native",
     "dep:orca-utils",
     "dep:orca-db",
@@ -23,14 +22,13 @@ native = [
 ]
 cli = [
     "native",
-    "orca-tool/cli",
 
     "dep:clap",
     "dep:colored",
 ]
 
 [dependencies]
-orca-tool        = { path = "../orca-tool", default-features = false }
+orca-dispatch        = { path = "../orca-dispatch" }
 orca-contract    = { path = "../orca-contract", default-features = false }
 orca-macro       = { path = "../orca-macro" }
 schemars         = { workspace = true }

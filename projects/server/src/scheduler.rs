@@ -1,6 +1,6 @@
 //! In-process cron scheduler. Replaces system cron entirely — single
 //! source of truth (the `config_rows` table) and uniform dispatch
-//! (calls into the same `ToolRegistry` the CLI/MCP/REST use).
+//! (calls into the same `orca_dispatch::dispatch` the CLI/MCP/REST use).
 //!
 //! See `docs/planned/orca-v1-scope.md` §3.4.
 //!
@@ -12,7 +12,7 @@
 //!      last completed run (or daemon start, whichever is later),
 //!      should we have fired by now?".
 //!   3. If yes, dispatches the row's `job` (canonical tool name) by
-//!      calling `ToolRegistry::dispatch`. Records the run history.
+//!      calling `orca_dispatch::dispatch`. Records the run history.
 //!
 //! ## Row shape (config_rows.json)
 //!
@@ -43,7 +43,6 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use cron::Schedule;
 use orca_contract::ToolCtx;
-use orca_tool::ToolRegistry;
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::{info, warn};
@@ -70,7 +69,7 @@ struct ScheduleRow {
 
 /// Spawn the scheduler. Returns the periodic-loop handle; daemon should
 /// drop it ("leak it") for the lifetime of the process.
-pub fn spawn(registry: Arc<ToolRegistry>, ctx: Arc<ToolCtx>) -> tokio::task::JoinHandle<()> {
+pub fn spawn(ctx: Arc<ToolCtx>) -> tokio::task::JoinHandle<()> {
     let daemon_start = Utc::now();
     periodic::spawn(
         periodic::PeriodicSpec {
@@ -79,14 +78,13 @@ pub fn spawn(registry: Arc<ToolRegistry>, ctx: Arc<ToolCtx>) -> tokio::task::Joi
             interval: TICK_INTERVAL,
         },
         periodic::boxed(move || {
-            let registry = registry.clone();
             let ctx = ctx.clone();
-            async move { tick(&registry, &ctx, daemon_start).await }
+            async move { tick(&ctx, daemon_start).await }
         }),
     )
 }
 
-async fn tick(registry: &ToolRegistry, ctx: &ToolCtx, daemon_start: DateTime<Utc>) -> Result<()> {
+async fn tick(ctx: &ToolCtx, daemon_start: DateTime<Utc>) -> Result<()> {
     let conn = db::open_default().context("open db for scheduler tick")?;
     let rows = db::config_store::list(&conn, Some("schedule"), None)?;
     drop(conn);
@@ -128,7 +126,7 @@ async fn tick(registry: &ToolRegistry, ctx: &ToolCtx, daemon_start: DateTime<Utc
         let job_name = parsed.job.clone();
         let started_at = Utc::now();
         let t0 = std::time::Instant::now();
-        let outcome = registry.dispatch(&job_name, args, ctx).await;
+        let outcome = orca_dispatch::dispatch(&job_name, args, ctx).await;
         let finished_at = Utc::now();
         let ok = outcome.is_ok();
         let error = outcome.as_ref().err().map(|e| format!("{e:#}"));

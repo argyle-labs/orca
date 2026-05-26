@@ -21,7 +21,7 @@ cli = ["dep:clap"]
 
 [dependencies]
 orca-utils       = { path = "../utils" }
-orca-tool        = { path = "../orca-tool", features = ["native"] }
+orca-dispatch    = { path = "../orca-dispatch" }
 orca-contract    = { path = "../orca-contract", features = ["native"] }
 orca-macro       = { path = "../orca-macro" }
 

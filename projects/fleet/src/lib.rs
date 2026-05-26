@@ -14,8 +14,7 @@ pub(crate) mod test_support;
 // bucket so the full `#[orca_tool]` graph is verifiable end-to-end.
 #[cfg(all(test, feature = "native"))]
 mod inventory_tests {
-    use orca_tool::ToolRegistration;
-    use orca_tool::native_register;
+    use orca_dispatch::ToolRegistration;
 
     // Side-effect imports — link the buckets in so their inventory::submit!
     // registrations are pulled into this test binary.
@@ -42,10 +41,8 @@ mod inventory_tests {
     }
 
     #[test]
-    fn native_register_enrolls_host_tools() {
-        let mut reg = orca_tool::ToolRegistry::new();
-        native_register(&mut reg);
-        let names = reg.names();
+    fn dispatch_names_includes_host_tools() {
+        let names = orca_dispatch::names();
         assert!(names.contains(&"system.host.detail"));
         assert!(names.contains(&"system.host.set"));
         assert!(names.contains(&"system.host.refresh"));

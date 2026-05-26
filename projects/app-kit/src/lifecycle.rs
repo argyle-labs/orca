@@ -42,7 +42,6 @@
 //! is the explicit design-pass deliverable for #4.
 
 use orca_contract::ToolCtx;
-use orca_tool::ToolRegistry;
 use orca_utils::config::Config;
 use std::sync::Arc;
 
@@ -68,8 +67,6 @@ pub struct OrcaAppKit {
     // CI's `-D warnings` clippy stays clean.
     #[allow(dead_code)]
     pub(crate) config: Arc<Config>,
-    #[allow(dead_code)]
-    pub(crate) registry: Arc<ToolRegistry>,
     #[allow(dead_code)]
     pub(crate) ctx: Arc<ToolCtx>,
     /// Multi-threaded tokio runtime owned by this instance. Dropped at
@@ -107,9 +104,11 @@ impl OrcaAppKit {
                 .build()?,
         );
 
-        let mut registry = ToolRegistry::new();
-        orca_tool::native_register(&mut registry);
-
+        // Tool dispatch walks the `inventory::iter::<ToolRegistration>`
+        // slice that every `#[orca_tool]` annotation submits into at link
+        // time — no registry to construct here. The cdylib's link anchors
+        // in `lib.rs` ensure every domain crate's inventory entries are
+        // pulled into this binary.
         let mut ctx = ToolCtx::new(config.clone());
         // Per the service-registration convention in
         // `tools_def::services::mod`, the embedder owns which `register_*`

@@ -6,7 +6,7 @@ edition.workspace = true
 # orca-sdk is a headless library crate.
 # It MUST NOT depend on orca-server, orca-commands, orca-agents, orca-conversation,
 # or anything that pulls in the ui feature or server-only deps.
-# Allowed: orca-config, orca-db, orca-state, orca-fs, orca-tool — core primitives only.
+# Allowed: orca-config, orca-db, orca-state, orca-fs, orca-contract — core primitives only.
 #
 # This is enforced by the build-sdk CI job which builds this crate in isolation.
 

@@ -1,3 +1,15 @@
+//! OpenAPI / GraphQL spec-registry tools — server-local because their
+//! backing implementations live in `crate::mcp::specs` (file-system layout
+//! of the operator's checkout).
+//!
+//! These five tools predate the `#[orca_tool]` macro and have NAMEs that
+//! external MCP clients (Claude Code) reference directly (e.g.
+//! `mcp__orca-local__list_rebuy_specs`). Renaming them to the
+//! macro's canonical `{domain}.{verb}` form would break those references,
+//! so we keep the hand-rolled `OrcaTool` impls and hand-write the
+//! inventory entries. Everything else (MCP/REST/OpenAPI emission) flows
+//! through the standard `orca_dispatch` paths.
+
 use anyhow::Result;
 use async_trait::async_trait;
 use orca_contract::{OrcaTool, OrcaToolDef, ToolCtx};
@@ -27,6 +39,7 @@ impl OrcaTool for ListRebuySpecs {
         specs::list_rebuy_specs()
     }
 }
+
 // ── get_rebuy_spec ────────────────────────────────────────────────────────────
 
 #[derive(Deserialize, Serialize, JsonSchema)]
@@ -52,6 +65,7 @@ impl OrcaTool for GetRebuySpec {
         specs::get_rebuy_spec(&json!({ "repo": args.repo }))
     }
 }
+
 // ── get_rebuy_spec_public ─────────────────────────────────────────────────────
 
 #[derive(Deserialize, Serialize, JsonSchema)]
@@ -77,6 +91,7 @@ impl OrcaTool for GetRebuySpecPublic {
         specs::get_rebuy_spec_public(&json!({ "repo": args.repo }))
     }
 }
+
 // ── get_rebuy_graphql_schema ──────────────────────────────────────────────────
 
 #[derive(Deserialize, Serialize, JsonSchema)]
@@ -102,6 +117,7 @@ impl OrcaTool for GetRebuyGraphqlSchema {
         specs::get_rebuy_graphql_schema(&json!({ "repo": args.repo }))
     }
 }
+
 // ── get_graphql_info ──────────────────────────────────────────────────────────
 
 #[derive(Deserialize, Serialize, JsonSchema)]
@@ -129,12 +145,28 @@ impl OrcaTool for GetGraphqlInfo {
         specs::get_graphql_info(&json!({ "repo": args.repo }))
     }
 }
-// ── register ──────────────────────────────────────────────────────────────────
 
-pub fn register(reg: &mut orca_tool::ToolRegistry) {
-    reg.register::<ListRebuySpecs>()
-        .register::<GetRebuySpec>()
-        .register::<GetRebuySpecPublic>()
-        .register::<GetRebuyGraphqlSchema>()
-        .register::<GetGraphqlInfo>();
+// ── inventory registration ────────────────────────────────────────────────────
+//
+// These five tools have hand-picked NAMEs that don't fit `{domain}.{verb}`, so
+// they can't go through the `#[orca_tool]` macro. We hand-submit their
+// `ToolRegistration` entries — same slice the macro fills for every other tool.
+
+macro_rules! register_spec_tool {
+    ($tool:ty) => {
+        ::inventory::submit! {
+            ::orca_dispatch::ToolRegistration {
+                name: <$tool as ::orca_contract::OrcaToolDef>::NAME,
+                make_erased: || ::std::boxed::Box::new(
+                    ::orca_dispatch::ToolWrapper::<$tool>(::std::marker::PhantomData)
+                ),
+            }
+        }
+    };
 }
+
+register_spec_tool!(ListRebuySpecs);
+register_spec_tool!(GetRebuySpec);
+register_spec_tool!(GetRebuySpecPublic);
+register_spec_tool!(GetRebuyGraphqlSchema);
+register_spec_tool!(GetGraphqlInfo);

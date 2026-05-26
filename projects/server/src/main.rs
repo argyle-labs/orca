@@ -340,7 +340,7 @@ async fn main() -> Result<()> {
                 let verb_opt = rest_args.get(depth);
                 let is_domain_help =
                     matches!(verb_opt.map(String::as_str), Some("--help") | Some("-h"));
-                orca_tool::cli::ops().any(|o| {
+                orca_dispatch::cli::ops().any(|o| {
                     o.domain == dom
                         && (is_domain_help
                             || verb_opt.is_none()
@@ -744,10 +744,10 @@ fn detect_project_from_cwd(config: &Config) -> Option<String> {
 }
 
 /// Dispatch a passthrough subcommand (`orca <domain> <verb> [args]`) to the
-/// `OrcaOp` inventory in `orca-tools-def::cli`. Returns an error if no
+/// `OrcaOp` inventory in `orca_dispatch::cli`. Returns an error if no
 /// (domain, verb) pair matches; clap printed help is preferred over this.
 async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
-    use orca_tool::cli as op_cli;
+    use orca_dispatch::cli as op_cli;
     use std::sync::Arc;
 
     argv.insert(0, "orca".to_string());
@@ -758,11 +758,9 @@ async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
     };
 
     // Reuse the MCP path's ToolCtx builder so every service trait (Docker,
-    // Plugins, McpRegistry, etc.) is registered exactly once. The discarded
-    // registry isn't needed for CLI — dispatch goes through `OrcaTool::run`
-    // directly, not the registry walk.
-    let (_reg, ctx) = mcp::build_tool_registry(Arc::new(config));
-    let ctx = Arc::new(ctx);
+    // Plugins, McpRegistry, etc.) is registered exactly once. Dispatch goes
+    // through `OrcaTool::run` directly, not the inventory walk.
+    let ctx = Arc::new(mcp::build_tool_ctx(Arc::new(config)));
 
     match op_cli::try_dispatch(&matches, ctx).await {
         Some(r) => r,

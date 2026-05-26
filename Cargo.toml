@@ -146,7 +146,7 @@ default-members = [
     "projects/sdk/rust",
     "projects/server",
     "projects/orca-contract",
-    "projects/orca-tool",
+    "projects/orca-dispatch",
     "projects/orca-macro",
     "projects/auth",
     "projects/fleet",

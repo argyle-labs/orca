@@ -10,14 +10,12 @@ path = "src/lib.rs"
 [features]
 default = []
 native = [
-    "orca-tool/native",
     "orca-contract/native",
     "dep:orca-db",
     "dep:async-trait",
 ]
 cli = [
     "native",
-    "orca-tool/cli",
     "dep:clap",
 ]
 
@@ -28,7 +26,7 @@ serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 tokio       = { workspace = true }
 
-orca-tool        = { path = "../../orca-tool", default-features = false }
+orca-dispatch        = { path = "../../orca-dispatch" }
 orca-contract    = { path = "../../orca-contract", default-features = false }
 orca-macro       = { path = "../../orca-macro" }
 schemars         = { workspace = true }

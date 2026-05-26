@@ -197,22 +197,16 @@ async fn schedule_run(
     let parsed: native_support::ScheduleRow = serde_json::from_str(&row.json)
         .map_err(|e| anyhow::anyhow!("malformed schedule row: {e}"))?;
 
-    // Pull the registry off the ToolCtx services. Daemon registers it on
-    // startup (see scheduler wiring); CLI invocations have no daemon, so
-    // we surface a clear error.
-    let registry: std::sync::Arc<orca_tool::ToolRegistry> = ctx
-        .service::<std::sync::Arc<orca_tool::ToolRegistry>>()
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "schedule.run requires daemon mode (registry-in-ctx not available from CLI)"
-            )
-        })?;
+    // Dispatch the scheduled job through the shared inventory. The free-fn
+    // dispatcher walks `inventory::iter::<ToolRegistration>` directly — no
+    // service-bag handoff. CLI invocations still work because the inventory
+    // slice is populated at link time regardless of daemon state.
     let args_value = parsed
         .args
         .map(|j| j.0)
         .unwrap_or_else(|| serde_json::json!({}));
     let t0 = std::time::Instant::now();
-    let outcome = registry.dispatch(&parsed.job, args_value, ctx).await;
+    let outcome = orca_dispatch::dispatch(&parsed.job, args_value, ctx).await;
     let duration_ms = t0.elapsed().as_millis() as i64;
     let (ok, error) = match &outcome {
         Ok(_) => (true, None),
@@ -228,13 +222,9 @@ async fn schedule_run(
 
 #[cfg(test)]
 mod tests {
-    use orca_tool::{ToolRegistry, native_register};
-
     #[test]
     fn schedule_tools_register_from_db_crate() {
-        let mut reg = ToolRegistry::new();
-        native_register(&mut reg);
-        let names = reg.names();
+        let names = orca_dispatch::names();
         assert!(names.contains(&"system.schedule.list"), "got: {names:?}");
         assert!(names.contains(&"system.schedule.status"), "got: {names:?}");
         assert!(names.contains(&"system.schedule.run"), "got: {names:?}");

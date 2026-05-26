@@ -586,21 +586,17 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
     info!("[host-addressing] refresh task armed (5m)");
 }
 
-/// Build the tool registry + ctx, register the registry on the ctx so
-/// nested tool dispatch works (e.g. `schedule.run` invoking another tool),
-/// then spawn the in-process cron scheduler. Best-effort: a config-load
-/// failure disables the scheduler but does not abort the daemon.
+/// Build the tool ctx and spawn the in-process cron scheduler. Nested tool
+/// dispatch (e.g. `schedule.run` invoking another tool) goes through the
+/// shared `orca_dispatch::dispatch` free fn, which walks the inventory
+/// directly. Best-effort: a config-load failure disables the scheduler but
+/// does not abort the daemon.
 fn spawn_scheduler_runtime() {
     match orca_utils::config::Config::load() {
         Ok(cfg) => {
             let cfg = Arc::new(cfg);
-            let (reg, mut ctx) = crate::mcp::build_tool_registry(cfg);
-            let registry = Arc::new(reg);
-            // Make the registry reachable from inside tool dispatch — needed
-            // for `schedule.run` to re-dispatch the scheduled job's tool.
-            ctx.register_service(registry.clone());
-            let ctx = Arc::new(ctx);
-            std::mem::drop(crate::scheduler::spawn(registry, ctx));
+            let ctx = Arc::new(crate::mcp::build_tool_ctx(cfg));
+            std::mem::drop(crate::scheduler::spawn(ctx));
             info!("[scheduler] in-process cron scheduler armed (60s tick)");
         }
         Err(e) => tracing::warn!("[scheduler] Config::load failed, scheduler disabled: {e}"),
@@ -975,14 +971,13 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
             // MCP-stdio surfaces use, otherwise tools that look up services on
             // ToolCtx (lifecycle, profile, pki, etc.) return 500.
             let cfg = Arc::new(cfg);
-            let (reg, ctx) = crate::mcp::build_tool_registry(cfg);
-            let reg = Arc::new(reg);
-            let ctx = Arc::new(ctx);
-            // Share the registry+ctx with the pod relay so peer-relayed tool
-            // calls dispatch in-process instead of looping back over HTTPS
-            // with the admin token (M4 in the v1 hardening punch list).
-            crate::pod::dispatcher::install(reg.clone(), ctx.clone());
-            api.nest("/api/tools", reg.axum_router(ctx))
+            let ctx = Arc::new(crate::mcp::build_tool_ctx(cfg));
+            // Share the ctx with the pod relay so peer-relayed tool calls
+            // dispatch in-process instead of looping back over HTTPS with
+            // the admin token (M4 in the v1 hardening punch list). Dispatch
+            // walks the inventory directly — no registry to ship.
+            crate::pod::dispatcher::install(ctx.clone());
+            api.nest("/api/tools", orca_dispatch::axum_router(ctx))
         }
         Err(e) => {
             tracing::warn!("Config::load failed, /api/tools disabled: {e}");

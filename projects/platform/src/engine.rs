@@ -349,7 +349,7 @@ mod cli_register {
     use super::*;
     use colored::Colorize;
 
-    ::orca_tool::register_op! {
+    ::orca_dispatch::register_op! {
         tool: EngineList,
         domain: "engine",
         verb: "list",
@@ -374,7 +374,7 @@ mod cli_register {
         }
     }
 
-    ::orca_tool::register_op! {
+    ::orca_dispatch::register_op! {
         tool: EngineCreate,
         domain: "engine",
         verb: "create",
@@ -382,7 +382,7 @@ mod cli_register {
         render: |out| { println!("{}", out.message); }
     }
 
-    ::orca_tool::register_op! {
+    ::orca_dispatch::register_op! {
         tool: EngineDelete,
         domain: "engine",
         verb: "delete",
@@ -390,7 +390,7 @@ mod cli_register {
         render: |out| { println!("{}", out.message); }
     }
 
-    ::orca_tool::register_op! {
+    ::orca_dispatch::register_op! {
         tool: EngineUpdate,
         domain: "engine",
         verb: "update",

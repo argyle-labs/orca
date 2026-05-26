@@ -15,7 +15,6 @@ mod tools;
 
 use anyhow::Result;
 use orca_contract::ToolCtx;
-use orca_tool::ToolRegistry;
 use orca_utils::config::Config;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -23,14 +22,6 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use handlers::run;
-
-/// Populate a ToolRegistry with every server-side OrcaTool. Single source of
-/// truth — called by MCP stdio, the HTTP /api/tools router, and (eventually)
-/// the WASM client surface.
-pub fn register_all_tools(reg: &mut ToolRegistry) {
-    orca_tool::native_register(reg);
-    spec_tools::register(reg);
-}
 
 /// Concrete embedder that satisfies the per-service `Provide*` traits in
 /// `tools_def::services::*`. Each `impl ProvideFoo for ServerEmbedder` is the
@@ -53,7 +44,7 @@ impl agents::agents::ProvideAgents for ServerEmbedder {
     }
 }
 
-pub fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
+pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     let embedder = ServerEmbedder {
         config: config.clone(),
     };
@@ -129,11 +120,9 @@ pub fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
         let ha_ep: Arc<dyn HaEndpointService> = Arc::new(crate::services::mgmt::ServerHaEndpoint);
         ctx.register_service(ha_ep);
     }
-    let mut reg = ToolRegistry::new();
-    register_all_tools(&mut reg);
-    crate::remote_ok::install(reg.remote_ok_names());
-    crate::tool_roles::install(reg.role_table());
-    (reg, ctx)
+    crate::remote_ok::install(orca_dispatch::remote_ok_names());
+    crate::tool_roles::install(orca_dispatch::role_table());
+    ctx
 }
 
 /// Servers whose tools orca already exposes natively or that must not be proxied back.
@@ -149,7 +138,7 @@ pub async fn serve(config: &Config) -> Result<()> {
     let pool = crate::serve::mcp_client::McpPool::new_with_db(config.db_path.clone());
 
     let config_arc = Arc::new(config.clone());
-    let (orca_registry, tool_ctx) = build_tool_registry(config_arc);
+    let tool_ctx = build_tool_ctx(config_arc);
 
     // Maps exposed tool name → (server_name, internal_tool_name).
     // For universal-mapped tools: exposed name differs from internal name.
@@ -193,7 +182,7 @@ pub async fn serve(config: &Config) -> Result<()> {
             "tools/list" => {
                 // Registry-derived tools replace the corresponding static entries in tools.rs.
                 // During migration: registry names shadow the static list.
-                let registry_defs = orca_registry.mcp_definitions();
+                let registry_defs = orca_dispatch::mcp_definitions();
                 let registry_names: std::collections::HashSet<String> = registry_defs
                     .iter()
                     .filter_map(|t| t["name"].as_str().map(str::to_string))
@@ -316,11 +305,9 @@ pub async fn serve(config: &Config) -> Result<()> {
                             }
                         }
                     }
-                } else if orca_registry.names().contains(&name) {
+                } else if orca_dispatch::names().contains(&name) {
                     // MCP wants text — Value::String passes through, structs pretty-print.
-                    let result = orca_registry
-                        .dispatch_text(name, args.clone(), &tool_ctx)
-                        .await;
+                    let result = orca_dispatch::dispatch_text(name, args.clone(), &tool_ctx).await;
                     match result {
                         Ok(text) => reply(
                             id,

@@ -7,13 +7,16 @@ edition.workspace = true
 #   - iOS / iPadOS / macOS SwiftUI    → UniFFI Swift bindings
 #   - Android                         → UniFFI Kotlin bindings
 #   - Linux native (egui/slint/...)   → Rust UI depends on this crate (or
-#                                       tools-def directly) — no UniFFI needed.
+#                                       the domain crates directly) — no
+#                                       UniFFI needed.
 #
 # This crate is the contract: every #[orca_tool] becomes a typed,
-# UniFFI-exported async fn here. Native UI code never calls tools-def directly.
+# UniFFI-exported async fn here. Native UI code never calls the domain crates
+# directly.
 #
-# Source-of-truth relationship — tools-def is the one place every tool's
-# Args/Output is defined. From those structs we auto-emit:
+# Source-of-truth relationship — every tool's Args/Output is declared in the
+# crate that owns its body (auth/fleet/platform/etc.). From those structs the
+# `#[orca_tool]` macro auto-emits:
 #   - REST + OpenAPI (schemars/utoipa)  → web UI via hey-api codegen
 #                                         (browser-delivered, NOT bundled in
 #                                          app-kit; native apps don't ship the
@@ -58,7 +61,7 @@ infra    = { path = "../infra",    features = ["native"] }
 docker        = { path = "../integrations/docker",        features = ["native"] }
 homeassistant = { path = "../integrations/homeassistant", features = ["native"] }
 proxmox       = { path = "../integrations/proxmox",       features = ["native"] }
-orca-tool     = { path = "../orca-tool", features = ["native"] }
+orca-dispatch = { path = "../orca-dispatch" }
 orca-contract = { path = "../orca-contract", features = ["native"] }
 orca-utils    = { path = "../utils" }
 
