@@ -369,8 +369,15 @@ pub async fn serve(config: &Config) -> Result<()> {
 // declarations are read from orca.db (cheap, no IPC); calls are forwarded to
 // the daemon's HTTP endpoint, which dispatches via the registry.
 
-const PLUGIN_TOOL_HTTP: &str = "https://127.0.0.1:12000";
 const PLUGIN_TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(35);
+
+/// Loopback base URL for plugin-tool HTTP dispatch. Read fresh from env
+/// so an operator override (`ORCA_HTTPS_PORT=…`) takes effect without
+/// recompiling. Cheap (pure env parse).
+fn plugin_tool_http_base() -> String {
+    let ports = orca_utils::config::Ports::from_env();
+    format!("https://127.0.0.1:{}", ports.https)
+}
 
 fn load_plugin_tool_rows() -> Vec<db::plugin_tools::PluginToolRow> {
     match db::open_default().and_then(|c| db::plugin_tools::list_all(&c)) {

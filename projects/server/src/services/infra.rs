@@ -15,7 +15,7 @@ pub struct ServerInfra;
 impl InfraService for ServerInfra {
     async fn list_services(&self) -> Result<Vec<InfraProject>> {
         let resp = loopback_client()?
-            .get("https://127.0.0.1:12443/api/logs/services")
+            .get(loopback_url("/api/logs/services"))
             .bearer_auth(loopback_token()?)
             .send()
             .await?
@@ -58,7 +58,7 @@ impl InfraService for ServerInfra {
     async fn service_logs(&self, project: &str, service: &str, tail: u64) -> Result<String> {
         let tail_str = tail.to_string();
         let resp = loopback_client()?
-            .get("https://127.0.0.1:12443/api/logs")
+            .get(loopback_url("/api/logs"))
             .bearer_auth(loopback_token()?)
             .query(&[
                 ("project", project),
@@ -86,12 +86,20 @@ impl InfraService for ServerInfra {
 }
 
 /// reqwest client for in-process loopback calls back into this daemon's REST
-/// API. The daemon serves a self-signed core-CA cert on `:12000`; for
+/// API. The daemon serves a self-signed mesh-CA cert on the HTTPS port; for
 /// localhost-only calls we accept invalid certs rather than threading the
 /// CA root through every call site. Cross-host traffic uses its own client
 /// configured with the real trust store.
 fn loopback_client() -> Result<reqwest::Client> {
-    crate::loopback_token::loopback_only_reqwest_client("https://127.0.0.1:12443")
+    crate::loopback_token::loopback_only_reqwest_client(&loopback_url(""))
+}
+
+/// Build a loopback URL using the config-resolved HTTPS port. Read fresh
+/// from env on each call so an operator override (`ORCA_HTTPS_PORT=…`)
+/// flows through without restart juggling. Cheap — pure env parse.
+fn loopback_url(path: &str) -> String {
+    let ports = orca_utils::config::Ports::from_env();
+    format!("https://127.0.0.1:{}{}", ports.https, path)
 }
 
 fn loopback_token() -> Result<String> {
