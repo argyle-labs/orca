@@ -22,5 +22,6 @@ pub fn empty_ctx() -> ToolCtx {
         app_dir: PathBuf::from("/tmp"),
         memory_root: PathBuf::from("/tmp"),
         db_path: PathBuf::from("/tmp/orca-tools-def-test.db"),
+        ports: Default::default(),
     }))
 }
