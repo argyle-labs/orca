@@ -4,8 +4,9 @@
 //! `mgmt::mgmt`, `infra::infra`, `docker::service_trait`).
 //!
 //! Every channel (REST, MCP stdio, CLI, WASM client) dispatches tool calls
-//! through the same `ToolRegistry`; this module supplies the concrete
-//! `Server*` impls that back the registry. Previously lived in
+//! through the same `orca_dispatch::dispatch` free fn; this module supplies
+//! the concrete `Server*` service impls those tools consult via `ToolCtx`.
+//! Previously lived in
 //! `crate::mcp::*_service` — that path conflated "MCP protocol" with
 //! "server-side tool plumbing"; only the former belongs in `mcp/`.
 

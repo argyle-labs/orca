@@ -280,8 +280,8 @@ pub fn refresh_and_persist(conn: &Connection) -> Result<()> {
 }
 
 /// Adapter implementing the wasm-safe `HostRefreshHook` trait from
-/// `orca-tools-def` so `host.refresh` can drive the real detect path
-/// without that crate depending on the server's process-level statics.
+/// `fleet::host` so `host.refresh` can drive the real detect path
+/// without the domain crate depending on the server's process-level statics.
 pub struct ServerHostRefreshHook;
 impl fleet::host::HostRefreshHook for ServerHostRefreshHook {
     fn refresh(&self, conn: &db::Conn) -> Result<()> {
