@@ -17,14 +17,18 @@
 //!   - `impl OrcaOp for HostInfo` (always — every annotated tool participates
 //!     in the unified domain/verb namespace).
 //!   - `#[cfg(feature = "native")] inventory::submit!` into the
-//!     `ToolRegistration` slice exposed by `orca-tool` so the registry picks
-//!     it up at startup without any central enrollment list.
+//!     `ToolRegistration` slice exposed by `orca-dispatch` so the
+//!     dispatchers pick it up at startup without any central enrollment list.
 //!   - An `OpenApiToolRegistration` inventory entry — the spec endpoint hoists
-//!     every tool path automatically (see `orca-tool::openapi`).
+//!     every tool path automatically (see `orca-dispatch::openapi`).
 //!
 //! Scope: this slice only supports the canonical `async fn name(args: T,
 //! ctx: &ToolCtx) -> Result<O>` form. Named-parameter expansion can be added
 //! later by destructuring `args` inside the thunk.
+//!
+//! Scope note: this proc-macro emits paths into `orca-contract` (cold types
+//! + trait anchors) and `orca-dispatch` (runtime). It never refers back to
+//! the prior `orca-tool` crate, which has been dissolved into those two.
 
 #[cfg(not(test))]
 use proc_macro::TokenStream;
@@ -49,7 +53,7 @@ struct ToolAttr {
     remote_ok: bool,
     /// Opt-in: `#[orca_tool(..., peer_dispatch = true)]` auto-emits a proxy
     /// stanza inside `OrcaTool::run` that inspects `args.peer_id` and, when
-    /// `Some`, dispatches to that peer via `orca_tool::cli::RemoteExec`
+    /// `Some`, dispatches to that peer via `orca_contract::RemoteExec`
     /// instead of running locally. Requires the Args type to derive `Clone`
     /// and `Serialize` and to declare `peer_id: Option<String>`.
     peer_dispatch: bool,
@@ -313,7 +317,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
         _ => quote! {
             #[cfg(feature = "cli")]
             const _: () = {
-                ::orca_tool::register_op! {
+                ::orca_dispatch::register_op! {
                     tool: #zst_ident,
                     domain: #domain,
                     verb: #verb,
@@ -328,7 +332,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     // injected into the spec at runtime.
     let openapi_block = quote! {
         ::inventory::submit! {
-            ::orca_tool::openapi::OpenApiToolRegistration {
+            ::orca_dispatch::openapi::OpenApiToolRegistration {
                 name: #tool_name,
                 description: #description,
                 domain: #domain,
@@ -384,11 +388,11 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
 
         #[cfg(feature = "native")]
         ::inventory::submit! {
-            ::orca_tool::ToolRegistration {
+            ::orca_dispatch::ToolRegistration {
                 name: #tool_name,
-                register: |reg| {
-                    reg.register::<#zst_ident>();
-                },
+                make_erased: || ::std::boxed::Box::new(
+                    ::orca_dispatch::ToolWrapper::<#zst_ident>(::std::marker::PhantomData)
+                ),
             }
         }
 
