@@ -13,7 +13,13 @@ mod daemon_signal_tests {
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
 
-    const TEST_PORT: u16 = 19998;
+    /// HTTP port for the test daemon. Picked well above the orca default
+    /// (`APP_REST_HTTP_PORT=12000`) so dev daemons on the workstation don't
+    /// collide with the test process.
+    const TEST_HTTP_PORT: u16 = 19998;
+    /// HTTPS port for the test daemon. Must be distinct from any other
+    /// process on the box (including a running real orca daemon on 12443).
+    const TEST_HTTPS_PORT: u16 = 19999;
     const TIMEOUT: Duration = Duration::from_secs(15);
     const POLL: Duration = Duration::from_millis(150);
 
