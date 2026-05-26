@@ -38,29 +38,25 @@ fn token_path() -> Result<PathBuf> {
 }
 
 /// Mint a fresh loopback token, persist it to `~/.orca/secrets/loopback.token`
-/// (mode 0600), and stash it in the process-wide cache. Subsequent calls are
-/// no-ops — the cached value wins for the lifetime of this process.
+/// (mode 0600), and stash it in the process-wide cache. Call exactly once per
+/// process at startup — a second call panics. The single-call invariant is
+/// load-bearing: disk and memory must hold the same token, and silently
+/// re-running this function would leave them divergent (memory pinned to the
+/// first caller via OnceLock, disk overwritten by the latest).
 pub fn install_at_startup() -> Result<()> {
-    if TOKEN.get().is_some() {
-        return Ok(());
-    }
     let mut buf = [0u8; 32];
     rand::rng().fill_bytes(&mut buf);
     let plaintext = format!("orca_loopback_{}", hex(&buf));
 
-    // Claim memory FIRST. If another caller already won the OnceLock we must
-    // not rewrite the on-disk file — that would leave disk and memory holding
-    // different tokens and silently break every Bearer auth attempt that
-    // reads the disk value (CLI subcommands, child processes, etc).
-    let claimed = TOKEN.set(plaintext.clone()).is_ok();
-    tracing::info!(
-        token_prefix = %&plaintext.chars().take(20).collect::<String>(),
-        claimed,
-        "loopback install_at_startup"
-    );
-    if !claimed {
-        return Ok(());
-    }
+    // Claim memory FIRST, then write disk. If we ever ignored a duplicate
+    // call here, memory would hold the first caller's token while disk would
+    // hold the most-recent caller's — silently breaking every Bearer auth
+    // attempt that reads the disk value. We .expect() instead of silently
+    // returning so a stray second `install_at_startup` call crashes the
+    // daemon at boot rather than shipping a divergent state into production.
+    TOKEN
+        .set(plaintext.clone())
+        .expect("install_at_startup called more than once — single-init invariant violated");
 
     let dir = secrets_dir()?;
     std::fs::create_dir_all(&dir)
@@ -234,19 +230,6 @@ mod tests {
             let mode = std::fs::metadata(dir.path()).unwrap().mode() & 0o777;
             assert_eq!(mode, 0o700, "mode should be 0700, got {mode:o}");
         }
-    }
-
-    #[test]
-    fn install_at_startup_is_idempotent() {
-        // install_at_startup returns Ok() immediately if TOKEN is already set.
-        // Ensure calling it twice doesn't error.
-        // (We can't control whether TOKEN was set by a prior test, but we can
-        // call install_at_startup safely — if TOKEN is set, it returns early.)
-        let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HOME", dir.path()) };
-        // May write a file or may return early — both paths must succeed.
-        let _ = install_at_startup(); // ignore result (may fail if HOME is weird)
-        let _ = install_at_startup(); // second call must also not panic
     }
 
     #[tokio::test]

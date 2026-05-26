@@ -53,3 +53,6 @@ tempfile = { workspace = true }
 [[example]]
 name = "db_bench"
 path = "examples/db_bench.rs"
+
+[lints]
+workspace = true

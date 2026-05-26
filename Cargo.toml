@@ -133,6 +133,16 @@ default-members = [
 ]
 resolver = "2"
 
+# Workspace-wide lint floor. `let _ = result_returning_call()` silently
+# discards Result/Option errors and was the load-bearing root cause of the
+# 2026-05-25 loopback token disk/memory divergence — both call sites of
+# `OnceLock::set` used `let _ = ...` and neither flagged that a second
+# caller would silently win. Promoting to deny means every "I intend to
+# ignore this" must be explicit (`.ok()`, `.expect(...)`, or a typed match)
+# and reviewed.
+[workspace.lints.clippy]
+let_underscore_must_use = "deny"
+
 [profile.release]
 # opt-level = 2 vs 3: ~2-3% slower at runtime for I/O-bound server code,
 # but ~10-15% faster to compile. Worth it for CI minutes. Bump to 3 only

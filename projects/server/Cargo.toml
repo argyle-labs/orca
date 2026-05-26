@@ -161,3 +161,6 @@ tempfile   = { workspace = true }
 tower      = { workspace = true }
 serde_json = { workspace = true }
 db = { package = "orca-db", path = "../db" }
+
+[lints]
+workspace = true
