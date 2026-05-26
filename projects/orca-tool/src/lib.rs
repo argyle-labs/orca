@@ -29,6 +29,8 @@ mod inventory_slice;
 #[cfg(feature = "native")]
 mod registry;
 #[cfg(feature = "native")]
+mod remote;
+#[cfg(feature = "native")]
 mod tool;
 #[cfg(feature = "native")]
 mod types;
@@ -41,6 +43,8 @@ pub use erased::{ErasedTool, ToolWrapper, value_to_text};
 pub use inventory_slice::{ToolRegistration, native_register};
 #[cfg(feature = "native")]
 pub use registry::{CliArgs, ToolRegistry};
+#[cfg(feature = "native")]
+pub use remote::RemoteExec;
 #[cfg(feature = "native")]
 pub use tool::OrcaTool;
 #[cfg(feature = "native")]

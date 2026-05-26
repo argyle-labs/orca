@@ -286,7 +286,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
                 let mut __a = ::core::clone::Clone::clone(&#args_forward);
                 __a.peer_id = ::core::option::Option::None;
                 let __svc = #ctx_param_name
-                    .service::<::std::sync::Arc<dyn ::orca_tool::cli::RemoteExec>>()?;
+                    .service::<::std::sync::Arc<dyn ::orca_tool::RemoteExec>>()?;
                 let __args_value = ::serde_json::to_value(&__a)
                     .map_err(|e| ::anyhow::anyhow!("peer_dispatch: serialize args: {e}"))?;
                 let __out_value = __svc.exec(&__peer_id, #tool_name, __args_value).await?;

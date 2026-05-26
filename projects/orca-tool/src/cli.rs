@@ -90,25 +90,7 @@ pub fn build_root(mut root: Command) -> Command {
     root
 }
 
-/// Trait the host registers on `ToolCtx` to enable `--peer <PEER>` remote
-/// dispatch. Decouples `exec_remote` from the concrete `PodService` so this
-/// CLI module can live in `orca-tool` without dragging in tools-def.
-///
-/// The host (server) registers an adapter that delegates to its `PodService`.
-#[async_trait::async_trait]
-pub trait RemoteExec: Send + Sync {
-    /// Dispatch one tool call to `peer` over the host's mesh transport.
-    /// Args/output are JSON-RPC wire payloads; `exec_remote` deserializes
-    /// the typed `OrcaToolDef::Output` immediately on receipt so opaque
-    /// values never reach user code.
-    #[allow(clippy::disallowed_types)]
-    async fn exec(
-        &self,
-        peer: &str,
-        tool: &str,
-        args: serde_json::Value,
-    ) -> Result<serde_json::Value>;
-}
+pub use crate::RemoteExec;
 
 /// Run an OrcaTool on a paired peer with end-to-end typed Args/Output. The
 /// JSON serialization happens internally — the call site, the trait API, and
