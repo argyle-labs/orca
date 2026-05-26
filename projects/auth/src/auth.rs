@@ -4,9 +4,16 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "native")]
+use anyhow::bail;
+#[cfg(feature = "native")]
 use orca_macro::orca_tool;
 #[cfg(feature = "native")]
-use std::sync::Arc;
+use rand::Rng;
+#[cfg(feature = "native")]
+use sha2::{Digest, Sha256};
+
+#[cfg(feature = "native")]
+const ANTHROPIC_KEY: &str = "anthropic_api_key";
 
 // ── Shared rows ─────────────────────────────────────────────────────────────
 
@@ -62,24 +69,53 @@ pub struct AuthLoginOutput {
 }
 
 /// Snapshot every configured credential the host knows about (Anthropic key + OAuth tokens).
+#[cfg(feature = "native")]
 #[orca_tool(domain = "system.auth.session", verb = "detail")]
 async fn auth_session_detail(
     _args: AuthStatusArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<AuthStatusReport> {
-    ctx.service::<Arc<dyn AuthService>>()?.status().await
+    let conn = db::open_default()?;
+    let anthropic = db::settings::secret_get(&conn, ANTHROPIC_KEY)?;
+    let github = crate::oauth::load_github_token();
+    let atlassian = crate::oauth::load_atlassian_access_token();
+    Ok(AuthStatusReport {
+        providers: vec![
+            AuthProviderStatus {
+                provider: "anthropic".into(),
+                configured: anthropic.is_some(),
+                identity: anthropic.as_deref().map(db::settings::mask_key),
+            },
+            AuthProviderStatus {
+                provider: "github".into(),
+                configured: github.is_some(),
+                identity: github.as_deref().map(db::settings::mask_key),
+            },
+            AuthProviderStatus {
+                provider: "atlassian".into(),
+                configured: atlassian.is_some(),
+                identity: atlassian.as_deref().map(db::settings::mask_key),
+            },
+        ],
+    })
 }
 
 /// [MUTATES STATE] Remove a stored credential. `removed=false` if nothing was stored.
+#[cfg(feature = "native")]
 #[orca_tool(domain = "system.auth.session", verb = "delete")]
 async fn auth_session_delete(
     args: AuthLogoutArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<AuthLogoutOutput> {
-    let removed = ctx
-        .service::<Arc<dyn AuthService>>()?
-        .logout(&args.provider)
-        .await?;
+    let removed = match args.provider.as_str() {
+        "anthropic" => {
+            let conn = db::open_default()?;
+            db::settings::secret_delete(&conn, ANTHROPIC_KEY)?
+        }
+        "github" => crate::oauth::delete_oauth_silent("github"),
+        "atlassian" => crate::oauth::delete_oauth_silent("atlassian"),
+        other => bail!("unknown provider '{other}' (want: anthropic|github|atlassian)"),
+    };
     Ok(AuthLogoutOutput {
         provider: args.provider,
         removed,
@@ -87,14 +123,51 @@ async fn auth_session_delete(
 }
 
 /// [MUTATES STATE] Authenticate with a provider. Anthropic: pass `key`. GitHub: device-flow. Atlassian: PKCE.
+#[cfg(feature = "native")]
 #[orca_tool(domain = "system.auth.session", verb = "create")]
 async fn auth_session_create(
     args: AuthLoginArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<AuthLoginOutput> {
-    ctx.service::<Arc<dyn AuthService>>()?
-        .login(&args.provider, args.key.as_deref())
-        .await
+    let provider = args.provider.as_str();
+    match provider {
+        "anthropic" => {
+            let key = args
+                .key
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("`key` is required when provider=anthropic"))?;
+            let conn = db::open_default()?;
+            db::settings::secret_set(&conn, ANTHROPIC_KEY, key)?;
+            Ok(AuthLoginOutput {
+                provider: provider.into(),
+                stored: true,
+                identity: Some(db::settings::mask_key(key)),
+            })
+        }
+        "github" => {
+            crate::oauth::cmd_oauth_github().await?;
+            let id = crate::oauth::load_github_token()
+                .as_deref()
+                .map(db::settings::mask_key);
+            Ok(AuthLoginOutput {
+                provider: provider.into(),
+                stored: id.is_some(),
+                identity: id,
+            })
+        }
+        "atlassian" => {
+            crate::oauth::cmd_oauth_atlassian().await?;
+            let id = crate::oauth::load_atlassian_access_token()
+                .as_deref()
+                .map(db::settings::mask_key);
+            Ok(AuthLoginOutput {
+                provider: provider.into(),
+                stored: id.is_some(),
+                identity: id,
+            })
+        }
+        other => bail!("unknown provider '{other}' (want: anthropic|github|atlassian)"),
+    }
 }
 
 // ── API tokens (REST/MCP bearer auth, local-host scope) ─────────────────────
@@ -156,83 +229,95 @@ pub struct TokenRevokeOutput {
 /// [MUTATES STATE] Mint a new REST/MCP bearer token on THIS host. Plaintext is
 /// returned exactly once and cannot be recovered from the DB. Token only
 /// authenticates calls to this host's `:12000` — not to other peers.
+#[cfg(feature = "native")]
 #[orca_tool(domain = "system.auth.token", verb = "create")]
 async fn auth_token_create(
     args: TokenCreateArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<TokenCreateOutput> {
-    ctx.service::<Arc<dyn AuthService>>()?
-        .token_create(&args.name, &args.role, args.expires_in_days)
-        .await
+    if !matches!(args.role.as_str(), "admin" | "read") {
+        bail!("role must be 'admin' or 'read', got '{}'", args.role);
+    }
+    // 16 random bytes → 32 hex chars. `orca_` prefix keeps tokens
+    // self-identifying in logs/secret-scanners.
+    let mut raw = [0u8; 16];
+    rand::rng().fill_bytes(&mut raw);
+    let plaintext = format!("orca_{}", hex_lower(&raw));
+    let token_hash = sha256_hex(plaintext.as_bytes());
+
+    let id = uuid::Uuid::now_v7().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let expires_at = args
+        .expires_in_days
+        .map(|d| (chrono::Utc::now() + chrono::Duration::days(d as i64)).to_rfc3339());
+
+    let conn = db::open_default()?;
+    db::api_tokens::insert(
+        &conn,
+        &id,
+        &args.name,
+        &token_hash,
+        &args.role,
+        &now,
+        expires_at.as_deref(),
+    )?;
+    Ok(TokenCreateOutput {
+        id,
+        name: args.name,
+        token: plaintext,
+    })
 }
 
 /// List all REST/MCP bearer tokens registered on this host. Token hashes are not returned.
+#[cfg(feature = "native")]
 #[orca_tool(domain = "system.auth.token", verb = "list")]
 async fn auth_token_list(
     _args: TokenListArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<TokenListOutput> {
-    let tokens = ctx.service::<Arc<dyn AuthService>>()?.token_list().await?;
+    let conn = db::open_default()?;
+    let rows = db::api_tokens::list(&conn)?;
+    let tokens = rows
+        .into_iter()
+        .map(|r| ApiTokenSummary {
+            id: r.id,
+            name: r.name,
+            role: r.role,
+            created_at: r.created_at,
+            last_used_at: r.last_used_at,
+            expires_at: r.expires_at,
+        })
+        .collect();
     Ok(TokenListOutput { tokens })
 }
 
 /// [MUTATES STATE] Revoke a token by id. Returns `revoked=false` if the id wasn't found.
+#[cfg(feature = "native")]
 #[orca_tool(domain = "system.auth.token", verb = "delete")]
 async fn auth_token_delete(
     args: TokenRevokeArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<TokenRevokeOutput> {
-    let revoked = ctx
-        .service::<Arc<dyn AuthService>>()?
-        .token_revoke(&args.id)
-        .await?;
+    let conn = db::open_default()?;
+    let revoked = db::api_tokens::revoke(&conn, &args.id)?;
     Ok(TokenRevokeOutput { revoked })
 }
 
-// ─── Service trait (impl in server crate) ────────────────────────────
+// ── Hex/sha helpers ─────────────────────────────────────────────────────────
 
-use anyhow::Result;
-use async_trait::async_trait;
-
-#[async_trait]
-pub trait AuthService: Send + Sync {
-    /// Snapshot every configured/unconfigured credential the host knows about.
-    async fn status(&self) -> Result<AuthStatusReport>;
-
-    /// Remove a stored credential. Returns `true` if anything was removed.
-    /// `provider` ∈ { "anthropic", "github", "atlassian" }.
-    async fn logout(&self, provider: &str) -> Result<bool>;
-
-    /// Authenticate with `provider`. For `anthropic` the caller must supply
-    /// `key`. For OAuth providers (`github`, `atlassian`) `key` is ignored
-    /// and the method drives the device-flow or PKCE callback to completion
-    /// before returning.
-    async fn login(&self, provider: &str, key: Option<&str>) -> Result<AuthLoginOutput>;
-
-    /// Mint a new API bearer token in THIS host's `api_tokens` table. The
-    /// plaintext is returned exactly once and never recoverable. Tokens are
-    /// scoped to the local REST API only — they don't authenticate calls to
-    /// other peers in the pod.
-    async fn token_create(
-        &self,
-        name: &str,
-        role: &str,
-        expires_in_days: Option<u32>,
-    ) -> Result<TokenCreateOutput>;
-
-    /// List all tokens registered on this host (hash excluded).
-    async fn token_list(&self) -> Result<Vec<ApiTokenSummary>>;
-
-    /// Revoke a token by id. Returns true if a row was deleted.
-    async fn token_revoke(&self, id: &str) -> Result<bool>;
+#[cfg(feature = "native")]
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
-/// Embedder hook — see `services::mod` doc.
-pub trait ProvideAuth {
-    fn auth(&self) -> std::sync::Arc<dyn AuthService>;
-}
-
-/// Register a `AuthService` into `ToolCtx`.
-pub fn register_auth(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideAuth) {
-    ctx.register_service(p.auth());
+#[cfg(feature = "native")]
+fn sha256_hex(input: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(input);
+    hex_lower(&h.finalize())
 }

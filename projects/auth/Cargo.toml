@@ -12,7 +12,7 @@ default = []
 native = [
     "orca-contract/native",
     "dep:orca-utils",
-    "dep:orca-db",
+    "dep:db",
     "dep:orca-sdk",
     "dep:anyhow",
     "dep:async-trait",
@@ -25,6 +25,7 @@ native = [
     "dep:hex",
     "dep:chrono",
     "dep:uuid",
+    "dep:rusqlite",
 ]
 cli = [
     "native",
@@ -42,7 +43,7 @@ serde_json       = { workspace = true }
 inventory        = { workspace = true }
 
 orca-utils  = { path = "../utils", optional = true }
-orca-db     = { package = "orca-db", path = "../db", optional = true }
+db          = { package = "orca-db", path = "../db", optional = true }
 orca-sdk    = { path = "../sdk/rust", optional = true }
 dirs        = { workspace = true, optional = true }
 anyhow      = { workspace = true, optional = true }
@@ -57,6 +58,7 @@ url         = { workspace = true, optional = true }
 hex         = { version = "0.4", optional = true }
 chrono      = { workspace = true, optional = true }
 uuid        = { workspace = true, optional = true }
+rusqlite    = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
