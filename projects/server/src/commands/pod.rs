@@ -6,10 +6,10 @@
 //! trust,self-secure,leave}`. Init lives in main.rs; ping lives in pod::ping.
 
 use anyhow::{Context, Result, bail};
+use db::ports::mesh_port;
 use orca_sdk::framing::{read_frame, write_frame};
 use orca_sdk::jsonrpc::{Message, Request, Response};
 use orca_sdk::pki::{self, PeerRole};
-use orca_utils::config::mesh_port;
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
 use std::sync::Arc;

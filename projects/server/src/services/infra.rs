@@ -98,7 +98,7 @@ fn loopback_client() -> Result<reqwest::Client> {
 /// from env on each call so an operator override (`ORCA_HTTPS_PORT=…`)
 /// flows through without restart juggling. Cheap — pure env parse.
 fn loopback_url(path: &str) -> String {
-    let ports = orca_utils::config::Ports::from_env();
+    let ports = db::ports::current();
     format!("https://127.0.0.1:{}{}", ports.https, path)
 }
 

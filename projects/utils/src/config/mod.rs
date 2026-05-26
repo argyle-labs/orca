@@ -41,6 +41,11 @@ pub struct Config {
 
 /// Network port assignments for the orca daemon. All three protocols listen
 /// concurrently on distinct ports; nothing collapses them.
+///
+/// `Ports` is a value type — resolution (DB settings + env override) lives
+/// in `orca_db::ports` because `orca-utils` cannot depend on the DB crate.
+/// Server code should call `orca_db::ports::current()` instead of
+/// constructing `Ports` directly.
 #[derive(Debug, Clone, Copy)]
 pub struct Ports {
     /// Plain HTTP REST + UI (homelab-friendly default, no cert needed).
@@ -62,92 +67,20 @@ impl Default for Ports {
 }
 
 impl Ports {
-    /// Resolve ports with the precedence: env var > orca.toml `[ports]` >
-    /// compile-time default. Cached after the first call so hot paths
-    /// (loopback URLs, mDNS, peer dial defaults) don't re-read disk per
-    /// call.
+    /// Layer env-var overrides onto a base set. Used by the DB-backed
+    /// resolver in `orca_db::ports` after it reads the persisted ports
+    /// — env vars are the highest-precedence runtime knob and apply on
+    /// top of whatever was stored.
     ///
-    /// Operator change flow:
-    ///   1. Edit `~/.orca/orca.toml` `[ports]` (persistent, per-host).
-    ///   2. Or export `ORCA_HTTP_PORT=…` etc (process-scoped override).
-    ///   3. Restart daemon — the cache is process-lifetime, so a restart
-    ///      picks up the new values.
-    pub fn from_env() -> Self {
-        static CACHE: std::sync::OnceLock<Ports> = std::sync::OnceLock::new();
-        *CACHE.get_or_init(Self::resolve_uncached)
-    }
-
-    /// Build the port set without consulting the cache. Public for tests
-    /// that need to verify resolution from a temp HOME without process
-    /// state. Production callers use `from_env`.
-    pub fn resolve_uncached() -> Self {
-        let toml_ports = load_ports_from_toml();
-        let const_default = Self::default();
-        let after_toml = Ports {
-            http: toml_ports.http.unwrap_or(const_default.http),
-            https: toml_ports.https.unwrap_or(const_default.https),
-            mesh: toml_ports.mesh.unwrap_or(const_default.mesh),
-        };
+    /// Unparseable values log a warning and pass the base through
+    /// unchanged so operator typos don't take a daemon offline.
+    pub fn apply_env_overrides(self) -> Self {
         Self {
-            http: parse_port_env("ORCA_HTTP_PORT", after_toml.http),
-            https: parse_port_env("ORCA_HTTPS_PORT", after_toml.https),
-            mesh: parse_port_env("ORCA_MESH_PORT", after_toml.mesh),
+            http: parse_port_env("ORCA_HTTP_PORT", self.http),
+            https: parse_port_env("ORCA_HTTPS_PORT", self.https),
+            mesh: parse_port_env("ORCA_MESH_PORT", self.mesh),
         }
     }
-}
-
-/// Optional port overrides read from `~/.orca/orca.toml`'s `[ports]`
-/// section. Each field is independent — operators can override one port
-/// without specifying the others. Missing file or missing section ⇒ all
-/// `None` (consts win).
-#[derive(Default, serde::Deserialize)]
-struct TomlPorts {
-    http: Option<u16>,
-    https: Option<u16>,
-    mesh: Option<u16>,
-}
-
-#[derive(Default, serde::Deserialize)]
-struct TomlRoot {
-    #[serde(default)]
-    ports: TomlPorts,
-}
-
-fn load_ports_from_toml() -> TomlPorts {
-    let Some(home) = dirs::home_dir() else {
-        return TomlPorts::default();
-    };
-    let path = home.join(consts::APP_STATE_DIR).join("orca.toml");
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        return TomlPorts::default();
-    };
-    match toml::from_str::<TomlRoot>(&raw) {
-        Ok(root) => root.ports,
-        Err(e) => {
-            eprintln!(
-                "[orca::config] {} has invalid [ports] section: {e} — falling back to defaults",
-                path.display()
-            );
-            TomlPorts::default()
-        }
-    }
-}
-
-/// Convenience: current HTTP port (env-overridable, falls back to
-/// `APP_REST_HTTP_PORT`). Use this in place of the const at any runtime
-/// call site that wants the operator's chosen port.
-pub fn http_port() -> u16 {
-    Ports::from_env().http
-}
-
-/// Convenience: current HTTPS port (env-overridable).
-pub fn https_port() -> u16 {
-    Ports::from_env().https
-}
-
-/// Convenience: current pod-mesh mTLS port (env-overridable).
-pub fn mesh_port() -> u16 {
-    Ports::from_env().mesh
 }
 
 fn parse_port_env(name: &str, fallback: u16) -> u16 {
@@ -240,7 +173,9 @@ impl Config {
             app_dir,
             memory_root,
             db_path,
-            ports: Ports::from_env(),
+            // Compile-time-default ports. Runtime callers must read from
+            // `orca_db::ports::current()` to see operator overrides.
+            ports: Ports::default(),
         })
     }
 
@@ -319,113 +254,31 @@ mod tests {
         );
     }
 
-    // ── Ports::from_env precedence: env > orca.toml > const ────────────────
-    //
-    // These tests serialize on the process env vars + the HOME dir, which
-    // is unsound under cargo's test-thread parallelism for siblings that
-    // also read `HOME` / `ORCA_*_PORT`. We isolate via a mutex.
+    // Ports resolution lives in `orca_db::ports` because the DB is the
+    // source of truth. See that module's tests for the precedence chain
+    // (env > DB > const). `apply_env_overrides` is the only pure piece
+    // that's testable here without a DB connection.
 
-    use std::sync::Mutex;
-    static ENV_GUARD: Mutex<()> = Mutex::new(());
-
-    fn with_isolated_env<R>(f: impl FnOnce() -> R) -> R {
-        let _lock = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        for k in ["ORCA_HTTP_PORT", "ORCA_HTTPS_PORT", "ORCA_MESH_PORT"] {
-            // SAFETY: tests are single-threaded under the mutex above; no
-            // other thread observes the env mutation window.
-            unsafe { std::env::remove_var(k) };
+    #[test]
+    fn apply_env_overrides_passes_through_when_unset() {
+        // Don't touch env in this test — it'd race with other tests.
+        // Just verify the no-op case using a sentinel base.
+        let base = Ports {
+            http: 11111,
+            https: 22222,
+            mesh: 33333,
+        };
+        // If env vars happen to be set in the calling shell they'd
+        // override, but the typical test env has them unset. Skip the
+        // assertion in that case to keep the test robust.
+        let out = base.apply_env_overrides();
+        if std::env::var("ORCA_HTTP_PORT").is_err()
+            && std::env::var("ORCA_HTTPS_PORT").is_err()
+            && std::env::var("ORCA_MESH_PORT").is_err()
+        {
+            assert_eq!(out.http, base.http);
+            assert_eq!(out.https, base.https);
+            assert_eq!(out.mesh, base.mesh);
         }
-        f()
-    }
-
-    #[test]
-    fn ports_const_default_when_no_toml_no_env() {
-        with_isolated_env(|| {
-            let tmp = tempfile::tempdir().unwrap();
-            // SAFETY: tests serialize via ENV_GUARD.
-            unsafe { std::env::set_var("HOME", tmp.path()) };
-            let p = Ports::resolve_uncached();
-            assert_eq!(p.http, consts::APP_REST_HTTP_PORT);
-            assert_eq!(p.https, consts::APP_REST_HTTPS_PORT);
-            assert_eq!(p.mesh, consts::APP_PLUGIN_PORT);
-        });
-    }
-
-    #[test]
-    fn ports_toml_overrides_const() {
-        with_isolated_env(|| {
-            let tmp = tempfile::tempdir().unwrap();
-            let app = tmp.path().join(consts::APP_STATE_DIR);
-            std::fs::create_dir_all(&app).unwrap();
-            std::fs::write(
-                app.join("orca.toml"),
-                "[ports]\nhttp = 18000\nhttps = 18443\nmesh = 18002\n",
-            )
-            .unwrap();
-            unsafe { std::env::set_var("HOME", tmp.path()) };
-            let p = Ports::resolve_uncached();
-            assert_eq!(p.http, 18000);
-            assert_eq!(p.https, 18443);
-            assert_eq!(p.mesh, 18002);
-        });
-    }
-
-    #[test]
-    fn ports_env_overrides_toml() {
-        with_isolated_env(|| {
-            let tmp = tempfile::tempdir().unwrap();
-            let app = tmp.path().join(consts::APP_STATE_DIR);
-            std::fs::create_dir_all(&app).unwrap();
-            std::fs::write(app.join("orca.toml"), "[ports]\nhttp = 18000\n").unwrap();
-            unsafe {
-                std::env::set_var("HOME", tmp.path());
-                std::env::set_var("ORCA_HTTP_PORT", "19000");
-            }
-            let p = Ports::resolve_uncached();
-            assert_eq!(p.http, 19000, "env must win over toml");
-        });
-    }
-
-    #[test]
-    fn ports_toml_partial_overrides_only_specified_fields() {
-        with_isolated_env(|| {
-            let tmp = tempfile::tempdir().unwrap();
-            let app = tmp.path().join(consts::APP_STATE_DIR);
-            std::fs::create_dir_all(&app).unwrap();
-            // Only `mesh` is specified — http + https fall back to consts.
-            std::fs::write(app.join("orca.toml"), "[ports]\nmesh = 12042\n").unwrap();
-            unsafe { std::env::set_var("HOME", tmp.path()) };
-            let p = Ports::resolve_uncached();
-            assert_eq!(p.http, consts::APP_REST_HTTP_PORT);
-            assert_eq!(p.https, consts::APP_REST_HTTPS_PORT);
-            assert_eq!(p.mesh, 12042);
-        });
-    }
-
-    #[test]
-    fn ports_malformed_toml_falls_back_to_const() {
-        with_isolated_env(|| {
-            let tmp = tempfile::tempdir().unwrap();
-            let app = tmp.path().join(consts::APP_STATE_DIR);
-            std::fs::create_dir_all(&app).unwrap();
-            std::fs::write(app.join("orca.toml"), "this is not toml at all").unwrap();
-            unsafe { std::env::set_var("HOME", tmp.path()) };
-            let p = Ports::resolve_uncached();
-            // Malformed file logs a warning but doesn't crash — consts win.
-            assert_eq!(p.http, consts::APP_REST_HTTP_PORT);
-        });
-    }
-
-    #[test]
-    fn ports_unparseable_env_falls_back() {
-        with_isolated_env(|| {
-            let tmp = tempfile::tempdir().unwrap();
-            unsafe {
-                std::env::set_var("HOME", tmp.path());
-                std::env::set_var("ORCA_HTTP_PORT", "not-a-number");
-            }
-            let p = Ports::resolve_uncached();
-            assert_eq!(p.http, consts::APP_REST_HTTP_PORT);
-        });
     }
 }

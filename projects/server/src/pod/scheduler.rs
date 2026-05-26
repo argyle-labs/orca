@@ -15,10 +15,10 @@
 //! restarted with a new key), the row stays unclaimed and we retry next tick.
 
 use anyhow::{Context, Result};
+use db::ports::mesh_port;
 use orca_sdk::framing::{read_frame, write_frame};
 use orca_sdk::jsonrpc::{Message, Request, Response};
 use orca_sdk::pki;
-use orca_utils::config::mesh_port;
 use rand::Rng;
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;

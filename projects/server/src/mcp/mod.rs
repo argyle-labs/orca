@@ -375,7 +375,7 @@ const PLUGIN_TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// so an operator override (`ORCA_HTTPS_PORT=…`) takes effect without
 /// recompiling. Cheap (pure env parse).
 fn plugin_tool_http_base() -> String {
-    let ports = orca_utils::config::Ports::from_env();
+    let ports = db::ports::current();
     format!("https://127.0.0.1:{}", ports.https)
 }
 

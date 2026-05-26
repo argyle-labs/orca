@@ -27,6 +27,7 @@ pub mod plugin_tools;
 pub mod plugin_types;
 pub mod plugins;
 pub mod pod;
+pub mod ports;
 pub mod profile_creds;
 pub mod profiles;
 pub mod proxmox;

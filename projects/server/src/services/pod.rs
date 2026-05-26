@@ -285,7 +285,7 @@ impl PodService for ServerPod {
 
     async fn offer(&self, addr: &str, port: Option<u16>) -> Result<PodOfferOutput> {
         use crate::pod::scheduler::{OFFER_TTL_SECS, mint_pairing_code, push_offer};
-        use orca_utils::config::mesh_port;
+        use db::ports::mesh_port;
 
         let port = port.unwrap_or_else(mesh_port);
 
@@ -344,7 +344,7 @@ impl PodService for ServerPod {
     }
 
     async fn join(&self, inviter_addr: &str, port: Option<u16>) -> Result<PodJoinOutput> {
-        use orca_utils::config::mesh_port;
+        use db::ports::mesh_port;
         let port = port.unwrap_or_else(mesh_port);
         Ok(PodJoinOutput {
             code: String::new(),
@@ -482,7 +482,7 @@ async fn local_peer_row() -> PodPeerDto {
         peer_id: "local".into(),
         hostname: crate::host_identity::display_hostname().to_string(),
         addr: "127.0.0.1".into(),
-        port: orca_utils::config::mesh_port(),
+        port: db::ports::mesh_port(),
         last_seen_at: chrono::Utc::now().timestamp(),
         local_secure: true,
         peer_secure: true,

@@ -125,7 +125,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     // listen concurrently — homelab clients without an internal CA reach
     // http://host:<port> while internal mesh traffic and Caddy fronts
     // dial https://host:<https_port>.
-    let ports = orca_utils::config::Ports::from_env();
+    let ports = db::ports::current();
     let http_addr: SocketAddr = format!("0.0.0.0:{port}").parse()?;
     let https_addr: SocketAddr = format!("0.0.0.0:{}", ports.https).parse()?;
     let app = build_router(false, db_path);
@@ -517,7 +517,7 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     crate::pod::host_status_replica::spawn_fleet_replicator();
     crate::plugin_host::start(
         pki_dir,
-        orca_utils::config::mesh_port(),
+        db::ports::mesh_port(),
         crate::plugin_host::PluginRegistry::new(),
     );
     spawn_pod_runtime(pki_dir).await;
@@ -563,10 +563,7 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
         tracing::warn!("[pod] stale-cert check failed: {e:#}");
     }
 
-    match crate::pod::mdns::build_advertisement(
-        pki_dir.to_path_buf(),
-        orca_utils::config::mesh_port(),
-    ) {
+    match crate::pod::mdns::build_advertisement(pki_dir.to_path_buf(), db::ports::mesh_port()) {
         Ok(ad) => match crate::pod::mdns::Mdns::start(ad) {
             Ok(handle) => {
                 info!("[pod] mDNS responder + discoverer up");

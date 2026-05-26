@@ -33,11 +33,12 @@ pub mod subscribe_wire;
 pub use bootstrap::handle_pod_bootstrap_connection;
 pub use listener::handle_pod_connection;
 
+use ::db::ports::mesh_port;
 use anyhow::{Context, Result};
 use orca_sdk::framing::{read_frame, write_frame};
 use orca_sdk::jsonrpc::{Message, Request, Response};
 use orca_sdk::pki;
-use orca_utils::config::{APP_PKI_DIR, APP_STATE_DIR, mesh_port};
+use orca_utils::config::{APP_PKI_DIR, APP_STATE_DIR};
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
 use serde::{Deserialize, Serialize};
