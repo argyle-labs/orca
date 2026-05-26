@@ -137,8 +137,7 @@ fn known_backends() -> &'static [&'static str] {
 #[cfg(feature = "native")]
 pub async fn get_secret(name: &str) -> anyhow::Result<(String, String)> {
     let conn = db::open_default()?;
-    let row =
-        db::secrets::get(&conn, name)?.ok_or_else(|| anyhow!("no secret named '{name}'"))?;
+    let row = db::secrets::get(&conn, name)?.ok_or_else(|| anyhow!("no secret named '{name}'"))?;
     let value = match row.backend.as_str() {
         "inline" => db::secrets::read_inline_value(&conn, &row.name)?
             .ok_or_else(|| anyhow!("inline secret '{}' has no stored value", row.name))?,
@@ -275,4 +274,3 @@ async fn secret_backends(
     }];
     Ok(SecretBackendsReport { backends })
 }
-

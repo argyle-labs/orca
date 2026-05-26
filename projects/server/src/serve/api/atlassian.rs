@@ -116,12 +116,11 @@ async fn try_or_refresh_atlassian(access_token: String) -> anyhow::Result<String
     }
 
     // Access token expired — try refresh
-    let refresh_token =
-        auth::oauth::load_atlassian_refresh_token().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Atlassian token expired and no refresh token stored — run `orca login atlassian`"
-            )
-        })?;
+    let refresh_token = auth::oauth::load_atlassian_refresh_token().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Atlassian token expired and no refresh token stored — run `orca login atlassian`"
+        )
+    })?;
 
     let client_id = std::env::var("ATLASSIAN_OAUTH_CLIENT_ID")
         .map_err(|_| anyhow::anyhow!("ATLASSIAN_OAUTH_CLIENT_ID not set — cannot refresh token"))?;
