@@ -246,7 +246,7 @@ pub async fn cmd_pod_connect(addr: &str) -> Result<()> {
 }
 
 pub async fn cmd_pod_join(addr: &str) -> Result<()> {
-    let (host, port) = pki::parse_peer_addr(addr, APP_PLUGIN_PORT)?;
+    let (host, port) = pki::parse_peer_addr(addr, mesh_port())?;
 
     let pki_d = pki_dir();
     let signing = pki::load_or_init_bootstrap_key(&pki_d)?;
@@ -436,7 +436,7 @@ pub fn resolve_offer_target(
 /// poll for completion.
 pub async fn push_pairing_offer(addr: &str) -> Result<(pdb::DiscoveryRow, String)> {
     let default_port_used = !addr.contains(':');
-    let (host, port) = pki::parse_peer_addr(addr, APP_PLUGIN_PORT)?;
+    let (host, port) = pki::parse_peer_addr(addr, mesh_port())?;
 
     let conn = db::open_default()?;
     if pki::load_mesh_client(&pki_dir()).is_err() {

@@ -165,12 +165,9 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                 // independent — poll until :12002 actually frees so our bind
                 // below doesn't race the prior listener's TCP teardown.
                 for _ in 0..50 {
-                    if tokio::net::TcpListener::bind((
-                        "0.0.0.0",
-                        orca_utils::config::APP_PLUGIN_PORT,
-                    ))
-                    .await
-                    .is_ok()
+                    if tokio::net::TcpListener::bind(("0.0.0.0", ports.mesh))
+                        .await
+                        .is_ok()
                     {
                         break;
                     }
@@ -369,7 +366,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                     // Bring the plugin host back up alongside REST.
                     crate::plugin_host::start(
                         &pki_dir,
-                        orca_utils::config::APP_PLUGIN_PORT,
+                        ports.mesh,
                         crate::plugin_host::PluginRegistry::new(),
                     );
                     break;
@@ -392,7 +389,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                             info!("[orca] auto-reclaiming port {port} (dev abandoned)");
                             crate::plugin_host::start(
                                 &pki_dir,
-                                orca_utils::config::APP_PLUGIN_PORT,
+                                ports.mesh,
                                 crate::plugin_host::PluginRegistry::new(),
                             );
                             break;
@@ -520,7 +517,7 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     crate::pod::host_status_replica::spawn_fleet_replicator();
     crate::plugin_host::start(
         pki_dir,
-        orca_utils::config::APP_PLUGIN_PORT,
+        orca_utils::config::mesh_port(),
         crate::plugin_host::PluginRegistry::new(),
     );
     spawn_pod_runtime(pki_dir).await;
@@ -568,7 +565,7 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
 
     match crate::pod::mdns::build_advertisement(
         pki_dir.to_path_buf(),
-        orca_utils::config::APP_PLUGIN_PORT,
+        orca_utils::config::mesh_port(),
     ) {
         Ok(ad) => match crate::pod::mdns::Mdns::start(ad) {
             Ok(handle) => {
