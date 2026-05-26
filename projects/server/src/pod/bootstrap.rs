@@ -450,7 +450,7 @@ fn handle_request_offer(
         inviter_peer_id,
         inviter_hostname,
         inviter_addr: String::new(), // joiner already knows our addr — it dialed us
-        inviter_port: orca_utils::config::APP_PLUGIN_PORT,
+        inviter_port: orca_utils::config::mesh_port(),
         mesh_ca_cert_pem,
         pod_id,
         code_hash,

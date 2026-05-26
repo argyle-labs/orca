@@ -75,6 +75,23 @@ impl Ports {
     }
 }
 
+/// Convenience: current HTTP port (env-overridable, falls back to
+/// `APP_REST_HTTP_PORT`). Use this in place of the const at any runtime
+/// call site that wants the operator's chosen port.
+pub fn http_port() -> u16 {
+    Ports::from_env().http
+}
+
+/// Convenience: current HTTPS port (env-overridable).
+pub fn https_port() -> u16 {
+    Ports::from_env().https
+}
+
+/// Convenience: current pod-mesh mTLS port (env-overridable).
+pub fn mesh_port() -> u16 {
+    Ports::from_env().mesh
+}
+
 fn parse_port_env(name: &str, fallback: u16) -> u16 {
     match std::env::var(name) {
         Ok(raw) => raw.parse::<u16>().unwrap_or_else(|_| {
