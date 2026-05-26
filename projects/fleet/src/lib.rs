@@ -2,6 +2,8 @@
 
 pub mod host;
 pub mod host_status;
+#[cfg(feature = "native")]
+pub mod infra;
 pub mod lifecycle;
 pub mod meta;
 pub mod pod;
@@ -23,7 +25,6 @@ mod inventory_tests {
     use docker as _;
     use docs as _;
     use homeassistant as _;
-    use infra as _;
     use mgmt as _;
     use platform as _;
     use plugins as _;

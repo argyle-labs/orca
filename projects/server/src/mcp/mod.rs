@@ -57,10 +57,7 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
             config: ctx.config.clone(),
         });
     ctx.register_service(docs_svc);
-    let infra_svc: Arc<dyn infra::infra::InfraService> =
-        Arc::new(crate::services::infra::ServerInfra);
-    ctx.register_service(infra_svc);
-    let spec_registry: Arc<dyn ::docs::spec_registry::SpecRegistryService> =
+let spec_registry: Arc<dyn ::docs::spec_registry::SpecRegistryService> =
         Arc::new(crate::services::spec_registry::ServerSpecRegistry);
     ctx.register_service(spec_registry);
     let system_svc: Arc<dyn fleet::system::SystemService> =

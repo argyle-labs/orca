@@ -105,9 +105,7 @@ use super::mcp_client::McpPool;
         (name = "docker",     description = "Docker Compose service management"),
         (name = "schema",     description = "MySQL schema visualizer"),
         (name = "health",     description = "Rebuy service health checks"),
-        (name = "logs",       description = "Docker service log streaming"),
         (name = "specs",      description = "External API spec registry"),
-        (name = "tests",      description = "Test suite runner"),
         (name = "jira",       description = "Jira issue management via Atlassian REST API"),
         (name = "confluence", description = "Confluence search via Atlassian REST API"),
         (name = "bitbucket",  description = "Bitbucket repo and PR listing"),
@@ -182,9 +180,6 @@ pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
         ))
         .routes(routes!(api::schema_databases_remove_handler))
         .routes(routes!(api::rebuy_health_handler))
-        .routes(routes!(api::log_services_handler))
-        .routes(routes!(api::log_fetch_handler))
-        .routes(routes!(api::tests_run_handler))
         .routes(routes!(api::repos_handler))
         .routes(routes!(api::prs_handler))
         .routes(routes!(api::jira_issues_handler))

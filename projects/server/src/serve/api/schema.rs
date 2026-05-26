@@ -576,3 +576,36 @@ pub(crate) fn build_schema_domains() -> Vec<SchemaDomain> {
     }
     all
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_mysql_tsv;
+
+    #[test]
+    fn parse_mysql_tsv_normal() {
+        let raw = "foo\tbar\nbaz\tqux\n";
+        let cols = &["col1", "col2"];
+        let rows = parse_mysql_tsv(raw, cols);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["col1"], "foo");
+        assert_eq!(rows[0]["col2"], "bar");
+        assert_eq!(rows[1]["col1"], "baz");
+    }
+
+    #[test]
+    fn parse_mysql_tsv_empty_input() {
+        let rows = parse_mysql_tsv("", &["col1"]);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn parse_mysql_tsv_short_row_fills_empty_strings() {
+        let raw = "only_one_field\n";
+        let cols = &["col1", "col2", "col3"];
+        let rows = parse_mysql_tsv(raw, cols);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["col1"], "only_one_field");
+        assert_eq!(rows[0]["col2"], "");
+        assert_eq!(rows[0]["col3"], "");
+    }
+}
