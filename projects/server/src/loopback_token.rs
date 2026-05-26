@@ -16,6 +16,11 @@ use rand::Rng;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
 static TOKEN: OnceLock<String> = OnceLock::new();
 
 const SECRETS_SUBDIR: &str = "secrets";
@@ -126,8 +131,6 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(unix)]
 pub(crate) fn write_secret_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -145,7 +148,6 @@ pub(crate) fn write_secret_file(path: &std::path::Path, content: &str) -> std::i
 
 #[cfg(unix)]
 pub(crate) fn chmod_dir_owner_only(dir: &std::path::Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     let mut perms = std::fs::metadata(dir)?.permissions();
     perms.set_mode(0o700);
     std::fs::set_permissions(dir, perms)

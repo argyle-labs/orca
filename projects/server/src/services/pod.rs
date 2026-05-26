@@ -286,9 +286,6 @@ impl PodService for ServerPod {
     }
 
     async fn offer(&self, addr: &str, port: Option<u16>) -> Result<PodOfferOutput> {
-        use crate::pod::scheduler::{OFFER_TTL_SECS, mint_pairing_code, push_offer};
-        use db::ports::mesh_port;
-
         let port = port.unwrap_or_else(mesh_port);
 
         // Look up the joiner in the discovery table by addr.
@@ -346,7 +343,6 @@ impl PodService for ServerPod {
     }
 
     async fn join(&self, inviter_addr: &str, port: Option<u16>) -> Result<PodJoinOutput> {
-        use db::ports::mesh_port;
         let port = port.unwrap_or_else(mesh_port);
         Ok(PodJoinOutput {
             code: String::new(),
