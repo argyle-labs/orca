@@ -267,7 +267,11 @@ async fn docker_service_list_logs(
 
     let entries = match std::fs::read_dir(&rebuy_root) {
         Ok(e) => e,
-        Err(_) => return Ok(GetLogServicesOutput { projects: Vec::new() }),
+        Err(_) => {
+            return Ok(GetLogServicesOutput {
+                projects: Vec::new(),
+            });
+        }
     };
 
     let project_dirs: Vec<PathBuf> = entries

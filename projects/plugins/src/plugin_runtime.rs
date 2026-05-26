@@ -54,11 +54,7 @@ async fn get_plugin_data(
                 args.plugin, args.key
             )
         })?,
-        None => anyhow::bail!(
-            "key '{}' not found for plugin '{}'",
-            args.key,
-            args.plugin
-        ),
+        None => anyhow::bail!("key '{}' not found for plugin '{}'", args.key, args.plugin),
     };
     Ok(GetPluginDataOutput { value })
 }
@@ -74,4 +70,3 @@ async fn set_plugin_data(
     orca_db::plugin_data::set(&conn, &args.plugin, &args.key, &text)?;
     Ok(SetPluginDataOutput { ok: true })
 }
-
