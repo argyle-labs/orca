@@ -1,5 +1,5 @@
 [package]
-name = "orca-tools-macro"
+name = "orca-macro"
 version.workspace = true
 edition.workspace = true
 
