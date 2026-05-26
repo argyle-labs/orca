@@ -674,6 +674,7 @@ async fn lmstudio_mcp_run_agent_offload() {
         app_dir: std::path::PathBuf::from(format!("{home}/.orca")),
         memory_root: std::path::PathBuf::from(format!("{home}/.orca/memory")),
         db_path: std::path::PathBuf::from(format!("{home}/.orca/orca.db")),
+        ports: Default::default(),
     };
 
     let (sink, buf) = buffer_sink();

@@ -120,7 +120,14 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         .parent()
         .unwrap_or(std::path::Path::new("."))
         .join(orca_utils::config::APP_PKI_DIR);
-    let addr: SocketAddr = format!("0.0.0.0:{port}").parse()?;
+    // `port` is the HTTP bind (CLI `--port`, default APP_REST_HTTP_PORT).
+    // HTTPS uses the Config-resolved https port (env-overridable). Both
+    // listen concurrently — homelab clients without an internal CA reach
+    // http://host:<port> while internal mesh traffic and Caddy fronts
+    // dial https://host:<https_port>.
+    let ports = orca_utils::config::Ports::from_env();
+    let http_addr: SocketAddr = format!("0.0.0.0:{port}").parse()?;
+    let https_addr: SocketAddr = format!("0.0.0.0:{}", ports.https).parse()?;
     let app = build_router(false, db_path);
 
     let binary = resolve_daemon_binary();

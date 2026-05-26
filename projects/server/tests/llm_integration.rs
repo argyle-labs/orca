@@ -70,6 +70,7 @@ fn test_config() -> Config {
         app_dir: PathBuf::from("/tmp/.orca-test"),
         memory_root: PathBuf::from("/tmp"),
         db_path: PathBuf::from("/tmp/.orca-test/orca.db"),
+        ports: Default::default(),
     }
 }
 
