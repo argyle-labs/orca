@@ -5,8 +5,6 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "native")]
 use orca_macro::orca_tool;
-#[cfg(feature = "native")]
-use std::sync::Arc;
 
 // ── Typed entities ──────────────────────────────────────────────────────────
 
@@ -132,13 +130,13 @@ pub struct SyncPluginCredsOutput {
 #[orca_tool(domain = "system.plugin", verb = "list")]
 async fn list_plugins(
     args: ListPluginsArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ListPluginsOutput> {
-    let plugins = ctx
-        .service::<Arc<dyn PluginsService>>()?
-        .list_plugins(args.workspace.as_deref())
-        .await?
+    let conn = orca_db::open_default()?;
+    let rows = orca_db::plugins::list(&conn)?;
+    let plugins = rows
         .into_iter()
+        .filter(|p| args.workspace.as_deref().is_none_or(|w| p.tier == w))
         .map(|p| PluginEntry {
             id: p.id,
             tier: p.tier,
@@ -154,12 +152,9 @@ async fn list_plugins(
 #[orca_tool(domain = "system.plugin", verb = "create")]
 async fn add_plugin(
     args: AddPluginArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<AddPluginOutput> {
-    let id = ctx
-        .service::<Arc<dyn PluginsService>>()?
-        .install_plugin(&args.manifest, args.instance_id.as_deref())
-        .await?;
+    let id = crate::install::install_plugin(&args.manifest, args.instance_id.as_deref())?;
     Ok(AddPluginOutput { id })
 }
 
@@ -167,12 +162,9 @@ async fn add_plugin(
 #[orca_tool(domain = "system.plugin", verb = "delete")]
 async fn remove_plugin(
     args: PluginIdArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PluginMutationResult> {
-    let changed = ctx
-        .service::<Arc<dyn PluginsService>>()?
-        .remove_plugin(&args.id)
-        .await?;
+    let changed = crate::install::remove_plugin(&args.id)?;
     Ok(PluginMutationResult {
         id: args.id,
         changed,
@@ -183,12 +175,10 @@ async fn remove_plugin(
 #[orca_tool(domain = "system.plugin", verb = "update")]
 async fn update_plugin(
     args: UpdatePluginArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PluginMutationResult> {
-    let changed = ctx
-        .service::<Arc<dyn PluginsService>>()?
-        .set_plugin_enabled(&args.id, args.enabled)
-        .await?;
+    let conn = orca_db::open_default()?;
+    let changed = orca_db::plugins::set_enabled(&conn, &args.id, args.enabled)?;
     Ok(PluginMutationResult {
         id: args.id,
         changed,
@@ -199,12 +189,11 @@ async fn update_plugin(
 #[orca_tool(domain = "system.plugin.cred", verb = "list")]
 async fn plugin_cred_list(
     args: ListPluginCredsArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ListPluginCredsOutput> {
-    let credentials = ctx
-        .service::<Arc<dyn PluginsService>>()?
-        .list_plugin_creds(&args.plugin)
-        .await?
+    let conn = orca_db::open_default()?;
+    let creds = orca_db::plugin_creds::list(&conn, &args.plugin)?;
+    let credentials = creds
         .into_iter()
         .map(|c| PluginCredEntry {
             key: c.key,
@@ -222,11 +211,10 @@ async fn plugin_cred_list(
 #[orca_tool(domain = "system.plugin.cred", verb = "create")]
 async fn plugin_cred_create(
     args: SetPluginCredArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PluginCredMutationResult> {
-    ctx.service::<Arc<dyn PluginsService>>()?
-        .set_plugin_cred(&args.plugin, &args.key, &args.value)
-        .await?;
+    let conn = orca_db::open_default()?;
+    orca_db::plugin_creds::set(&conn, &args.plugin, &args.key, &args.value)?;
     Ok(PluginCredMutationResult {
         plugin: args.plugin,
         key: args.key,
@@ -238,12 +226,10 @@ async fn plugin_cred_create(
 #[orca_tool(domain = "system.plugin.cred", verb = "delete")]
 async fn plugin_cred_delete(
     args: RemovePluginCredArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PluginCredMutationResult> {
-    let changed = ctx
-        .service::<Arc<dyn PluginsService>>()?
-        .remove_plugin_cred(&args.plugin, &args.key)
-        .await?;
+    let conn = orca_db::open_default()?;
+    let changed = orca_db::plugin_creds::delete(&conn, &args.plugin, &args.key)?;
     Ok(PluginCredMutationResult {
         plugin: args.plugin,
         key: args.key,
@@ -255,66 +241,10 @@ async fn plugin_cred_delete(
 #[orca_tool(domain = "system.plugin.cred", verb = "sync")]
 async fn plugin_cred_sync(
     args: SyncPluginCredsArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<SyncPluginCredsOutput> {
-    ctx.service::<Arc<dyn PluginsService>>()?
-        .sync_plugin_creds(&args.plugin)
-        .await?;
+    crate::creds::sync_plugin_creds(&args.plugin)?;
     Ok(SyncPluginCredsOutput {
         plugin: args.plugin,
     })
-}
-
-// ─── Service trait (impl in server crate) ────────────────────────────
-
-use anyhow::Result;
-use async_trait::async_trait;
-
-#[derive(Clone)]
-pub struct PluginSummary {
-    pub id: String,
-    pub tier: String,
-    pub mode: String,
-    pub mcp_command: Option<String>,
-    pub enabled: bool,
-}
-
-#[derive(Clone)]
-pub struct PluginCredSummary {
-    pub key: String,
-    pub synced_at: Option<String>,
-    pub updated_at: String,
-}
-
-#[async_trait]
-pub trait PluginsService: Send + Sync {
-    async fn list_plugins(&self, workspace: Option<&str>) -> Result<Vec<PluginSummary>>;
-
-    /// Install a plugin from a manifest path or URL. Returns the resolved id.
-    async fn install_plugin(&self, manifest: &str, instance_id: Option<&str>) -> Result<String>;
-
-    /// Returns `true` when a plugin was removed, `false` when none matched `id`.
-    async fn remove_plugin(&self, id: &str) -> Result<bool>;
-
-    /// Returns `true` when the plugin existed and was toggled, `false` when
-    /// no plugin matched `id`.
-    async fn set_plugin_enabled(&self, id: &str, enabled: bool) -> Result<bool>;
-
-    async fn list_plugin_creds(&self, plugin: &str) -> Result<Vec<PluginCredSummary>>;
-    async fn set_plugin_cred(&self, plugin: &str, key: &str, value: &str) -> Result<()>;
-
-    /// Returns `true` when the credential existed and was removed.
-    async fn remove_plugin_cred(&self, plugin: &str, key: &str) -> Result<bool>;
-
-    async fn sync_plugin_creds(&self, plugin: &str) -> Result<()>;
-}
-
-/// Embedder hook — see `services::mod` doc.
-pub trait ProvidePlugins {
-    fn plugins(&self) -> std::sync::Arc<dyn PluginsService>;
-}
-
-/// Register a `PluginsService` into `ToolCtx`.
-pub fn register_plugins(ctx: &mut orca_contract::ToolCtx, p: &impl ProvidePlugins) {
-    ctx.register_service(p.plugins());
 }

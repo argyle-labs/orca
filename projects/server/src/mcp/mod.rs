@@ -60,9 +60,6 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     let infra_svc: Arc<dyn infra::infra::InfraService> =
         Arc::new(crate::services::infra::ServerInfra);
     ctx.register_service(infra_svc);
-    let plugins_svc: Arc<dyn plugins::plugins::PluginsService> =
-        Arc::new(crate::services::plugins::ServerPlugins);
-    ctx.register_service(plugins_svc);
     let spec_registry: Arc<dyn ::docs::spec_registry::SpecRegistryService> =
         Arc::new(crate::services::spec_registry::ServerSpecRegistry);
     ctx.register_service(spec_registry);

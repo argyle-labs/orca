@@ -10,8 +10,6 @@
 //! - `install` — install/uninstall report builders + REST status snapshot;
 //!   shared by `LifecycleService` and `/api/system`.
 //! - `mcp_cmd` — `mcp_sync_server` helper (shared with REST + service trait).
-//! - `plugin_cmd` — `install_plugin` / `remove_plugin` helpers (shared).
-//! - `creds_cmd` — `sync_plugin_creds` helper (shared).
 //! - `spec` — disk-spec scaffold (`spec add`) + repo scanner (`spec sync`)
 //!   not yet migrated. Most spec verbs already go through OrcaOp.
 //! - `update` — `check_for_update` / `apply_update` / `startup_update_check`
@@ -28,14 +26,12 @@ pub fn list_embedded_commands() -> Vec<String> {
         .collect()
 }
 
-pub mod creds_cmd;
 pub mod daemon;
 pub mod dev_serve;
 pub mod hook_cmd;
 pub mod install;
 pub mod mcp_cmd;
 pub mod package;
-pub mod plugin_cmd;
 pub mod pod;
 pub mod spec;
 pub mod system;
@@ -46,7 +42,6 @@ pub use hook_cmd::{HookAction, cmd_hook};
 pub use install::{InstallReport, install_status};
 pub use mcp_cmd::mcp_sync_server;
 pub use package::{PackageAction, cmd_package};
-pub use plugin_cmd::{install_plugin, remove_plugin};
 pub use spec::{SpecAction, cmd_spec};
 pub use system::{SystemAction, cmd_system};
 pub use update::startup_update_check;

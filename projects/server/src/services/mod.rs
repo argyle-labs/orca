@@ -16,7 +16,6 @@ pub mod docs;
 pub mod infra;
 pub mod lifecycle;
 pub mod mgmt;
-pub mod plugins;
 pub mod pod;
 pub mod profile;
 pub mod spec_registry;

@@ -3,7 +3,7 @@
 //! `resolve_plugin_url` is the canonical "where does this plugin live" helper.
 
 use anyhow::{Context, Result};
-use db;
+use orca_db as db;
 
 /// Push all credentials for a plugin to its running HTTP instance.
 /// Reads plugin URL and token from the plugins table.

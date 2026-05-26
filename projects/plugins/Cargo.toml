@@ -17,7 +17,9 @@ native = [
     "dep:async-trait",
     "dep:tokio",
     "dep:chrono",
-
+    "dep:rusqlite",
+    "dep:toml",
+    "dep:reqwest",
 ]
 cli = [
     "native",
@@ -42,6 +44,12 @@ tokio       = { workspace = true,         optional = true }
 chrono      = { workspace = true,         optional = true }
 clap        = { workspace = true,         optional = true }
 colored     = { workspace = true,         optional = true }
+rusqlite    = { workspace = true,         optional = true }
+toml        = { workspace = true,         optional = true }
+reqwest     = { workspace = true,         optional = true, features = ["blocking"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
