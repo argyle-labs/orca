@@ -203,21 +203,35 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             }
         }
 
-        // Simple dev-binary serve loop: bind, serve, exit on SIGTERM.
-        // Production daemon will reclaim port when we exit.
+        // Simple dev-binary serve loop: bind both HTTP + HTTPS, exit on SIGTERM.
+        // Production daemon will reclaim ports when we exit.
         let tls = load_rest_tls(&pki_dir).await?;
-        info!("[orca] dev binary listening on https://localhost:{port}");
+        info!(
+            "[orca] dev binary listening on http://localhost:{port} + https://localhost:{}",
+            ports.https
+        );
 
         spawn_all_runtime_tasks(&pki_dir).await;
 
         let mut sigterm = signal(SignalKind::terminate())?;
-        let handle = axum_server::Handle::new();
-        let serve = axum_server::bind_rustls(addr, tls)
-            .handle(handle.clone())
+        let https_handle = axum_server::Handle::new();
+        let http_handle = axum_server::Handle::new();
+        let https_serve = axum_server::bind_rustls(https_addr, tls)
+            .handle(https_handle.clone())
+            .serve(
+                app.clone()
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            );
+        let http_serve = axum_server::bind(http_addr)
+            .handle(http_handle.clone())
             .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>());
         tokio::select! {
-            result = serve => result?,
-            _ = sigterm.recv() => { handle.graceful_shutdown(Some(Duration::from_secs(1))); }
+            result = https_serve => result?,
+            result = http_serve => result?,
+            _ = sigterm.recv() => {
+                https_handle.graceful_shutdown(Some(Duration::from_secs(1)));
+                http_handle.graceful_shutdown(Some(Duration::from_secs(1)));
+            }
         }
         return Ok(());
     }
