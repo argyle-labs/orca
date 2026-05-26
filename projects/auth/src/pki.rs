@@ -71,9 +71,18 @@ pub struct PkiListArgs {}
 #[orca_tool(domain = "system.pki.ca", verb = "create")]
 async fn pki_ca_create(
     _args: PkiCaInitArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PkiInitReport> {
-    ctx.service::<Arc<dyn PkiService>>()?.ca_init().await
+    let dir = pki_dir();
+    let ca_path = sdk_pki::ca_cert_path(&dir);
+    let server_cert_path = sdk_pki::server_cert_path(&dir);
+    let existed = ca_path.exists();
+    sdk_pki::init(&dir)?;
+    Ok(PkiInitReport {
+        ca_path: ca_path.display().to_string(),
+        server_cert_path: server_cert_path.display().to_string(),
+        created: !existed,
+    })
 }
 
 /// [MUTATES STATE] Issue a cert for a plugin.
