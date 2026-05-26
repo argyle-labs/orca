@@ -55,10 +55,11 @@ pub fn watch(
             };
             // try_send drops on full buffer; that matches the documented
             // "oldest first" coalescing for fast-changing trees.
-            let _ = tx.try_send(WatchEvent {
+            tx.try_send(WatchEvent {
                 kind,
                 paths: ev.paths,
-            });
+            })
+            .ok();
         }
     })?;
     let mode = if recursive {
