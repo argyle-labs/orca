@@ -119,7 +119,7 @@ pub struct ProfileUnshareArgs {
 #[orca_tool(domain = "namespace", verb = "list")]
 async fn profile_list(
     _args: ProfileListArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ProfileListReport> {
     ctx.service::<Arc<dyn ProfileService>>()?.list().await
 }
@@ -128,7 +128,7 @@ async fn profile_list(
 #[orca_tool(domain = "namespace", verb = "show")]
 async fn profile_show(
     args: ProfileShowArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ProfileDetail> {
     ctx.service::<Arc<dyn ProfileService>>()?
         .show(args.spec.as_deref())
@@ -139,7 +139,7 @@ async fn profile_show(
 #[orca_tool(domain = "namespace", verb = "current")]
 async fn profile_current(
     _args: ProfileCurrentArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ProfileCurrentReport> {
     ctx.service::<Arc<dyn ProfileService>>()?.current().await
 }
@@ -148,7 +148,7 @@ async fn profile_current(
 #[orca_tool(domain = "namespace", verb = "create")]
 async fn profile_create(
     args: ProfileCreateArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ProfileDetail> {
     ctx.service::<Arc<dyn ProfileService>>()?
         .create(&args.name, args.description.as_deref())
@@ -159,7 +159,7 @@ async fn profile_create(
 #[orca_tool(domain = "namespace", verb = "delete")]
 async fn profile_delete(
     args: ProfileSpecArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ProfileMutationResult> {
     ctx.service::<Arc<dyn ProfileService>>()?
         .delete(&args.spec)
@@ -170,7 +170,7 @@ async fn profile_delete(
 #[orca_tool(domain = "namespace", verb = "use")]
 async fn profile_use(
     args: ProfileSpecArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ProfileMutationResult> {
     ctx.service::<Arc<dyn ProfileService>>()?
         .use_profile(&args.spec)
@@ -181,7 +181,7 @@ async fn profile_use(
 #[orca_tool(domain = "namespace.share", verb = "create")]
 async fn profile_share_create(
     args: ProfileShareArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ProfileMutationResult> {
     ctx.service::<Arc<dyn ProfileService>>()?
         .share(&args.spec, &args.user, &args.role)
@@ -192,7 +192,7 @@ async fn profile_share_create(
 #[orca_tool(domain = "namespace.share", verb = "delete")]
 async fn profile_share_delete(
     args: ProfileUnshareArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ProfileMutationResult> {
     ctx.service::<Arc<dyn ProfileService>>()?
         .unshare(&args.spec, &args.user)
@@ -203,7 +203,7 @@ async fn profile_share_delete(
 #[orca_tool(domain = "namespace.share", verb = "list")]
 async fn profile_share_list(
     args: ProfileSpecArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ProfileSharesReport> {
     ctx.service::<Arc<dyn ProfileService>>()?
         .shares(&args.spec)
@@ -234,6 +234,6 @@ pub trait ProvideProfile {
 }
 
 /// Register a `ProfileService` into `ToolCtx`.
-pub fn register_profile(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideProfile) {
+pub fn register_profile(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideProfile) {
     ctx.register_service(p.profile());
 }

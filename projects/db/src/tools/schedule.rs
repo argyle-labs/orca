@@ -134,7 +134,7 @@ mod native_support {
 #[orca_tool(domain = "system.schedule", verb = "list")]
 async fn schedule_list(
     args: ScheduleListArgs,
-    _ctx: &orca_tool::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ScheduleListOutput> {
     let conn = crate::open_default()?;
     let rows = crate::config_store::list(&conn, Some("schedule"), args.host.as_deref())?;
@@ -159,7 +159,7 @@ async fn schedule_list(
 #[orca_tool(domain = "system.schedule", verb = "status")]
 async fn schedule_status(
     args: ScheduleStatusArgs,
-    _ctx: &orca_tool::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ScheduleStatusOutput> {
     let conn = crate::open_default()?;
     let runs = match args.job {
@@ -187,7 +187,7 @@ async fn schedule_status(
 #[orca_tool(domain = "system.schedule", verb = "run")]
 async fn schedule_run(
     args: ScheduleRunArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ScheduleRunOutput> {
     let conn = crate::open_default()?;
     let row = crate::config_store::get(&conn, "schedule", &args.name)?

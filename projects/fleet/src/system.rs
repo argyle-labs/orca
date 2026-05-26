@@ -88,7 +88,7 @@ pub struct SystemStatusArgs {}
 #[orca_tool(domain = "system", verb = "detail", remote_ok = true)]
 async fn system_detail(
     _args: SystemStatusArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<SystemStatusReport> {
     ctx.service::<Arc<dyn SystemService>>()?.status().await
 }
@@ -143,7 +143,7 @@ mod tests {
         }
     }
 
-    fn ctx_with_stub() -> orca_tool::ToolCtx {
+    fn ctx_with_stub() -> orca_contract::ToolCtx {
         let stub: Arc<dyn SystemService> = Arc::new(StubSystem);
         let mut ctx = empty_ctx();
         ctx.register_service(stub);
@@ -184,6 +184,6 @@ pub trait ProvideSystem {
 }
 
 /// Register a `SystemService` into `ToolCtx`.
-pub fn register_system(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideSystem) {
+pub fn register_system(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideSystem) {
     ctx.register_service(p.system());
 }

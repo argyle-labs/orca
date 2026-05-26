@@ -73,7 +73,7 @@ fn rows_to_dtos(rows: Vec<orca_db::host_status::HostStatusRow>) -> Vec<HostStatu
 #[orca_tool(domain = "system.host.status", verb = "list", remote_ok = true)]
 async fn host_status_list(
     _args: HostStatusRowsArgs,
-    _ctx: &orca_tool::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<HostStatusRows> {
     let conn = orca_db::open_default()?;
     let rows = orca_db::host_status::latest_per_peer(&conn)?;
@@ -85,7 +85,7 @@ async fn host_status_list(
 #[orca_tool(domain = "system.host.status", verb = "detail", remote_ok = true)]
 async fn host_status_detail(
     args: HostStatusDetailArgs,
-    _ctx: &orca_tool::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<HostStatusRows> {
     let conn = orca_db::open_default()?;
     let limit = args.limit.unwrap_or(256) as usize;

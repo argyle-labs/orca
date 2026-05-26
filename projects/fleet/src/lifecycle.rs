@@ -323,7 +323,7 @@ pub struct SystemUpdateArgs {
 #[orca_tool(domain = "system", verb = "create")]
 async fn system_create(
     _args: EmptyDeleteArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<LifecycleReport> {
     ctx.service::<Arc<dyn LifecycleService>>()?.install().await
 }
@@ -341,7 +341,7 @@ async fn system_create(
 )]
 async fn system_update(
     args: SystemUpdateArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<LifecycleReport> {
     let s = ctx.service::<Arc<dyn LifecycleService>>()?;
     if let Some(ref v) = args.version {
@@ -354,7 +354,7 @@ async fn system_update(
 #[orca_tool(domain = "system", verb = "delete")]
 async fn system_delete(
     _args: EmptyDeleteArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<LifecycleReport> {
     ctx.service::<Arc<dyn LifecycleService>>()?
         .uninstall()
@@ -365,7 +365,7 @@ async fn system_delete(
 #[orca_tool(domain = "system.diagnostic", verb = "list")]
 async fn system_diagnostic_list(
     _args: SystemDoctorArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<DoctorReport> {
     ctx.service::<Arc<dyn LifecycleService>>()?.doctor().await
 }
@@ -374,7 +374,7 @@ async fn system_diagnostic_list(
 #[orca_tool(domain = "namespace.project", verb = "list")]
 async fn projects_list(
     _args: ProjectsListArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ProjectsListReport> {
     ctx.service::<Arc<dyn LifecycleService>>()?
         .projects_list()
@@ -385,7 +385,7 @@ async fn projects_list(
 #[orca_tool(domain = "namespace.spec", verb = "detail")]
 async fn spec_detail(
     _args: SpecDumpArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<SpecDumpReport> {
     ctx.service::<Arc<dyn LifecycleService>>()?
         .spec_dump()
@@ -470,7 +470,7 @@ mod tests {
         }
     }
 
-    fn ctx_with_stub() -> (orca_tool::ToolCtx, Arc<StubLifecycle>) {
+    fn ctx_with_stub() -> (orca_contract::ToolCtx, Arc<StubLifecycle>) {
         let stub = Arc::new(StubLifecycle::default());
         let svc: Arc<dyn LifecycleService> = stub.clone();
         let mut ctx = empty_ctx();
@@ -627,7 +627,7 @@ mod tests {
     struct StubRemoteExec(Arc<StubPod>);
 
     #[async_trait]
-    impl orca_tool::RemoteExec for StubRemoteExec {
+    impl orca_contract::RemoteExec for StubRemoteExec {
         #[allow(clippy::disallowed_types)]
         async fn exec(
             &self,
@@ -641,13 +641,13 @@ mod tests {
         }
     }
 
-    fn ctx_with_lifecycle_and_pod() -> (orca_tool::ToolCtx, Arc<StubLifecycle>, Arc<StubPod>) {
+    fn ctx_with_lifecycle_and_pod() -> (orca_contract::ToolCtx, Arc<StubLifecycle>, Arc<StubPod>) {
         let lifecycle = Arc::new(StubLifecycle::default());
         let pod = Arc::new(StubPod::default());
         let mut ctx = empty_ctx();
         ctx.register_service(Arc::clone(&lifecycle) as Arc<dyn LifecycleService>);
         ctx.register_service(Arc::clone(&pod) as Arc<dyn crate::pod::PodService>);
-        let remote: Arc<dyn orca_tool::RemoteExec> = Arc::new(StubRemoteExec(Arc::clone(&pod)));
+        let remote: Arc<dyn orca_contract::RemoteExec> = Arc::new(StubRemoteExec(Arc::clone(&pod)));
         ctx.register_service(remote);
         (ctx, lifecycle, pod)
     }
@@ -721,6 +721,6 @@ pub trait ProvideLifecycle {
 }
 
 /// Register a `LifecycleService` into `ToolCtx`.
-pub fn register_lifecycle(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideLifecycle) {
+pub fn register_lifecycle(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideLifecycle) {
     ctx.register_service(p.lifecycle());
 }

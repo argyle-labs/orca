@@ -59,7 +59,7 @@ pub struct PkiListArgs {}
 #[orca_tool(domain = "system.pki.ca", verb = "create")]
 async fn pki_ca_create(
     _args: PkiCaInitArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PkiInitReport> {
     ctx.service::<Arc<dyn PkiService>>()?.ca_init().await
 }
@@ -68,7 +68,7 @@ async fn pki_ca_create(
 #[orca_tool(domain = "system.pki.cert", verb = "create")]
 async fn pki_cert_create(
     args: PkiCertIssueArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PkiCertReport> {
     ctx.service::<Arc<dyn PkiService>>()?
         .cert_issue(&args.plugin_id, &args.capability)
@@ -77,7 +77,7 @@ async fn pki_cert_create(
 
 /// List all issued plugin certs.
 #[orca_tool(domain = "system.pki", verb = "list")]
-async fn pki_list(_args: PkiListArgs, ctx: &orca_tool::ToolCtx) -> anyhow::Result<PkiListReport> {
+async fn pki_list(_args: PkiListArgs, ctx: &orca_contract::ToolCtx) -> anyhow::Result<PkiListReport> {
     ctx.service::<Arc<dyn PkiService>>()?.list().await
 }
 
@@ -99,6 +99,6 @@ pub trait ProvidePki {
 }
 
 /// Register a `PkiService` into `ToolCtx`.
-pub fn register_pki(ctx: &mut orca_tool::ToolCtx, p: &impl ProvidePki) {
+pub fn register_pki(ctx: &mut orca_contract::ToolCtx, p: &impl ProvidePki) {
     ctx.register_service(p.pki());
 }

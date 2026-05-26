@@ -594,29 +594,29 @@ pub struct GetSchemaDomainsOutput {
 use crate::mgmt as svc;
 
 #[cfg(feature = "native")]
-fn mcp(ctx: &orca_tool::ToolCtx) -> anyhow::Result<std::sync::Arc<dyn svc::McpRegistryService>> {
+fn mcp(ctx: &orca_contract::ToolCtx) -> anyhow::Result<std::sync::Arc<dyn svc::McpRegistryService>> {
     ctx.service::<std::sync::Arc<dyn svc::McpRegistryService>>()
 }
 #[cfg(feature = "native")]
-fn sch(ctx: &orca_tool::ToolCtx) -> anyhow::Result<std::sync::Arc<dyn svc::SchemaDbService>> {
+fn sch(ctx: &orca_contract::ToolCtx) -> anyhow::Result<std::sync::Arc<dyn svc::SchemaDbService>> {
     ctx.service::<std::sync::Arc<dyn svc::SchemaDbService>>()
 }
 #[cfg(feature = "native")]
-fn drt(ctx: &orca_tool::ToolCtx) -> anyhow::Result<std::sync::Arc<dyn svc::DockerRuntimeService>> {
+fn drt(ctx: &orca_contract::ToolCtx) -> anyhow::Result<std::sync::Arc<dyn svc::DockerRuntimeService>> {
     ctx.service::<std::sync::Arc<dyn svc::DockerRuntimeService>>()
 }
 #[cfg(feature = "native")]
-fn doc(ctx: &orca_tool::ToolCtx) -> anyhow::Result<std::sync::Arc<dyn svc::DocRootService>> {
+fn doc(ctx: &orca_contract::ToolCtx) -> anyhow::Result<std::sync::Arc<dyn svc::DocRootService>> {
     ctx.service::<std::sync::Arc<dyn svc::DocRootService>>()
 }
 #[cfg(feature = "native")]
 fn pmx(
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<std::sync::Arc<dyn svc::ProxmoxEndpointService>> {
     ctx.service::<std::sync::Arc<dyn svc::ProxmoxEndpointService>>()
 }
 #[cfg(feature = "native")]
-fn ha(ctx: &orca_tool::ToolCtx) -> anyhow::Result<std::sync::Arc<dyn svc::HaEndpointService>> {
+fn ha(ctx: &orca_contract::ToolCtx) -> anyhow::Result<std::sync::Arc<dyn svc::HaEndpointService>> {
     ctx.service::<std::sync::Arc<dyn svc::HaEndpointService>>()
 }
 
@@ -628,7 +628,7 @@ fn ha(ctx: &orca_tool::ToolCtx) -> anyhow::Result<std::sync::Arc<dyn svc::HaEndp
 #[orca_tool(domain = "system.mcp.federation", verb = "list-tools")]
 async fn list_mcp_tools(
     _args: ListMcpToolsArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ListMcpToolsOutput> {
     let tools = mcp(ctx)?
         .list_tools()
@@ -648,7 +648,7 @@ async fn list_mcp_tools(
 #[orca_tool(domain = "system.mcp.federation", verb = "run", cli = skip)]
 async fn run_mcp_tool(
     args: RunMcpToolArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<RunMcpToolOutput> {
     let arguments = match args.args {
         Some(m) => serde_json::Value::Object(m),
@@ -667,7 +667,7 @@ async fn run_mcp_tool(
 #[orca_tool(domain = "namespace.schema.view", verb = "detail")]
 async fn schema_view_detail(
     _args: GetSchemaArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<GetSchemaOutput> {
     sch(ctx)?.schema().await
 }
@@ -676,7 +676,7 @@ async fn schema_view_detail(
 #[orca_tool(domain = "namespace.schema.view", verb = "list")]
 async fn schema_view_list(
     _args: GetSchemaDomainsArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<GetSchemaDomainsOutput> {
     Ok(GetSchemaDomainsOutput {
         domains: sch(ctx)?.schema_domains().await?,
@@ -691,7 +691,7 @@ async fn schema_view_list(
 #[orca_tool(domain = "system.mcp", verb = "list")]
 async fn list_mcp_servers(
     _args: ListMcpServersArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ListMcpServersOutput> {
     let servers = mcp(ctx)?
         .list_servers()
@@ -712,7 +712,7 @@ async fn list_mcp_servers(
 #[orca_tool(domain = "system.mcp", verb = "create")]
 async fn add_mcp_server(
     args: AddMcpServerArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<McpServerMutationResult> {
     mcp(ctx)?
         .upsert_server(svc::McpServerInput {
@@ -732,7 +732,7 @@ async fn add_mcp_server(
 #[orca_tool(domain = "system.mcp", verb = "delete")]
 async fn remove_mcp_server(
     args: RemoveMcpServerArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<McpServerMutationResult> {
     let changed = mcp(ctx)?.remove_server(&args.name).await?;
     Ok(McpServerMutationResult {
@@ -745,7 +745,7 @@ async fn remove_mcp_server(
 #[orca_tool(domain = "system.mcp.mapping", verb = "create")]
 async fn mcp_mapping_create(
     args: MapToolArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<MapToolResult> {
     mcp(ctx)?
         .map_tool(&args.name, &args.orca_tool, &args.external_tool)
@@ -761,7 +761,7 @@ async fn mcp_mapping_create(
 #[orca_tool(domain = "system.mcp.mapping", verb = "delete")]
 async fn mcp_mapping_delete(
     args: UnmapToolArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<UnmapToolResult> {
     let changed = mcp(ctx)?.unmap_tool(&args.orca_tool).await?;
     Ok(UnmapToolResult {
@@ -774,7 +774,7 @@ async fn mcp_mapping_delete(
 #[orca_tool(domain = "system.mcp", verb = "sync")]
 async fn sync_tools(
     args: SyncToolsArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<SyncToolsOutput> {
     let threshold = args.threshold.unwrap_or(0.8);
     let results = mcp(ctx)?
@@ -795,7 +795,7 @@ async fn sync_tools(
 #[orca_tool(domain = "system.mcp.mapping", verb = "list")]
 async fn mcp_mapping_list(
     args: ListToolMappingsArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ListToolMappingsOutput> {
     let mappings = mcp(ctx)?
         .list_mappings(args.name.as_deref())
@@ -821,7 +821,7 @@ async fn mcp_mapping_list(
 #[orca_tool(domain = "namespace.schema", verb = "list")]
 async fn list_schemas(
     _args: ListSchemasArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ListSchemasOutput> {
     let schemas = sch(ctx)?
         .list()
@@ -846,7 +846,7 @@ async fn list_schemas(
 #[orca_tool(domain = "namespace.schema", verb = "create")]
 async fn add_schema(
     args: AddSchemaArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<SchemaMutationResult> {
     sch(ctx)?
         .upsert(svc::SchemaDbInput {
@@ -870,7 +870,7 @@ async fn add_schema(
 #[orca_tool(domain = "namespace.schema", verb = "delete")]
 async fn remove_schema(
     args: RemoveSchemaArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<SchemaMutationResult> {
     let changed = sch(ctx)?.remove(&args.name).await?;
     Ok(SchemaMutationResult {
@@ -887,7 +887,7 @@ async fn remove_schema(
 #[orca_tool(domain = "docker.runtime", verb = "list")]
 async fn list_docker_runtimes(
     _args: ListDockerRuntimesArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ListDockerRuntimesOutput> {
     let runtimes = drt(ctx)?
         .list()
@@ -908,7 +908,7 @@ async fn list_docker_runtimes(
 #[orca_tool(domain = "docker.runtime", verb = "create")]
 async fn add_docker_runtime(
     args: AddDockerRuntimeArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<DockerRuntimeMutationResult> {
     drt(ctx)?
         .upsert(svc::DockerRuntimeInput {
@@ -928,7 +928,7 @@ async fn add_docker_runtime(
 #[orca_tool(domain = "docker.runtime", verb = "delete")]
 async fn remove_docker_runtime(
     args: RemoveDockerRuntimeArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<DockerRuntimeMutationResult> {
     let changed = drt(ctx)?.remove(&args.name).await?;
     Ok(DockerRuntimeMutationResult {
@@ -945,7 +945,7 @@ async fn remove_docker_runtime(
 #[orca_tool(domain = "namespace.doc.root", verb = "list")]
 async fn list_doc_roots(
     _args: ListDocRootsArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ListDocRootsOutput> {
     let roots = doc(ctx)?
         .list_roots()
@@ -965,7 +965,7 @@ async fn list_doc_roots(
 #[orca_tool(domain = "namespace.doc.root", verb = "create")]
 async fn add_doc_root(
     args: AddDocRootArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<DocRootMutationResult> {
     doc(ctx)?
         .upsert_root(svc::DocRootInput {
@@ -984,7 +984,7 @@ async fn add_doc_root(
 #[orca_tool(domain = "namespace.doc.root", verb = "delete")]
 async fn remove_doc_root(
     args: RemoveDocRootArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<DocRootMutationResult> {
     let changed = doc(ctx)?.remove_root(&args.name).await?;
     Ok(DocRootMutationResult {
@@ -997,7 +997,7 @@ async fn remove_doc_root(
 #[orca_tool(domain = "namespace.doc.pattern", verb = "list")]
 async fn list_doc_ignore_patterns(
     _args: ListDocIgnorePatternsArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ListDocIgnorePatternsOutput> {
     let patterns = doc(ctx)?.list_ignore_patterns().await?;
     Ok(ListDocIgnorePatternsOutput { patterns })
@@ -1007,7 +1007,7 @@ async fn list_doc_ignore_patterns(
 #[orca_tool(domain = "namespace.doc.pattern", verb = "create")]
 async fn add_doc_ignore_pattern(
     args: DocIgnorePatternArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<DocIgnorePatternMutationResult> {
     let changed = doc(ctx)?.add_ignore_pattern(&args.pattern).await?;
     Ok(DocIgnorePatternMutationResult {
@@ -1020,7 +1020,7 @@ async fn add_doc_ignore_pattern(
 #[orca_tool(domain = "namespace.doc.pattern", verb = "delete")]
 async fn remove_doc_ignore_pattern(
     args: DocIgnorePatternArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<DocIgnorePatternMutationResult> {
     let changed = doc(ctx)?.remove_ignore_pattern(&args.pattern).await?;
     Ok(DocIgnorePatternMutationResult {
@@ -1037,7 +1037,7 @@ async fn remove_doc_ignore_pattern(
 #[orca_tool(domain = "proxmox.endpoint", verb = "list")]
 async fn list_proxmox_endpoints(
     _args: ListProxmoxEndpointsArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ListProxmoxEndpointsOutput> {
     let endpoints = pmx(ctx)?
         .list()
@@ -1058,7 +1058,7 @@ async fn list_proxmox_endpoints(
 #[orca_tool(domain = "proxmox.endpoint", verb = "create")]
 async fn add_proxmox_endpoint(
     args: AddProxmoxEndpointArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ProxmoxMutationResult> {
     pmx(ctx)?
         .upsert(svc::ProxmoxEndpointInput {
@@ -1079,7 +1079,7 @@ async fn add_proxmox_endpoint(
 #[orca_tool(domain = "proxmox.endpoint", verb = "delete")]
 async fn remove_proxmox_endpoint(
     args: RemoveProxmoxEndpointArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ProxmoxMutationResult> {
     let changed = pmx(ctx)?.remove(&args.name).await?;
     Ok(ProxmoxMutationResult {
@@ -1096,7 +1096,7 @@ async fn remove_proxmox_endpoint(
 #[orca_tool(domain = "ha.endpoint", verb = "list")]
 async fn list_home_assistant_endpoints(
     _args: ListHomeAssistantEndpointsArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ListHomeAssistantEndpointsOutput> {
     let endpoints = ha(ctx)?
         .list()
@@ -1115,7 +1115,7 @@ async fn list_home_assistant_endpoints(
 #[orca_tool(domain = "ha.endpoint", verb = "create")]
 async fn add_home_assistant_endpoint(
     args: AddHomeAssistantEndpointArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<HaMutationResult> {
     ha(ctx)?
         .upsert(svc::HaEndpointInput {
@@ -1134,7 +1134,7 @@ async fn add_home_assistant_endpoint(
 #[orca_tool(domain = "ha.endpoint", verb = "delete")]
 async fn remove_home_assistant_endpoint(
     args: RemoveHomeAssistantEndpointArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<HaMutationResult> {
     let changed = ha(ctx)?.remove(&args.name).await?;
     Ok(HaMutationResult {
@@ -1382,41 +1382,41 @@ pub trait HaEndpointService: Send + Sync {
 pub trait ProvideMcpRegistry {
     fn mcp_registry(&self) -> std::sync::Arc<dyn McpRegistryService>;
 }
-pub fn register_mcp_registry(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideMcpRegistry) {
+pub fn register_mcp_registry(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideMcpRegistry) {
     ctx.register_service(p.mcp_registry());
 }
 
 pub trait ProvideSchemaDb {
     fn schema_db(&self) -> std::sync::Arc<dyn SchemaDbService>;
 }
-pub fn register_schema_db(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideSchemaDb) {
+pub fn register_schema_db(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideSchemaDb) {
     ctx.register_service(p.schema_db());
 }
 
 pub trait ProvideDockerRuntime {
     fn docker_runtime(&self) -> std::sync::Arc<dyn DockerRuntimeService>;
 }
-pub fn register_docker_runtime(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideDockerRuntime) {
+pub fn register_docker_runtime(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideDockerRuntime) {
     ctx.register_service(p.docker_runtime());
 }
 
 pub trait ProvideDocRoot {
     fn doc_root(&self) -> std::sync::Arc<dyn DocRootService>;
 }
-pub fn register_doc_root(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideDocRoot) {
+pub fn register_doc_root(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideDocRoot) {
     ctx.register_service(p.doc_root());
 }
 
 pub trait ProvideProxmoxEndpoint {
     fn proxmox_endpoint(&self) -> std::sync::Arc<dyn ProxmoxEndpointService>;
 }
-pub fn register_proxmox_endpoint(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideProxmoxEndpoint) {
+pub fn register_proxmox_endpoint(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideProxmoxEndpoint) {
     ctx.register_service(p.proxmox_endpoint());
 }
 
 pub trait ProvideHaEndpoint {
     fn ha_endpoint(&self) -> std::sync::Arc<dyn HaEndpointService>;
 }
-pub fn register_ha_endpoint(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideHaEndpoint) {
+pub fn register_ha_endpoint(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideHaEndpoint) {
     ctx.register_service(p.ha_endpoint());
 }

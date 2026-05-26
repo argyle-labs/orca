@@ -76,7 +76,7 @@ fn make_client(name: &str) -> anyhow::Result<Client> {
 #[orca_tool(domain = "ha.entity", verb = "list")]
 async fn ha_entity_list(
     args: HaEntityListArgs,
-    _ctx: &orca_tool::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<JsonAny> {
     let client = make_client(&args.endpoint)?;
     Ok(client.entity_list(args.domain.as_deref()).await?.into())
@@ -86,7 +86,7 @@ async fn ha_entity_list(
 #[orca_tool(domain = "ha.entity", verb = "detail")]
 async fn ha_entity_detail(
     args: HaEntityStateArgs,
-    _ctx: &orca_tool::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<JsonAny> {
     let client = make_client(&args.endpoint)?;
     Ok(client.entity_state(&args.entity_id).await?.into())
@@ -96,7 +96,7 @@ async fn ha_entity_detail(
 #[orca_tool(domain = "ha.automation", verb = "list")]
 async fn ha_automation_list(
     args: HaAutomationListArgs,
-    _ctx: &orca_tool::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<JsonAny> {
     let client = make_client(&args.endpoint)?;
     Ok(client.automation_list().await?.into())
@@ -106,7 +106,7 @@ async fn ha_automation_list(
 #[orca_tool(domain = "ha.service", verb = "update")]
 async fn ha_service_update(
     args: HaServiceCallArgs,
-    _ctx: &orca_tool::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<JsonAny> {
     let client = make_client(&args.endpoint)?;
     let call = ServiceCall {

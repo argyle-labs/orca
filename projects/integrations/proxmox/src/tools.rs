@@ -95,7 +95,7 @@ mod native_support {
 #[orca_tool(domain = "proxmox.node", verb = "list")]
 async fn proxmox_node_list(
     args: ProxmoxListNodesArgs,
-    _ctx: &orca_tool::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<::orca_tool::JsonAny> {
     let client = native_support::make_client(&args.endpoint)?;
     Ok(client.nodes().await?.into())
@@ -105,7 +105,7 @@ async fn proxmox_node_list(
 #[orca_tool(domain = "proxmox.vm", verb = "list")]
 async fn proxmox_vm_list(
     args: ProxmoxListVmsArgs,
-    _ctx: &orca_tool::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<::orca_tool::JsonAny> {
     let client = native_support::make_client(&args.endpoint)?;
     Ok(client.vms(&args.node).await?.into())
@@ -115,7 +115,7 @@ async fn proxmox_vm_list(
 #[orca_tool(domain = "proxmox.container", verb = "list")]
 async fn proxmox_container_list(
     args: ProxmoxListContainersArgs,
-    _ctx: &orca_tool::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<::orca_tool::JsonAny> {
     let client = native_support::make_client(&args.endpoint)?;
     Ok(client.containers(&args.node).await?.into())
@@ -125,7 +125,7 @@ async fn proxmox_container_list(
 #[orca_tool(domain = "proxmox.vm", verb = "update")]
 async fn proxmox_vm_update(
     args: ProxmoxVmActionArgs,
-    _ctx: &orca_tool::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ProxmoxActionResult> {
     let client = native_support::make_client(&args.endpoint)?;
     let action: crate::ProxmoxAction = args.action.parse()?;
@@ -139,7 +139,7 @@ async fn proxmox_vm_update(
 #[orca_tool(domain = "proxmox.container", verb = "update")]
 async fn proxmox_container_update(
     args: ProxmoxContainerActionArgs,
-    _ctx: &orca_tool::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ProxmoxActionResult> {
     let client = native_support::make_client(&args.endpoint)?;
     let action: crate::ProxmoxAction = args.action.parse()?;

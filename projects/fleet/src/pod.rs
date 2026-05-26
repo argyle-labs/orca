@@ -525,7 +525,7 @@ pub trait ProvidePod {
 }
 
 #[cfg(feature = "native")]
-pub fn register_pod(ctx: &mut orca_tool::ToolCtx, p: &impl ProvidePod) {
+pub fn register_pod(ctx: &mut orca_contract::ToolCtx, p: &impl ProvidePod) {
     let pod = p.pod();
     ctx.register_service(pod.clone());
     // Register the RemoteExec adapter so `cli::exec_remote::<T>(...)` (in
@@ -545,7 +545,7 @@ pub fn register_pod(ctx: &mut orca_tool::ToolCtx, p: &impl ProvidePod) {
 #[orca_tool(domain = "system.peer", verb = "list", remote_ok = true)]
 async fn pod_peer_list(
     _args: EmptyArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodPeerListOutput> {
     Ok(PodPeerListOutput(
         native_support::svc(ctx)?.list_enriched().await?,
@@ -567,7 +567,7 @@ async fn pod_peer_list(
 #[orca_tool(domain = "system.peer", verb = "create")]
 async fn peer_create(
     args: PeerCreateArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PeerCreateOutput> {
     let svc = native_support::svc(ctx)?;
     match args.action.as_str() {
@@ -651,7 +651,7 @@ async fn peer_create(
 #[orca_tool(domain = "system.peer", verb = "update")]
 async fn pod_peer_update(
     args: PodTrustArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodTrustOutput> {
     let svc = native_support::svc(ctx)?;
     if args.push {
@@ -664,7 +664,7 @@ async fn pod_peer_update(
 #[orca_tool(domain = "system.peer", verb = "detail")]
 async fn pod_peer_detail(
     args: PodPingArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodPingOutput> {
     Ok(native_support::svc(ctx)?.ping(&args.peer_id).await)
 }
@@ -673,7 +673,7 @@ async fn pod_peer_detail(
 #[orca_tool(domain = "system.peer.discovery", verb = "list")]
 async fn pod_discovery_list(
     _args: EmptyArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodDiscoveryListOutput> {
     Ok(PodDiscoveryListOutput(
         native_support::svc(ctx)?.discover()?,
@@ -684,7 +684,7 @@ async fn pod_discovery_list(
 #[orca_tool(domain = "system.peer.handshake", verb = "list")]
 async fn pod_handshake_list(
     _args: EmptyArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodPendingListOutput> {
     Ok(PodPendingListOutput(native_support::svc(ctx)?.pending()?))
 }
@@ -693,7 +693,7 @@ async fn pod_handshake_list(
 #[orca_tool(domain = "system.peer", verb = "delete")]
 async fn pod_peer_delete(
     args: PodLeaveArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodLeaveOutput> {
     native_support::svc(ctx)?.leave_peer(&args.peer_id).await
 }
@@ -703,7 +703,7 @@ async fn pod_peer_delete(
 #[orca_tool(domain = "system.pod", verb = "detail")]
 async fn pod_detail(
     _args: EmptyArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodCertStatusOutput> {
     let svc = native_support::svc(ctx)?;
     let mut out = svc.cert_status()?;
@@ -723,7 +723,7 @@ async fn pod_detail(
 )]
 async fn pod_update(
     args: PodUpdateArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodUpdateOutput> {
     if let Some(ref peer_id) = args.peer_id {
         let dispatch = native_support::svc(ctx)?
@@ -915,7 +915,7 @@ mod tests {
         }
     }
 
-    fn ctx_with_stub() -> (orca_tool::ToolCtx, Arc<StubPod>) {
+    fn ctx_with_stub() -> (orca_contract::ToolCtx, Arc<StubPod>) {
         let stub = Arc::new(StubPod::default());
         let svc: Arc<dyn PodService> = stub.clone();
         let mut ctx = empty_ctx();

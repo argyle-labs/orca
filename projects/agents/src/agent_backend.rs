@@ -98,7 +98,7 @@ pub struct AgentBackendStatusOutput {
 #[orca_tool(domain = "system.agent.backend", verb = "clear-key")]
 async fn agent_backend_clear_api_key(
     _args: ClearArgs,
-    _ctx: &orca_tool::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ApiKeyMutationResult> {
     let conn = orca_db::open_default()?;
     let removed = orca_db::settings::secret_delete(&conn, "anthropic_api_key")?;
@@ -117,7 +117,7 @@ async fn agent_backend_clear_api_key(
 #[orca_tool(domain = "system.agent.backend", verb = "set-key")]
 async fn agent_backend_set_api_key(
     args: SetArgs,
-    _ctx: &orca_tool::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ApiKeyMutationResult> {
     if args.key.trim().is_empty() {
         anyhow::bail!("key must not be empty");
@@ -136,7 +136,7 @@ async fn agent_backend_set_api_key(
 #[orca_tool(domain = "system.agent.backend", verb = "set-mode")]
 async fn agent_backend_set_mode(
     args: SetModeArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<SetModeResult> {
     let mode = ctx
         .service::<Arc<dyn AgentBackendService>>()?
@@ -149,7 +149,7 @@ async fn agent_backend_set_mode(
 #[orca_tool(domain = "system.agent.backend", verb = "override")]
 async fn agent_backend_override(
     args: OverrideArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<OverrideResult> {
     let s = ctx.service::<Arc<dyn AgentBackendService>>()?;
     if args.backend == "clear" {
@@ -175,7 +175,7 @@ async fn agent_backend_override(
 #[orca_tool(domain = "system.agent.backend", verb = "use-server-anthropic")]
 async fn agent_backend_use_server_anthropic(
     args: UseServerAnthropicArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<UseServerAnthropicResult> {
     ctx.service::<Arc<dyn AgentBackendService>>()?
         .set_use_server_anthropic(args.enabled)
@@ -189,7 +189,7 @@ async fn agent_backend_use_server_anthropic(
 #[orca_tool(domain = "system.agent.backend", verb = "detail")]
 async fn agent_backend_detail(
     _args: AgentBackendStatusArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<AgentBackendStatusOutput> {
     let s = ctx.service::<Arc<dyn AgentBackendService>>()?;
     let mode = s.current_mode().await?;
@@ -259,6 +259,6 @@ pub trait ProvideAgentBackend {
 
 /// Register an `AgentBackendService` into `ToolCtx` from any embedder that
 /// implements `ProvideAgentBackend`.
-pub fn register_agent_backend(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideAgentBackend) {
+pub fn register_agent_backend(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideAgentBackend) {
     ctx.register_service(p.agent_backend());
 }

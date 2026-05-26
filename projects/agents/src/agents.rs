@@ -121,7 +121,7 @@ pub struct SearchLogsOutput {
 #[orca_tool(domain = "system.agent", verb = "list")]
 async fn list_agents(
     _args: ListAgentsArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ListAgentsOutput> {
     let agents = ctx
         .service::<Arc<dyn AgentsService>>()?
@@ -139,7 +139,7 @@ async fn list_agents(
 /// Return the full system prompt for a named orca agent. Use this to invoke an
 /// agent programmatically via Agent(general-purpose, prompt=<result>+task).
 #[orca_tool(domain = "system.agent", verb = "get")]
-async fn get_agent(args: GetAgentArgs, ctx: &orca_tool::ToolCtx) -> anyhow::Result<GetAgentOutput> {
+async fn get_agent(args: GetAgentArgs, ctx: &orca_contract::ToolCtx) -> anyhow::Result<GetAgentOutput> {
     let prompt = ctx
         .service::<Arc<dyn AgentsService>>()?
         .get_agent_prompt(&args.name)
@@ -157,7 +157,7 @@ async fn get_agent(args: GetAgentArgs, ctx: &orca_tool::ToolCtx) -> anyhow::Resu
 #[orca_tool(domain = "system.agent", verb = "get-config")]
 async fn get_config(
     args: GetConfigArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<GetConfigOutput> {
     let s = ctx.service::<Arc<dyn AgentsService>>()?;
     let available = s.list_config_docs().await?;
@@ -183,7 +183,7 @@ async fn get_config(
 #[orca_tool(domain = "system.agent", verb = "get-context")]
 async fn get_context(
     args: GetContextArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<GetContextOutput> {
     match ctx
         .service::<Arc<dyn AgentsService>>()?
@@ -217,7 +217,7 @@ async fn get_context(
 #[orca_tool(domain = "system.agent", verb = "search-logs")]
 async fn search_logs(
     args: SearchLogsArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<SearchLogsOutput> {
     let data = ctx
         .service::<Arc<dyn AgentsService>>()?
@@ -309,6 +309,6 @@ pub trait ProvideAgents {
 }
 
 /// Register an `AgentsService` into `ToolCtx`.
-pub fn register_agents(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideAgents) {
+pub fn register_agents(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideAgents) {
     ctx.register_service(p.agents());
 }

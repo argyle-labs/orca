@@ -156,7 +156,7 @@ pub struct DockerStatsOutput {
 #[orca_tool(domain = "docker.engine", verb = "detail")]
 async fn docker_engine_detail(
     _args: GetDockerEngineArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<DockerEngineStatus> {
     ctx.service::<Arc<dyn DockerService>>()?
         .engine_status()
@@ -167,7 +167,7 @@ async fn docker_engine_detail(
 #[orca_tool(domain = "docker.engine", verb = "update")]
 async fn docker_engine_update(
     _args: StartDockerEngineArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<StartDockerEngineOutput> {
     let output = ctx
         .service::<Arc<dyn DockerService>>()?
@@ -181,7 +181,7 @@ async fn docker_engine_update(
 #[orca_tool(domain = "docker.service", verb = "list")]
 async fn docker_service_list(
     args: GetDockerServicesArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<DockerServicesView> {
     ctx.service::<Arc<dyn DockerService>>()?
         .services(&args.path)
@@ -193,7 +193,7 @@ async fn docker_service_list(
 #[orca_tool(domain = "docker.service", verb = "update")]
 async fn docker_service_update(
     args: RunDockerActionArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<DockerActionResult> {
     ctx.service::<Arc<dyn DockerService>>()?
         .action(
@@ -210,7 +210,7 @@ async fn docker_service_update(
 #[orca_tool(domain = "docker.service", verb = "detail")]
 async fn docker_service_detail(
     args: GetLogsArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<GetLogsOutput> {
     let tail = args.tail.unwrap_or(200);
     let output = ctx
@@ -225,7 +225,7 @@ async fn docker_service_detail(
 #[orca_tool(domain = "docker.service", verb = "list-logs")]
 async fn docker_service_list_logs(
     _args: GetLogServicesArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<GetLogServicesOutput> {
     let projects = ctx
         .service::<Arc<dyn DockerService>>()?
@@ -239,7 +239,7 @@ async fn docker_service_list_logs(
 #[orca_tool(domain = "docker.service", verb = "list-stats")]
 async fn docker_service_list_stats(
     _args: DockerStatsArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<DockerStatsOutput> {
     let containers = ctx
         .service::<Arc<dyn DockerService>>()?

@@ -65,7 +65,7 @@ pub struct AuthLoginOutput {
 #[orca_tool(domain = "system.auth.session", verb = "detail")]
 async fn auth_session_detail(
     _args: AuthStatusArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<AuthStatusReport> {
     ctx.service::<Arc<dyn AuthService>>()?.status().await
 }
@@ -74,7 +74,7 @@ async fn auth_session_detail(
 #[orca_tool(domain = "system.auth.session", verb = "delete")]
 async fn auth_session_delete(
     args: AuthLogoutArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<AuthLogoutOutput> {
     let removed = ctx
         .service::<Arc<dyn AuthService>>()?
@@ -90,7 +90,7 @@ async fn auth_session_delete(
 #[orca_tool(domain = "system.auth.session", verb = "create")]
 async fn auth_session_create(
     args: AuthLoginArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<AuthLoginOutput> {
     ctx.service::<Arc<dyn AuthService>>()?
         .login(&args.provider, args.key.as_deref())
@@ -159,7 +159,7 @@ pub struct TokenRevokeOutput {
 #[orca_tool(domain = "system.auth.token", verb = "create")]
 async fn auth_token_create(
     args: TokenCreateArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<TokenCreateOutput> {
     ctx.service::<Arc<dyn AuthService>>()?
         .token_create(&args.name, &args.role, args.expires_in_days)
@@ -170,7 +170,7 @@ async fn auth_token_create(
 #[orca_tool(domain = "system.auth.token", verb = "list")]
 async fn auth_token_list(
     _args: TokenListArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<TokenListOutput> {
     let tokens = ctx.service::<Arc<dyn AuthService>>()?.token_list().await?;
     Ok(TokenListOutput { tokens })
@@ -180,7 +180,7 @@ async fn auth_token_list(
 #[orca_tool(domain = "system.auth.token", verb = "delete")]
 async fn auth_token_delete(
     args: TokenRevokeArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<TokenRevokeOutput> {
     let revoked = ctx
         .service::<Arc<dyn AuthService>>()?
@@ -233,6 +233,6 @@ pub trait ProvideAuth {
 }
 
 /// Register a `AuthService` into `ToolCtx`.
-pub fn register_auth(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideAuth) {
+pub fn register_auth(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideAuth) {
     ctx.register_service(p.auth());
 }

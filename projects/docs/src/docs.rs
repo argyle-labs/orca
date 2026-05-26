@@ -171,7 +171,7 @@ fn data_to_node(d: crate::docs::DocTreeNodeData) -> DocTreeNode {
 #[orca_tool(domain = "namespace.doc", verb = "list-roots")]
 async fn list_roots(
     _args: ListRootsArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ListRootsOutput> {
     let roots = ctx
         .service::<Arc<dyn DocsService>>()?
@@ -191,7 +191,7 @@ async fn list_roots(
 /// Get the compacted documentation tree for a root, optionally scoped to a
 /// subpath. Returns a typed tree of .md files.
 #[orca_tool(domain = "namespace.doc", verb = "tree")]
-async fn get_tree(args: GetTreeArgs, ctx: &orca_tool::ToolCtx) -> anyhow::Result<GetTreeOutput> {
+async fn get_tree(args: GetTreeArgs, ctx: &orca_contract::ToolCtx) -> anyhow::Result<GetTreeOutput> {
     let data = ctx
         .service::<Arc<dyn DocsService>>()?
         .get_tree(&args.root, args.path.as_deref())
@@ -208,7 +208,7 @@ async fn get_tree(args: GetTreeArgs, ctx: &orca_tool::ToolCtx) -> anyhow::Result
 #[orca_tool(domain = "namespace.doc", verb = "full-tree")]
 async fn get_full_tree(
     args: GetFullTreeArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<GetFullTreeOutput> {
     let raw = args.raw.unwrap_or(false);
     let data = ctx
@@ -228,7 +228,7 @@ async fn get_full_tree(
 /// Read a documentation file by root and relative path (e.g. root=rebuy,
 /// path=admin-api/README).
 #[orca_tool(domain = "namespace.doc", verb = "read")]
-async fn read_doc(args: ReadDocArgs, ctx: &orca_tool::ToolCtx) -> anyhow::Result<ReadDocOutput> {
+async fn read_doc(args: ReadDocArgs, ctx: &orca_contract::ToolCtx) -> anyhow::Result<ReadDocOutput> {
     let llm = args.format.as_deref() == Some("llm");
     let content = ctx
         .service::<Arc<dyn DocsService>>()?
@@ -245,7 +245,7 @@ async fn read_doc(args: ReadDocArgs, ctx: &orca_tool::ToolCtx) -> anyhow::Result
 #[orca_tool(domain = "namespace.doc", verb = "search")]
 async fn search_docs(
     args: SearchDocsArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<SearchDocsOutput> {
     let filter = args.root.as_deref().unwrap_or("all");
     let llm = args.format.as_deref() == Some("llm");
@@ -280,7 +280,7 @@ async fn search_docs(
 #[orca_tool(domain = "namespace.doc", verb = "list-commands")]
 async fn list_commands(
     _args: ListCommandsArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ListCommandsOutput> {
     let commands = ctx
         .service::<Arc<dyn DocsService>>()?
@@ -373,6 +373,6 @@ pub trait ProvideDocs {
 }
 
 /// Register a `DocsService` into `ToolCtx`.
-pub fn register_docs(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideDocs) {
+pub fn register_docs(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideDocs) {
     ctx.register_service(p.docs());
 }

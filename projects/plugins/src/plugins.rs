@@ -132,7 +132,7 @@ pub struct SyncPluginCredsOutput {
 #[orca_tool(domain = "system.plugin", verb = "list")]
 async fn list_plugins(
     args: ListPluginsArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ListPluginsOutput> {
     let plugins = ctx
         .service::<Arc<dyn PluginsService>>()?
@@ -154,7 +154,7 @@ async fn list_plugins(
 #[orca_tool(domain = "system.plugin", verb = "create")]
 async fn add_plugin(
     args: AddPluginArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<AddPluginOutput> {
     let id = ctx
         .service::<Arc<dyn PluginsService>>()?
@@ -167,7 +167,7 @@ async fn add_plugin(
 #[orca_tool(domain = "system.plugin", verb = "delete")]
 async fn remove_plugin(
     args: PluginIdArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PluginMutationResult> {
     let changed = ctx
         .service::<Arc<dyn PluginsService>>()?
@@ -183,7 +183,7 @@ async fn remove_plugin(
 #[orca_tool(domain = "system.plugin", verb = "update")]
 async fn update_plugin(
     args: UpdatePluginArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PluginMutationResult> {
     let changed = ctx
         .service::<Arc<dyn PluginsService>>()?
@@ -199,7 +199,7 @@ async fn update_plugin(
 #[orca_tool(domain = "system.plugin.cred", verb = "list")]
 async fn plugin_cred_list(
     args: ListPluginCredsArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ListPluginCredsOutput> {
     let credentials = ctx
         .service::<Arc<dyn PluginsService>>()?
@@ -222,7 +222,7 @@ async fn plugin_cred_list(
 #[orca_tool(domain = "system.plugin.cred", verb = "create")]
 async fn plugin_cred_create(
     args: SetPluginCredArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PluginCredMutationResult> {
     ctx.service::<Arc<dyn PluginsService>>()?
         .set_plugin_cred(&args.plugin, &args.key, &args.value)
@@ -238,7 +238,7 @@ async fn plugin_cred_create(
 #[orca_tool(domain = "system.plugin.cred", verb = "delete")]
 async fn plugin_cred_delete(
     args: RemovePluginCredArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PluginCredMutationResult> {
     let changed = ctx
         .service::<Arc<dyn PluginsService>>()?
@@ -255,7 +255,7 @@ async fn plugin_cred_delete(
 #[orca_tool(domain = "system.plugin.cred", verb = "sync")]
 async fn plugin_cred_sync(
     args: SyncPluginCredsArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<SyncPluginCredsOutput> {
     ctx.service::<Arc<dyn PluginsService>>()?
         .sync_plugin_creds(&args.plugin)
@@ -315,6 +315,6 @@ pub trait ProvidePlugins {
 }
 
 /// Register a `PluginsService` into `ToolCtx`.
-pub fn register_plugins(ctx: &mut orca_tool::ToolCtx, p: &impl ProvidePlugins) {
+pub fn register_plugins(ctx: &mut orca_contract::ToolCtx, p: &impl ProvidePlugins) {
     ctx.register_service(p.plugins());
 }

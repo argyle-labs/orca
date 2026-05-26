@@ -75,7 +75,7 @@ pub struct RunTestsOutput {
 #[orca_tool(domain = "system.infra.service", verb = "list")]
 async fn infra_service_list(
     _args: ListServicesArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ListServicesOutput> {
     let projects = ctx
         .service::<Arc<dyn InfraService>>()?
@@ -105,7 +105,7 @@ async fn infra_service_list(
 #[orca_tool(domain = "system.infra.service", verb = "detail")]
 async fn infra_service_detail(
     args: GetServiceLogsArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<GetServiceLogsOutput> {
     let tail = args.tail.unwrap_or(200);
     let output = ctx
@@ -124,7 +124,7 @@ async fn infra_service_detail(
 #[orca_tool(domain = "system.infra.test", verb = "create")]
 async fn infra_test_create(
     args: RunTestsArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<RunTestsOutput> {
     let suite = args.suite.as_deref().unwrap_or("rust");
     let r = ctx
@@ -185,7 +185,7 @@ mod tests {
         }
     }
 
-    fn ctx_with_stub() -> (orca_tool::ToolCtx, Arc<Stub>) {
+    fn ctx_with_stub() -> (orca_contract::ToolCtx, Arc<Stub>) {
         let stub = Arc::new(Stub::default());
         let svc: Arc<dyn InfraService> = stub.clone();
         let mut ctx = empty_ctx();
@@ -322,6 +322,6 @@ pub trait ProvideInfra {
 }
 
 /// Register a `InfraService` into `ToolCtx`.
-pub fn register_infra(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideInfra) {
+pub fn register_infra(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideInfra) {
     ctx.register_service(p.infra());
 }

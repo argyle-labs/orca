@@ -52,7 +52,7 @@ pub struct DbLifecycleUpdateArgs {
 #[orca_tool(domain = "system.db", verb = "detail")]
 async fn db_detail(
     _args: DbStatusArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<DbStatusReport> {
     ctx.service::<Arc<dyn DbAdminService>>()?.status().await
 }
@@ -64,7 +64,7 @@ async fn db_detail(
 #[orca_tool(domain = "system.db.lifecycle", verb = "update")]
 async fn db_lifecycle_update(
     args: DbLifecycleUpdateArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<DbMigrateReport> {
     let s = ctx.service::<Arc<dyn DbAdminService>>()?;
     match args.action.as_str() {
@@ -133,7 +133,7 @@ mod tests {
         }
     }
 
-    fn ctx_with_stub() -> (orca_tool::ToolCtx, Arc<Stub>) {
+    fn ctx_with_stub() -> (orca_contract::ToolCtx, Arc<Stub>) {
         let stub = Stub::new();
         let svc: Arc<dyn DbAdminService> = stub.clone();
         let mut ctx = empty_ctx();
@@ -230,6 +230,6 @@ pub trait ProvideDbAdmin {
 }
 
 /// Register a `DbAdminService` into `ToolCtx`.
-pub fn register_db_admin(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideDbAdmin) {
+pub fn register_db_admin(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideDbAdmin) {
     ctx.register_service(p.db_admin());
 }

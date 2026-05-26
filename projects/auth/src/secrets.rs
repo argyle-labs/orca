@@ -129,7 +129,7 @@ pub struct SecretBackendsReport {
 #[orca_tool(domain = "system.secret", verb = "list")]
 async fn secret_list(
     _args: SecretListArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<SecretListReport> {
     let secrets = ctx.service::<Arc<dyn SecretsService>>()?.list().await?;
     Ok(SecretListReport { secrets })
@@ -139,7 +139,7 @@ async fn secret_list(
 #[orca_tool(domain = "system.secret", verb = "detail")]
 async fn secret_detail(
     args: SecretGetArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<SecretGetReport> {
     let (backend, value) = ctx
         .service::<Arc<dyn SecretsService>>()?
@@ -164,7 +164,7 @@ async fn secret_detail(
 )]
 async fn secret_set(
     args: SecretSetArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<SecretMutationReport> {
     ctx.service::<Arc<dyn SecretsService>>()?.set(args).await
 }
@@ -174,7 +174,7 @@ async fn secret_set(
 #[orca_tool(domain = "system.secret", verb = "delete")]
 async fn secret_delete(
     args: SecretDeleteArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<SecretDeleteReport> {
     let removed = ctx
         .service::<Arc<dyn SecretsService>>()?
@@ -190,7 +190,7 @@ async fn secret_delete(
 #[orca_tool(domain = "system.secret", verb = "backends")]
 async fn secret_backends(
     _args: SecretBackendsArgs,
-    ctx: &orca_tool::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<SecretBackendsReport> {
     let backends = ctx.service::<Arc<dyn SecretsService>>()?.backends().await;
     Ok(SecretBackendsReport { backends })
@@ -273,6 +273,6 @@ pub trait ProvideSecrets {
 }
 
 /// Register a `SecretsService` into `ToolCtx`.
-pub fn register_secrets(ctx: &mut orca_tool::ToolCtx, p: &impl ProvideSecrets) {
+pub fn register_secrets(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideSecrets) {
     ctx.register_service(p.secrets());
 }
