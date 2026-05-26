@@ -318,4 +318,114 @@ mod tests {
             "got: {m:?}"
         );
     }
+
+    // ── Ports::from_env precedence: env > orca.toml > const ────────────────
+    //
+    // These tests serialize on the process env vars + the HOME dir, which
+    // is unsound under cargo's test-thread parallelism for siblings that
+    // also read `HOME` / `ORCA_*_PORT`. We isolate via a mutex.
+
+    use std::sync::Mutex;
+    static ENV_GUARD: Mutex<()> = Mutex::new(());
+
+    fn with_isolated_env<R>(f: impl FnOnce() -> R) -> R {
+        let _lock = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        for k in ["ORCA_HTTP_PORT", "ORCA_HTTPS_PORT", "ORCA_MESH_PORT"] {
+            // SAFETY: tests are single-threaded under the mutex above; no
+            // other thread observes the env mutation window.
+            unsafe { std::env::remove_var(k) };
+        }
+        f()
+    }
+
+    #[test]
+    fn ports_const_default_when_no_toml_no_env() {
+        with_isolated_env(|| {
+            let tmp = tempfile::tempdir().unwrap();
+            // SAFETY: tests serialize via ENV_GUARD.
+            unsafe { std::env::set_var("HOME", tmp.path()) };
+            let p = Ports::resolve_uncached();
+            assert_eq!(p.http, consts::APP_REST_HTTP_PORT);
+            assert_eq!(p.https, consts::APP_REST_HTTPS_PORT);
+            assert_eq!(p.mesh, consts::APP_PLUGIN_PORT);
+        });
+    }
+
+    #[test]
+    fn ports_toml_overrides_const() {
+        with_isolated_env(|| {
+            let tmp = tempfile::tempdir().unwrap();
+            let app = tmp.path().join(consts::APP_STATE_DIR);
+            std::fs::create_dir_all(&app).unwrap();
+            std::fs::write(
+                app.join("orca.toml"),
+                "[ports]\nhttp = 18000\nhttps = 18443\nmesh = 18002\n",
+            )
+            .unwrap();
+            unsafe { std::env::set_var("HOME", tmp.path()) };
+            let p = Ports::resolve_uncached();
+            assert_eq!(p.http, 18000);
+            assert_eq!(p.https, 18443);
+            assert_eq!(p.mesh, 18002);
+        });
+    }
+
+    #[test]
+    fn ports_env_overrides_toml() {
+        with_isolated_env(|| {
+            let tmp = tempfile::tempdir().unwrap();
+            let app = tmp.path().join(consts::APP_STATE_DIR);
+            std::fs::create_dir_all(&app).unwrap();
+            std::fs::write(app.join("orca.toml"), "[ports]\nhttp = 18000\n").unwrap();
+            unsafe {
+                std::env::set_var("HOME", tmp.path());
+                std::env::set_var("ORCA_HTTP_PORT", "19000");
+            }
+            let p = Ports::resolve_uncached();
+            assert_eq!(p.http, 19000, "env must win over toml");
+        });
+    }
+
+    #[test]
+    fn ports_toml_partial_overrides_only_specified_fields() {
+        with_isolated_env(|| {
+            let tmp = tempfile::tempdir().unwrap();
+            let app = tmp.path().join(consts::APP_STATE_DIR);
+            std::fs::create_dir_all(&app).unwrap();
+            // Only `mesh` is specified — http + https fall back to consts.
+            std::fs::write(app.join("orca.toml"), "[ports]\nmesh = 12042\n").unwrap();
+            unsafe { std::env::set_var("HOME", tmp.path()) };
+            let p = Ports::resolve_uncached();
+            assert_eq!(p.http, consts::APP_REST_HTTP_PORT);
+            assert_eq!(p.https, consts::APP_REST_HTTPS_PORT);
+            assert_eq!(p.mesh, 12042);
+        });
+    }
+
+    #[test]
+    fn ports_malformed_toml_falls_back_to_const() {
+        with_isolated_env(|| {
+            let tmp = tempfile::tempdir().unwrap();
+            let app = tmp.path().join(consts::APP_STATE_DIR);
+            std::fs::create_dir_all(&app).unwrap();
+            std::fs::write(app.join("orca.toml"), "this is not toml at all").unwrap();
+            unsafe { std::env::set_var("HOME", tmp.path()) };
+            let p = Ports::resolve_uncached();
+            // Malformed file logs a warning but doesn't crash — consts win.
+            assert_eq!(p.http, consts::APP_REST_HTTP_PORT);
+        });
+    }
+
+    #[test]
+    fn ports_unparseable_env_falls_back() {
+        with_isolated_env(|| {
+            let tmp = tempfile::tempdir().unwrap();
+            unsafe {
+                std::env::set_var("HOME", tmp.path());
+                std::env::set_var("ORCA_HTTP_PORT", "not-a-number");
+            }
+            let p = Ports::resolve_uncached();
+            assert_eq!(p.http, consts::APP_REST_HTTP_PORT);
+        });
+    }
 }
