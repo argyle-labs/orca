@@ -38,25 +38,23 @@ fn token_path() -> Result<PathBuf> {
 }
 
 /// Mint a fresh loopback token, persist it to `~/.orca/secrets/loopback.token`
-/// (mode 0600), and stash it in the process-wide cache. Call exactly once per
-/// process at startup — a second call panics. The single-call invariant is
-/// load-bearing: disk and memory must hold the same token, and silently
-/// re-running this function would leave them divergent (memory pinned to the
-/// first caller via OnceLock, disk overwritten by the latest).
+/// (mode 0600), and stash it in the process-wide cache. Idempotent: a second
+/// caller in the same process returns early without touching memory or disk.
+/// The structural guarantee is that disk and memory NEVER diverge — only the
+/// caller that wins the OnceLock claim is allowed to write the disk file.
 pub fn install_at_startup() -> Result<()> {
     let mut buf = [0u8; 32];
     rand::rng().fill_bytes(&mut buf);
     let plaintext = format!("orca_loopback_{}", hex(&buf));
 
-    // Claim memory FIRST, then write disk. If we ever ignored a duplicate
-    // call here, memory would hold the first caller's token while disk would
-    // hold the most-recent caller's — silently breaking every Bearer auth
-    // attempt that reads the disk value. We .expect() instead of silently
-    // returning so a stray second `install_at_startup` call crashes the
-    // daemon at boot rather than shipping a divergent state into production.
-    TOKEN
-        .set(plaintext.clone())
-        .expect("install_at_startup called more than once — single-init invariant violated");
+    // Claim memory FIRST. If a prior call already claimed it (test harness
+    // reuses the static across many `tokio::test` cases in one binary),
+    // return early WITHOUT touching disk — that's the load-bearing guarantee:
+    // disk and memory never diverge because disk is only written by the
+    // caller that won the OnceLock race.
+    if TOKEN.set(plaintext.clone()).is_err() {
+        return Ok(());
+    }
 
     let dir = secrets_dir()?;
     std::fs::create_dir_all(&dir)
