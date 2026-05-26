@@ -1,9 +1,11 @@
 //! `OrcaAppKit` — embedder lifecycle.
 //!
 //! Task #4 design. The struct that native UIs hold for the lifetime of the
-//! app. Constructs the in-process orca core (config + tool registry +
-//! service-injected `ToolCtx`) and owns the tokio runtime that tool bodies
-//! run on. UI ↔ core calls are direct UniFFI (no localhost HTTP).
+//! app. Constructs the in-process orca core (config + service-injected
+//! `ToolCtx`) and owns the tokio runtime that tool bodies run on. Tool
+//! dispatch goes through `orca_dispatch`'s free-fn API, which walks the
+//! `inventory` slice directly — no registry struct to hold here. UI ↔ core
+//! calls are direct UniFFI (no localhost HTTP).
 //!
 //! ## Four-surface rule and the lifecycle carve-out
 //!
@@ -23,18 +25,18 @@
 //!
 //! ## What still needs lifting (gating #5)
 //!
-//! `build_tool_registry` in `projects/server/src/mcp/mod.rs:54` wires every
+//! `build_tool_ctx` in `projects/server/src/mcp/mod.rs` wires every
 //! server-side `*Service` trait object into `ToolCtx`. App-kit cannot depend
 //! on `orca-server` (would pull axum + clap + the entire daemon surface).
 //! Two options for the lift, decision deferred to #5 kickoff:
 //!
-//! - **A. Extract `orca-runtime` crate.** Move `build_tool_registry` +
+//! - **A. Extract `orca-runtime` crate.** Move `build_tool_ctx` +
 //!   `ServerFoo` service impls (the ones that have no axum dependency) into
 //!   a transport-neutral crate that both `orca-server` and `orca-app-kit`
 //!   depend on. Cleanest but largest refactor.
-//! - **B. Service-registration trait in tools-def.** Each `services::*`
-//!   module exposes a `register_services(&mut ToolCtx)` fn; concrete impls
-//!   live wherever, and the embedder picks. Smaller change, less elegant.
+//! - **B. Service-registration trait in each domain crate.** Each domain
+//!   exposes a `register_services(&mut ToolCtx)` fn; concrete impls live
+//!   wherever, and the embedder picks. Smaller change, less elegant.
 //!
 //! Until the lift, `init` registers only `#[orca_tool]`-inventory-registered
 //! tools (tools whose bodies don't fetch from `ctx.service()`); tools that
@@ -82,12 +84,11 @@ impl OrcaAppKit {
     /// Steps:
     ///   1. Load (or initialize) `Config` from `app_dir`.
     ///   2. Spin up a multi-threaded tokio runtime sized for in-process work.
-    ///   3. Build an empty `ToolRegistry` and call
-    ///      `orca_tool::native_register` to enroll every
-    ///      `#[orca_tool]` from the inventory slice.
-    ///   4. Build a `ToolCtx` carrying the config. (Service injection lives
-    ///      in `build_tool_registry` in orca-server today — lifting it is
-    ///      tracked in #5.)
+    ///   3. Build a `ToolCtx` carrying the config. (Service injection lives
+    ///      in `build_tool_ctx` in orca-server today — lifting it is
+    ///      tracked in #5.) Tool dispatch reads from the `inventory` slice
+    ///      that the `#[orca_tool]` macro fills at link time, so there is
+    ///      no separate registration step here.
     ///
     /// Returns an `Arc<Self>` so multiple native UI screens can hold onto
     /// the same instance without copying state.
@@ -110,17 +111,15 @@ impl OrcaAppKit {
         // in `lib.rs` ensure every domain crate's inventory entries are
         // pulled into this binary.
         let mut ctx = ToolCtx::new(config.clone());
-        // Per the service-registration convention in
-        // `tools_def::services::mod`, the embedder owns which `register_*`
-        // calls happen. App-kit hosts pass a closure that calls
-        // `tools_def::services::foo::register_foo(&mut ctx, &MyProvider)`
-        // for each service their UI needs. Missing services fail at
+        // Per the service-registration convention, the embedder owns which
+        // `register_*` calls happen. App-kit hosts pass a closure that
+        // calls each domain crate's `register_<svc>(&mut ctx, &MyProvider)`
+        // for the services their UI needs. Missing services fail at
         // dispatch with a clear `no service registered for <T>` error.
         install_services(&mut ctx);
 
         Ok(Arc::new(Self {
             config,
-            registry: Arc::new(registry),
             ctx: Arc::new(ctx),
             runtime,
         }))

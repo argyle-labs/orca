@@ -267,7 +267,7 @@ pub async fn dev_enable(host: &str) -> Result<PodDevEnableResult> {
 
 // `pod/exec` is the wire-level JSON-RPC dispatch for cross-peer OrcaTool
 // invocation. The Value fields here are strictly the JSON-RPC wire payload —
-// the caller (`orca_tool::cli::exec_remote`) serializes the tool's
+// the caller (`orca_dispatch::cli::exec_remote`) serializes the tool's
 // typed Args before this point and deserializes the typed Output immediately
 // after, so opaque JSON never reaches any user-facing type.
 mod exec_wire {

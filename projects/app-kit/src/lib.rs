@@ -1,6 +1,6 @@
 //! Orca app-kit — in-process embedding surface for native UIs.
 //!
-//! See `Cargo.toml` for the surface-emission relationship to tools-def.
+//! See `Cargo.toml` for the surface-emission relationship to the domain crates.
 //!
 //! **Hard rule:** this file contains NO hand-written `#[uniffi::export]`. Every
 //! UniFFI symbol that ends up in the cdylib comes from the `#[orca_tool]`
@@ -10,9 +10,9 @@
 //! Foundation slice scope:
 //!   1. `uniffi::setup_scaffolding!()` registers the FFI symbol table that
 //!      Swift/Kotlin bindings hook into.
-//!   2. Re-exporting `orca_tool` ensures every `#[orca_tool]` is linked
-//!      into this cdylib so the macro's UniFFI emission (forthcoming) lands
-//!      here.
+//!   2. Re-exporting the runtime + every domain crate ensures every
+//!      `#[orca_tool]` is linked into this cdylib so the macro's UniFFI
+//!      emission (forthcoming) lands here.
 //!
 //! Pipeline verification deferred until the macro emits the first real
 //! UniFFI wrapper (task #5, blocked on `OrcaAppKit::init()` lifecycle task #4).
@@ -25,7 +25,7 @@ uniffi::setup_scaffolding!();
 #[allow(unused_imports)]
 use {
     agents as _, auth as _, docker as _, docs as _, fleet as _, homeassistant as _, infra as _,
-    mgmt as _, orca_tool as _, platform as _, plugins as _, proxmox as _,
+    mgmt as _, orca_dispatch as _, platform as _, plugins as _, proxmox as _,
 };
 
 pub mod lifecycle;
