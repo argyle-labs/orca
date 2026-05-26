@@ -33,10 +33,10 @@ static MACHINE_ID: OnceLock<String> = OnceLock::new();
 /// machine_id. Safe to call more than once; subsequent calls are no-ops.
 pub fn init(app_dir: &Path) -> Result<()> {
     let hostname = capture_hostname();
-    let _ = HOSTNAME.set(hostname);
+    HOSTNAME.set(hostname).ok();
 
     let machine_id = load_or_generate_machine_id(app_dir).context("load or generate machine_id")?;
-    let _ = MACHINE_ID.set(machine_id);
+    MACHINE_ID.set(machine_id).ok();
     Ok(())
 }
 
