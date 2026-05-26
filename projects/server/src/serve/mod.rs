@@ -294,7 +294,10 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         if let Err(e) = crate::loopback_token::install_at_startup() {
             tracing::warn!("loopback token install failed: {e:#}");
         }
-        info!("[orca] daemon listening on https://localhost:{port}");
+        info!(
+            "[orca] daemon listening on http://localhost:{port} + https://localhost:{}",
+            ports.https
+        );
         if let Err(e) = orca_utils::state::set_mode(DaemonMode::Daemon) {
             tracing::warn!("failed to set daemon mode: {e}");
         }
@@ -302,32 +305,43 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             tracing::warn!("failed to set active_pid: {e}");
         }
 
-        let handle = axum_server::Handle::new();
-        let serve = axum_server::bind_rustls(addr, tls)
-            .handle(handle.clone())
+        let https_handle = axum_server::Handle::new();
+        let http_handle = axum_server::Handle::new();
+        let https_serve = axum_server::bind_rustls(https_addr, tls)
+            .handle(https_handle.clone())
+            .serve(
+                app.clone()
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            );
+        let http_serve = axum_server::bind(http_addr)
+            .handle(http_handle.clone())
             .serve(
                 app.clone()
                     .into_make_service_with_connect_info::<std::net::SocketAddr>(),
             );
 
         let parked = tokio::select! {
-            result = serve => { result?; false }
+            result = https_serve => { result?; false }
+            result = http_serve  => { result?; false }
             _ = sigusr1.recv() => {
-                // Park: drop the REST listener AND stop the plugin host so both
-                // :12000 and :12002 are released for the dev binary.
-                handle.shutdown();
+                // Park: drop both REST listeners AND stop the plugin host so
+                // every port we own is released for the dev binary to take.
+                https_handle.shutdown();
+                http_handle.shutdown();
                 crate::plugin_host::stop();
                 true
             }
             _ = sigterm.recv() => {
                 info!("[orca] daemon shutting down");
-                handle.graceful_shutdown(Some(Duration::from_secs(1)));
+                https_handle.graceful_shutdown(Some(Duration::from_secs(1)));
+                http_handle.graceful_shutdown(Some(Duration::from_secs(1)));
                 let _ = orca_utils::state::clear();
                 return Ok(());
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("[orca] daemon shutting down");
-                handle.graceful_shutdown(Some(Duration::from_secs(1)));
+                https_handle.graceful_shutdown(Some(Duration::from_secs(1)));
+                http_handle.graceful_shutdown(Some(Duration::from_secs(1)));
                 let _ = orca_utils::state::clear();
                 return Ok(());
             }
