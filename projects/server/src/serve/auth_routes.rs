@@ -23,7 +23,7 @@ use crate::serve::middleware::{AuthIdentity, AuthKind, SESSION_COOKIE, SESSION_T
 static DEV_MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 pub fn set_dev_mode(dev: bool) {
-    let _ = DEV_MODE.set(dev);
+    _ = DEV_MODE.set(dev);
 }
 
 /// Use Lax everywhere. Strict can silently block cookies on self-signed TLS
@@ -347,7 +347,7 @@ pub async fn signout(req: Request) -> Response {
         && let AuthKind::Session { session_id, .. } = &ident.kind
         && let Ok(conn) = db::open_default()
     {
-        let _ = db::sessions::revoke(&conn, session_id, &chrono::Utc::now().to_rfc3339());
+        _ = db::sessions::revoke(&conn, session_id, &chrono::Utc::now().to_rfc3339());
     }
     let mut resp = (
         StatusCode::OK,

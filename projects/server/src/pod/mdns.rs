@@ -135,7 +135,7 @@ impl Mdns {
     /// unclaimed to pod-member, or after `pod self-secure on` flips
     /// `can_invite`).
     pub fn republish(&self, ad: Advertisement) -> Result<()> {
-        let _ = self.daemon.unregister(&self.instance_fullname);
+        _ = self.daemon.unregister(&self.instance_fullname);
         let info = ad.into_service_info()?;
         self.daemon
             .register(info)
@@ -145,12 +145,12 @@ impl Mdns {
 
     /// Stop advertising and browsing.
     pub fn shutdown(&self) {
-        let _ = self.daemon.unregister(&self.instance_fullname);
+        _ = self.daemon.unregister(&self.instance_fullname);
         // 1s grace for the unregister broadcast to flush, then shutdown.
         let d = self.daemon.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(1));
-            let _ = d.shutdown();
+            _ = d.shutdown();
         });
     }
 }

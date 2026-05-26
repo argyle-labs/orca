@@ -845,7 +845,7 @@ pub async fn cmd_pod_leave(wipe_secrets: bool, wipe_all: bool) -> Result<()> {
             "oauth_tokens",
             "profile_credentials",
         ] {
-            let _ = conn.execute(&format!("DELETE FROM {tbl}"), []);
+            _ = conn.execute(&format!("DELETE FROM {tbl}"), []);
         }
         println!("✓ wiped plugin_data, plugin_credentials, oauth_tokens, profile_credentials");
     }
@@ -855,7 +855,7 @@ pub async fn cmd_pod_leave(wipe_secrets: bool, wipe_all: bool) -> Result<()> {
     let pki_d = pki_dir();
     let mesh = pki::mesh_dir(&pki_d);
     if mesh.exists() {
-        let _ = std::fs::remove_dir_all(&mesh);
+        _ = std::fs::remove_dir_all(&mesh);
         println!("✓ removed mesh PKI material at {}", mesh.display());
     }
 

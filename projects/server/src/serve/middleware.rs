@@ -253,7 +253,7 @@ fn try_session_auth_with(
         return None;
     }
     let new_expires = now + SESSION_TTL;
-    let _ = db::sessions::touch(
+    _ = db::sessions::touch(
         conn,
         &row.session_id,
         &now.to_rfc3339(),
@@ -302,7 +302,7 @@ fn try_token_auth_with(
     {
         return None;
     }
-    let _ = db::api_tokens::touch(conn, &row.id, &now.to_rfc3339());
+    _ = db::api_tokens::touch(conn, &row.id, &now.to_rfc3339());
     Some(AuthIdentity {
         kind: AuthKind::Token {
             id: row.id,

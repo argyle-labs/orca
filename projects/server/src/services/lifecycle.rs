@@ -116,7 +116,7 @@ impl LifecycleService for ServerLifecycle {
             let test = logs_dir.join(".doctor_test");
             match std::fs::write(&test, "test") {
                 Ok(_) => {
-                    let _ = std::fs::remove_file(&test);
+                    _ = std::fs::remove_file(&test);
                     push(&mut entries, "logs", "ok", "logs dir writable".into());
                 }
                 Err(e) => push(
@@ -186,7 +186,7 @@ impl LifecycleService for ServerLifecycle {
                 let ch = resolve_channel(version);
                 write_channel_marker(&ch)?;
                 // Clear any semver pin so the channel takes effect.
-                let _ = clear_version_pin();
+                _ = clear_version_pin();
             }
             v => {
                 // Treat as a semver pin.

@@ -236,7 +236,7 @@ pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
 
 pub(super) fn install_spec(mut spec: utoipa::openapi::OpenApi) {
     spec.info.version = env!("CARGO_PKG_VERSION").to_string();
-    let _ = SPEC.set(spec);
+    _ = SPEC.set(spec);
 }
 
 /// Build the OpenAPI spec on demand without starting the server.

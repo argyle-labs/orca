@@ -109,7 +109,7 @@ pub fn loopback_only_reqwest_client(url: &str) -> anyhow::Result<reqwest::Client
 /// production OnceLock semantics.
 #[cfg(test)]
 pub(crate) fn set_for_tests(s: String) {
-    let _ = TOKEN.set(s);
+    _ = TOKEN.set(s);
 }
 
 /// Read the token from disk. Used by loopback HTTP clients that aren't the

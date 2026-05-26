@@ -420,12 +420,12 @@ pub fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
 }
 
 pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
-    let _ = crossterm::terminal::disable_raw_mode();
-    let _ = crossterm::execute!(
+    _ = crossterm::terminal::disable_raw_mode();
+    _ = crossterm::execute!(
         terminal.backend_mut(),
         crossterm::terminal::LeaveAlternateScreen
     );
-    let _ = terminal.show_cursor();
+    _ = terminal.show_cursor();
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

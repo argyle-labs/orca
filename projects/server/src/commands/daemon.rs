@@ -340,7 +340,7 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     println!("{} wrote {}", "✓".green(), plist_path);
 
     // Remove any existing registration before bootstrapping; ignore failure when not loaded
-    let _ = Command::new("launchctl")
+    _ = Command::new("launchctl")
         .args(["bootout", &domain, &plist_path])
         .stderr(std::process::Stdio::null())
         .status();
@@ -367,7 +367,7 @@ fn uninstall_service() -> Result<()> {
     let domain = format!("gui/{uid}");
     let plist_path = format!("{home}/Library/LaunchAgents/{APP_PLIST_LABEL}.plist");
 
-    let _ = Command::new("launchctl")
+    _ = Command::new("launchctl")
         .args(["bootout", &domain, &plist_path])
         .status();
 

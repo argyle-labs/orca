@@ -115,7 +115,7 @@ where
         Err(e) => {
             let resp = Response::err(id, ErrorObject::invalid_params(&e.to_string()));
             let bytes = serde_json::to_vec(&resp).context("serialize error response")?;
-            let _ = write_frame(&mut stream, &bytes).await;
+            _ = write_frame(&mut stream, &bytes).await;
             return Err(e);
         }
     };
@@ -422,11 +422,11 @@ mod tests {
 
         let own_for_server = own.to_string();
         let server = tokio::spawn(async move {
-            let _ = serve_session(server_io, &own_for_server).await;
+            _ = serve_session(server_io, &own_for_server).await;
         });
         let own_for_client = own.to_string();
         let client = tokio::spawn(async move {
-            let _ = run_client(client_io, &own_for_client, tx).await;
+            _ = run_client(client_io, &own_for_client, tx).await;
         });
 
         // Let the handshake (subscribe → ack) complete before publishing.
@@ -456,8 +456,8 @@ mod tests {
         // Dropping the receiver makes run_client exit; dropping that side of
         // the duplex makes serve_session's next write fail and exit.
         drop(rx);
-        let _ = tokio::time::timeout(Duration::from_secs(2), client).await;
-        let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
+        _ = tokio::time::timeout(Duration::from_secs(2), client).await;
+        _ = tokio::time::timeout(Duration::from_secs(2), server).await;
     }
 
     /// End-to-end: client's auto-heartbeat reaches the server. Drive the
@@ -470,7 +470,7 @@ mod tests {
 
         let own_for_server = own.to_string();
         let server = tokio::spawn(async move {
-            let _ = serve_session(server_io, &own_for_server).await;
+            _ = serve_session(server_io, &own_for_server).await;
         });
         // Manually drive the subscribe handshake on the client side, then
         // inject a heartbeat frame so the test doesn't have to wait for
@@ -510,7 +510,7 @@ mod tests {
         );
 
         drop(tx);
-        let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
+        _ = tokio::time::timeout(Duration::from_secs(2), server).await;
     }
 
     /// Server rejects a bad subscribe → client surfaces the rejection.
@@ -582,7 +582,7 @@ mod tests {
             .await
             .expect_err("expected EventFrame parse error");
         assert!(err.to_string().contains("EventFrame"), "got: {err}");
-        let _ = server.await;
+        _ = server.await;
     }
 
     /// Notification with no params → `unwrap_or(Value::Null)` branch, followed
@@ -616,7 +616,7 @@ mod tests {
             .await
             .expect_err("expected EventFrame parse error from Null");
         assert!(err.to_string().contains("EventFrame"), "got: {err}");
-        let _ = server.await;
+        _ = server.await;
     }
 
     /// Garbage bytes mid-stream → run_client surfaces the parse error.
@@ -647,7 +647,7 @@ mod tests {
             .await
             .expect_err("expected parse error");
         assert!(err.to_string().contains("parse event frame"), "got: {err}");
-        let _ = server.await;
+        _ = server.await;
     }
 
     /// Client receives a non-Response first frame → run_client bails.
@@ -667,7 +667,7 @@ mod tests {
 
         let err = run_client(client_io, "peer.x", tx).await.unwrap_err();
         assert!(err.to_string().contains("expected Response ack"));
-        let _ = server.await;
+        _ = server.await;
     }
 
     /// run_client must ignore Notifications whose method isn't EVENT_METHOD,
@@ -720,7 +720,7 @@ mod tests {
         });
 
         let client = tokio::spawn(async move {
-            let _ = run_client(client_io, "peer.skip-test", tx).await;
+            _ = run_client(client_io, "peer.skip-test", tx).await;
         });
 
         let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())
@@ -730,7 +730,7 @@ mod tests {
         assert_eq!(got.snapshot_at_unix, 7);
         assert_eq!(got.payload, "yes");
 
-        let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
-        let _ = tokio::time::timeout(Duration::from_secs(2), client).await;
+        _ = tokio::time::timeout(Duration::from_secs(2), server).await;
+        _ = tokio::time::timeout(Duration::from_secs(2), client).await;
     }
 }

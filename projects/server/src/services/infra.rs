@@ -123,6 +123,6 @@ mod tests {
     fn loopback_token_returns_err_when_no_token() {
         // If TOKEN is not set and no file on disk, returns Err.
         // If TOKEN is set (by another test), returns Ok — both are valid.
-        let _ = loopback_token(); // must not panic
+        _ = loopback_token(); // must not panic
     }
 }

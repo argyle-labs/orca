@@ -157,7 +157,7 @@ impl Session {
                     if input.is_empty() {
                         continue;
                     }
-                    let _ = rl.add_history_entry(&input);
+                    _ = rl.add_history_entry(&input);
 
                     if matches!(input.as_str(), "exit" | "quit" | "q" | "bye") {
                         self.out(&"bye.".dimmed().to_string());

@@ -63,7 +63,7 @@ async fn tick() -> Result<()> {
         if let Err(e) = pki::drop_mesh_ca_previous(&pki_d) {
             warn!("[cert-rotation] could not drop previous CA: {e:#}");
         } else {
-            let _ = pdb::set_ca_previous_expires_at(&conn, None);
+            _ = pdb::set_ca_previous_expires_at(&conn, None);
             info!("[cert-rotation] dropped previous CA (overlap expired)");
         }
     }

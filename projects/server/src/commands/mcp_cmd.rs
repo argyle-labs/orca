@@ -64,7 +64,7 @@ pub fn mcp_sync_server(server: &ServerRow, _threshold: f64) -> anyhow::Result<(u
         }
         line.clear();
     }
-    let _ = child.kill();
+    _ = child.kill();
 
     if external_tools.is_empty() {
         anyhow::bail!("no tools returned from {}", server.name);

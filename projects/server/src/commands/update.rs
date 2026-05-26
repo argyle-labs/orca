@@ -465,7 +465,7 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
     // Without this the launchd daemon gets SIGKILLed on respawn (exit -9).
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("codesign")
+        _ = std::process::Command::new("codesign")
             .args(["--force", "--sign", "-"])
             .arg(&current)
             .status();
@@ -540,7 +540,7 @@ fn schedule_self_restart() {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let cmd = format!("sleep 2; kill -TERM {my_pid}");
 
-    let _ = std::process::Command::new("sh")
+    _ = std::process::Command::new("sh")
         .args(["-c", &cmd])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -716,7 +716,7 @@ fn write_dev_pid(pid: u32) -> Result<()> {
 
 fn clear_dev_pid() {
     if let Some(p) = dev_pid_path() {
-        let _ = std::fs::remove_file(p);
+        _ = std::fs::remove_file(p);
     }
 }
 
@@ -853,7 +853,7 @@ pub fn cmd_dev_enable() -> Result<DevEnableResult> {
     // Tell the parked daemon: the "active dev process" is cargo-watch, which lives forever.
     if daemon_parked && let Ok(Some(mut s)) = orca_utils::state::read() {
         s.active_pid = watch_pid;
-        let _ = orca_utils::state::write(&s);
+        _ = orca_utils::state::write(&s);
     }
 
     Ok(DevEnableResult {
@@ -899,7 +899,7 @@ pub fn cmd_dev_disable() -> Result<DevDisableResult> {
         && pid_alive(pid)
     {
         // Kill the entire process group (cargo watch spawns child processes)
-        let _ = Command::new("kill")
+        _ = Command::new("kill")
             .args(["-TERM", &pid.to_string()])
             .status();
         clear_dev_pid();
@@ -1046,7 +1046,7 @@ fn prune_check_cache() {
             continue;
         };
         if age.as_secs() > CHECK_CACHE_TTL_SECS {
-            let _ = std::fs::remove_file(entry.path());
+            _ = std::fs::remove_file(entry.path());
         }
     }
 }

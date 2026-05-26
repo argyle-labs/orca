@@ -114,7 +114,7 @@ fn load_db_configs() -> Vec<DbConfig> {
                 domains_file: d.domains_file.clone(),
                 enabled: true,
             };
-            let _ = db::schema_databases::upsert(&conn, &row);
+            _ = db::schema_databases::upsert(&conn, &row);
         }
         if !dbs.is_empty() {
             return dbs

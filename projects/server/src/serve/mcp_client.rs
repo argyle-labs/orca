@@ -440,7 +440,7 @@ impl McpClient {
                     let mut buf = String::new();
                     // Read endpoint event.
                     let mut session_post = String::new();
-                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
                         while let Some(Ok(chunk)) = stream.next().await {
                             buf.push_str(&String::from_utf8_lossy(&chunk));
                             for line in buf.lines() {
@@ -458,7 +458,7 @@ impl McpClient {
                         } else {
                             format!("{base_url}{session_post}")
                         };
-                        let _ = http.post(&post_url).json(&msg).send().await;
+                        _ = http.post(&post_url).json(&msg).send().await;
                     }
                 }
             }

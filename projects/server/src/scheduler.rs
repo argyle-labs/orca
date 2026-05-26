@@ -142,7 +142,7 @@ async fn tick(registry: &ToolRegistry, ctx: &ToolCtx, daemon_start: DateTime<Utc
         // shows last-run/outcome under the job's canonical name (not the
         // scheduler's own loop).
         if let Ok(conn) = db::open_default() {
-            let _ = db::scheduler_runs::record(
+            _ = db::scheduler_runs::record(
                 &conn,
                 &job_name,
                 &started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),

@@ -44,7 +44,7 @@ pub fn cmd_hook(action: HookAction) -> Result<()> {
 
 fn read_stdin() -> Value {
     let mut buf = String::new();
-    let _ = std::io::stdin().read_to_string(&mut buf);
+    _ = std::io::stdin().read_to_string(&mut buf);
     serde_json::from_str(&buf).unwrap_or(Value::Null)
 }
 

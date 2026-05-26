@@ -329,7 +329,7 @@ fn step_cli_client_cert(home: &Path, report: &mut InstallReport) {
 
 fn step_claude_md(home: &Path, report: &mut InstallReport) {
     let claude_dir = home.join(".claude");
-    let _ = std::fs::create_dir_all(&claude_dir);
+    _ = std::fs::create_dir_all(&claude_dir);
 
     let vault_claude_md = home.join(APP_STATE_DIR).join("CLAUDE.md");
     let dot_claude_md = claude_dir.join("CLAUDE.md");
@@ -398,8 +398,8 @@ fn step_memory_symlinks(home: &Path, report: &mut InstallReport) {
         let memory_link = project_dir.join("memory");
         let vault_dir = orca_memory.join(vault_name);
 
-        let _ = std::fs::create_dir_all(&project_dir);
-        let _ = std::fs::create_dir_all(&vault_dir);
+        _ = std::fs::create_dir_all(&project_dir);
+        _ = std::fs::create_dir_all(&vault_dir);
 
         if memory_link.exists() && !is_symlink(&memory_link) {
             // Real dir exists — back it up then remove
@@ -587,7 +587,7 @@ fn is_symlink(path: &Path) -> bool {
 fn force_symlink(src: &Path, dest: &Path, report: &mut InstallReport, label: &str) {
     // Remove existing symlink so we can replace it
     if is_symlink(dest) {
-        let _ = std::fs::remove_file(dest);
+        _ = std::fs::remove_file(dest);
     }
 
     #[cfg(unix)]
@@ -620,7 +620,7 @@ fn set_executable(path: &Path) {
     if let Ok(meta) = std::fs::metadata(path) {
         let mut perms = meta.permissions();
         perms.set_mode(0o755);
-        let _ = std::fs::set_permissions(path, perms);
+        _ = std::fs::set_permissions(path, perms);
     }
 }
 

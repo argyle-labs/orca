@@ -93,7 +93,7 @@ pub async fn run_bash(
                 Some(_) => break,
                 None => {
                     if start.elapsed() > timeout {
-                        let _ = child.kill();
+                        _ = child.kill();
                         bail!("command timed out after {}s", timeout.as_secs());
                     }
                     std::thread::sleep(Duration::from_millis(100));

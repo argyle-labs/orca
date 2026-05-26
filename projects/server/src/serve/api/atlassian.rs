@@ -144,7 +144,7 @@ async fn try_or_refresh_atlassian(access_token: String) -> anyhow::Result<String
         .await?;
 
     // Persist the new access token
-    let _ = crate::commands::oauth::update_atlassian_access_token(&resp.access_token);
+    _ = crate::commands::oauth::update_atlassian_access_token(&resp.access_token);
 
     Ok(resp.access_token)
 }

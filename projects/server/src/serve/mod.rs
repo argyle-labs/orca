@@ -149,7 +149,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                     "[dev] re-parking production daemon (pid {}) before bind",
                     s.daemon_pid
                 );
-                let _ = std::process::Command::new("kill")
+                _ = std::process::Command::new("kill")
                     .args(["-USR1", &s.daemon_pid.to_string()])
                     .status();
                 for _ in 0..30 {
@@ -271,7 +271,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             tokio::select! {
                 _ = sigusr2.recv() => break,
                 _ = sigterm.recv() => {
-                    let _ = orca_utils::state::clear();
+                    _ = orca_utils::state::clear();
                     return Ok(());
                 }
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {
@@ -329,14 +329,14 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                 info!("[orca] daemon shutting down");
                 https_handle.graceful_shutdown(Some(Duration::from_secs(1)));
                 http_handle.graceful_shutdown(Some(Duration::from_secs(1)));
-                let _ = orca_utils::state::clear();
+                _ = orca_utils::state::clear();
                 return Ok(());
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("[orca] daemon shutting down");
                 https_handle.graceful_shutdown(Some(Duration::from_secs(1)));
                 http_handle.graceful_shutdown(Some(Duration::from_secs(1)));
-                let _ = orca_utils::state::clear();
+                _ = orca_utils::state::clear();
                 return Ok(());
             }
         };
@@ -370,7 +370,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                 }
                 _ = sigterm.recv() => {
                     info!("[orca] daemon shutting down (while parked)");
-                    let _ = orca_utils::state::clear();
+                    _ = orca_utils::state::clear();
                     return Ok(());
                 }
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {
@@ -398,7 +398,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         // Outer loop: rebind and serve again
     }
 
-    let _ = orca_utils::state::clear();
+    _ = orca_utils::state::clear();
     Ok(())
 }
 
@@ -877,7 +877,7 @@ async fn proxy_ws_to_vite(mut browser: axum::extract::ws::WebSocket, path: Strin
     let (mut vite, _) = match connect_async(&url).await {
         Ok(v) => v,
         Err(_) => {
-            let _ = browser.close().await;
+            _ = browser.close().await;
             return;
         }
     };
@@ -885,23 +885,23 @@ async fn proxy_ws_to_vite(mut browser: axum::extract::ws::WebSocket, path: Strin
     loop {
         tokio::select! {
             msg = browser.recv() => match msg {
-                Some(Ok(BMsg::Text(t)))   => { let _ = vite.send(VMsg::Text(t.as_str().into())).await; }
-                Some(Ok(BMsg::Binary(b))) => { let _ = vite.send(VMsg::Binary(b.to_vec().into())).await; }
-                Some(Ok(BMsg::Ping(p)))   => { let _ = vite.send(VMsg::Ping(p.to_vec().into())).await; }
-                Some(Ok(BMsg::Pong(p)))   => { let _ = vite.send(VMsg::Pong(p.to_vec().into())).await; }
+                Some(Ok(BMsg::Text(t)))   => { _ = vite.send(VMsg::Text(t.as_str().into())).await; }
+                Some(Ok(BMsg::Binary(b))) => { _ = vite.send(VMsg::Binary(b.to_vec().into())).await; }
+                Some(Ok(BMsg::Ping(p)))   => { _ = vite.send(VMsg::Ping(p.to_vec().into())).await; }
+                Some(Ok(BMsg::Pong(p)))   => { _ = vite.send(VMsg::Pong(p.to_vec().into())).await; }
                 _ => break,
             },
             msg = vite.next() => match msg {
-                Some(Ok(VMsg::Text(t)))   => { let _ = browser.send(BMsg::Text(t.as_str().into())).await; }
-                Some(Ok(VMsg::Binary(b))) => { let _ = browser.send(BMsg::Binary(b.to_vec().into())).await; }
-                Some(Ok(VMsg::Ping(p)))   => { let _ = browser.send(BMsg::Ping(p.to_vec().into())).await; }
-                Some(Ok(VMsg::Pong(p)))   => { let _ = browser.send(BMsg::Pong(p.to_vec().into())).await; }
+                Some(Ok(VMsg::Text(t)))   => { _ = browser.send(BMsg::Text(t.as_str().into())).await; }
+                Some(Ok(VMsg::Binary(b))) => { _ = browser.send(BMsg::Binary(b.to_vec().into())).await; }
+                Some(Ok(VMsg::Ping(p)))   => { _ = browser.send(BMsg::Ping(p.to_vec().into())).await; }
+                Some(Ok(VMsg::Pong(p)))   => { _ = browser.send(BMsg::Pong(p.to_vec().into())).await; }
                 _ => break,
             },
         }
     }
 
-    let _ = browser.close().await;
+    _ = browser.close().await;
 }
 
 /// Build the axum `Router` — exposed so integration tests can call it directly.

@@ -61,17 +61,17 @@ impl Write for BufferWriter {
 /// Helper: write formatted output to a sink (replaces print!/println! for redirectable output).
 pub fn sink_write(sink: &OutputSink, data: &str) {
     if let Ok(mut w) = sink.lock() {
-        let _ = w.write_all(data.as_bytes());
-        let _ = w.flush();
+        _ = w.write_all(data.as_bytes());
+        _ = w.flush();
     }
 }
 
 /// Helper: write formatted output to a sink with trailing newline.
 pub fn sink_writeln(sink: &OutputSink, data: &str) {
     if let Ok(mut w) = sink.lock() {
-        let _ = w.write_all(data.as_bytes());
-        let _ = w.write_all(b"\n");
-        let _ = w.flush();
+        _ = w.write_all(data.as_bytes());
+        _ = w.write_all(b"\n");
+        _ = w.flush();
     }
 }
 

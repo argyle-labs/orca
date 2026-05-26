@@ -171,7 +171,7 @@ pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
     for sub in ["client", "server"] {
         let d = mesh.join(sub);
         if d.exists() {
-            let _ = std::fs::remove_dir_all(&d);
+            _ = std::fs::remove_dir_all(&d);
         }
     }
     let conn = ::db::open_default()?;

@@ -37,7 +37,7 @@ fn load_oauth(service: &str) -> Option<db::oauth::TokenRow> {
 
 fn delete_oauth(service: &str) {
     if let Ok(conn) = open_db() {
-        let _ = db::oauth::delete(&conn, service);
+        _ = db::oauth::delete(&conn, service);
     }
 }
 
@@ -253,7 +253,7 @@ fn random_hex(bytes: usize) -> String {
     rand::rng().fill_bytes(&mut buf);
     buf.iter().fold(String::new(), |mut s, b| {
         use std::fmt::Write;
-        let _ = write!(s, "{b:02x}");
+        _ = write!(s, "{b:02x}");
         s
     })
 }
@@ -273,8 +273,8 @@ fn receive_callback(listener: TcpListener, expected_state: &str) -> Result<Strin
         "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    let _ = stream.write_all(response.as_bytes());
-    let _ = stream.write_all(body);
+    _ = stream.write_all(response.as_bytes());
+    _ = stream.write_all(body);
 
     let first_line = request.lines().next().unwrap_or("");
     let path = first_line.split_whitespace().nth(1).unwrap_or("");
@@ -300,7 +300,7 @@ fn receive_callback(listener: TcpListener, expected_state: &str) -> Result<Strin
 
 fn open_browser(url: &str) {
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(url).spawn();
+    _ = std::process::Command::new("open").arg(url).spawn();
     #[cfg(target_os = "linux")]
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]

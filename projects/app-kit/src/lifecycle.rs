@@ -161,7 +161,7 @@ mod tests {
         let v = env!("CARGO_PKG_VERSION");
         assert!(!v.is_empty());
         // Smoke-test the struct shape compiles + the Arc fields are wired.
-        let _ = std::mem::size_of::<OrcaAppKit>();
-        let _ = std::mem::size_of::<AppKitConfig>();
+        _ = std::mem::size_of::<OrcaAppKit>();
+        _ = std::mem::size_of::<AppKitConfig>();
     }
 }

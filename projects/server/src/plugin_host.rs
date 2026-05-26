@@ -229,7 +229,7 @@ pub fn global() -> Option<PluginRegistry> {
 /// silently ignored so duplicate `start()` invocations (dev rebuild paths) are
 /// safe.
 fn install_global(registry: PluginRegistry) -> PluginRegistry {
-    let _ = GLOBAL_REGISTRY.set(registry.clone());
+    _ = GLOBAL_REGISTRY.set(registry.clone());
     GLOBAL_REGISTRY.get().cloned().unwrap_or(registry)
 }
 
@@ -755,7 +755,7 @@ fn dispatch(state: &mut ConnState, frame: &[u8]) -> serde_json::Value {
             if let Some(id) = resp.id.as_u64() {
                 let tx = state.pending.lock().unwrap().remove(&id);
                 if let Some(tx) = tx {
-                    let _ = tx.send(resp);
+                    _ = tx.send(resp);
                 }
             }
             json!(null)
@@ -1266,7 +1266,7 @@ fn handle_tools_invoke(
                 .expect("Response serializes")
             }
         };
-        let _ = outbound.send(resp_value);
+        _ = outbound.send(resp_value);
     });
 
     // Returning null suppresses the normal sync-write path; the spawned
@@ -1338,7 +1338,7 @@ fn handle_context_publish(
 
     let tx = state.registry.channel(&params.context_id);
     // Ignore SendError when no current subscribers — message is just dropped.
-    let _ = tx.send((params.context_id, params.value));
+    _ = tx.send((params.context_id, params.value));
     serde_json::to_value(Response::ok(id, json!({ "ok": true }))).expect("Response serializes")
 }
 

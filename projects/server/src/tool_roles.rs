@@ -14,7 +14,7 @@ static ROLES: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
 /// no-ops. Matches the registry's single-instance lifecycle.
 pub fn install(pairs: impl IntoIterator<Item = (&'static str, &'static str)>) {
     let map: HashMap<&'static str, &'static str> = pairs.into_iter().collect();
-    let _ = ROLES.set(map);
+    _ = ROLES.set(map);
 }
 
 /// Role required to invoke `tool` over an authenticated REST surface. Returns

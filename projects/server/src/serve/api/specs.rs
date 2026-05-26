@@ -335,7 +335,7 @@ pub async fn specs_get_handler(
     let exe = std::env::current_exe().unwrap_or_else(|_| "orca".into());
     let repo_clone = repo.clone();
     tokio::spawn(async move {
-        let _ = tokio::process::Command::new(&exe)
+        _ = tokio::process::Command::new(&exe)
             .args(["spec", "sync", &repo_clone])
             .output()
             .await;

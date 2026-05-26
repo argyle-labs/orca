@@ -187,7 +187,7 @@ async fn pull_one_peer_inner(peer_id: &str, addr: &str) -> Result<()> {
             .filter(|n| !n.trim().is_empty())
             .unwrap_or_else(|| pong.hostname.clone());
         let addressing = pong.addressing.clone();
-        let _ = tokio::task::spawn_blocking(move || -> Result<()> {
+        _ = tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = db::open_default()?;
             db::pod::update_hostname(&conn, &pid, &host)?;
             if let Some(snap) = addressing {
@@ -273,7 +273,7 @@ async fn pull_one_peer_inner(peer_id: &str, addr: &str) -> Result<()> {
                 Some(s) => serde_json::to_string(&s).unwrap_or_default(),
                 None => continue, // skip rows we can't decode
             };
-            let _ = db::host_status::insert_status(
+            _ = db::host_status::insert_status(
                 &conn,
                 &owner_peer_id,
                 row.snapshot_at_unix,

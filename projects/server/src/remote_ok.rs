@@ -11,7 +11,7 @@ static REMOTE_OK: OnceLock<HashSet<&'static str>> = OnceLock::new();
 /// are no-ops (matches the registry's single-instance lifecycle).
 pub fn install(names: impl IntoIterator<Item = &'static str>) {
     let set: HashSet<&'static str> = names.into_iter().collect();
-    let _ = REMOTE_OK.set(set);
+    _ = REMOTE_OK.set(set);
 }
 
 /// True if a paired peer may invoke `tool` via `pod/exec`. Returns false
