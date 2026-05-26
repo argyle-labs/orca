@@ -347,7 +347,7 @@ pub async fn boot_observation_host(
             let event_tx = event_tx.clone();
             tokio::spawn(async move {
                 if let Ok(tls) = acceptor.accept(tcp).await {
-                    let _ = handle_observation_conn(tls, event_tx).await;
+                    handle_observation_conn(tls, event_tx).await.ok();
                 }
             });
         }
@@ -422,7 +422,7 @@ async fn handle_observation_conn(
                             plugins_required: vec![],
                             plugins_optional: vec![],
                         });
-                        let _ = event_tx.send(Event::Hello(params.clone()));
+                        event_tx.send(Event::Hello(params.clone())).ok();
                         hello_seen = true;
                         let result = HelloResult {
                             server_version: crate::SDK_VERSION.to_string(),
@@ -454,7 +454,7 @@ async fn handle_observation_conn(
                                 .iter()
                                 .map(|t| format!("{plugin_id}.{}", t.type_name))
                                 .collect();
-                            let _ = event_tx.send(Event::TypesDeclared(params.types));
+                            event_tx.send(Event::TypesDeclared(params.types)).ok();
                             Response::ok(
                                 id,
                                 serde_json::to_value(&TypesDeclareResult { accepted })?,
@@ -470,10 +470,12 @@ async fn handle_observation_conn(
                         } else {
                             let params: ContextPublishParams =
                                 serde_json::from_value(req.params.unwrap_or_default())?;
-                            let _ = event_tx.send(Event::Published {
-                                context_id: params.context_id,
-                                value: params.value,
-                            });
+                            event_tx
+                                .send(Event::Published {
+                                    context_id: params.context_id,
+                                    value: params.value,
+                                })
+                                .ok();
                             Response::ok(id, serde_json::json!({"ok": true}))
                         }
                     }
@@ -492,7 +494,7 @@ async fn handle_observation_conn(
                                 .iter()
                                 .map(|t| format!("{plugin_id}.{}", t.name))
                                 .collect();
-                            let _ = event_tx.send(Event::ToolsDeclared(params.tools));
+                            event_tx.send(Event::ToolsDeclared(params.tools)).ok();
                             Response::ok(
                                 id,
                                 serde_json::to_value(&ToolsDeclareResult { accepted })?,
@@ -539,7 +541,7 @@ async fn handle_observation_conn(
                         (_, Some(e)) => (None, Some(e.message)),
                         _ => (None, Some("response missing both result and error".into())),
                     };
-                    let _ = event_tx.send(Event::ToolCallResult { result, error });
+                    event_tx.send(Event::ToolCallResult { result, error }).ok();
                 }
             }
             Message::Notification(_) => {}
@@ -556,7 +558,7 @@ pub async fn collect_observations(
 ) -> Observations {
     let obs = Arc::new(StdMutex::new(Observations::default()));
     let obs_inner = obs.clone();
-    let _ = tokio::time::timeout(timeout, async move {
+    tokio::time::timeout(timeout, async move {
         while let Some(event) = rx.recv().await {
             let mut o = obs_inner.lock().unwrap();
             match event {
@@ -579,7 +581,8 @@ pub async fn collect_observations(
             }
         }
     })
-    .await;
+    .await
+    .ok();
 
     Arc::try_unwrap(obs).unwrap().into_inner().unwrap()
 }
@@ -650,7 +653,7 @@ pub async fn run_subprocess(cfg: SubprocessConfig) -> Result<Report> {
     // has seen hello + types.declare + publish, even if the plugin is still
     // alive (e.g. holding the connection open).
     let plugin_handle = tokio::spawn(async move {
-        let _ = child.wait().await;
+        child.wait().await.ok();
     });
     let observations = observe.await;
     plugin_handle.abort();
@@ -668,7 +671,9 @@ mod tests {
     use std::sync::Arc;
 
     fn install_ring() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
     }
 
     // ── Pure checker tests ───────────────────────────────────────────────────

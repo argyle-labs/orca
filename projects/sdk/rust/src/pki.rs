@@ -14,6 +14,7 @@ use rcgen::{
     Issuer, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, PKCS_ED25519, SanType,
 };
 use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
@@ -1125,8 +1126,7 @@ pub fn bootstrap_pubkey_fingerprint(verifying: &ed25519_dalek::VerifyingKey) -> 
     let d = h.finalize();
     let mut s = String::with_capacity(32);
     for b in &d[..16] {
-        use std::fmt::Write;
-        let _ = write!(s, "{b:02x}");
+        write!(s, "{b:02x}").unwrap();
     }
     s
 }
@@ -1151,7 +1151,7 @@ pub fn load_or_init_bootstrap_cert(pki_dir: &Path) -> Result<(String, String)> {
     let key_path = bootstrap_key_path(pki_dir);
 
     // Ensure the key exists; the cert without the key would be useless.
-    let _ = load_or_init_bootstrap_key(pki_dir)?;
+    load_or_init_bootstrap_key(pki_dir)?;
     let key_pem = std::fs::read_to_string(&key_path).context("read bootstrap key")?;
 
     if cert_path.exists() {
@@ -1318,8 +1318,7 @@ pub fn spki_fingerprint_der(cert_der: &[u8]) -> Result<String> {
     let d = h.finalize();
     let mut s = String::with_capacity(32);
     for b in &d[..16] {
-        use std::fmt::Write;
-        let _ = write!(s, "{b:02x}");
+        write!(s, "{b:02x}").unwrap();
     }
     Ok(s)
 }
@@ -1425,8 +1424,7 @@ pub fn cert_fingerprint(cert_pem: &str) -> Result<String> {
         if i > 0 {
             s.push(':');
         }
-        use std::fmt::Write;
-        let _ = write!(s, "{b:02X}");
+        write!(s, "{b:02X}").unwrap();
     }
     Ok(s)
 }

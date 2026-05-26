@@ -295,13 +295,13 @@ impl TcpTransport {
                         if let Some(id) = r.id.as_u64() {
                             let tx = demux_for_task.pending.lock().unwrap().remove(&id);
                             if let Some(tx) = tx {
-                                let _ = tx.send(r);
+                                tx.send(r).ok();
                             }
                         }
                     }
                     Message::Notification(n) => {
                         // ignore the SendError when nobody is subscribed
-                        let _ = demux_for_task.notifications.send(n);
+                        demux_for_task.notifications.send(n).ok();
                     }
                     Message::Request(req) => {
                         // Spawn a per-request task so a slow handler doesn't
@@ -317,7 +317,9 @@ impl TcpTransport {
                                 Ok(b) => b,
                                 Err(_) => return,
                             };
-                            let _ = write_frame(&mut *writer_for_req.lock().await, &bytes).await;
+                            write_frame(&mut *writer_for_req.lock().await, &bytes)
+                                .await
+                                .ok();
                         });
                     }
                 }
