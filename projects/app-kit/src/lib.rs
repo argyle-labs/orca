@@ -24,8 +24,8 @@ uniffi::setup_scaffolding!();
 // linker would drop unused crates and lose `#[orca_tool]` entries.
 #[allow(unused_imports)]
 use {
-    agents as _, auth as _, docker as _, docs as _, fleet as _, homeassistant as _, infra as _,
-    mgmt as _, orca_dispatch as _, platform as _, plugins as _, proxmox as _,
+    agents as _, auth as _, docker as _, docs as _, fleet as _, homeassistant as _, mgmt as _,
+    orca_dispatch as _, platform as _, plugins as _, proxmox as _,
 };
 
 pub mod lifecycle;

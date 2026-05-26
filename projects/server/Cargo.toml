@@ -42,7 +42,6 @@ agents   = { path = "../agents",   features = ["native", "cli"] }
 plugins  = { path = "../plugins",  features = ["native", "cli"] }
 docs     = { path = "../docs",     features = ["native", "cli"] }
 mgmt     = { path = "../mgmt",     features = ["native", "cli"] }
-infra    = { path = "../infra",    features = ["native", "cli"] }
 # Integration crates (flat names, no facade)
 docker        = { path = "../integrations/docker",        features = ["native", "cli"] }
 dockge        = { path = "../integrations/dockge" }
