@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use db::ports::mesh_port;
 use orca_sdk::pki;
 use orca_tools_def::pod::{
     CertInfo, PodAcceptOutput, PodCertStatusOutput, PodDiscoveryRowDto, PodExecDispatch,
@@ -8,6 +9,8 @@ use orca_tools_def::pod::{
 };
 use std::time::Instant;
 
+use crate::commands::pod::dial_bootstrap_pub;
+use crate::pod::scheduler::{OFFER_TTL_SECS, mint_pairing_code, push_offer};
 use crate::pod::{db as pdb, pki_dir};
 
 pub struct ServerPod;
@@ -57,7 +60,6 @@ impl PodService for ServerPod {
         };
         let env = pki::sign_envelope(&signing, &body)?;
 
-        use crate::commands::pod::dial_bootstrap_pub;
         let resp_value = dial_bootstrap_pub(
             &offer.peer_addr,
             offer.peer_port,
