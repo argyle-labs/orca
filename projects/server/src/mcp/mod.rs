@@ -398,7 +398,10 @@ fn is_plugin_tool(fq_name: &str) -> bool {
 
 async fn call_plugin_tool(fq_name: &str, args: &Value) -> Result<Value> {
     use anyhow::Context;
-    let url = format!("{PLUGIN_TOOL_HTTP}/api/plugin-tools/{fq_name}/call");
+    let url = format!(
+        "{}/api/plugin-tools/{fq_name}/call",
+        plugin_tool_http_base()
+    );
     let body = json!({ "arguments": args.clone() });
     // Loopback HTTPS to the same-process daemon: self-signed core-CA cert,
     // accept invalid so we don't have to thread the CA root through here.
@@ -478,12 +481,12 @@ mod tests {
 
     #[test]
     fn plugin_tool_http_is_loopback() {
-        // Verify that PLUGIN_TOOL_HTTP never accidentally gets changed to a non-loopback address.
+        // The dispatch base must stay loopback regardless of which port the
+        // operator overrode — it's the same-process daemon, not a peer.
+        let base = plugin_tool_http_base();
         assert!(
-            PLUGIN_TOOL_HTTP.contains("127.0.0.1")
-                || PLUGIN_TOOL_HTTP.contains("localhost")
-                || PLUGIN_TOOL_HTTP.contains("[::1]"),
-            "PLUGIN_TOOL_HTTP must target loopback: {PLUGIN_TOOL_HTTP}"
+            base.contains("127.0.0.1") || base.contains("localhost") || base.contains("[::1]"),
+            "plugin_tool_http_base must target loopback: {base}"
         );
     }
 }
