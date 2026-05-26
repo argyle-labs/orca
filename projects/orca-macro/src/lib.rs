@@ -26,9 +26,10 @@
 //! ctx: &ToolCtx) -> Result<O>` form. Named-parameter expansion can be added
 //! later by destructuring `args` inside the thunk.
 //!
-//! Scope note: this proc-macro emits paths into `orca-contract` (cold types
-//! + trait anchors) and `orca-dispatch` (runtime). It never refers back to
-//! the prior `orca-tool` crate, which has been dissolved into those two.
+//! Scope note: this proc-macro emits paths into `orca-contract` (cold
+//! types + trait anchors) and `orca-dispatch` (runtime). It never refers
+//! back to the prior `orca-tool` crate, which has been dissolved into
+//! those two.
 
 #[cfg(not(test))]
 use proc_macro::TokenStream;

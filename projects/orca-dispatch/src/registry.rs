@@ -419,7 +419,9 @@ mod tests {
         // Build an args map exactly the way CliArgs::Pairs would and prove
         // numeric coercion picks i64 over string.
         let pairs = CliArgs::Pairs(vec!["a=5".into(), "b=3".into()]);
-        let CliArgs::Pairs(p) = &pairs else { unreachable!() };
+        let CliArgs::Pairs(p) = &pairs else {
+            unreachable!()
+        };
         let mut map = serde_json::Map::new();
         for pair in p {
             let (k, v) = pair.split_once('=').unwrap();

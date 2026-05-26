@@ -26,6 +26,6 @@ mod registry;
 pub use erased::{ErasedTool, ToolWrapper, value_to_text};
 pub use inventory_slice::ToolRegistration;
 pub use registry::{
-    CliArgs, axum_router, cli_dispatch, clap_command, dispatch, dispatch_text, mcp_definitions,
+    CliArgs, axum_router, clap_command, cli_dispatch, dispatch, dispatch_text, mcp_definitions,
     names, remote_ok_names, required_role, role_table,
 };
