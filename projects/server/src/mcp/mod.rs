@@ -69,16 +69,11 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     let system_svc: Arc<dyn fleet::system::SystemService> =
         Arc::new(crate::services::system::ServerSystem);
     ctx.register_service(system_svc);
-    let auth_svc: Arc<dyn auth::auth::AuthService> = Arc::new(crate::services::auth::ServerAuth);
-    ctx.register_service(auth_svc);
     let profile_svc: Arc<dyn platform::profile::ProfileService> =
         Arc::new(crate::services::profile::ServerProfile {
             config: ctx.config.clone(),
         });
     ctx.register_service(profile_svc);
-    let secrets_svc: Arc<dyn auth::secrets::SecretsService> =
-        Arc::new(crate::services::secrets::DbSecretsService::new());
-    ctx.register_service(secrets_svc.clone());
     // Host-addressing refresh hook: host.refresh tool calls into this to
     // trigger a fresh detect + persist before reading host_addressing rows.
     let host_refresh: Arc<dyn fleet::host::HostRefreshHook + Send + Sync> =
@@ -89,7 +84,6 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     let lifecycle_svc: Arc<dyn fleet::lifecycle::LifecycleService> =
         Arc::new(crate::services::lifecycle::ServerLifecycle {
             config: ctx.config.clone(),
-            secrets: secrets_svc,
         });
     ctx.register_service(lifecycle_svc);
     {

@@ -3,7 +3,6 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use auth::secrets::SecretsService;
 use fleet::lifecycle::LifecycleService;
 use fleet::lifecycle::{
     DoctorEntry, DoctorReport, LifecycleReport, ProjectsListReport, RuntimeSpecReport,
@@ -18,10 +17,10 @@ use crate::commands::update::{
     resolve_channel, resolve_pin_veto, write_channel_marker,
 };
 
-/// Resolve the GitHub bearer token: prefer the `github_token` secret managed
-/// by `SecretsService`; fall back to `GITHUB_TOKEN` env var for bootstrap.
-async fn resolve_github_token(secrets: &Arc<dyn SecretsService>) -> Option<String> {
-    if let Ok((_backend, v)) = secrets.get("github_token").await
+/// Resolve the GitHub bearer token: prefer the `github_token` secret;
+/// fall back to `GITHUB_TOKEN` env var for bootstrap.
+async fn resolve_github_token() -> Option<String> {
+    if let Ok((_backend, v)) = auth::secrets::get_secret("github_token").await
         && !v.is_empty()
     {
         return Some(v);
@@ -39,7 +38,6 @@ fn convert_install(rep: InstallReport) -> LifecycleReport {
 
 pub struct ServerLifecycle {
     pub config: Arc<Config>,
-    pub secrets: Arc<dyn SecretsService>,
 }
 
 #[async_trait]
@@ -205,7 +203,7 @@ impl LifecycleService for ServerLifecycle {
             skipped: vec![],
             errors: vec![],
         };
-        let token = match resolve_github_token(&self.secrets).await {
+        let token = match resolve_github_token().await {
             Some(t) => t,
             None => {
                 report.errors.push(

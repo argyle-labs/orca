@@ -19,6 +19,5 @@ pub mod mgmt;
 pub mod plugins;
 pub mod pod;
 pub mod profile;
-pub mod secrets;
 pub mod spec_registry;
 pub mod system;
