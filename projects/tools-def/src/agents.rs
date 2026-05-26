@@ -5,6 +5,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::orca_tool;
+#[cfg(feature = "native")]
+use crate::services::agents::AgentsService;
+#[cfg(feature = "native")]
+use std::sync::Arc;
 
 // ── Typed entities ──────────────────────────────────────────────────────────
 
@@ -114,20 +118,14 @@ pub struct SearchLogsOutput {
 
 // ── Native dispatch ─────────────────────────────────────────────────────────
 
-#[cfg(feature = "native")]
-fn agents_svc(
-    ctx: &orca_tool::ToolCtx,
-) -> anyhow::Result<std::sync::Arc<dyn crate::services::agents::AgentsService>> {
-    ctx.service::<std::sync::Arc<dyn crate::services::agents::AgentsService>>()
-}
-
 /// List all available orca agents with their names and descriptions.
 #[orca_tool(domain = "system.agent", verb = "list")]
 async fn list_agents(
     _args: ListAgentsArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ListAgentsOutput> {
-    let agents = agents_svc(ctx)?
+    let agents = ctx
+        .service::<Arc<dyn AgentsService>>()?
         .list_agents()
         .await?
         .into_iter()
@@ -143,7 +141,8 @@ async fn list_agents(
 /// agent programmatically via Agent(general-purpose, prompt=<result>+task).
 #[orca_tool(domain = "system.agent", verb = "get")]
 async fn get_agent(args: GetAgentArgs, ctx: &orca_tool::ToolCtx) -> anyhow::Result<GetAgentOutput> {
-    let prompt = agents_svc(ctx)?
+    let prompt = ctx
+        .service::<Arc<dyn AgentsService>>()?
         .get_agent_prompt(&args.name)
         .await?
         .ok_or_else(|| anyhow::anyhow!("agent not found: {}", args.name))?;
@@ -161,7 +160,7 @@ async fn get_config(
     args: GetConfigArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<GetConfigOutput> {
-    let s = agents_svc(ctx)?;
+    let s = ctx.service::<Arc<dyn AgentsService>>()?;
     let available = s.list_config_docs().await?;
     let content = if let Some(n) = args
         .name
@@ -187,7 +186,11 @@ async fn get_context(
     args: GetContextArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<GetContextOutput> {
-    match agents_svc(ctx)?.read_project_memory(&args.project).await? {
+    match ctx
+        .service::<Arc<dyn AgentsService>>()?
+        .read_project_memory(&args.project)
+        .await?
+    {
         Some(mem) => Ok(GetContextOutput {
             project: args.project,
             exists: true,
@@ -217,7 +220,10 @@ async fn search_logs(
     args: SearchLogsArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SearchLogsOutput> {
-    let data = agents_svc(ctx)?.search_logs(&args.query, 20).await?;
+    let data = ctx
+        .service::<Arc<dyn AgentsService>>()?
+        .search_logs(&args.query, 20)
+        .await?;
     let matches = data
         .matches
         .into_iter()

@@ -7,6 +7,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::orca_tool;
+#[cfg(feature = "native")]
+use crate::services::profile::ProfileService;
+#[cfg(feature = "native")]
+use std::sync::Arc;
 
 // ── Shared rows ─────────────────────────────────────────────────────────────
 
@@ -112,20 +116,13 @@ pub struct ProfileUnshareArgs {
 
 // ── Native dispatch ─────────────────────────────────────────────────────────
 
-#[cfg(feature = "native")]
-fn profile_svc(
-    ctx: &orca_tool::ToolCtx,
-) -> anyhow::Result<std::sync::Arc<dyn crate::services::profile::ProfileService>> {
-    ctx.service::<std::sync::Arc<dyn crate::services::profile::ProfileService>>()
-}
-
 /// List all profiles the current user can access (owned + shared).
 #[orca_tool(domain = "namespace", verb = "list")]
 async fn profile_list(
     _args: ProfileListArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ProfileListReport> {
-    profile_svc(ctx)?.list().await
+    ctx.service::<Arc<dyn ProfileService>>()?.list().await
 }
 
 /// Show details of a profile (defaults to the active one).
@@ -134,7 +131,9 @@ async fn profile_show(
     args: ProfileShowArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ProfileDetail> {
-    profile_svc(ctx)?.show(args.spec.as_deref()).await
+    ctx.service::<Arc<dyn ProfileService>>()?
+        .show(args.spec.as_deref())
+        .await
 }
 
 /// Show the currently active profile (or None).
@@ -143,7 +142,7 @@ async fn profile_current(
     _args: ProfileCurrentArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ProfileCurrentReport> {
-    profile_svc(ctx)?.current().await
+    ctx.service::<Arc<dyn ProfileService>>()?.current().await
 }
 
 /// [MUTATES STATE] Create a new profile owned by the current user.
@@ -152,7 +151,7 @@ async fn profile_create(
     args: ProfileCreateArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ProfileDetail> {
-    profile_svc(ctx)?
+    ctx.service::<Arc<dyn ProfileService>>()?
         .create(&args.name, args.description.as_deref())
         .await
 }
@@ -163,7 +162,9 @@ async fn profile_delete(
     args: ProfileSpecArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ProfileMutationResult> {
-    profile_svc(ctx)?.delete(&args.spec).await
+    ctx.service::<Arc<dyn ProfileService>>()?
+        .delete(&args.spec)
+        .await
 }
 
 /// [MUTATES STATE] Set the active profile for the current user.
@@ -172,7 +173,9 @@ async fn profile_use(
     args: ProfileSpecArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ProfileMutationResult> {
-    profile_svc(ctx)?.use_profile(&args.spec).await
+    ctx.service::<Arc<dyn ProfileService>>()?
+        .use_profile(&args.spec)
+        .await
 }
 
 /// [MUTATES STATE] Share a profile with another user.
@@ -181,7 +184,7 @@ async fn profile_share_create(
     args: ProfileShareArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ProfileMutationResult> {
-    profile_svc(ctx)?
+    ctx.service::<Arc<dyn ProfileService>>()?
         .share(&args.spec, &args.user, &args.role)
         .await
 }
@@ -192,7 +195,9 @@ async fn profile_share_delete(
     args: ProfileUnshareArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ProfileMutationResult> {
-    profile_svc(ctx)?.unshare(&args.spec, &args.user).await
+    ctx.service::<Arc<dyn ProfileService>>()?
+        .unshare(&args.spec, &args.user)
+        .await
 }
 
 /// List shares on a profile (owner only).
@@ -201,5 +206,7 @@ async fn profile_share_list(
     args: ProfileSpecArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ProfileSharesReport> {
-    profile_svc(ctx)?.shares(&args.spec).await
+    ctx.service::<Arc<dyn ProfileService>>()?
+        .shares(&args.spec)
+        .await
 }

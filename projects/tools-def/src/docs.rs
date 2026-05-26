@@ -5,6 +5,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::orca_tool;
+#[cfg(feature = "native")]
+use crate::services::docs::DocsService;
+#[cfg(feature = "native")]
+use std::sync::Arc;
 
 // ── Typed entities ──────────────────────────────────────────────────────────
 
@@ -149,13 +153,6 @@ pub struct ListCommandsOutput {
 // ── Native dispatch ─────────────────────────────────────────────────────────
 
 #[cfg(feature = "native")]
-fn docs_svc(
-    ctx: &orca_tool::ToolCtx,
-) -> anyhow::Result<std::sync::Arc<dyn crate::services::docs::DocsService>> {
-    ctx.service::<std::sync::Arc<dyn crate::services::docs::DocsService>>()
-}
-
-#[cfg(feature = "native")]
 fn data_to_node(d: crate::services::docs::DocTreeNodeData) -> DocTreeNode {
     DocTreeNode {
         name: d.name,
@@ -177,7 +174,8 @@ async fn list_roots(
     _args: ListRootsArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ListRootsOutput> {
-    let roots = docs_svc(ctx)?
+    let roots = ctx
+        .service::<Arc<dyn DocsService>>()?
         .list_roots()
         .await?
         .into_iter()
@@ -195,7 +193,8 @@ async fn list_roots(
 /// subpath. Returns a typed tree of .md files.
 #[orca_tool(domain = "namespace.doc", verb = "tree")]
 async fn get_tree(args: GetTreeArgs, ctx: &orca_tool::ToolCtx) -> anyhow::Result<GetTreeOutput> {
-    let data = docs_svc(ctx)?
+    let data = ctx
+        .service::<Arc<dyn DocsService>>()?
         .get_tree(&args.root, args.path.as_deref())
         .await?;
     Ok(GetTreeOutput {
@@ -213,7 +212,10 @@ async fn get_full_tree(
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<GetFullTreeOutput> {
     let raw = args.raw.unwrap_or(false);
-    let data = docs_svc(ctx)?.get_full_tree(raw).await?;
+    let data = ctx
+        .service::<Arc<dyn DocsService>>()?
+        .get_full_tree(raw)
+        .await?;
     let roots = data
         .into_iter()
         .map(|r| DocRootTreeEntry {
@@ -229,7 +231,10 @@ async fn get_full_tree(
 #[orca_tool(domain = "namespace.doc", verb = "read")]
 async fn read_doc(args: ReadDocArgs, ctx: &orca_tool::ToolCtx) -> anyhow::Result<ReadDocOutput> {
     let llm = args.format.as_deref() == Some("llm");
-    let content = docs_svc(ctx)?.read_doc(&args.root, &args.path, llm).await?;
+    let content = ctx
+        .service::<Arc<dyn DocsService>>()?
+        .read_doc(&args.root, &args.path, llm)
+        .await?;
     Ok(ReadDocOutput {
         root: args.root,
         path: args.path,
@@ -245,7 +250,10 @@ async fn search_docs(
 ) -> anyhow::Result<SearchDocsOutput> {
     let filter = args.root.as_deref().unwrap_or("all");
     let llm = args.format.as_deref() == Some("llm");
-    let data = docs_svc(ctx)?.search_docs(&args.query, filter, llm).await?;
+    let data = ctx
+        .service::<Arc<dyn DocsService>>()?
+        .search_docs(&args.query, filter, llm)
+        .await?;
     let hits = data
         .hits
         .into_iter()
@@ -275,6 +283,9 @@ async fn list_commands(
     _args: ListCommandsArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ListCommandsOutput> {
-    let commands = docs_svc(ctx)?.list_commands().await?;
+    let commands = ctx
+        .service::<Arc<dyn DocsService>>()?
+        .list_commands()
+        .await?;
     Ok(ListCommandsOutput { commands })
 }

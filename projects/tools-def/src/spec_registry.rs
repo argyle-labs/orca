@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::orca_tool;
+#[cfg(feature = "native")]
+use crate::services::spec_registry::SpecRegistryService;
+#[cfg(feature = "native")]
+use std::sync::Arc;
 
 // ── Shared row shapes ───────────────────────────────────────────────────────
 
@@ -247,20 +251,16 @@ pub use proxy_graphql_args_mod::ProxyGraphqlArgs;
 // Native dispatch
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg(feature = "native")]
-fn svc(
-    ctx: &orca_tool::ToolCtx,
-) -> anyhow::Result<std::sync::Arc<dyn crate::services::spec_registry::SpecRegistryService>> {
-    ctx.service::<std::sync::Arc<dyn crate::services::spec_registry::SpecRegistryService>>()
-}
-
 /// List every registered OpenAPI / GraphQL spec — filesystem-resident, DB-backed, and plugin-declared — with per-source metadata.
 #[orca_tool(domain = "namespace.spec", verb = "list")]
 async fn list_specs(
     _args: ListSpecsArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ListSpecsOutput> {
-    let specs = svc(ctx)?.list_specs().await?;
+    let specs = ctx
+        .service::<Arc<dyn SpecRegistryService>>()?
+        .list_specs()
+        .await?;
     Ok(ListSpecsOutput { specs })
 }
 
@@ -270,7 +270,10 @@ async fn list_db_specs(
     _args: ListDbSpecsArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ListDbSpecsOutput> {
-    let specs = svc(ctx)?.list_db_specs().await?;
+    let specs = ctx
+        .service::<Arc<dyn SpecRegistryService>>()?
+        .list_db_specs()
+        .await?;
     Ok(ListDbSpecsOutput { specs })
 }
 
@@ -280,7 +283,9 @@ async fn spec_create(
     args: RegisterSpecArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<RegisterSpecResult> {
-    svc(ctx)?.register_spec(&args.name, &args.url).await
+    ctx.service::<Arc<dyn SpecRegistryService>>()?
+        .register_spec(&args.name, &args.url)
+        .await
 }
 
 /// [MUTATES STATE] Re-fetch a previously-registered spec from its stored URL and update orca.db.
@@ -289,7 +294,9 @@ async fn refresh_spec(
     args: RefreshSpecArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<RegisterSpecResult> {
-    svc(ctx)?.refresh_spec(&args.name).await
+    ctx.service::<Arc<dyn SpecRegistryService>>()?
+        .refresh_spec(&args.name)
+        .await
 }
 
 /// [MUTATES STATE] Remove a spec from orca.db. Returns `removed: true` when a row was deleted.
@@ -298,7 +305,10 @@ async fn spec_delete(
     args: UnregisterSpecArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<UnregisterSpecOutput> {
-    let removed = svc(ctx)?.unregister_spec(&args.name).await?;
+    let removed = ctx
+        .service::<Arc<dyn SpecRegistryService>>()?
+        .unregister_spec(&args.name)
+        .await?;
     Ok(UnregisterSpecOutput { removed })
 }
 
@@ -308,7 +318,9 @@ async fn sync_mcp_specs(
     args: SyncMcpSpecsArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SyncMcpSpecsResult> {
-    svc(ctx)?.sync_mcp_specs(&args.server).await
+    ctx.service::<Arc<dyn SpecRegistryService>>()?
+        .sync_mcp_specs(&args.server)
+        .await
 }
 
 /// Parse the local `<repo>.graphql` SDL into a structured types/queries/mutations view.
@@ -317,7 +329,9 @@ async fn spec_graphql_detail(
     args: GetSpecGraphqlInfoArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<GraphQlInfoData> {
-    svc(ctx)?.graphql_info(&args.repo).await
+    ctx.service::<Arc<dyn SpecRegistryService>>()?
+        .graphql_info(&args.repo)
+        .await
 }
 
 /// Proxy a GraphQL request to a Shopify shop using the configured shop+token. Returns the raw upstream JSON body.
@@ -326,7 +340,7 @@ async fn spec_graphql_update(
     args: ProxyGraphqlArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<GraphqlProxyResult> {
-    svc(ctx)?
+    ctx.service::<Arc<dyn SpecRegistryService>>()?
         .proxy_graphql(
             &args.repo,
             &args.shop,

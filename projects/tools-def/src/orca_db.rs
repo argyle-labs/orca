@@ -4,6 +4,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::orca_tool;
+#[cfg(feature = "native")]
+use crate::services::db_admin::DbAdminService;
+#[cfg(feature = "native")]
+use std::sync::Arc;
 
 // ── Shared outputs ──────────────────────────────────────────────────────────
 
@@ -45,20 +49,13 @@ pub struct DbLifecycleUpdateArgs {
     pub action: String,
 }
 
-#[cfg(feature = "native")]
-fn db_svc(
-    ctx: &orca_tool::ToolCtx,
-) -> anyhow::Result<std::sync::Arc<dyn crate::services::db_admin::DbAdminService>> {
-    ctx.service::<std::sync::Arc<dyn crate::services::db_admin::DbAdminService>>()
-}
-
 /// Show current schema version and pending-migration count.
 #[orca_tool(domain = "system.db", verb = "detail")]
 async fn db_detail(
     _args: DbStatusArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<DbStatusReport> {
-    db_svc(ctx)?.status().await
+    ctx.service::<Arc<dyn DbAdminService>>()?.status().await
 }
 
 /// [MUTATES STATE] Drive the migration runner. `action`:
@@ -70,7 +67,7 @@ async fn db_lifecycle_update(
     args: DbLifecycleUpdateArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<DbMigrateReport> {
-    let s = db_svc(ctx)?;
+    let s = ctx.service::<Arc<dyn DbAdminService>>()?;
     match args.action.as_str() {
         "migrate" => s.migrate().await,
         "up" => s.up().await,

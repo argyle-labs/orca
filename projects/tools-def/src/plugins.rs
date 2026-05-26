@@ -4,6 +4,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::orca_tool;
+#[cfg(feature = "native")]
+use crate::services::plugins::PluginsService;
+#[cfg(feature = "native")]
+use std::sync::Arc;
 
 // ── Typed entities ──────────────────────────────────────────────────────────
 
@@ -125,20 +129,14 @@ pub struct SyncPluginCredsOutput {
 
 // ── Native dispatch ─────────────────────────────────────────────────────────
 
-#[cfg(feature = "native")]
-fn plugins_svc(
-    ctx: &orca_tool::ToolCtx,
-) -> anyhow::Result<std::sync::Arc<dyn crate::services::plugins::PluginsService>> {
-    ctx.service::<std::sync::Arc<dyn crate::services::plugins::PluginsService>>()
-}
-
 /// List all orca plugins registered in orca.db.
 #[orca_tool(domain = "system.plugin", verb = "list")]
 async fn list_plugins(
     args: ListPluginsArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ListPluginsOutput> {
-    let plugins = plugins_svc(ctx)?
+    let plugins = ctx
+        .service::<Arc<dyn PluginsService>>()?
         .list_plugins(args.workspace.as_deref())
         .await?
         .into_iter()
@@ -159,7 +157,8 @@ async fn add_plugin(
     args: AddPluginArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<AddPluginOutput> {
-    let id = plugins_svc(ctx)?
+    let id = ctx
+        .service::<Arc<dyn PluginsService>>()?
         .install_plugin(&args.manifest, args.instance_id.as_deref())
         .await?;
     Ok(AddPluginOutput { id })
@@ -171,7 +170,10 @@ async fn remove_plugin(
     args: PluginIdArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<PluginMutationResult> {
-    let changed = plugins_svc(ctx)?.remove_plugin(&args.id).await?;
+    let changed = ctx
+        .service::<Arc<dyn PluginsService>>()?
+        .remove_plugin(&args.id)
+        .await?;
     Ok(PluginMutationResult {
         id: args.id,
         changed,
@@ -184,7 +186,8 @@ async fn update_plugin(
     args: UpdatePluginArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<PluginMutationResult> {
-    let changed = plugins_svc(ctx)?
+    let changed = ctx
+        .service::<Arc<dyn PluginsService>>()?
         .set_plugin_enabled(&args.id, args.enabled)
         .await?;
     Ok(PluginMutationResult {
@@ -199,7 +202,8 @@ async fn plugin_cred_list(
     args: ListPluginCredsArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ListPluginCredsOutput> {
-    let credentials = plugins_svc(ctx)?
+    let credentials = ctx
+        .service::<Arc<dyn PluginsService>>()?
         .list_plugin_creds(&args.plugin)
         .await?
         .into_iter()
@@ -221,7 +225,7 @@ async fn plugin_cred_create(
     args: SetPluginCredArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<PluginCredMutationResult> {
-    plugins_svc(ctx)?
+    ctx.service::<Arc<dyn PluginsService>>()?
         .set_plugin_cred(&args.plugin, &args.key, &args.value)
         .await?;
     Ok(PluginCredMutationResult {
@@ -237,7 +241,8 @@ async fn plugin_cred_delete(
     args: RemovePluginCredArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<PluginCredMutationResult> {
-    let changed = plugins_svc(ctx)?
+    let changed = ctx
+        .service::<Arc<dyn PluginsService>>()?
         .remove_plugin_cred(&args.plugin, &args.key)
         .await?;
     Ok(PluginCredMutationResult {
@@ -253,7 +258,9 @@ async fn plugin_cred_sync(
     args: SyncPluginCredsArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SyncPluginCredsOutput> {
-    plugins_svc(ctx)?.sync_plugin_creds(&args.plugin).await?;
+    ctx.service::<Arc<dyn PluginsService>>()?
+        .sync_plugin_creds(&args.plugin)
+        .await?;
     Ok(SyncPluginCredsOutput {
         plugin: args.plugin,
     })

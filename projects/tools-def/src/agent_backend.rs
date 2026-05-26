@@ -4,6 +4,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::orca_tool;
+#[cfg(feature = "native")]
+use crate::services::agent_backend::AgentBackendService;
+#[cfg(feature = "native")]
+use std::sync::Arc;
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -91,13 +95,6 @@ pub struct AgentBackendStatusOutput {
     pub overrides: Vec<AgentBackendOverrideEntry>,
 }
 
-#[cfg(feature = "native")]
-fn svc(
-    ctx: &orca_tool::ToolCtx,
-) -> anyhow::Result<std::sync::Arc<dyn crate::services::agent_backend::AgentBackendService>> {
-    ctx.service::<std::sync::Arc<dyn crate::services::agent_backend::AgentBackendService>>()
-}
-
 /// [MUTATES STATE] Remove the stored Anthropic API key from the encrypted orca DB.
 #[orca_tool(domain = "system.agent.backend", verb = "clear-key")]
 async fn agent_backend_clear_api_key(
@@ -142,7 +139,10 @@ async fn agent_backend_set_mode(
     args: SetModeArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SetModeResult> {
-    let mode = svc(ctx)?.set_mode(&args.mode).await?;
+    let mode = ctx
+        .service::<Arc<dyn AgentBackendService>>()?
+        .set_mode(&args.mode)
+        .await?;
     Ok(SetModeResult { mode })
 }
 
@@ -152,7 +152,7 @@ async fn agent_backend_override(
     args: OverrideArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<OverrideResult> {
-    let s = svc(ctx)?;
+    let s = ctx.service::<Arc<dyn AgentBackendService>>()?;
     if args.backend == "clear" {
         let removed = s.clear_override(&args.agent).await?;
         return Ok(OverrideResult {
@@ -178,7 +178,9 @@ async fn agent_backend_use_server_anthropic(
     args: UseServerAnthropicArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<UseServerAnthropicResult> {
-    svc(ctx)?.set_use_server_anthropic(args.enabled).await?;
+    ctx.service::<Arc<dyn AgentBackendService>>()?
+        .set_use_server_anthropic(args.enabled)
+        .await?;
     Ok(UseServerAnthropicResult {
         enabled: args.enabled,
     })
@@ -190,7 +192,7 @@ async fn agent_backend_detail(
     _args: AgentBackendStatusArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<AgentBackendStatusOutput> {
-    let s = svc(ctx)?;
+    let s = ctx.service::<Arc<dyn AgentBackendService>>()?;
     let mode = s.current_mode().await?;
     let use_server_anthropic = s.use_server_anthropic().await?;
     let api_key_in_db = s.api_key_present().await?;

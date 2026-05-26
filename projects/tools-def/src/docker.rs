@@ -5,6 +5,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::orca_tool;
+#[cfg(feature = "native")]
+use crate::services::docker::DockerService;
+#[cfg(feature = "native")]
+use std::sync::Arc;
 
 // ── Shared row shapes ───────────────────────────────────────────────────────
 
@@ -148,20 +152,15 @@ pub struct DockerStatsOutput {
 
 // ── Native dispatch ─────────────────────────────────────────────────────────
 
-#[cfg(feature = "native")]
-fn docker_svc(
-    ctx: &orca_tool::ToolCtx,
-) -> anyhow::Result<std::sync::Arc<dyn crate::services::docker::DockerService>> {
-    ctx.service::<std::sync::Arc<dyn crate::services::docker::DockerService>>()
-}
-
 /// Probe the local docker engine (colima | desktop | none) and whether it is running.
 #[orca_tool(domain = "docker.engine", verb = "detail")]
 async fn docker_engine_detail(
     _args: GetDockerEngineArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<DockerEngineStatus> {
-    docker_svc(ctx)?.engine_status().await
+    ctx.service::<Arc<dyn DockerService>>()?
+        .engine_status()
+        .await
 }
 
 /// [MUTATES STATE] Start the local docker engine. Returns the start-command output.
@@ -170,7 +169,10 @@ async fn docker_engine_update(
     _args: StartDockerEngineArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<StartDockerEngineOutput> {
-    let output = docker_svc(ctx)?.engine_start().await?;
+    let output = ctx
+        .service::<Arc<dyn DockerService>>()?
+        .engine_start()
+        .await?;
     Ok(StartDockerEngineOutput { output })
 }
 
@@ -181,7 +183,9 @@ async fn docker_service_list(
     args: GetDockerServicesArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<DockerServicesView> {
-    docker_svc(ctx)?.services(&args.path).await
+    ctx.service::<Arc<dyn DockerService>>()?
+        .services(&args.path)
+        .await
 }
 
 /// [MUTATES STATE] Run a docker-compose lifecycle action against the compose
@@ -191,7 +195,7 @@ async fn docker_service_update(
     args: RunDockerActionArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<DockerActionResult> {
-    docker_svc(ctx)?
+    ctx.service::<Arc<dyn DockerService>>()?
         .action(
             &args.project_path,
             &args.action,
@@ -209,7 +213,8 @@ async fn docker_service_detail(
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<GetLogsOutput> {
     let tail = args.tail.unwrap_or(200);
-    let output = docker_svc(ctx)?
+    let output = ctx
+        .service::<Arc<dyn DockerService>>()?
         .logs(&args.project, args.service.as_deref(), tail)
         .await?;
     Ok(GetLogsOutput { output })
@@ -222,7 +227,10 @@ async fn docker_service_list_logs(
     _args: GetLogServicesArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<GetLogServicesOutput> {
-    let projects = docker_svc(ctx)?.log_services().await?;
+    let projects = ctx
+        .service::<Arc<dyn DockerService>>()?
+        .log_services()
+        .await?;
     Ok(GetLogServicesOutput { projects })
 }
 
@@ -233,6 +241,9 @@ async fn docker_service_list_stats(
     _args: DockerStatsArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<DockerStatsOutput> {
-    let containers = docker_svc(ctx)?.container_stats().await?;
+    let containers = ctx
+        .service::<Arc<dyn DockerService>>()?
+        .container_stats()
+        .await?;
     Ok(DockerStatsOutput { containers })
 }

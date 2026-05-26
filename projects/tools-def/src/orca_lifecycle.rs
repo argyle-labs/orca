@@ -5,6 +5,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::orca_tool;
+#[cfg(feature = "native")]
+use crate::services::lifecycle::LifecycleService;
+#[cfg(feature = "native")]
+use std::sync::Arc;
 
 // ── Shared outputs ──────────────────────────────────────────────────────────
 
@@ -316,20 +320,13 @@ pub struct SystemUpdateArgs {
 
 // ── Tools ───────────────────────────────────────────────────────────────────
 
-#[cfg(feature = "native")]
-fn svc(
-    ctx: &orca_tool::ToolCtx,
-) -> anyhow::Result<std::sync::Arc<dyn crate::services::lifecycle::LifecycleService>> {
-    ctx.service::<std::sync::Arc<dyn crate::services::lifecycle::LifecycleService>>()
-}
-
 /// [MUTATES STATE] Install orca on this host: wire symlinks, register MCP server, install binary.
 #[orca_tool(domain = "system", verb = "create")]
 async fn system_create(
     _args: EmptyDeleteArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<LifecycleReport> {
-    svc(ctx)?.install().await
+    ctx.service::<Arc<dyn LifecycleService>>()?.install().await
 }
 
 /// [MUTATES STATE] Update orca on this host.
@@ -347,7 +344,7 @@ async fn system_update(
     args: SystemUpdateArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<LifecycleReport> {
-    let s = svc(ctx)?;
+    let s = ctx.service::<Arc<dyn LifecycleService>>()?;
     if let Some(ref v) = args.version {
         s.set_version(v).await?;
     }
@@ -360,7 +357,9 @@ async fn system_delete(
     _args: EmptyDeleteArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<LifecycleReport> {
-    svc(ctx)?.uninstall().await
+    ctx.service::<Arc<dyn LifecycleService>>()?
+        .uninstall()
+        .await
 }
 
 /// Validate agent files, symlinks, config, tool availability — returns ok/warn/error entries.
@@ -369,7 +368,7 @@ async fn system_diagnostic_list(
     _args: SystemDoctorArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<DoctorReport> {
-    svc(ctx)?.doctor().await
+    ctx.service::<Arc<dyn LifecycleService>>()?.doctor().await
 }
 
 /// List projects (memory directories under the orca vault root).
@@ -378,7 +377,9 @@ async fn projects_list(
     _args: ProjectsListArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<ProjectsListReport> {
-    svc(ctx)?.projects_list().await
+    ctx.service::<Arc<dyn LifecycleService>>()?
+        .projects_list()
+        .await
 }
 
 /// Dump orca's own OpenAPI JSON document. Used by build pipelines that don't want to spin up the HTTP server.
@@ -387,7 +388,9 @@ async fn spec_detail(
     _args: SpecDumpArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SpecDumpReport> {
-    svc(ctx)?.spec_dump().await
+    ctx.service::<Arc<dyn LifecycleService>>()?
+        .spec_dump()
+        .await
 }
 
 #[cfg(all(test, feature = "native"))]

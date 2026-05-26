@@ -9,6 +9,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::orca_tool;
+#[cfg(feature = "native")]
+use crate::services::secrets::SecretsService;
+#[cfg(feature = "native")]
+use std::sync::Arc;
 
 // ── Shared types ────────────────────────────────────────────────────────────
 
@@ -122,20 +126,13 @@ pub struct SecretBackendsReport {
 
 // ── Native dispatch ─────────────────────────────────────────────────────────
 
-#[cfg(feature = "native")]
-fn secrets_svc(
-    ctx: &orca_tool::ToolCtx,
-) -> anyhow::Result<std::sync::Arc<dyn crate::services::secrets::SecretsService>> {
-    ctx.service::<std::sync::Arc<dyn crate::services::secrets::SecretsService>>()
-}
-
 /// List configured secrets (names + backends + metadata). Never returns values.
 #[orca_tool(domain = "system.secret", verb = "list")]
 async fn secret_list(
     _args: SecretListArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SecretListReport> {
-    let secrets = secrets_svc(ctx)?.list().await?;
+    let secrets = ctx.service::<Arc<dyn SecretsService>>()?.list().await?;
     Ok(SecretListReport { secrets })
 }
 
@@ -145,7 +142,10 @@ async fn secret_detail(
     args: SecretGetArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SecretGetReport> {
-    let (backend, value) = secrets_svc(ctx)?.get(&args.name).await?;
+    let (backend, value) = ctx
+        .service::<Arc<dyn SecretsService>>()?
+        .get(&args.name)
+        .await?;
     Ok(SecretGetReport {
         name: args.name,
         backend,
@@ -167,7 +167,7 @@ async fn secret_set(
     args: SecretSetArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SecretMutationReport> {
-    secrets_svc(ctx)?.set(args).await
+    ctx.service::<Arc<dyn SecretsService>>()?.set(args).await
 }
 
 /// [MUTATES STATE] Remove a secret. The inline value is zeroed; for external backends
@@ -177,7 +177,10 @@ async fn secret_delete(
     args: SecretDeleteArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SecretDeleteReport> {
-    let removed = secrets_svc(ctx)?.delete(&args.name).await?;
+    let removed = ctx
+        .service::<Arc<dyn SecretsService>>()?
+        .delete(&args.name)
+        .await?;
     Ok(SecretDeleteReport {
         name: args.name,
         removed,
@@ -190,6 +193,6 @@ async fn secret_backends(
     _args: SecretBackendsArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SecretBackendsReport> {
-    let backends = secrets_svc(ctx)?.backends().await;
+    let backends = ctx.service::<Arc<dyn SecretsService>>()?.backends().await;
     Ok(SecretBackendsReport { backends })
 }

@@ -81,20 +81,13 @@ pub struct SystemStatusReport {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SystemStatusArgs {}
 
-#[cfg(feature = "native")]
-fn svc(
-    ctx: &orca_tool::ToolCtx,
-) -> anyhow::Result<std::sync::Arc<dyn crate::services::system::SystemService>> {
-    ctx.service::<std::sync::Arc<dyn crate::services::system::SystemService>>()
-}
-
 /// Snapshot of orca's installation: binary, ~/.claude/CLAUDE.md, vault dir, agents symlink, PKI init, MCP registration.
 #[orca_tool(domain = "system", verb = "detail", remote_ok = true)]
 async fn system_detail(
     _args: SystemStatusArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SystemStatusReport> {
-    svc(ctx)?.status().await
+    ctx.service::<Arc<dyn SystemService>>()?.status().await
 }
 
 #[cfg(all(test, feature = "native"))]

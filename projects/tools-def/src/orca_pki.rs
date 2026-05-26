@@ -4,6 +4,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::orca_tool;
+#[cfg(feature = "native")]
+use crate::services::pki::PkiService;
+#[cfg(feature = "native")]
+use std::sync::Arc;
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PkiInitReport {
@@ -52,20 +56,13 @@ fn default_capability() -> String {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PkiListArgs {}
 
-#[cfg(feature = "native")]
-fn pki_svc(
-    ctx: &orca_tool::ToolCtx,
-) -> anyhow::Result<std::sync::Arc<dyn crate::services::pki::PkiService>> {
-    ctx.service::<std::sync::Arc<dyn crate::services::pki::PkiService>>()
-}
-
 /// [MUTATES STATE] Initialize the orca CA and server cert. Safe to re-run; skips if CA exists.
 #[orca_tool(domain = "system.pki.ca", verb = "create")]
 async fn pki_ca_create(
     _args: PkiCaInitArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<PkiInitReport> {
-    pki_svc(ctx)?.ca_init().await
+    ctx.service::<Arc<dyn PkiService>>()?.ca_init().await
 }
 
 /// [MUTATES STATE] Issue a cert for a plugin.
@@ -74,7 +71,7 @@ async fn pki_cert_create(
     args: PkiCertIssueArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<PkiCertReport> {
-    pki_svc(ctx)?
+    ctx.service::<Arc<dyn PkiService>>()?
         .cert_issue(&args.plugin_id, &args.capability)
         .await
 }
@@ -82,5 +79,5 @@ async fn pki_cert_create(
 /// List all issued plugin certs.
 #[orca_tool(domain = "system.pki", verb = "list")]
 async fn pki_list(_args: PkiListArgs, ctx: &orca_tool::ToolCtx) -> anyhow::Result<PkiListReport> {
-    pki_svc(ctx)?.list().await
+    ctx.service::<Arc<dyn PkiService>>()?.list().await
 }
