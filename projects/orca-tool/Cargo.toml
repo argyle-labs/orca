@@ -37,6 +37,10 @@ cli = [
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# `tracing` is unconditional because OrcaError construction emits a structured
+# error event from EVERY surface (wasm/native/cli) so failures are captured
+# centrally regardless of where the tool runs.
+tracing = { workspace = true }
 
 # `inventory` powers the cross-crate `#[orca_tool]` registration slice — used
 # by `inventory.rs`, `openapi.rs`, and (under `cli`) `cli.rs`. Default-feature

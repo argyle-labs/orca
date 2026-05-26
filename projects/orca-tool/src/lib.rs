@@ -15,6 +15,9 @@
 mod def;
 pub use def::{OrcaOp, OrcaToolDef};
 
+mod error;
+pub use error::{ErrorKind, OrcaError, OrcaResult};
+
 pub mod json_any;
 pub use json_any::JsonAny;
 
