@@ -62,15 +62,73 @@ impl Default for Ports {
 }
 
 impl Ports {
-    /// Load each port from its env var; fall back to the compile-time default
-    /// when unset or unparseable. Unparseable values log a warning but never
-    /// abort startup — operator typos shouldn't take a daemon offline.
+    /// Resolve ports with the precedence: env var > orca.toml `[ports]` >
+    /// compile-time default. Cached after the first call so hot paths
+    /// (loopback URLs, mDNS, peer dial defaults) don't re-read disk per
+    /// call.
+    ///
+    /// Operator change flow:
+    ///   1. Edit `~/.orca/orca.toml` `[ports]` (persistent, per-host).
+    ///   2. Or export `ORCA_HTTP_PORT=…` etc (process-scoped override).
+    ///   3. Restart daemon — the cache is process-lifetime, so a restart
+    ///      picks up the new values.
     pub fn from_env() -> Self {
-        let d = Self::default();
+        static CACHE: std::sync::OnceLock<Ports> = std::sync::OnceLock::new();
+        *CACHE.get_or_init(Self::resolve_uncached)
+    }
+
+    /// Build the port set without consulting the cache. Public for tests
+    /// that need to verify resolution from a temp HOME without process
+    /// state. Production callers use `from_env`.
+    pub fn resolve_uncached() -> Self {
+        let toml_ports = load_ports_from_toml();
+        let const_default = Self::default();
+        let after_toml = Ports {
+            http: toml_ports.http.unwrap_or(const_default.http),
+            https: toml_ports.https.unwrap_or(const_default.https),
+            mesh: toml_ports.mesh.unwrap_or(const_default.mesh),
+        };
         Self {
-            http: parse_port_env("ORCA_HTTP_PORT", d.http),
-            https: parse_port_env("ORCA_HTTPS_PORT", d.https),
-            mesh: parse_port_env("ORCA_MESH_PORT", d.mesh),
+            http: parse_port_env("ORCA_HTTP_PORT", after_toml.http),
+            https: parse_port_env("ORCA_HTTPS_PORT", after_toml.https),
+            mesh: parse_port_env("ORCA_MESH_PORT", after_toml.mesh),
+        }
+    }
+}
+
+/// Optional port overrides read from `~/.orca/orca.toml`'s `[ports]`
+/// section. Each field is independent — operators can override one port
+/// without specifying the others. Missing file or missing section ⇒ all
+/// `None` (consts win).
+#[derive(Default, serde::Deserialize)]
+struct TomlPorts {
+    http: Option<u16>,
+    https: Option<u16>,
+    mesh: Option<u16>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct TomlRoot {
+    #[serde(default)]
+    ports: TomlPorts,
+}
+
+fn load_ports_from_toml() -> TomlPorts {
+    let Some(home) = dirs::home_dir() else {
+        return TomlPorts::default();
+    };
+    let path = home.join(consts::APP_STATE_DIR).join("orca.toml");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return TomlPorts::default();
+    };
+    match toml::from_str::<TomlRoot>(&raw) {
+        Ok(root) => root.ports,
+        Err(e) => {
+            eprintln!(
+                "[orca::config] {} has invalid [ports] section: {e} — falling back to defaults",
+                path.display()
+            );
+            TomlPorts::default()
         }
     }
 }
