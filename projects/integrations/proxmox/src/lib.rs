@@ -8,6 +8,8 @@
 // Typed structs are used where the shape is stable (ActionResult, lifecycle).
 #![allow(clippy::disallowed_types)]
 
+pub mod tools;
+
 use orca_utils::http::{Client as HttpClient, HttpError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

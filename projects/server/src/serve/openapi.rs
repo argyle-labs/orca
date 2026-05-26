@@ -252,7 +252,7 @@ pub fn orca_spec_json() -> serde_json::Value {
     let mut value = serde_json::to_value(&spec).unwrap_or_default();
     // Inject every `#[orca_tool]`-annotated endpoint and bump the spec to
     // OpenAPI 3.1 (schemars 1.x emits 2020-12, which 3.1 accepts directly).
-    orca_tools_def::openapi::inject_tool_paths(&mut value);
+    orca_tool::openapi::inject_tool_paths(&mut value);
     value["x-orca"] = serde_json::json!({
         "repo": "orca",
         "project": "orca",

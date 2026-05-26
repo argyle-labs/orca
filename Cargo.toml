@@ -116,12 +116,21 @@ members = [
     "projects/sdk/rust",
     "projects/server",
     "projects/orca-tool",
-    "projects/tools-def",
     "projects/tools-macro",
+    # Domain crates — one per cohesive surface. HARD RULE: keep flat names
+    # (no `orca-tools-` prefix). Each crate's `#[orca_tool]` fns and their
+    # service trait live in the same module file.
+    "projects/auth",
+    "projects/fleet",
+    "projects/platform",
+    "projects/agents",
+    "projects/plugins",
+    "projects/docs",
+    "projects/mgmt",
+    "projects/infra",
     "projects/utils",
-    "projects/integrations",
-    # HARD RULE: each integration is its own crate so cargo can build +
-    # cache it independently. Never merge them back into the facade.
+    # Per-backend integration crates — every backend builds + caches
+    # independently. No facade.
     "projects/integrations/docker",
     "projects/integrations/dockge",
     "projects/integrations/homeassistant",
@@ -136,10 +145,16 @@ default-members = [
     "projects/sdk/rust",
     "projects/server",
     "projects/orca-tool",
-    "projects/tools-def",
     "projects/tools-macro",
+    "projects/auth",
+    "projects/fleet",
+    "projects/platform",
+    "projects/agents",
+    "projects/plugins",
+    "projects/docs",
+    "projects/mgmt",
+    "projects/infra",
     "projects/utils",
-    "projects/integrations",
     "projects/integrations/docker",
     "projects/integrations/dockge",
     "projects/integrations/homeassistant",

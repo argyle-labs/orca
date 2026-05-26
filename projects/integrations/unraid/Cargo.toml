@@ -1,10 +1,10 @@
 [package]
-name    = "orca-integration-unraid"
+name = "unraid"
 version.workspace = true
 edition.workspace = true
 
 [lib]
-name = "orca_integration_unraid"
+name = "unraid"
 path = "src/lib.rs"
 
 [dependencies]

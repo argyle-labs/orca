@@ -7,7 +7,7 @@ edition.workspace = true
 # (OrcaToolDef + OrcaTool + OrcaOp + inventory entry + wasm method) anchored
 # on a single annotated `async fn`, so tool bodies can live in whichever crate
 # has their deps. Annotated tools flow into the `ToolRegistry` via the
-# `inventory` slice exposed by `orca-tools-def`.
+# `inventory` slice exposed by `orca-tool`.
 
 [lib]
 proc-macro = true

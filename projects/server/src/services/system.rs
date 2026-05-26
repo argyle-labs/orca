@@ -4,8 +4,8 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use orca_tools_def::services::system::SystemService;
-use orca_tools_def::system::{
+use fleet::system::SystemService;
+use fleet::system::{
     McpRegistration, PathExists, PathInitialized, PathInstalled, PathLinked, SystemStatusReport,
 };
 use serde_json::Value;

@@ -8,7 +8,7 @@
 
 pub mod system_type;
 
-use orca_tools_def::orca_lifecycle::{GpuInfo, NetIfaceDto, SystemInfoReport};
+use fleet::lifecycle::{GpuInfo, NetIfaceDto, SystemInfoReport};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;

@@ -19,6 +19,9 @@ mod error;
 pub use error::{ErrorKind, OrcaError, OrcaResult};
 
 pub mod json_any;
+// The re-export itself triggers the disallowed-type lint workspace-wide;
+// defining + exposing the type is exactly what this crate exists to do.
+#[allow(clippy::disallowed_types)]
 pub use json_any::JsonAny;
 
 pub mod openapi;

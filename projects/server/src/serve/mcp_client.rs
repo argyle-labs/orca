@@ -145,7 +145,7 @@ pub struct McpTool {
     pub name: String,
     pub description: String,
     #[serde(rename = "inputSchema")]
-    pub input_schema: orca_tools_def::json_schema::JsonSchemaNode,
+    pub input_schema: platform::json_schema::JsonSchemaNode,
 }
 
 impl McpClient {

@@ -1,10 +1,10 @@
 [package]
-name    = "orca-integration-ntfy"
+name = "ntfy"
 version.workspace = true
 edition.workspace = true
 
 [lib]
-name = "orca_integration_ntfy"
+name = "ntfy"
 path = "src/lib.rs"
 
 [dependencies]

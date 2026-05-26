@@ -340,7 +340,7 @@ async fn main() -> Result<()> {
                 let verb_opt = rest_args.get(depth);
                 let is_domain_help =
                     matches!(verb_opt.map(String::as_str), Some("--help") | Some("-h"));
-                orca_tools_def::cli::ops().any(|o| {
+                orca_tool::cli::ops().any(|o| {
                     o.domain == dom
                         && (is_domain_help
                             || verb_opt.is_none()
@@ -747,7 +747,7 @@ fn detect_project_from_cwd(config: &Config) -> Option<String> {
 /// `OrcaOp` inventory in `orca-tools-def::cli`. Returns an error if no
 /// (domain, verb) pair matches; clap printed help is preferred over this.
 async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
-    use orca_tools_def::cli as op_cli;
+    use orca_tool::cli as op_cli;
     use std::sync::Arc;
 
     argv.insert(0, "orca".to_string());

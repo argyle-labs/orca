@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use orca_tools_def::services::plugin_runtime::PluginRuntimeService;
+use plugins::plugin_runtime::PluginRuntimeService;
 use serde_json::Value;
 
 pub struct ServerPluginRuntime;

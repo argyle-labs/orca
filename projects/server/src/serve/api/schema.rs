@@ -6,11 +6,11 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Json, Response},
 };
-use mysql_async::Pool;
-use mysql_async::prelude::Queryable;
-use orca_tools_def::mgmt::{
+use mgmt::mgmt::{
     GetSchemaOutput, SchemaColumn, SchemaDomain, SchemaForeignKey, SchemaTab, SchemaTableInfo,
 };
+use mysql_async::Pool;
+use mysql_async::prelude::Queryable;
 use serde::Deserialize;
 
 use super::prelude::*;

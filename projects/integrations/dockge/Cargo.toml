@@ -1,10 +1,10 @@
 [package]
-name    = "orca-integration-dockge"
+name = "dockge"
 version.workspace = true
 edition.workspace = true
 
 [lib]
-name = "orca_integration_dockge"
+name = "dockge"
 path = "src/lib.rs"
 
 [dependencies]

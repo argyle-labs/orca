@@ -2,9 +2,9 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use auth::pki::PkiService;
+use auth::pki::{PkiCertEntry, PkiCertReport, PkiInitReport, PkiListReport};
 use orca_sdk::pki::{self, Capability};
-use orca_tools_def::orca_pki::{PkiCertEntry, PkiCertReport, PkiInitReport, PkiListReport};
-use orca_tools_def::services::pki::PkiService;
 use orca_utils::config::{APP_PKI_DIR, APP_STATE_DIR};
 use std::path::PathBuf;
 

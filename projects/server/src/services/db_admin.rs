@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use orca_tools_def::orca_db::{DbMigrateReport, DbStatusReport};
-use orca_tools_def::services::db_admin::DbAdminService;
+use platform::db_admin::DbAdminService;
+use platform::db_admin::{DbMigrateReport, DbStatusReport};
 
 pub struct ServerDbAdmin;
 

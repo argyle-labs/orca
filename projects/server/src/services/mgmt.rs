@@ -4,14 +4,14 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use orca_tools_def::mgmt::{GetSchemaOutput, McpContent, RunMcpToolOutput, SchemaDomain};
-use orca_tools_def::services::mgmt::{
+use mgmt::mgmt::{
     DocRootData, DocRootInput, DocRootService, DockerRuntimeData, DockerRuntimeInput,
     DockerRuntimeService, HaEndpointData, HaEndpointInput, HaEndpointService, McpRegistryService,
     McpServerData, McpServerInput, McpToolMeta, ProxmoxEndpointData, ProxmoxEndpointInput,
     ProxmoxEndpointService, SchemaDbData, SchemaDbInput, SchemaDbService, SyncToolsServerResult,
     ToolMappingData,
 };
+use mgmt::mgmt::{GetSchemaOutput, McpContent, RunMcpToolOutput, SchemaDomain};
 use serde_json::Value;
 
 /// Build an `McpPool` rooted at orca's default DB path. Used by the

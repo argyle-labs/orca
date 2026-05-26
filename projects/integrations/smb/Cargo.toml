@@ -1,10 +1,10 @@
 [package]
-name    = "orca-integration-smb"
+name = "smb"
 version.workspace = true
 edition.workspace = true
 
 [lib]
-name = "orca_integration_smb"
+name = "smb"
 path = "src/lib.rs"
 
 [dependencies]

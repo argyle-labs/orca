@@ -13,9 +13,9 @@
 //! only the first invocation actually starts a task.
 
 use anyhow::{Context, Result};
-use orca_tools_def::host_status::HostStatusRows;
-use orca_tools_def::orca_lifecycle::SystemInfoReport;
-use orca_tools_def::system::SystemStatusReport;
+use fleet::host_status::HostStatusRows;
+use fleet::lifecycle::SystemInfoReport;
+use fleet::system::SystemStatusReport;
 use std::sync::OnceLock;
 use std::time::Duration;
 

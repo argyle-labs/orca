@@ -85,7 +85,7 @@ impl OrcaAppKit {
     ///   1. Load (or initialize) `Config` from `app_dir`.
     ///   2. Spin up a multi-threaded tokio runtime sized for in-process work.
     ///   3. Build an empty `ToolRegistry` and call
-    ///      `orca_tools_def::native_register` to enroll every
+    ///      `orca_tool::native_register` to enroll every
     ///      `#[orca_tool]` from the inventory slice.
     ///   4. Build a `ToolCtx` carrying the config. (Service injection lives
     ///      in `build_tool_registry` in orca-server today — lifting it is
@@ -107,7 +107,7 @@ impl OrcaAppKit {
         );
 
         let mut registry = ToolRegistry::new();
-        orca_tools_def::native_register(&mut registry);
+        orca_tool::native_register(&mut registry);
 
         let mut ctx = ToolCtx::new(config.clone());
         // Per the service-registration convention in

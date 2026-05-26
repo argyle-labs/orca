@@ -1,4 +1,7 @@
-//! Server-side implementations of the `orca_tools_def::services::*` traits.
+//! Server-side implementations of every per-domain service trait
+//! (`auth::{auth,pki,secrets}`, `fleet::{lifecycle,system}`,
+//! `platform::{db_admin,profile}`, `agents::*`, `plugins::*`, `docs::*`,
+//! `mgmt::mgmt`, `infra::infra`, `docker::service_trait`).
 //!
 //! Every channel (REST, MCP stdio, CLI, WASM client) dispatches tool calls
 //! through the same `ToolRegistry`; this module supplies the concrete

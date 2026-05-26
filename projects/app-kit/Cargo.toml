@@ -47,9 +47,19 @@ path = "bin/uniffi-bindgen.rs"
 # Pull in every #[orca_tool] with its native body. The app embeds the full
 # orca core in-process — peer/HTTP transports are not used; UI ↔ core is a
 # direct UniFFI call (see project_mobile_as_standalone_orca.md).
-orca-tools-def = { path = "../tools-def", features = ["native"] }
-orca-tool      = { path = "../orca-tool", features = ["native"] }
-orca-utils     = { path = "../utils" }
+auth     = { path = "../auth",     features = ["native"] }
+fleet    = { path = "../fleet",    features = ["native"] }
+platform = { path = "../platform", features = ["native"] }
+agents   = { path = "../agents",   features = ["native"] }
+plugins  = { path = "../plugins",  features = ["native"] }
+docs     = { path = "../docs",     features = ["native"] }
+mgmt     = { path = "../mgmt",     features = ["native"] }
+infra    = { path = "../infra",    features = ["native"] }
+docker        = { path = "../integrations/docker",        features = ["native"] }
+homeassistant = { path = "../integrations/homeassistant", features = ["native"] }
+proxmox       = { path = "../integrations/proxmox",       features = ["native"] }
+orca-tool  = { path = "../orca-tool", features = ["native"] }
+orca-utils = { path = "../utils" }
 
 uniffi    = { workspace = true, features = ["cli"] }
 tokio     = { workspace = true }

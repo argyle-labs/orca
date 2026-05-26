@@ -1,10 +1,10 @@
 #![allow(clippy::disallowed_types)] // upstream Docker API passthrough — shape not owned by orca
+use ::docker::{Compose, ComposeError};
 use axum::{
     extract::Query,
     http::StatusCode,
     response::{IntoResponse, Json, Response},
 };
-use orca_integrations::docker::{Compose, ComposeError};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -14,16 +14,16 @@ use super::prelude::*;
 use super::{DockerActionRequest, DockerActionResponse};
 
 // Re-exported helper used by tests_handler.rs.
-pub(crate) use orca_integrations::docker::compose::parse_compose_ps;
+pub(crate) use ::docker::compose::parse_compose_ps;
 
 /// Compatibility shim — keeps the old call sites working unchanged.
 pub(crate) fn find_compose_file(project_path: &str) -> Option<std::path::PathBuf> {
     Compose::find(Path::new(project_path)).map(|c| c.file().to_path_buf())
 }
 
-/// Compatibility shim around the now-public `orca_integrations::docker::run`.
+/// Compatibility shim around the now-public `::docker::run`.
 pub(crate) async fn run_docker(args: &[&str], cwd: Option<&str>) -> anyhow::Result<String> {
-    orca_integrations::docker::run(args, cwd).await
+    ::docker::run(args, cwd).await
 }
 
 // ── GET /api/docker/engine ────────────────────────────────────────────────────
@@ -38,11 +38,11 @@ pub(crate) async fn run_docker(args: &[&str], cwd: Option<&str>) -> anyhow::Resu
     tag = "docker"
 )]
 pub async fn docker_engine_handler() -> Response {
-    let status = orca_integrations::docker::engine::status().await;
+    let status = ::docker::engine::status().await;
     let label = match status.engine {
-        orca_integrations::docker::Engine::Colima => "colima",
-        orca_integrations::docker::Engine::Desktop => "desktop",
-        orca_integrations::docker::Engine::None => "none",
+        ::docker::Engine::Colima => "colima",
+        ::docker::Engine::Desktop => "desktop",
+        ::docker::Engine::None => "none",
     };
     Json(json!({ "engine": label, "running": status.running })).into_response()
 }
@@ -60,7 +60,7 @@ pub async fn docker_engine_handler() -> Response {
     tag = "docker"
 )]
 pub async fn docker_engine_start_handler() -> Response {
-    match orca_integrations::docker::engine::start().await {
+    match ::docker::engine::start().await {
         Ok(output) => Json(json!({ "output": output })).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }

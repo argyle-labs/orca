@@ -1,15 +1,15 @@
 //! Server-side impl of `DockerService` — engine probing, compose project
 //! services + lifecycle actions, log fetch, and the cross-project log
-//! aggregator. Backed by the `orca_integrations::docker` crate.
+//! aggregator. Backed by the `::docker` crate.
 
+use ::docker::{self, Compose, ComposeError, Engine};
 use anyhow::Result;
 use async_trait::async_trait;
-use orca_integrations::docker::{self, Compose, ComposeError, Engine};
-use orca_tools_def::docker::{
+use docker::service_trait::DockerService;
+use docker::tools::{
     DockerActionResult, DockerContainerStats, DockerEngineKind, DockerEngineStatus,
     DockerLogProject, DockerServiceRow, DockerServicesView,
 };
-use orca_tools_def::services::docker::DockerService;
 use std::path::{Path, PathBuf};
 
 pub struct ServerDocker;

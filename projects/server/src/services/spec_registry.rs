@@ -4,8 +4,8 @@
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use orca_tools_def::services::spec_registry::SpecRegistryService;
-use orca_tools_def::spec_registry::{
+use docs::spec_registry::SpecRegistryService;
+use docs::spec_registry::{
     DbSpecRow, GraphQlEnum, GraphQlField, GraphQlInfoData, GraphQlOperation, GraphQlType,
     GraphqlProxyResult, RegisterSpecResult, SpecFilesPresence, SpecMetaRow, SyncMcpSpecsResult,
 };

@@ -27,7 +27,7 @@ use handlers::run;
 /// truth — called by MCP stdio, the HTTP /api/tools router, and (eventually)
 /// the WASM client surface.
 pub fn register_all_tools(reg: &mut ToolRegistry) {
-    orca_tools_def::native_register(reg);
+    orca_tool::native_register(reg);
     spec_tools::register(reg);
 }
 
@@ -38,16 +38,14 @@ struct ServerEmbedder {
     config: Arc<Config>,
 }
 
-impl orca_tools_def::services::agent_backend::ProvideAgentBackend for ServerEmbedder {
-    fn agent_backend(
-        &self,
-    ) -> Arc<dyn orca_tools_def::services::agent_backend::AgentBackendService> {
+impl agents::agent_backend::ProvideAgentBackend for ServerEmbedder {
+    fn agent_backend(&self) -> Arc<dyn agents::agent_backend::AgentBackendService> {
         Arc::new(crate::llm::agent_backend_service::ServerAgentBackend)
     }
 }
 
-impl orca_tools_def::services::agents::ProvideAgents for ServerEmbedder {
-    fn agents(&self) -> Arc<dyn orca_tools_def::services::agents::AgentsService> {
+impl agents::agents::ProvideAgents for ServerEmbedder {
+    fn agents(&self) -> Arc<dyn agents::agents::AgentsService> {
         Arc::new(crate::services::agents::ServerAgents {
             config: self.config.clone(),
         })
@@ -59,64 +57,61 @@ pub fn build_tool_registry(config: Arc<Config>) -> (ToolRegistry, ToolCtx) {
         config: config.clone(),
     };
     let mut ctx = ToolCtx::new(config);
-    orca_tools_def::services::agent_backend::register_agent_backend(&mut ctx, &embedder);
-    orca_tools_def::services::agents::register_agents(&mut ctx, &embedder);
-    let docs_svc: Arc<dyn orca_tools_def::services::docs::DocsService> =
+    agents::agent_backend::register_agent_backend(&mut ctx, &embedder);
+    agents::agents::register_agents(&mut ctx, &embedder);
+    let docs_svc: Arc<dyn ::docs::docs::DocsService> =
         Arc::new(crate::services::docs::ServerDocs {
             config: ctx.config.clone(),
         });
     ctx.register_service(docs_svc);
-    let infra_svc: Arc<dyn orca_tools_def::services::infra::InfraService> =
+    let infra_svc: Arc<dyn infra::infra::InfraService> =
         Arc::new(crate::services::infra::ServerInfra);
     ctx.register_service(infra_svc);
-    let plugins_svc: Arc<dyn orca_tools_def::services::plugins::PluginsService> =
+    let plugins_svc: Arc<dyn plugins::plugins::PluginsService> =
         Arc::new(crate::services::plugins::ServerPlugins);
     ctx.register_service(plugins_svc);
-    let plugin_runtime: Arc<dyn orca_tools_def::services::plugin_runtime::PluginRuntimeService> =
+    let plugin_runtime: Arc<dyn plugins::plugin_runtime::PluginRuntimeService> =
         Arc::new(crate::services::plugin_runtime::ServerPluginRuntime);
     ctx.register_service(plugin_runtime);
-    let docker_svc: Arc<dyn orca_tools_def::services::docker::DockerService> =
+    let docker_svc: Arc<dyn docker::service_trait::DockerService> =
         Arc::new(crate::services::docker::ServerDocker);
     ctx.register_service(docker_svc);
-    let spec_registry: Arc<dyn orca_tools_def::services::spec_registry::SpecRegistryService> =
+    let spec_registry: Arc<dyn ::docs::spec_registry::SpecRegistryService> =
         Arc::new(crate::services::spec_registry::ServerSpecRegistry);
     ctx.register_service(spec_registry);
-    let system_svc: Arc<dyn orca_tools_def::services::system::SystemService> =
+    let system_svc: Arc<dyn fleet::system::SystemService> =
         Arc::new(crate::services::system::ServerSystem);
     ctx.register_service(system_svc);
-    let auth_svc: Arc<dyn orca_tools_def::services::auth::AuthService> =
-        Arc::new(crate::services::auth::ServerAuth);
+    let auth_svc: Arc<dyn auth::auth::AuthService> = Arc::new(crate::services::auth::ServerAuth);
     ctx.register_service(auth_svc);
-    let db_admin: Arc<dyn orca_tools_def::services::db_admin::DbAdminService> =
+    let db_admin: Arc<dyn platform::db_admin::DbAdminService> =
         Arc::new(crate::services::db_admin::ServerDbAdmin);
     ctx.register_service(db_admin);
-    let pki_svc: Arc<dyn orca_tools_def::services::pki::PkiService> =
-        Arc::new(crate::services::pki::ServerPki);
+    let pki_svc: Arc<dyn auth::pki::PkiService> = Arc::new(crate::services::pki::ServerPki);
     ctx.register_service(pki_svc);
-    let profile_svc: Arc<dyn orca_tools_def::services::profile::ProfileService> =
+    let profile_svc: Arc<dyn platform::profile::ProfileService> =
         Arc::new(crate::services::profile::ServerProfile {
             config: ctx.config.clone(),
         });
     ctx.register_service(profile_svc);
-    let secrets_svc: Arc<dyn orca_tools_def::services::secrets::SecretsService> =
+    let secrets_svc: Arc<dyn auth::secrets::SecretsService> =
         Arc::new(crate::services::secrets::DbSecretsService::new());
     ctx.register_service(secrets_svc.clone());
     // Host-addressing refresh hook: host.refresh tool calls into this to
     // trigger a fresh detect + persist before reading host_addressing rows.
-    let host_refresh: Arc<dyn orca_tools_def::host::HostRefreshHook + Send + Sync> =
+    let host_refresh: Arc<dyn fleet::host::HostRefreshHook + Send + Sync> =
         Arc::new(crate::host_identity::ServerHostRefreshHook);
     ctx.register_service(host_refresh);
-    let pod_svc: Arc<dyn orca_tools_def::pod::PodService> =
-        Arc::new(crate::services::pod::ServerPod);
+    let pod_svc: Arc<dyn fleet::pod::PodService> = Arc::new(crate::services::pod::ServerPod);
     ctx.register_service(pod_svc);
-    let lifecycle_svc: Arc<dyn orca_tools_def::services::lifecycle::LifecycleService> =
+    let lifecycle_svc: Arc<dyn fleet::lifecycle::LifecycleService> =
         Arc::new(crate::services::lifecycle::ServerLifecycle {
             config: ctx.config.clone(),
             secrets: secrets_svc,
         });
     ctx.register_service(lifecycle_svc);
     {
-        use orca_tools_def::services::mgmt::*;
+        use mgmt::mgmt::*;
         let mcp_reg: Arc<dyn McpRegistryService> =
             Arc::new(crate::services::mgmt::ServerMcpRegistry);
         ctx.register_service(mcp_reg);

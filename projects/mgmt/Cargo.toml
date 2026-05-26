@@ -1,0 +1,49 @@
+[package]
+name = "mgmt"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "mgmt"
+path = "src/lib.rs"
+
+[features]
+default = []
+native = [
+    "orca-tool/native",
+    "dep:orca-utils",
+    "dep:orca-db",
+    "dep:anyhow",
+    "dep:async-trait",
+    "dep:tokio",
+    "dep:chrono",
+
+]
+cli = [
+    "native",
+    "orca-tool/cli",
+    "dep:clap",
+    "dep:colored",
+]
+
+[dependencies]
+orca-tool        = { path = "../orca-tool", default-features = false }
+orca-tools-macro = { path = "../tools-macro" }
+# mgmt's MCP tool-schema doc reuses `JsonSchemaNode` defined in platform.
+platform         = { path = "../platform", default-features = false }
+schemars         = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+inventory        = { workspace = true }
+
+orca-utils  = { path = "../utils",        optional = true }
+orca-db     = { package = "orca-db", path = "../db", optional = true }
+anyhow      = { workspace = true,         optional = true }
+async-trait = { workspace = true,         optional = true }
+tokio       = { workspace = true,         optional = true }
+chrono      = { workspace = true,         optional = true }
+clap        = { workspace = true,         optional = true }
+colored     = { workspace = true,         optional = true }
+
+[lints]
+workspace = true

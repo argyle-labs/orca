@@ -3,10 +3,10 @@
 
 use anyhow::{Result, bail};
 use async_trait::async_trait;
-use orca_tools_def::orca_auth::{
+use auth::auth::AuthService;
+use auth::auth::{
     ApiTokenSummary, AuthLoginOutput, AuthProviderStatus, AuthStatusReport, TokenCreateOutput,
 };
-use orca_tools_def::services::auth::AuthService;
 use rand::Rng;
 use sha2::{Digest, Sha256};
 

@@ -1,11 +1,11 @@
 //! `AgentsService` impl — thin shim over agents listing, agent prompts,
 //! config-doc registry, project memory, and session-log search.
 
-use anyhow::Result;
-use async_trait::async_trait;
-use orca_tools_def::services::agents::{
+use agents::agents::{
     AgentInfo, AgentsService, LogMatchData, MemoryFileData, ProjectMemoryData, SearchLogsData,
 };
+use anyhow::Result;
+use async_trait::async_trait;
 use orca_utils::config::Config;
 use std::sync::Arc;
 

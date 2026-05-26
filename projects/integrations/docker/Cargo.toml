@@ -1,11 +1,24 @@
 [package]
-name    = "orca-integration-docker"
+name = "docker"
 version.workspace = true
 edition.workspace = true
 
 [lib]
-name = "orca_integration_docker"
+name = "docker"
 path = "src/lib.rs"
+
+[features]
+default = []
+native = [
+    "orca-tool/native",
+    "dep:orca-db",
+    "dep:async-trait",
+]
+cli = [
+    "native",
+    "orca-tool/cli",
+    "dep:clap",
+]
 
 [dependencies]
 anyhow      = { workspace = true }
@@ -13,6 +26,15 @@ serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 tokio       = { workspace = true }
+
+orca-tool        = { path = "../../orca-tool", default-features = false }
+orca-tools-macro = { path = "../../tools-macro" }
+schemars         = { workspace = true }
+inventory        = { workspace = true }
+
+orca-db     = { package = "orca-db", path = "../../db", optional = true }
+async-trait = { workspace = true, optional = true }
+clap        = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

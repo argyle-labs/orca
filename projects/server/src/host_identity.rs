@@ -283,7 +283,7 @@ pub fn refresh_and_persist(conn: &Connection) -> Result<()> {
 /// `orca-tools-def` so `host.refresh` can drive the real detect path
 /// without that crate depending on the server's process-level statics.
 pub struct ServerHostRefreshHook;
-impl orca_tools_def::host::HostRefreshHook for ServerHostRefreshHook {
+impl fleet::host::HostRefreshHook for ServerHostRefreshHook {
     fn refresh(&self, conn: &db::Conn) -> Result<()> {
         refresh_and_persist(conn)
     }

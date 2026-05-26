@@ -2,12 +2,12 @@
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use orca_tools_def::orca_profile::{
+use orca_utils::config::{Config, LOCAL_USER};
+use platform::profile::ProfileService;
+use platform::profile::{
     ProfileCurrentReport, ProfileDetail, ProfileListReport, ProfileMutationResult,
     ProfileShareEntry, ProfileSharesReport, ProfileSummary,
 };
-use orca_tools_def::services::profile::ProfileService;
-use orca_utils::config::{Config, LOCAL_USER};
 use std::sync::Arc;
 
 use crate::profile::{ProfileManager, Role};

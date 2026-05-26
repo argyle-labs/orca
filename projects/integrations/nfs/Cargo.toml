@@ -1,10 +1,10 @@
 [package]
-name    = "orca-integration-nfs"
+name = "nfs"
 version.workspace = true
 edition.workspace = true
 
 [lib]
-name = "orca_integration_nfs"
+name = "nfs"
 path = "src/lib.rs"
 
 [dependencies]

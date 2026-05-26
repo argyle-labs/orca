@@ -7,8 +7,8 @@
 
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
-use orca_tools_def::orca_secrets::{BackendInfo, SecretEntry, SecretMutationReport, SecretSetArgs};
-use orca_tools_def::services::secrets::{SecretValue, SecretsBackend, SecretsService};
+use auth::secrets::{BackendInfo, SecretEntry, SecretMutationReport, SecretSetArgs};
+use auth::secrets::{SecretValue, SecretsBackend, SecretsService};
 use std::collections::HashMap;
 use std::sync::Arc;
 

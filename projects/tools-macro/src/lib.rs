@@ -17,10 +17,10 @@
 //!   - `impl OrcaOp for HostInfo` (always — every annotated tool participates
 //!     in the unified domain/verb namespace).
 //!   - `#[cfg(feature = "native")] inventory::submit!` into the
-//!     `ORCA_TOOLS` slice exposed by `orca-tools-def` so the registry picks
+//!     `ToolRegistration` slice exposed by `orca-tool` so the registry picks
 //!     it up at startup without any central enrollment list.
 //!   - An `OpenApiToolRegistration` inventory entry — the spec endpoint hoists
-//!     every tool path automatically (see `tools-def::openapi`).
+//!     every tool path automatically (see `orca-tool::openapi`).
 //!
 //! Scope: this slice only supports the canonical `async fn name(args: T,
 //! ctx: &ToolCtx) -> Result<O>` form. Named-parameter expansion can be added

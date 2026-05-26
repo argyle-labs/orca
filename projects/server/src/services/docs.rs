@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use orca_tools_def::services::docs::{
+use docs::docs::{
     DocNodeKind, DocRootSummary, DocRootTree, DocTreeNodeData, DocsService, SearchDocHit,
     SearchDocMatch, SearchDocsData,
 };

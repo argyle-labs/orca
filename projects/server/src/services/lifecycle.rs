@@ -3,12 +3,12 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use orca_tools_def::orca_lifecycle::{
+use auth::secrets::SecretsService;
+use fleet::lifecycle::LifecycleService;
+use fleet::lifecycle::{
     DoctorEntry, DoctorReport, LifecycleReport, ProjectsListReport, RuntimeSpecReport,
     SpecDumpReport,
 };
-use orca_tools_def::services::lifecycle::LifecycleService;
-use orca_tools_def::services::secrets::SecretsService;
 use orca_utils::config::Config;
 use std::sync::Arc;
 

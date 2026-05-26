@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use db::ports::mesh_port;
-use orca_sdk::pki;
-use orca_tools_def::pod::{
+use fleet::pod::{
     CertInfo, PodAcceptOutput, PodCertStatusOutput, PodDiscoveryRowDto, PodExecDispatch,
     PodJoinOutput, PodLeaveOutput, PodOfferOutput, PodPeerAddressDto, PodPeerDto,
     PodPendingOfferDto, PodPingOutput, PodService, PodTrustOutput,
 };
+use orca_sdk::pki;
 use std::time::Instant;
 
 use crate::commands::pod::dial_bootstrap_pub;
@@ -513,10 +513,8 @@ const REACHABLE_FRESHNESS_SECS: i64 = 180;
 /// The peer itself wrote those rows; the sync puller mirrored them in.
 /// No network IO — this is the read-only consumer side of the mesh sync.
 fn enrich_from_local_db(base: &mut PodPeerDto, latest: &db::host_status::HostStatusRow) {
-    base.system = serde_json::from_str::<orca_tools_def::orca_lifecycle::SystemInfoReport>(
-        &latest.payload_json,
-    )
-    .ok();
+    base.system =
+        serde_json::from_str::<fleet::lifecycle::SystemInfoReport>(&latest.payload_json).ok();
     let now = chrono::Utc::now().timestamp();
     base.reachable = Some(now - latest.snapshot_at_unix <= REACHABLE_FRESHNESS_SECS);
     // Re-purpose latency_ms to mean "age of latest snapshot in seconds" when

@@ -1,11 +1,25 @@
 [package]
-name    = "orca-integration-proxmox"
+name = "proxmox"
 version.workspace = true
 edition.workspace = true
 
 [lib]
-name = "orca_integration_proxmox"
+name = "proxmox"
 path = "src/lib.rs"
+
+[features]
+default = []
+native = [
+    "orca-tool/native",
+    "dep:orca-db",
+    "dep:anyhow",
+    "dep:async-trait",
+]
+cli = [
+    "native",
+    "orca-tool/cli",
+    "dep:clap",
+]
 
 [dependencies]
 serde       = { workspace = true }
@@ -14,9 +28,19 @@ thiserror   = { workspace = true }
 urlencoding = { workspace = true }
 orca-utils  = { path = "../../utils" }
 
+orca-tool        = { path = "../../orca-tool", default-features = false }
+orca-tools-macro = { path = "../../tools-macro" }
+schemars         = { workspace = true }
+inventory        = { workspace = true }
+
+orca-db     = { package = "orca-db", path = "../../db", optional = true }
+anyhow      = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+clap        = { workspace = true, optional = true }
+
 [dev-dependencies]
-tokio       = { workspace = true }
-wiremock    = "0.6"
+tokio    = { workspace = true }
+wiremock = "0.6"
 
 [lints]
 workspace = true

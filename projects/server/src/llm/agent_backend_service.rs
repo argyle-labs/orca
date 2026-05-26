@@ -4,9 +4,9 @@
 //! agent_backend tools (which now live in `tools-def`) can dispatch
 //! through the trait instead of calling server-internal modules.
 
+use agents::agent_backend::AgentBackendService;
 use anyhow::Result;
 use async_trait::async_trait;
-use orca_tools_def::services::agent_backend::AgentBackendService;
 
 use crate::llm::resolve;
 

@@ -28,12 +28,28 @@ php-ast = ["dep:tree-sitter", "dep:tree-sitter-php"]
 
 [dependencies]
 # Workspace crates
-orca-sdk           = { path = "../sdk/rust" }
-orca-utils         = { path = "../utils" }
-orca-tool          = { path = "../orca-tool", features = ["native"] }
-db                 = { package = "orca-db", path = "../db" }
-orca-integrations  = { path = "../integrations" }
-orca-tools-def     = { path = "../tools-def", features = ["native", "cli"] }
+orca-sdk   = { path = "../sdk/rust" }
+orca-utils = { path = "../utils" }
+orca-tool  = { path = "../orca-tool", features = ["native"] }
+db         = { package = "orca-db", path = "../db" }
+# Domain crates
+auth     = { path = "../auth",     features = ["native", "cli"] }
+fleet    = { path = "../fleet",    features = ["native", "cli"] }
+platform = { path = "../platform", features = ["native", "cli"] }
+agents   = { path = "../agents",   features = ["native", "cli"] }
+plugins  = { path = "../plugins",  features = ["native", "cli"] }
+docs     = { path = "../docs",     features = ["native", "cli"] }
+mgmt     = { path = "../mgmt",     features = ["native", "cli"] }
+infra    = { path = "../infra",    features = ["native", "cli"] }
+# Integration crates (flat names, no facade)
+docker        = { path = "../integrations/docker",        features = ["native", "cli"] }
+dockge        = { path = "../integrations/dockge" }
+homeassistant = { path = "../integrations/homeassistant", features = ["native", "cli"] }
+nfs           = { path = "../integrations/nfs" }
+ntfy          = { path = "../integrations/ntfy" }
+proxmox       = { path = "../integrations/proxmox",       features = ["native", "cli"] }
+smb           = { path = "../integrations/smb" }
+unraid        = { path = "../integrations/unraid" }
 
 # CLI
 clap = { workspace = true }

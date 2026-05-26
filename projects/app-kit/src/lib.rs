@@ -10,7 +10,7 @@
 //! Foundation slice scope:
 //!   1. `uniffi::setup_scaffolding!()` registers the FFI symbol table that
 //!      Swift/Kotlin bindings hook into.
-//!   2. Re-exporting `orca_tools_def` ensures every `#[orca_tool]` is linked
+//!   2. Re-exporting `orca_tool` ensures every `#[orca_tool]` is linked
 //!      into this cdylib so the macro's UniFFI emission (forthcoming) lands
 //!      here.
 //!
@@ -19,11 +19,14 @@
 
 uniffi::setup_scaffolding!();
 
-// Anchor the link so the tools-def crate (and every #[orca_tool] inside it,
-// plus its native impls) is pulled into this cdylib. Without a use-site
-// reference, the linker would drop the crate.
+// Link anchors — every domain crate must be referenced so the linker keeps
+// its `inventory::submit!` registrations in this cdylib. Without these the
+// linker would drop unused crates and lose `#[orca_tool]` entries.
 #[allow(unused_imports)]
-use orca_tools_def as _;
+use {
+    agents as _, auth as _, docker as _, docs as _, fleet as _, homeassistant as _, infra as _,
+    mgmt as _, orca_tool as _, platform as _, plugins as _, proxmox as _,
+};
 
 pub mod lifecycle;
 pub use lifecycle::{AppKitConfig, OrcaAppKit};

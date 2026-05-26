@@ -21,8 +21,8 @@
 //! both as sources and as merge targets.
 
 use anyhow::Result;
+use fleet::pod::{PodPeerDto, PodPeerListOutput};
 use orca_sdk::pki;
-use orca_tools_def::pod::{PodPeerDto, PodPeerListOutput};
 use rusqlite::OptionalExtension;
 use std::time::Duration;
 use tracing::{info, warn};

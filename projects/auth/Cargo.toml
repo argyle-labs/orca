@@ -1,0 +1,48 @@
+[package]
+name = "auth"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "auth"
+path = "src/lib.rs"
+
+[features]
+default = []
+native = [
+    "orca-tool/native",
+    "dep:orca-utils",
+    "dep:orca-db",
+    "dep:anyhow",
+    "dep:async-trait",
+    "dep:tokio",
+]
+cli = [
+    "native",
+    "orca-tool/cli",
+    "dep:clap",
+    "dep:colored",
+]
+
+[dependencies]
+orca-tool        = { path = "../orca-tool", default-features = false }
+orca-tools-macro = { path = "../tools-macro" }
+schemars         = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+inventory        = { workspace = true }
+
+orca-utils  = { path = "../utils", optional = true }
+orca-db     = { package = "orca-db", path = "../db", optional = true }
+anyhow      = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+tokio       = { workspace = true, optional = true }
+clap        = { workspace = true, optional = true }
+colored     = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true
