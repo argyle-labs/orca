@@ -458,6 +458,49 @@ mod tests {
     }
 
     #[test]
+    fn mcp_definitions_returns_a_vec_even_when_empty() {
+        // Empty inventory in this test binary: should still be a Vec, not
+        // panic.
+        let defs = mcp_definitions();
+        assert!(defs.is_empty() || defs.iter().all(|d| d.is_object()));
+    }
+
+    #[test]
+    fn role_table_is_consistent_with_required_role_lookup() {
+        for (name, role) in role_table() {
+            assert_eq!(required_role(name), Some(role));
+        }
+    }
+
+    #[test]
+    fn names_and_role_table_have_the_same_cardinality() {
+        let names_len = names().len();
+        let roles_len = role_table().len();
+        assert_eq!(names_len, roles_len);
+    }
+
+    #[test]
+    fn remote_ok_names_are_a_subset_of_names() {
+        let all: std::collections::HashSet<&'static str> = names().into_iter().collect();
+        for n in remote_ok_names() {
+            assert!(all.contains(n), "remote_ok name {n} not in names()");
+        }
+    }
+
+    #[test]
+    fn required_role_returns_none_for_unknown_tool() {
+        assert!(required_role("does.not.exist").is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_text_unknown_tool_propagates_error() {
+        let err = dispatch_text("ghost.tool", serde_json::json!({}), &make_ctx())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown tool"));
+    }
+
+    #[test]
     fn value_to_text_pretty_prints_objects() {
         let pretty = value_to_text(&serde_json::json!({"a": 1}));
         assert!(pretty.contains('\n'));
