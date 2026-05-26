@@ -3,7 +3,7 @@
 //! Lives at the `native` layer (not `cli`) because the macro-emitted
 //! `peer_dispatch` proxy stanza needs to resolve it from any tool body — not
 //! just the CLI surface. The server registers an adapter
-//! (`PodRemoteExec` in tools-def::pod) that delegates to its `PodService`.
+//! (`PodRemoteExec` in `fleet::pod`) that delegates to its `PodService`.
 
 use anyhow::Result;
 

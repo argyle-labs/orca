@@ -1,5 +1,6 @@
-//! `OrcaToolDef` — wasm-safe metadata trait shared by orca-utils (native
-//! `OrcaTool` supertrait) and orca-tools-def (wasm client codegen).
+//! `OrcaToolDef` — wasm-safe metadata trait. The native `OrcaTool`
+//! supertrait (defined in this same crate) and any future wasm client
+//! codegen both anchor on it.
 //!
 //! Carries only types/consts — no `run` method, no async, no native deps.
 
