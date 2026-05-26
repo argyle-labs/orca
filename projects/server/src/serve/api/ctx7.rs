@@ -124,3 +124,33 @@ pub(crate) fn extract_library_id(text: &str) -> Option<(String, String)> {
         .to_string();
     Some((id, title))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::extract_library_id;
+
+    #[test]
+    fn extract_library_id_from_json() {
+        let json = r#"{"libraries":[{"id":"/vercel/next.js","name":"Next.js"}]}"#;
+        let result = extract_library_id(json);
+        assert_eq!(
+            result,
+            Some(("/vercel/next.js".to_string(), "Next.js".to_string()))
+        );
+    }
+
+    #[test]
+    fn extract_library_id_regex_fallback() {
+        let text = "See /tanstack/react-query for details";
+        let result = extract_library_id(text);
+        let (id, title) = result.expect("should match via regex");
+        assert_eq!(id, "/tanstack/react-query");
+        assert_eq!(title, "react-query");
+    }
+
+    #[test]
+    fn extract_library_id_returns_none_for_no_match() {
+        let result = extract_library_id("no library here at all");
+        assert!(result.is_none());
+    }
+}

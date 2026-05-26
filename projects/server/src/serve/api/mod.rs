@@ -235,32 +235,6 @@ pub struct HealthResponse {
 }
 
 #[derive(Serialize, ToSchema)]
-pub struct LogService {
-    pub name: String,
-    pub state: String,
-    pub running: bool,
-    pub health: String,
-    pub ports: Vec<String>,
-}
-
-#[derive(Serialize, ToSchema)]
-pub struct LogProject {
-    pub project: String,
-    pub path: String,
-    pub services: Vec<LogService>,
-}
-
-#[derive(Serialize, ToSchema)]
-pub struct LogServicesResponse {
-    pub projects: Vec<LogProject>,
-}
-
-#[derive(Serialize, ToSchema)]
-pub struct LogsResponse {
-    pub output: String,
-}
-
-#[derive(Serialize, ToSchema)]
 pub struct OkResponse {
     pub ok: bool,
 }
@@ -297,12 +271,6 @@ pub struct McpServerAddRequest {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
-}
-
-#[derive(Deserialize, ToSchema)]
-pub struct TestRunQuery {
-    /// Which suite to run: rust | frontend | e2e | all
-    pub suite: String,
 }
 
 #[derive(Serialize, Deserialize, ToSchema, Clone)]
@@ -404,16 +372,6 @@ pub struct SpecInfo {
     pub enabled: bool,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct TestRunResponse {
-    pub suite: String,
-    pub output: String,
-    pub exit_code: i32,
-    pub passed: u32,
-    pub failed: u32,
-    pub duration_ms: u64,
-}
-
 // ── Handler prelude ───────────────────────────────────────────────────────────
 // Import this with `use super::prelude::*;` in every handler module.
 // All types listed here are available unqualified — critical for utoipa body
@@ -445,7 +403,6 @@ pub mod github;
 pub mod health;
 pub mod learning;
 pub mod llm;
-pub mod logs;
 pub mod mcp;
 pub mod mcp_mappings;
 #[cfg(feature = "pdf")]
@@ -456,7 +413,6 @@ pub mod schema;
 pub mod schema_registry;
 pub mod specs;
 pub mod system;
-pub mod tests_handler;
 
 pub use atlassian::*;
 pub use bitbucket::*;
@@ -470,7 +426,6 @@ pub use fs::*;
 pub use github::*;
 pub use health::*;
 pub use learning::*;
-pub use logs::*;
 pub use mcp::*;
 pub use mcp_mappings::*;
 #[cfg(feature = "pdf")]
@@ -481,4 +436,3 @@ pub use schema::*;
 pub use schema_registry::*;
 pub use specs::*;
 pub use system::*;
-pub use tests_handler::*;

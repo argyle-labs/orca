@@ -57,7 +57,6 @@ agents   = { path = "../agents",   features = ["native"] }
 plugins  = { path = "../plugins",  features = ["native"] }
 docs     = { path = "../docs",     features = ["native"] }
 mgmt     = { path = "../mgmt",     features = ["native"] }
-infra    = { path = "../infra",    features = ["native"] }
 docker        = { path = "../integrations/docker",        features = ["native"] }
 homeassistant = { path = "../integrations/homeassistant", features = ["native"] }
 proxmox       = { path = "../integrations/proxmox",       features = ["native"] }
