@@ -37,7 +37,7 @@ impl TestApp {
         // Install the process-local loopback token once so the auth middleware
         // sees a valid bearer on every request the harness makes. Idempotent —
         // OnceLock means the first test wins and the rest share the token.
-        let _ = orca::loopback_token::install_at_startup();
+        _ = orca::loopback_token::install_at_startup();
         TestApp {
             router,
             _tmp: tmp,

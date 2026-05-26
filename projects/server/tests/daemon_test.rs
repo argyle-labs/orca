@@ -94,6 +94,6 @@ mod daemon_signal_tests {
         send_signal(pid, "TERM");
         wait_for_file_gone(&state_path);
 
-        let _ = child.wait();
+        _ = child.wait();
     }
 }

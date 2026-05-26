@@ -19,7 +19,7 @@ fn isolate_db(dir: &std::path::Path) {
 }
 
 fn install_ring() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 async fn boot_host(pki_dir: &std::path::Path) -> SocketAddr {
@@ -46,7 +46,7 @@ async fn boot_host_with_plugins(
         .await
         .expect("plugin_host::bind");
     tokio::spawn(async move {
-        let _ = plugin_host::serve(listener, acceptor, registry, plugins_for_serve).await;
+        _ = plugin_host::serve(listener, acceptor, registry, plugins_for_serve).await;
     });
     // Connect via loopback regardless of the 0.0.0.0 bind.
     (SocketAddr::from(([127, 0, 0, 1], bound.port())), plugins)

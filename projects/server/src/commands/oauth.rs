@@ -300,9 +300,9 @@ fn receive_callback(listener: TcpListener, expected_state: &str) -> Result<Strin
 
 fn open_browser(url: &str) {
     #[cfg(target_os = "macos")]
-    _ = std::process::Command::new("open").arg(url).spawn();
+    std::process::Command::new("open").arg(url).spawn().ok();
     #[cfg(target_os = "linux")]
-    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    std::process::Command::new("xdg-open").arg(url).spawn().ok();
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     eprintln!("Cannot open browser automatically on this platform — visit the URL manually.");
 }

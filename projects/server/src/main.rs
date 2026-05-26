@@ -286,11 +286,11 @@ async fn main() -> Result<()> {
         struct Tee<A: std::io::Write, B: std::io::Write>(A, B);
         impl<A: std::io::Write, B: std::io::Write> std::io::Write for Tee<A, B> {
             fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-                let _ = self.1.write_all(b);
+                _ = self.1.write_all(b);
                 self.0.write(b)
             }
             fn flush(&mut self) -> std::io::Result<()> {
-                let _ = self.1.flush();
+                _ = self.1.flush();
                 self.0.flush()
             }
         }
@@ -666,7 +666,7 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
                 .status()?;
             if let Err(e) = orca_utils::state::wait_for_mode(DaemonMode::Parked, 5).await {
                 // Parking timed out — reclaim immediately so daemon isn't stuck parked
-                let _ = Command::new("kill")
+                _ = Command::new("kill")
                     .args(["-USR2", &pid.to_string()])
                     .status();
                 return Err(e.context("daemon did not park in time; reclaim sent"));
@@ -681,7 +681,7 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
     if let Some(mut s) = orca_utils::state::read()? {
         s.mode = DaemonMode::Dev;
         s.active_pid = std::process::id();
-        let _ = orca_utils::state::write(&s);
+        _ = orca_utils::state::write(&s);
     }
 
     // Run dev server (Ctrl-C will exit)
@@ -721,7 +721,7 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
                 .or(daemon_binary);
             if let Some(bin) = binary {
                 println!("[orca] daemon gone — respawning {bin}");
-                let _ = Command::new(&bin)
+                _ = Command::new(&bin)
                     .args(["daemon", "start", "--port", &port.to_string()])
                     .spawn();
             }
