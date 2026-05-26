@@ -344,8 +344,8 @@ impl PodService for ServerPod {
     }
 
     async fn join(&self, inviter_addr: &str, port: Option<u16>) -> Result<PodJoinOutput> {
-        use orca_utils::config::APP_PLUGIN_PORT;
-        let port = port.unwrap_or(APP_PLUGIN_PORT);
+        use orca_utils::config::mesh_port;
+        let port = port.unwrap_or_else(mesh_port);
         Ok(PodJoinOutput {
             code: String::new(),
             inviter_addr: inviter_addr.to_string(),
