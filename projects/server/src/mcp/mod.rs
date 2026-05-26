@@ -66,9 +66,6 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     let plugin_runtime: Arc<dyn plugins::plugin_runtime::PluginRuntimeService> =
         Arc::new(crate::services::plugin_runtime::ServerPluginRuntime);
     ctx.register_service(plugin_runtime);
-    let docker_svc: Arc<dyn docker::service_trait::DockerService> =
-        Arc::new(crate::services::docker::ServerDocker);
-    ctx.register_service(docker_svc);
     let spec_registry: Arc<dyn ::docs::spec_registry::SpecRegistryService> =
         Arc::new(crate::services::spec_registry::ServerSpecRegistry);
     ctx.register_service(spec_registry);

@@ -14,7 +14,6 @@ pub mod agent_resolve;
 pub mod agents;
 pub mod auth;
 pub mod db_admin;
-pub mod docker;
 pub mod docs;
 pub mod infra;
 pub mod lifecycle;
