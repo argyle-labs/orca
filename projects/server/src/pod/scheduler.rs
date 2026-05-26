@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use orca_sdk::framing::{read_frame, write_frame};
 use orca_sdk::jsonrpc::{Message, Request, Response};
 use orca_sdk::pki;
-use orca_utils::config::APP_PLUGIN_PORT;
+use orca_utils::config::mesh_port;
 use rand::Rng;
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
@@ -164,7 +164,7 @@ pub async fn push_offer(
         inviter_peer_id: &inviter_peer_id,
         inviter_hostname: &inviter_hostname,
         inviter_addr: "", // joiner uses the TLS source addr; we don't reveal ours here
-        inviter_port: APP_PLUGIN_PORT,
+        inviter_port: mesh_port(),
         mesh_ca_cert_pem: &mesh_ca_cert_pem,
         pod_id,
         code_hash: pdb::hash_code(code),
