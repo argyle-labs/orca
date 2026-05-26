@@ -7,20 +7,19 @@ edition.workspace = true
 name = "orca_integrations"
 path = "src/lib.rs"
 
+# Facade — re-exports each per-integration crate so consumers continue to
+# write `orca_integrations::docker::...` while every backend is its own
+# workspace member that builds and caches independently. HARD RULE: every
+# new integration is its own crate. Never merge them back into one lib.
 [dependencies]
-anyhow      = { workspace = true }
-serde       = { workspace = true }
-serde_json  = { workspace = true }
-thiserror   = { workspace = true }
-tokio       = { workspace = true }
-urlencoding = { workspace = true }
-
-orca-utils = { path = "../utils" }
-schemars.workspace = true
-
-[dev-dependencies]
-tempfile = { workspace = true }
-wiremock = "0.6"
+orca-integration-docker         = { path = "docker" }
+orca-integration-dockge         = { path = "dockge" }
+orca-integration-homeassistant  = { path = "homeassistant" }
+orca-integration-nfs            = { path = "nfs" }
+orca-integration-ntfy           = { path = "ntfy" }
+orca-integration-proxmox        = { path = "proxmox" }
+orca-integration-smb            = { path = "smb" }
+orca-integration-unraid         = { path = "unraid" }
 
 [lints]
 workspace = true

@@ -1,0 +1,16 @@
+[package]
+name    = "orca-integration-smb"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "orca_integration_smb"
+path = "src/lib.rs"
+
+[dependencies]
+serde       = { workspace = true }
+thiserror   = { workspace = true }
+tokio       = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,13 +1,12 @@
-//! First-party integrations with external systems (Docker, Proxmox,
-//! Home Assistant, etc.). Each subsystem lives in its own module; the
-//! crate aggregates them so consumers (the runtime, MCP handlers) only
-//! pull a single workspace dependency.
+//! First-party integrations with external systems. Facade crate — each
+//! backend is a standalone workspace member that builds and caches
+//! independently. Hard rule: every new integration is its own crate.
 
-pub mod docker;
-pub mod dockge;
-pub mod homeassistant;
-pub mod nfs;
-pub mod ntfy;
-pub mod proxmox;
-pub mod smb;
-pub mod unraid;
+pub use orca_integration_docker as docker;
+pub use orca_integration_dockge as dockge;
+pub use orca_integration_homeassistant as homeassistant;
+pub use orca_integration_nfs as nfs;
+pub use orca_integration_ntfy as ntfy;
+pub use orca_integration_proxmox as proxmox;
+pub use orca_integration_smb as smb;
+pub use orca_integration_unraid as unraid;

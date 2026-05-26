@@ -1,0 +1,21 @@
+[package]
+name    = "orca-integration-dockge"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "orca_integration_dockge"
+path = "src/lib.rs"
+
+[dependencies]
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+orca-utils  = { path = "../../utils" }
+
+[dev-dependencies]
+tokio       = { workspace = true }
+wiremock    = "0.6"
+
+[lints]
+workspace = true

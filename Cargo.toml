@@ -120,6 +120,16 @@ members = [
     "projects/tools-macro",
     "projects/utils",
     "projects/integrations",
+    # HARD RULE: each integration is its own crate so cargo can build +
+    # cache it independently. Never merge them back into the facade.
+    "projects/integrations/docker",
+    "projects/integrations/dockge",
+    "projects/integrations/homeassistant",
+    "projects/integrations/nfs",
+    "projects/integrations/ntfy",
+    "projects/integrations/proxmox",
+    "projects/integrations/smb",
+    "projects/integrations/unraid",
 ]
 default-members = [
     "projects/db",
@@ -130,6 +140,14 @@ default-members = [
     "projects/tools-macro",
     "projects/utils",
     "projects/integrations",
+    "projects/integrations/docker",
+    "projects/integrations/dockge",
+    "projects/integrations/homeassistant",
+    "projects/integrations/nfs",
+    "projects/integrations/ntfy",
+    "projects/integrations/proxmox",
+    "projects/integrations/smb",
+    "projects/integrations/unraid",
 ]
 resolver = "2"
 

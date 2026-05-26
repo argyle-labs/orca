@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::orca_lifecycle::SystemInfoReport;
 use crate::orca_tool;
+#[cfg(feature = "native")]
+use crate::services::system::SystemService;
+#[cfg(feature = "native")]
+use std::sync::Arc;
 
 // ── Shared shapes ───────────────────────────────────────────────────────────
 

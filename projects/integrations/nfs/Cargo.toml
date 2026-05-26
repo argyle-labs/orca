@@ -1,0 +1,19 @@
+[package]
+name    = "orca-integration-nfs"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "orca_integration_nfs"
+path = "src/lib.rs"
+
+[dependencies]
+serde       = { workspace = true }
+thiserror   = { workspace = true }
+tokio       = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
