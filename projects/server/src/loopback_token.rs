@@ -52,7 +52,13 @@ pub fn install_at_startup() -> Result<()> {
     // not rewrite the on-disk file — that would leave disk and memory holding
     // different tokens and silently break every Bearer auth attempt that
     // reads the disk value (CLI subcommands, child processes, etc).
-    if TOKEN.set(plaintext.clone()).is_err() {
+    let claimed = TOKEN.set(plaintext.clone()).is_ok();
+    tracing::info!(
+        token_prefix = %&plaintext.chars().take(20).collect::<String>(),
+        claimed,
+        "loopback install_at_startup"
+    );
+    if !claimed {
         return Ok(());
     }
 

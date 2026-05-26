@@ -388,6 +388,16 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
     }
 
     if let Some(token) = extract_bearer(&req) {
+        let lb_dbg = crate::loopback_token::get();
+        tracing::info!(
+            path = %path,
+            token_prefix = %token.chars().take(20).collect::<String>(),
+            lb_prefix = %lb_dbg.map(|s| s.chars().take(20).collect::<String>()).unwrap_or_default(),
+            lb_len = lb_dbg.map(|s| s.len()).unwrap_or(0),
+            token_len = token.len(),
+            matches = lb_dbg == Some(token),
+            "bearer compare"
+        );
         // Fast path: process-local loopback token minted at boot. Constant
         // string compare (no DB hit) for the high-volume in-process callers.
         if let Some(lb) = crate::loopback_token::get()
