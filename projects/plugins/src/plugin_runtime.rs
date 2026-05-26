@@ -10,6 +10,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[cfg(feature = "native")]
+use db;
+
 use orca_macro::orca_tool;
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -39,20 +42,27 @@ pub struct SetPluginDataOutput {
     pub ok: bool,
 }
 
-#[cfg(feature = "native")]
-fn pr(
-    ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<std::sync::Arc<dyn crate::plugin_runtime::PluginRuntimeService>> {
-    ctx.service::<std::sync::Arc<dyn crate::plugin_runtime::PluginRuntimeService>>()
-}
-
 /// Read a single key from a plugin's encrypted KV store in orca.db.
 #[orca_tool(domain = "system.plugin.data", verb = "get")]
 async fn get_plugin_data(
     args: GetPluginDataArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<GetPluginDataOutput> {
-    let value = pr(ctx)?.get(&args.plugin, &args.key).await?;
+    use anyhow::Context;
+    let conn = db::open_default()?;
+    let value = match db::plugin_data::get(&conn, &args.plugin, &args.key)? {
+        Some(row) => serde_json::from_str::<Value>(&row.value).with_context(|| {
+            format!(
+                "plugin_data row for {}/{} is not valid JSON",
+                args.plugin, args.key
+            )
+        })?,
+        None => anyhow::bail!(
+            "key '{}' not found for plugin '{}'",
+            args.key,
+            args.plugin
+        ),
+    };
     Ok(GetPluginDataOutput { value })
 }
 
@@ -60,135 +70,11 @@ async fn get_plugin_data(
 #[orca_tool(domain = "system.plugin.data", verb = "set", cli = skip)]
 async fn set_plugin_data(
     args: SetPluginDataArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<SetPluginDataOutput> {
-    pr(ctx)?.set(&args.plugin, &args.key, &args.value).await?;
+    let conn = db::open_default()?;
+    let text = serde_json::to_string(&args.value)?;
+    db::plugin_data::set(&conn, &args.plugin, &args.key, &text)?;
     Ok(SetPluginDataOutput { ok: true })
 }
 
-#[cfg(all(test, feature = "native"))]
-mod tests {
-    use super::*;
-    use crate::plugin_runtime::PluginRuntimeService;
-    use crate::test_support::empty_ctx;
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use serde_json::json;
-    use std::sync::{Arc, Mutex};
-
-    #[derive(Default)]
-    struct StubKv {
-        store: Mutex<std::collections::HashMap<(String, String), Value>>,
-    }
-    #[async_trait]
-    impl PluginRuntimeService for StubKv {
-        async fn get(&self, plugin: &str, key: &str) -> Result<Value> {
-            self.store
-                .lock()
-                .unwrap()
-                .get(&(plugin.to_string(), key.to_string()))
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("missing {plugin}/{key}"))
-        }
-        async fn set(&self, plugin: &str, key: &str, value: &Value) -> Result<()> {
-            self.store
-                .lock()
-                .unwrap()
-                .insert((plugin.to_string(), key.to_string()), value.clone());
-            Ok(())
-        }
-    }
-
-    fn ctx_with_stub() -> orca_contract::ToolCtx {
-        let svc: Arc<dyn PluginRuntimeService> = Arc::new(StubKv::default());
-        let mut ctx = empty_ctx();
-        ctx.register_service(svc);
-        ctx
-    }
-
-    #[tokio::test]
-    async fn set_then_get_roundtrips_value() {
-        let ctx = ctx_with_stub();
-        let val = json!({"hello": "world", "n": 42});
-        let setr = set_plugin_data(
-            SetPluginDataArgs {
-                plugin: "foo".into(),
-                key: "k".into(),
-                value: val.clone(),
-            },
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert!(setr.ok);
-        let got = get_plugin_data(
-            GetPluginDataArgs {
-                plugin: "foo".into(),
-                key: "k".into(),
-            },
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert_eq!(got.value, val);
-    }
-
-    #[tokio::test]
-    async fn get_missing_key_errors() {
-        let ctx = ctx_with_stub();
-        let err = get_plugin_data(
-            GetPluginDataArgs {
-                plugin: "foo".into(),
-                key: "nope".into(),
-            },
-            &ctx,
-        )
-        .await
-        .err();
-        assert!(err.is_some());
-    }
-
-    #[tokio::test]
-    async fn unregistered_service_errors() {
-        let ctx = empty_ctx();
-        assert!(
-            get_plugin_data(
-                GetPluginDataArgs {
-                    plugin: "a".into(),
-                    key: "b".into(),
-                },
-                &ctx,
-            )
-            .await
-            .is_err()
-        );
-    }
-}
-
-// ─── Service trait (impl in server crate) ────────────────────────────
-
-use anyhow::Result;
-use async_trait::async_trait;
-
-#[async_trait]
-pub trait PluginRuntimeService: Send + Sync {
-    /// Fetch a single key for a plugin. Errors when the key does not exist.
-    /// Value is free-form by contract — each plugin defines its own KV schema.
-    #[allow(clippy::disallowed_types)]
-    async fn get(&self, plugin: &str, key: &str) -> Result<Value>;
-
-    /// Upsert a single key for a plugin.
-    /// Value is free-form by contract — each plugin defines its own KV schema.
-    #[allow(clippy::disallowed_types)]
-    async fn set(&self, plugin: &str, key: &str, value: &Value) -> Result<()>;
-}
-
-/// Embedder hook — see `services::mod` doc.
-pub trait ProvidePluginRuntime {
-    fn plugin_runtime(&self) -> std::sync::Arc<dyn PluginRuntimeService>;
-}
-
-/// Register a `PluginRuntimeService` into `ToolCtx`.
-pub fn register_plugin_runtime(ctx: &mut orca_contract::ToolCtx, p: &impl ProvidePluginRuntime) {
-    ctx.register_service(p.plugin_runtime());
-}

@@ -63,9 +63,6 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     let plugins_svc: Arc<dyn plugins::plugins::PluginsService> =
         Arc::new(crate::services::plugins::ServerPlugins);
     ctx.register_service(plugins_svc);
-    let plugin_runtime: Arc<dyn plugins::plugin_runtime::PluginRuntimeService> =
-        Arc::new(crate::services::plugin_runtime::ServerPluginRuntime);
-    ctx.register_service(plugin_runtime);
     let spec_registry: Arc<dyn ::docs::spec_registry::SpecRegistryService> =
         Arc::new(crate::services::spec_registry::ServerSpecRegistry);
     ctx.register_service(spec_registry);
@@ -74,11 +71,6 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     ctx.register_service(system_svc);
     let auth_svc: Arc<dyn auth::auth::AuthService> = Arc::new(crate::services::auth::ServerAuth);
     ctx.register_service(auth_svc);
-    let db_admin: Arc<dyn platform::db_admin::DbAdminService> =
-        Arc::new(crate::services::db_admin::ServerDbAdmin);
-    ctx.register_service(db_admin);
-    let pki_svc: Arc<dyn auth::pki::PkiService> = Arc::new(crate::services::pki::ServerPki);
-    ctx.register_service(pki_svc);
     let profile_svc: Arc<dyn platform::profile::ProfileService> =
         Arc::new(crate::services::profile::ServerProfile {
             config: ctx.config.clone(),

@@ -13,13 +13,10 @@
 pub mod agent_resolve;
 pub mod agents;
 pub mod auth;
-pub mod db_admin;
 pub mod docs;
 pub mod infra;
 pub mod lifecycle;
 pub mod mgmt;
-pub mod pki;
-pub mod plugin_runtime;
 pub mod plugins;
 pub mod pod;
 pub mod profile;

@@ -89,40 +89,36 @@ async fn pki_ca_create(
 #[orca_tool(domain = "system.pki.cert", verb = "create")]
 async fn pki_cert_create(
     args: PkiCertIssueArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PkiCertReport> {
-    ctx.service::<Arc<dyn PkiService>>()?
-        .cert_issue(&args.plugin_id, &args.capability)
-        .await
+    let dir = pki_dir();
+    let cap: Capability = args.capability.parse()?;
+    let _bundle = sdk_pki::issue(&dir, &args.plugin_id, cap)?;
+    Ok(PkiCertReport {
+        plugin_id: args.plugin_id.clone(),
+        capability: cap.as_str().into(),
+        cert_path: sdk_pki::plugin_cert_path(&dir, &args.plugin_id)
+            .display()
+            .to_string(),
+        key_path: sdk_pki::plugin_key_path(&dir, &args.plugin_id)
+            .display()
+            .to_string(),
+    })
 }
 
 /// List all issued plugin certs.
 #[orca_tool(domain = "system.pki", verb = "list")]
 async fn pki_list(
     _args: PkiListArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PkiListReport> {
-    ctx.service::<Arc<dyn PkiService>>()?.list().await
-}
-
-// ─── Service trait (impl in server crate) ────────────────────────────
-
-use anyhow::Result;
-use async_trait::async_trait;
-
-#[async_trait]
-pub trait PkiService: Send + Sync {
-    async fn ca_init(&self) -> Result<PkiInitReport>;
-    async fn cert_issue(&self, plugin_id: &str, capability: &str) -> Result<PkiCertReport>;
-    async fn list(&self) -> Result<PkiListReport>;
-}
-
-/// Embedder hook — see `services::mod` doc.
-pub trait ProvidePki {
-    fn pki(&self) -> std::sync::Arc<dyn PkiService>;
-}
-
-/// Register a `PkiService` into `ToolCtx`.
-pub fn register_pki(ctx: &mut orca_contract::ToolCtx, p: &impl ProvidePki) {
-    ctx.register_service(p.pki());
+    let dir = pki_dir();
+    let certs = sdk_pki::list_plugins(&dir)
+        .into_iter()
+        .map(|id| PkiCertEntry {
+            cert_path: sdk_pki::plugin_cert_path(&dir, &id).display().to_string(),
+            plugin_id: id,
+        })
+        .collect();
+    Ok(PkiListReport { certs })
 }
