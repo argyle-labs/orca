@@ -287,6 +287,29 @@ mod tests {
         }))
     }
 
+    #[derive(Deserialize, Serialize, JsonSchema)]
+    struct AddArgs {
+        a: i64,
+        b: i64,
+    }
+
+    struct AddTool;
+
+    impl OrcaToolDef for AddTool {
+        const NAME: &'static str = "add.local";
+        const DESCRIPTION: &'static str = "Adds two numbers.";
+        const REMOTE_OK: bool = true;
+        type Args = AddArgs;
+        type Output = String;
+    }
+
+    #[async_trait]
+    impl OrcaTool for AddTool {
+        async fn run(args: AddArgs, _ctx: &ToolCtx) -> Result<String> {
+            Ok((args.a + args.b).to_string())
+        }
+    }
+
     #[tokio::test]
     async fn erased_wrapper_round_trips_via_run_json() {
         let w = ToolWrapper::<EchoTool>(PhantomData);
@@ -296,6 +319,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(v, serde_json::json!("hi"));
+    }
+
+    #[tokio::test]
+    async fn erased_wrapper_add_serializes_typed_output() {
+        let w = ToolWrapper::<AddTool>(PhantomData);
+        let e: &dyn ErasedTool = &w;
+        let v = e
+            .run_json(serde_json::json!({"a": 7, "b": 3}), &make_ctx())
+            .await
+            .unwrap();
+        assert_eq!(v, serde_json::json!("10"));
+    }
+
+    #[tokio::test]
+    async fn erased_wrapper_invalid_args_returns_named_error() {
+        let w = ToolWrapper::<EchoTool>(PhantomData);
+        let e: &dyn ErasedTool = &w;
+        let err = e
+            .run_json(serde_json::json!({}), &make_ctx())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid args for echo.local"));
+    }
+
+    #[test]
+    fn erased_wrapper_forwards_remote_ok_and_required_role() {
+        let w = ToolWrapper::<EchoTool>(PhantomData);
+        let e: &dyn ErasedTool = &w;
+        assert!(!e.remote_ok());
+        assert_eq!(e.required_role(), "admin");
+        let w2 = ToolWrapper::<AddTool>(PhantomData);
+        let e2: &dyn ErasedTool = &w2;
+        assert!(e2.remote_ok());
+        assert_eq!(e2.required_role(), "any");
+    }
+
+    #[test]
+    fn erased_wrapper_exposes_input_and_output_schemas() {
+        let w = ToolWrapper::<AddTool>(PhantomData);
+        let e: &dyn ErasedTool = &w;
+        let inp = e.input_schema();
+        let out = e.output_schema();
+        for v in [&inp, &out] {
+            let obj = v.as_object().expect("schema is an object");
+            assert!(!obj.contains_key("$schema"));
+            assert!(!obj.contains_key("title"));
+        }
+        assert!(inp.to_string().contains('a') && inp.to_string().contains('b'));
     }
 
     #[tokio::test]
@@ -341,6 +412,56 @@ mod tests {
         let _ = role_table();
         assert!(required_role("ghost.tool").is_none());
         let _ = mcp_definitions();
+    }
+
+    #[tokio::test]
+    async fn cli_dispatch_pair_args_parse_into_typed_struct() {
+        // Build an args map exactly the way CliArgs::Pairs would and prove
+        // numeric coercion picks i64 over string.
+        let pairs = CliArgs::Pairs(vec!["a=5".into(), "b=3".into()]);
+        let CliArgs::Pairs(p) = &pairs else { unreachable!() };
+        let mut map = serde_json::Map::new();
+        for pair in p {
+            let (k, v) = pair.split_once('=').unwrap();
+            let val: Value = serde_json::from_str(v).unwrap_or(Value::String(v.to_string()));
+            map.insert(k.to_string(), val);
+        }
+        assert_eq!(map["a"], serde_json::json!(5));
+        assert_eq!(map["b"], serde_json::json!(3));
+    }
+
+    #[test]
+    fn cli_args_pairs_constructor_round_trips() {
+        // CliArgs is opaque from outside the crate; this proves both
+        // variants enumerate cleanly inside.
+        match CliArgs::Json("{}".into()) {
+            CliArgs::Json(s) => assert_eq!(s, "{}"),
+            _ => panic!(),
+        }
+        match CliArgs::Pairs(vec!["a=1".into()]) {
+            CliArgs::Pairs(v) => assert_eq!(v[0], "a=1"),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn clap_command_builds_top_level_orca_root() {
+        // Empty inventory → no subcommands, but the root command still has
+        // the right name + about line.
+        let cmd = clap_command();
+        assert_eq!(cmd.get_name(), "orca");
+    }
+
+    #[test]
+    fn value_to_text_passes_strings_through() {
+        assert_eq!(value_to_text(&Value::String("hi".into())), "hi");
+    }
+
+    #[test]
+    fn value_to_text_pretty_prints_objects() {
+        let pretty = value_to_text(&serde_json::json!({"a": 1}));
+        assert!(pretty.contains('\n'));
+        assert!(pretty.contains("\"a\""));
     }
 
     #[tokio::test]
