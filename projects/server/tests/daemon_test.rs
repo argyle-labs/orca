@@ -68,7 +68,12 @@ mod daemon_signal_tests {
 
         let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_orca"))
             .env("HOME", home)
-            .args(["daemon", "start", "--port", &TEST_PORT.to_string()])
+            // Override HTTPS port — the daemon now dual-binds, and the
+            // default 12443 collides with any running real daemon on the
+            // workstation. ORCA_HTTPS_PORT is the only knob (the test
+            // doesn't expose a `--https-port` flag).
+            .env("ORCA_HTTPS_PORT", TEST_HTTPS_PORT.to_string())
+            .args(["daemon", "start", "--port", &TEST_HTTP_PORT.to_string()])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
