@@ -58,7 +58,13 @@ pub fn install_at_startup() -> Result<()> {
     write_secret_file(&path, &plaintext)
         .with_context(|| format!("write loopback token to {}", path.display()))?;
 
-    let _ = TOKEN.set(plaintext);
+    let set_ok = TOKEN.set(plaintext.clone()).is_ok();
+    tracing::info!(
+        token_prefix = %&plaintext.chars().take(20).collect::<String>(),
+        memory_set = set_ok,
+        path = %path.display(),
+        "loopback token installed"
+    );
     Ok(())
 }
 
