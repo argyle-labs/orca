@@ -15,7 +15,7 @@ pub struct ServerInfra;
 impl InfraService for ServerInfra {
     async fn list_services(&self) -> Result<Vec<InfraProject>> {
         let resp = loopback_client()?
-            .get("https://127.0.0.1:12000/api/logs/services")
+            .get("https://127.0.0.1:12443/api/logs/services")
             .bearer_auth(loopback_token()?)
             .send()
             .await?
@@ -58,7 +58,7 @@ impl InfraService for ServerInfra {
     async fn service_logs(&self, project: &str, service: &str, tail: u64) -> Result<String> {
         let tail_str = tail.to_string();
         let resp = loopback_client()?
-            .get("https://127.0.0.1:12000/api/logs")
+            .get("https://127.0.0.1:12443/api/logs")
             .bearer_auth(loopback_token()?)
             .query(&[
                 ("project", project),
@@ -91,7 +91,7 @@ impl InfraService for ServerInfra {
 /// CA root through every call site. Cross-host traffic uses its own client
 /// configured with the real trust store.
 fn loopback_client() -> Result<reqwest::Client> {
-    crate::loopback_token::loopback_only_reqwest_client("https://127.0.0.1:12000")
+    crate::loopback_token::loopback_only_reqwest_client("https://127.0.0.1:12443")
 }
 
 fn loopback_token() -> Result<String> {
