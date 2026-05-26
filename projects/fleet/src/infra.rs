@@ -326,8 +326,7 @@ mod tests {
 
     #[test]
     fn parse_test_counts_rust_extracts_pass_fail() {
-        let out =
-            "running 5 tests\n\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured\n";
+        let out = "running 5 tests\n\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured\n";
         let (p, f) = parse_test_counts(out, "rust");
         assert_eq!(p, 5);
         assert_eq!(f, 0);
