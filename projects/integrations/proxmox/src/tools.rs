@@ -96,7 +96,7 @@ mod native_support {
 async fn proxmox_node_list(
     args: ProxmoxListNodesArgs,
     _ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<::orca_tool::JsonAny> {
+) -> anyhow::Result<::orca_contract::JsonAny> {
     let client = native_support::make_client(&args.endpoint)?;
     Ok(client.nodes().await?.into())
 }
@@ -106,7 +106,7 @@ async fn proxmox_node_list(
 async fn proxmox_vm_list(
     args: ProxmoxListVmsArgs,
     _ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<::orca_tool::JsonAny> {
+) -> anyhow::Result<::orca_contract::JsonAny> {
     let client = native_support::make_client(&args.endpoint)?;
     Ok(client.vms(&args.node).await?.into())
 }
@@ -116,7 +116,7 @@ async fn proxmox_vm_list(
 async fn proxmox_container_list(
     args: ProxmoxListContainersArgs,
     _ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<::orca_tool::JsonAny> {
+) -> anyhow::Result<::orca_contract::JsonAny> {
     let client = native_support::make_client(&args.endpoint)?;
     Ok(client.containers(&args.node).await?.into())
 }

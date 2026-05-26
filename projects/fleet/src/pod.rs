@@ -493,7 +493,7 @@ pub mod native_support {
         ctx.service::<Arc<dyn PodService>>()
     }
 
-    /// Adapter that lets the generic `orca_tool::cli::RemoteExec` trait
+    /// Adapter that lets the generic `orca_contract::RemoteExec` trait
     /// dispatch through `PodService::exec`. Registered alongside the
     /// `PodService` so `cli::exec_remote::<T>(...)` (which lives in
     /// `orca-tool` and knows nothing about pod) finds a transport.
@@ -502,7 +502,7 @@ pub mod native_support {
 
     #[cfg(feature = "cli")]
     #[async_trait]
-    impl orca_tool::cli::RemoteExec for PodRemoteExec {
+    impl orca_contract::RemoteExec for PodRemoteExec {
         #[allow(clippy::disallowed_types)]
         async fn exec(
             &self,
@@ -533,7 +533,7 @@ pub fn register_pod(ctx: &mut orca_contract::ToolCtx, p: &impl ProvidePod) {
     // depending on tools-def.
     #[cfg(feature = "cli")]
     {
-        let remote: std::sync::Arc<dyn orca_tool::cli::RemoteExec> =
+        let remote: std::sync::Arc<dyn orca_contract::RemoteExec> =
             std::sync::Arc::new(native_support::PodRemoteExec(pod));
         ctx.register_service(remote);
     }

@@ -15,5 +15,5 @@
 # Run: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 disallowed-types = [
     { path = "serde_json::Value", reason = "no opaque JSON anywhere in the workspace — model the payload as a typed struct deriving serde + schemars. If the data is genuinely free-form upstream, add a #[allow(clippy::disallowed_types)] with a justifying comment." },
-    { path = "orca_tool::JsonAny", reason = "JsonAny is the same escape hatch as serde_json::Value — replace with a typed struct. Only legitimate for genuinely free-form upstream payloads (e.g. Home Assistant entity dumps, Proxmox cluster listings, MCP structuredContent passthrough)." },
+    { path = "orca_contract::JsonAny", reason = "JsonAny is the same escape hatch as serde_json::Value — replace with a typed struct. Only legitimate for genuinely free-form upstream payloads (e.g. Home Assistant entity dumps, Proxmox cluster listings, MCP structuredContent passthrough)." },
 ]
