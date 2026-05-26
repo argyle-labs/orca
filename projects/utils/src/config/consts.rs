@@ -10,8 +10,18 @@ pub const APP_SYSTEMD_SERVICE: &str = "orca";
 pub const APP_KEYRING_SERVICE: &str = "orca";
 /// Subdirectory inside APP_STATE_DIR where PKI material (CA, certs) is stored.
 pub const APP_PKI_DIR: &str = "pki";
-/// Default TCP port the plugin RPC host listens on.
+/// Default TCP port the plugin RPC host listens on (pod mesh mTLS).
 pub const APP_PLUGIN_PORT: u16 = 12002;
+
+/// Default TCP port for plain HTTP REST + UI. Homelab-friendly default;
+/// no internal CA required. All operator-facing tools default to this
+/// when no `--port` override is given. Overridable via orca.toml.
+pub const APP_REST_HTTP_PORT: u16 = 12000;
+
+/// Default TCP port for HTTPS REST + UI. Uses the mesh CA server cert
+/// by default; production / public exposure usually fronts this with
+/// Caddy on an edge peer. Overridable via orca.toml.
+pub const APP_REST_HTTPS_PORT: u16 = 12443;
 
 /// Subdirectory inside APP_STATE_DIR that holds per-profile content
 /// (`~/.orca/profiles/<profile-id>/`). Profile metadata + ACLs live in `orca.db`.

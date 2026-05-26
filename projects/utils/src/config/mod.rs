@@ -30,6 +30,61 @@ pub struct Config {
     pub app_dir: PathBuf,
     pub memory_root: PathBuf,
     pub db_path: PathBuf,
+    /// All listening ports for this daemon. Defaults from
+    /// `consts::APP_REST_HTTP_PORT` / `APP_REST_HTTPS_PORT` / `APP_PLUGIN_PORT`;
+    /// each is overridable via env var (`ORCA_HTTP_PORT`, `ORCA_HTTPS_PORT`,
+    /// `ORCA_MESH_PORT`). Daemon code reads from here, never from the raw
+    /// consts, so a single override flows through to bind, loopback URLs,
+    /// pod dial targets, etc.
+    pub ports: Ports,
+}
+
+/// Network port assignments for the orca daemon. All three protocols listen
+/// concurrently on distinct ports; nothing collapses them.
+#[derive(Debug, Clone, Copy)]
+pub struct Ports {
+    /// Plain HTTP REST + UI (homelab-friendly default, no cert needed).
+    pub http: u16,
+    /// HTTPS REST + UI (mesh CA server cert; Caddy front later).
+    pub https: u16,
+    /// Pod mesh mTLS — peer-to-peer plugin RPC.
+    pub mesh: u16,
+}
+
+impl Default for Ports {
+    fn default() -> Self {
+        Self {
+            http: consts::APP_REST_HTTP_PORT,
+            https: consts::APP_REST_HTTPS_PORT,
+            mesh: consts::APP_PLUGIN_PORT,
+        }
+    }
+}
+
+impl Ports {
+    /// Load each port from its env var; fall back to the compile-time default
+    /// when unset or unparseable. Unparseable values log a warning but never
+    /// abort startup — operator typos shouldn't take a daemon offline.
+    pub fn from_env() -> Self {
+        let d = Self::default();
+        Self {
+            http: parse_port_env("ORCA_HTTP_PORT", d.http),
+            https: parse_port_env("ORCA_HTTPS_PORT", d.https),
+            mesh: parse_port_env("ORCA_MESH_PORT", d.mesh),
+        }
+    }
+}
+
+fn parse_port_env(name: &str, fallback: u16) -> u16 {
+    match std::env::var(name) {
+        Ok(raw) => raw.parse::<u16>().unwrap_or_else(|_| {
+            eprintln!(
+                "[orca::config] {name}={raw:?} could not be parsed as u16; using default {fallback}"
+            );
+            fallback
+        }),
+        Err(_) => fallback,
+    }
 }
 
 /// Which model backend and model ID to use for a session.
@@ -110,6 +165,7 @@ impl Config {
             app_dir,
             memory_root,
             db_path,
+            ports: Ports::from_env(),
         })
     }
 
