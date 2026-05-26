@@ -279,6 +279,7 @@ mod tests {
             app_dir: PathBuf::from("/tmp"),
             memory_root: PathBuf::from("/tmp"),
             db_path: PathBuf::from("/tmp/test.db"),
+            ports: Default::default(),
         }))
     }
 
