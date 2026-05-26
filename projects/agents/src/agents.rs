@@ -139,7 +139,10 @@ async fn list_agents(
 /// Return the full system prompt for a named orca agent. Use this to invoke an
 /// agent programmatically via Agent(general-purpose, prompt=<result>+task).
 #[orca_tool(domain = "system.agent", verb = "get")]
-async fn get_agent(args: GetAgentArgs, ctx: &orca_contract::ToolCtx) -> anyhow::Result<GetAgentOutput> {
+async fn get_agent(
+    args: GetAgentArgs,
+    ctx: &orca_contract::ToolCtx,
+) -> anyhow::Result<GetAgentOutput> {
     let prompt = ctx
         .service::<Arc<dyn AgentsService>>()?
         .get_agent_prompt(&args.name)

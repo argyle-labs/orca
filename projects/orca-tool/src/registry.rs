@@ -114,8 +114,8 @@ async fn http_dispatch(
     Json(args): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     if !state.registry.names().iter().any(|n| *n == name) {
-        let oe =
-            orca_contract::OrcaError::not_found(format!("unknown tool: {name}")).with_code("tool.unknown");
+        let oe = orca_contract::OrcaError::not_found(format!("unknown tool: {name}"))
+            .with_code("tool.unknown");
         return Err(orca_error_response(oe));
     }
     state
@@ -229,9 +229,9 @@ pub enum CliArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orca_contract::{OrcaTool, OrcaToolDef, ToolCtx};
     use anyhow::Result;
     use async_trait::async_trait;
+    use orca_contract::{OrcaTool, OrcaToolDef, ToolCtx};
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
     use std::sync::Arc;

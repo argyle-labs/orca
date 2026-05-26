@@ -77,7 +77,10 @@ async fn pki_cert_create(
 
 /// List all issued plugin certs.
 #[orca_tool(domain = "system.pki", verb = "list")]
-async fn pki_list(_args: PkiListArgs, ctx: &orca_contract::ToolCtx) -> anyhow::Result<PkiListReport> {
+async fn pki_list(
+    _args: PkiListArgs,
+    ctx: &orca_contract::ToolCtx,
+) -> anyhow::Result<PkiListReport> {
     ctx.service::<Arc<dyn PkiService>>()?.list().await
 }
 

@@ -191,7 +191,10 @@ async fn list_roots(
 /// Get the compacted documentation tree for a root, optionally scoped to a
 /// subpath. Returns a typed tree of .md files.
 #[orca_tool(domain = "namespace.doc", verb = "tree")]
-async fn get_tree(args: GetTreeArgs, ctx: &orca_contract::ToolCtx) -> anyhow::Result<GetTreeOutput> {
+async fn get_tree(
+    args: GetTreeArgs,
+    ctx: &orca_contract::ToolCtx,
+) -> anyhow::Result<GetTreeOutput> {
     let data = ctx
         .service::<Arc<dyn DocsService>>()?
         .get_tree(&args.root, args.path.as_deref())
@@ -228,7 +231,10 @@ async fn get_full_tree(
 /// Read a documentation file by root and relative path (e.g. root=rebuy,
 /// path=admin-api/README).
 #[orca_tool(domain = "namespace.doc", verb = "read")]
-async fn read_doc(args: ReadDocArgs, ctx: &orca_contract::ToolCtx) -> anyhow::Result<ReadDocOutput> {
+async fn read_doc(
+    args: ReadDocArgs,
+    ctx: &orca_contract::ToolCtx,
+) -> anyhow::Result<ReadDocOutput> {
     let llm = args.format.as_deref() == Some("llm");
     let content = ctx
         .service::<Arc<dyn DocsService>>()?

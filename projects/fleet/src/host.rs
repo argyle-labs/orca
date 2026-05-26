@@ -150,7 +150,10 @@ async fn host_detail(
 
 /// Write a manual host addressing override (display_name, fqdn, or a channel value).
 #[orca_tool(domain = "system.host", verb = "set")]
-async fn host_set(args: HostSetArgs, _ctx: &orca_contract::ToolCtx) -> anyhow::Result<HostSetOutput> {
+async fn host_set(
+    args: HostSetArgs,
+    _ctx: &orca_contract::ToolCtx,
+) -> anyhow::Result<HostSetOutput> {
     if !ALLOWED_HOST_KEYS.contains(&args.key.as_str()) {
         anyhow::bail!(
             "host.set: key '{}' is not in the allowlist ({:?})",

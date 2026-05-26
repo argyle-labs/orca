@@ -99,7 +99,10 @@ fn infer_kind(url: &str, supplied: &str) -> anyhow::Result<String> {
 
 /// List registered LLM backends (LM Studio, Ollama).
 #[orca_tool(domain = "system.engine", verb = "list", cli = manual)]
-async fn engine_list(_args: EmptyArgs, _ctx: &orca_contract::ToolCtx) -> anyhow::Result<ProviderList> {
+async fn engine_list(
+    _args: EmptyArgs,
+    _ctx: &orca_contract::ToolCtx,
+) -> anyhow::Result<ProviderList> {
     let conn = orca_db::open_default()?;
     Ok(ProviderList(
         orca_db::llm::list(&conn)?
@@ -111,7 +114,10 @@ async fn engine_list(_args: EmptyArgs, _ctx: &orca_contract::ToolCtx) -> anyhow:
 
 /// Register a new LLM backend. Kind auto-inferred from URL if not supplied.
 #[orca_tool(domain = "system.engine", verb = "create", cli = manual)]
-async fn engine_create(args: AddArgs, _ctx: &orca_contract::ToolCtx) -> anyhow::Result<EngineOpResult> {
+async fn engine_create(
+    args: AddArgs,
+    _ctx: &orca_contract::ToolCtx,
+) -> anyhow::Result<EngineOpResult> {
     let conn = orca_db::open_default()?;
     let kind = infer_kind(&args.url, &args.kind)?;
     orca_db::llm::upsert(&conn, &args.name, &args.url, &kind)?;

@@ -594,7 +594,9 @@ pub struct GetSchemaDomainsOutput {
 use crate::mgmt as svc;
 
 #[cfg(feature = "native")]
-fn mcp(ctx: &orca_contract::ToolCtx) -> anyhow::Result<std::sync::Arc<dyn svc::McpRegistryService>> {
+fn mcp(
+    ctx: &orca_contract::ToolCtx,
+) -> anyhow::Result<std::sync::Arc<dyn svc::McpRegistryService>> {
     ctx.service::<std::sync::Arc<dyn svc::McpRegistryService>>()
 }
 #[cfg(feature = "native")]
@@ -602,7 +604,9 @@ fn sch(ctx: &orca_contract::ToolCtx) -> anyhow::Result<std::sync::Arc<dyn svc::S
     ctx.service::<std::sync::Arc<dyn svc::SchemaDbService>>()
 }
 #[cfg(feature = "native")]
-fn drt(ctx: &orca_contract::ToolCtx) -> anyhow::Result<std::sync::Arc<dyn svc::DockerRuntimeService>> {
+fn drt(
+    ctx: &orca_contract::ToolCtx,
+) -> anyhow::Result<std::sync::Arc<dyn svc::DockerRuntimeService>> {
     ctx.service::<std::sync::Arc<dyn svc::DockerRuntimeService>>()
 }
 #[cfg(feature = "native")]
@@ -1410,7 +1414,10 @@ pub fn register_doc_root(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideDocRo
 pub trait ProvideProxmoxEndpoint {
     fn proxmox_endpoint(&self) -> std::sync::Arc<dyn ProxmoxEndpointService>;
 }
-pub fn register_proxmox_endpoint(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideProxmoxEndpoint) {
+pub fn register_proxmox_endpoint(
+    ctx: &mut orca_contract::ToolCtx,
+    p: &impl ProvideProxmoxEndpoint,
+) {
     ctx.register_service(p.proxmox_endpoint());
 }
 

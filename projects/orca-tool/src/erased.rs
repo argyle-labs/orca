@@ -103,8 +103,8 @@ pub fn value_to_text(v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orca_contract::{OrcaTool, OrcaToolDef, ToolCtx};
     use async_trait::async_trait;
+    use orca_contract::{OrcaTool, OrcaToolDef, ToolCtx};
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
     use std::path::PathBuf;
