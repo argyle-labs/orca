@@ -5,10 +5,20 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "native")]
-use crate::service_trait::DockerService;
-use orca_macro::orca_tool;
+use crate::{Compose, ComposeError, Engine};
 #[cfg(feature = "native")]
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+
+use orca_macro::orca_tool;
+
+#[cfg(feature = "native")]
+fn map_engine(e: Engine) -> DockerEngineKind {
+    match e {
+        Engine::Colima => DockerEngineKind::Colima,
+        Engine::Desktop => DockerEngineKind::Desktop,
+        Engine::None => DockerEngineKind::None,
+    }
+}
 
 // ── Shared row shapes ───────────────────────────────────────────────────────
 
@@ -156,23 +166,22 @@ pub struct DockerStatsOutput {
 #[orca_tool(domain = "docker.engine", verb = "detail")]
 async fn docker_engine_detail(
     _args: GetDockerEngineArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<DockerEngineStatus> {
-    ctx.service::<Arc<dyn DockerService>>()?
-        .engine_status()
-        .await
+    let s = crate::engine::status().await;
+    Ok(DockerEngineStatus {
+        engine: map_engine(s.engine),
+        running: s.running,
+    })
 }
 
 /// [MUTATES STATE] Start the local docker engine. Returns the start-command output.
 #[orca_tool(domain = "docker.engine", verb = "update")]
 async fn docker_engine_update(
     _args: StartDockerEngineArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<StartDockerEngineOutput> {
-    let output = ctx
-        .service::<Arc<dyn DockerService>>()?
-        .engine_start()
-        .await?;
+    let output = crate::engine::start().await?;
     Ok(StartDockerEngineOutput { output })
 }
 
@@ -181,11 +190,28 @@ async fn docker_engine_update(
 #[orca_tool(domain = "docker.service", verb = "list")]
 async fn docker_service_list(
     args: GetDockerServicesArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<DockerServicesView> {
-    ctx.service::<Arc<dyn DockerService>>()?
-        .services(&args.path)
-        .await
+    let Some(compose) = Compose::find(Path::new(&args.path)) else {
+        return Ok(DockerServicesView {
+            compose_file: None,
+            services: Vec::new(),
+        });
+    };
+    let services = compose.services().await.map_err(anyhow::Error::from)?;
+    Ok(DockerServicesView {
+        compose_file: compose.file().to_str().map(str::to_string),
+        services: services
+            .into_iter()
+            .map(|s| DockerServiceRow {
+                name: s.name,
+                state: s.state,
+                running: s.running,
+                health: s.health,
+                ports: s.ports,
+            })
+            .collect(),
+    })
 }
 
 /// [MUTATES STATE] Run a docker-compose lifecycle action against the compose
@@ -193,16 +219,21 @@ async fn docker_service_list(
 #[orca_tool(domain = "docker.service", verb = "update")]
 async fn docker_service_update(
     args: RunDockerActionArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<DockerActionResult> {
-    ctx.service::<Arc<dyn DockerService>>()?
-        .action(
-            &args.project_path,
-            &args.action,
-            args.service.as_deref(),
-            args.tail,
-        )
+    let compose = Compose::find(Path::new(&args.project_path))
+        .ok_or_else(|| anyhow::anyhow!("no compose file under {}", args.project_path))?;
+    let output = compose
+        .run_action(&args.action, args.service.as_deref(), args.tail)
         .await
+        .map_err(|e| match e {
+            ComposeError::UnknownAction(a) => anyhow::anyhow!("unknown action: {a}"),
+            other => anyhow::Error::from(other),
+        })?;
+    Ok(DockerActionResult {
+        output,
+        compose_file: compose.file().to_str().map(str::to_string),
+    })
 }
 
 /// Read docker-compose logs from the project at `project` (optionally scoped
@@ -210,13 +241,17 @@ async fn docker_service_update(
 #[orca_tool(domain = "docker.service", verb = "detail")]
 async fn docker_service_detail(
     args: GetLogsArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<GetLogsOutput> {
     let tail = args.tail.unwrap_or(200);
-    let output = ctx
-        .service::<Arc<dyn DockerService>>()?
-        .logs(&args.project, args.service.as_deref(), tail)
-        .await?;
+    let compose = Compose::find(Path::new(&args.project))
+        .ok_or_else(|| anyhow::anyhow!("no compose file under {}", args.project))?;
+    let svc = args.service.as_deref();
+    let services: Vec<&str> = svc.into_iter().collect();
+    let output = compose
+        .logs(&services, tail)
+        .await
+        .map_err(anyhow::Error::from)?;
     Ok(GetLogsOutput { output })
 }
 
@@ -225,13 +260,61 @@ async fn docker_service_detail(
 #[orca_tool(domain = "docker.service", verb = "list-logs")]
 async fn docker_service_list_logs(
     _args: GetLogServicesArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<GetLogServicesOutput> {
-    let projects = ctx
-        .service::<Arc<dyn DockerService>>()?
-        .log_services()
-        .await?;
-    Ok(GetLogServicesOutput { projects })
+    let home = std::env::var("HOME").unwrap_or_default();
+    let rebuy_root = std::env::var("REBUY_ROOT").unwrap_or_else(|_| format!("{home}/code/rebuy"));
+
+    let entries = match std::fs::read_dir(&rebuy_root) {
+        Ok(e) => e,
+        Err(_) => return Ok(GetLogServicesOutput { projects: Vec::new() }),
+    };
+
+    let project_dirs: Vec<PathBuf> = entries
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            if p.is_dir() && Compose::find(&p).is_some() {
+                Some(p)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut out = Vec::with_capacity(project_dirs.len());
+    for project_path in project_dirs {
+        let path_str = project_path.to_string_lossy().into_owned();
+        let name = project_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path_str.clone());
+
+        let services = match Compose::find(&project_path) {
+            None => Vec::new(),
+            Some(c) => match c.services().await {
+                Ok(s) => s
+                    .into_iter()
+                    .map(|s| DockerServiceRow {
+                        name: s.name,
+                        state: s.state,
+                        running: s.running,
+                        health: s.health,
+                        ports: s.ports,
+                    })
+                    .collect(),
+                Err(_) => Vec::new(),
+            },
+        };
+
+        out.push(DockerLogProject {
+            project: name,
+            path: path_str,
+            services,
+        });
+    }
+
+    Ok(GetLogServicesOutput { projects: out })
 }
 
 /// Live CPU + memory stats for all running containers (`docker stats --no-stream`).
@@ -239,11 +322,22 @@ async fn docker_service_list_logs(
 #[orca_tool(domain = "docker.service", verb = "list-stats")]
 async fn docker_service_list_stats(
     _args: DockerStatsArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<DockerStatsOutput> {
-    let containers = ctx
-        .service::<Arc<dyn DockerService>>()?
-        .container_stats()
-        .await?;
+    let raw = crate::containers::live_stats().await?;
+    let containers = raw
+        .into_iter()
+        .map(|s| DockerContainerStats {
+            id: s.id,
+            name: s.name,
+            cpu_percent: s.cpu_percent,
+            mem_usage_mb: s.mem_usage_mb,
+            mem_limit_mb: s.mem_limit_mb,
+            block_read_bytes: s.block_read_bytes,
+            block_write_bytes: s.block_write_bytes,
+            net_rx_bytes: s.net_rx_bytes,
+            net_tx_bytes: s.net_tx_bytes,
+        })
+        .collect();
     Ok(DockerStatsOutput { containers })
 }

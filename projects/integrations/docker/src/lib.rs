@@ -10,8 +10,6 @@
 pub mod compose;
 pub mod containers;
 pub mod engine;
-#[cfg(feature = "native")]
-pub mod service_trait;
 pub mod tools;
 
 pub use compose::{Compose, ComposeError, ServiceStatus, ServiceSummary};
