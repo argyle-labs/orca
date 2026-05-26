@@ -47,6 +47,12 @@ struct ToolAttr {
     /// Opt-in: `#[orca_tool(..., remote_ok = true)]` makes this tool callable
     /// by paired pod peers via `pod/exec`. Default false.
     remote_ok: bool,
+    /// Opt-in: `#[orca_tool(..., peer_dispatch = true)]` auto-emits a proxy
+    /// stanza inside `OrcaTool::run` that inspects `args.peer_id` and, when
+    /// `Some`, dispatches to that peer via `orca_tool::cli::RemoteExec`
+    /// instead of running locally. Requires the Args type to derive `Clone`
+    /// and `Serialize` and to declare `peer_id: Option<String>`.
+    peer_dispatch: bool,
     /// Minimum role required to invoke this tool via authenticated surfaces.
     /// `"any"` (default) means any authenticated identity passes; `"admin"`
     /// requires `AuthIdentity::role == "admin"`. Set via
@@ -61,6 +67,7 @@ impl Parse for ToolAttr {
         let mut verb = None;
         let mut cli_mode = None;
         let mut remote_ok = false;
+        let mut peer_dispatch = false;
         let mut role: Option<LitStr> = None;
         for nv in items {
             let key = nv
@@ -80,6 +87,19 @@ impl Parse for ToolAttr {
                             return Err(syn::Error::new_spanned(
                                 &nv.value,
                                 "remote_ok expects a bool literal",
+                            ));
+                        }
+                    };
+                }
+                "peer_dispatch" => {
+                    peer_dispatch = match &nv.value {
+                        Expr::Lit(ExprLit {
+                            lit: Lit::Bool(b), ..
+                        }) => b.value,
+                        _ => {
+                            return Err(syn::Error::new_spanned(
+                                &nv.value,
+                                "peer_dispatch expects a bool literal",
                             ));
                         }
                     };
@@ -126,6 +146,7 @@ impl Parse for ToolAttr {
                 .ok_or_else(|| syn::Error::new(Span::call_site(), "missing `verb = \"…\"`"))?,
             cli_mode,
             remote_ok,
+            peer_dispatch,
             role,
         })
     }
@@ -252,6 +273,35 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     let ctx_param_name = Ident::new("ctx", Span::call_site());
     let ctx_param = quote! { #ctx_param_name: &::orca_tool::ToolCtx };
 
+    if attr.peer_dispatch && !needs_args_binding {
+        return Err(syn::Error::new_spanned(
+            &item.sig.inputs,
+            "peer_dispatch=true requires a named (non-underscored) args parameter \
+             so the macro can read `args.peer_id`",
+        ));
+    }
+    let peer_dispatch_stanza = if attr.peer_dispatch {
+        quote! {
+            if let ::core::option::Option::Some(__peer_id) = #args_forward.peer_id.clone() {
+                let mut __a = ::core::clone::Clone::clone(&#args_forward);
+                __a.peer_id = ::core::option::Option::None;
+                let __svc = #ctx_param_name
+                    .service::<::std::sync::Arc<dyn ::orca_tool::cli::RemoteExec>>()?;
+                let __args_value = ::serde_json::to_value(&__a)
+                    .map_err(|e| ::anyhow::anyhow!("peer_dispatch: serialize args: {e}"))?;
+                let __out_value = __svc.exec(&__peer_id, #tool_name, __args_value).await?;
+                let __out: #output_ty = ::serde_json::from_value(__out_value)
+                    .map_err(|e| ::anyhow::anyhow!(
+                        "peer_dispatch: decode {} output from peer {}: {}",
+                        #tool_name, __peer_id, e,
+                    ))?;
+                return ::core::result::Result::Ok(__out);
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     // Doc string keeps the original — we just relocate the description into
     // the const.
     let inner_fn = item;
@@ -327,6 +377,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
                 #args_param,
                 #ctx_param,
             ) -> ::anyhow::Result<#output_ty> {
+                #peer_dispatch_stanza
                 #fn_ident(#args_forward, #ctx_param_name).await
             }
         }
