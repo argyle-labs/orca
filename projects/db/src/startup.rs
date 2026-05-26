@@ -62,11 +62,12 @@ fn migrate_toml_servers_to_db(toml_path: &std::path::Path, db_path: &std::path::
     for s in &parsed.mcp.servers {
         let args_json = serde_json::to_string(&s.args).unwrap_or_else(|_| "[]".into());
         let env_json = serde_json::to_string(&s.env).unwrap_or_else(|_| "{}".into());
-        let _ = conn.execute(
+        conn.execute(
             "INSERT OR IGNORE INTO mcp_servers (name, command, args, env, enabled)
              VALUES (?1, ?2, ?3, ?4, 1)",
             rusqlite::params![s.name, s.command, args_json, env_json],
-        );
+        )
+        .ok();
     }
     tracing::info!(
         "migrated {} mcp server(s) from orca.toml to orca.db",
