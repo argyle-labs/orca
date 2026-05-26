@@ -10,6 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 serde       = { workspace = true }
 thiserror   = { workspace = true }
+urlencoding = { workspace = true }
 orca-utils  = { path = "../../utils" }
 
 [dev-dependencies]
