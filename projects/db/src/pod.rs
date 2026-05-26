@@ -1,4 +1,5 @@
-//! Read-only pod_peers helpers exposed to wasm-safe callers (tools-def).
+//! Read-only pod_peers helpers exposed to wasm-safe callers (the `fleet`
+//! domain crate's pod-related `#[orca_tool]`s).
 //!
 //! The mutating side of the pod registry (offers, trust handshakes, wipes)
 //! lives in `projects/server/src/pod/db.rs` because it's wired into the

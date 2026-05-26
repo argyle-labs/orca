@@ -1,8 +1,8 @@
 //! `AgentBackendService` impl that wraps `crate::llm::resolve::*`.
 //!
-//! Wired into `ToolCtx` from `mcp::build_tool_registry` so the four
-//! agent_backend tools (which now live in `tools-def`) can dispatch
-//! through the trait instead of calling server-internal modules.
+//! Wired into `ToolCtx` from `mcp::build_tool_ctx` so the four
+//! agent_backend tools (in the `agents` crate) can dispatch through the
+//! trait instead of calling server-internal modules.
 
 use agents::agent_backend::AgentBackendService;
 use anyhow::Result;

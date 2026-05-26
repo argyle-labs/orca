@@ -6,7 +6,7 @@
 //! `native` feature: native-only trait anchors — `OrcaTool`, `ToolCtx`,
 //! `RemoteExec`. Brings `orca-utils` (for `Config`), `anyhow`, `async-trait`.
 //!
-//! No inventory, no axum, no tokio — those live in `orca-tool`.
+//! No inventory, no axum, no tokio — those live in `orca-dispatch`.
 
 mod def;
 pub use def::{OrcaOp, OrcaToolDef};

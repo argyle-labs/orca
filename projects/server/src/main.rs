@@ -179,7 +179,7 @@ enum Command {
 
     /// Passthrough for `OrcaOp`-migrated domains — dispatched via inventory.
     /// Captures any first arg not matching a derive variant above; the
-    /// `orca-tools-def::cli` registry routes it to the right tool.
+    /// `orca_dispatch::cli` inventory routes it to the right tool.
     #[command(external_subcommand)]
     Op(Vec<String>),
 }

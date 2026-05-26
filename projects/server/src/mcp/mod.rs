@@ -24,8 +24,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use handlers::run;
 
 /// Concrete embedder that satisfies the per-service `Provide*` traits in
-/// `tools_def::services::*`. Each `impl ProvideFoo for ServerEmbedder` is the
-/// single source of truth for which server-side type backs that service.
+/// each domain crate (`agents::*`, `fleet::*`, `platform::*`, ...). Each
+/// `impl ProvideFoo for ServerEmbedder` is the single source of truth for
+/// which server-side type backs that service.
 struct ServerEmbedder {
     config: Arc<Config>,
 }
