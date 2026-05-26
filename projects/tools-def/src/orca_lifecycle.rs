@@ -297,7 +297,7 @@ empty_args!(EmptyDeleteArgs);
 empty_args!(ProjectsListArgs);
 empty_args!(SpecDumpArgs);
 #[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct SystemUpdateArgs {
     /// Version or channel to switch to, then apply.
     /// Channels: "stable" | "rc" | "dev".
@@ -323,11 +323,6 @@ fn svc(
     ctx.service::<std::sync::Arc<dyn crate::services::lifecycle::LifecycleService>>()
 }
 
-#[cfg(feature = "native")]
-fn pod_svc(ctx: &orca_tool::ToolCtx) -> anyhow::Result<std::sync::Arc<dyn crate::pod::PodService>> {
-    ctx.service::<std::sync::Arc<dyn crate::pod::PodService>>()
-}
-
 /// [MUTATES STATE] Install orca on this host: wire symlinks, register MCP server, install binary.
 #[orca_tool(domain = "system", verb = "create")]
 async fn system_create(
@@ -342,21 +337,16 @@ async fn system_create(
 /// "stable" | "rc" | "dev" | "<semver>". "dev" tracks GitHub HEAD via
 /// cargo-watch. Omit to apply the latest on the current channel.
 /// When `peer_id` is set the update runs on the named peer instead of locally.
-#[orca_tool(domain = "system", verb = "update", remote_ok = true)]
+#[orca_tool(
+    domain = "system",
+    verb = "update",
+    remote_ok = true,
+    peer_dispatch = true
+)]
 async fn system_update(
     args: SystemUpdateArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<LifecycleReport> {
-    if let Some(ref peer_id) = args.peer_id {
-        let dispatch = pod_svc(ctx)?
-            .exec(
-                peer_id,
-                "system.update",
-                serde_json::json!({ "version": args.version }),
-            )
-            .await?;
-        return Ok(serde_json::from_value(dispatch.result)?);
-    }
     let s = svc(ctx)?;
     if let Some(ref v) = args.version {
         s.set_version(v).await?;

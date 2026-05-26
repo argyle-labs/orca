@@ -10,11 +10,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::orca_tool;
 
-#[cfg(feature = "native")]
-fn pod_svc(ctx: &orca_tool::ToolCtx) -> anyhow::Result<std::sync::Arc<dyn crate::pod::PodService>> {
-    ctx.service::<std::sync::Arc<dyn crate::pod::PodService>>()
-}
-
 // ── Shared types ────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
@@ -162,19 +157,16 @@ async fn secret_detail(
 /// for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field').
 /// When `peer_id` is set the secret is written on the named peer instead of locally
 /// — same admin trust surface as `system.update`.
-#[orca_tool(domain = "system.secret", verb = "set", remote_ok = true)]
+#[orca_tool(
+    domain = "system.secret",
+    verb = "set",
+    remote_ok = true,
+    peer_dispatch = true
+)]
 async fn secret_set(
     args: SecretSetArgs,
     ctx: &orca_tool::ToolCtx,
 ) -> anyhow::Result<SecretMutationReport> {
-    if let Some(ref peer_id) = args.peer_id {
-        let mut a = args.clone();
-        a.peer_id = None;
-        let dispatch = pod_svc(ctx)?
-            .exec(peer_id, "system.secret.set", serde_json::to_value(&a)?)
-            .await?;
-        return Ok(serde_json::from_value(dispatch.result)?);
-    }
     secrets_svc(ctx)?.set(args).await
 }
 
