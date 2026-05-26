@@ -7,10 +7,10 @@
 //! No `install` verb: schedules are in-process. Setting a `schedule` row
 //! via `orca config set schedule …` is the install step.
 //!
-//! Lives in `db` (not `tools-def`) — proof-of-shape for content crates
-//! carrying their own tools. The body calls `crate::config_store` /
-//! `crate::scheduler_runs` directly without going through any service
-//! trait.
+//! Lives in `db` (the crate that owns the rows) — proof-of-shape for
+//! content crates carrying their own tools. The body calls
+//! `crate::config_store` / `crate::scheduler_runs` directly without going
+//! through any service trait.
 
 use orca_macro::orca_tool;
 use schemars::JsonSchema;

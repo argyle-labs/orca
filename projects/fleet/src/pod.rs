@@ -431,9 +431,10 @@ pub mod native_support {
         }
     }
 
-    /// Service hook the server registers at startup. tools-def stays
-    /// — every mTLS dial, PKI read, and bootstrap signing op lives
-    /// behind this trait so the daemon owns all the network/process state.
+    /// Service hook the server registers at startup. `fleet` stays
+    /// transport-neutral — every mTLS dial, PKI read, and bootstrap signing
+    /// op lives behind this trait so the daemon owns all the network/process
+    /// state.
     #[async_trait]
     pub trait PodService: Send + Sync {
         /// Enriched peer list used by `pod.list`. Adds a synthetic local row
@@ -496,7 +497,7 @@ pub mod native_support {
     /// Adapter that lets the generic `orca_contract::RemoteExec` trait
     /// dispatch through `PodService::exec`. Registered alongside the
     /// `PodService` so `cli::exec_remote::<T>(...)` (which lives in
-    /// `orca-tool` and knows nothing about pod) finds a transport.
+    /// `orca-dispatch` and knows nothing about pod) finds a transport.
     #[cfg(feature = "cli")]
     pub struct PodRemoteExec(pub Arc<dyn PodService>);
 
@@ -529,8 +530,8 @@ pub fn register_pod(ctx: &mut orca_contract::ToolCtx, p: &impl ProvidePod) {
     let pod = p.pod();
     ctx.register_service(pod.clone());
     // Register the RemoteExec adapter so `cli::exec_remote::<T>(...)` (in
-    // orca-tool) can dispatch through PodService::exec without orca-tool
-    // depending on tools-def.
+    // orca-dispatch) can dispatch through PodService::exec without
+    // orca-dispatch depending on the `fleet` domain crate.
     #[cfg(feature = "cli")]
     {
         let remote: std::sync::Arc<dyn orca_contract::RemoteExec> =

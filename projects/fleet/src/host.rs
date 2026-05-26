@@ -99,8 +99,8 @@ mod native_support {
     }
 
     /// Hook the server registers at startup so `host.refresh` can drive
-    /// `host_identity::refresh_and_persist` without tools-def depending on
-    /// the server crate.
+    /// `host_identity::refresh_and_persist` without this domain crate
+    /// depending on the server crate.
     pub trait HostRefreshHook: Send + Sync {
         fn refresh(&self, conn: &db::Conn) -> Result<()>;
     }
