@@ -288,9 +288,6 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
 
     loop {
         let tls = load_rest_tls(&pki_dir).await?;
-        if let Err(e) = crate::loopback_token::install_at_startup() {
-            tracing::warn!("loopback token install failed: {e:#}");
-        }
         info!(
             "[orca] daemon listening on http://localhost:{port} + https://localhost:{}",
             ports.https

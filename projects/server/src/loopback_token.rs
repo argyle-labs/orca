@@ -48,23 +48,21 @@ pub fn install_at_startup() -> Result<()> {
     rand::rng().fill_bytes(&mut buf);
     let plaintext = format!("orca_loopback_{}", hex(&buf));
 
+    // Claim memory FIRST. If another caller already won the OnceLock we must
+    // not rewrite the on-disk file — that would leave disk and memory holding
+    // different tokens and silently break every Bearer auth attempt that
+    // reads the disk value (CLI subcommands, child processes, etc).
+    if TOKEN.set(plaintext.clone()).is_err() {
+        return Ok(());
+    }
+
     let dir = secrets_dir()?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("create secrets dir {}", dir.display()))?;
-    // Tighten the dir to 0700: file names under here (loopback token, future
-    // per-secret blobs) shouldn't be enumerable by other users on shared hosts.
     chmod_dir_owner_only(&dir).with_context(|| format!("chmod 0700 on {}", dir.display()))?;
     let path = token_path()?;
     write_secret_file(&path, &plaintext)
         .with_context(|| format!("write loopback token to {}", path.display()))?;
-
-    let set_ok = TOKEN.set(plaintext.clone()).is_ok();
-    tracing::info!(
-        token_prefix = %&plaintext.chars().take(20).collect::<String>(),
-        memory_set = set_ok,
-        path = %path.display(),
-        "loopback token installed"
-    );
     Ok(())
 }
 
