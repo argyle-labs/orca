@@ -113,12 +113,10 @@ async fn http_dispatch(
     Path(name): Path<String>,
     Json(args): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    // Unknown tool → 404; bad args / tool failure → 500 with the error body.
     if !state.registry.names().iter().any(|n| *n == name) {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": format!("unknown tool: {name}") })),
-        ));
+        let oe =
+            crate::OrcaError::not_found(format!("unknown tool: {name}")).with_code("tool.unknown");
+        return Err(orca_error_response(oe));
     }
     state
         .registry
@@ -126,11 +124,30 @@ async fn http_dispatch(
         .await
         .map(Json)
         .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
+            // Tools may return `OrcaResult<T>` (typed kind) or fall through
+            // as `anyhow::Error` (legacy / unclassified). When the inner
+            // cause is an OrcaError, lift its `kind` to the HTTP status and
+            // serialize the full body so clients can branch on `kind`+`code`.
+            if let Some(oe) = e.downcast_ref::<crate::OrcaError>() {
+                let kind = oe.kind;
+                let body = serde_json::to_value(oe).unwrap_or_else(
+                    |_| json!({ "kind": "internal", "message": "serialize failure" }),
+                );
+                let status = StatusCode::from_u16(kind.http_status())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                return (status, Json(body));
+            }
+            let oe = crate::OrcaError::internal(e.to_string());
+            orca_error_response(oe)
         })
+}
+
+fn orca_error_response(oe: crate::OrcaError) -> (StatusCode, Json<Value>) {
+    let status =
+        StatusCode::from_u16(oe.kind.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let body = serde_json::to_value(&oe)
+        .unwrap_or_else(|_| json!({ "kind": "internal", "message": oe.message }));
+    (status, Json(body))
 }
 
 impl ToolRegistry {
