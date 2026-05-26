@@ -11,6 +11,7 @@ path = "src/lib.rs"
 default = []
 native = [
     "orca-tool/native",
+    "orca-contract/native",
     "dep:orca-db",
     "dep:async-trait",
 ]
@@ -28,7 +29,8 @@ thiserror   = { workspace = true }
 tokio       = { workspace = true }
 
 orca-tool        = { path = "../../orca-tool", default-features = false }
-orca-tools-macro = { path = "../../tools-macro" }
+orca-contract    = { path = "../../orca-contract", default-features = false }
+orca-macro       = { path = "../../orca-macro" }
 schemars         = { workspace = true }
 inventory        = { workspace = true }
 

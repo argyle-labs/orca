@@ -11,6 +11,7 @@ path = "src/lib.rs"
 default = []
 native = [
     "orca-tool/native",
+    "orca-contract/native",
     "dep:orca-utils",
     "dep:orca-db",
     "dep:anyhow",
@@ -28,7 +29,8 @@ cli = [
 
 [dependencies]
 orca-tool        = { path = "../orca-tool", default-features = false }
-orca-tools-macro = { path = "../tools-macro" }
+orca-contract    = { path = "../orca-contract", default-features = false }
+orca-macro       = { path = "../orca-macro" }
 # mgmt's MCP tool-schema doc reuses `JsonSchemaNode` defined in platform.
 platform         = { path = "../platform", default-features = false }
 schemars         = { workspace = true }

@@ -1,7 +1,7 @@
 //! Proxmox tool defs + native impls.
 #![allow(clippy::disallowed_types)] // Proxmox API shapes are upstream-defined; JsonAny outputs are intentional
 
-use orca_tools_macro::orca_tool;
+use orca_macro::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 

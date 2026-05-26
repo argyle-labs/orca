@@ -10,7 +10,7 @@
 use crate::llm::types::{BackendResponse, Message};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use orca_tool::ToolDef;
+use orca_contract::ToolDef;
 use orca_utils::config::{Config, Model};
 use std::io::Write;
 use std::sync::{Arc, Mutex};

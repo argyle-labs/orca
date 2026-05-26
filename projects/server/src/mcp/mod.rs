@@ -14,7 +14,8 @@ mod specs;
 mod tools;
 
 use anyhow::Result;
-use orca_tool::{ToolCtx, ToolRegistry};
+use orca_tool::{ToolRegistry};
+use orca_contract::{ToolCtx};
 use orca_utils::config::Config;
 use serde_json::{Value, json};
 use std::collections::HashMap;

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[cfg(feature = "native")]
-use orca_tools_macro::orca_tool;
+use orca_macro::orca_tool;
 #[cfg(feature = "native")]
 use std::sync::Arc;
 

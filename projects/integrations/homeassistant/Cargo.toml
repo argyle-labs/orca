@@ -17,6 +17,7 @@ path = "src/lib.rs"
 default = []
 native = [
     "orca-tool/native",
+    "orca-contract/native",
     "dep:orca-db",
     "dep:anyhow",
     "dep:async-trait",
@@ -38,7 +39,8 @@ orca-utils  = { path = "../../utils" }
 # impls so anyone consuming this crate gets the tool Args/Output schema even
 # without the runtime.
 orca-tool        = { path = "../../orca-tool", default-features = false }
-orca-tools-macro = { path = "../../tools-macro" }
+orca-contract    = { path = "../../orca-contract", default-features = false }
+orca-macro       = { path = "../../orca-macro" }
 schemars         = { workspace = true }
 inventory        = { workspace = true }
 

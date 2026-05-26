@@ -1,60 +1,33 @@
-//! `orca-tool` — the contract + runtime for OrcaTool.
+//! `orca-tool` — native runtime for OrcaTool.
 //!
-//! Default feature: wasm-safe metadata traits (`OrcaToolDef`, `OrcaOp`),
-//! `JsonAny`, and the `openapi` spec injector (pure JSON Schema munging).
-//! `native` feature: full runtime (`OrcaTool`, `ToolCtx`, `ToolRegistry`,
-//! `ErasedTool`, axum router, inventory-driven `native_register`).
-//! `cli` feature: unified clap-driven CLI surface (`register_op!` macro +
-//! `CliOp` inventory + dispatcher). Implies `native`.
+//! The wasm-safe contract (metadata traits, error, JsonAny, protocol types,
+//! ToolCtx/OrcaTool/RemoteExec trait anchors) lives in `orca-contract`.
+//! This crate adds: the `ToolRegistry` (axum router + MCP/CLI dispatch),
+//! the `ErasedTool` object-safe wrapper, the `inventory` slice
+//! (`ToolRegistration` + `native_register`), the `openapi` spec injector,
+//! and (under `cli`) the unified clap-driven CLI surface (`register_op!`
+//! macro + `CliOp` inventory + dispatcher).
 //!
 //! Every crate that defines `#[orca_tool]`-annotated functions depends on
 //! this crate. The registration framework lives here (not in `tools-def`)
 //! so content crates carrying their own tools have no cycle through any
 //! upstream "all the tools" crate.
 
-mod def;
-pub use def::{OrcaOp, OrcaToolDef};
-
-mod error;
-pub use error::{ErrorKind, OrcaError, OrcaResult};
-
-pub mod json_any;
-// The re-export itself triggers the disallowed-type lint workspace-wide;
-// defining + exposing the type is exactly what this crate exists to do.
-#[allow(clippy::disallowed_types)]
-pub use json_any::JsonAny;
-
 pub mod openapi;
 
-#[cfg(feature = "native")]
-mod ctx;
 #[cfg(feature = "native")]
 mod erased;
 #[cfg(feature = "native")]
 mod inventory_slice;
 #[cfg(feature = "native")]
 mod registry;
-#[cfg(feature = "native")]
-mod remote;
-#[cfg(feature = "native")]
-mod tool;
-#[cfg(feature = "native")]
-mod types;
 
-#[cfg(feature = "native")]
-pub use ctx::ToolCtx;
 #[cfg(feature = "native")]
 pub use erased::{ErasedTool, ToolWrapper, value_to_text};
 #[cfg(feature = "native")]
 pub use inventory_slice::{ToolRegistration, native_register};
 #[cfg(feature = "native")]
 pub use registry::{CliArgs, ToolRegistry};
-#[cfg(feature = "native")]
-pub use remote::RemoteExec;
-#[cfg(feature = "native")]
-pub use tool::OrcaTool;
-#[cfg(feature = "native")]
-pub use types::{ToolCall, ToolDef, ToolResult};
 
 #[cfg(feature = "cli")]
 pub mod cli;

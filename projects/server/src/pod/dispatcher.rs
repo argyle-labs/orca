@@ -18,7 +18,8 @@
 #![allow(clippy::disallowed_types)]
 
 use anyhow::Result;
-use orca_tool::{ToolCtx, ToolRegistry};
+use orca_tool::{ToolRegistry};
+use orca_contract::{ToolCtx};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "native")]
 use crate::service_trait::DockerService;
-use orca_tools_macro::orca_tool;
+use orca_macro::orca_tool;
 #[cfg(feature = "native")]
 use std::sync::Arc;
 

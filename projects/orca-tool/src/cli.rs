@@ -16,7 +16,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::{ArgMatches, Command};
 
-use crate::ToolCtx;
+use orca_contract::ToolCtx;
 
 /// Erased CLI dispatch closure: parses matches into the op's Args struct,
 /// invokes `OrcaTool::run`, formats Output to stdout.
@@ -90,7 +90,7 @@ pub fn build_root(mut root: Command) -> Command {
     root
 }
 
-pub use crate::RemoteExec;
+use orca_contract::RemoteExec;
 
 /// Run an OrcaTool on a paired peer with end-to-end typed Args/Output. The
 /// JSON serialization happens internally — the call site, the trait API, and
@@ -100,7 +100,7 @@ pub use crate::RemoteExec;
 /// the `ToolCtx`. The remote allowlist (`REMOTE_OK = true` on the tool) is
 /// enforced on the peer side; calls to non-remote-ok tools surface here as
 /// an error.
-pub async fn exec_remote<T: crate::OrcaToolDef>(
+pub async fn exec_remote<T: orca_contract::OrcaToolDef>(
     peer: &str,
     args: T::Args,
     ctx: &ToolCtx,
@@ -195,7 +195,7 @@ macro_rules! register_op {
     ) => {
         const _: () = {
             use $crate::cli::{CliOp, CliBuildFn, CliRunFn};
-            use $crate::{OrcaTool, OrcaToolDef};
+            use ::orca_contract::{OrcaTool, OrcaToolDef};
 
             fn build() -> clap::Command {
                 let cmd = clap::Command::new($verb).about($summary);
@@ -215,7 +215,7 @@ macro_rules! register_op {
 
             fn run(
                 m: &clap::ArgMatches,
-                ctx: ::std::sync::Arc<$crate::ToolCtx>,
+                ctx: ::std::sync::Arc<::orca_contract::ToolCtx>,
             ) -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = ::anyhow::Result<()>> + Send>> {
                 let m = m.clone();
                 Box::pin(async move {

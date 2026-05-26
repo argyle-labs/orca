@@ -115,8 +115,9 @@ members = [
     "projects/db",
     "projects/sdk/rust",
     "projects/server",
+    "projects/orca-contract",
     "projects/orca-tool",
-    "projects/tools-macro",
+    "projects/orca-macro",
     # Domain crates — one per cohesive surface. HARD RULE: keep flat names
     # (no `orca-tools-` prefix). Each crate's `#[orca_tool]` fns and their
     # service trait live in the same module file.
@@ -144,8 +145,9 @@ default-members = [
     "projects/db",
     "projects/sdk/rust",
     "projects/server",
+    "projects/orca-contract",
     "projects/orca-tool",
-    "projects/tools-macro",
+    "projects/orca-macro",
     "projects/auth",
     "projects/fleet",
     "projects/platform",

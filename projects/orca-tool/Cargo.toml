@@ -19,6 +19,7 @@ path = "src/lib.rs"
 [features]
 default = []
 native = [
+    "orca-contract/native",
     "dep:orca-utils",
     "dep:anyhow",
     "dep:async-trait",
@@ -34,6 +35,7 @@ cli = [
 ]
 
 [dependencies]
+orca-contract = { path = "../orca-contract" }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

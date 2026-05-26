@@ -12,7 +12,7 @@
 //! `crate::scheduler_runs` directly without going through any service
 //! trait.
 
-use orca_tools_macro::orca_tool;
+use orca_macro::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -97,7 +97,7 @@ mod native_support {
     use cron::Schedule;
     use serde::Deserialize;
 
-    use orca_tool::JsonAny;
+    use orca_contract::JsonAny;
 
     #[derive(Deserialize)]
     pub(super) struct ScheduleRow {

@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use colored::Colorize;
 use futures_util::StreamExt;
-use orca_tool::{ToolCall, ToolDef};
+use orca_contract::{ToolCall, ToolDef};
 use reqwest::Client;
 use serde_json::{Value, json};
 use std::collections::HashMap;

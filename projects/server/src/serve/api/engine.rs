@@ -9,7 +9,7 @@
 
 use super::prelude::*;
 use axum::response::IntoResponse;
-use orca_tool::{OrcaTool, ToolCtx};
+use orca_contract::{OrcaTool, ToolCtx};
 use orca_utils::config::Config;
 use platform::engine::{
     AddArgs, EmptyArgs, EngineCreate, EngineDelete, EngineList, EngineUpdate, NameArgs, UpdateArgs,

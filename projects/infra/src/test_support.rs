@@ -1,5 +1,5 @@
 //! Shared test helpers for in-crate unit tests.
-use orca_tool::ToolCtx;
+use orca_contract::ToolCtx;
 use orca_utils::config::{Config, Model};
 use std::path::PathBuf;
 use std::sync::Arc;

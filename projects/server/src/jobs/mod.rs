@@ -8,7 +8,7 @@ use crate::llm::tools::ToolRegistry;
 use crate::llm::{Message, ModelBackend, OutputSink, buffer_sink, sink_write};
 use anyhow::Result;
 use colored::Colorize;
-use orca_tool::ToolResult;
+use orca_contract::ToolResult;
 use orca_utils::config::{Config, Model};
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;

@@ -23,7 +23,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::erased::{ErasedTool, ToolWrapper, value_to_text};
-use crate::{OrcaTool, ToolCtx};
+use orca_contract::{OrcaTool, ToolCtx};
 
 pub struct ToolRegistry {
     tools: Vec<Box<dyn ErasedTool>>,
@@ -115,7 +115,7 @@ async fn http_dispatch(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     if !state.registry.names().iter().any(|n| *n == name) {
         let oe =
-            crate::OrcaError::not_found(format!("unknown tool: {name}")).with_code("tool.unknown");
+            orca_contract::OrcaError::not_found(format!("unknown tool: {name}")).with_code("tool.unknown");
         return Err(orca_error_response(oe));
     }
     state
@@ -128,7 +128,7 @@ async fn http_dispatch(
             // as `anyhow::Error` (legacy / unclassified). When the inner
             // cause is an OrcaError, lift its `kind` to the HTTP status and
             // serialize the full body so clients can branch on `kind`+`code`.
-            if let Some(oe) = e.downcast_ref::<crate::OrcaError>() {
+            if let Some(oe) = e.downcast_ref::<orca_contract::OrcaError>() {
                 let kind = oe.kind;
                 let body = serde_json::to_value(oe).unwrap_or_else(
                     |_| json!({ "kind": "internal", "message": "serialize failure" }),
@@ -137,12 +137,12 @@ async fn http_dispatch(
                     .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
                 return (status, Json(body));
             }
-            let oe = crate::OrcaError::internal(e.to_string());
+            let oe = orca_contract::OrcaError::internal(e.to_string());
             orca_error_response(oe)
         })
 }
 
-fn orca_error_response(oe: crate::OrcaError) -> (StatusCode, Json<Value>) {
+fn orca_error_response(oe: orca_contract::OrcaError) -> (StatusCode, Json<Value>) {
     let status =
         StatusCode::from_u16(oe.kind.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let body = serde_json::to_value(&oe)
@@ -229,7 +229,7 @@ pub enum CliArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{OrcaTool, OrcaToolDef, ToolCtx};
+    use orca_contract::{OrcaTool, OrcaToolDef, ToolCtx};
     use anyhow::Result;
     use async_trait::async_trait;
     use schemars::JsonSchema;

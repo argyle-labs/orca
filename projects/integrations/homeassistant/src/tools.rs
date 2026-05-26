@@ -11,12 +11,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use orca_tools_macro::orca_tool;
+use orca_macro::orca_tool;
 
 #[cfg(feature = "native")]
 use anyhow::Context;
 #[cfg(feature = "native")]
-use orca_tool::JsonAny;
+use orca_contract::JsonAny;
 
 #[cfg(feature = "native")]
 use crate::{Client, Config, ServiceCall};

@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use orca_tools_macro::orca_tool;
+use orca_macro::orca_tool;
 // Value is used only in MCP-federation inner modules where all Value uses are
 // legitimate opaque blobs (MCP protocol-level). The allow on each mod block
 // covers derive expansions; this import-level allow covers the import itself.

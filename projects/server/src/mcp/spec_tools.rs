@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use orca_tool::{OrcaTool, OrcaToolDef, ToolCtx};
+use orca_contract::{OrcaTool, OrcaToolDef, ToolCtx};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 

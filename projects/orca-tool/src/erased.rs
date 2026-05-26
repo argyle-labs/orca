@@ -17,7 +17,7 @@ use futures::future::BoxFuture;
 use serde_json::Value;
 use std::marker::PhantomData;
 
-use crate::{OrcaTool, ToolCtx};
+use orca_contract::{OrcaTool, ToolCtx};
 
 /// Object-safe version of OrcaTool. Implemented automatically for any OrcaTool via ToolWrapper.
 pub trait ErasedTool: Send + Sync {
@@ -103,7 +103,7 @@ pub fn value_to_text(v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{OrcaTool, OrcaToolDef, ToolCtx};
+    use orca_contract::{OrcaTool, OrcaToolDef, ToolCtx};
     use async_trait::async_trait;
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};

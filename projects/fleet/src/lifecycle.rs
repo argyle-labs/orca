@@ -5,7 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "native")]
-use orca_tools_macro::orca_tool;
+use orca_macro::orca_tool;
 #[cfg(feature = "native")]
 use std::sync::Arc;
 
@@ -654,7 +654,7 @@ mod tests {
 
     #[tokio::test]
     async fn system_update_proxies_to_peer_when_peer_id_set() {
-        use orca_tool::OrcaTool;
+        use orca_contract::OrcaTool;
         let (ctx, _, pod) = ctx_with_lifecycle_and_pod();
         let r = SystemUpdate::run(
             SystemUpdateArgs {

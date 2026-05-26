@@ -13,7 +13,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use orca_tools_macro::orca_tool;
+use orca_macro::orca_tool;
 
 // ── Args / Output types (shared by every surface) ────────────────
 

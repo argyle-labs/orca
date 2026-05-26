@@ -9,7 +9,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use orca_tools_macro::orca_tool;
+use orca_macro::orca_tool;
 
 // ── Args / Output types (shared by every surface) ────────────────
 
@@ -388,7 +388,7 @@ pub mod native_support {
     use anyhow::Result;
     use async_trait::async_trait;
     use orca_db as db;
-    use orca_tool::ToolCtx;
+    use orca_contract::ToolCtx;
     use std::sync::Arc;
 
     impl From<db::host_addressing::PodPeerAddress> for PodPeerAddressDto {

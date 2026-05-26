@@ -58,8 +58,9 @@ infra    = { path = "../infra",    features = ["native"] }
 docker        = { path = "../integrations/docker",        features = ["native"] }
 homeassistant = { path = "../integrations/homeassistant", features = ["native"] }
 proxmox       = { path = "../integrations/proxmox",       features = ["native"] }
-orca-tool  = { path = "../orca-tool", features = ["native"] }
-orca-utils = { path = "../utils" }
+orca-tool     = { path = "../orca-tool", features = ["native"] }
+orca-contract = { path = "../orca-contract", features = ["native"] }
+orca-utils    = { path = "../utils" }
 
 uniffi    = { workspace = true, features = ["cli"] }
 tokio     = { workspace = true }
