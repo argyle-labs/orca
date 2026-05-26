@@ -64,8 +64,9 @@ enum Command {
         /// Dev mode: spawn Vite dev server for hot reload
         #[arg(long)]
         dev: bool,
-        /// Port to listen on
-        #[arg(short, long, default_value = "12000")]
+        /// HTTP port to bind. Defaults to `APP_REST_HTTP_PORT` (12000);
+        /// override with `--port`, `ORCA_HTTP_PORT=<n>`, or orca.toml.
+        #[arg(short, long, default_value_t = orca_utils::config::APP_REST_HTTP_PORT)]
         port: u16,
     },
 
@@ -78,7 +79,8 @@ enum Command {
     /// Start dev server, superseding any running daemon on the port.
     /// Parks the stable daemon, runs dev mode, reclaims on exit.
     Dev {
-        #[arg(short, long, default_value = "12000")]
+        /// HTTP port to bind. Defaults to `APP_REST_HTTP_PORT` (12000).
+        #[arg(short, long, default_value_t = orca_utils::config::APP_REST_HTTP_PORT)]
         port: u16,
     },
 

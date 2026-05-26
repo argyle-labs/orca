@@ -106,10 +106,16 @@ trap 'cleanup; exit 0' INT TERM
 echo "  syncing rebuy specs..."
 "$ORCA" spec sync --all 2>&1 | sed 's/^/[specs]    /' || true
 
-# ── Take port 12000 ───────────────────────────────────────────────────────────
+# ── Take dev ports ────────────────────────────────────────────────────────────
+# Defaults match orca_utils::config::APP_REST_HTTP_PORT / APP_REST_HTTPS_PORT.
+# Override via env: ORCA_HTTP_PORT, ORCA_HTTPS_PORT.
+ORCA_HTTP_PORT="${ORCA_HTTP_PORT:-12000}"
+ORCA_HTTPS_PORT="${ORCA_HTTPS_PORT:-12443}"
+VITE_PORT="${VITE_PORT:-12001}"
+
 stop_system_daemon
 rm -f "$HOME/.orca/state.json"
-for port in 12000 12001; do
+for port in "$ORCA_HTTP_PORT" "$ORCA_HTTPS_PORT" "$VITE_PORT"; do
   # -sTCP:LISTEN restricts to listening sockets — without it lsof returns every
   # process with *any* connection on that port (including your browser holding
   # open HMR WebSockets), which we'd then SIGTERM.
@@ -121,9 +127,10 @@ done
 sleep 0.3
 
 export ORCA_DEV_PARENT_PID=$$
+export ORCA_HTTP_PORT ORCA_HTTPS_PORT
 
 echo ""
-echo "  orca  →  http://localhost:12000  (rust + vite HMR)"
+echo "  orca  →  http://localhost:${ORCA_HTTP_PORT}  +  https://localhost:${ORCA_HTTPS_PORT}  (rust + vite HMR via :${VITE_PORT})"
 echo ""
 
 # ── Start dev servers ─────────────────────────────────────────────────────────

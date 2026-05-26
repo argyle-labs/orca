@@ -11,9 +11,11 @@ use std::process::Command;
 
 #[derive(Subcommand)]
 pub enum DaemonAction {
-    /// Start the daemon (runs the serve loop with signal handling)
+    /// Start the daemon (runs the serve loop with signal handling). HTTP +
+    /// HTTPS bind concurrently; `--port` controls the HTTP listener,
+    /// `ORCA_HTTPS_PORT` / orca.toml controls HTTPS (default 12443).
     Start {
-        #[arg(short, long, default_value = "12000")]
+        #[arg(short, long, default_value_t = orca_utils::config::APP_REST_HTTP_PORT)]
         port: u16,
     },
     /// Show daemon status
@@ -26,7 +28,7 @@ pub enum DaemonAction {
     Reclaim,
     /// Install and enable as a system service (launchd on macOS, systemd/openrc/unraid on Linux)
     Install {
-        #[arg(short, long, default_value = "12000")]
+        #[arg(short, long, default_value_t = orca_utils::config::APP_REST_HTTP_PORT)]
         port: u16,
         /// Install as a SYSTEM service running as this user (requires root).
         /// Required on OpenRC and Unraid; optional on systemd (otherwise installs
