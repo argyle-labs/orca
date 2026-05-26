@@ -622,19 +622,39 @@ mod tests {
         }
     }
 
+    struct StubRemoteExec(Arc<StubPod>);
+
+    #[async_trait]
+    impl orca_tool::RemoteExec for StubRemoteExec {
+        #[allow(clippy::disallowed_types)]
+        async fn exec(
+            &self,
+            peer: &str,
+            tool: &str,
+            args: serde_json::Value,
+        ) -> Result<serde_json::Value> {
+            let dispatch =
+                <StubPod as crate::pod::PodService>::exec(&self.0, peer, tool, args).await?;
+            Ok(dispatch.result)
+        }
+    }
+
     fn ctx_with_lifecycle_and_pod() -> (orca_tool::ToolCtx, Arc<StubLifecycle>, Arc<StubPod>) {
         let lifecycle = Arc::new(StubLifecycle::default());
         let pod = Arc::new(StubPod::default());
         let mut ctx = empty_ctx();
         ctx.register_service(Arc::clone(&lifecycle) as Arc<dyn LifecycleService>);
         ctx.register_service(Arc::clone(&pod) as Arc<dyn crate::pod::PodService>);
+        let remote: Arc<dyn orca_tool::RemoteExec> = Arc::new(StubRemoteExec(Arc::clone(&pod)));
+        ctx.register_service(remote);
         (ctx, lifecycle, pod)
     }
 
     #[tokio::test]
     async fn system_update_proxies_to_peer_when_peer_id_set() {
+        use orca_tool::OrcaTool;
         let (ctx, _, pod) = ctx_with_lifecycle_and_pod();
-        let r = system_update(
+        let r = SystemUpdate::run(
             SystemUpdateArgs {
                 version: Some("rc".into()),
                 peer_id: Some("peer.abc".into()),
