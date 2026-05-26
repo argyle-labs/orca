@@ -37,7 +37,7 @@ use anyhow::{Context, Result};
 use orca_sdk::framing::{read_frame, write_frame};
 use orca_sdk::jsonrpc::{Message, Request, Response};
 use orca_sdk::pki;
-use orca_utils::config::{APP_PKI_DIR, APP_PLUGIN_PORT, APP_STATE_DIR};
+use orca_utils::config::{APP_PKI_DIR, APP_STATE_DIR, mesh_port};
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
 use serde::{Deserialize, Serialize};
@@ -338,7 +338,7 @@ pub(crate) async fn connect_pod_tls(
         .context("build client TLS config")?;
 
     let connector = TlsConnector::from(Arc::new(client_config));
-    let addr = format!("{host}:{}", APP_PLUGIN_PORT);
+    let addr = format!("{host}:{}", mesh_port());
     let tcp = TcpStream::connect(&addr)
         .await
         .with_context(|| format!("connect {addr}"))?;

@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use orca_sdk::framing::{read_frame, write_frame};
 use orca_sdk::jsonrpc::{Message, Request, Response};
 use orca_sdk::pki::{self, PeerRole};
-use orca_utils::config::APP_PLUGIN_PORT;
+use orca_utils::config::mesh_port;
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
 use std::sync::Arc;
