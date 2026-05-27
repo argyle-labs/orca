@@ -20,7 +20,7 @@ use std::sync::OnceLock;
 #[cfg(unix)]
 use std::io::Write;
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 
 static TOKEN: OnceLock<String> = OnceLock::new();
 
