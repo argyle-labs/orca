@@ -12,7 +12,13 @@ name = "orca"
 path = "src/main.rs"
 
 [features]
-default = ["ui"]
+default = ["ui", "native", "cli"]
+
+# No-op feature flags expected by `#[orca_tool]` codegen — the macro emits
+# `#[cfg(feature = "native")]` / `cfg(feature = "cli")]` on its generated
+# items. The server binary is always native+cli, so we just enable them.
+native = []
+cli = []
 
 # Embed the compiled frontend (projects/frontend/dist/) into the binary.
 # On by default. Disable with `--no-default-features` for a true headless build.

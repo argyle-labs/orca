@@ -25,9 +25,8 @@ pub use crate::conversation::context;
 pub use crate::conversation::tui;
 
 pub mod auth_password;
-pub mod diagnostic;
-pub mod spec_detail;
 pub mod auth_throttle;
+pub mod diagnostic;
 pub mod host_identity;
 pub mod host_status_writer;
 pub mod log_cmd;
@@ -41,4 +40,5 @@ pub mod remote_ok;
 pub mod scheduler;
 pub mod serve;
 pub mod services;
+pub mod spec_detail;
 pub mod tool_roles;

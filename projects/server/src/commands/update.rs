@@ -236,5 +236,4 @@ mod tests {
         let err = cmd_update_pin("").unwrap_err();
         assert!(err.to_string().contains("empty"));
     }
-
 }

@@ -17,8 +17,8 @@ use crate::install::{cmd_install_report, cmd_uninstall_report};
 use crate::update::{apply_update, check_for_update, resolve_github_token};
 #[cfg(feature = "native")]
 use crate::update_state::{
-    clear_version_pin, read_channel_marker, resolve_channel, resolve_pin_veto, write_channel_marker,
-    write_version_pin,
+    clear_version_pin, read_channel_marker, resolve_channel, resolve_pin_veto,
+    write_channel_marker, write_version_pin,
 };
 #[cfg(feature = "native")]
 use orca_macro::orca_tool;
