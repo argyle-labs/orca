@@ -170,11 +170,11 @@ pub fn cmd_install_report() -> InstallReport {
     step_pki_init(&home, &mut report);
     step_cli_client_cert(&home, &mut report);
     step_claude_md(&home, &mut report);
-    // Agents are served via the orca-local MCP server (list_agents / get_agent /
-    // run_agent), not by a `~/.claude/agents` symlink. On hosts upgraded from
-    // older orca versions, sweep the old symlink so Claude Code doesn't see
-    // duplicate agent definitions from two sources.
-    step_remove_legacy_agents_link(&home, &mut report);
+    // Materialize embedded agents to `~/.claude/agents/<name>.md` so Claude
+    // Code's native Agent picker auto-discovers them — no MCP roundtrip
+    // required. Also writes per-project copies under each known
+    // `<project>/.claude/agents/` so project-scoped agents override globals.
+    step_claude_agents(&home, &mut report);
     step_memory_symlinks(&home, &mut report);
     step_git_hooks(&mut report);
     step_mcp_registration(&mut report);
@@ -193,7 +193,7 @@ pub fn cmd_uninstall_report() -> InstallReport {
     let mut report = InstallReport::new();
     step_remove_mcp(&mut report);
     step_remove_claude_md(&home, &mut report);
-    step_remove_legacy_agents_link(&home, &mut report);
+    step_remove_claude_agents(&home, &mut report);
     step_remove_binary(&home, &mut report);
     report
 }
@@ -340,21 +340,81 @@ fn step_claude_md(home: &Path, report: &mut InstallReport) {
     }
 }
 
-/// Sweep the legacy `~/.claude/agents` symlink that older orca installs
-/// created. Agents are now served exclusively via the orca-local MCP server
-/// (list_agents / get_agent / run_agent), so the on-disk link only causes
-/// Claude Code to see duplicate definitions. Idempotent: silent no-op when
-/// nothing's there. Real directories are left alone — if a user has hand-
-/// curated content under `~/.claude/agents/`, we don't want to nuke it.
-fn step_remove_legacy_agents_link(home: &Path, report: &mut InstallReport) {
-    let agents_link = home.join(".claude/agents");
-    if is_symlink(&agents_link) {
-        match std::fs::remove_file(&agents_link) {
-            Ok(_) => report.ok("~/.claude/agents: removed legacy symlink (agents now via MCP)"),
-            Err(e) => report.err(format!("~/.claude/agents: remove failed: {e}")),
+/// Materialize every embedded agent to `~/.claude/agents/<name>.md` so
+/// Claude Code's native Agent picker discovers them automatically (no MCP
+/// roundtrip). Also writes per-project copies under each known
+/// `~/code/<project>/.claude/agents/` directory.
+///
+/// Overwrite policy: unconditional. Re-run on every `orca install` /
+/// `orca update` / daemon start. Users who want to edit an agent's prompt
+/// should fork it to a different name (e.g. `wolf-custom.md`); orca only
+/// owns the bare canonical names.
+fn step_claude_agents(home: &Path, report: &mut InstallReport) {
+    materialize_agents_to(&home.join(".claude/agents"), "~/.claude/agents", report);
+
+    for (macos_slug, linux_slug, vault_name) in MEMORY_PROJECTS {
+        let _ = (macos_slug, linux_slug); // memory slugs not used here
+        let project_root = home.join("code").join(vault_name);
+        if !project_root.exists() {
+            continue;
         }
-    } else if agents_link.exists() {
-        report.skip("~/.claude/agents: real directory present — not touching (move or delete manually if obsolete)");
+        let target = project_root.join(".claude/agents");
+        materialize_agents_to(
+            &target,
+            &format!("~/code/{vault_name}/.claude/agents"),
+            report,
+        );
+    }
+}
+
+fn materialize_agents_to(target_dir: &Path, label: &str, report: &mut InstallReport) {
+    if let Err(e) = std::fs::create_dir_all(target_dir) {
+        report.err(format!("{label}: mkdir failed: {e}"));
+        return;
+    }
+    let mut written = 0usize;
+    let mut errored = 0usize;
+    for name in agents::embedded::embedded_agent_names() {
+        let Some(raw) = agents::embedded::embedded_agent(name) else {
+            continue;
+        };
+        let path = target_dir.join(format!("{name}.md"));
+        match std::fs::write(&path, raw) {
+            Ok(_) => written += 1,
+            Err(e) => {
+                errored += 1;
+                report.err(format!("{label}/{name}.md: write failed: {e}"));
+            }
+        }
+    }
+    if errored == 0 {
+        report.ok(format!("{label}: materialized {written} agents"));
+    }
+}
+
+/// Remove every agent file orca materialized at install time. Only deletes
+/// canonical names that match an embedded agent — user-authored agents in
+/// the same directory are left alone.
+fn step_remove_claude_agents(home: &Path, report: &mut InstallReport) {
+    let mut targets: Vec<std::path::PathBuf> = vec![home.join(".claude/agents")];
+    for (_, _, vault_name) in MEMORY_PROJECTS {
+        let dir = home.join("code").join(vault_name).join(".claude/agents");
+        if dir.exists() {
+            targets.push(dir);
+        }
+    }
+    for dir in &targets {
+        if !dir.exists() {
+            continue;
+        }
+        let mut removed = 0usize;
+        for name in agents::embedded::embedded_agent_names() {
+            let path = dir.join(format!("{name}.md"));
+            if path.exists() && std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+        report.ok(format!("{}: removed {removed} agents", dir.display()));
     }
 }
 

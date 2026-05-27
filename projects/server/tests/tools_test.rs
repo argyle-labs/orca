@@ -1,7 +1,7 @@
 use std::fs;
 use tempfile::tempdir;
 
-use orca::agents::{list_embedded_agents, load_agent_prompt};
+use agents::embedded::{list_embedded_agents, load_agent_prompt};
 use orca::llm::tools::bash::BashPermissions;
 use orca_utils::fs::{ops, search};
 
