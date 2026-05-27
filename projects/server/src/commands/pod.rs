@@ -995,7 +995,7 @@ mod tests {
             offer_id: "o1".into(),
             direction: "in".into(),
             peer_pubkey_fp: "fp".into(),
-            peer_hostname: "thor".into(),
+            peer_hostname: "host-g".into(),
             peer_addr: "10.0.0.1".into(),
             peer_port: 12002,
             code_hash: "h".into(),
@@ -1024,32 +1024,32 @@ mod tests {
 
     #[test]
     fn resolve_no_match_when_unknown_host() {
-        let rows = vec![mk_disc("10.0.0.5", "thor", 12002, "fp1")];
-        let got = resolve_offer_target(&rows, "loki", 12002, true);
+        let rows = vec![mk_disc("10.0.0.5", "host-g", 12002, "fp1")];
+        let got = resolve_offer_target(&rows, "host-h", 12002, true);
         assert!(matches!(got, OfferTargetResolution::NoMatch));
     }
 
     #[test]
     fn resolve_matches_by_addr() {
-        let rows = vec![mk_disc("10.0.0.5", "thor", 12002, "fp1")];
+        let rows = vec![mk_disc("10.0.0.5", "host-g", 12002, "fp1")];
         let got = resolve_offer_target(&rows, "10.0.0.5", 12002, true);
         assert!(matches!(got, OfferTargetResolution::Match(r) if r.pubkey_fp == "fp1"));
     }
 
     #[test]
     fn resolve_matches_by_hostname() {
-        let rows = vec![mk_disc("10.0.0.5", "thor", 12002, "fp1")];
-        let got = resolve_offer_target(&rows, "thor", 12002, true);
+        let rows = vec![mk_disc("10.0.0.5", "host-g", 12002, "fp1")];
+        let got = resolve_offer_target(&rows, "host-g", 12002, true);
         assert!(matches!(got, OfferTargetResolution::Match(_)));
     }
 
     #[test]
     fn resolve_ambiguous_when_multihomed_default_port() {
         let rows = vec![
-            mk_disc("10.0.0.5", "thor", 12002, "fp1"),
-            mk_disc("10.0.0.5", "thor", 12003, "fp2"),
+            mk_disc("10.0.0.5", "host-g", 12002, "fp1"),
+            mk_disc("10.0.0.5", "host-g", 12003, "fp2"),
         ];
-        let got = resolve_offer_target(&rows, "thor", 12002, /* default */ true);
+        let got = resolve_offer_target(&rows, "host-g", 12002, /* default */ true);
         match got {
             OfferTargetResolution::Ambiguous(hits) => assert_eq!(hits.len(), 2),
             other => panic!("expected Ambiguous, got {other:?}"),
@@ -1059,10 +1059,10 @@ mod tests {
     #[test]
     fn resolve_explicit_port_disambiguates() {
         let rows = vec![
-            mk_disc("10.0.0.5", "thor", 12002, "fp1"),
-            mk_disc("10.0.0.5", "thor", 12003, "fp2"),
+            mk_disc("10.0.0.5", "host-g", 12002, "fp1"),
+            mk_disc("10.0.0.5", "host-g", 12003, "fp2"),
         ];
-        let got = resolve_offer_target(&rows, "thor", 12003, /* explicit */ false);
+        let got = resolve_offer_target(&rows, "host-g", 12003, /* explicit */ false);
         assert!(matches!(got, OfferTargetResolution::Match(r) if r.pubkey_fp == "fp2"));
     }
 

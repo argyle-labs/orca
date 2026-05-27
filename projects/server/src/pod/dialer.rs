@@ -196,18 +196,18 @@ mod tests {
     #[test]
     fn lan_v4_preferred_when_same_subnet() {
         let local = vec![ch(LAN_V4, "10.0.0.4")];
-        let peer = vec![ch(LAN_V4, "10.0.0.5"), ch(FQDN, "thor.lan")];
+        let peer = vec![ch(LAN_V4, "10.0.0.5"), ch(FQDN, "host-g.lan")];
         let out = select_dial_targets(&local, &peer, "");
-        assert_eq!(out, vec!["10.0.0.5", "thor.lan"]);
+        assert_eq!(out, vec!["10.0.0.5", "host-g.lan"]);
     }
 
     #[test]
     fn lan_v4_skipped_when_different_subnet() {
         let local = vec![ch(LAN_V4, "10.0.0.4")];
-        let peer = vec![ch(LAN_V4, "192.168.1.5"), ch(FQDN, "thor.lan")];
+        let peer = vec![ch(LAN_V4, "192.168.1.5"), ch(FQDN, "host-g.lan")];
         let out = select_dial_targets(&local, &peer, "");
         // lan_v4 fails /24 match → fqdn moves up; lan_v4 not retried
-        assert_eq!(out, vec!["thor.lan"]);
+        assert_eq!(out, vec!["host-g.lan"]);
     }
 
     #[test]
@@ -230,7 +230,7 @@ mod tests {
             ch(TAILSCALE_V6, "fd7a::1"),
         ];
         let peer = vec![
-            ch(FQDN, "thor.scottkey.me"),
+            ch(FQDN, "host-g.example.test"),
             ch(LAN_V6, "fe80::5"),
             ch(TAILSCALE_V4, "100.64.1.2"),
             ch(LAN_V4, "10.0.0.5"),
@@ -240,12 +240,12 @@ mod tests {
         assert_eq!(
             out,
             vec![
-                "10.0.0.5",         // 1. lan_v4 (same /24)
-                "100.64.1.2",       // 2. tailscale_v4
-                "thor.scottkey.me", // 3. fqdn
-                "fe80::5",          // 4. lan_v6
-                "fd7a::5",          // 5. tailscale_v6
-                                    // 6. legacy "10.0.0.5" dedup'd
+                "10.0.0.5",            // 1. lan_v4 (same /24)
+                "100.64.1.2",          // 2. tailscale_v4
+                "host-g.example.test", // 3. fqdn
+                "fe80::5",             // 4. lan_v6
+                "fd7a::5",             // 5. tailscale_v6
+                                       // 6. legacy "10.0.0.5" dedup'd
             ]
         );
     }

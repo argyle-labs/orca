@@ -420,7 +420,7 @@ mod tests {
             "version": "0.0.4",
             "hostname": "abc123",
             "addressing": {
-                "display_name": "thor",
+                "display_name": "host-g",
                 "channels": [
                     { "kind": "lan_v4", "value": "10.0.0.8" },
                     { "kind": "tailscale_v4", "value": "100.96.1.2" },
@@ -429,7 +429,7 @@ mod tests {
         });
         let r: PodPingResult = serde_json::from_value(json).unwrap();
         let a = r.addressing.expect("addressing populated");
-        assert_eq!(a.display_name, "thor");
+        assert_eq!(a.display_name, "host-g");
         assert_eq!(a.channels.len(), 2);
         assert_eq!(a.channels[0].kind, "lan_v4");
         assert_eq!(a.channels[0].value, "10.0.0.8");

@@ -203,7 +203,7 @@ mod tests {
     const SAMPLE: &str = "\
 proc /proc proc rw,nosuid,nodev,noexec 0 0
 10.10.10.10:/data /mnt/data nfs4 rw 0 0
-//willow/share /mnt/willow cifs rw 0 0
+//host-e/share /mnt/host-e cifs rw 0 0
 /dev/sda1 / ext4 rw 0 0
 malformed_line
 nasbox:/legacy /mnt/legacy smbfs ro 0 0
@@ -214,7 +214,7 @@ nasbox:/legacy /mnt/legacy smbfs ro 0 0
         let mounts = parse_mounts(SAMPLE.as_bytes()).unwrap();
         assert_eq!(mounts.len(), 3);
         assert_eq!(mounts[0].fstype, "nfs4");
-        assert_eq!(mounts[1].mountpoint, "/mnt/willow");
+        assert_eq!(mounts[1].mountpoint, "/mnt/host-e");
         assert_eq!(mounts[2].fstype, "smbfs");
     }
 

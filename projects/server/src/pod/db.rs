@@ -688,8 +688,8 @@ mod tests {
         upsert_discovery(
             &c,
             "fp1",
-            Some("peer.thor"),
-            "thor",
+            Some("peer.host-g"),
+            "host-g",
             "10.0.0.5",
             12002,
             "unclaimed",
@@ -699,8 +699,8 @@ mod tests {
         upsert_discovery(
             &c,
             "fp1",
-            Some("peer.thor"),
-            "thor",
+            Some("peer.host-g"),
+            "host-g",
             "10.0.0.6",
             12002,
             "pod:abc",
@@ -723,12 +723,12 @@ mod tests {
             "off1",
             "in",
             "fpA",
-            "mint",
+            "host-i",
             "10.0.0.1",
             12002,
             &hash_code(code),
             Some("CA-PEM"),
-            Some("peer.mint"),
+            Some("peer.host-i"),
             Some("pod-1"),
             300,
             None,
@@ -736,7 +736,7 @@ mod tests {
         .unwrap();
         let found = find_pending_offer_by_code(&c, code).unwrap().unwrap();
         assert_eq!(found.offer_id, "off1");
-        assert_eq!(found.peer_hostname, "mint");
+        assert_eq!(found.peer_hostname, "host-i");
         assert!(find_pending_offer_by_code(&c, "BAD").unwrap().is_none());
     }
 
@@ -748,7 +748,7 @@ mod tests {
             "off2",
             "in",
             "fpA",
-            "mint",
+            "host-i",
             "10.0.0.1",
             12002,
             &hash_code("X"),
@@ -767,8 +767,8 @@ mod tests {
         let (_d, c) = test_conn();
         upsert_peer(
             &c,
-            "peer.thor",
-            "thor",
+            "peer.host-g",
+            "host-g",
             "10.0.0.5",
             12002,
             Some("fp1"),
@@ -786,44 +786,80 @@ mod tests {
     #[test]
     fn peer_departed_resets_trust() {
         let (_d, c) = test_conn();
-        upsert_peer(&c, "peer.thor", "thor", "10.0.0.5", 12002, None, "ca-pem").unwrap();
-        set_trust(&c, "peer.thor", Some(true), Some(true)).unwrap();
-        mark_peer_departed(&c, "peer.thor").unwrap();
-        assert!(is_peer_departed(&c, "peer.thor").unwrap());
-        let t = get_trust(&c, "peer.thor").unwrap();
+        upsert_peer(
+            &c,
+            "peer.host-g",
+            "host-g",
+            "10.0.0.5",
+            12002,
+            None,
+            "ca-pem",
+        )
+        .unwrap();
+        set_trust(&c, "peer.host-g", Some(true), Some(true)).unwrap();
+        mark_peer_departed(&c, "peer.host-g").unwrap();
+        assert!(is_peer_departed(&c, "peer.host-g").unwrap());
+        let t = get_trust(&c, "peer.host-g").unwrap();
         assert!(!t.local_secure && !t.peer_secure);
     }
 
     #[test]
     fn rejoining_clears_departed() {
         let (_d, c) = test_conn();
-        upsert_peer(&c, "peer.thor", "thor", "10.0.0.5", 12002, None, "ca-pem").unwrap();
-        mark_peer_departed(&c, "peer.thor").unwrap();
-        assert!(is_peer_departed(&c, "peer.thor").unwrap());
-        upsert_peer(&c, "peer.thor", "thor", "10.0.0.5", 12002, None, "ca-pem").unwrap();
-        assert!(!is_peer_departed(&c, "peer.thor").unwrap());
+        upsert_peer(
+            &c,
+            "peer.host-g",
+            "host-g",
+            "10.0.0.5",
+            12002,
+            None,
+            "ca-pem",
+        )
+        .unwrap();
+        mark_peer_departed(&c, "peer.host-g").unwrap();
+        assert!(is_peer_departed(&c, "peer.host-g").unwrap());
+        upsert_peer(
+            &c,
+            "peer.host-g",
+            "host-g",
+            "10.0.0.5",
+            12002,
+            None,
+            "ca-pem",
+        )
+        .unwrap();
+        assert!(!is_peer_departed(&c, "peer.host-g").unwrap());
     }
 
     #[test]
     fn trust_bits_independent() {
         let (_d, c) = test_conn();
-        upsert_peer(&c, "peer.thor", "thor", "10.0.0.5", 12002, None, "ca-pem").unwrap();
-        set_trust(&c, "peer.thor", Some(true), None).unwrap();
-        let t = get_trust(&c, "peer.thor").unwrap();
+        upsert_peer(
+            &c,
+            "peer.host-g",
+            "host-g",
+            "10.0.0.5",
+            12002,
+            None,
+            "ca-pem",
+        )
+        .unwrap();
+        set_trust(&c, "peer.host-g", Some(true), None).unwrap();
+        let t = get_trust(&c, "peer.host-g").unwrap();
         assert!(t.local_secure && !t.peer_secure && !is_mutual_secure(t));
-        set_trust(&c, "peer.thor", None, Some(true)).unwrap();
-        assert!(is_mutual_secure(get_trust(&c, "peer.thor").unwrap()));
+        set_trust(&c, "peer.host-g", None, Some(true)).unwrap();
+        assert!(is_mutual_secure(get_trust(&c, "peer.host-g").unwrap()));
     }
 
     #[test]
     fn cleanup_unknown_stub_removes_matching_row_and_trust() {
         let (_d, c) = test_conn();
-        upsert_peer(&c, "unknown", "mint", "10.0.0.1", 12002, None, "").unwrap();
+        upsert_peer(&c, "unknown", "host-i", "10.0.0.1", 12002, None, "").unwrap();
         set_trust(&c, "unknown", Some(true), None).unwrap();
         upsert_peer(
             &c,
             "peer.real",
-            "mint",
+            "host-i",
             "10.0.0.1",
             12002,
             Some("fp"),
@@ -848,7 +884,7 @@ mod tests {
     #[test]
     fn cleanup_unknown_stub_at_different_addr_is_noop() {
         let (_d, c) = test_conn();
-        upsert_peer(&c, "unknown", "mint", "10.0.0.1", 12002, None, "").unwrap();
+        upsert_peer(&c, "unknown", "host-i", "10.0.0.1", 12002, None, "").unwrap();
         // Caller passes the addr of a NEW peer we just paired with — if that
         // addr doesn't match the stub, the stub stays (other host's leftover).
         cleanup_unknown_stub_at(&c, "10.0.0.2").unwrap();
@@ -863,7 +899,7 @@ mod tests {
         upsert_peer(
             &c,
             "peer.real",
-            "mint",
+            "host-i",
             "10.0.0.1",
             12002,
             Some("fp"),
@@ -890,13 +926,22 @@ mod tests {
     #[test]
     fn wipe_clears_state() {
         let (_d, c) = test_conn();
-        upsert_peer(&c, "peer.thor", "thor", "10.0.0.5", 12002, None, "ca-pem").unwrap();
-        set_trust(&c, "peer.thor", Some(true), Some(true)).unwrap();
+        upsert_peer(
+            &c,
+            "peer.host-g",
+            "host-g",
+            "10.0.0.5",
+            12002,
+            None,
+            "ca-pem",
+        )
+        .unwrap();
+        set_trust(&c, "peer.host-g", Some(true), Some(true)).unwrap();
         upsert_discovery(
             &c,
             "fp1",
             None,
-            "thor",
+            "host-g",
             "10.0.0.5",
             12002,
             "unclaimed",

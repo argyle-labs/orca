@@ -98,7 +98,7 @@ mod tests {
     fn endpoint_crud() {
         let conn = test_conn();
         let ep = EndpointRow {
-            name: "halvor".into(),
+            name: "host-d".into(),
             base_url: "https://pve.lan:8006".into(),
             token_id: "root@pam!auto".into(),
             token_secret: "deadbeef-1111-2222-3333-444444444444".into(),
@@ -109,14 +109,14 @@ mod tests {
 
         let rows = list(&conn).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].name, "halvor");
+        assert_eq!(rows[0].name, "host-d");
         assert!(rows[0].insecure);
 
-        let got = get(&conn, "halvor").unwrap().unwrap();
+        let got = get(&conn, "host-d").unwrap().unwrap();
         assert_eq!(got.token_id, "root@pam!auto");
 
         let ep2 = EndpointRow {
-            name: "halvor".into(),
+            name: "host-d".into(),
             base_url: "https://new.lan:8006".into(),
             token_id: "root@pam!auto".into(),
             token_secret: "rotated-uuid".into(),
@@ -124,13 +124,13 @@ mod tests {
             enabled: true,
         };
         upsert(&conn, &ep2).unwrap();
-        let after = get(&conn, "halvor").unwrap().unwrap();
+        let after = get(&conn, "host-d").unwrap().unwrap();
         assert_eq!(after.base_url, "https://new.lan:8006");
         assert_eq!(after.token_secret, "rotated-uuid");
         assert!(!after.insecure);
 
-        assert!(remove(&conn, "halvor").unwrap());
+        assert!(remove(&conn, "host-d").unwrap());
         assert!(list(&conn).unwrap().is_empty());
-        assert!(get(&conn, "halvor").unwrap().is_none());
+        assert!(get(&conn, "host-d").unwrap().is_none());
     }
 }

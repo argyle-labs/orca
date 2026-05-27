@@ -9,10 +9,6 @@ path = "src/lib.rs"
 
 [features]
 default = []
-# AST-based PHP analysis via tree-sitter-php. Off by default — pulls in
-# tree-sitter + tree-sitter-php (~few MB). ci4_generator skips AST passes
-# when this feature is off.
-php-ast = ["dep:tree-sitter", "dep:tree-sitter-php"]
 
 [dependencies]
 anyhow         = { workspace = true }
@@ -21,8 +17,6 @@ graphql-parser = "0.4"
 regex          = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }
-tree-sitter     = { version = "0.24", optional = true }
-tree-sitter-php = { version = "0.24", optional = true }
 utoipa          = { workspace = true }
 
 [lints]

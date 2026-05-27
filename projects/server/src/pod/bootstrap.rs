@@ -501,7 +501,7 @@ mod tests {
 
     #[test]
     fn select_peer_label_prefers_display_name() {
-        assert_eq!(select_peer_label("abc123", Some("thor")), "thor");
+        assert_eq!(select_peer_label("abc123", Some("host-g")), "host-g");
     }
 
     #[test]
@@ -543,10 +543,10 @@ mod tests {
             "pod_id": "p1",
             "code_hash": "h",
             "expires_at": 0,
-            "inviter_display_name": "thor",
+            "inviter_display_name": "host-g",
         });
         let body: OfferBody = serde_json::from_value(json).unwrap();
-        assert_eq!(body.inviter_display_name.as_deref(), Some("thor"));
+        assert_eq!(body.inviter_display_name.as_deref(), Some("host-g"));
     }
 
     #[test]
@@ -568,11 +568,11 @@ mod tests {
             "joiner_peer_id": "peer.abc",
             "joiner_hostname": "abc123",
             "joiner_pubkey_fp": "fp-deadbeef",
-            "joiner_display_name": "loki",
+            "joiner_display_name": "host-h",
         });
         let body: RequestOfferBody = serde_json::from_value(json).unwrap();
         assert_eq!(body.joiner_pubkey_fp, "fp-deadbeef");
-        assert_eq!(body.joiner_display_name.as_deref(), Some("loki"));
+        assert_eq!(body.joiner_display_name.as_deref(), Some("host-h"));
     }
 
     #[test]
@@ -590,15 +590,15 @@ mod tests {
     fn request_offer_result_roundtrip() {
         let r = RequestOfferResult {
             inviter_pubkey_fp: "fp-inviter".into(),
-            inviter_peer_id: "peer.thor".into(),
-            inviter_hostname: "thor".into(),
+            inviter_peer_id: "peer.host-g".into(),
+            inviter_hostname: "host-g".into(),
             inviter_addr: String::new(),
             inviter_port: 12002,
             mesh_ca_cert_pem: "ca".into(),
             pod_id: "p1".into(),
             code_hash: "h".into(),
             expires_at: 1234,
-            inviter_display_name: Some("thor.local".into()),
+            inviter_display_name: Some("host-g.local".into()),
             code_hint: Some("AB".into()),
             code_plain: None,
         };
@@ -617,10 +617,10 @@ mod tests {
             "joiner_hostname": "xyz789",
             "csr_client_pem": "",
             "csr_server_pem": "",
-            "joiner_display_name": "loki",
+            "joiner_display_name": "host-h",
         });
         let body: JoinConfirmBody = serde_json::from_value(json).unwrap();
-        assert_eq!(body.joiner_display_name.as_deref(), Some("loki"));
+        assert_eq!(body.joiner_display_name.as_deref(), Some("host-h"));
     }
 
     #[test]

@@ -165,15 +165,15 @@ mod tests {
     #[test]
     fn host_addressing_roundtrip() {
         let conn = test_conn();
-        upsert_host_addressing(&conn, "display_name", "mint", "manual").unwrap();
+        upsert_host_addressing(&conn, "display_name", "host-i", "manual").unwrap();
         upsert_host_addressing(&conn, "lan_v4", "10.0.0.5", "autodetect").unwrap();
         let rows = list_host_addressing(&conn).unwrap();
         assert_eq!(rows.len(), 2);
         // Upsert mutates value
-        upsert_host_addressing(&conn, "display_name", "mint-2", "manual").unwrap();
+        upsert_host_addressing(&conn, "display_name", "host-i-2", "manual").unwrap();
         let rows = list_host_addressing(&conn).unwrap();
         let dn = rows.iter().find(|r| r.key == "display_name").unwrap();
-        assert_eq!(dn.value, "mint-2");
+        assert_eq!(dn.value, "host-i-2");
 
         // Clear by source
         let n = clear_host_addressing_by_source(&conn, "autodetect").unwrap();
@@ -189,7 +189,7 @@ mod tests {
         conn.execute(
             "INSERT INTO pod_peers (peer_id, peer_hostname, peer_addr, peer_port,
                                     ca_cert_pem, first_seen_at, last_seen_at)
-             VALUES ('p1', 'thor', '10.0.0.6', 9100, '', 0, 0)",
+             VALUES ('p1', 'host-g', '10.0.0.6', 9100, '', 0, 0)",
             [],
         )
         .unwrap();
@@ -210,7 +210,7 @@ mod tests {
         conn.execute(
             "INSERT INTO pod_peers (peer_id, peer_hostname, peer_addr, peer_port,
                                     ca_cert_pem, first_seen_at, last_seen_at)
-             VALUES ('p1', 'thor', '10.0.0.6', 9100, '', 0, 0)",
+             VALUES ('p1', 'host-g', '10.0.0.6', 9100, '', 0, 0)",
             [],
         )
         .unwrap();
@@ -218,7 +218,7 @@ mod tests {
         // Seed: 2 autodetect rows + 1 manual row.
         upsert_peer_address(&conn, "p1", "lan_v4", "10.0.0.6", "autodetect").unwrap();
         upsert_peer_address(&conn, "p1", "lan_v4", "10.0.0.7", "autodetect").unwrap();
-        upsert_peer_address(&conn, "p1", "fqdn", "thor.lan", "manual").unwrap();
+        upsert_peer_address(&conn, "p1", "fqdn", "host-g.lan", "manual").unwrap();
 
         // Replace autodetect rows with a single fresh entry; manual row must survive.
         replace_peer_addresses_from_source(
@@ -253,7 +253,7 @@ mod tests {
         conn.execute(
             "INSERT INTO pod_peers (peer_id, peer_hostname, peer_addr, peer_port,
                                     ca_cert_pem, first_seen_at, last_seen_at)
-             VALUES ('p2', 'loki', '10.0.0.9', 9100, '', 0, 0)",
+             VALUES ('p2', 'host-h', '10.0.0.9', 9100, '', 0, 0)",
             [],
         )
         .unwrap();

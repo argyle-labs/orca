@@ -1641,13 +1641,13 @@ mod tests {
     fn parse_peer_addr_variants() {
         // bare host
         assert_eq!(
-            parse_peer_addr("thor", 12002).unwrap(),
-            ("thor".into(), 12002)
+            parse_peer_addr("host-g", 12002).unwrap(),
+            ("host-g".into(), 12002)
         );
         // host:port
         assert_eq!(
-            parse_peer_addr("thor:9999", 12002).unwrap(),
-            ("thor".into(), 9999)
+            parse_peer_addr("host-g:9999", 12002).unwrap(),
+            ("host-g".into(), 9999)
         );
         // IPv4
         assert_eq!(
@@ -1676,13 +1676,13 @@ mod tests {
         );
         // whitespace tolerated
         assert_eq!(
-            parse_peer_addr("  thor:1  ", 12002).unwrap(),
-            ("thor".into(), 1)
+            parse_peer_addr("  host-g:1  ", 12002).unwrap(),
+            ("host-g".into(), 1)
         );
         // errors
         assert!(parse_peer_addr("", 12002).is_err());
         assert!(parse_peer_addr(":12345", 12002).is_err());
-        assert!(parse_peer_addr("thor:notaport", 12002).is_err());
+        assert!(parse_peer_addr("host-g:notaport", 12002).is_err());
     }
 
     #[test]
@@ -1746,7 +1746,7 @@ mod tests {
     fn peer_cert_validity_is_30d_window() {
         let dir = tempfile::tempdir().unwrap();
         let pki = dir.path();
-        init_mesh_ca(pki, "thor").unwrap();
+        init_mesh_ca(pki, "host-g").unwrap();
         let server_pem = std::fs::read_to_string(mesh_server_cert_path(pki)).unwrap();
         let days = cert_days_remaining(&server_pem).unwrap();
         // Just-issued; allow some slack for clock granularity but it should
@@ -1767,7 +1767,7 @@ mod tests {
     fn ca_cert_validity_is_one_year() {
         let dir = tempfile::tempdir().unwrap();
         let pki = dir.path();
-        init_mesh_ca(pki, "thor").unwrap();
+        init_mesh_ca(pki, "host-g").unwrap();
         let ca_pem = std::fs::read_to_string(mesh_ca_cert_path(pki)).unwrap();
         let days = cert_days_remaining(&ca_pem).unwrap();
         assert!((363..=365).contains(&days), "got {days}d");
@@ -1777,7 +1777,7 @@ mod tests {
     fn should_rotate_fires_inside_threshold() {
         let dir = tempfile::tempdir().unwrap();
         let pki = dir.path();
-        init_mesh_ca(pki, "thor").unwrap();
+        init_mesh_ca(pki, "host-g").unwrap();
         let server_pem = std::fs::read_to_string(mesh_server_cert_path(pki)).unwrap();
         // Just-issued 30d cert; threshold 7d → should NOT rotate.
         assert!(!should_rotate(&server_pem, 7).unwrap());
@@ -1789,7 +1789,7 @@ mod tests {
     fn reissue_swaps_cert_atomically() {
         let dir = tempfile::tempdir().unwrap();
         let pki = dir.path();
-        init_mesh_ca(pki, "thor").unwrap();
+        init_mesh_ca(pki, "host-g").unwrap();
         let before = std::fs::read_to_string(mesh_server_cert_path(pki)).unwrap();
         // Wait long enough that not_before differs (clock resolution).
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -1821,7 +1821,7 @@ mod tests {
     fn ca_rotate_moves_current_to_previous() {
         let dir = tempfile::tempdir().unwrap();
         let pki = dir.path();
-        init_mesh_ca(pki, "thor").unwrap();
+        init_mesh_ca(pki, "host-g").unwrap();
         let before_cur_cert = std::fs::read_to_string(mesh_ca_cert_path(pki)).unwrap();
         let before_cur_key = std::fs::read_to_string(mesh_ca_key_path(pki)).unwrap();
 
@@ -1840,7 +1840,7 @@ mod tests {
     fn drop_previous_is_idempotent_and_clears_slot() {
         let dir = tempfile::tempdir().unwrap();
         let pki = dir.path();
-        init_mesh_ca(pki, "thor").unwrap();
+        init_mesh_ca(pki, "host-g").unwrap();
         rotate_mesh_ca(pki).unwrap();
         assert!(has_mesh_ca_previous(pki));
         drop_mesh_ca_previous(pki).unwrap();
@@ -1853,7 +1853,7 @@ mod tests {
     fn root_store_spans_two_cas() {
         let dir = tempfile::tempdir().unwrap();
         let pki = dir.path();
-        init_mesh_ca(pki, "thor").unwrap();
+        init_mesh_ca(pki, "host-g").unwrap();
         let old_ca = std::fs::read_to_string(mesh_ca_cert_path(pki)).unwrap();
         rotate_mesh_ca(pki).unwrap();
         let new_ca = std::fs::read_to_string(mesh_ca_cert_path(pki)).unwrap();
@@ -1864,7 +1864,7 @@ mod tests {
     #[test]
     fn import_state_round_trips_both_slots() {
         let src_dir = tempfile::tempdir().unwrap();
-        init_mesh_ca(src_dir.path(), "thor").unwrap();
+        init_mesh_ca(src_dir.path(), "host-g").unwrap();
         rotate_mesh_ca(src_dir.path()).unwrap();
         let cur_c = std::fs::read_to_string(mesh_ca_cert_path(src_dir.path())).unwrap();
         let cur_k = std::fs::read_to_string(mesh_ca_key_path(src_dir.path())).unwrap();

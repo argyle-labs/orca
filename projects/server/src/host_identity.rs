@@ -3,7 +3,7 @@
 //! Two facts about a host that callers in the pod-mesh code need:
 //!
 //!   * **`hostname()`** — a *display* label for humans. macOS rewrites the
-//!     OS hostname on mDNS conflicts (`mint` → `mint-2` → `mint-10`), and
+//!     OS hostname on mDNS conflicts (`host-i` → `host-i-2` → `host-i-10`), and
 //!     some Linux distros mutate it on DHCP renewal. We capture it once at
 //!     daemon startup and strip the `-<digits>` suffix so log lines and
 //!     mDNS TXT records stay coherent across the process lifetime.
@@ -316,12 +316,12 @@ mod tests {
 
     #[test]
     fn strips_macos_numeric_suffix() {
-        assert_eq!(strip_macos_suffix("mint-2"), "mint");
-        assert_eq!(strip_macos_suffix("mint-10"), "mint");
-        assert_eq!(strip_macos_suffix("mint"), "mint");
-        assert_eq!(strip_macos_suffix("mint.local"), "mint.local");
+        assert_eq!(strip_macos_suffix("host-i-2"), "host-i");
+        assert_eq!(strip_macos_suffix("host-i-10"), "host-i");
+        assert_eq!(strip_macos_suffix("host-i"), "host-i");
+        assert_eq!(strip_macos_suffix("host-i.local"), "host-i.local");
         // -alpha is not a conflict suffix
-        assert_eq!(strip_macos_suffix("mint-alpha"), "mint-alpha");
+        assert_eq!(strip_macos_suffix("host-i-alpha"), "host-i-alpha");
         // Hostname with legitimate hyphens but no trailing digits
         assert_eq!(strip_macos_suffix("home-server"), "home-server");
     }

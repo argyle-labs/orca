@@ -29,9 +29,6 @@ ui = ["dep:mime_guess", "system/ui"]
 # Off by default; pulls ~10 MB of typst + font + WASM crates into the binary.
 pdf = ["dep:typst", "dep:typst-pdf", "dep:typst-assets", "dep:zip"]
 
-# Enable AST-based PHP analysis via tree-sitter-php in the scanner crate.
-php-ast = ["scanner/php-ast"]
-
 [dependencies]
 # Workspace crates
 orca-sdk   = { path = "../sdk/rust" }

@@ -6,11 +6,6 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use utoipa::ToSchema;
 
-pub mod ci2_generator;
-pub mod ci4_generator;
-pub mod nextjs_generator;
-pub mod php_parse;
-
 /// Directory holding all tracked external API specs — both OpenAPI (.json)
 /// and GraphQL (.graphql) files live here.
 pub fn specs_dir() -> PathBuf {

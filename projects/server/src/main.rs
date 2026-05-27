@@ -215,7 +215,7 @@ enum PodAction {
     /// Mark a peer as locally trusted (or untrust). Triggers CA-key
     /// replication when both sides have flagged each other secure.
     Trust {
-        /// Peer ID (e.g. `peer.thor`).
+        /// Peer ID (e.g. `peer.host-g`).
         peer_id: String,
         #[arg(value_parser = ["on", "off"])]
         state: String,

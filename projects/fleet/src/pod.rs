@@ -773,7 +773,7 @@ mod tests {
         async fn list_enriched(&self) -> Result<Vec<PodPeerDto>> {
             Ok(vec![PodPeerDto {
                 peer_id: "peer.abc".into(),
-                hostname: "willow".into(),
+                hostname: "host-e".into(),
                 addr: "10.0.0.1".into(),
                 port: 12002,
                 last_seen_at: 0,
@@ -801,7 +801,7 @@ mod tests {
             Ok(PodAcceptOutput {
                 pod_id: "pod-1".into(),
                 inviter_peer_id: "peer.inv".into(),
-                inviter_hostname: "mint".into(),
+                inviter_hostname: "host-i".into(),
                 inviter_addr: "10.0.0.2".into(),
                 inviter_port: 12002,
                 self_secure: false,
@@ -833,7 +833,7 @@ mod tests {
                 latency_ms: 3,
                 error: None,
                 peer_id: Some(peer_id.into()),
-                hostname: Some("loki".into()),
+                hostname: Some("host-h".into()),
                 version: Some("0.0.0".into()),
             }
         }
@@ -841,7 +841,7 @@ mod tests {
             Ok(vec![PodDiscoveryRowDto {
                 pubkey_fp: "fp".into(),
                 peer_id: None,
-                hostname: "freyr".into(),
+                hostname: "host-c".into(),
                 addr: "10.0.0.3".into(),
                 port: 12002,
                 state: "seen".into(),
@@ -857,7 +857,7 @@ mod tests {
             *self.last_offer.lock().unwrap() = Some((addr.into(), port));
             Ok(PodOfferOutput {
                 code: "ABC123".into(),
-                joiner_hostname: "thor".into(),
+                joiner_hostname: "host-g".into(),
                 joiner_addr: addr.into(),
                 joiner_port: port.unwrap_or(12002),
                 joiner_pubkey_fp: "fp".into(),
@@ -1051,7 +1051,7 @@ mod tests {
         let (ctx, _) = ctx_with_stub();
         let out = pod_discovery_list(EmptyArgs {}, &ctx).await.unwrap();
         assert_eq!(out.0.len(), 1);
-        assert_eq!(out.0[0].hostname, "freyr");
+        assert_eq!(out.0[0].hostname, "host-c");
     }
 
     #[tokio::test]

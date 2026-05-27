@@ -659,43 +659,43 @@ mod tests {
 
     #[test]
     fn resolves_by_peer_id_case_insensitive() {
-        let peers = vec![peer("peer.abc", "willow", "10.0.0.1", false)];
+        let peers = vec![peer("peer.abc", "host-e", "10.0.0.1", false)];
         assert_eq!(resolve_peer_addr(&peers, "PEER.abc").unwrap(), "10.0.0.1");
     }
 
     #[test]
     fn resolves_by_hostname() {
-        let peers = vec![peer("peer.abc", "willow", "10.0.0.1", false)];
-        assert_eq!(resolve_peer_addr(&peers, "willow").unwrap(), "10.0.0.1");
+        let peers = vec![peer("peer.abc", "host-e", "10.0.0.1", false)];
+        assert_eq!(resolve_peer_addr(&peers, "host-e").unwrap(), "10.0.0.1");
     }
 
     #[test]
     fn resolves_by_addr() {
-        let peers = vec![peer("peer.abc", "willow", "10.0.0.1", false)];
+        let peers = vec![peer("peer.abc", "host-e", "10.0.0.1", false)];
         assert_eq!(resolve_peer_addr(&peers, "10.0.0.1").unwrap(), "10.0.0.1");
     }
 
     #[test]
     fn departed_peers_are_skipped() {
-        let peers = vec![peer("peer.abc", "willow", "10.0.0.1", true)];
-        let err = resolve_peer_addr(&peers, "willow").unwrap_err();
+        let peers = vec![peer("peer.abc", "host-e", "10.0.0.1", true)];
+        let err = resolve_peer_addr(&peers, "host-e").unwrap_err();
         assert!(err.to_string().contains("no active paired peer"));
     }
 
     #[test]
     fn no_match_errors_with_selector() {
-        let peers = vec![peer("peer.abc", "willow", "10.0.0.1", false)];
-        let err = resolve_peer_addr(&peers, "mint").unwrap_err();
-        assert!(err.to_string().contains("'mint'"));
+        let peers = vec![peer("peer.abc", "host-e", "10.0.0.1", false)];
+        let err = resolve_peer_addr(&peers, "host-i").unwrap_err();
+        assert!(err.to_string().contains("'host-i'"));
     }
 
     #[test]
     fn ambiguous_hostname_lists_peer_ids() {
         let peers = vec![
-            peer("peer.abc", "willow", "10.0.0.1", false),
-            peer("peer.def", "willow", "10.0.0.2", false),
+            peer("peer.abc", "host-e", "10.0.0.1", false),
+            peer("peer.def", "host-e", "10.0.0.2", false),
         ];
-        let err = resolve_peer_addr(&peers, "willow").unwrap_err();
+        let err = resolve_peer_addr(&peers, "host-e").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("ambiguous"), "got: {msg}");
         assert!(msg.contains("peer.abc"), "got: {msg}");
@@ -705,9 +705,9 @@ mod tests {
     #[test]
     fn one_active_one_departed_with_same_hostname_is_not_ambiguous() {
         let peers = vec![
-            peer("peer.abc", "willow", "10.0.0.1", true),
-            peer("peer.def", "willow", "10.0.0.2", false),
+            peer("peer.abc", "host-e", "10.0.0.1", true),
+            peer("peer.def", "host-e", "10.0.0.2", false),
         ];
-        assert_eq!(resolve_peer_addr(&peers, "willow").unwrap(), "10.0.0.2");
+        assert_eq!(resolve_peer_addr(&peers, "host-e").unwrap(), "10.0.0.2");
     }
 }

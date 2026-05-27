@@ -208,7 +208,7 @@ macro_rules! register_op {
                     clap::Arg::new("__peer")
                         .long("peer")
                         .value_name("PEER")
-                        .help("Run on a paired peer (hostname like 'willow', peer_id, addr, or `local`) instead of this host; ambiguous hostnames are rejected")
+                        .help("Run on a paired peer (hostname like 'host-e', peer_id, addr, or `local`) instead of this host; ambiguous hostnames are rejected")
                         .required(false),
                 )
             }

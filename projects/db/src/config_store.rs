@@ -305,7 +305,7 @@ mod tests {
     use super::*;
     use crate::testing::test_conn;
 
-    const LOCAL: &str = "thor";
+    const LOCAL: &str = "host-g";
 
     fn set_local(conn: &Connection, noun: &str, name: &str, json: &str) -> Result<bool> {
         set(conn, LOCAL, LOCAL, noun, name, json, "test")
@@ -320,7 +320,7 @@ mod tests {
         let r = get(&conn, "service", "plex").unwrap().unwrap();
         assert_eq!(r.noun, "service");
         assert_eq!(r.name, "plex");
-        assert_eq!(r.host_owner, "thor");
+        assert_eq!(r.host_owner, "host-g");
         assert!(!r.is_replica);
         // Test-only: parse stored JSON to index into a field. Value is the
         // right tool here — we're asserting on a runtime-shaped tree.
@@ -345,17 +345,20 @@ mod tests {
     #[test]
     fn cross_host_write_refused() {
         let conn = test_conn();
-        let err = set(&conn, "thor", "frigg", "service", "jellyfin", "{}", "test").unwrap_err();
+        let err = set(
+            &conn, "host-g", "host-b", "service", "jellyfin", "{}", "test",
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("refusing to write"), "got: {err}");
     }
 
     #[test]
     fn apply_replica_marks_row_as_replica() {
         let conn = test_conn();
-        apply_replica(&conn, "frigg", "service", "jellyfin", r#"{"v":1}"#, "mesh").unwrap();
+        apply_replica(&conn, "host-b", "service", "jellyfin", r#"{"v":1}"#, "mesh").unwrap();
         let r = get(&conn, "service", "jellyfin").unwrap().unwrap();
         assert!(r.is_replica);
-        assert_eq!(r.host_owner, "frigg");
+        assert_eq!(r.host_owner, "host-b");
     }
 
     #[test]
@@ -366,7 +369,7 @@ mod tests {
         assert!(removed);
         assert!(get(&conn, "schedule", "host.backup").unwrap().is_none());
 
-        let row_id = "schedule:host.backup@thor";
+        let row_id = "schedule:host.backup@host-g";
         let h = history(&conn, row_id).unwrap();
         assert_eq!(h.len(), 1);
     }
@@ -388,10 +391,10 @@ mod tests {
         let services = list(&conn, Some("service"), None).unwrap();
         assert_eq!(services.len(), 2);
 
-        let all_thor = list(&conn, None, Some("thor")).unwrap();
+        let all_thor = list(&conn, None, Some("host-g")).unwrap();
         assert_eq!(all_thor.len(), 3);
 
-        let none = list(&conn, None, Some("frigg")).unwrap();
+        let none = list(&conn, None, Some("host-b")).unwrap();
         assert!(none.is_empty());
     }
 

@@ -134,7 +134,7 @@ pub async fn cmd_dev_serve(binary: Option<&Path>, port: u16) -> Result<()> {
     println!("[orca dev serve] listening on http://0.0.0.0:{port}");
     println!("[orca dev serve]   GET /version.json  — sha256 of current build");
     println!("[orca dev serve]   GET /binary         — binary bytes");
-    println!("[orca dev serve] On each peer: orca update --source http://<mint-ip>:{port}",);
+    println!("[orca dev serve] On each peer: orca update --source http://<host-i-ip>:{port}",);
 
     let app = Router::new()
         .route("/version.json", get(version_handler))
