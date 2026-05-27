@@ -498,7 +498,9 @@ mod tests {
         let snap = collect_blocking();
         assert!(snap.cpu_logical.is_some_and(|c| c > 0));
         assert!(snap.mem_total_mb.is_some_and(|m| m > 0));
-        assert!(snap.mem_available_mb.is_some_and(|m| m > 0));
+        // Integer-divided to MB — under memory pressure this may round to 0;
+        // assert presence, not magnitude.
+        assert!(snap.mem_available_mb.is_some());
         // mem_used = total - available; must be non-negative
         let total = snap.mem_total_mb.unwrap();
         let used = snap.mem_used_mb.unwrap();
