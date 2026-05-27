@@ -61,5 +61,8 @@ tracing     = { workspace = true,         optional = true }
 dirs        = { workspace = true,         optional = true }
 toml        = { workspace = true,         optional = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

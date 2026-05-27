@@ -30,5 +30,8 @@ agents        = { path = "../agents" }
 db            = { package = "orca-db", path = "../db" }
 platform      = { path = "../platform", features = ["native"] }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

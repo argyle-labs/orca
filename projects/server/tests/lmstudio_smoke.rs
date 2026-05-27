@@ -678,8 +678,8 @@ async fn lmstudio_mcp_run_agent_offload() {
     };
 
     let (sink, buf) = buffer_sink();
-    let ctx = orca::conversation::context::ProjectContext::default();
-    let mut session = orca::conversation::session::Session::new_with_output(config, ctx, sink)
+    let ctx = conversation::sessions::context::ProjectContext::default();
+    let mut session = conversation::sessions::session::Session::new_with_output(config, ctx, sink)
         .await
         .expect("failed to create session");
 

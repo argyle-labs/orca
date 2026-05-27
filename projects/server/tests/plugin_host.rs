@@ -23,30 +23,30 @@ fn install_ring() {
 }
 
 async fn boot_host(pki_dir: &std::path::Path) -> SocketAddr {
-    boot_host_with_registry(pki_dir, plugin_host::ContextRegistry::new()).await
+    boot_host_with_registry(pki_dir, plugins::host::ContextRegistry::new()).await
 }
 
 async fn boot_host_with_registry(
     pki_dir: &std::path::Path,
-    registry: plugin_host::ContextRegistry,
+    registry: plugins::host::ContextRegistry,
 ) -> SocketAddr {
     let (addr, _) = boot_host_with_plugins(pki_dir, registry).await;
     addr
 }
 
-/// Boot variant that returns the [`plugin_host::PluginRegistry`] alongside
+/// Boot variant that returns the [`plugins::host::PluginRegistry`] alongside
 /// the socket so tests can dispatch host→plugin `tools/call` invocations.
 async fn boot_host_with_plugins(
     pki_dir: &std::path::Path,
-    registry: plugin_host::ContextRegistry,
-) -> (SocketAddr, plugin_host::PluginRegistry) {
-    let plugins = plugin_host::PluginRegistry::new();
+    registry: plugins::host::ContextRegistry,
+) -> (SocketAddr, plugins::host::PluginRegistry) {
+    let plugins = plugins::host::PluginRegistry::new();
     let plugins_for_serve = plugins.clone();
-    let (listener, acceptor, bound) = plugin_host::bind(pki_dir, 0)
+    let (listener, acceptor, bound) = plugins::host::bind(pki_dir, 0)
         .await
-        .expect("plugin_host::bind");
+        .expect("plugins::host::bind");
     tokio::spawn(async move {
-        _ = plugin_host::serve(listener, acceptor, registry, plugins_for_serve).await;
+        _ = plugins::host::serve(listener, acceptor, registry, plugins_for_serve).await;
     });
     // Connect via loopback regardless of the 0.0.0.0 bind.
     (SocketAddr::from(([127, 0, 0, 1], bound.port())), plugins)
@@ -320,7 +320,7 @@ async fn context_subscribe_receives_published_events_across_clients() {
     let pub_bundle = pki::issue(pki_dir, "publisher", Capability::General).unwrap();
     let sub_bundle = pki::issue(pki_dir, "subscriber", Capability::General).unwrap();
 
-    let registry = plugin_host::ContextRegistry::new();
+    let registry = plugins::host::ContextRegistry::new();
     let addr = boot_host_with_registry(pki_dir, registry).await;
 
     let publisher = TcpTransport::connect(addr, &pub_bundle).await.unwrap();
@@ -576,7 +576,7 @@ async fn context_publish_subscribe_preserves_order_under_burst() {
     let pub_bundle = pki::issue(pki_dir, "burst-pub", Capability::General).unwrap();
     let sub_bundle = pki::issue(pki_dir, "burst-sub", Capability::General).unwrap();
 
-    let registry = plugin_host::ContextRegistry::new();
+    let registry = plugins::host::ContextRegistry::new();
     let addr = boot_host_with_registry(pki_dir, registry).await;
 
     let publisher = TcpTransport::connect(addr, &pub_bundle).await.unwrap();
@@ -666,7 +666,7 @@ async fn context_subscribe_preserves_per_publisher_order_when_interleaved() {
     let pub_b = pki::issue(pki_dir, "pub-b", Capability::General).unwrap();
     let sub_b = pki::issue(pki_dir, "ord-sub", Capability::General).unwrap();
 
-    let registry = plugin_host::ContextRegistry::new();
+    let registry = plugins::host::ContextRegistry::new();
     let addr = boot_host_with_registry(pki_dir, registry).await;
 
     let publisher_a = TcpTransport::connect(addr, &pub_a).await.unwrap();
@@ -1111,7 +1111,7 @@ async fn host_can_call_plugin_tool_via_registry() {
     let bundle = pki::issue(pki_dir, "callable-plug", Capability::General).unwrap();
 
     let (addr, plugins) =
-        boot_host_with_plugins(pki_dir, plugin_host::ContextRegistry::new()).await;
+        boot_host_with_plugins(pki_dir, plugins::host::ContextRegistry::new()).await;
     let transport = TcpTransport::connect(addr, &bundle).await.unwrap();
     transport
         .hello("callable-plug", orca_sdk::Flavor::Headless, vec![], vec![])
@@ -1169,7 +1169,7 @@ async fn host_call_to_unknown_tool_surfaces_handler_error() {
     let bundle = pki::issue(pki_dir, "no-tools-plug", Capability::General).unwrap();
 
     let (addr, plugins) =
-        boot_host_with_plugins(pki_dir, plugin_host::ContextRegistry::new()).await;
+        boot_host_with_plugins(pki_dir, plugins::host::ContextRegistry::new()).await;
     let transport = TcpTransport::connect(addr, &bundle).await.unwrap();
     transport
         .hello("no-tools-plug", orca_sdk::Flavor::Headless, vec![], vec![])
@@ -1201,7 +1201,7 @@ async fn plugin_registry_unregisters_on_disconnect() {
     let bundle = pki::issue(pki_dir, "drop-plug", Capability::General).unwrap();
 
     let (addr, plugins) =
-        boot_host_with_plugins(pki_dir, plugin_host::ContextRegistry::new()).await;
+        boot_host_with_plugins(pki_dir, plugins::host::ContextRegistry::new()).await;
     let transport = TcpTransport::connect(addr, &bundle).await.unwrap();
     transport
         .hello("drop-plug", orca_sdk::Flavor::Headless, vec![], vec![])
@@ -1243,7 +1243,7 @@ async fn cross_plugin_invoke_routes_through_host() {
     let consumer_bundle = pki::issue(pki_dir, "consumer", Capability::General).unwrap();
 
     let (addr, _plugins) =
-        boot_host_with_plugins(pki_dir, plugin_host::ContextRegistry::new()).await;
+        boot_host_with_plugins(pki_dir, plugins::host::ContextRegistry::new()).await;
 
     // ── Provider: declares a "double" tool.
     let provider = TcpTransport::connect(addr, &provider_bundle).await.unwrap();

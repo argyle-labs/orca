@@ -106,8 +106,7 @@ pub fn loopback_only_reqwest_client(url: &str) -> anyhow::Result<reqwest::Client
 /// unit tests that need to exercise the loopback fast path without minting
 /// real randomness or writing to disk. First-call-wins, matching the
 /// production OnceLock semantics.
-#[cfg(test)]
-pub(crate) fn set_for_tests(s: String) {
+pub fn set_for_tests(s: String) {
     _ = TOKEN.set(s);
 }
 
