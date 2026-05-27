@@ -94,8 +94,12 @@ pub async fn handle_pod_connection(
     // request/response path below is bypassed.
     if request.method == crate::pod_native::subscribe_wire::METHOD {
         let own_peer_id = format!("peer.{}", crate::host_identity::machine_id_short());
-        return crate::pod_native::subscribe_wire::serve_session_with_request(tls, request, &own_peer_id)
-            .await;
+        return crate::pod_native::subscribe_wire::serve_session_with_request(
+            tls,
+            request,
+            &own_peer_id,
+        )
+        .await;
     }
 
     let response = dispatch(request, &peer_cn, peer_addr).await;
@@ -500,7 +504,7 @@ mod tests {
 
     #[test]
     fn authorize_exec_passes_remote_ok_and_any_role() {
-        authorize_exec("namespace.doc.search", true, "any").expect("should pass");
+        authorize_exec("fs.search", true, "any").expect("should pass");
     }
 
     #[test]

@@ -52,7 +52,10 @@ pub struct PackageBuildArgs {
     #[cfg_attr(feature = "cli", arg(long))]
     pub arch: Option<String>,
     /// Maintainer string embedded in deb/rpm package metadata.
-    #[cfg_attr(feature = "cli", arg(long, default_value = "Orca <noreply@orca.local>"))]
+    #[cfg_attr(
+        feature = "cli",
+        arg(long, default_value = "Orca <noreply@orca.local>")
+    )]
     #[serde(default = "default_maintainer")]
     pub maintainer: String,
     /// macOS Developer ID Application identity for codesign (binary signing).
@@ -89,7 +92,9 @@ async fn package_build(args: PackageBuildArgs, _ctx: &ToolCtx) -> Result<Package
     }
 
     let format = args.format.map(Ok).unwrap_or_else(detect_format)?;
-    let arch = args.arch.unwrap_or_else(|| std::env::consts::ARCH.to_string());
+    let arch = args
+        .arch
+        .unwrap_or_else(|| std::env::consts::ARCH.to_string());
     std::fs::create_dir_all(&args.out_dir)?;
 
     match &format {

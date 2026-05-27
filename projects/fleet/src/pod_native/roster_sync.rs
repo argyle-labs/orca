@@ -20,8 +20,8 @@
 //! seconds; before that fix, peers with `peer_id="unknown"` are skipped
 //! both as sources and as merge targets.
 
-use anyhow::Result;
 use crate::pod::{PodPeerDto, PodPeerListOutput};
+use anyhow::Result;
 use orca_sdk::pki;
 use rusqlite::OptionalExtension;
 use std::time::Duration;

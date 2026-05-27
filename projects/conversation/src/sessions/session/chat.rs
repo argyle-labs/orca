@@ -1,6 +1,6 @@
 use super::{Session, util};
-use::llm::Message;
-use::llm::tools::ToolRegistry;
+use ::llm::Message;
+use ::llm::tools::ToolRegistry;
 use anyhow::Result;
 use colored::Colorize;
 use orca_contract::ToolResult;

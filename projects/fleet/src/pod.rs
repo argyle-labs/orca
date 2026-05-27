@@ -387,8 +387,8 @@ pub mod native_support {
     use super::*;
     use anyhow::Result;
     use async_trait::async_trait;
-    use orca_contract::ToolCtx;
     use db;
+    use orca_contract::ToolCtx;
     use std::sync::Arc;
 
     impl From<db::host_addressing::PodPeerAddress> for PodPeerAddressDto {

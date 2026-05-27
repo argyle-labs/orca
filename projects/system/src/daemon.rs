@@ -33,10 +33,7 @@ pub struct DaemonStatusOutput {
 
 /// Show daemon status (mode, pid, port, version, uptime).
 #[orca_tool(domain = "system.daemon", verb = "status")]
-async fn daemon_status_tool(
-    _args: DaemonStatusArgs,
-    _ctx: &ToolCtx,
-) -> Result<DaemonStatusOutput> {
+async fn daemon_status_tool(_args: DaemonStatusArgs, _ctx: &ToolCtx) -> Result<DaemonStatusOutput> {
     let Some(s) = orca_utils::state::read()? else {
         println!("{} daemon not running", "●".dimmed());
         return Ok(DaemonStatusOutput {

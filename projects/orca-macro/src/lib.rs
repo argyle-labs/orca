@@ -112,11 +112,11 @@ impl Parse for ToolAttr {
                 "role" => {
                     let s = lit_str(&nv.value)?;
                     match s.value().as_str() {
-                        "any" | "admin" => {}
+                        "any" | "read" | "admin" => {}
                         other => {
                             return Err(syn::Error::new_spanned(
                                 &nv.value,
-                                format!("role must be \"any\" or \"admin\", got {other:?}"),
+                                format!("role must be \"any\", \"read\", or \"admin\", got {other:?}"),
                             ));
                         }
                     }

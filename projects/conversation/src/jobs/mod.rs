@@ -4,8 +4,8 @@
 //! without blocking the foreground session. Results are buffered in memory and
 //! retrieved via `get_output`. Cancellation is handled via `CancellationToken`.
 
-use::llm::tools::ToolRegistry;
-use::llm::{Message, ModelBackend, OutputSink, buffer_sink, sink_write};
+use ::llm::tools::ToolRegistry;
+use ::llm::{Message, ModelBackend, OutputSink, buffer_sink, sink_write};
 use anyhow::Result;
 use colored::Colorize;
 use orca_contract::ToolResult;
@@ -71,7 +71,7 @@ impl JobManager {
         let id = self.next_id;
         self.next_id += 1;
 
-        let backend =::llm::build_backend(config, model)?;
+        let backend = ::llm::build_backend(config, model)?;
         let (sink, buffer) = buffer_sink();
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
@@ -172,7 +172,7 @@ async fn run_background_chat(
     let mut tools = ToolRegistry {
         output: output.clone(),
         permissions: {
-            let mut p =::llm::tools::bash::BashPermissions::default();
+            let mut p = ::llm::tools::bash::BashPermissions::default();
             p.auto_approve = true;
             p
         },
@@ -253,7 +253,7 @@ fn write_to_sink(sink: &OutputSink, data: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use::llm::buffer_sink;
+    use ::llm::buffer_sink;
 
     fn make_finished_job(id: usize, prompt: &str) -> BackgroundJob {
         let (_, buffer) = buffer_sink();

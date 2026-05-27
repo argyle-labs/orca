@@ -1,13 +1,13 @@
 //! Server-side `ProfileService` impl — wraps `ProfileManager`.
 
-use anyhow::{Context, Result, anyhow};
-use async_trait::async_trait;
-use orca_utils::config::{Config, LOCAL_USER};
 use crate::profile::ProfileService;
 use crate::profile::{
     ProfileCurrentReport, ProfileDetail, ProfileListReport, ProfileMutationResult,
     ProfileShareEntry, ProfileSharesReport, ProfileSummary,
 };
+use anyhow::{Context, Result, anyhow};
+use async_trait::async_trait;
+use orca_utils::config::{Config, LOCAL_USER};
 use std::sync::Arc;
 
 use crate::profile_manager::{ProfileManager, Role};

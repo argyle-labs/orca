@@ -165,12 +165,7 @@ async fn host_set(
     match args.key.as_str() {
         "display_name" => db::settings::set(&conn, "host.display_name", &args.value)?,
         "fqdn" => db::settings::set(&conn, "host.fqdn", &args.value)?,
-        _ => db::host_addressing::upsert_host_addressing(
-            &conn,
-            &args.key,
-            &args.value,
-            "manual",
-        )?,
+        _ => db::host_addressing::upsert_host_addressing(&conn, &args.key, &args.value, "manual")?,
     }
     Ok(HostSetOutput {
         key: args.key,
@@ -245,20 +240,10 @@ mod tests {
         let ctx = make_ctx();
         db::with_db_path(path.clone(), async move {
             let conn = db::open_default().unwrap();
-            db::host_addressing::upsert_host_addressing(
-                &conn,
-                "display_name",
-                "testbox",
-                "manual",
-            )
-            .unwrap();
-            db::host_addressing::upsert_host_addressing(
-                &conn,
-                "lan_v4",
-                "10.0.0.5",
-                "autodetect",
-            )
-            .unwrap();
+            db::host_addressing::upsert_host_addressing(&conn, "display_name", "testbox", "manual")
+                .unwrap();
+            db::host_addressing::upsert_host_addressing(&conn, "lan_v4", "10.0.0.5", "autodetect")
+                .unwrap();
             drop(conn);
 
             let out = host_detail(EmptyArgs {}, &ctx).await.unwrap();
@@ -378,13 +363,8 @@ mod tests {
         let ctx = make_ctx();
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let conn = db::open_default().unwrap();
-            db::host_addressing::upsert_host_addressing(
-                &conn,
-                "lan_v4",
-                "10.0.0.9",
-                "autodetect",
-            )
-            .unwrap();
+            db::host_addressing::upsert_host_addressing(&conn, "lan_v4", "10.0.0.9", "autodetect")
+                .unwrap();
             drop(conn);
 
             let out = host_refresh(EmptyArgs {}, &ctx).await.unwrap();

@@ -289,8 +289,7 @@ pub async fn signin(
         }
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("lookup: {e}")),
     };
-    let ok =
-        auth::password::verify_password(&req.password, &row.password_hash).unwrap_or(false);
+    let ok = auth::password::verify_password(&req.password, &row.password_hash).unwrap_or(false);
     if !ok {
         auth::throttle::record_failure(&ip, &req.username);
         tracing::warn!(

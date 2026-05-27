@@ -226,8 +226,8 @@ impl ProfileManager {
         profile_id: &str,
         user_id: &str,
     ) -> Result<Access, ProfileError> {
-        let role =
-            orca_db::profiles::role_for_user(conn, profile_id, user_id).map_err(ProfileError::Other)?;
+        let role = orca_db::profiles::role_for_user(conn, profile_id, user_id)
+            .map_err(ProfileError::Other)?;
         Ok(match role.as_deref() {
             Some("owner") => Access::Owner,
             Some("viewer") => Access::Viewer,
@@ -384,7 +384,9 @@ impl ProfileManager {
             return Ok(Some(p));
         }
         // 2. Persisted active selection
-        if let Some(id) = orca_db::profiles::get_active(conn, user_id).map_err(ProfileError::Other)? {
+        if let Some(id) =
+            orca_db::profiles::get_active(conn, user_id).map_err(ProfileError::Other)?
+        {
             // ACL-check; if access lapsed, fall through.
             if let Ok(p) = self.get(conn, &id, user_id) {
                 return Ok(Some(p));

@@ -5,6 +5,6 @@ pub mod plugins;
 #[cfg(feature = "native")]
 pub mod creds;
 #[cfg(feature = "native")]
-pub mod install;
-#[cfg(feature = "native")]
 pub mod host;
+#[cfg(feature = "native")]
+pub mod install;

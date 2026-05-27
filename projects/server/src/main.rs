@@ -1,16 +1,16 @@
 use ::llm::{ClaudeBackend, Message, ModelBackend, stdout_sink};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use system::dev_serve as dev_serve_cmd;
-use system::hook::{self as hook_cmd, HookAction};
-use system::update_cmd;
+use conversation::log_cmd::{LogAction, cmd_log};
 use conversation::sessions::context::ProjectContext;
 use conversation::sessions::session::Session;
-use conversation::log_cmd::{LogAction, cmd_log};
 use orca::mcp;
 use orca::serve;
 use orca::serve::openapi::orca_spec_json;
 use orca_utils::config::Config;
+use system::dev_serve as dev_serve_cmd;
+use system::hook::{self as hook_cmd, HookAction};
+use system::update_cmd;
 
 #[derive(Parser)]
 #[command(name = "orca", about = "Context-first AI agent orchestrator", version)]
@@ -421,7 +421,9 @@ async fn main() -> Result<()> {
                 fleet::cli::cmd_pod_self_secure(action)
             }
             PodAction::CertStatus => fleet::cli::cmd_pod_cert_status(),
-            PodAction::CaRotate { overlap_days } => fleet::cli::cmd_pod_ca_rotate(overlap_days).await,
+            PodAction::CaRotate { overlap_days } => {
+                fleet::cli::cmd_pod_ca_rotate(overlap_days).await
+            }
             PodAction::Leave {
                 wipe_secrets,
                 wipe_all,

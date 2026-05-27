@@ -202,8 +202,7 @@ pub async fn list_specs() -> Result<Vec<SpecMetaRow>> {
                 let Ok(read) = std::fs::read_dir(&plugin_dir) else {
                     continue;
                 };
-                let mut seen: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 let mut plugin_repos: Vec<String> = read
                     .flatten()
                     .filter_map(|entry| {
@@ -314,8 +313,8 @@ pub async fn refresh_spec(name: &str) -> Result<RegisterSpecResult> {
         return Err(anyhow!("invalid spec name"));
     }
     let conn = db::open_default()?;
-    let row = db::openapi_specs::get(&conn, name)?
-        .ok_or_else(|| anyhow!("no spec named '{name}'"))?;
+    let row =
+        db::openapi_specs::get(&conn, name)?.ok_or_else(|| anyhow!("no spec named '{name}'"))?;
     let url = row
         .url
         .clone()

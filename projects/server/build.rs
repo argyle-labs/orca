@@ -94,4 +94,3 @@ fn resolve_version() -> String {
         s
     }
 }
-

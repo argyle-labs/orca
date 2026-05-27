@@ -12,8 +12,8 @@
 //! Both tasks are idempotent: callers can fire `spawn_…` more than once and
 //! only the first invocation actually starts a task.
 
-use anyhow::{Context, Result};
 use crate::host_status::HostStatusRows;
+use anyhow::{Context, Result};
 use std::sync::OnceLock;
 use std::time::Duration;
 use system::system::SystemStatusReport;
@@ -113,11 +113,13 @@ async fn persist_local_snapshot() -> Result<()> {
 
     // Fan out to in-process subscribers (UI sessions, mesh forwarder).
     // Best-effort: failures here don't roll back the DB write.
-    crate::pod_native::subscribe::publish_host_status(crate::pod_native::subscribe::HostStatusEvent {
-        peer_id,
-        snapshot_at_unix: snapshot_at,
-        payload,
-    });
+    crate::pod_native::subscribe::publish_host_status(
+        crate::pod_native::subscribe::HostStatusEvent {
+            peer_id,
+            snapshot_at_unix: snapshot_at,
+            payload,
+        },
+    );
     Ok(())
 }
 
@@ -176,8 +178,9 @@ async fn pull_one_peer_inner(peer_id: &str, addr: &str) -> Result<()> {
     // returns the OS hostname, and rc.25+ peers also include a full addressing
     // snapshot (display_name + per-channel addresses). Display name from the
     // snapshot wins; fall back to OS hostname for rc.≤24 peers.
-    let ping_fut =
-        crate::pod_native::dialer::try_targets(&targets, |t| async move { crate::pod_native::ping(&t).await });
+    let ping_fut = crate::pod_native::dialer::try_targets(&targets, |t| async move {
+        crate::pod_native::ping(&t).await
+    });
     if let Ok(Ok(pong)) = tokio::time::timeout(Duration::from_secs(5), ping_fut).await {
         let pid = peer_id.to_string();
         let host = pong

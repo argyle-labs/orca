@@ -377,14 +377,9 @@ mod tests {
 
     #[tokio::test]
     async fn update_set_source_empty_returns_err() {
-        let err = update_set_source(
-            UpdateSetSourceArgs {
-                url: String::new(),
-            },
-            &ctx(),
-        )
-        .await
-        .unwrap_err();
+        let err = update_set_source(UpdateSetSourceArgs { url: String::new() }, &ctx())
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("empty"));
     }
 

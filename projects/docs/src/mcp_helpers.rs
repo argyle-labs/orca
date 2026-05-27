@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use orca_utils::markdown::to_llm_text;
 use crate::tree::{TreeNode, build_tree_raw};
+use orca_utils::markdown::to_llm_text;
 
 pub struct DocRoot {
     pub name: String,

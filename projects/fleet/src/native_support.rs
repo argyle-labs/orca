@@ -1,11 +1,11 @@
-use anyhow::{Context, Result};
-use async_trait::async_trait;
-use db::ports::mesh_port;
 use crate::pod::{
     CertInfo, PodAcceptOutput, PodCertStatusOutput, PodDiscoveryRowDto, PodExecDispatch,
     PodJoinOutput, PodLeaveOutput, PodOfferOutput, PodPeerAddressDto, PodPeerDto,
     PodPendingOfferDto, PodPingOutput, PodService, PodTrustOutput,
 };
+use anyhow::{Context, Result};
+use async_trait::async_trait;
+use db::ports::mesh_port;
 use orca_sdk::pki;
 use std::time::Instant;
 use system::update_state::{read_channel_marker, read_version_pin};
@@ -214,13 +214,13 @@ impl PodService for ServerPod {
             }
         };
 
-        let targets = crate::pod_native::dialer::dial_targets_for_peer(&conn, peer_id, &peer.peer_addr)
-            .unwrap_or_else(|_| vec![peer.peer_addr.clone()]);
+        let targets =
+            crate::pod_native::dialer::dial_targets_for_peer(&conn, peer_id, &peer.peer_addr)
+                .unwrap_or_else(|_| vec![peer.peer_addr.clone()]);
         let start = Instant::now();
-        match crate::pod_native::dialer::try_targets(
-            &targets,
-            |t| async move { crate::pod_native::ping(&t).await },
-        )
+        match crate::pod_native::dialer::try_targets(&targets, |t| async move {
+            crate::pod_native::ping(&t).await
+        })
         .await
         {
             Ok(r) => PodPingOutput {
@@ -491,8 +491,16 @@ async fn local_peer_row() -> PodPeerDto {
         reachable: Some(true),
         latency_ms: Some(0),
         probe_error: None,
-        version: Some(option_env!("ORCA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")).into()),
-        target: Some(option_env!("ORCA_BUILD_TARGET").unwrap_or("unknown-target").into()),
+        version: Some(
+            option_env!("ORCA_VERSION")
+                .unwrap_or(env!("CARGO_PKG_VERSION"))
+                .into(),
+        ),
+        target: Some(
+            option_env!("ORCA_BUILD_TARGET")
+                .unwrap_or("unknown-target")
+                .into(),
+        ),
         frontend: Some(frontend.into()),
         mode,
         channel,

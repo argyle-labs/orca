@@ -1,8 +1,8 @@
 // Session delegation; HashMap/Value appear in delegated tool calls as protocol-level passthrough.
 #![allow(clippy::disallowed_types)]
 use super::{Session, util};
-use::llm::Message;
-use::llm::tools::ToolRegistry;
+use ::llm::Message;
+use ::llm::tools::ToolRegistry;
 use colored::Colorize;
 use orca_contract::ToolResult;
 use tokio_util::sync::CancellationToken;
@@ -20,17 +20,16 @@ impl Session {
             };
         }
 
-        let agent_prompt =
-            match agents::resolve::load_agent_prompt(agent, &self.config) {
-                Some(prompt) => prompt,
-                None => {
-                    return ToolResult {
-                        tool_use_id: String::new(),
-                        content: format!("error: agent @{agent} not found"),
-                        is_error: true,
-                    };
-                }
-            };
+        let agent_prompt = match agents::resolve::load_agent_prompt(agent, &self.config) {
+            Some(prompt) => prompt,
+            None => {
+                return ToolResult {
+                    tool_use_id: String::new(),
+                    content: format!("error: agent @{agent} not found"),
+                    is_error: true,
+                };
+            }
+        };
 
         let agent_icon = util::agent_emoji(agent);
         if self.narration {
