@@ -210,57 +210,6 @@ pub struct RemoveSchemaArgs {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Docker runtimes
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct DockerRuntimeEntry {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub socket_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub host: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    pub enabled: bool,
-}
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct ListDockerRuntimesArgs {}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct ListDockerRuntimesOutput {
-    pub runtimes: Vec<DockerRuntimeEntry>,
-}
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct AddDockerRuntimeArgs {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub socket_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct DockerRuntimeMutationResult {
-    pub name: String,
-    pub changed: bool,
-}
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct RemoveDockerRuntimeArgs {
-    pub name: String,
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // Doc roots + ignore patterns
 // ═══════════════════════════════════════════════════════════════════════════
 

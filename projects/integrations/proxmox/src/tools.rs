@@ -148,3 +148,104 @@ async fn proxmox_container_update(
         .await?
         .into())
 }
+
+// ── Proxmox endpoints (registered in orca.db) ───────────────────────────────
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxmoxEndpointEntry {
+    pub name: String,
+    pub base_url: String,
+    pub token_id: String,
+    pub insecure: bool,
+    pub enabled: bool,
+}
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ListProxmoxEndpointsArgs {}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ListProxmoxEndpointsOutput {
+    pub endpoints: Vec<ProxmoxEndpointEntry>,
+}
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AddProxmoxEndpointArgs {
+    pub name: String,
+    pub base_url: String,
+    pub token_id: String,
+    pub token_secret: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insecure: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ProxmoxMutationResult {
+    pub name: String,
+    pub changed: bool,
+}
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct RemoveProxmoxEndpointArgs {
+    pub name: String,
+}
+
+/// List all Proxmox VE endpoints registered in orca.db (token secrets are redacted).
+#[orca_tool(domain = "proxmox.endpoint", verb = "list")]
+async fn proxmox_endpoint_list(
+    _args: ListProxmoxEndpointsArgs,
+    _ctx: &orca_contract::ToolCtx,
+) -> anyhow::Result<ListProxmoxEndpointsOutput> {
+    let conn = orca_db::open_default()?;
+    let endpoints = orca_db::proxmox::list(&conn)?
+        .into_iter()
+        .map(|r| ProxmoxEndpointEntry {
+            name: r.name,
+            base_url: r.base_url,
+            token_id: r.token_id,
+            insecure: r.insecure,
+            enabled: r.enabled,
+        })
+        .collect();
+    Ok(ListProxmoxEndpointsOutput { endpoints })
+}
+
+/// [MUTATES STATE] Register or update a Proxmox VE endpoint in orca.db. Auth uses an API token (PVEAPIToken header).
+#[orca_tool(domain = "proxmox.endpoint", verb = "create")]
+async fn proxmox_endpoint_create(
+    args: AddProxmoxEndpointArgs,
+    _ctx: &orca_contract::ToolCtx,
+) -> anyhow::Result<ProxmoxMutationResult> {
+    let row = orca_db::proxmox::EndpointRow {
+        name: args.name.clone(),
+        base_url: args.base_url,
+        token_id: args.token_id,
+        token_secret: args.token_secret,
+        insecure: args.insecure.unwrap_or(false),
+        enabled: true,
+    };
+    let conn = orca_db::open_default()?;
+    orca_db::proxmox::upsert(&conn, &row)?;
+    Ok(ProxmoxMutationResult {
+        name: args.name,
+        changed: true,
+    })
+}
+
+/// [MUTATES STATE] Remove a Proxmox VE endpoint from orca.db by name.
+#[orca_tool(domain = "proxmox.endpoint", verb = "delete")]
+async fn proxmox_endpoint_delete(
+    args: RemoveProxmoxEndpointArgs,
+    _ctx: &orca_contract::ToolCtx,
+) -> anyhow::Result<ProxmoxMutationResult> {
+    let conn = orca_db::open_default()?;
+    let changed = orca_db::proxmox::remove(&conn, &args.name)?;
+    Ok(ProxmoxMutationResult {
+        name: args.name,
+        changed,
+    })
+}

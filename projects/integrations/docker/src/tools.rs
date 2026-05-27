@@ -345,3 +345,110 @@ async fn docker_service_list_stats(
         .collect();
     Ok(DockerStatsOutput { containers })
 }
+
+// ── Docker runtimes (registered endpoints in orca.db) ───────────────────────
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerRuntimeEntry {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub socket_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub enabled: bool,
+}
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ListDockerRuntimesArgs {}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ListDockerRuntimesOutput {
+    pub runtimes: Vec<DockerRuntimeEntry>,
+}
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AddDockerRuntimeArgs {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DockerRuntimeMutationResult {
+    pub name: String,
+    pub changed: bool,
+}
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct RemoveDockerRuntimeArgs {
+    pub name: String,
+}
+
+/// List all Docker runtimes registered in orca.db.
+#[orca_tool(domain = "docker.runtime", verb = "list")]
+async fn docker_runtime_list(
+    _args: ListDockerRuntimesArgs,
+    _ctx: &orca_contract::ToolCtx,
+) -> anyhow::Result<ListDockerRuntimesOutput> {
+    let conn = orca_db::open_default()?;
+    let runtimes = orca_db::docker_runtimes::list(&conn)?
+        .into_iter()
+        .map(|r| DockerRuntimeEntry {
+            name: r.name,
+            socket_path: r.socket_path,
+            host: r.host,
+            url: r.url,
+            enabled: r.enabled,
+        })
+        .collect();
+    Ok(ListDockerRuntimesOutput { runtimes })
+}
+
+/// [MUTATES STATE] Register a Docker runtime in orca.db. Provide socketPath, host, or url.
+#[orca_tool(domain = "docker.runtime", verb = "create")]
+async fn docker_runtime_create(
+    args: AddDockerRuntimeArgs,
+    _ctx: &orca_contract::ToolCtx,
+) -> anyhow::Result<DockerRuntimeMutationResult> {
+    if args.socket_path.is_none() && args.host.is_none() && args.url.is_none() {
+        anyhow::bail!("provide socket_path, host, or url");
+    }
+    let row = orca_db::docker_runtimes::RuntimeRow {
+        name: args.name.clone(),
+        socket_path: args.socket_path,
+        host: args.host,
+        url: args.url,
+        enabled: true,
+    };
+    let conn = orca_db::open_default()?;
+    orca_db::docker_runtimes::upsert(&conn, &row)?;
+    Ok(DockerRuntimeMutationResult {
+        name: args.name,
+        changed: true,
+    })
+}
+
+/// [MUTATES STATE] Remove a Docker runtime from orca.db by name.
+#[orca_tool(domain = "docker.runtime", verb = "delete")]
+async fn docker_runtime_delete(
+    args: RemoveDockerRuntimeArgs,
+    _ctx: &orca_contract::ToolCtx,
+) -> anyhow::Result<DockerRuntimeMutationResult> {
+    let conn = orca_db::open_default()?;
+    let changed = orca_db::docker_runtimes::remove(&conn, &args.name)?;
+    Ok(DockerRuntimeMutationResult {
+        name: args.name,
+        changed,
+    })
+}

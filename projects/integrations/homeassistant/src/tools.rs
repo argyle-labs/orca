@@ -114,3 +114,95 @@ async fn ha_service_update(
     };
     Ok(client.service_call(&call).await?.into())
 }
+
+// ── Home Assistant endpoints (registered in orca.db) ────────────────────────
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HaEndpointEntry {
+    pub name: String,
+    pub base_url: String,
+    pub enabled: bool,
+}
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ListHomeAssistantEndpointsArgs {}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ListHomeAssistantEndpointsOutput {
+    pub endpoints: Vec<HaEndpointEntry>,
+}
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AddHomeAssistantEndpointArgs {
+    pub name: String,
+    pub base_url: String,
+    pub token: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct HaMutationResult {
+    pub name: String,
+    pub changed: bool,
+}
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct RemoveHomeAssistantEndpointArgs {
+    pub name: String,
+}
+
+/// List all Home Assistant endpoints registered in orca.db (tokens are redacted).
+#[orca_tool(domain = "ha.endpoint", verb = "list")]
+async fn ha_endpoint_list(
+    _args: ListHomeAssistantEndpointsArgs,
+    _ctx: &orca_contract::ToolCtx,
+) -> anyhow::Result<ListHomeAssistantEndpointsOutput> {
+    let conn = orca_db::open_default()?;
+    let endpoints = orca_db::home_assistant::list(&conn)?
+        .into_iter()
+        .map(|r| HaEndpointEntry {
+            name: r.name,
+            base_url: r.base_url,
+            enabled: r.enabled,
+        })
+        .collect();
+    Ok(ListHomeAssistantEndpointsOutput { endpoints })
+}
+
+/// [MUTATES STATE] Register or update a Home Assistant endpoint in orca.db. Auth uses a long-lived access token (Bearer header).
+#[orca_tool(domain = "ha.endpoint", verb = "create")]
+async fn ha_endpoint_create(
+    args: AddHomeAssistantEndpointArgs,
+    _ctx: &orca_contract::ToolCtx,
+) -> anyhow::Result<HaMutationResult> {
+    let row = orca_db::home_assistant::EndpointRow {
+        name: args.name.clone(),
+        base_url: args.base_url,
+        token: args.token,
+        enabled: true,
+    };
+    let conn = orca_db::open_default()?;
+    orca_db::home_assistant::upsert(&conn, &row)?;
+    Ok(HaMutationResult {
+        name: args.name,
+        changed: true,
+    })
+}
+
+/// [MUTATES STATE] Remove a Home Assistant endpoint from orca.db by name.
+#[orca_tool(domain = "ha.endpoint", verb = "delete")]
+async fn ha_endpoint_delete(
+    args: RemoveHomeAssistantEndpointArgs,
+    _ctx: &orca_contract::ToolCtx,
+) -> anyhow::Result<HaMutationResult> {
+    let conn = orca_db::open_default()?;
+    let changed = orca_db::home_assistant::remove(&conn, &args.name)?;
+    Ok(HaMutationResult {
+        name: args.name,
+        changed,
+    })
+}
