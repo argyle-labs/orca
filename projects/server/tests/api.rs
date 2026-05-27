@@ -502,18 +502,6 @@ async fn system_status_returns_200() {
 // ── External-service error paths (no live backend) ───────────────────────────
 
 #[tokio::test]
-async fn rebuy_health_without_mcp_returns_503_or_error() {
-    let app = TestApp::new();
-    let db = app.db_path.clone();
-    TestApp::with_db(&db, || async {
-        let (status, _) = app.get("/api/rebuy/health/local").await;
-        // No rebuy MCP registered → 503
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    })
-    .await;
-}
-
-#[tokio::test]
 async fn mcp_run_unknown_server_returns_error() {
     let app = TestApp::new();
     let db = app.db_path.clone();

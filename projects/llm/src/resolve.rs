@@ -8,7 +8,7 @@
 //! Configuration lives in the `settings` kv table. All failures are hard:
 //! there is no silent fallback between modes.
 
-use crate::llm::discovery::{TaskKind, discover_all, select_for_task, to_config_model};
+use crate::discovery::{TaskKind, discover_all, select_for_task, to_config_model};
 use anyhow::{Context, Result};
 use db;
 use orca_utils::config::{Config, Model};
@@ -246,7 +246,7 @@ pub async fn resolve_model(config: &Config, task: Option<TaskKind>) -> Result<Mo
 /// Estimate the context window in tokens for a model. Used to warn the user
 /// when context is filling up.
 pub fn estimate_context_window(model: &Model) -> usize {
-    use crate::llm::discovery::classify_model;
+    use crate::discovery::classify_model;
     match model {
         Model::Claude(id) => classify_model(id, "claude").context_window,
         Model::LMStudio { id, .. } => classify_model(id, "lmstudio").context_window,

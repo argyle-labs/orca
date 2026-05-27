@@ -9,7 +9,7 @@
 //! No model is hardcoded as "the" model. Selection is always driven by what's
 //! literally available at call time.
 
-use crate::llm::backend::{ClaudeBackend, LMStudioBackend, OllamaBackend};
+use crate::backend::{ClaudeBackend, LMStudioBackend, OllamaBackend};
 use futures_util::future::join_all;
 use orca_utils::config::Config;
 

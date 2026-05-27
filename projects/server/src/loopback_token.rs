@@ -221,19 +221,19 @@ mod tests {
 
     #[tokio::test]
     async fn loopback_only_reqwest_client_accepts_127() {
-        crate::llm::ensure_crypto_provider();
+        ::llm::ensure_crypto_provider();
         loopback_only_reqwest_client("https://127.0.0.1:12000/api/foo").unwrap();
     }
 
     #[tokio::test]
     async fn loopback_only_reqwest_client_accepts_localhost() {
-        crate::llm::ensure_crypto_provider();
+        ::llm::ensure_crypto_provider();
         loopback_only_reqwest_client("http://localhost:8080/").unwrap();
     }
 
     #[tokio::test]
     async fn loopback_only_reqwest_client_accepts_ipv6_loopback() {
-        crate::llm::ensure_crypto_provider();
+        ::llm::ensure_crypto_provider();
         loopback_only_reqwest_client("https://[::1]:12000/").unwrap();
     }
 

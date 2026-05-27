@@ -1,6 +1,6 @@
 use super::Session;
 use crate::conversation::ledger::fmt_tokens;
-use crate::llm::{
+use ::llm::{
     ClaudeBackend, LMStudioBackend, Message, ModelBackend, build_backend, estimate_context_window,
 };
 use anyhow::{Context, Result};

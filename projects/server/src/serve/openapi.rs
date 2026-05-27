@@ -98,7 +98,7 @@ use ::mcp::client::McpPool;
         (name = "mcp",        description = "MCP tool proxy — run any connected MCP server tool"),
         (name = "docker",     description = "Docker Compose service management"),
         (name = "schema",     description = "MySQL schema visualizer"),
-        (name = "health",     description = "Rebuy service health checks"),
+        (name = "health",     description = "Service health checks"),
         (name = "specs",      description = "External API spec registry"),
         (name = "jira",       description = "Jira issue management via Atlassian REST API"),
         (name = "confluence", description = "Confluence search via Atlassian REST API"),
@@ -173,7 +173,6 @@ pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
             api::schema_databases_add_handler
         ))
         .routes(routes!(api::schema_databases_remove_handler))
-        .routes(routes!(api::rebuy_health_handler))
         .routes(routes!(api::repos_handler))
         .routes(routes!(api::prs_handler))
         .routes(routes!(api::jira_issues_handler))

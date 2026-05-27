@@ -1,4 +1,4 @@
-use crate::llm::backend::{OutputSink, sink_writeln};
+use crate::backend::{OutputSink, sink_writeln};
 use anyhow::{Result, bail};
 use colored::Colorize;
 use std::collections::HashSet;
@@ -138,7 +138,7 @@ pub async fn run_bash(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::buffer_sink;
+    use crate::buffer_sink;
 
     // ── BashPermissions ───────────────────────────────────────────────────────
 

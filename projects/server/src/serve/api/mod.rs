@@ -412,6 +412,10 @@ pub mod schema_registry;
 pub mod specs;
 pub mod system;
 
+// FIXME: glob re-exports — slated for removal. Every consumer should
+// reference `api::module::Type` directly. Restored temporarily so the
+// build stays green while we delete the duplicate hand-written REST
+// handlers that these globs prop up.
 pub use atlassian::*;
 pub use bitbucket::*;
 pub use ctx7::*;
@@ -434,3 +438,4 @@ pub use schema::*;
 pub use schema_registry::*;
 pub use specs::*;
 pub use system::*;
+

@@ -1,0 +1,32 @@
+[package]
+name = "llm"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "llm"
+path = "src/lib.rs"
+
+[dependencies]
+orca-contract = { path = "../orca-contract", features = ["native"] }
+orca-utils    = { path = "../utils" }
+db            = { package = "orca-db", path = "../db" }
+
+anyhow       = { workspace = true }
+async-trait  = { workspace = true }
+colored      = { workspace = true }
+futures-util = { workspace = true }
+reqwest      = { workspace = true }
+rustls       = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+tokio        = { workspace = true }
+tokio-util   = { workspace = true }
+tracing      = { workspace = true }
+uuid         = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

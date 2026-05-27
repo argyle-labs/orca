@@ -9,8 +9,8 @@ use crate::conversation::ledger::TokenLedger;
 use crate::conversation::log::SessionLog;
 use crate::conversation::tui::{self, TuiAction, TuiApp};
 use crate::jobs::JobManager;
-use crate::llm::tools::ToolRegistry;
-use crate::llm::{
+use ::llm::tools::ToolRegistry;
+use ::llm::{
     Message, ModelBackend, OutputSink, build_backend, estimate_context_window, resolve_model,
     sink_write, sink_writeln, stdout_sink,
 };

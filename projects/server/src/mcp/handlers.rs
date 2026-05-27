@@ -1,12 +1,12 @@
 #![allow(clippy::disallowed_types)] // mirrors trait signature — see trait-level allow
-use crate::llm::buffer_sink;
+use ::llm::buffer_sink;
 use anyhow::Result;
 use orca_utils::config::Config;
 use serde_json::{Value, json};
 
 use crate::conversation::context::ProjectContext;
 use crate::conversation::session::Session;
-use crate::llm::resolve::{self, Resolution};
+use ::llm::resolve::{self, Resolution};
 
 pub async fn run(args: &Value, config: &Config) -> Result<String> {
     let agent = args["agent"].as_str().unwrap_or("wolf");

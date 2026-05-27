@@ -1,4 +1,4 @@
-use crate::llm::OutputSink;
+use ::llm::OutputSink;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame, Terminal,

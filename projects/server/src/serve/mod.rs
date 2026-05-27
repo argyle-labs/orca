@@ -903,7 +903,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
     use std::sync::Arc;
 
     // Ensures reqwest (rustls-no-provider) has a crypto provider; idempotent.
-    crate::llm::ensure_crypto_provider();
+    ::llm::ensure_crypto_provider();
 
     // Plumb the dev flag to auth_routes so session cookies use SameSite=None
     // in dev (cross-port) and SameSite=Strict in prod (same-origin).

@@ -1,4 +1,4 @@
-//! `AgentBackendService` impl that wraps `crate::llm::resolve::*`.
+//! `AgentBackendService` impl that wraps `::llm::resolve::*`.
 //!
 //! Wired into `ToolCtx` from `mcp::build_tool_ctx` so the four
 //! agent_backend tools (in the `agents` crate) can dispatch through the
@@ -8,7 +8,7 @@ use agents::agent_backend::AgentBackendService;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::llm::resolve;
+use ::llm::resolve;
 
 pub struct ServerAgentBackend;
 

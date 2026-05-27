@@ -2,7 +2,7 @@
 #![allow(clippy::disallowed_types)]
 pub mod bash;
 
-use crate::llm::backend::{OutputSink, stdout_sink};
+use crate::backend::{OutputSink, stdout_sink};
 use anyhow::Result;
 use bash::BashPermissions;
 use orca_contract::{ToolDef, ToolResult};
@@ -114,7 +114,7 @@ impl ToolRegistry {
             },
             ToolDef {
                 name: "delegate".into(),
-                description: "Delegate a task to a specialist agent. The agent runs a sub-conversation with full tool access and returns its result. Available agents: owl (explain code), fox (debug), crow (write code), spider (simplify), bear (review + audit), ferret (code standards), badger (homelab), hawk (containers), mole (processes/ports), elephant (external docs), boar (carl/rebuy only), lynx (plan), raven (notes), otter (session logs).".into(),
+                description: "Delegate a task to a specialist agent. The agent runs a sub-conversation with full tool access and returns its result. Common generic agents: owl (explain code), fox (debug), crow (write code), spider (simplify), bear (review + audit), ferret (code standards), hawk (containers), mole (processes/ports), elephant (external docs), lynx (plan), raven (notes), otter (session logs). Additional domain-specific agents may be installed by plugins.".into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {

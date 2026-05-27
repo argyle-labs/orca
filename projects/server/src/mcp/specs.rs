@@ -13,7 +13,7 @@ pub fn validate_spec_repo(repo: &str) -> bool {
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
-pub fn list_rebuy_specs() -> Result<String> {
+pub fn list_specs() -> Result<String> {
     let dir = spec_dir();
     let mut lines = vec!["OpenAPI Spec Registry\n".to_string()];
 
@@ -74,7 +74,7 @@ pub fn list_rebuy_specs() -> Result<String> {
     Ok(lines.join("\n"))
 }
 
-pub fn get_rebuy_spec(args: &Value) -> Result<String> {
+pub fn get_spec(args: &Value) -> Result<String> {
     let repo = args["repo"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("repo is required"))?;
@@ -97,7 +97,7 @@ pub fn get_rebuy_spec(args: &Value) -> Result<String> {
     )
 }
 
-pub fn get_rebuy_spec_public(args: &Value) -> Result<String> {
+pub fn get_spec_public(args: &Value) -> Result<String> {
     let repo = args["repo"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("repo is required"))?;
@@ -110,7 +110,7 @@ pub fn get_rebuy_spec_public(args: &Value) -> Result<String> {
     })
 }
 
-pub fn get_rebuy_graphql_schema(args: &Value) -> Result<String> {
+pub fn get_graphql_schema(args: &Value) -> Result<String> {
     let repo = args["repo"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("repo is required"))?;

@@ -7,7 +7,7 @@
 //! `OutputSink` is the streaming output target: stdout for interactive sessions,
 //! a memory buffer (`buffer_sink`) for background jobs.
 
-use crate::llm::types::{BackendResponse, Message};
+use crate::types::{BackendResponse, Message};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use orca_contract::ToolDef;

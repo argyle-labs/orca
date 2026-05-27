@@ -1,6 +1,6 @@
 use super::{Session, util};
-use crate::llm::Message;
-use crate::llm::tools::ToolRegistry;
+use ::llm::Message;
+use ::llm::tools::ToolRegistry;
 use anyhow::Result;
 use colored::Colorize;
 use orca_contract::ToolResult;

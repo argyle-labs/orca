@@ -11,7 +11,7 @@
 //!
 //! Set LMSTUDIO_URL to override the default (http://localhost:1234).
 
-use orca::llm::{
+use ::llm::{
     ClaudeBackend, DiscoveredModel, LMStudioBackend, Message, ModelBackend, StopReason, TaskKind,
     buffer_sink, classify_model, discover_all, estimate_context_window, resolve_model,
     select_for_task, stdout_sink,
@@ -770,7 +770,7 @@ fn claude_known_models_non_empty() {
 
 #[test]
 fn buffer_sink_captures_output() {
-    use orca::llm::sink_writeln;
+    use ::llm::sink_writeln;
     let (sink, buf) = buffer_sink();
     sink_writeln(&sink, "hello");
     sink_writeln(&sink, "world");
@@ -780,7 +780,7 @@ fn buffer_sink_captures_output() {
 
 #[test]
 fn stdout_sink_does_not_panic() {
-    use orca::llm::sink_write;
+    use ::llm::sink_write;
     let sink = stdout_sink();
     sink_write(&sink, ""); // should not panic
 }

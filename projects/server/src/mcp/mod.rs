@@ -85,7 +85,7 @@ pub async fn serve(config: &Config) -> Result<()> {
     // Reqwest is built with `rustls-no-provider`; without this the first HTTPS
     // client construction (e.g. on tools/list federation calls) panics with
     // "No provider set" and Claude Code sees zero tools. Mirrors `build_router`.
-    crate::llm::ensure_crypto_provider();
+    ::llm::ensure_crypto_provider();
 
     let pool = ::mcp::client::McpPool::new_with_db(config.db_path.clone());
 

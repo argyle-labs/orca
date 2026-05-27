@@ -1,7 +1,7 @@
 // Anthropic Claude provider SDK request/response envelopes; HashMap/Value are wire-format passthrough.
 #![allow(clippy::disallowed_types)]
 use super::{ModelBackend, OutputSink, serialize, sink_write, sink_writeln};
-use crate::llm::types::{BackendResponse, Message, StopReason};
+use crate::types::{BackendResponse, Message, StopReason};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use colored::Colorize;
@@ -20,7 +20,7 @@ pub struct ClaudeBackend {
 
 impl ClaudeBackend {
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        crate::llm::ensure_crypto_provider();
+        crate::ensure_crypto_provider();
         ClaudeBackend {
             client: Client::new(),
             api_key: api_key.into(),

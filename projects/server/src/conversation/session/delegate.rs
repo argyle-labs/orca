@@ -1,8 +1,8 @@
 // Session delegation; HashMap/Value appear in delegated tool calls as protocol-level passthrough.
 #![allow(clippy::disallowed_types)]
 use super::{Session, util};
-use crate::llm::Message;
-use crate::llm::tools::ToolRegistry;
+use ::llm::Message;
+use ::llm::tools::ToolRegistry;
 use colored::Colorize;
 use orca_contract::ToolResult;
 use tokio_util::sync::CancellationToken;
