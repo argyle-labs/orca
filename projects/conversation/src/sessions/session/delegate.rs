@@ -1,8 +1,8 @@
 // Session delegation; HashMap/Value appear in delegated tool calls as protocol-level passthrough.
 #![allow(clippy::disallowed_types)]
 use super::{Session, util};
-use ::llm::Message;
-use ::llm::tools::ToolRegistry;
+use::llm::Message;
+use::llm::tools::ToolRegistry;
 use colored::Colorize;
 use orca_contract::ToolResult;
 use tokio_util::sync::CancellationToken;
@@ -21,7 +21,7 @@ impl Session {
         }
 
         let agent_prompt =
-            match crate::services::agent_resolve::load_agent_prompt(agent, &self.config) {
+            match crate::agent_resolve::load_agent_prompt(agent, &self.config) {
                 Some(prompt) => prompt,
                 None => {
                     return ToolResult {

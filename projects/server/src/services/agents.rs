@@ -25,7 +25,7 @@ impl AgentsService for ServerAgents {
     }
 
     async fn get_agent_prompt(&self, name: &str) -> Result<Option<String>> {
-        Ok(crate::services::agent_resolve::load_agent_prompt(
+        Ok(conversation::agent_resolve::load_agent_prompt(
             name,
             &self.config,
         ))
@@ -74,7 +74,7 @@ impl AgentsService for ServerAgents {
     }
 
     async fn search_logs(&self, query: &str, limit: usize) -> Result<SearchLogsData> {
-        let raw = crate::conversation::log::search_logs(&self.config.logs_dir(), query, limit)?;
+        let raw = conversation::sessions::log::search_logs(&self.config.logs_dir(), query, limit)?;
         let matches: Vec<LogMatchData> = raw
             .iter()
             .map(|m| {

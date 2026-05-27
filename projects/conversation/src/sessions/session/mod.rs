@@ -4,13 +4,13 @@ mod delegate;
 mod ui;
 pub mod util;
 
-use crate::conversation::context::ProjectContext;
-use crate::conversation::ledger::TokenLedger;
-use crate::conversation::log::SessionLog;
-use crate::conversation::tui::{self, TuiAction, TuiApp};
+use crate::sessions::context::ProjectContext;
+use crate::sessions::ledger::TokenLedger;
+use crate::sessions::log::SessionLog;
+use crate::sessions::tui::{self, TuiAction, TuiApp};
 use crate::jobs::JobManager;
-use ::llm::tools::ToolRegistry;
-use ::llm::{
+use::llm::tools::ToolRegistry;
+use::llm::{
     Message, ModelBackend, OutputSink, build_backend, estimate_context_window, resolve_model,
     sink_write, sink_writeln, stdout_sink,
 };
@@ -119,7 +119,7 @@ impl Session {
     }
 
     pub fn set_agent(&mut self, agent: &str) {
-        if let Some(prompt) = crate::services::agent_resolve::load_agent_prompt(agent, &self.config)
+        if let Some(prompt) = crate::agent_resolve::load_agent_prompt(agent, &self.config)
         {
             self.system_prompt = prompt;
         }

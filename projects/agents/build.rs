@@ -1,12 +1,14 @@
-//! Embed agent .md prompts at build time. Produces `embedded_agents.rs`
-//! in `OUT_DIR` with two functions:
-//!   - `embedded_agent(name: &str) -> Option<&'static str>` — lookup
-//!   - `embedded_agent_names() -> &'static [&'static str]`  — full list
+//! Embed agent and slash-command .md prompts at build time.
 //!
-//! `src/embedded.rs` includes the generated file and exposes the higher-level
-//! API (`list_embedded_agents`, `load_agent_prompt_from_dirs`, etc.).
+//! Produces two files in `OUT_DIR`:
+//!   - `embedded_agents.rs`   — `embedded_agent` / `embedded_agent_names`
+//!   - `embedded_commands.rs` — `embedded_command` / `embedded_command_names`
 //!
-//! Override the source dir with `ORCA_AGENTS_DIR` for hot-reload-style dev.
+//! `src/embedded.rs` includes the generated agent file and exposes the
+//! higher-level API. `src/commands.rs` includes the generated command file.
+//!
+//! Override the source dirs with `ORCA_AGENTS_DIR` / `ORCA_COMMANDS_DIR` for
+//! hot-reload-style dev.
 
 use std::env;
 use std::fs;
@@ -21,21 +23,44 @@ fn main() {
     write_embedded_map(
         Path::new(&agents_dir),
         Path::new(&out_dir).join("embedded_agents.rs"),
+        "embedded_agent",
+        "embedded_agent_names",
+        "Agent",
     );
     println!("cargo:rerun-if-env-changed=ORCA_AGENTS_DIR");
+
+    let commands_dir =
+        env::var("ORCA_COMMANDS_DIR").unwrap_or_else(|_| format!("{manifest}/src/commands"));
+    write_embedded_map(
+        Path::new(&commands_dir),
+        Path::new(&out_dir).join("embedded_commands.rs"),
+        "embedded_command",
+        "embedded_command_names",
+        "Slash command",
+    );
+    println!("cargo:rerun-if-env-changed=ORCA_COMMANDS_DIR");
+
     println!("cargo:rerun-if-changed=build.rs");
 }
 
-fn write_embedded_map(src_dir: &Path, dest: std::path::PathBuf) {
-    let mut code = String::from("/// Agent prompts embedded at build time.\n");
-    code.push_str("pub fn embedded_agent(name: &str) -> Option<&'static str> {\n");
+fn write_embedded_map(
+    src_dir: &Path,
+    dest: std::path::PathBuf,
+    lookup_fn: &str,
+    names_fn: &str,
+    kind_label: &str,
+) {
+    let mut code = format!("/// {kind_label} prompts embedded at build time.\n");
+    code.push_str(&format!(
+        "pub fn {lookup_fn}(name: &str) -> Option<&'static str> {{\n"
+    ));
     code.push_str("    match name {\n");
 
     let mut names: Vec<String> = vec![];
 
     if src_dir.exists() {
         let mut entries: Vec<_> = fs::read_dir(src_dir)
-            .expect("failed to read agents dir")
+            .expect("failed to read embed dir")
             .flatten()
             .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
             .collect();
@@ -64,8 +89,13 @@ fn write_embedded_map(src_dir: &Path, dest: std::path::PathBuf) {
     code.push_str("    }\n");
     code.push_str("}\n\n");
 
-    code.push_str("/// All agent names embedded at build time.\n");
-    code.push_str("pub fn embedded_agent_names() -> &'static [&'static str] {\n");
+    code.push_str(&format!(
+        "/// All {} names embedded at build time.\n",
+        kind_label.to_lowercase()
+    ));
+    code.push_str(&format!(
+        "pub fn {names_fn}() -> &'static [&'static str] {{\n"
+    ));
     code.push_str("    &[\n");
     for name in &names {
         code.push_str(&format!("        \"{name}\",\n"));
@@ -73,5 +103,5 @@ fn write_embedded_map(src_dir: &Path, dest: std::path::PathBuf) {
     code.push_str("    ]\n");
     code.push_str("}\n");
 
-    fs::write(&dest, code).expect("failed to write embedded_agents.rs");
+    fs::write(&dest, code).expect("failed to write embedded map");
 }

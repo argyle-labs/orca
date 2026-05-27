@@ -12,7 +12,6 @@
 //! `crate::mcp::*_service` — that path conflated "MCP protocol" with
 //! "server-side tool plumbing"; only the former belongs in `mcp/`.
 
-pub mod agent_resolve;
 pub mod agents;
 pub mod docs;
 pub mod pod;

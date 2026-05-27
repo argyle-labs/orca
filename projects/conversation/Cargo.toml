@@ -1,0 +1,34 @@
+[package]
+name = "conversation"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "conversation"
+path = "src/lib.rs"
+
+[dependencies]
+orca-contract = { path = "../orca-contract", features = ["native"] }
+orca-utils    = { path = "../utils" }
+llm           = { path = "../llm" }
+
+anyhow        = { workspace = true }
+chrono        = { workspace = true }
+clap          = { workspace = true }
+colored       = { workspace = true }
+crossterm     = { workspace = true }
+futures-util  = { workspace = true }
+ratatui       = { workspace = true }
+rustyline     = { workspace = true }
+serde_json    = { workspace = true }
+tokio         = { workspace = true }
+tokio-util    = { workspace = true }
+unicode-width = "0.2"
+uuid          = { workspace = true }
+dirs          = { workspace = true }
+agents        = { path = "../agents" }
+db            = { package = "orca-db", path = "../db" }
+platform      = { path = "../platform", features = ["native"] }
+
+[lints]
+workspace = true

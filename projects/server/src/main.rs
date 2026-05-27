@@ -4,9 +4,9 @@ use clap::{Parser, Subcommand};
 use orca::commands::{
     self as cmd, DaemonAction, HookAction, PackageAction, SpecAction, SystemAction,
 };
-use orca::conversation::context::ProjectContext;
-use orca::conversation::session::Session;
-use orca::log_cmd::{LogAction, cmd_log};
+use conversation::sessions::context::ProjectContext;
+use conversation::sessions::session::Session;
+use conversation::log_cmd::{LogAction, cmd_log};
 use orca::mcp;
 use orca::serve;
 use orca::serve::openapi::orca_spec_json;

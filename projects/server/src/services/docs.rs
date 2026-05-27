@@ -242,6 +242,6 @@ impl DocsService for ServerDocs {
     }
 
     async fn list_commands(&self) -> Result<Vec<String>> {
-        Ok(crate::commands::list_embedded_commands())
+        Ok(agents::commands::list_embedded_commands())
     }
 }

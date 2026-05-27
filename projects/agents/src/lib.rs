@@ -4,4 +4,5 @@
 
 pub mod agent_backend;
 pub mod agents;
+pub mod commands;
 pub mod embedded;

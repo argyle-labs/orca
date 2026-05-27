@@ -1,5 +1,5 @@
 #![allow(clippy::disallowed_types)] // doc tree helpers return Vec<Value> — forced by this module's contract
-use crate::commands::list_embedded_commands;
+use agents::commands::list_embedded_commands;
 use anyhow::Result;
 use orca_utils::config::Config;
 use orca_utils::fs::expand_tilde;

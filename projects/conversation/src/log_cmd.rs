@@ -1,4 +1,4 @@
-use crate::conversation::log;
+use crate::sessions::log;
 use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;

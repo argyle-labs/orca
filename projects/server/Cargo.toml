@@ -48,6 +48,7 @@ plugins  = { path = "../plugins",  features = ["native", "cli"] }
 docs     = { path = "../docs",     features = ["native", "cli"] }
 mcp      = { path = "../mcp",      features = ["native", "cli"] }
 llm      = { path = "../llm" }
+conversation = { path = "../conversation" }
 scanner  = { path = "../scanner" }
 schema   = { path = "../schema",   features = ["native", "cli"] }
 # Integration crates (flat names, no facade)

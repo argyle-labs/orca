@@ -10,14 +10,11 @@
 
 // Absorbed crates — each previously had its own workspace member.
 pub mod commands;
-pub mod conversation;
-pub mod jobs;
 pub mod llm;
 
 pub mod auth_password;
 pub mod auth_throttle;
 pub mod diagnostic;
-pub mod log_cmd;
 pub mod loopback_token;
 pub mod mcp;
 pub mod plugin_host;
