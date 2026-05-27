@@ -321,7 +321,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                 // every port we own is released for the dev binary to take.
                 https_handle.shutdown();
                 http_handle.shutdown();
-                crate::plugin_host::stop();
+                plugins::host::stop();
                 true
             }
             _ = sigterm.recv() => {
@@ -360,10 +360,10 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                 _ = sigusr2.recv() => {
                     info!("[orca] daemon reclaiming port {port}");
                     // Bring the plugin host back up alongside REST.
-                    crate::plugin_host::start(
+                    plugins::host::start(
                         &pki_dir,
                         ports.mesh,
-                        crate::plugin_host::PluginRegistry::new(),
+                        plugins::host::PluginRegistry::new(),
                     );
                     break;
                 }
@@ -383,10 +383,10 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                         };
                         if abandoned {
                             info!("[orca] auto-reclaiming port {port} (dev abandoned)");
-                            crate::plugin_host::start(
+                            plugins::host::start(
                                 &pki_dir,
                                 ports.mesh,
-                                crate::plugin_host::PluginRegistry::new(),
+                                plugins::host::PluginRegistry::new(),
                             );
                             break;
                         }
@@ -511,10 +511,10 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     fleet::host_status_writer::spawn_local_writer();
     fleet::host_status_writer::spawn_sync_puller();
     fleet::pod_native::host_status_replica::spawn_fleet_replicator();
-    crate::plugin_host::start(
+    plugins::host::start(
         pki_dir,
         db::ports::mesh_port(),
-        crate::plugin_host::PluginRegistry::new(),
+        plugins::host::PluginRegistry::new(),
     );
     spawn_pod_runtime(pki_dir).await;
     spawn_scheduler_runtime();

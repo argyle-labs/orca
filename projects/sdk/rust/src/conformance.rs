@@ -324,7 +324,7 @@ use tokio_rustls::TlsAcceptor;
 ///
 /// The host is intentionally tiny — it implements only the methods the
 /// scenario exercises and stores nothing persistently. For full host
-/// behavior, see `orca::plugin_host` in `projects/server`.
+/// behavior, see `plugins::host` in `projects/server`.
 pub async fn boot_observation_host(
     pki_dir: &Path,
 ) -> Result<(SocketAddr, mpsc::UnboundedReceiver<Event>)> {

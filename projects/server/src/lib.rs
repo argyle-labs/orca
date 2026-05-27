@@ -14,7 +14,6 @@ pub mod llm;
 
 pub mod diagnostic;
 pub mod mcp;
-pub mod plugin_host;
 pub mod serve;
 pub mod services;
 pub mod spec_detail;

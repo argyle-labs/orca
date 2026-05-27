@@ -7,7 +7,7 @@
 
 use std::net::SocketAddr;
 
-use orca::plugin_host;
+use plugins::host;
 use orca_sdk::pki::{self, Capability};
 use orca_sdk::transport::{Sensitivity, TcpTransport, TypeDeclaration, TypedValue};
 
