@@ -517,7 +517,7 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     );
     spawn_pod_runtime(pki_dir).await;
     spawn_scheduler_runtime();
-    tokio::spawn(crate::commands::startup_update_check());
+    tokio::spawn(system::update_cmd::startup_update_check());
     if let Some(src) = system::dev::read_dev_source() {
         tokio::spawn(dev_source_auto_poll(src));
     }

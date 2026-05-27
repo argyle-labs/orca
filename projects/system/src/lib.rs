@@ -44,5 +44,18 @@ pub mod scheduler;
 #[cfg(feature = "native")]
 pub mod diagnostic;
 
+// Subcommand handler modules. These currently mix clap action enums + impl;
+// the next slice converts each public entry into a `#[orca_tool]` and lets the
+// macro emit the CLI surface, killing the action enums.
 #[cfg(feature = "cli")]
-pub mod cli;
+pub mod daemon;
+#[cfg(feature = "cli")]
+pub mod dev_serve;
+#[cfg(feature = "cli")]
+pub mod hook;
+#[cfg(feature = "cli")]
+pub mod package;
+#[cfg(feature = "cli")]
+pub mod sysadmin;
+#[cfg(feature = "cli")]
+pub mod update_cmd;

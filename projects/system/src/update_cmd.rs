@@ -1,12 +1,12 @@
 use anyhow::{Result, bail};
-use system::dev::{
+use crate::dev::{
     apply_update_dev, check_for_update_dev, clear_dev_source, read_dev_source, write_dev_source,
 };
-use system::update::{
+use crate::update::{
     apply_update, check_for_update, download_asset, prune_check_cache, resolve_github_token,
     write_cached_sha256,
 };
-use system::update_state::{
+use crate::update_state::{
     Channel, clear_version_pin, read_channel_marker, resolve_channel, resolve_pin_veto,
     write_channel_marker, write_version_pin,
 };
@@ -173,7 +173,7 @@ pub async fn startup_update_check() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use system::update_state::read_version_pin;
+    use crate::update_state::read_version_pin;
 
     fn isolated_orca_home(scenario: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");

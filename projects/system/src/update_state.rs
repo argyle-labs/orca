@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 /// Path to the version pin file (`$ORCA_HOME/version-pin`, default `~/.orca/version-pin`).
 /// Returns None only if both `ORCA_HOME` and `HOME` are unset (CI sandboxes).
+#[cfg(feature = "native")]
 pub fn pin_path() -> Option<PathBuf> {
     Some(orca_utils::fs::orca_home()?.join("version-pin"))
 }
@@ -113,6 +114,7 @@ impl Channel {
 
 /// Path to the channel marker file (`$ORCA_HOME/channel`, default `~/.orca/channel`).
 /// Returns None only if both `ORCA_HOME` and `HOME` are unset (CI sandboxes).
+#[cfg(feature = "native")]
 pub fn channel_marker_path() -> Option<PathBuf> {
     Some(orca_utils::fs::orca_home()?.join("channel"))
 }

@@ -1,9 +1,13 @@
 use ::llm::{ClaudeBackend, Message, ModelBackend, stdout_sink};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use orca::commands::{
-    self as cmd, DaemonAction, HookAction, PackageAction, SpecAction, SystemAction,
-};
+use system::daemon::{self as daemon_cmd, DaemonAction};
+use system::dev_serve as dev_serve_cmd;
+use system::hook::{self as hook_cmd, HookAction};
+use system::package::{self as package_cmd, PackageAction};
+use system::sysadmin::{self as sysadmin_cmd, SystemAction};
+use system::update_cmd;
+use docs::spec_cli::{self as spec_cmd, SpecAction};
 use conversation::sessions::context::ProjectContext;
 use conversation::sessions::session::Session;
 use conversation::log_cmd::{LogAction, cmd_log};
@@ -365,7 +369,7 @@ async fn main() -> Result<()> {
     // where Keychain access (called inside Config::load) can hang and trigger a SIGKILL timeout.
     // Hook implementations are lightweight (regex, stdin, filesystem) and don't need Config.
     if let Some(Command::Hook { action }) = cli.command {
-        return cmd::cmd_hook(action);
+        return hook_cmd::cmd_hook(action);
     }
 
     let mut config = Config::load()?;
@@ -409,12 +413,12 @@ async fn main() -> Result<()> {
         Some(Command::Serve { dev, port }) => serve::run(dev, port, config.db_path.clone()).await,
         Some(Command::Daemon { action }) => match action {
             DaemonAction::Start { port } => serve::run_daemon(port, config.db_path.clone()).await,
-            other => cmd::cmd_daemon(other),
+            other => daemon_cmd::cmd_daemon(other),
         },
         Some(Command::Dev { port }) => cmd_dev(port, &config).await,
-        Some(Command::Hook { action }) => cmd::cmd_hook(action),
-        Some(Command::System { action }) => cmd::cmd_system(action),
-        Some(Command::Package { action }) => cmd::cmd_package(action),
+        Some(Command::Hook { action }) => hook_cmd::cmd_hook(action),
+        Some(Command::System { action }) => sysadmin_cmd::cmd_system(action),
+        Some(Command::Package { action }) => package_cmd::cmd_package(action),
         Some(Command::Admin { action }) => cmd_admin(action).await,
         Some(Command::Op(argv)) => dispatch_op(argv, config).await,
         Some(Command::Update {
@@ -426,26 +430,26 @@ async fn main() -> Result<()> {
             clear_source,
         }) => {
             if let Some(url) = source {
-                cmd::update::cmd_update_set_source(&url)?;
-                cmd::update::cmd_update("").await
+                update_cmd::cmd_update_set_source(&url)?;
+                update_cmd::cmd_update("").await
             } else if clear_source {
-                cmd::update::cmd_update_clear_source()
+                update_cmd::cmd_update_clear_source()
             } else if let Some(v) = pin {
-                let pinned = cmd::update::cmd_update_pin(&v)?;
+                let pinned = update_cmd::cmd_update_pin(&v)?;
                 println!("[orca] pinned to {pinned}");
                 Ok(())
             } else if unpin {
-                cmd::update::cmd_update_unpin()?;
+                update_cmd::cmd_update_unpin()?;
                 println!("[orca] pin cleared");
                 Ok(())
             } else if check {
-                cmd::update::cmd_update_check(channel.as_deref().unwrap_or("")).await
+                update_cmd::cmd_update_check(channel.as_deref().unwrap_or("")).await
             } else {
-                cmd::update::cmd_update(channel.as_deref().unwrap_or("")).await
+                update_cmd::cmd_update(channel.as_deref().unwrap_or("")).await
             }
         }
         Some(Command::DevServe { binary, port }) => {
-            cmd::dev_serve::cmd_dev_serve(binary.as_deref(), port).await
+            dev_serve_cmd::cmd_dev_serve(binary.as_deref(), port).await
         }
         Some(Command::Pod { action }) => match action {
             PodAction::Init => {
@@ -515,7 +519,7 @@ async fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&spec)?);
                 Ok(())
             }
-            other => cmd::cmd_spec(other),
+            other => spec_cmd::cmd_spec(other),
         },
         Some(Command::Openapi { action }) => match action {
             OpenapiAction::Emit => {
