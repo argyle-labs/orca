@@ -1,8 +1,5 @@
-//! Home Assistant OrcaTool surface.
-//!
-//! Tools live in the crate that owns the work — there is no central
-//! "tools-def" crate. The `#[orca_tool]` macro is the only "tools
-//! definition" surface; it is applied at the function's home.
+//! Home Assistant OrcaTool surface. Tools live in the crate that owns the
+//! work; the `#[orca_tool]` macro is the only tool-definition surface.
 // HaServiceCallArgs.data uses Map<String, Value> — HA service data is
 // free-form by spec.
 #![allow(clippy::disallowed_types)]
