@@ -10,6 +10,8 @@
 use anyhow::{Context, Result};
 use orca_sdk::pki;
 use orca_utils::config::{APP_MCP_SERVER, APP_NAME, APP_PKI_DIR, APP_STATE_DIR};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 const CLAUDE_MD: &str = include_str!("../../../CLAUDE.md");
@@ -106,6 +108,7 @@ const MEMORY_PROJECTS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct InstallReport {
     pub done: Vec<String>,
     pub skipped: Vec<String>,

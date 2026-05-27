@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::update::{current_binary_path, require_sha256_nonempty, sha2_digest, verify_sha256};
+use crate::update::{
+    current_binary_path, require_sha256_nonempty, resolve_github_token, sha2_digest, verify_sha256,
+};
 
 // ── Dev source (local serve) ──────────────────────────────────────────────────
 
@@ -156,19 +158,6 @@ fn chmod_dir_owner_only(dir: &std::path::Path) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn chmod_dir_owner_only(_dir: &std::path::Path) -> std::io::Result<()> {
     Ok(())
-}
-
-// ── GitHub token resolution (duplicated from server::commands::update) ────────
-
-fn resolve_github_token() -> String {
-    if let Ok(conn) = db::open_default()
-        && let Ok(Some(_)) = db::secrets::get(&conn, "github_token")
-        && let Ok(Some(v)) = db::secrets::read_inline_value(&conn, "github_token")
-        && !v.is_empty()
-    {
-        return v;
-    }
-    std::env::var("GITHUB_TOKEN").unwrap_or_default()
 }
 
 // ── Dev mode (git checkout + cargo watch) ────────────────────────────────────

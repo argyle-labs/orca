@@ -3,7 +3,8 @@ use system::dev::{
     apply_update_dev, check_for_update_dev, clear_dev_source, read_dev_source, write_dev_source,
 };
 use system::update::{
-    apply_update, check_for_update, download_asset, prune_check_cache, write_cached_sha256,
+    apply_update, check_for_update, download_asset, prune_check_cache, resolve_github_token,
+    write_cached_sha256,
 };
 use system::update_state::{
     Channel, clear_version_pin, read_channel_marker, resolve_channel, resolve_pin_veto,
@@ -12,21 +13,6 @@ use system::update_state::{
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TARGET: &str = env!("ORCA_BUILD_TARGET");
-
-/// Resolve the GitHub token: prefer the `github_token` secret in orca.db (the
-/// canonical post-2026-05-11 location); fall back to `GITHUB_TOKEN` env var
-/// for bootstrap + CI flows. Returns an empty string if neither is set —
-/// callers should report an actionable error themselves.
-pub fn resolve_github_token() -> String {
-    if let Ok(conn) = db::open_default()
-        && let Ok(Some(_)) = db::secrets::get(&conn, "github_token")
-        && let Ok(Some(v)) = db::secrets::read_inline_value(&conn, "github_token")
-        && !v.is_empty()
-    {
-        return v;
-    }
-    std::env::var("GITHUB_TOKEN").unwrap_or_default()
-}
 
 /// CLI entry: `orca update [--channel rc|stable|...]`. Empty channel reads the
 /// install marker; on a successful apply, the marker is rewritten so future
@@ -251,15 +237,4 @@ mod tests {
         assert!(err.to_string().contains("empty"));
     }
 
-    #[test]
-    fn resolve_github_token_reads_env() {
-        let _g = marker_lock();
-        let _dir = isolated_orca_home("gh_token");
-        unsafe {
-            std::env::set_var("GITHUB_TOKEN", "test-token-xyz");
-        }
-        let tok = resolve_github_token();
-        assert!(tok == "test-token-xyz" || tok.is_empty() || !tok.is_empty());
-        unsafe { std::env::remove_var("GITHUB_TOKEN") };
-    }
 }

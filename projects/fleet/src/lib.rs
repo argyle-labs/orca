@@ -1,10 +1,9 @@
-//! Fleet domain — pod/mesh, system, host, lifecycle, meta.
+//! Fleet domain — pod/mesh, host, meta. (lifecycle dissolved into `system` crate, slice B3.)
 
 pub mod host;
 pub mod host_status;
 #[cfg(feature = "native")]
 pub mod infra;
-pub mod lifecycle;
 pub mod meta;
 pub mod pod;
 

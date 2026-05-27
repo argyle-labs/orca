@@ -6,6 +6,11 @@
 //! and schedule a supervisor restart. Channel/pin state is in
 //! [`super::update_state`]; dev-mode supervisor + dev-source HTTP
 //! fetcher remain in `server::commands::update` (B2c).
+//!
+//! Also owns [`resolve_github_token`] — the single canonical GitHub PAT
+//! resolver shared by the production update path, the dev-source fetcher,
+//! and the high-level lifecycle tools. Prefers the `github_token` secret in
+//! orca.db; falls back to `$GITHUB_TOKEN` for bootstrap / CI.
 
 use anyhow::{Context, Result, bail};
 use orca_utils::config::{APP_NAME, APP_REPO_API_URL};
@@ -13,6 +18,21 @@ use serde::Deserialize;
 use std::path::PathBuf;
 
 use crate::update_state::{Channel, is_newer_full};
+
+/// Resolve the GitHub token: prefer the `github_token` secret in orca.db
+/// (the canonical post-2026-05-11 location); fall back to `GITHUB_TOKEN` env
+/// var for bootstrap + CI flows. Returns an empty string if neither is set —
+/// callers should report an actionable error themselves.
+pub fn resolve_github_token() -> String {
+    if let Ok(conn) = db::open_default()
+        && let Ok(Some(_)) = db::secrets::get(&conn, "github_token")
+        && let Ok(Some(v)) = db::secrets::read_inline_value(&conn, "github_token")
+        && !v.is_empty()
+    {
+        return v;
+    }
+    std::env::var("GITHUB_TOKEN").unwrap_or_default()
+}
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TARGET: &str = env!("ORCA_BUILD_TARGET");

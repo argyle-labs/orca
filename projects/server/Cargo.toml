@@ -31,6 +31,7 @@ php-ast = ["dep:tree-sitter", "dep:tree-sitter-php"]
 orca-sdk   = { path = "../sdk/rust" }
 orca-utils = { path = "../utils" }
 orca-dispatch = { path = "../orca-dispatch" }
+orca-macro    = { path = "../orca-macro" }
 inventory     = { workspace = true }
 orca-contract = { path = "../orca-contract", features = ["native"] }
 db         = { package = "orca-db", path = "../db" }

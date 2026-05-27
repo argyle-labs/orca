@@ -25,6 +25,8 @@ pub use crate::conversation::context;
 pub use crate::conversation::tui;
 
 pub mod auth_password;
+pub mod diagnostic;
+pub mod spec_detail;
 pub mod auth_throttle;
 pub mod host_identity;
 pub mod host_status_writer;

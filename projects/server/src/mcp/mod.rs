@@ -72,11 +72,6 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     ctx.register_service(host_refresh);
     let pod_svc: Arc<dyn fleet::pod::PodService> = Arc::new(crate::services::pod::ServerPod);
     ctx.register_service(pod_svc);
-    let lifecycle_svc: Arc<dyn fleet::lifecycle::LifecycleService> =
-        Arc::new(crate::services::lifecycle::ServerLifecycle {
-            config: ctx.config.clone(),
-        });
-    ctx.register_service(lifecycle_svc);
     crate::remote_ok::install(orca_dispatch::remote_ok_names());
     crate::tool_roles::install(orca_dispatch::role_table());
     ctx

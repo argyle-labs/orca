@@ -25,6 +25,9 @@ pub mod dev;
 pub mod install;
 
 #[cfg(feature = "native")]
+pub mod commands;
+
+#[cfg(feature = "native")]
 pub mod install_status;
 
 #[cfg(feature = "native")]
