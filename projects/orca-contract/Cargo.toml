@@ -14,7 +14,7 @@ path = "src/lib.rs"
 # crate so generated code never sees the runtime's modules.
 
 [features]
-default = []
+default = ["native"]
 native = [
     "dep:orca-utils",
     "dep:anyhow",

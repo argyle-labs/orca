@@ -15,7 +15,7 @@ path = "src/lib.rs"
 #   - cli:            adds clap derives on Args so the tools surface in the
 #                     unified `orca` CLI binary. Implies `native`.
 [features]
-default = []
+default = ["native"]
 native = [
     "orca-contract/native",
     "dep:orca-db",

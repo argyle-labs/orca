@@ -9,6 +9,12 @@ path = "src/lib.rs"
 
 [dependencies]
 orca-contract = { path = "../orca-contract", features = ["native"] }
+orca-macro    = { path = "../orca-macro" }
+orca-dispatch = { path = "../orca-dispatch" }
+schemars      = { workspace = true }
+serde         = { workspace = true }
+inventory     = { workspace = true }
+tracing       = { workspace = true }
 orca-utils    = { path = "../utils" }
 llm           = { path = "../llm" }
 
@@ -26,7 +32,7 @@ tokio-util    = { workspace = true }
 unicode-width = "0.2"
 uuid          = { workspace = true }
 dirs          = { workspace = true }
-agents        = { path = "../agents" }
+agents        = { path = "../agents", features = ["native"] }
 db            = { package = "orca-db", path = "../db" }
 platform      = { path = "../platform", features = ["native"] }
 

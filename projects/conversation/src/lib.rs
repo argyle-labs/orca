@@ -5,4 +5,5 @@
 
 pub mod jobs;
 pub mod log_cmd;
+pub mod run;
 pub mod sessions;

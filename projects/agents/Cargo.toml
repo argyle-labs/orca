@@ -9,7 +9,7 @@ name = "agents"
 path = "src/lib.rs"
 
 [features]
-default = []
+default = ["native"]
 native = [
     "orca-contract/native",
     "dep:orca-utils",
