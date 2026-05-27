@@ -5,82 +5,21 @@ use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use super::api;
 use super::auth_routes;
 use ::mcp::client::McpPool;
 
-/// Static OpenAPI doc skeleton — info, tags, and shared schemas.
-///
-/// Paths are NOT listed here. They are registered automatically by
-/// `utoipa-axum` when each handler is added to the router via
-/// `routes!(handler)`. The `#[utoipa::path]` attribute on the handler
-/// is the single source of truth for the route.
+/// Static OpenAPI doc skeleton — info + tags. Paths are injected at
+/// `orca_spec_json()` time from every `#[orca_tool]` registration.
+/// Auth routes are still hand-written (sessions/cookies) so they
+/// remain on the static router via `routes!()`.
 #[derive(OpenApi)]
 #[openapi(
     info(
         title = "orca API",
         version = "0.1.0",
-        description = "orca local dev tool — docs, services, schema, MCP proxy"
+        description = "orca — typed tool dispatch via #[orca_tool]; auth is the only hand-written REST surface"
     ),
     components(schemas(
-        super::tree::TreeNode,
-        super::tree::NodeType,
-        super::api::SearchResult,
-        super::api::McpToolInfo,
-        super::api::McpRunRequest,
-        super::api::McpRunResponse,
-        super::api::McpContent,
-        super::api::DockerService,
-        super::api::DockerServicesResponse,
-        super::api::DockerActionRequest,
-        super::api::DockerActionResponse,
-        super::api::Ctx7Response,
-        super::api::SchemaResponse,
-        super::api::SchemaTab,
-        super::api::SchemaTableInfo,
-        super::api::SchemaColumn,
-        super::api::SchemaForeignKey,
-        super::api::SchemaDomain,
-        super::api::HealthResponse,
-        super::api::HealthCheck,
-        super::api::ErrorResponse,
-        super::api::OkResponse,
-        super::api::SpecFiles,
-        super::api::SpecMeta,
-        super::api::SpecQuery,
-        super::api::McpServerInfo,
-        super::api::McpServerAddRequest,
-        super::api::SchemaDbInfo,
-        super::api::SchemaDbAddRequest,
-        super::api::DockerRuntimeInfo,
-        super::api::DockerRuntimeAddRequest,
-        super::api::JiraIssuesQuery,
-        super::api::TransitionBody,
-        super::api::ConfluenceSearchQuery,
-        super::api::RepoInfo,
-        super::api::PrQuery,
-        scanner::GraphQlInfo,
-        scanner::GraphQlOperation,
-        scanner::GraphQlField,
-        scanner::GraphQlType,
-        scanner::GraphQlEnum,
-        super::api::SystemStatusResponse,
-        super::api::ComponentStatus,
-        super::api::MpcStatus,
-        super::api::SystemActionResponse,
-        super::api::SystemActionRequest,
-        super::api::SpecDownloadQuery,
-        super::api::GraphqlDownloadQuery,
-        super::api::GraphqlProxyRequest,
-        super::api::ProgressRequest,
-        super::api::ProgressResponse,
-        super::api::SpecRegisterRequest,
-        super::api::SpecInfo,
-        super::api::PluginInfo,
-        super::api::CredInfo,
-        super::api::SetCredRequest,
-        super::api::PluginDataEntry,
-        super::api::SetPluginDataRequest,
         auth_routes::SignupRequest,
         auth_routes::SigninRequest,
         auth_routes::ChangePasswordRequest,
@@ -91,135 +30,21 @@ use ::mcp::client::McpPool;
         auth_routes::AuthErrorResponse,
     )),
     tags(
-        // Public domains — served at /api/openapi/public.json
-        (name = "docs",       description = "Orca vault document tree and search [public]"),
-        (name = "library",    description = "Library documentation via context7 [public]"),
-        // Internal domains — orca local use only
-        (name = "mcp",        description = "MCP tool proxy — run any connected MCP server tool"),
-        (name = "docker",     description = "Docker Compose service management"),
-        (name = "schema",     description = "MySQL schema visualizer"),
-        (name = "health",     description = "Service health checks"),
-        (name = "specs",      description = "External API spec registry"),
-        (name = "jira",       description = "Jira issue management via Atlassian REST API"),
-        (name = "confluence", description = "Confluence search via Atlassian REST API"),
-        (name = "bitbucket",  description = "Bitbucket repo and PR listing"),
-        (name = "github",     description = "GitHub repos, pull requests, and issues"),
-        (name = "system",     description = "Orca installation status and install/uninstall actions"),
-        (name = "learning",   description = "Learning progress tracking"),
-        (name = "plugins",    description = "Plugin registry and credential management"),
-        (name = "auth",       description = "Browser sign-up / sign-in / session management"),
+        (name = "auth", description = "Browser sign-up / sign-in / session management"),
     )
 )]
 pub struct ApiDoc;
 
-/// The fully assembled OpenAPI spec — populated once at router build time
-/// from `OpenApiRouter::split_for_parts()`. Read by the spec handlers.
 static SPEC: OnceLock<utoipa::openapi::OpenApi> = OnceLock::new();
 
-/// Build the `OpenApiRouter` used by both the live server and offline spec
-/// dump. Each handler's `#[utoipa::path]` attribute is the single source of
-/// truth — `routes!(handler)` registers the axum route AND the OpenAPI
-/// metadata. Multi-method paths combine handlers in one `routes!()` call.
 pub(super) fn openapi_router() -> OpenApiRouter<std::sync::Arc<McpPool>> {
-    let router = OpenApiRouter::with_openapi(ApiDoc::openapi())
-        .routes(routes!(api::ping_handler))
-        .routes(routes!(api::specs_list_handler))
-        .routes(routes!(api::specs_db_list_handler))
-        .routes(routes!(api::specs_register_handler))
-        .routes(routes!(api::specs_get_public_handler))
-        .routes(routes!(api::specs_graphql_info_handler))
-        .routes(routes!(api::specs_graphql_proxy_handler))
-        .routes(routes!(api::graphql_download_handler))
-        .routes(routes!(api::specs_get_graphql_handler))
-        .routes(routes!(api::spec_download_handler))
-        .routes(routes!(api::specs_refresh_handler))
-        .routes(routes!(api::specs_unregister_handler))
-        .routes(routes!(api::specs_sync_mcp_handler))
-        .routes(routes!(api::specs_get_handler))
-        .routes(routes!(api::tree_handler))
-        .routes(routes!(api::search_handler))
-        .routes(routes!(api::mcp_servers_handler, api::mcp_add_handler))
-        .routes(routes!(api::mcp_remove_handler))
-        .routes(routes!(
-            api::mcp_mappings_list_handler,
-            api::mcp_mappings_create_handler
-        ))
-        .routes(routes!(api::mcp_mappings_delete_handler))
-        .routes(routes!(api::mcp_tools_handler))
-        .routes(routes!(api::mcp_run_handler))
-        .routes(routes!(
-            api::docker_runtimes_handler,
-            api::docker_runtimes_add_handler
-        ))
-        .routes(routes!(api::docker_runtimes_remove_handler))
-        .routes(routes!(api::engines_list_handler, api::engines_add_handler))
-        .routes(routes!(api::engines_remove_handler))
-        .routes(routes!(api::engines_enable_handler))
-        .routes(routes!(api::engines_disable_handler))
-        .routes(routes!(api::docker_engine_handler))
-        .routes(routes!(api::docker_engine_start_handler))
-        .routes(routes!(api::docker_services_handler))
-        .routes(routes!(api::docker_action_handler))
-        .routes(routes!(api::ctx7_handler))
-        .routes(routes!(api::doc_handler))
-        .routes(routes!(
-            api::get_progress_handler,
-            api::save_progress_handler
-        ))
-        .routes(routes!(api::schema_handler))
-        .routes(routes!(api::schema_domains_handler))
-        .routes(routes!(
-            api::schema_databases_handler,
-            api::schema_databases_add_handler
-        ))
-        .routes(routes!(api::schema_databases_remove_handler))
-        .routes(routes!(api::repos_handler))
-        .routes(routes!(api::prs_handler))
-        .routes(routes!(api::jira_issues_handler))
-        .routes(routes!(
-            api::jira_get_transitions_handler,
-            api::jira_transition_handler
-        ))
-        .routes(routes!(api::confluence_search_handler))
-        .routes(routes!(api::github_user_handler))
-        .routes(routes!(api::github_repos_handler))
-        .routes(routes!(api::github_prs_handler))
-        .routes(routes!(api::github_issues_handler))
-        .routes(routes!(api::github_orgs_handler))
-        .routes(routes!(
-            api::plugins_list_handler,
-            api::plugin_install_handler
-        ))
-        .routes(routes!(api::plugin_remove_handler))
-        .routes(routes!(api::plugin_enable_handler))
-        .routes(routes!(api::plugin_disable_handler))
-        .routes(routes!(api::plugin_health_handler))
-        .routes(routes!(
-            api::plugin_creds_list_handler,
-            api::plugin_creds_set_handler
-        ))
-        .routes(routes!(api::plugin_creds_delete_handler))
-        .routes(routes!(api::plugin_creds_sync_handler))
-        .routes(routes!(api::plugin_tools_list_handler))
-        .routes(routes!(api::plugin_tool_call_handler))
-        .routes(routes!(api::plugin_data_list_handler))
-        .routes(routes!(
-            api::plugin_data_get_handler,
-            api::plugin_data_set_handler,
-            api::plugin_data_delete_handler
-        ))
-        .routes(routes!(api::system_status_handler))
-        .routes(routes!(api::system_action_handler))
-        .routes(routes!(api::fs_browse_handler))
+    OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(auth_routes::signup_status))
         .routes(routes!(auth_routes::signup))
         .routes(routes!(auth_routes::signin))
         .routes(routes!(auth_routes::signout))
         .routes(routes!(auth_routes::change_password))
-        .routes(routes!(auth_routes::me));
-    #[cfg(feature = "pdf")]
-    let router = router.routes(routes!(api::pdf_handler));
-    router
+        .routes(routes!(auth_routes::me))
 }
 
 pub(super) fn install_spec(mut spec: utoipa::openapi::OpenApi) {
@@ -227,8 +52,6 @@ pub(super) fn install_spec(mut spec: utoipa::openapi::OpenApi) {
     _ = SPEC.set(spec);
 }
 
-/// Build the OpenAPI spec on demand without starting the server.
-/// Used by the `orca spec dump` CLI command.
 fn build_spec() -> utoipa::openapi::OpenApi {
     let (_, mut spec) = openapi_router().split_for_parts();
     spec.info.version = env!("CARGO_PKG_VERSION").to_string();
@@ -238,8 +61,6 @@ fn build_spec() -> utoipa::openapi::OpenApi {
 pub fn orca_spec_json() -> serde_json::Value {
     let spec = SPEC.get().cloned().unwrap_or_else(build_spec);
     let mut value = serde_json::to_value(&spec).unwrap_or_default();
-    // Inject every `#[orca_tool]`-annotated endpoint and bump the spec to
-    // OpenAPI 3.1 (schemars 1.x emits 2020-12, which 3.1 accepts directly).
     orca_dispatch::openapi::inject_tool_paths(&mut value);
     value["x-orca"] = serde_json::json!({
         "repo": "orca",

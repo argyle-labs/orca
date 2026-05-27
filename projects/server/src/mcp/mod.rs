@@ -6,12 +6,10 @@
 // Server-side tool-implementations moved to `crate::services::*` — only
 // the MCP-protocol pieces (handlers, context7 federation, run_agent legacy
 // static tool defs) stay here.
-mod context7;
 pub mod docs;
 mod handlers;
-mod spec_tools;
-mod specs;
 mod tools;
+use ::mcp::context7;
 
 use anyhow::Result;
 use orca_contract::ToolCtx;

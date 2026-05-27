@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use orca_utils::config::Config;
 use std::sync::Arc;
 
-use crate::serve::api::llm as local_llm;
+use ::llm::local as local_llm;
 
 pub struct ServerAgents {
     pub config: Arc<Config>,

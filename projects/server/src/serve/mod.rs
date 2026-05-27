@@ -1,4 +1,3 @@
-pub mod api;
 pub mod auth_routes;
 pub mod middleware;
 pub mod openapi;

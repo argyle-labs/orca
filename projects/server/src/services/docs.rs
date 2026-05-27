@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crate::markdown::to_llm_text;
 use crate::mcp::docs as docs_mod;
-use crate::serve::api::llm as local_llm;
+use ::llm::local as local_llm;
 use crate::serve::tree::{NodeType, TreeNode};
 
 pub struct ServerDocs {

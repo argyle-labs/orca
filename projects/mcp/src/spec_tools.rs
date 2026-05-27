@@ -1,5 +1,5 @@
 //! OpenAPI / GraphQL spec-registry tools — server-local because their
-//! backing implementations live in `crate::mcp::specs` (file-system layout
+//! backing implementations live in `crate::specs` (file-system layout
 //! of the operator's checkout).
 //!
 //! These tools predate the `#[orca_tool]` macro. They expose
@@ -15,7 +15,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::mcp::specs;
+use crate::specs;
 
 // ── list_specs ──────────────────────────────────────────────────────────
 
