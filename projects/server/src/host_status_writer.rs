@@ -14,10 +14,10 @@
 
 use anyhow::{Context, Result};
 use fleet::host_status::HostStatusRows;
-use fleet::lifecycle::SystemInfoReport;
-use fleet::system::SystemStatusReport;
 use std::sync::OnceLock;
 use std::time::Duration;
+use system::system::SystemStatusReport;
+use system::system_info_types::SystemInfoReport;
 
 use crate::pod::runtime_cache;
 
@@ -83,10 +83,10 @@ async fn persist_local_snapshot() -> Result<()> {
     // Prefer the in-memory cache so cpu_usage_percent is a real delta (not the
     // first-call zero that collect_blocking() always returns). Fall back to a
     // fresh collect only when the background refresher hasn't run yet.
-    let snap = if let Some(cached) = crate::system_info::current() {
+    let snap = if let Some(cached) = system::system_info::current() {
         (*cached).clone()
     } else {
-        tokio::task::spawn_blocking(crate::system_info::collect_blocking).await?
+        tokio::task::spawn_blocking(system::system_info::collect_blocking).await?
     };
     let payload = serde_json::to_string(&snap).context("serialise SystemInfoReport")?;
     let snapshot_at = snap

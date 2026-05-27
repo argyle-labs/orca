@@ -26,6 +26,22 @@ pub struct PeerSummary {
     pub addresses: Vec<PodPeerAddress>,
 }
 
+/// Read the host-local `self_secure` flag from `pod_self`. Returns `false`
+/// when the row is absent (host hasn't opted into Tier-2 cred sync yet).
+///
+/// This is a read-only helper exposed to non-server crates that need to
+/// surface the value in a snapshot. The mutating side (`set_self_secure`)
+/// stays in `server::pod::db` next to the Tier-2 state machine.
+pub fn get_self_secure(conn: &Connection) -> Result<bool> {
+    use rusqlite::OptionalExtension;
+    let row = conn
+        .query_row("SELECT self_secure FROM pod_self WHERE id = 1", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .optional()?;
+    Ok(row.unwrap_or(0) != 0)
+}
+
 pub fn list_peers(conn: &Connection) -> Result<Vec<PeerSummary>> {
     let mut stmt = conn.prepare(
         "SELECT p.peer_id, p.peer_hostname, p.peer_addr, p.peer_port,

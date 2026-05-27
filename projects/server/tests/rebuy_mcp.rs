@@ -10,7 +10,7 @@
 ///    ```
 ///    cargo test -p orca rebuy_ -- --ignored --nocapture
 ///    ```
-use orca::serve::mcp_client::{McpClient, McpPool, McpServerConfig};
+use mcp::client::{McpClient, McpPool, McpServerConfig};
 use serde_json::json;
 
 // ── Constants ─────────────────────────────────────────────────────────────────

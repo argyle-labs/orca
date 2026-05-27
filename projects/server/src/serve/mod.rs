@@ -1,6 +1,5 @@
 pub mod api;
 pub mod auth_routes;
-pub mod mcp_client;
 pub mod middleware;
 mod openapi;
 #[cfg(feature = "pdf")]
@@ -508,7 +507,7 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     if let Err(e) = crate::loopback_token::install_at_startup() {
         tracing::warn!("loopback token install failed: {e:#}");
     }
-    crate::system_info::spawn_refresher();
+    system::system_info::spawn_refresher();
     crate::host_status_writer::spawn_local_writer();
     crate::host_status_writer::spawn_sync_puller();
     crate::pod::host_status_replica::spawn_fleet_replicator();
@@ -520,7 +519,7 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     spawn_pod_runtime(pki_dir).await;
     spawn_scheduler_runtime();
     tokio::spawn(crate::commands::startup_update_check());
-    if let Some(src) = crate::commands::update::read_dev_source() {
+    if let Some(src) = system::dev::read_dev_source() {
         tokio::spawn(dev_source_auto_poll(src));
     }
 }
@@ -533,10 +532,10 @@ async fn dev_source_auto_poll(src: String) {
     interval.tick().await; // skip immediate tick
     loop {
         interval.tick().await;
-        match crate::commands::update::check_for_update_dev(&src).await {
+        match system::dev::check_for_update_dev(&src).await {
             Ok(Some(_)) => {
                 tracing::info!("[dev] new build detected — applying and restarting");
-                if let Err(e) = crate::commands::update::apply_update_dev(&src).await {
+                if let Err(e) = system::dev::apply_update_dev(&src).await {
                     tracing::warn!("[dev] apply failed: {e}");
                 } else {
                     std::process::exit(0);
@@ -936,7 +935,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
             .allow_credentials(true)
     };
 
-    let mcp_pool = Arc::new(mcp_client::McpPool::new_with_db(db_path));
+    let mcp_pool = Arc::new(::mcp::client::McpPool::new_with_db(db_path));
 
     let (api, spec) = openapi::openapi_router().split_for_parts();
     // Stash the assembled spec so the spec-serving handlers can read it.

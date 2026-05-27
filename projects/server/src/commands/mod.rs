@@ -7,9 +7,6 @@
 //! - `oauth` — GitHub/Atlassian OAuth flows used by `AuthService`.
 //! - `daemon` — daemon lifecycle (not yet migrated; long-running supervisor).
 //! - `hook_cmd` — Claude Code hook handlers (stdin-driven; different shape).
-//! - `install` — install/uninstall report builders + REST status snapshot;
-//!   shared by `LifecycleService` and `/api/system`.
-//! - `mcp_cmd` — `mcp_sync_server` helper (shared with REST + service trait).
 //! - `spec` — disk-spec scaffold (`spec add`) + repo scanner (`spec sync`)
 //!   not yet migrated. Most spec verbs already go through OrcaOp.
 //! - `update` — `check_for_update` / `apply_update` / `startup_update_check`
@@ -29,8 +26,6 @@ pub fn list_embedded_commands() -> Vec<String> {
 pub mod daemon;
 pub mod dev_serve;
 pub mod hook_cmd;
-pub mod install;
-pub mod mcp_cmd;
 pub mod package;
 pub mod pod;
 pub mod spec;
@@ -39,8 +34,6 @@ pub mod update;
 
 pub use daemon::{DaemonAction, cmd_daemon};
 pub use hook_cmd::{HookAction, cmd_hook};
-pub use install::{InstallReport, install_status};
-pub use mcp_cmd::mcp_sync_server;
 pub use package::{PackageAction, cmd_package};
 pub use spec::{SpecAction, cmd_spec};
 pub use system::{SystemAction, cmd_system};

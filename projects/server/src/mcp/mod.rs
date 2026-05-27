@@ -60,9 +60,6 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     let spec_registry: Arc<dyn ::docs::spec_registry::SpecRegistryService> =
         Arc::new(crate::services::spec_registry::ServerSpecRegistry);
     ctx.register_service(spec_registry);
-    let system_svc: Arc<dyn fleet::system::SystemService> =
-        Arc::new(crate::services::system::ServerSystem);
-    ctx.register_service(system_svc);
     let profile_svc: Arc<dyn platform::profile::ProfileService> =
         Arc::new(crate::services::profile::ServerProfile {
             config: ctx.config.clone(),
@@ -80,16 +77,6 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
             config: ctx.config.clone(),
         });
     ctx.register_service(lifecycle_svc);
-    {
-        use mgmt::mgmt::*;
-        let mcp_reg: Arc<dyn McpRegistryService> =
-            Arc::new(crate::services::mgmt::ServerMcpRegistry);
-        ctx.register_service(mcp_reg);
-        let schemas: Arc<dyn SchemaDbService> = Arc::new(crate::services::mgmt::ServerSchemaDb);
-        ctx.register_service(schemas);
-        let doc_root: Arc<dyn DocRootService> = Arc::new(crate::services::mgmt::ServerDocRoot);
-        ctx.register_service(doc_root);
-    }
     crate::remote_ok::install(orca_dispatch::remote_ok_names());
     crate::tool_roles::install(orca_dispatch::role_table());
     ctx
@@ -105,7 +92,7 @@ pub async fn serve(config: &Config) -> Result<()> {
     // "No provider set" and Claude Code sees zero tools. Mirrors `build_router`.
     crate::llm::ensure_crypto_provider();
 
-    let pool = crate::serve::mcp_client::McpPool::new_with_db(config.db_path.clone());
+    let pool = ::mcp::client::McpPool::new_with_db(config.db_path.clone());
 
     let config_arc = Arc::new(config.clone());
     let tool_ctx = build_tool_ctx(config_arc);

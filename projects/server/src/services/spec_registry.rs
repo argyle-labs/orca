@@ -73,17 +73,15 @@ fn map_info(info: ScannerInfo) -> GraphQlInfoData {
     }
 }
 
-fn make_mcp_pool() -> crate::serve::mcp_client::McpPool {
+fn make_mcp_pool() -> ::mcp::client::McpPool {
     use orca_utils::config::{APP_DB_FILE, APP_STATE_DIR};
     if let Ok(path) = std::env::var("ORCA_DB_PATH") {
-        return crate::serve::mcp_client::McpPool::new_with_db(std::path::PathBuf::from(path));
+        return ::mcp::client::McpPool::new_with_db(std::path::PathBuf::from(path));
     }
     if let Some(home) = dirs::home_dir() {
-        return crate::serve::mcp_client::McpPool::new_with_db(
-            home.join(APP_STATE_DIR).join(APP_DB_FILE),
-        );
+        return ::mcp::client::McpPool::new_with_db(home.join(APP_STATE_DIR).join(APP_DB_FILE));
     }
-    crate::serve::mcp_client::McpPool::new()
+    ::mcp::client::McpPool::new()
 }
 
 #[async_trait]

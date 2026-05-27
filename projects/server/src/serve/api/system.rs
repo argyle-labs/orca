@@ -52,8 +52,13 @@ pub struct SystemActionRequest {
     tag = "system"
 )]
 pub async fn system_status_handler() -> Response {
-    let status = crate::commands::install_status();
-    Json(status).into_response()
+    match system::install_status::install_status_report() {
+        Ok(report) => Json(report).into_response(),
+        Err(e) => err(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &e.to_string(),
+        ),
+    }
 }
 
 /// POST /api/system/action — run install or uninstall
@@ -69,7 +74,7 @@ pub async fn system_status_handler() -> Response {
     tag = "system"
 )]
 pub async fn system_action_handler(Json(req): Json<SystemActionRequest>) -> Response {
-    use crate::commands::install::{InstallReport, cmd_install_report, cmd_uninstall_report};
+    use system::install::{InstallReport, cmd_install_report, cmd_uninstall_report};
 
     let report: InstallReport = match req.action.as_str() {
         "install" => cmd_install_report(),

@@ -8,6 +8,7 @@ use fleet::pod::{
 };
 use orca_sdk::pki;
 use std::time::Instant;
+use system::update_state::{read_channel_marker, read_version_pin};
 
 use crate::commands::pod::dial_bootstrap_pub;
 use crate::pod::scheduler::{OFFER_TTL_SECS, mint_pairing_code, push_offer};
@@ -442,7 +443,7 @@ impl PodService for ServerPod {
 
     fn get_self_secure(&self) -> Result<bool> {
         let conn = db::open_default()?;
-        pdb::get_self_secure(&conn)
+        db::pod::get_self_secure(&conn)
     }
 
     async fn set_self_secure(&self, on: bool) -> Result<bool> {
@@ -469,8 +470,8 @@ async fn local_peer_row() -> PodPeerDto {
             orca_utils::state::DaemonMode::Parked => "parked".to_string(),
             orca_utils::state::DaemonMode::Dev => "dev".to_string(),
         });
-    let channel = crate::commands::update::read_channel_marker().map(|c| c.as_marker().to_string());
-    let pinned_to = crate::commands::update::read_version_pin();
+    let channel = read_channel_marker().map(|c| c.as_marker().to_string());
+    let pinned_to = read_version_pin();
     // update-check is intentionally skipped for the local row: it requires
     // the secrets service to mint a GitHub token, and we don't want pod.list
     // to fail (or hang on GitHub) when called before the daemon is fully
@@ -498,7 +499,7 @@ async fn local_peer_row() -> PodPeerDto {
         pinned_to,
         update_latest: None,
         update_available: None,
-        system: Some((*crate::system_info::current_or_collect()).clone()),
+        system: Some((*system::system_info::current_or_collect()).clone()),
     }
 }
 
@@ -514,7 +515,8 @@ const REACHABLE_FRESHNESS_SECS: i64 = 180;
 /// No network IO — this is the read-only consumer side of the mesh sync.
 fn enrich_from_local_db(base: &mut PodPeerDto, latest: &db::host_status::HostStatusRow) {
     base.system =
-        serde_json::from_str::<fleet::lifecycle::SystemInfoReport>(&latest.payload_json).ok();
+        serde_json::from_str::<system::system_info_types::SystemInfoReport>(&latest.payload_json)
+            .ok();
     let now = chrono::Utc::now().timestamp();
     base.reachable = Some(now - latest.snapshot_at_unix <= REACHABLE_FRESHNESS_SECS);
     // Re-purpose latency_ms to mean "age of latest snapshot in seconds" when

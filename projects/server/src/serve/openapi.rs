@@ -7,7 +7,7 @@ use utoipa_axum::routes;
 
 use super::api;
 use super::auth_routes;
-use super::mcp_client::McpPool;
+use ::mcp::client::McpPool;
 
 /// Static OpenAPI doc skeleton — info, tags, and shared schemas.
 ///

@@ -17,7 +17,7 @@ default = ["ui"]
 # Embed the compiled frontend (projects/frontend/dist/) into the binary.
 # On by default. Disable with `--no-default-features` for a true headless build.
 # Runtime serving is additionally gated by the `ui.enabled` DB setting.
-ui = ["dep:mime_guess"]
+ui = ["dep:mime_guess", "system/ui"]
 
 # Enable the /api/pdf endpoint — markdown → PDF rendering via typst.
 # Off by default; pulls ~10 MB of typst + font + WASM crates into the binary.
@@ -37,11 +37,13 @@ db         = { package = "orca-db", path = "../db" }
 # Domain crates
 auth     = { path = "../auth",     features = ["native", "cli"] }
 fleet    = { path = "../fleet",    features = ["native", "cli"] }
+system   = { path = "../system",   features = ["native", "cli"] }
 platform = { path = "../platform", features = ["native", "cli"] }
 agents   = { path = "../agents",   features = ["native", "cli"] }
 plugins  = { path = "../plugins",  features = ["native", "cli"] }
 docs     = { path = "../docs",     features = ["native", "cli"] }
-mgmt     = { path = "../mgmt",     features = ["native", "cli"] }
+mcp      = { path = "../mcp",      features = ["native", "cli"] }
+schema   = { path = "../schema",   features = ["native", "cli"] }
 # Integration crates (flat names, no facade)
 docker        = { path = "../integrations/docker",        features = ["native", "cli"] }
 dockge        = { path = "../integrations/dockge" }

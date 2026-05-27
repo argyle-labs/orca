@@ -1,12 +1,18 @@
+//! Install / uninstall reporter — relocated from
+//! `server::commands::install` (slice B1). Pure functions; no service
+//! indirection. Helpers (`home_dir`, `install_bin_path`, `is_symlink`,
+//! `check_mcp_registered`, `local_hostname`) are duplicated privately
+//! per the no-indirection rule — this crate must not call back into
+//! server.
+
 // CLI install command passing through spec/config blobs; HashMap/Value are protocol-level passthrough.
 #![allow(clippy::disallowed_types)]
 use anyhow::{Context, Result};
-use colored::Colorize;
 use orca_sdk::pki;
 use orca_utils::config::{APP_MCP_SERVER, APP_NAME, APP_PKI_DIR, APP_STATE_DIR};
 use std::path::{Path, PathBuf};
 
-const CLAUDE_MD: &str = include_str!("../../../../CLAUDE.md");
+const CLAUDE_MD: &str = include_str!("../../../CLAUDE.md");
 
 // Known project slugs to wire memory symlinks for.
 // Format: (macos_slug, linux_slug, vault_name)
@@ -129,13 +135,13 @@ impl InstallReport {
 
     pub fn print(&self) {
         for s in &self.done {
-            println!("  {} {s}", "✓".green());
+            println!("  ✓ {s}");
         }
         for s in &self.skipped {
-            println!("  {} {s}", "-".dimmed());
+            println!("  - {s}");
         }
         for s in &self.errors {
-            println!("  {} {s}", "✗".red());
+            println!("  ✗ {s}");
         }
     }
 
@@ -187,44 +193,6 @@ pub fn cmd_uninstall_report() -> InstallReport {
     step_remove_legacy_agents_link(&home, &mut report);
     step_remove_binary(&home, &mut report);
     report
-}
-
-/// Machine-readable status for web UI polling.
-pub fn install_status() -> serde_json::Value {
-    let home = match home_dir() {
-        Ok(h) => h,
-        Err(e) => return serde_json::json!({ "error": e.to_string() }),
-    };
-
-    let binary_path = install_bin_path(&home);
-    let claude_md_path = home.join(".claude/CLAUDE.md");
-    let vault_dir = home.join(APP_STATE_DIR);
-    let pki_dir = vault_dir.join(APP_PKI_DIR);
-    let pki_ca = pki::ca_cert_path(&pki_dir);
-    let pki_server = pki::server_cert_path(&pki_dir);
-    let mcp_registered = check_mcp_registered();
-
-    serde_json::json!({
-        "binary": {
-            "installed": binary_path.exists(),
-            "path": binary_path.to_string_lossy(),
-        },
-        "claude_md": {
-            "linked": is_symlink(&claude_md_path),
-            "path": claude_md_path.to_string_lossy(),
-        },
-        "vault": {
-            "exists": vault_dir.exists(),
-            "path": vault_dir.to_string_lossy(),
-        },
-        "pki": {
-            "initialized": pki_ca.exists() && pki_server.exists(),
-            "path": pki_dir.to_string_lossy(),
-        },
-        "mcp": {
-            "registered": mcp_registered,
-        },
-    })
 }
 
 // ── install steps ─────────────────────────────────────────────────────────────
@@ -314,10 +282,10 @@ fn step_cli_client_cert(home: &Path, report: &mut InstallReport) {
         ));
         return;
     }
-    // host_identity::init() may not have run in the install CLI process; fall
-    // back to a hostname read so we don't panic. CN is cosmetic for routing —
-    // the trust gate is the signature, not the name.
-    let host_cn = crate::host_identity::cli_hostname_or_fallback();
+    // Hostname for CN — install runs in standalone CLI flows where the
+    // server-side host_identity OnceLock may not be populated. CN is
+    // cosmetic for routing; the trust gate is the signature, not the name.
+    let host_cn = local_hostname();
     match pki::issue_cli_client_cert(&pki_dir, &host_cn) {
         Ok(_) => report.ok(format!(
             "pki/cli: issued client cert cli.{host_cn} at {}",
@@ -582,6 +550,16 @@ fn is_symlink(path: &Path) -> bool {
     path.symlink_metadata()
         .map(|m| m.file_type().is_symlink())
         .unwrap_or(false)
+}
+
+fn local_hostname() -> String {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn force_symlink(src: &Path, dest: &Path, report: &mut InstallReport, label: &str) {

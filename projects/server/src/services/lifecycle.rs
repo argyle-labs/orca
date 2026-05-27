@@ -11,10 +11,13 @@ use fleet::lifecycle::{
 use orca_utils::config::Config;
 use std::sync::Arc;
 
-use crate::commands::install::{InstallReport, cmd_install_report, cmd_uninstall_report};
-use crate::commands::update::{
-    apply_update, check_for_update, clear_version_pin, cmd_dev_enable, cmd_update_pin,
-    resolve_channel, resolve_pin_veto, write_channel_marker,
+use crate::commands::update::cmd_update_pin;
+use system::dev::cmd_dev_enable;
+use system::install::{InstallReport, cmd_install_report, cmd_uninstall_report};
+use system::update::{apply_update, check_for_update};
+use system::update_state::{
+    clear_version_pin, read_channel_marker, read_version_pin, resolve_channel, resolve_pin_veto,
+    write_channel_marker,
 };
 
 /// Resolve the GitHub bearer token: prefer the `github_token` secret;
@@ -195,8 +198,7 @@ impl LifecycleService for ServerLifecycle {
     }
 
     async fn update_apply_current(&self) -> Result<LifecycleReport> {
-        let ch = crate::commands::update::read_channel_marker()
-            .unwrap_or_else(|| resolve_channel("stable"));
+        let ch = read_channel_marker().unwrap_or_else(|| resolve_channel("stable"));
         let resolved = ch.as_marker();
         let mut report = LifecycleReport {
             done: vec![],
@@ -217,7 +219,7 @@ impl LifecycleService for ServerLifecycle {
                 .skipped
                 .push(format!("already up to date on '{resolved}'")),
             Some(info) => {
-                if let Some(pin) = resolve_pin_veto(&info) {
+                if let Some(pin) = resolve_pin_veto(&info.version) {
                     report.skipped.push(format!(
                         "pinned to {pin}; available v{} — run `orca system update --version stable` to unpin",
                         info.version
@@ -278,10 +280,9 @@ impl LifecycleService for ServerLifecycle {
                     orca_utils::state::DaemonMode::Dev => "dev".to_string(),
                 })
         };
-        let channel =
-            crate::commands::update::read_channel_marker().map(|c| c.as_marker().to_string());
-        let pinned_to = crate::commands::update::read_version_pin();
-        let system = Some((*crate::system_info::current_or_collect()).clone());
+        let channel = read_channel_marker().map(|c| c.as_marker().to_string());
+        let pinned_to = read_version_pin();
+        let system = Some((*system::system_info::current_or_collect()).clone());
         Ok(RuntimeSpecReport {
             version: env!("ORCA_VERSION").into(),
             frontend: frontend.into(),
