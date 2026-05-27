@@ -1,7 +1,7 @@
 //! Management domain tools — MCP server registry + tool mappings, schema
-//! databases, Docker runtimes, doc roots + ignore patterns, Proxmox + Home
-//! Assistant endpoints. Run impls dispatch through the six sub-services in
-//! `services::mgmt`.
+//! databases, doc roots + ignore patterns. Run impls dispatch through the
+//! three sub-services in `services::mgmt`. (Docker runtimes, Proxmox + Home
+//! Assistant endpoints moved to their respective integration crates.)
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -274,95 +274,6 @@ pub struct DocIgnorePatternMutationResult {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Proxmox endpoints
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ProxmoxEndpointEntry {
-    pub name: String,
-    pub base_url: String,
-    pub token_id: String,
-    pub insecure: bool,
-    pub enabled: bool,
-}
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct ListProxmoxEndpointsArgs {}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct ListProxmoxEndpointsOutput {
-    pub endpoints: Vec<ProxmoxEndpointEntry>,
-}
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct AddProxmoxEndpointArgs {
-    pub name: String,
-    pub base_url: String,
-    pub token_id: String,
-    pub token_secret: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub insecure: Option<bool>,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct ProxmoxMutationResult {
-    pub name: String,
-    pub changed: bool,
-}
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct RemoveProxmoxEndpointArgs {
-    pub name: String,
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Home Assistant endpoints
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct HaEndpointEntry {
-    pub name: String,
-    pub base_url: String,
-    pub enabled: bool,
-}
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct ListHomeAssistantEndpointsArgs {}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct ListHomeAssistantEndpointsOutput {
-    pub endpoints: Vec<HaEndpointEntry>,
-}
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct AddHomeAssistantEndpointArgs {
-    pub name: String,
-    pub base_url: String,
-    pub token: String,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct HaMutationResult {
-    pub name: String,
-    pub changed: bool,
-}
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct RemoveHomeAssistantEndpointArgs {
-    pub name: String,
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // MCP federation — list_mcp_tools / run_mcp_tool
 //
 // These structs carry MCP protocol-level opaque blobs (input_schema, args,
@@ -553,24 +464,8 @@ fn sch(ctx: &orca_contract::ToolCtx) -> anyhow::Result<std::sync::Arc<dyn svc::S
     ctx.service::<std::sync::Arc<dyn svc::SchemaDbService>>()
 }
 #[cfg(feature = "native")]
-fn drt(
-    ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<std::sync::Arc<dyn svc::DockerRuntimeService>> {
-    ctx.service::<std::sync::Arc<dyn svc::DockerRuntimeService>>()
-}
-#[cfg(feature = "native")]
 fn doc(ctx: &orca_contract::ToolCtx) -> anyhow::Result<std::sync::Arc<dyn svc::DocRootService>> {
     ctx.service::<std::sync::Arc<dyn svc::DocRootService>>()
-}
-#[cfg(feature = "native")]
-fn pmx(
-    ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<std::sync::Arc<dyn svc::ProxmoxEndpointService>> {
-    ctx.service::<std::sync::Arc<dyn svc::ProxmoxEndpointService>>()
-}
-#[cfg(feature = "native")]
-fn ha(ctx: &orca_contract::ToolCtx) -> anyhow::Result<std::sync::Arc<dyn svc::HaEndpointService>> {
-    ctx.service::<std::sync::Arc<dyn svc::HaEndpointService>>()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -833,64 +728,6 @@ async fn remove_schema(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Docker runtimes
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// List all Docker runtimes registered in orca.db.
-#[orca_tool(domain = "docker.runtime", verb = "list")]
-async fn list_docker_runtimes(
-    _args: ListDockerRuntimesArgs,
-    ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<ListDockerRuntimesOutput> {
-    let runtimes = drt(ctx)?
-        .list()
-        .await?
-        .into_iter()
-        .map(|r| DockerRuntimeEntry {
-            name: r.name,
-            socket_path: r.socket_path,
-            host: r.host,
-            url: r.url,
-            enabled: r.enabled,
-        })
-        .collect();
-    Ok(ListDockerRuntimesOutput { runtimes })
-}
-
-/// [MUTATES STATE] Register a Docker runtime in orca.db. Provide socketPath, host, or url.
-#[orca_tool(domain = "docker.runtime", verb = "create")]
-async fn add_docker_runtime(
-    args: AddDockerRuntimeArgs,
-    ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<DockerRuntimeMutationResult> {
-    drt(ctx)?
-        .upsert(svc::DockerRuntimeInput {
-            name: args.name.clone(),
-            socket_path: args.socket_path,
-            host: args.host,
-            url: args.url,
-        })
-        .await?;
-    Ok(DockerRuntimeMutationResult {
-        name: args.name,
-        changed: true,
-    })
-}
-
-/// [MUTATES STATE] Remove a Docker runtime from orca.db by name.
-#[orca_tool(domain = "docker.runtime", verb = "delete")]
-async fn remove_docker_runtime(
-    args: RemoveDockerRuntimeArgs,
-    ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<DockerRuntimeMutationResult> {
-    let changed = drt(ctx)?.remove(&args.name).await?;
-    Ok(DockerRuntimeMutationResult {
-        name: args.name,
-        changed,
-    })
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // Doc roots + ignore patterns
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -978,120 +815,6 @@ async fn remove_doc_ignore_pattern(
     let changed = doc(ctx)?.remove_ignore_pattern(&args.pattern).await?;
     Ok(DocIgnorePatternMutationResult {
         pattern: args.pattern,
-        changed,
-    })
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Proxmox endpoints
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// List all Proxmox VE endpoints registered in orca.db (token secrets are redacted).
-#[orca_tool(domain = "proxmox.endpoint", verb = "list")]
-async fn list_proxmox_endpoints(
-    _args: ListProxmoxEndpointsArgs,
-    ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<ListProxmoxEndpointsOutput> {
-    let endpoints = pmx(ctx)?
-        .list()
-        .await?
-        .into_iter()
-        .map(|r| ProxmoxEndpointEntry {
-            name: r.name,
-            base_url: r.base_url,
-            token_id: r.token_id,
-            insecure: r.insecure,
-            enabled: r.enabled,
-        })
-        .collect();
-    Ok(ListProxmoxEndpointsOutput { endpoints })
-}
-
-/// [MUTATES STATE] Register or update a Proxmox VE endpoint in orca.db. Auth uses an API token (PVEAPIToken header).
-#[orca_tool(domain = "proxmox.endpoint", verb = "create")]
-async fn add_proxmox_endpoint(
-    args: AddProxmoxEndpointArgs,
-    ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<ProxmoxMutationResult> {
-    pmx(ctx)?
-        .upsert(svc::ProxmoxEndpointInput {
-            name: args.name.clone(),
-            base_url: args.base_url,
-            token_id: args.token_id,
-            token_secret: args.token_secret,
-            insecure: args.insecure.unwrap_or(false),
-        })
-        .await?;
-    Ok(ProxmoxMutationResult {
-        name: args.name,
-        changed: true,
-    })
-}
-
-/// [MUTATES STATE] Remove a Proxmox VE endpoint from orca.db by name.
-#[orca_tool(domain = "proxmox.endpoint", verb = "delete")]
-async fn remove_proxmox_endpoint(
-    args: RemoveProxmoxEndpointArgs,
-    ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<ProxmoxMutationResult> {
-    let changed = pmx(ctx)?.remove(&args.name).await?;
-    Ok(ProxmoxMutationResult {
-        name: args.name,
-        changed,
-    })
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Home Assistant endpoints
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// List all Home Assistant endpoints registered in orca.db (tokens are redacted).
-#[orca_tool(domain = "ha.endpoint", verb = "list")]
-async fn list_home_assistant_endpoints(
-    _args: ListHomeAssistantEndpointsArgs,
-    ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<ListHomeAssistantEndpointsOutput> {
-    let endpoints = ha(ctx)?
-        .list()
-        .await?
-        .into_iter()
-        .map(|r| HaEndpointEntry {
-            name: r.name,
-            base_url: r.base_url,
-            enabled: r.enabled,
-        })
-        .collect();
-    Ok(ListHomeAssistantEndpointsOutput { endpoints })
-}
-
-/// [MUTATES STATE] Register or update a Home Assistant endpoint in orca.db. Auth uses a long-lived access token (Bearer header).
-#[orca_tool(domain = "ha.endpoint", verb = "create")]
-async fn add_home_assistant_endpoint(
-    args: AddHomeAssistantEndpointArgs,
-    ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<HaMutationResult> {
-    ha(ctx)?
-        .upsert(svc::HaEndpointInput {
-            name: args.name.clone(),
-            base_url: args.base_url,
-            token: args.token,
-        })
-        .await?;
-    Ok(HaMutationResult {
-        name: args.name,
-        changed: true,
-    })
-}
-
-/// [MUTATES STATE] Remove a Home Assistant endpoint from orca.db by name.
-#[orca_tool(domain = "ha.endpoint", verb = "delete")]
-async fn remove_home_assistant_endpoint(
-    args: RemoveHomeAssistantEndpointArgs,
-    ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<HaMutationResult> {
-    let changed = ha(ctx)?.remove(&args.name).await?;
-    Ok(HaMutationResult {
-        name: args.name,
         changed,
     })
 }
@@ -1226,32 +949,6 @@ pub trait SchemaDbService: Send + Sync {
     async fn schema_domains(&self) -> Result<Vec<crate::mgmt::SchemaDomain>>;
 }
 
-// ── Docker runtimes ─────────────────────────────────────────────────────────
-
-#[derive(Clone)]
-pub struct DockerRuntimeData {
-    pub name: String,
-    pub socket_path: Option<String>,
-    pub host: Option<String>,
-    pub url: Option<String>,
-    pub enabled: bool,
-}
-
-#[derive(Clone)]
-pub struct DockerRuntimeInput {
-    pub name: String,
-    pub socket_path: Option<String>,
-    pub host: Option<String>,
-    pub url: Option<String>,
-}
-
-#[async_trait]
-pub trait DockerRuntimeService: Send + Sync {
-    async fn list(&self) -> Result<Vec<DockerRuntimeData>>;
-    async fn upsert(&self, input: DockerRuntimeInput) -> Result<()>;
-    async fn remove(&self, name: &str) -> Result<bool>;
-}
-
 // ── Doc roots + ignore patterns ─────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -1280,56 +977,6 @@ pub trait DocRootService: Send + Sync {
     async fn remove_ignore_pattern(&self, pattern: &str) -> Result<bool>;
 }
 
-// ── Proxmox endpoints ───────────────────────────────────────────────────────
-
-#[derive(Clone)]
-pub struct ProxmoxEndpointData {
-    pub name: String,
-    pub base_url: String,
-    pub token_id: String,
-    pub insecure: bool,
-    pub enabled: bool,
-}
-
-#[derive(Clone)]
-pub struct ProxmoxEndpointInput {
-    pub name: String,
-    pub base_url: String,
-    pub token_id: String,
-    pub token_secret: String,
-    pub insecure: bool,
-}
-
-#[async_trait]
-pub trait ProxmoxEndpointService: Send + Sync {
-    async fn list(&self) -> Result<Vec<ProxmoxEndpointData>>;
-    async fn upsert(&self, input: ProxmoxEndpointInput) -> Result<()>;
-    async fn remove(&self, name: &str) -> Result<bool>;
-}
-
-// ── Home Assistant endpoints ────────────────────────────────────────────────
-
-#[derive(Clone)]
-pub struct HaEndpointData {
-    pub name: String,
-    pub base_url: String,
-    pub enabled: bool,
-}
-
-#[derive(Clone)]
-pub struct HaEndpointInput {
-    pub name: String,
-    pub base_url: String,
-    pub token: String,
-}
-
-#[async_trait]
-pub trait HaEndpointService: Send + Sync {
-    async fn list(&self) -> Result<Vec<HaEndpointData>>;
-    async fn upsert(&self, input: HaEndpointInput) -> Result<()>;
-    async fn remove(&self, name: &str) -> Result<bool>;
-}
-
 // ── Provide/register entry points (see `services::mod` doc) ─────────────
 
 pub trait ProvideMcpRegistry {
@@ -1346,33 +993,9 @@ pub fn register_schema_db(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideSche
     ctx.register_service(p.schema_db());
 }
 
-pub trait ProvideDockerRuntime {
-    fn docker_runtime(&self) -> std::sync::Arc<dyn DockerRuntimeService>;
-}
-pub fn register_docker_runtime(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideDockerRuntime) {
-    ctx.register_service(p.docker_runtime());
-}
-
 pub trait ProvideDocRoot {
     fn doc_root(&self) -> std::sync::Arc<dyn DocRootService>;
 }
 pub fn register_doc_root(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideDocRoot) {
     ctx.register_service(p.doc_root());
-}
-
-pub trait ProvideProxmoxEndpoint {
-    fn proxmox_endpoint(&self) -> std::sync::Arc<dyn ProxmoxEndpointService>;
-}
-pub fn register_proxmox_endpoint(
-    ctx: &mut orca_contract::ToolCtx,
-    p: &impl ProvideProxmoxEndpoint,
-) {
-    ctx.register_service(p.proxmox_endpoint());
-}
-
-pub trait ProvideHaEndpoint {
-    fn ha_endpoint(&self) -> std::sync::Arc<dyn HaEndpointService>;
-}
-pub fn register_ha_endpoint(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideHaEndpoint) {
-    ctx.register_service(p.ha_endpoint());
 }

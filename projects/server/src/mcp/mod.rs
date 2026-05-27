@@ -87,16 +87,8 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
         ctx.register_service(mcp_reg);
         let schemas: Arc<dyn SchemaDbService> = Arc::new(crate::services::mgmt::ServerSchemaDb);
         ctx.register_service(schemas);
-        let docker_rt: Arc<dyn DockerRuntimeService> =
-            Arc::new(crate::services::mgmt::ServerDockerRuntime);
-        ctx.register_service(docker_rt);
         let doc_root: Arc<dyn DocRootService> = Arc::new(crate::services::mgmt::ServerDocRoot);
         ctx.register_service(doc_root);
-        let proxmox_ep: Arc<dyn ProxmoxEndpointService> =
-            Arc::new(crate::services::mgmt::ServerProxmoxEndpoint);
-        ctx.register_service(proxmox_ep);
-        let ha_ep: Arc<dyn HaEndpointService> = Arc::new(crate::services::mgmt::ServerHaEndpoint);
-        ctx.register_service(ha_ep);
     }
     crate::remote_ok::install(orca_dispatch::remote_ok_names());
     crate::tool_roles::install(orca_dispatch::role_table());

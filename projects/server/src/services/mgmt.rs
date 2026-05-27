@@ -1,14 +1,13 @@
-//! Server-side impls of the 6 mgmt sub-services. Each is a thin shim over a
-//! `db::*` sub-module; sync_tools delegates to `commands::mcp_sync_server`.
+//! Server-side impls of the 3 remaining mgmt sub-services (MCP registry,
+//! schema DBs, doc roots). Each is a thin shim over a `db::*` sub-module;
+//! sync_tools delegates to `commands::mcp_sync_server`.
 #![allow(clippy::disallowed_types)] // mirrors trait signatures + MCP JSON-RPC protocol — see trait-level allow
 
 use anyhow::Result;
 use async_trait::async_trait;
 use mgmt::mgmt::{
-    DocRootData, DocRootInput, DocRootService, DockerRuntimeData, DockerRuntimeInput,
-    DockerRuntimeService, HaEndpointData, HaEndpointInput, HaEndpointService, McpRegistryService,
-    McpServerData, McpServerInput, McpToolMeta, ProxmoxEndpointData, ProxmoxEndpointInput,
-    ProxmoxEndpointService, SchemaDbData, SchemaDbInput, SchemaDbService, SyncToolsServerResult,
+    DocRootData, DocRootInput, DocRootService, McpRegistryService, McpServerData, McpServerInput,
+    McpToolMeta, SchemaDbData, SchemaDbInput, SchemaDbService, SyncToolsServerResult,
     ToolMappingData,
 };
 use mgmt::mgmt::{GetSchemaOutput, McpContent, RunMcpToolOutput, SchemaDomain};
@@ -332,47 +331,6 @@ fn parse_mcp_call_result(raw: Value) -> RunMcpToolOutput {
     }
 }
 
-// ── Docker runtimes ─────────────────────────────────────────────────────────
-
-pub struct ServerDockerRuntime;
-
-#[async_trait]
-impl DockerRuntimeService for ServerDockerRuntime {
-    async fn list(&self) -> Result<Vec<DockerRuntimeData>> {
-        let conn = db::open_default()?;
-        Ok(db::docker_runtimes::list(&conn)?
-            .into_iter()
-            .map(|r| DockerRuntimeData {
-                name: r.name,
-                socket_path: r.socket_path,
-                host: r.host,
-                url: r.url,
-                enabled: r.enabled,
-            })
-            .collect())
-    }
-
-    async fn upsert(&self, input: DockerRuntimeInput) -> Result<()> {
-        if input.socket_path.is_none() && input.host.is_none() && input.url.is_none() {
-            anyhow::bail!("provide socket_path, host, or url");
-        }
-        let row = db::docker_runtimes::RuntimeRow {
-            name: input.name,
-            socket_path: input.socket_path,
-            host: input.host,
-            url: input.url,
-            enabled: true,
-        };
-        let conn = db::open_default()?;
-        db::docker_runtimes::upsert(&conn, &row)
-    }
-
-    async fn remove(&self, name: &str) -> Result<bool> {
-        let conn = db::open_default()?;
-        db::docker_runtimes::remove(&conn, name)
-    }
-}
-
 // ── Doc roots + ignore patterns ─────────────────────────────────────────────
 
 pub struct ServerDocRoot;
@@ -421,79 +379,5 @@ impl DocRootService for ServerDocRoot {
     async fn remove_ignore_pattern(&self, pattern: &str) -> Result<bool> {
         let conn = db::open_default()?;
         db::docs::remove_ignore_pattern(&conn, pattern)
-    }
-}
-
-// ── Proxmox endpoints ───────────────────────────────────────────────────────
-
-pub struct ServerProxmoxEndpoint;
-
-#[async_trait]
-impl ProxmoxEndpointService for ServerProxmoxEndpoint {
-    async fn list(&self) -> Result<Vec<ProxmoxEndpointData>> {
-        let conn = db::open_default()?;
-        Ok(db::proxmox::list(&conn)?
-            .into_iter()
-            .map(|r| ProxmoxEndpointData {
-                name: r.name,
-                base_url: r.base_url,
-                token_id: r.token_id,
-                insecure: r.insecure,
-                enabled: r.enabled,
-            })
-            .collect())
-    }
-
-    async fn upsert(&self, input: ProxmoxEndpointInput) -> Result<()> {
-        let row = db::proxmox::EndpointRow {
-            name: input.name,
-            base_url: input.base_url,
-            token_id: input.token_id,
-            token_secret: input.token_secret,
-            insecure: input.insecure,
-            enabled: true,
-        };
-        let conn = db::open_default()?;
-        db::proxmox::upsert(&conn, &row)
-    }
-
-    async fn remove(&self, name: &str) -> Result<bool> {
-        let conn = db::open_default()?;
-        db::proxmox::remove(&conn, name)
-    }
-}
-
-// ── Home Assistant endpoints ────────────────────────────────────────────────
-
-pub struct ServerHaEndpoint;
-
-#[async_trait]
-impl HaEndpointService for ServerHaEndpoint {
-    async fn list(&self) -> Result<Vec<HaEndpointData>> {
-        let conn = db::open_default()?;
-        Ok(db::home_assistant::list(&conn)?
-            .into_iter()
-            .map(|r| HaEndpointData {
-                name: r.name,
-                base_url: r.base_url,
-                enabled: r.enabled,
-            })
-            .collect())
-    }
-
-    async fn upsert(&self, input: HaEndpointInput) -> Result<()> {
-        let row = db::home_assistant::EndpointRow {
-            name: input.name,
-            base_url: input.base_url,
-            token: input.token,
-            enabled: true,
-        };
-        let conn = db::open_default()?;
-        db::home_assistant::upsert(&conn, &row)
-    }
-
-    async fn remove(&self, name: &str) -> Result<bool> {
-        let conn = db::open_default()?;
-        db::home_assistant::remove(&conn, name)
     }
 }
