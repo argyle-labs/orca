@@ -1,13 +1,9 @@
 use ::llm::{ClaudeBackend, Message, ModelBackend, stdout_sink};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use system::daemon::{self as daemon_cmd, DaemonAction};
 use system::dev_serve as dev_serve_cmd;
 use system::hook::{self as hook_cmd, HookAction};
-use system::package::{self as package_cmd, PackageAction};
-use system::sysadmin::{self as sysadmin_cmd, SystemAction};
 use system::update_cmd;
-use docs::spec_cli::{self as spec_cmd, SpecAction};
 use conversation::sessions::context::ProjectContext;
 use conversation::sessions::session::Session;
 use conversation::log_cmd::{LogAction, cmd_log};
@@ -74,10 +70,11 @@ enum Command {
         port: u16,
     },
 
-    /// Run as daemon with cooperative port handoff (SIGUSR1 park / SIGUSR2 reclaim)
+    /// Run as daemon with cooperative port handoff (SIGUSR1 park / SIGUSR2 reclaim).
+    /// `system.daemon.{status,stop,park,reclaim,install,uninstall}` are tools.
     Daemon {
-        #[command(subcommand)]
-        action: DaemonAction,
+        #[arg(short, long, default_value_t = orca_utils::config::APP_REST_HTTP_PORT)]
+        port: u16,
     },
 
     /// Start dev server, superseding any running daemon on the port.
@@ -86,42 +83,6 @@ enum Command {
         /// HTTP port to bind. Defaults to `APP_REST_HTTP_PORT` (12000).
         #[arg(short, long, default_value_t = orca_utils::config::APP_REST_HTTP_PORT)]
         port: u16,
-    },
-
-    /// Manage the external API spec registry (~/.orca/openapi/)
-    Spec {
-        #[command(subcommand)]
-        action: SpecAction,
-    },
-
-    /// Check or apply binary updates from GitHub releases on the configured channel.
-    ///
-    /// With no flags: applies the latest update on the channel marker
-    /// (~/.orca/channel). Use --channel to switch (also rewrites the marker).
-    /// Use --check to preview (downloads + caches the .sha256 only).
-    /// Use --source to pull from a local `orca dev serve` instance instead of GitHub.
-    Update {
-        /// Channel override: stable | rc | beta | alpha. Falls back to the
-        /// channel marker, then to "stable" if no marker is set.
-        #[arg(long)]
-        channel: Option<String>,
-        /// Preview only — resolve the target version + cache its sha256,
-        /// do not download or swap the binary.
-        #[arg(long)]
-        check: bool,
-        /// Pin to a version. Future `orca update` runs will not upgrade past this.
-        #[arg(long, value_name = "VERSION", conflicts_with = "unpin")]
-        pin: Option<String>,
-        /// Clear the version pin. `orca update` resumes following the channel.
-        #[arg(long, conflicts_with = "pin")]
-        unpin: bool,
-        /// Set a dev-source URL (e.g. http://10.10.10.40:12009). Persists to
-        /// ~/.orca/dev-source; future `orca update` runs pull from there instead of GitHub.
-        #[arg(long, value_name = "URL", conflicts_with_all = ["clear_source", "channel", "pin", "unpin", "check"])]
-        source: Option<String>,
-        /// Clear the dev-source URL, reverting to GitHub-based updates.
-        #[arg(long, conflicts_with_all = ["source", "channel", "pin", "unpin", "check"])]
-        clear_source: bool,
     },
 
     /// Serve the locally-built linux binary for fleet hot-reload.
@@ -148,21 +109,6 @@ enum Command {
     Hook {
         #[command(subcommand)]
         action: HookAction,
-    },
-
-    /// Host-level lifecycle helpers (kill stale processes, bootstrap service
-    /// user, etc.) shared by Makefile, install.sh, and deploy-host.sh.
-    System {
-        #[command(subcommand)]
-        action: SystemAction,
-    },
-
-    /// Build distributable packages (deb/rpm/apk/PKGBUILD) from the current
-    /// binary. Postinst scripts delegate to `system bootstrap` + `daemon
-    /// install`, so non-systemd init (OpenRC, Unraid) is automatically handled.
-    Package {
-        #[command(subcommand)]
-        action: PackageAction,
     },
 
     /// Emit orca's own OpenAPI 3 spec to stdout as raw JSON. Used by the
@@ -411,43 +357,11 @@ async fn main() -> Result<()> {
         Some(Command::Run { agent, prompt }) => run_one_shot(&config, &agent, &prompt).await,
         Some(Command::McpServe) => mcp::serve(&config).await,
         Some(Command::Serve { dev, port }) => serve::run(dev, port, config.db_path.clone()).await,
-        Some(Command::Daemon { action }) => match action {
-            DaemonAction::Start { port } => serve::run_daemon(port, config.db_path.clone()).await,
-            other => daemon_cmd::cmd_daemon(other),
-        },
+        Some(Command::Daemon { port }) => serve::run_daemon(port, config.db_path.clone()).await,
         Some(Command::Dev { port }) => cmd_dev(port, &config).await,
         Some(Command::Hook { action }) => hook_cmd::cmd_hook(action),
-        Some(Command::System { action }) => sysadmin_cmd::cmd_system(action),
-        Some(Command::Package { action }) => package_cmd::cmd_package(action),
         Some(Command::Admin { action }) => cmd_admin(action).await,
         Some(Command::Op(argv)) => dispatch_op(argv, config).await,
-        Some(Command::Update {
-            channel,
-            check,
-            pin,
-            unpin,
-            source,
-            clear_source,
-        }) => {
-            if let Some(url) = source {
-                update_cmd::cmd_update_set_source(&url)?;
-                update_cmd::cmd_update("").await
-            } else if clear_source {
-                update_cmd::cmd_update_clear_source()
-            } else if let Some(v) = pin {
-                let pinned = update_cmd::cmd_update_pin(&v)?;
-                println!("[orca] pinned to {pinned}");
-                Ok(())
-            } else if unpin {
-                update_cmd::cmd_update_unpin()?;
-                println!("[orca] pin cleared");
-                Ok(())
-            } else if check {
-                update_cmd::cmd_update_check(channel.as_deref().unwrap_or("")).await
-            } else {
-                update_cmd::cmd_update(channel.as_deref().unwrap_or("")).await
-            }
-        }
         Some(Command::DevServe { binary, port }) => {
             dev_serve_cmd::cmd_dev_serve(binary.as_deref(), port).await
         }
@@ -512,14 +426,6 @@ async fn main() -> Result<()> {
                 wipe_secrets,
                 wipe_all,
             } => fleet::cli::cmd_pod_leave(wipe_secrets, wipe_all).await,
-        },
-        Some(Command::Spec { action }) => match action {
-            SpecAction::Dump => {
-                let spec = orca_spec_json();
-                println!("{}", serde_json::to_string_pretty(&spec)?);
-                Ok(())
-            }
-            other => spec_cmd::cmd_spec(other),
         },
         Some(Command::Openapi { action }) => match action {
             OpenapiAction::Emit => {

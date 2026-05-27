@@ -1,71 +1,93 @@
-//! `orca system <verb>` — host-level lifecycle helpers that scripts shell out to.
+//! Host-level lifecycle helpers: `system.kill-stale` and `system.bootstrap`.
 //!
-//! Each verb is a Rust function so Makefile, install.sh, deploy-host.sh, and
-//! the orca binary itself agree on patterns and behavior. Adding a new
-//! pattern (e.g. another process name to clean up on binary swap) is a single
-//! edit here, not a sweep across shell files.
+//! Each verb is a `#[orca_tool]` so the macro emits CLI/REST/MCP/WASM in
+//! lockstep. Internals (user creation, group management, linger, SSH key
+//! install) are module-private helpers — there is no service trait.
 
 use anyhow::Result;
-use clap::Subcommand;
+#[cfg(feature = "native")]
 use colored::Colorize;
+use orca_contract::ToolCtx;
+use orca_macro::orca_tool;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
-#[derive(Subcommand, Debug)]
-pub enum SystemAction {
-    /// Kill stale orca runtime processes (mcp-serve, daemon start) so a
-    /// binary swap is picked up by their clients on next call. Safe to run
-    /// before any deploy; no-op when nothing matches.
-    KillStale,
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct KillStaleArgs {}
 
-    /// Create the orca service user and configure SSH access. Idempotent.
-    /// Designed to run as root immediately after the binary is placed,
-    /// before `daemon install --service-user orca`.
-    Bootstrap {
-        /// SSH pubkey to add to the service user's authorized_keys.
-        #[arg(long)]
-        admin_pubkey: Option<String>,
-        /// Service user name (default: orca).
-        #[arg(long, default_value = "orca")]
-        service_user: String,
-        /// Home directory for the service user (default: /var/lib/orca).
-        #[arg(long, default_value = "/var/lib/orca")]
-        home_dir: String,
-    },
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+pub struct KillStaleOutput {
+    pub killed_patterns: Vec<String>,
 }
 
-pub fn cmd_system(action: SystemAction) -> Result<()> {
-    match action {
-        SystemAction::KillStale => kill_stale_runtime(),
-        SystemAction::Bootstrap {
-            admin_pubkey,
-            service_user,
-            home_dir,
-        } => bootstrap(admin_pubkey, &service_user, &home_dir),
-    }
-}
-
-/// Patterns kept here as the single source — scripts must NOT inline pkill.
-const STALE_PATTERNS: &[&str] = &["orca mcp-serve", "orca daemon start"];
-
-pub fn kill_stale_runtime() -> Result<()> {
+/// Kill stale orca runtime processes (mcp-serve, daemon start) so a binary
+/// swap is picked up by their clients on next call. Safe to run before any
+/// deploy; no-op when nothing matches.
+#[orca_tool(domain = "system", verb = "kill-stale")]
+async fn kill_stale(_args: KillStaleArgs, _ctx: &ToolCtx) -> Result<KillStaleOutput> {
+    let mut killed = Vec::new();
     for pat in STALE_PATTERNS {
-        // pkill -f matches against the full argv string. Exit 1 = no match,
-        // which is fine — we ignore non-zero. Other exits (2 = syntax, 3 =
-        // fatal, 64+ = signal failure) we surface as warnings, not fatals,
-        // because deploy must proceed.
         let status = Command::new("pkill").arg("-f").arg(pat).status();
         match status {
-            Ok(s) if s.success() => println!("→ killed processes matching '{pat}'"),
-            Ok(_) => {} // no match — silent
+            Ok(s) if s.success() => {
+                println!("→ killed processes matching '{pat}'");
+                killed.push((*pat).to_string());
+            }
+            Ok(_) => {}
             Err(e) => eprintln!("warn: pkill '{pat}' failed: {e}"),
         }
     }
-    Ok(())
+    Ok(KillStaleOutput {
+        killed_patterns: killed,
+    })
 }
 
-// ── bootstrap ─────────────────────────────────────────────────────────────────
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct BootstrapArgs {
+    /// SSH pubkey to add to the service user's authorized_keys.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub admin_pubkey: Option<String>,
+    /// Service user name (default: orca).
+    #[cfg_attr(feature = "cli", arg(long, default_value = "orca"))]
+    #[serde(default = "default_service_user")]
+    pub service_user: String,
+    /// Home directory for the service user (default: /var/lib/orca).
+    #[cfg_attr(feature = "cli", arg(long, default_value = "/var/lib/orca"))]
+    #[serde(default = "default_home_dir")]
+    pub home_dir: String,
+}
+
+fn default_service_user() -> String {
+    "orca".to_string()
+}
+fn default_home_dir() -> String {
+    "/var/lib/orca".to_string()
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+pub struct BootstrapOutput {
+    pub user: String,
+    pub home_dir: String,
+}
+
+/// Create the orca service user and configure SSH access. Idempotent.
+/// Designed to run as root immediately after the binary is placed, before
+/// `daemon install --service-user orca`.
+#[orca_tool(domain = "system", verb = "bootstrap")]
+async fn bootstrap_tool(args: BootstrapArgs, _ctx: &ToolCtx) -> Result<BootstrapOutput> {
+    bootstrap(args.admin_pubkey, &args.service_user, &args.home_dir)?;
+    Ok(BootstrapOutput {
+        user: args.service_user,
+        home_dir: args.home_dir,
+    })
+}
+
+const STALE_PATTERNS: &[&str] = &["orca mcp-serve", "orca daemon start"];
 
 #[cfg(target_os = "linux")]
 fn bootstrap(admin_pubkey: Option<String>, user: &str, home_dir: &str) -> Result<()> {
@@ -129,7 +151,6 @@ fn create_service_user(user: &str, home_dir: &str) -> Result<()> {
             .status()?
             .success()
     } else if tool_present("adduser") {
-        // busybox adduser (Alpine/Unraid)
         Command::new("adduser")
             .args(["-S", "-D", "-h", home_dir, "-s", shell, user])
             .status()?
@@ -244,8 +265,6 @@ fn tool_present(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Validate that a string is safe to interpolate into shell scripts written
-/// to disk. Accepts Unix username and path chars only.
 #[cfg(target_os = "linux")]
 fn validate_shell_safe(label: &str, s: &str) -> Result<()> {
     if s.is_empty() {

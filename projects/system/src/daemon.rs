@@ -1,73 +1,169 @@
+//! `system.daemon.*` tools — daemon control plane (status/stop/park/reclaim/install/uninstall).
+//! Start is intentionally NOT a tool here: it IS the daemon's main loop, wired
+//! at the binary entry point in `orca`'s main.rs (depends on `serve::run_daemon`).
+
 use anyhow::Result;
-use clap::Subcommand;
 use colored::Colorize;
+use orca_contract::ToolCtx;
+use orca_macro::orca_tool;
 #[cfg(target_os = "linux")]
 use orca_utils::config::APP_SYSTEMD_SERVICE;
 #[cfg(target_os = "macos")]
 use orca_utils::config::{APP_DAEMON_LOG, APP_PLIST_LABEL};
 use orca_utils::config::{APP_NAME, APP_STATE_DIR};
 use orca_utils::state::DaemonMode;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::process::Command;
 
-#[derive(Subcommand)]
-pub enum DaemonAction {
-    /// Start the daemon (runs the serve loop with signal handling). HTTP +
-    /// HTTPS bind concurrently; `--port` controls the HTTP listener,
-    /// `ORCA_HTTPS_PORT` / orca.toml controls HTTPS (default 12443).
-    Start {
-        #[arg(short, long, default_value_t = orca_utils::config::APP_REST_HTTP_PORT)]
-        port: u16,
-    },
-    /// Show daemon status
-    Status,
-    /// Stop the daemon gracefully
-    Stop,
-    /// Park the daemon — release port, stay alive (SIGUSR1)
-    Park,
-    /// Reclaim the port after a dev session (SIGUSR2)
-    Reclaim,
-    /// Install and enable as a system service (launchd on macOS, systemd/openrc/unraid on Linux)
-    Install {
-        #[arg(short, long, default_value_t = orca_utils::config::APP_REST_HTTP_PORT)]
-        port: u16,
-        /// Install as a SYSTEM service running as this user (requires root).
-        /// Required on OpenRC and Unraid; optional on systemd (otherwise installs
-        /// a per-user service into the current user's systemd --user manager).
-        #[arg(long)]
-        service_user: Option<String>,
-    },
-    /// Disable and remove the system service
-    Uninstall,
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DaemonStatusArgs {}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+pub struct DaemonStatusOutput {
+    pub running: bool,
+    pub mode: Option<String>,
+    pub pid: Option<u32>,
+    pub port: Option<u16>,
+    pub version: Option<String>,
+    pub binary: Option<String>,
+    pub uptime_seconds: Option<i64>,
 }
 
-/// Handle all DaemonAction variants except Start (which needs the server crate — handled in main.rs).
-pub fn cmd_daemon(action: DaemonAction) -> Result<()> {
-    match action {
-        DaemonAction::Start { .. } => unreachable!("Start handled in main.rs"),
-        DaemonAction::Status => status(),
-        DaemonAction::Stop => stop(),
-        DaemonAction::Park => park(),
-        DaemonAction::Reclaim => reclaim(),
-        DaemonAction::Install { port, service_user } => install(port, service_user),
-        DaemonAction::Uninstall => uninstall(),
-    }
-}
-
-fn status() -> Result<()> {
+/// Show daemon status (mode, pid, port, version, uptime).
+#[orca_tool(domain = "system.daemon", verb = "status")]
+async fn daemon_status_tool(
+    _args: DaemonStatusArgs,
+    _ctx: &ToolCtx,
+) -> Result<DaemonStatusOutput> {
     let Some(s) = orca_utils::state::read()? else {
         println!("{} daemon not running", "●".dimmed());
-        return Ok(());
+        return Ok(DaemonStatusOutput {
+            running: false,
+            mode: None,
+            pid: None,
+            port: None,
+            version: None,
+            binary: None,
+            uptime_seconds: None,
+        });
     };
+    status_print(&s);
+    let secs = chrono::Utc::now()
+        .signed_duration_since(s.started_at)
+        .num_seconds();
+    Ok(DaemonStatusOutput {
+        running: pid_alive(s.daemon_pid),
+        mode: Some(format!("{:?}", s.mode).to_lowercase()),
+        pid: Some(s.daemon_pid),
+        port: Some(s.port),
+        version: Some(s.version),
+        binary: Some(s.binary),
+        uptime_seconds: Some(secs),
+    })
+}
 
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DaemonStopArgs {}
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+pub struct DaemonSignalOutput {
+    pub pid: u32,
+}
+
+/// Stop the daemon gracefully (SIGTERM).
+#[orca_tool(domain = "system.daemon", verb = "stop")]
+async fn daemon_stop_tool(_args: DaemonStopArgs, _ctx: &ToolCtx) -> Result<DaemonSignalOutput> {
+    stop()
+}
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DaemonParkArgs {}
+
+/// Park the daemon — release port, stay alive (SIGUSR1).
+#[orca_tool(domain = "system.daemon", verb = "park")]
+async fn daemon_park_tool(_args: DaemonParkArgs, _ctx: &ToolCtx) -> Result<DaemonSignalOutput> {
+    park()
+}
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DaemonReclaimArgs {}
+
+/// Reclaim the port after a dev session (SIGUSR2).
+#[orca_tool(domain = "system.daemon", verb = "reclaim")]
+async fn daemon_reclaim_tool(
+    _args: DaemonReclaimArgs,
+    _ctx: &ToolCtx,
+) -> Result<DaemonSignalOutput> {
+    reclaim()
+}
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DaemonInstallArgs {
+    /// HTTP port to bind.
+    #[cfg_attr(feature = "cli", arg(short, long, default_value_t = orca_utils::config::APP_REST_HTTP_PORT))]
+    #[serde(default = "default_http_port")]
+    pub port: u16,
+    /// Install as a SYSTEM service running as this user (requires root).
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub service_user: Option<String>,
+}
+
+fn default_http_port() -> u16 {
+    orca_utils::config::APP_REST_HTTP_PORT
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+pub struct DaemonInstallOutput {
+    pub installed: bool,
+    pub port: u16,
+}
+
+/// Install and enable as a system service (launchd on macOS, systemd/openrc/unraid on Linux).
+#[orca_tool(domain = "system.daemon", verb = "install")]
+async fn daemon_install_tool(
+    args: DaemonInstallArgs,
+    _ctx: &ToolCtx,
+) -> Result<DaemonInstallOutput> {
+    install(args.port, args.service_user)?;
+    Ok(DaemonInstallOutput {
+        installed: true,
+        port: args.port,
+    })
+}
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DaemonUninstallArgs {}
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+pub struct DaemonUninstallOutput {
+    pub uninstalled: bool,
+}
+
+/// Disable and remove the system service.
+#[orca_tool(domain = "system.daemon", verb = "uninstall")]
+async fn daemon_uninstall_tool(
+    _args: DaemonUninstallArgs,
+    _ctx: &ToolCtx,
+) -> Result<DaemonUninstallOutput> {
+    uninstall()?;
+    Ok(DaemonUninstallOutput { uninstalled: true })
+}
+
+// ── internal helpers (status print + signal/install/uninstall) ──────────────
+
+fn status_print(s: &orca_utils::state::DaemonState) {
     let mode_label = match s.mode {
         DaemonMode::Daemon => "running".green().to_string(),
         DaemonMode::Parked => "parked (port released)".yellow().to_string(),
         DaemonMode::Dev => "dev-superseded".cyan().to_string(),
     };
-
     let alive = pid_alive(s.daemon_pid);
     let dot = if alive { "●".green() } else { "●".red() };
-
     println!("{} {APP_NAME} daemon", dot);
     println!("  mode:    {}", mode_label);
     println!("  pid:     {}", s.daemon_pid);
@@ -77,7 +173,6 @@ fn status() -> Result<()> {
     println!("  port:    {}", s.port);
     println!("  version: {}", s.version);
     println!("  binary:  {}", s.binary);
-
     let secs = chrono::Utc::now()
         .signed_duration_since(s.started_at)
         .num_seconds();
@@ -89,7 +184,6 @@ fn status() -> Result<()> {
         format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
     };
     println!("  uptime:  {}", uptime);
-
     if !alive {
         println!(
             "  {}",
@@ -100,10 +194,9 @@ fn status() -> Result<()> {
             format!("hint: remove ~/{APP_STATE_DIR}/state.json and restart").dimmed()
         );
     }
-    Ok(())
 }
 
-fn stop() -> Result<()> {
+fn stop() -> Result<DaemonSignalOutput> {
     let s = orca_utils::state::read()?
         .ok_or_else(|| anyhow::anyhow!("daemon not running (no state file)"))?;
     send_signal(s.daemon_pid, "TERM")?;
@@ -112,10 +205,10 @@ fn stop() -> Result<()> {
         "✓".green(),
         s.daemon_pid
     );
-    Ok(())
+    Ok(DaemonSignalOutput { pid: s.daemon_pid })
 }
 
-fn park() -> Result<()> {
+fn park() -> Result<DaemonSignalOutput> {
     let s = orca_utils::state::read()?
         .ok_or_else(|| anyhow::anyhow!("daemon not running (no state file)"))?;
     if s.mode != DaemonMode::Daemon {
@@ -128,10 +221,10 @@ fn park() -> Result<()> {
         s.daemon_pid,
         s.port
     );
-    Ok(())
+    Ok(DaemonSignalOutput { pid: s.daemon_pid })
 }
 
-fn reclaim() -> Result<()> {
+fn reclaim() -> Result<DaemonSignalOutput> {
     let s = orca_utils::state::read()?
         .ok_or_else(|| anyhow::anyhow!("daemon not running (no state file)"))?;
     if s.mode == DaemonMode::Daemon {
@@ -140,7 +233,7 @@ fn reclaim() -> Result<()> {
             "✓".green(),
             s.port
         );
-        return Ok(());
+        return Ok(DaemonSignalOutput { pid: s.daemon_pid });
     }
     send_signal(s.daemon_pid, "USR2")?;
     println!(
@@ -149,7 +242,7 @@ fn reclaim() -> Result<()> {
         s.daemon_pid,
         s.port
     );
-    Ok(())
+    Ok(DaemonSignalOutput { pid: s.daemon_pid })
 }
 
 fn send_signal(pid: u32, sig: &str) -> Result<()> {

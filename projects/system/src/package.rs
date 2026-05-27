@@ -5,8 +5,11 @@
 //! handled automatically by the existing detect_linux_init() dispatch.
 
 use anyhow::Result;
-use clap::{Subcommand, ValueEnum};
 use colored::Colorize;
+use orca_contract::ToolCtx;
+use orca_macro::orca_tool;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -14,40 +17,9 @@ use std::process::Command;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Subcommand, Debug)]
-pub enum PackageAction {
-    /// Build a distributable package from the current orca binary.
-    /// Format is auto-detected from the host OS when --format is omitted.
-    Build {
-        /// Package format: deb / rpm / apk / pkgbuild / pkg / homebrew.
-        #[arg(long, value_enum)]
-        format: Option<PackageFormat>,
-        /// Write the finished package into this directory.
-        #[arg(long, default_value = ".")]
-        out_dir: PathBuf,
-        /// Binary to package (default: running executable).
-        #[arg(long)]
-        binary: Option<PathBuf>,
-        /// CPU architecture override for cross-compiled binaries (x86_64 or aarch64).
-        #[arg(long)]
-        arch: Option<String>,
-        /// Maintainer string embedded in deb/rpm package metadata.
-        #[arg(long, default_value = "Orca <noreply@orca.local>")]
-        maintainer: String,
-        /// macOS Developer ID Application identity for codesign (binary signing).
-        /// e.g. "Developer ID Application: Jane Smith (TEAMID)"
-        /// Omit for ad-hoc signing (local use only).
-        #[arg(long)]
-        codesign_identity: Option<String>,
-        /// macOS Developer ID Installer identity for productsign (.pkg signing).
-        /// e.g. "Developer ID Installer: Jane Smith (TEAMID)"
-        /// Omit to leave the .pkg unsigned.
-        #[arg(long)]
-        pkg_sign_identity: Option<String>,
-    },
-}
-
-#[derive(ValueEnum, Clone, Debug)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
 pub enum PackageFormat {
     /// Debian/Ubuntu — requires dpkg-deb
     Deb,
@@ -63,41 +35,85 @@ pub enum PackageFormat {
     Homebrew,
 }
 
-pub fn cmd_package(action: PackageAction) -> Result<()> {
-    let PackageAction::Build {
-        format,
-        out_dir,
-        binary,
-        arch,
-        maintainer,
-        codesign_identity,
-        pkg_sign_identity,
-    } = action;
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PackageBuildArgs {
+    /// Package format: deb / rpm / apk / pkgbuild / pkg / homebrew. Auto-detected when omitted.
+    #[cfg_attr(feature = "cli", arg(long, value_enum))]
+    pub format: Option<PackageFormat>,
+    /// Write the finished package into this directory.
+    #[cfg_attr(feature = "cli", arg(long, default_value = "."))]
+    #[serde(default = "default_out_dir")]
+    pub out_dir: PathBuf,
+    /// Binary to package (default: running executable).
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub binary: Option<PathBuf>,
+    /// CPU architecture override for cross-compiled binaries (x86_64 or aarch64).
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub arch: Option<String>,
+    /// Maintainer string embedded in deb/rpm package metadata.
+    #[cfg_attr(feature = "cli", arg(long, default_value = "Orca <noreply@orca.local>"))]
+    #[serde(default = "default_maintainer")]
+    pub maintainer: String,
+    /// macOS Developer ID Application identity for codesign (binary signing).
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub codesign_identity: Option<String>,
+    /// macOS Developer ID Installer identity for productsign (.pkg signing).
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub pkg_sign_identity: Option<String>,
+}
 
-    let binary = binary.map(Ok).unwrap_or_else(std::env::current_exe)?;
+fn default_out_dir() -> PathBuf {
+    PathBuf::from(".")
+}
+fn default_maintainer() -> String {
+    "Orca <noreply@orca.local>".to_string()
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+pub struct PackageBuildOutput {
+    pub format: PackageFormat,
+    pub version: String,
+    pub arch: String,
+    pub out_dir: PathBuf,
+}
+
+/// Build a distributable package (deb/rpm/apk/PKGBUILD/pkg/homebrew) from the current orca binary.
+/// Format auto-detected from host OS when not provided. Postinst scripts delegate to
+/// `system bootstrap` + `daemon install`.
+#[orca_tool(domain = "system.package", verb = "build")]
+async fn package_build(args: PackageBuildArgs, _ctx: &ToolCtx) -> Result<PackageBuildOutput> {
+    let binary = args.binary.map(Ok).unwrap_or_else(std::env::current_exe)?;
     if !binary.exists() {
         anyhow::bail!("binary not found: {}", binary.display());
     }
 
-    let format = format.map(Ok).unwrap_or_else(detect_format)?;
-    let arch = arch.unwrap_or_else(|| std::env::consts::ARCH.to_string());
-    std::fs::create_dir_all(&out_dir)?;
+    let format = args.format.map(Ok).unwrap_or_else(detect_format)?;
+    let arch = args.arch.unwrap_or_else(|| std::env::consts::ARCH.to_string());
+    std::fs::create_dir_all(&args.out_dir)?;
 
-    match format {
-        PackageFormat::Deb => build_deb(&binary, VERSION, &arch, &maintainer, &out_dir),
-        PackageFormat::Rpm => build_rpm(&binary, VERSION, &arch, &maintainer, &out_dir),
-        PackageFormat::Apk => build_apk(&binary, VERSION, &arch, &out_dir),
-        PackageFormat::Pkgbuild => build_pkgbuild(VERSION, &arch, &out_dir),
+    match &format {
+        PackageFormat::Deb => build_deb(&binary, VERSION, &arch, &args.maintainer, &args.out_dir)?,
+        PackageFormat::Rpm => build_rpm(&binary, VERSION, &arch, &args.maintainer, &args.out_dir)?,
+        PackageFormat::Apk => build_apk(&binary, VERSION, &arch, &args.out_dir)?,
+        PackageFormat::Pkgbuild => build_pkgbuild(VERSION, &arch, &args.out_dir)?,
         PackageFormat::Pkg => build_pkg(
             &binary,
             VERSION,
             &arch,
-            codesign_identity.as_deref(),
-            pkg_sign_identity.as_deref(),
-            &out_dir,
-        ),
-        PackageFormat::Homebrew => build_homebrew(VERSION, &out_dir),
+            args.codesign_identity.as_deref(),
+            args.pkg_sign_identity.as_deref(),
+            &args.out_dir,
+        )?,
+        PackageFormat::Homebrew => build_homebrew(VERSION, &args.out_dir)?,
     }
+
+    Ok(PackageBuildOutput {
+        format,
+        version: VERSION.to_string(),
+        arch,
+        out_dir: args.out_dir,
+    })
 }
 
 fn detect_format() -> Result<PackageFormat> {
