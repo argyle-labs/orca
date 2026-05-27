@@ -40,3 +40,9 @@ pub mod periodic;
 
 #[cfg(feature = "native")]
 pub mod scheduler;
+
+#[cfg(feature = "native")]
+pub mod diagnostic;
+
+#[cfg(feature = "cli")]
+pub mod cli;
