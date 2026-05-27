@@ -13,19 +13,6 @@ use utoipa::ToSchema;
 use super::prelude::*;
 use super::{DockerActionRequest, DockerActionResponse};
 
-// Re-exported helper used by tests_handler.rs.
-pub(crate) use ::docker::compose::parse_compose_ps;
-
-/// Compatibility shim — keeps the old call sites working unchanged.
-pub(crate) fn find_compose_file(project_path: &str) -> Option<std::path::PathBuf> {
-    Compose::find(Path::new(project_path)).map(|c| c.file().to_path_buf())
-}
-
-/// Compatibility shim around the now-public `::docker::run`.
-pub(crate) async fn run_docker(args: &[&str], cwd: Option<&str>) -> anyhow::Result<String> {
-    ::docker::run(args, cwd).await
-}
-
 // ── GET /api/docker/engine ────────────────────────────────────────────────────
 
 #[utoipa::path(
