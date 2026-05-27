@@ -17,7 +17,13 @@ native = [
     "dep:async-trait",
     "dep:tokio",
     "dep:chrono",
-
+    "dep:agents",
+    "dep:llm",
+    "dep:scanner",
+    "dep:utoipa",
+    "dep:mcp",
+    "dep:reqwest",
+    "dep:tracing",
 ]
 cli = [
     "native",
@@ -43,6 +49,13 @@ chrono      = { workspace = true,         optional = true }
 clap        = { workspace = true,         optional = true }
 colored     = { workspace = true,         optional = true }
 rust-embed  = { workspace = true }
+agents      = { path = "../agents",       optional = true }
+llm         = { path = "../llm",          optional = true }
+scanner     = { path = "../scanner",      optional = true }
+utoipa      = { workspace = true,         optional = true }
+mcp         = { path = "../mcp",          optional = true }
+reqwest     = { workspace = true,         optional = true }
+tracing     = { workspace = true,         optional = true }
 
 [lints]
 workspace = true

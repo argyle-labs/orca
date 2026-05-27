@@ -3,7 +3,6 @@ pub mod middleware;
 pub mod openapi;
 #[cfg(feature = "pdf")]
 pub mod pdf_gen;
-pub mod tree;
 
 use std::net::SocketAddr;
 use std::sync::Arc;

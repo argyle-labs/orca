@@ -4,8 +4,8 @@
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use docs::spec_registry::SpecRegistryService;
-use docs::spec_registry::{
+use crate::spec_registry::SpecRegistryService;
+use crate::spec_registry::{
     DbSpecRow, GraphQlEnum, GraphQlField, GraphQlInfoData, GraphQlOperation, GraphQlType,
     GraphqlProxyResult, RegisterSpecResult, SpecFilesPresence, SpecMetaRow, SyncMcpSpecsResult,
 };

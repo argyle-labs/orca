@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use docs::docs::{
+use crate::docs::{
     DocNodeKind, DocRootSummary, DocRootTree, DocTreeNodeData, DocsService, SearchDocHit,
     SearchDocMatch, SearchDocsData,
 };
@@ -12,9 +12,9 @@ use orca_utils::config::Config;
 use std::sync::Arc;
 
 use orca_utils::markdown::to_llm_text;
-use crate::mcp::docs as docs_mod;
-use crate::serve::tree::{NodeType, TreeNode};
-use ::llm::local as local_llm;
+use crate::mcp_helpers as docs_mod;
+use crate::tree::{NodeType, TreeNode};
+use llm::local as local_llm;
 
 pub struct ServerDocs {
     pub config: Arc<Config>,
@@ -67,15 +67,15 @@ impl DocsService for ServerDocs {
             name: "docs".to_string(),
             path: "(embedded in binary)".to_string(),
             exists: true,
-            doc_count: ::docs::embedded::file_count(),
+            doc_count: crate::embedded::file_count(),
         });
         Ok(out)
     }
 
     async fn get_tree(&self, root: &str, path: Option<&str>) -> Result<Vec<DocTreeNodeData>> {
         if root == "docs" {
-            let tree_value = ::docs::embedded::tree();
-            // ::docs::embedded::tree() returns serde_json::Value array of nodes.
+            let tree_value = crate::embedded::tree();
+            // crate::embedded::tree() returns serde_json::Value array of nodes.
             let arr = tree_value.as_array().cloned().unwrap_or_default();
             return Ok(arr
                 .iter()
@@ -104,13 +104,13 @@ impl DocsService for ServerDocs {
     }
 
     async fn get_full_tree(&self, raw: bool) -> Result<Vec<DocRootTree>> {
-        let roots = crate::serve::tree::get_roots();
+        let roots = crate::tree::get_roots();
         let mut out: Vec<DocRootTree> = Vec::new();
         for name in roots.keys() {
             let nodes = if raw {
-                crate::serve::tree::get_root_tree_raw(name)
+                crate::tree::get_root_tree_raw(name)
             } else {
-                crate::serve::tree::get_root_tree(name)
+                crate::tree::get_root_tree(name)
             };
             out.push(DocRootTree {
                 root: name.clone(),
@@ -124,7 +124,7 @@ impl DocsService for ServerDocs {
         let apply = |s: String| if llm_format { to_llm_text(&s) } else { s };
 
         if root == "docs" {
-            return ::docs::embedded::read(path)
+            return crate::embedded::read(path)
                 .map(apply)
                 .ok_or_else(|| anyhow::anyhow!("not found: docs/{path}"));
         }
@@ -194,7 +194,7 @@ impl DocsService for ServerDocs {
         }
 
         if filter == "all" || filter == "docs" {
-            for (path, line_matches) in ::docs::embedded::search(query) {
+            for (path, line_matches) in crate::embedded::search(query) {
                 let matches: Vec<SearchDocMatch> = line_matches
                     .into_iter()
                     .enumerate()

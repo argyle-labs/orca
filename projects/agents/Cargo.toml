@@ -18,7 +18,8 @@ native = [
     "dep:async-trait",
     "dep:tokio",
     "dep:chrono",
-
+    "dep:llm",
+    "dep:platform",
 ]
 cli = [
     "native",
@@ -43,6 +44,8 @@ tokio       = { workspace = true,         optional = true }
 chrono      = { workspace = true,         optional = true }
 clap        = { workspace = true,         optional = true }
 colored     = { workspace = true,         optional = true }
+llm         = { path = "../llm",          optional = true }
+platform    = { path = "../platform",     optional = true }
 
 [lints]
 workspace = true

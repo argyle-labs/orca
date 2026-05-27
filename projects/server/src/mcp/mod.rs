@@ -6,7 +6,6 @@
 // Server-side tool-implementations moved to `crate::services::*` — only
 // the MCP-protocol pieces (handlers, context7 federation, run_agent legacy
 // static tool defs) stay here.
-pub mod docs;
 mod handlers;
 mod tools;
 use ::mcp::context7;
@@ -29,37 +28,21 @@ struct ServerEmbedder {
     config: Arc<Config>,
 }
 
-impl agents::agent_backend::ProvideAgentBackend for ServerEmbedder {
-    fn agent_backend(&self) -> Arc<dyn agents::agent_backend::AgentBackendService> {
-        Arc::new(crate::llm::agent_backend_service::ServerAgentBackend)
-    }
-}
-
-impl agents::agents::ProvideAgents for ServerEmbedder {
-    fn agents(&self) -> Arc<dyn agents::agents::AgentsService> {
-        Arc::new(crate::services::agents::ServerAgents {
-            config: self.config.clone(),
-        })
-    }
-}
-
 pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
-    let embedder = ServerEmbedder {
+    let _embedder = ServerEmbedder {
         config: config.clone(),
     };
     let mut ctx = ToolCtx::new(config);
-    agents::agent_backend::register_agent_backend(&mut ctx, &embedder);
-    agents::agents::register_agents(&mut ctx, &embedder);
     let docs_svc: Arc<dyn ::docs::docs::DocsService> =
-        Arc::new(crate::services::docs::ServerDocs {
+        Arc::new(::docs::native_support_docs::ServerDocs {
             config: ctx.config.clone(),
         });
     ctx.register_service(docs_svc);
     let spec_registry: Arc<dyn ::docs::spec_registry::SpecRegistryService> =
-        Arc::new(crate::services::spec_registry::ServerSpecRegistry);
+        Arc::new(::docs::native_support_specs::ServerSpecRegistry);
     ctx.register_service(spec_registry);
     let profile_svc: Arc<dyn platform::profile::ProfileService> =
-        Arc::new(crate::services::profile::ServerProfile {
+        Arc::new(platform::profile_native::ServerProfile {
             config: ctx.config.clone(),
         });
     ctx.register_service(profile_svc);
@@ -68,7 +51,7 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     let host_refresh: Arc<dyn fleet::host::HostRefreshHook + Send + Sync> =
         Arc::new(fleet::host_identity::ServerHostRefreshHook);
     ctx.register_service(host_refresh);
-    let pod_svc: Arc<dyn fleet::pod::PodService> = Arc::new(crate::services::pod::ServerPod);
+    let pod_svc: Arc<dyn fleet::pod::PodService> = Arc::new(fleet::native_support::ServerPod);
     ctx.register_service(pod_svc);
     orca_dispatch::remote_ok::install(orca_dispatch::remote_ok_names());
     orca_dispatch::tool_roles::install(orca_dispatch::role_table());

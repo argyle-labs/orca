@@ -3,14 +3,14 @@
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use orca_utils::config::{Config, LOCAL_USER};
-use platform::profile::ProfileService;
-use platform::profile::{
+use crate::profile::ProfileService;
+use crate::profile::{
     ProfileCurrentReport, ProfileDetail, ProfileListReport, ProfileMutationResult,
     ProfileShareEntry, ProfileSharesReport, ProfileSummary,
 };
 use std::sync::Arc;
 
-use platform::profile_manager::{ProfileManager, Role};
+use crate::profile_manager::{ProfileManager, Role};
 
 fn user_id() -> String {
     LOCAL_USER.to_string()
@@ -22,12 +22,12 @@ pub struct ServerProfile {
 
 impl ServerProfile {
     fn open(&self) -> Result<(rusqlite::Connection, ProfileManager)> {
-        let conn = db::open(&self.config.db_path).context("open orca.db")?;
+        let conn = orca_db::open(&self.config.db_path).context("open orca.db")?;
         let mgr = ProfileManager::from_config(&self.config);
         Ok((conn, mgr))
     }
 
-    fn summary(p: &platform::profile_manager::Profile, active_id: Option<&str>) -> ProfileSummary {
+    fn summary(p: &crate::profile_manager::Profile, active_id: Option<&str>) -> ProfileSummary {
         ProfileSummary {
             id: p.id.clone(),
             name: p.name.clone(),
@@ -43,7 +43,7 @@ impl ProfileService for ServerProfile {
         let (conn, mgr) = self.open()?;
         let me = user_id();
         let profiles = mgr.list_for_user(&conn, &me)?;
-        let active = db::profiles::get_active(&conn, &me).ok().flatten();
+        let active = orca_db::profiles::get_active(&conn, &me).ok().flatten();
         let summaries = profiles
             .iter()
             .map(|p| Self::summary(p, active.as_deref()))

@@ -9,6 +9,8 @@ pub mod host_status;
 #[cfg(feature = "native")]
 pub mod host_status_writer;
 #[cfg(feature = "native")]
+pub mod native_support;
+#[cfg(feature = "native")]
 pub mod infra;
 pub mod meta;
 pub mod pod;

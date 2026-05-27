@@ -3,7 +3,6 @@
 //! doesn't carry REPL code, and so other front-ends (mobile, web shell)
 //! can embed the session loop directly.
 
-pub mod agent_resolve;
 pub mod jobs;
 pub mod log_cmd;
 pub mod sessions;

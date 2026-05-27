@@ -10,10 +10,8 @@
 
 // Absorbed crates — each previously had its own workspace member.
 pub mod commands;
-pub mod llm;
 
 pub mod diagnostic;
 pub mod mcp;
 pub mod serve;
-pub mod services;
 pub mod spec_detail;

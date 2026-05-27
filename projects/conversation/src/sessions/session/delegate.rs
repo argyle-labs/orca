@@ -21,7 +21,7 @@ impl Session {
         }
 
         let agent_prompt =
-            match crate::agent_resolve::load_agent_prompt(agent, &self.config) {
+            match agents::resolve::load_agent_prompt(agent, &self.config) {
                 Some(prompt) => prompt,
                 None => {
                     return ToolResult {

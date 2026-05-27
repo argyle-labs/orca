@@ -1,12 +1,13 @@
-//! Agent-backend API-key tools — defs + native impls in one file.
+//! Agent-backend tools — manage the LLM resolution config (mode, per-agent
+//! overrides, server-side Anthropic toggle, encrypted API key). Tool bodies
+//! call `llm::resolve` and `orca_db::settings` directly — no service-trait
+//! indirection.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "native")]
 use orca_macro::orca_tool;
-#[cfg(feature = "native")]
-use std::sync::Arc;
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -15,11 +16,8 @@ pub struct ClearArgs {}
 /// Outcome of a mutation against the encrypted API-key slot.
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ApiKeyMutationResult {
-    /// Whether the slot now holds a key (true after `set`, false after `clear`).
     pub present: bool,
-    /// Human-readable summary.
     pub message: String,
-    /// Masked preview when a key is now present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub masked: Option<String>,
 }
@@ -27,7 +25,6 @@ pub struct ApiKeyMutationResult {
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SetArgs {
-    /// Anthropic API key (sk-ant-...)
     pub key: String,
 }
 
@@ -40,7 +37,6 @@ pub struct SetModeArgs {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SetModeResult {
-    /// Canonical mode string after the change.
     pub mode: String,
 }
 
@@ -55,8 +51,6 @@ pub struct OverrideArgs {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct OverrideResult {
     pub agent: String,
-    /// Resulting backend after the call. `None` when an override was cleared
-    /// (or when no override existed for the agent).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
     pub cleared: bool,
@@ -88,13 +82,13 @@ pub struct AgentBackendStatusOutput {
     pub mode: String,
     pub use_server_anthropic: bool,
     pub api_key_in_db: bool,
-    /// Masked preview of the stored Anthropic key (e.g. "sk-ant-…ABCD"), when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key_masked: Option<String>,
     pub overrides: Vec<AgentBackendOverrideEntry>,
 }
 
 /// [MUTATES STATE] Remove the stored Anthropic API key from the encrypted orca DB.
+#[cfg(feature = "native")]
 #[orca_tool(domain = "system.agent.backend", verb = "clear-key")]
 async fn agent_backend_clear_api_key(
     _args: ClearArgs,
@@ -113,7 +107,8 @@ async fn agent_backend_clear_api_key(
     })
 }
 
-/// [MUTATES STATE] Store an Anthropic API key in the encrypted orca DB (settings table, key 'secrets.anthropic_api_key'). The DB is SQLCipher-encrypted at rest. Required for server-side Anthropic calls.
+/// [MUTATES STATE] Store an Anthropic API key in the encrypted orca DB.
+#[cfg(feature = "native")]
 #[orca_tool(domain = "system.agent.backend", verb = "set-key")]
 async fn agent_backend_set_api_key(
     args: SetArgs,
@@ -132,38 +127,42 @@ async fn agent_backend_set_api_key(
     })
 }
 
-/// [MUTATES STATE] Set the global agent backend mode. local = always LM Studio. claude = always route to Claude (server-side if enabled, else delegate to caller). hybrid = check per-agent override; default is Claude when no override is set.
+/// [MUTATES STATE] Set the global agent backend mode (local | claude | hybrid).
+#[cfg(feature = "native")]
 #[orca_tool(domain = "system.agent.backend", verb = "set-mode")]
 async fn agent_backend_set_mode(
     args: SetModeArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<SetModeResult> {
-    let mode = ctx
-        .service::<Arc<dyn AgentBackendService>>()?
-        .set_mode(&args.mode)
-        .await?;
-    Ok(SetModeResult { mode })
+    let parsed = llm::resolve::Mode::parse(&args.mode)?;
+    llm::resolve::set_mode(parsed)?;
+    Ok(SetModeResult {
+        mode: parsed.as_str().to_string(),
+    })
 }
 
-/// [MUTATES STATE] Set, change, or clear a per-agent backend override (only consulted in hybrid mode). backend=clear deletes the override.
+/// [MUTATES STATE] Set, change, or clear a per-agent backend override.
+#[cfg(feature = "native")]
 #[orca_tool(domain = "system.agent.backend", verb = "override")]
 async fn agent_backend_override(
     args: OverrideArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<OverrideResult> {
-    let s = ctx.service::<Arc<dyn AgentBackendService>>()?;
     if args.backend == "clear" {
-        let removed = s.clear_override(&args.agent).await?;
+        let removed = llm::resolve::clear_override(&args.agent)?;
         return Ok(OverrideResult {
             agent: args.agent,
             backend: None,
             cleared: removed,
         });
     }
-    if !s.agent_exists(&args.agent).await? {
+    let exists = crate::embedded::list_embedded_agents()
+        .iter()
+        .any(|(name, _)| name == &args.agent);
+    if !exists {
         anyhow::bail!("unknown agent: {}", args.agent);
     }
-    s.set_override(&args.agent, &args.backend).await?;
+    llm::resolve::set_override(&args.agent, &args.backend)?;
     Ok(OverrideResult {
         agent: args.agent,
         backend: Some(args.backend),
@@ -171,41 +170,33 @@ async fn agent_backend_override(
     })
 }
 
-/// [MUTATES STATE] Toggle whether the orca server makes Anthropic API calls directly when the resolver picks Claude. When false (default), Claude-routed agents return a delegate-to-claude-code envelope instead. Requires a stored API key when true.
+/// [MUTATES STATE] Toggle whether the orca server makes Anthropic API calls directly.
+#[cfg(feature = "native")]
 #[orca_tool(domain = "system.agent.backend", verb = "use-server-anthropic")]
 async fn agent_backend_use_server_anthropic(
     args: UseServerAnthropicArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<UseServerAnthropicResult> {
-    ctx.service::<Arc<dyn AgentBackendService>>()?
-        .set_use_server_anthropic(args.enabled)
-        .await?;
+    llm::resolve::set_use_server_anthropic(args.enabled)?;
     Ok(UseServerAnthropicResult {
         enabled: args.enabled,
     })
 }
 
-/// Show the current agent backend configuration: mode (local|claude|hybrid), per-agent overrides, whether server-side Anthropic calls are enabled, and a masked preview of the stored API key (when present).
+/// Show the current agent backend configuration.
+#[cfg(feature = "native")]
 #[orca_tool(domain = "system.agent.backend", verb = "detail")]
 async fn agent_backend_detail(
     _args: AgentBackendStatusArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<AgentBackendStatusOutput> {
-    let s = ctx.service::<Arc<dyn AgentBackendService>>()?;
-    let mode = s.current_mode().await?;
-    let use_server_anthropic = s.use_server_anthropic().await?;
-    let api_key_in_db = s.api_key_present().await?;
-    let api_key_masked = if api_key_in_db {
-        let conn = orca_db::open_default()?;
-        orca_db::settings::secret_get(&conn, "anthropic_api_key")?
-            .as_deref()
-            .map(orca_db::settings::mask_key)
-    } else {
-        None
-    };
-    let overrides = s
-        .list_overrides()
-        .await?
+    let mode = llm::resolve::current_mode()?.as_str().to_string();
+    let use_server_anthropic = llm::resolve::use_server_anthropic()?;
+    let conn = orca_db::open_default()?;
+    let stored = orca_db::settings::secret_get(&conn, "anthropic_api_key")?;
+    let api_key_in_db = stored.is_some();
+    let api_key_masked = stored.as_deref().map(orca_db::settings::mask_key);
+    let overrides = llm::resolve::list_overrides()?
         .into_iter()
         .map(|(agent, backend)| AgentBackendOverrideEntry { agent, backend })
         .collect();
@@ -216,49 +207,4 @@ async fn agent_backend_detail(
         api_key_masked,
         overrides,
     })
-}
-
-// ─── Service trait (impl in server crate) ────────────────────────────
-
-use anyhow::Result;
-use async_trait::async_trait;
-
-#[async_trait]
-pub trait AgentBackendService: Send + Sync {
-    /// Current global mode as its canonical string ("local"|"claude"|"hybrid").
-    async fn current_mode(&self) -> Result<String>;
-
-    /// Set the global mode. Accepts the same strings as `current_mode`
-    /// returns. Returns the parsed canonical mode string for echo.
-    async fn set_mode(&self, mode: &str) -> Result<String>;
-
-    async fn use_server_anthropic(&self) -> Result<bool>;
-    async fn set_use_server_anthropic(&self, enabled: bool) -> Result<()>;
-
-    /// All per-agent overrides as (agent, backend) pairs.
-    async fn list_overrides(&self) -> Result<Vec<(String, String)>>;
-
-    async fn set_override(&self, agent: &str, backend: &str) -> Result<()>;
-
-    /// Remove a per-agent override. Returns `true` if one was present.
-    async fn clear_override(&self, agent: &str) -> Result<bool>;
-
-    /// Validate an agent name against the embedded agent set.
-    async fn agent_exists(&self, agent: &str) -> Result<bool>;
-
-    /// Whether an Anthropic API key is currently stored in the encrypted DB.
-    async fn api_key_present(&self) -> Result<bool>;
-}
-
-/// Embedder hook — implemented by hosts (orca-server, orca-app-kit) to
-/// yield their concrete `AgentBackendService` impl into `ToolCtx`. See
-/// `services::mod` doc for the convention.
-pub trait ProvideAgentBackend {
-    fn agent_backend(&self) -> std::sync::Arc<dyn AgentBackendService>;
-}
-
-/// Register an `AgentBackendService` into `ToolCtx` from any embedder that
-/// implements `ProvideAgentBackend`.
-pub fn register_agent_backend(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideAgentBackend) {
-    ctx.register_service(p.agent_backend());
 }

@@ -119,7 +119,7 @@ impl Session {
     }
 
     pub fn set_agent(&mut self, agent: &str) {
-        if let Some(prompt) = crate::agent_resolve::load_agent_prompt(agent, &self.config)
+        if let Some(prompt) = agents::resolve::load_agent_prompt(agent, &self.config)
         {
             self.system_prompt = prompt;
         }
