@@ -5,6 +5,7 @@
 //! `server/src/commands/update.rs`; everything dev-runtime-related lives here.
 
 use anyhow::{Context, Result};
+use orca_utils::fs::chmod_dir_owner_only;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -16,10 +17,7 @@ use crate::update::{
 // ── Dev source (local serve) ──────────────────────────────────────────────────
 
 fn dev_source_path() -> Option<PathBuf> {
-    let dir = std::env::var_os("ORCA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".orca")))?;
-    Some(dir.join("dev-source"))
+    Some(orca_utils::fs::orca_home()?.join("dev-source"))
 }
 
 pub fn read_dev_source() -> Option<String> {
@@ -145,37 +143,16 @@ pub async fn apply_update_dev(source_url: &str) -> Result<()> {
     Ok(())
 }
 
-// ── chmod helper (duplicated from server::loopback_token per relocate-not-wrap) ─
-
-#[cfg(unix)]
-fn chmod_dir_owner_only(dir: &std::path::Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(dir)?.permissions();
-    perms.set_mode(0o700);
-    std::fs::set_permissions(dir, perms)
-}
-
-#[cfg(not(unix))]
-fn chmod_dir_owner_only(_dir: &std::path::Path) -> std::io::Result<()> {
-    Ok(())
-}
-
 // ── Dev mode (git checkout + cargo watch) ────────────────────────────────────
 
 const DEV_REPO_SUBDIR: &str = "dev/orca";
 
 fn dev_repo_path() -> Option<PathBuf> {
-    let dir = std::env::var_os("ORCA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".orca")))?;
-    Some(dir.join(DEV_REPO_SUBDIR))
+    Some(orca_utils::fs::orca_home()?.join(DEV_REPO_SUBDIR))
 }
 
 fn dev_pid_path() -> Option<PathBuf> {
-    let dir = std::env::var_os("ORCA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".orca")))?;
-    Some(dir.join("dev.pid"))
+    Some(orca_utils::fs::orca_home()?.join("dev.pid"))
 }
 
 /// Find `cargo` for `dev_enable` — daemon-inherited PATH typically lacks

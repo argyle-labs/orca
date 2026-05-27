@@ -15,10 +15,7 @@ use std::path::PathBuf;
 /// Path to the version pin file (`$ORCA_HOME/version-pin`, default `~/.orca/version-pin`).
 /// Returns None only if both `ORCA_HOME` and `HOME` are unset (CI sandboxes).
 pub fn pin_path() -> Option<PathBuf> {
-    let dir = std::env::var_os("ORCA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".orca")))?;
-    Some(dir.join("version-pin"))
+    Some(orca_utils::fs::orca_home()?.join("version-pin"))
 }
 
 /// Read the version pin from `$ORCA_HOME/version-pin`. Returns None if absent.
@@ -117,10 +114,7 @@ impl Channel {
 /// Path to the channel marker file (`$ORCA_HOME/channel`, default `~/.orca/channel`).
 /// Returns None only if both `ORCA_HOME` and `HOME` are unset (CI sandboxes).
 pub fn channel_marker_path() -> Option<PathBuf> {
-    let dir = std::env::var_os("ORCA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".orca")))?;
-    Some(dir.join("channel"))
+    Some(orca_utils::fs::orca_home()?.join("channel"))
 }
 
 /// Read the channel marker written by `install.sh` (or a prior `orca update`).

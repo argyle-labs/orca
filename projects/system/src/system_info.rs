@@ -415,9 +415,7 @@ fn collect_intel_gpus() -> Vec<GpuInfo> {
 }
 
 fn orca_dir() -> Option<PathBuf> {
-    std::env::var_os("ORCA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(orca_utils::config::APP_STATE_DIR)))
+    orca_utils::fs::orca_home()
 }
 
 /// Returns `(virtualization, dmi_vendor, dmi_product)`.

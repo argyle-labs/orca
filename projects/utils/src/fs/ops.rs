@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Expand a leading `~/` to the user's home directory.
 pub fn expand_tilde(path: &str) -> String {
@@ -9,6 +9,28 @@ pub fn expand_tilde(path: &str) -> String {
     } else {
         path.to_string()
     }
+}
+
+/// Resolve orca's state dir: `$ORCA_HOME` if set, else `$HOME/.orca`.
+/// Returns `None` when neither env var is set (test sandboxes, sealed CI).
+pub fn orca_home() -> Option<PathBuf> {
+    std::env::var_os("ORCA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".orca")))
+}
+
+/// Restrict a directory to mode 0700 (owner-only rwx). No-op on non-unix.
+#[cfg(unix)]
+pub fn chmod_dir_owner_only(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(dir)?.permissions();
+    perms.set_mode(0o700);
+    std::fs::set_permissions(dir, perms)
+}
+
+#[cfg(not(unix))]
+pub fn chmod_dir_owner_only(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Read a file's contents. Returns an error message string on failure (not Err)

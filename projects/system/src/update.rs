@@ -386,10 +386,7 @@ pub fn sha2_digest(data: &[u8]) -> [u8; 32] {
 const CHECK_CACHE_TTL_SECS: u64 = 14 * 24 * 3600;
 
 fn check_cache_dir() -> Option<PathBuf> {
-    let dir = std::env::var_os("ORCA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".orca")))?;
-    Some(dir.join("cache").join("sha256"))
+    Some(orca_utils::fs::orca_home()?.join("cache").join("sha256"))
 }
 
 /// Drop any cached sha256 files older than `CHECK_CACHE_TTL_SECS`. Best-effort

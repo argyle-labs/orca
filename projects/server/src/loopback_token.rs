@@ -12,6 +12,7 @@
 //! permissions, not network namespace.
 
 use anyhow::{Context, Result};
+use orca_utils::fs::chmod_dir_owner_only;
 use rand::Rng;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -148,18 +149,6 @@ pub(crate) fn write_secret_file(path: &std::path::Path, content: &str) -> std::i
 #[cfg(not(unix))]
 pub(crate) fn write_secret_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     std::fs::write(path, content)
-}
-
-#[cfg(unix)]
-pub(crate) fn chmod_dir_owner_only(dir: &std::path::Path) -> std::io::Result<()> {
-    let mut perms = std::fs::metadata(dir)?.permissions();
-    perms.set_mode(0o700);
-    std::fs::set_permissions(dir, perms)
-}
-
-#[cfg(not(unix))]
-pub(crate) fn chmod_dir_owner_only(_dir: &std::path::Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
