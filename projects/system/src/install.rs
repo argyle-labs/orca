@@ -14,7 +14,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const CLAUDE_MD: &str = include_str!("../../../CLAUDE.md");
+/// Global directive written to `~/.claude/CLAUDE.md` by `orca install`.
+/// Tells Claude Code to invoke the `orca` agent first and delegate from
+/// there. Distinct from the orca *project* CLAUDE.md (rust style rules)
+/// which lives at `~/code/orca/CLAUDE.md` and is auto-loaded by Claude Code
+/// only when working inside that repo.
+const GLOBAL_CLAUDE_MD: &str = include_str!("templates/global_claude_md.md");
 
 // Known project slugs to wire memory symlinks for.
 // Format: (macos_slug, linux_slug, vault_name)
@@ -300,90 +305,176 @@ fn step_cli_client_cert(home: &Path, report: &mut InstallReport) {
 
 fn step_claude_md(home: &Path, report: &mut InstallReport) {
     let claude_dir = home.join(".claude");
-    _ = std::fs::create_dir_all(&claude_dir);
+    if let Err(e) = std::fs::create_dir_all(&claude_dir) {
+        report.err(format!("~/.claude: mkdir failed: {e}"));
+        return;
+    }
 
-    let vault_claude_md = home.join(APP_STATE_DIR).join("CLAUDE.md");
+    // Clear any legacy symlink at ~/.orca/CLAUDE.md left by older installs
+    // — the vault no longer hosts CLAUDE.md; the global directive lives
+    // directly at ~/.claude/CLAUDE.md and the per-project rules stay in
+    // each repo's CLAUDE.md.
+    let legacy_vault_md = home.join(APP_STATE_DIR).join("CLAUDE.md");
+    if let Ok(meta) = std::fs::symlink_metadata(&legacy_vault_md)
+        && meta.file_type().is_symlink()
+    {
+        _ = std::fs::remove_file(&legacy_vault_md);
+    }
+
     let dot_claude_md = claude_dir.join("CLAUDE.md");
+    // If a previous install symlinked ~/.claude/CLAUDE.md elsewhere, drop
+    // the link so std::fs::write doesn't follow it back into the repo.
+    if let Ok(meta) = std::fs::symlink_metadata(&dot_claude_md)
+        && meta.file_type().is_symlink()
+    {
+        _ = std::fs::remove_file(&dot_claude_md);
+    }
 
-    // If orca repo is present, symlink through the vault. Otherwise write embedded content.
-    let orca_repo_md = home.join("code/orca/CLAUDE.md");
-    if orca_repo_md.exists() {
-        // vault → repo
-        force_symlink(
-            &orca_repo_md,
-            &vault_claude_md,
-            report,
-            "vault CLAUDE.md → repo",
-        );
-        // ~/.claude/CLAUDE.md → vault
-        force_symlink(
-            &vault_claude_md,
-            &dot_claude_md,
-            report,
-            "~/.claude/CLAUDE.md → vault",
-        );
-    } else {
-        // Write embedded content to vault (release install, no repo)
-        match std::fs::write(&vault_claude_md, CLAUDE_MD) {
-            Ok(_) => report.ok("vault CLAUDE.md written (embedded, no repo)".to_string()),
-            Err(e) => {
-                report.err(format!("vault CLAUDE.md write failed: {e}"));
-                return;
-            }
-        }
-        force_symlink(
-            &vault_claude_md,
-            &dot_claude_md,
-            report,
-            "~/.claude/CLAUDE.md → vault",
-        );
+    match std::fs::write(&dot_claude_md, GLOBAL_CLAUDE_MD) {
+        Ok(_) => report.ok("~/.claude/CLAUDE.md written (orca-first directive)".to_string()),
+        Err(e) => report.err(format!("~/.claude/CLAUDE.md write failed: {e}")),
     }
 }
 
-/// Materialize every embedded agent to `~/.claude/agents/<name>.md` so
-/// Claude Code's native Agent picker discovers them automatically (no MCP
-/// roundtrip). Also writes per-project copies under each known
-/// `~/code/<project>/.claude/agents/` directory.
+/// External repos that own their own agent rosters. Each entry is a path
+/// (relative to `$HOME/code/`) to a directory containing `<name>.md` files.
+/// Discovered at install time and merged with orca's embedded agents.
+///
+/// To register a new external source, add the path here. Future: read this
+/// list from `orca.db` so plugins can self-register without recompiling
+/// orca.
+const EXTERNAL_AGENT_SOURCES: &[&str] = &[
+    "meerkat/agents",
+    "rebuy/rebuy-cli-mcp-server/agents",
+    "leetcode/agents",
+];
+
+/// One agent prompt resolved at install time: either embedded in the orca
+/// binary or read from an external source repo. `body` is the full file
+/// contents (frontmatter + prompt), ready to write verbatim.
+struct AgentEntry {
+    name: String,
+    body: String,
+    origin: String,
+}
+
+/// Walk embedded + external sources and return the full agent roster.
+/// External sources win over embedded on name collision — that's how a
+/// plugin can override an orca-shipped default for projects that have
+/// the plugin installed (it just won't be a collision because we're
+/// dropping the agents that belong to external repos).
+fn collect_agent_entries(home: &Path) -> Vec<AgentEntry> {
+    let mut by_name: std::collections::BTreeMap<String, AgentEntry> =
+        std::collections::BTreeMap::new();
+
+    for name in agents::embedded::embedded_agent_names() {
+        if let Some(raw) = agents::embedded::embedded_agent(name) {
+            by_name.insert(
+                name.to_string(),
+                AgentEntry {
+                    name: name.to_string(),
+                    body: raw.to_string(),
+                    origin: "embedded".to_string(),
+                },
+            );
+        }
+    }
+
+    for rel in EXTERNAL_AGENT_SOURCES {
+        let dir = home.join("code").join(rel);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.strip_suffix(".md"))
+            else {
+                continue;
+            };
+            let Ok(body) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            by_name.insert(
+                name.to_string(),
+                AgentEntry {
+                    name: name.to_string(),
+                    body,
+                    origin: format!("~/code/{rel}"),
+                },
+            );
+        }
+    }
+
+    by_name.into_values().collect()
+}
+
+/// Materialize every agent (embedded + external sources) to
+/// `~/.claude/agents/<name>.md` so Claude Code's native Agent picker
+/// discovers them automatically. Also writes per-project copies under
+/// each known `~/code/<project>/.claude/agents/`.
 ///
 /// Overwrite policy: unconditional. Re-run on every `orca install` /
 /// `orca update` / daemon start. Users who want to edit an agent's prompt
-/// should fork it to a different name (e.g. `wolf-custom.md`); orca only
-/// owns the bare canonical names.
+/// should fork it to a different name (e.g. `wolf-custom.md`).
 fn step_claude_agents(home: &Path, report: &mut InstallReport) {
-    materialize_agents_to(&home.join(".claude/agents"), "~/.claude/agents", report);
+    let entries = collect_agent_entries(home);
+
+    materialize_agents_to(
+        &entries,
+        &home.join(".claude/agents"),
+        "~/.claude/agents",
+        report,
+    );
 
     for (macos_slug, linux_slug, vault_name) in MEMORY_PROJECTS {
-        let _ = (macos_slug, linux_slug); // memory slugs not used here
+        let _ = (macos_slug, linux_slug);
         let project_root = home.join("code").join(vault_name);
         if !project_root.exists() {
             continue;
         }
         let target = project_root.join(".claude/agents");
         materialize_agents_to(
+            &entries,
             &target,
             &format!("~/code/{vault_name}/.claude/agents"),
             report,
         );
     }
+
+    let from_external = entries
+        .iter()
+        .filter(|e| e.origin != "embedded")
+        .count();
+    if from_external > 0 {
+        report.ok(format!(
+            "agents: {from_external} from external sources, {} embedded",
+            entries.len() - from_external
+        ));
+    }
 }
 
-fn materialize_agents_to(target_dir: &Path, label: &str, report: &mut InstallReport) {
+fn materialize_agents_to(
+    entries: &[AgentEntry],
+    target_dir: &Path,
+    label: &str,
+    report: &mut InstallReport,
+) {
     if let Err(e) = std::fs::create_dir_all(target_dir) {
         report.err(format!("{label}: mkdir failed: {e}"));
         return;
     }
     let mut written = 0usize;
     let mut errored = 0usize;
-    for name in agents::embedded::embedded_agent_names() {
-        let Some(raw) = agents::embedded::embedded_agent(name) else {
-            continue;
-        };
-        let path = target_dir.join(format!("{name}.md"));
-        match std::fs::write(&path, raw) {
+    for entry in entries {
+        let path = target_dir.join(format!("{}.md", entry.name));
+        match std::fs::write(&path, &entry.body) {
             Ok(_) => written += 1,
             Err(e) => {
                 errored += 1;
-                report.err(format!("{label}/{name}.md: write failed: {e}"));
+                report.err(format!("{label}/{}.md: write failed: {e}", entry.name));
             }
         }
     }
@@ -393,9 +484,10 @@ fn materialize_agents_to(target_dir: &Path, label: &str, report: &mut InstallRep
 }
 
 /// Remove every agent file orca materialized at install time. Only deletes
-/// canonical names that match an embedded agent — user-authored agents in
+/// canonical names that match an entry we wrote — user-authored agents in
 /// the same directory are left alone.
 fn step_remove_claude_agents(home: &Path, report: &mut InstallReport) {
+    let entries = collect_agent_entries(home);
     let mut targets: Vec<std::path::PathBuf> = vec![home.join(".claude/agents")];
     for (_, _, vault_name) in MEMORY_PROJECTS {
         let dir = home.join("code").join(vault_name).join(".claude/agents");
@@ -408,8 +500,8 @@ fn step_remove_claude_agents(home: &Path, report: &mut InstallReport) {
             continue;
         }
         let mut removed = 0usize;
-        for name in agents::embedded::embedded_agent_names() {
-            let path = dir.join(format!("{name}.md"));
+        for entry in &entries {
+            let path = dir.join(format!("{}.md", entry.name));
             if path.exists() && std::fs::remove_file(&path).is_ok() {
                 removed += 1;
             }
@@ -566,22 +658,36 @@ fn step_remove_mcp(report: &mut InstallReport) {
 
 fn step_remove_claude_md(home: &Path, report: &mut InstallReport) {
     let vault_link = home.join(APP_STATE_DIR).join("CLAUDE.md");
-    let dot_link = home.join(".claude/CLAUDE.md");
+    let dot_path = home.join(".claude/CLAUDE.md");
 
-    for (path, label) in [
-        (&dot_link, "~/.claude/CLAUDE.md"),
-        (&vault_link, "vault CLAUDE.md"),
-    ] {
-        if is_symlink(path) {
-            match std::fs::remove_file(path) {
-                Ok(_) => report.ok(format!("{label}: removed symlink")),
-                Err(e) => report.err(format!("{label}: remove failed: {e}")),
-            }
-        } else if path.exists() {
-            report.skip(format!("{label}: not a symlink — leaving in place"));
-        } else {
-            report.skip(format!("{label}: not present"));
+    // Vault path: only remove if it's a legacy symlink (we no longer write
+    // a regular file here, so any plain file present is user-owned).
+    if is_symlink(&vault_link) {
+        match std::fs::remove_file(&vault_link) {
+            Ok(_) => report.ok("vault CLAUDE.md: removed legacy symlink".to_string()),
+            Err(e) => report.err(format!("vault CLAUDE.md: remove failed: {e}")),
         }
+    } else if vault_link.exists() {
+        report.skip("vault CLAUDE.md: not a symlink — leaving in place".to_string());
+    } else {
+        report.skip("vault CLAUDE.md: not present".to_string());
+    }
+
+    // ~/.claude/CLAUDE.md: orca-managed file (or legacy symlink). Remove
+    // only if it matches our directive content or is a symlink we placed.
+    match std::fs::symlink_metadata(&dot_path) {
+        Ok(meta) if meta.file_type().is_symlink() => match std::fs::remove_file(&dot_path) {
+            Ok(_) => report.ok("~/.claude/CLAUDE.md: removed legacy symlink".to_string()),
+            Err(e) => report.err(format!("~/.claude/CLAUDE.md: remove failed: {e}")),
+        },
+        Ok(_) => match std::fs::read_to_string(&dot_path) {
+            Ok(s) if s == GLOBAL_CLAUDE_MD => match std::fs::remove_file(&dot_path) {
+                Ok(_) => report.ok("~/.claude/CLAUDE.md: removed".to_string()),
+                Err(e) => report.err(format!("~/.claude/CLAUDE.md: remove failed: {e}")),
+            },
+            _ => report.skip("~/.claude/CLAUDE.md: user-modified — leaving in place".to_string()),
+        },
+        Err(_) => report.skip("~/.claude/CLAUDE.md: not present".to_string()),
     }
 }
 
