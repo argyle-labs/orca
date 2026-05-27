@@ -24,6 +24,8 @@ native = [
     "dep:mcp",
     "dep:reqwest",
     "dep:tracing",
+    "dep:dirs",
+    "dep:toml",
 ]
 cli = [
     "native",
@@ -56,6 +58,8 @@ utoipa      = { workspace = true,         optional = true }
 mcp         = { path = "../mcp",          optional = true }
 reqwest     = { workspace = true,         optional = true }
 tracing     = { workspace = true,         optional = true }
+dirs        = { workspace = true,         optional = true }
+toml        = { workspace = true,         optional = true }
 
 [lints]
 workspace = true
