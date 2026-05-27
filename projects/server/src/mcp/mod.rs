@@ -30,14 +30,6 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
         config: config.clone(),
     };
     let mut ctx = ToolCtx::new(config);
-    let docs_svc: Arc<dyn ::docs::docs::DocsService> =
-        Arc::new(::docs::native_support_docs::ServerDocs {
-            config: ctx.config.clone(),
-        });
-    ctx.register_service(docs_svc);
-    let spec_registry: Arc<dyn ::docs::spec_registry::SpecRegistryService> =
-        Arc::new(::docs::native_support_specs::ServerSpecRegistry);
-    ctx.register_service(spec_registry);
     let profile_svc: Arc<dyn platform::profile::ProfileService> =
         Arc::new(platform::profile_native::ServerProfile {
             config: ctx.config.clone(),

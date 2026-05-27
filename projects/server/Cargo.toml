@@ -46,6 +46,7 @@ platform = { path = "../platform", features = ["native", "cli"] }
 agents   = { path = "../agents",   features = ["native", "cli"] }
 plugins  = { path = "../plugins",  features = ["native", "cli"] }
 docs     = { path = "../docs",     features = ["native", "cli"] }
+specs    = { path = "../specs",    features = ["native", "cli"] }
 mcp      = { path = "../mcp",      features = ["native", "cli"] }
 llm      = { path = "../llm" }
 conversation = { path = "../conversation" }

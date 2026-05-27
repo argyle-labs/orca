@@ -1,13 +1,13 @@
 //! Docs domain tools — root listing, file tree, read, search, commands.
-//! Run impls dispatch through `services::docs::DocsService`.
+//! Tools call free functions in `crate::native_support_docs` directly per
+//! [[feedback_no_indirection]]. Will fold into a generic `fs` crate later —
+//! see [[project_fs_crate]].
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "native")]
 use orca_macro::orca_tool;
-#[cfg(feature = "native")]
-use std::sync::Arc;
 
 // ── Typed entities ──────────────────────────────────────────────────────────
 
@@ -173,9 +173,7 @@ async fn list_roots(
     _args: ListRootsArgs,
     ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ListRootsOutput> {
-    let roots = ctx
-        .service::<Arc<dyn DocsService>>()?
-        .list_roots()
+    let roots = crate::native_support_docs::list_roots(&ctx.config)
         .await?
         .into_iter()
         .map(|r| DocRootEntry {
@@ -195,10 +193,8 @@ async fn get_tree(
     args: GetTreeArgs,
     ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<GetTreeOutput> {
-    let data = ctx
-        .service::<Arc<dyn DocsService>>()?
-        .get_tree(&args.root, args.path.as_deref())
-        .await?;
+    let data =
+        crate::native_support_docs::get_tree(&ctx.config, &args.root, args.path.as_deref()).await?;
     Ok(GetTreeOutput {
         root: args.root,
         path: args.path,
@@ -211,13 +207,10 @@ async fn get_tree(
 #[orca_tool(domain = "namespace.doc", verb = "full-tree")]
 async fn get_full_tree(
     args: GetFullTreeArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<GetFullTreeOutput> {
     let raw = args.raw.unwrap_or(false);
-    let data = ctx
-        .service::<Arc<dyn DocsService>>()?
-        .get_full_tree(raw)
-        .await?;
+    let data = crate::native_support_docs::get_full_tree(raw).await?;
     let roots = data
         .into_iter()
         .map(|r| DocRootTreeEntry {
@@ -236,10 +229,8 @@ async fn read_doc(
     ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ReadDocOutput> {
     let llm = args.format.as_deref() == Some("llm");
-    let content = ctx
-        .service::<Arc<dyn DocsService>>()?
-        .read_doc(&args.root, &args.path, llm)
-        .await?;
+    let content =
+        crate::native_support_docs::read_doc(&ctx.config, &args.root, &args.path, llm).await?;
     Ok(ReadDocOutput {
         root: args.root,
         path: args.path,
@@ -255,10 +246,8 @@ async fn search_docs(
 ) -> anyhow::Result<SearchDocsOutput> {
     let filter = args.root.as_deref().unwrap_or("all");
     let llm = args.format.as_deref() == Some("llm");
-    let data = ctx
-        .service::<Arc<dyn DocsService>>()?
-        .search_docs(&args.query, filter, llm)
-        .await?;
+    let data =
+        crate::native_support_docs::search_docs(&ctx.config, &args.query, filter, llm).await?;
     let hits = data
         .hits
         .into_iter()
@@ -286,19 +275,13 @@ async fn search_docs(
 #[orca_tool(domain = "namespace.doc", verb = "list-commands")]
 async fn list_commands(
     _args: ListCommandsArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<ListCommandsOutput> {
-    let commands = ctx
-        .service::<Arc<dyn DocsService>>()?
-        .list_commands()
-        .await?;
+    let commands = crate::native_support_docs::list_commands().await?;
     Ok(ListCommandsOutput { commands })
 }
 
-// ─── Service trait (impl in server crate) ────────────────────────────
-
-use anyhow::Result;
-use async_trait::async_trait;
+// ─── Data shapes used by native dispatch ──────────────────────────────
 
 #[derive(Clone)]
 pub struct DocRootSummary {
@@ -342,43 +325,3 @@ pub struct SearchDocsData {
     pub enhanced_summary: Option<String>,
 }
 
-#[async_trait]
-pub trait DocsService: Send + Sync {
-    /// List doc roots from the config + the embedded vault, with file counts.
-    async fn list_roots(&self) -> Result<Vec<DocRootSummary>>;
-
-    /// Compacted tree under `root[/path]`. Errors when the root or path is
-    /// unknown.
-    async fn get_tree(&self, root: &str, path: Option<&str>) -> Result<Vec<DocTreeNodeData>>;
-
-    /// Build the multi-root tree (every registered root, keyed by name) in
-    /// one call. When `raw` is true, skip compaction so callers see the raw
-    /// filesystem layout.
-    async fn get_full_tree(&self, raw: bool) -> Result<Vec<DocRootTree>>;
-
-    /// Read a doc file. When `llm_format` is true, decorative markdown is
-    /// stripped to reduce token usage.
-    async fn read_doc(&self, root: &str, path: &str, llm_format: bool) -> Result<String>;
-
-    /// Search docs across one or all roots (filter == "all" matches every
-    /// configured root + the embedded vault).
-    async fn search_docs(
-        &self,
-        query: &str,
-        filter: &str,
-        llm_format: bool,
-    ) -> Result<SearchDocsData>;
-
-    /// All embedded slash-command / skill basenames in the orca vault.
-    async fn list_commands(&self) -> Result<Vec<String>>;
-}
-
-/// Embedder hook — see `services::mod` doc.
-pub trait ProvideDocs {
-    fn docs(&self) -> std::sync::Arc<dyn DocsService>;
-}
-
-/// Register a `DocsService` into `ToolCtx`.
-pub fn register_docs(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideDocs) {
-    ctx.register_service(p.docs());
-}
