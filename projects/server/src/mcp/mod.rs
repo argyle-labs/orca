@@ -6,7 +6,6 @@
 // Server-side tool-implementations moved to `crate::services::*` — only
 // the MCP-protocol pieces (handlers, context7 federation, run_agent legacy
 // static tool defs) stay here.
-mod handlers;
 mod tools;
 use ::mcp::context7;
 
@@ -17,8 +16,6 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-use handlers::run;
 
 /// Concrete embedder that satisfies the per-service `Provide*` traits in
 /// each domain crate (`agents::*`, `fleet::*`, `platform::*`, ...). Each
@@ -354,11 +351,10 @@ async fn call_plugin_tool(fq_name: &str, args: &Value) -> Result<Value> {
         .unwrap_or(serde_json::Value::Null))
 }
 
-// Legacy dispatch — only tools not yet converted to OrcaTool remain here.
-// TODO: convert run_agent, then delete this function entirely.
+// Context7 federation dispatch. All other tools flow through
+// `orca_dispatch`'s inventory and never reach this match.
 async fn dispatch(name: &str, args: &Value, config: &Config) -> Result<String> {
     match name {
-        "run_agent" => run(args, config).await,
         "resolve_library" | "get_library_docs" => {
             context7::proxy_context7(name, args, config).await
         }
