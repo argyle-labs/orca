@@ -345,7 +345,7 @@ fn step_claude_md(home: &Path, report: &mut InstallReport) {
 /// orca.
 const EXTERNAL_AGENT_SOURCES: &[&str] = &[
     "meerkat/agents",
-    "rebuy/rebuy-cli-mcp-server/agents",
+    "rebuy/rebuy-orca-plugin/agents",
     "leetcode/agents",
 ];
 
@@ -444,10 +444,7 @@ fn step_claude_agents(home: &Path, report: &mut InstallReport) {
         );
     }
 
-    let from_external = entries
-        .iter()
-        .filter(|e| e.origin != "embedded")
-        .count();
+    let from_external = entries.iter().filter(|e| e.origin != "embedded").count();
     if from_external > 0 {
         report.ok(format!(
             "agents: {from_external} from external sources, {} embedded",
