@@ -8,4 +8,5 @@ pub mod fs;
 pub mod git;
 pub mod graphql;
 pub mod http;
+pub mod markdown;
 pub mod state;

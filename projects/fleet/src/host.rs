@@ -72,7 +72,7 @@ pub const ALLOWED_HOST_KEYS: &[&str] = &[
 mod native_support {
     use super::*;
     use anyhow::Result;
-    use orca_db as db;
+    use db;
 
     impl From<db::host_addressing::HostAddressingRow> for HostChannel {
         fn from(r: db::host_addressing::HostAddressingRow) -> Self {
@@ -125,8 +125,8 @@ async fn host_detail(
     _args: EmptyArgs,
     _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<HostInfoOutput> {
-    let conn = orca_db::open_default()?;
-    let channels: Vec<HostChannel> = orca_db::host_addressing::list_host_addressing(&conn)?
+    let conn = db::open_default()?;
+    let channels: Vec<HostChannel> = db::host_addressing::list_host_addressing(&conn)?
         .into_iter()
         .map(Into::into)
         .collect();
@@ -161,11 +161,11 @@ async fn host_set(
             ALLOWED_HOST_KEYS
         );
     }
-    let conn = orca_db::open_default()?;
+    let conn = db::open_default()?;
     match args.key.as_str() {
-        "display_name" => orca_db::settings::set(&conn, "host.display_name", &args.value)?,
-        "fqdn" => orca_db::settings::set(&conn, "host.fqdn", &args.value)?,
-        _ => orca_db::host_addressing::upsert_host_addressing(
+        "display_name" => db::settings::set(&conn, "host.display_name", &args.value)?,
+        "fqdn" => db::settings::set(&conn, "host.fqdn", &args.value)?,
+        _ => db::host_addressing::upsert_host_addressing(
             &conn,
             &args.key,
             &args.value,
@@ -184,11 +184,11 @@ async fn host_refresh(
     _args: EmptyArgs,
     ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<HostRefreshOutput> {
-    let conn = orca_db::open_default()?;
+    let conn = db::open_default()?;
     if let Ok(hook) = ctx.service::<std::sync::Arc<dyn HostRefreshHook + Send + Sync>>() {
         hook.refresh(&conn)?;
     }
-    let channels = orca_db::host_addressing::list_host_addressing(&conn)?
+    let channels = db::host_addressing::list_host_addressing(&conn)?
         .into_iter()
         .map(Into::into)
         .collect();
@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn host_channel_from_row_copies_fields() {
-        let row = orca_db::host_addressing::HostAddressingRow {
+        let row = db::host_addressing::HostAddressingRow {
             key: "lan_v4".to_string(),
             value: "10.0.0.1".to_string(),
             source: "manual".to_string(),
@@ -243,16 +243,16 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().to_path_buf();
         let ctx = make_ctx();
-        orca_db::with_db_path(path.clone(), async move {
-            let conn = orca_db::open_default().unwrap();
-            orca_db::host_addressing::upsert_host_addressing(
+        db::with_db_path(path.clone(), async move {
+            let conn = db::open_default().unwrap();
+            db::host_addressing::upsert_host_addressing(
                 &conn,
                 "display_name",
                 "testbox",
                 "manual",
             )
             .unwrap();
-            orca_db::host_addressing::upsert_host_addressing(
+            db::host_addressing::upsert_host_addressing(
                 &conn,
                 "lan_v4",
                 "10.0.0.5",
@@ -272,7 +272,7 @@ mod tests {
     async fn host_info_falls_back_to_os_hostname_when_no_channel() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = make_ctx();
-        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+        db::with_db_path(tmp.path().to_path_buf(), async move {
             let out = host_detail(EmptyArgs {}, &ctx).await.unwrap();
             assert!(!out.display_name.is_empty());
             assert_eq!(out.channels.len(), 0);
@@ -284,7 +284,7 @@ mod tests {
     async fn host_set_rejects_unknown_key() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = make_ctx();
-        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+        db::with_db_path(tmp.path().to_path_buf(), async move {
             let res = host_set(
                 HostSetArgs {
                     key: "bogus".into(),
@@ -304,7 +304,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().to_path_buf();
         let ctx = make_ctx();
-        orca_db::with_db_path(path.clone(), async move {
+        db::with_db_path(path.clone(), async move {
             let out = host_set(
                 HostSetArgs {
                     key: "display_name".into(),
@@ -316,9 +316,9 @@ mod tests {
             .unwrap();
             assert_eq!(out.key, "display_name");
             assert_eq!(out.value, "alpha");
-            let conn = orca_db::open_default().unwrap();
+            let conn = db::open_default().unwrap();
             assert_eq!(
-                orca_db::settings::get(&conn, "host.display_name").unwrap(),
+                db::settings::get(&conn, "host.display_name").unwrap(),
                 Some("alpha".to_string())
             );
         })
@@ -329,7 +329,7 @@ mod tests {
     async fn host_set_writes_fqdn_to_settings() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = make_ctx();
-        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+        db::with_db_path(tmp.path().to_path_buf(), async move {
             host_set(
                 HostSetArgs {
                     key: "fqdn".into(),
@@ -339,9 +339,9 @@ mod tests {
             )
             .await
             .unwrap();
-            let conn = orca_db::open_default().unwrap();
+            let conn = db::open_default().unwrap();
             assert_eq!(
-                orca_db::settings::get(&conn, "host.fqdn").unwrap(),
+                db::settings::get(&conn, "host.fqdn").unwrap(),
                 Some("alpha.example.com".to_string())
             );
         })
@@ -352,7 +352,7 @@ mod tests {
     async fn host_set_writes_channel_value_to_host_addressing() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = make_ctx();
-        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+        db::with_db_path(tmp.path().to_path_buf(), async move {
             host_set(
                 HostSetArgs {
                     key: "lan_v4".into(),
@@ -362,8 +362,8 @@ mod tests {
             )
             .await
             .unwrap();
-            let conn = orca_db::open_default().unwrap();
-            let rows = orca_db::host_addressing::list_host_addressing(&conn).unwrap();
+            let conn = db::open_default().unwrap();
+            let rows = db::host_addressing::list_host_addressing(&conn).unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].key, "lan_v4");
             assert_eq!(rows[0].value, "10.0.0.7");
@@ -376,9 +376,9 @@ mod tests {
     async fn host_refresh_without_hook_returns_existing_channels() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = make_ctx();
-        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
-            let conn = orca_db::open_default().unwrap();
-            orca_db::host_addressing::upsert_host_addressing(
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            let conn = db::open_default().unwrap();
+            db::host_addressing::upsert_host_addressing(
                 &conn,
                 "lan_v4",
                 "10.0.0.9",
@@ -402,9 +402,9 @@ mod tests {
             called: Arc<AtomicBool>,
         }
         impl HostRefreshHook for CountingHook {
-            fn refresh(&self, conn: &orca_db::Conn) -> anyhow::Result<()> {
+            fn refresh(&self, conn: &db::Conn) -> anyhow::Result<()> {
                 self.called.store(true, Ordering::SeqCst);
-                orca_db::host_addressing::upsert_host_addressing(
+                db::host_addressing::upsert_host_addressing(
                     conn,
                     "tailscale_v4",
                     "100.64.0.1",
@@ -422,7 +422,7 @@ mod tests {
         let mut ctx = make_ctx();
         ctx.register_service(hook);
 
-        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+        db::with_db_path(tmp.path().to_path_buf(), async move {
             let out = host_refresh(EmptyArgs {}, &ctx).await.unwrap();
             assert!(called.load(Ordering::SeqCst));
             assert_eq!(out.channels.len(), 1);

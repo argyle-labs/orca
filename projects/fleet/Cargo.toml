@@ -12,13 +12,25 @@ default = []
 native = [
     "orca-contract/native",
     "dep:orca-utils",
-    "dep:orca-db",
+    "dep:db",
     "dep:anyhow",
     "dep:async-trait",
     "dep:tokio",
     "dep:chrono",
     "dep:docker",
     "docker/native",
+    "dep:orca-sdk",
+    "dep:tracing",
+    "dep:rustls",
+    "dep:tokio-rustls",
+    "dep:rusqlite",
+    "dep:mdns-sd",
+    "dep:sha2",
+    "dep:rand",
+    "dep:uuid",
+    "dep:if-addrs",
+    "dep:rustls-pemfile",
+    "system/native",
 ]
 cli = [
     "native",
@@ -37,7 +49,7 @@ serde_json       = { workspace = true }
 inventory        = { workspace = true }
 
 orca-utils        = { path = "../utils",        optional = true }
-orca-db           = { package = "orca-db", path = "../db", optional = true }
+db                = { package = "orca-db", path = "../db", optional = true }
 anyhow            = { workspace = true,         optional = true }
 async-trait       = { workspace = true,         optional = true }
 tokio             = { workspace = true,         optional = true }
@@ -46,6 +58,17 @@ cron              = { workspace = true,         optional = true }
 clap              = { workspace = true,         optional = true }
 colored           = { workspace = true,         optional = true }
 docker            = { path = "../integrations/docker", optional = true, default-features = false }
+orca-sdk          = { path = "../sdk/rust", optional = true }
+tracing           = { workspace = true, optional = true }
+rustls            = { workspace = true, optional = true }
+tokio-rustls      = { workspace = true, optional = true }
+rusqlite          = { workspace = true, optional = true }
+mdns-sd           = { version = "0.19", optional = true }
+sha2              = { workspace = true, optional = true }
+rand              = { workspace = true, optional = true }
+uuid              = { workspace = true, optional = true }
+if-addrs          = { version = "0.14", optional = true }
+rustls-pemfile    = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

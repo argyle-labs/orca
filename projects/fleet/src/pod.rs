@@ -388,7 +388,7 @@ pub mod native_support {
     use anyhow::Result;
     use async_trait::async_trait;
     use orca_contract::ToolCtx;
-    use orca_db as db;
+    use db;
     use std::sync::Arc;
 
     impl From<db::host_addressing::PodPeerAddress> for PodPeerAddressDto {
@@ -926,7 +926,7 @@ mod tests {
 
     #[test]
     fn pod_peer_address_from_db_row() {
-        let row = orca_db::host_addressing::PodPeerAddress {
+        let row = db::host_addressing::PodPeerAddress {
             peer_id: "peer.x".into(),
             kind: "lan_v4".into(),
             value: "10.0.0.5".into(),
@@ -942,7 +942,7 @@ mod tests {
 
     #[test]
     fn pod_peer_from_db_summary_defaults_optional_fields_to_none() {
-        let row = orca_db::pod::PeerSummary {
+        let row = db::pod::PeerSummary {
             peer_id: "peer.x".into(),
             hostname: "h".into(),
             addr: "1.2.3.4".into(),

@@ -34,3 +34,9 @@ pub mod install_status;
 pub mod system_info;
 
 pub mod system;
+
+#[cfg(feature = "native")]
+pub mod periodic;
+
+#[cfg(feature = "native")]
+pub mod scheduler;

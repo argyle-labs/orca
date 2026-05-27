@@ -508,9 +508,9 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
         tracing::warn!("loopback token install failed: {e:#}");
     }
     system::system_info::spawn_refresher();
-    crate::host_status_writer::spawn_local_writer();
-    crate::host_status_writer::spawn_sync_puller();
-    crate::pod::host_status_replica::spawn_fleet_replicator();
+    fleet::host_status_writer::spawn_local_writer();
+    fleet::host_status_writer::spawn_sync_puller();
+    fleet::pod_native::host_status_replica::spawn_fleet_replicator();
     crate::plugin_host::start(
         pki_dir,
         db::ports::mesh_port(),
@@ -555,12 +555,12 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
     // convention and reset them. Mixing CN conventions on the same host
     // produces duplicate pod_peers rows (one keyed on the old CN via the
     // listener stub, one on the new machine_id_short CN via join-confirm).
-    if let Err(e) = crate::pod::reset_if_stale_mesh_identity(pki_dir) {
+    if let Err(e) = fleet::pod_native::reset_if_stale_mesh_identity(pki_dir) {
         tracing::warn!("[pod] stale-cert check failed: {e:#}");
     }
 
-    match crate::pod::mdns::build_advertisement(pki_dir.to_path_buf(), db::ports::mesh_port()) {
-        Ok(ad) => match crate::pod::mdns::Mdns::start(ad) {
+    match fleet::pod_native::mdns::build_advertisement(pki_dir.to_path_buf(), db::ports::mesh_port()) {
+        Ok(ad) => match fleet::pod_native::mdns::Mdns::start(ad) {
             Ok(handle) => {
                 info!("[pod] mDNS responder + discoverer up");
                 // Leak the handle for daemon lifetime — the discovery task
@@ -572,16 +572,16 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
         Err(e) => tracing::warn!("[pod] cannot build mDNS advertisement: {e:#}"),
     }
 
-    std::mem::drop(crate::pod::scheduler::spawn());
+    std::mem::drop(fleet::pod_native::scheduler::spawn());
     info!("[pod] auto-offer scheduler armed");
 
-    std::mem::drop(crate::pod::cert_rotation::spawn());
+    std::mem::drop(fleet::pod_native::cert_rotation::spawn());
     info!("[pod] cert-rotation scheduler armed (daily)");
 
-    std::mem::drop(crate::pod::roster_sync::spawn());
+    std::mem::drop(fleet::pod_native::roster_sync::spawn());
     info!("[pod] roster-sync armed (60s) — auto-fills pod_peers from any paired peer");
 
-    std::mem::drop(crate::host_identity::spawn_refresh_task());
+    std::mem::drop(fleet::host_identity::spawn_refresh_task());
     info!("[host-addressing] refresh task armed (5m)");
 }
 
@@ -595,7 +595,7 @@ fn spawn_scheduler_runtime() {
         Ok(cfg) => {
             let cfg = Arc::new(cfg);
             let ctx = Arc::new(crate::mcp::build_tool_ctx(cfg));
-            std::mem::drop(crate::scheduler::spawn(ctx));
+            std::mem::drop(system::scheduler::spawn(ctx));
             info!("[scheduler] in-process cron scheduler armed (60s tick)");
         }
         Err(e) => tracing::warn!("[scheduler] Config::load failed, scheduler disabled: {e}"),
@@ -972,7 +972,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
             // dispatch in-process instead of looping back over HTTPS with
             // the admin token (M4 in the v1 hardening punch list). Dispatch
             // walks the inventory directly — no registry to ship.
-            crate::pod::dispatcher::install(ctx.clone());
+            fleet::pod_native::dispatcher::install(ctx.clone());
             api.nest("/api/tools", orca_dispatch::axum_router(ctx))
         }
         Err(e) => {

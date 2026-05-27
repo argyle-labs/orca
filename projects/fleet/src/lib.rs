@@ -1,11 +1,19 @@
 //! Fleet domain — pod/mesh, host, meta. (lifecycle dissolved into `system` crate, slice B3.)
 
+#[cfg(feature = "native")]
+pub mod cli;
 pub mod host;
+#[cfg(feature = "native")]
+pub mod host_identity;
 pub mod host_status;
+#[cfg(feature = "native")]
+pub mod host_status_writer;
 #[cfg(feature = "native")]
 pub mod infra;
 pub mod meta;
 pub mod pod;
+#[cfg(feature = "native")]
+pub mod pod_native;
 
 #[cfg(all(test, feature = "native"))]
 pub(crate) mod test_support;

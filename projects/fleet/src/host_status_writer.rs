@@ -13,13 +13,13 @@
 //! only the first invocation actually starts a task.
 
 use anyhow::{Context, Result};
-use fleet::host_status::HostStatusRows;
+use crate::host_status::HostStatusRows;
 use std::sync::OnceLock;
 use std::time::Duration;
 use system::system::SystemStatusReport;
 use system::system_info_types::SystemInfoReport;
 
-use crate::pod::runtime_cache;
+use crate::pod_native::runtime_cache;
 
 /// How often the sync puller asks each peer for new status rows. Matches
 /// the persist cadence — pulling more often than peers write just burns
@@ -45,10 +45,10 @@ pub fn spawn_local_writer() {
             if let Err(e) = persist_local_snapshot().await {
                 tracing::warn!("host_status local writer: {e:#}");
             }
-            let next = crate::pod::subscribe_demand::choose_cadence(
-                crate::pod::subscribe_demand::is_live(),
-                crate::pod::subscribe_demand::FAST_CADENCE,
-                crate::pod::subscribe_demand::SLOW_CADENCE,
+            let next = crate::pod_native::subscribe_demand::choose_cadence(
+                crate::pod_native::subscribe_demand::is_live(),
+                crate::pod_native::subscribe_demand::FAST_CADENCE,
+                crate::pod_native::subscribe_demand::SLOW_CADENCE,
             );
             tokio::time::sleep(next).await;
         }
@@ -113,7 +113,7 @@ async fn persist_local_snapshot() -> Result<()> {
 
     // Fan out to in-process subscribers (UI sessions, mesh forwarder).
     // Best-effort: failures here don't roll back the DB write.
-    crate::pod::subscribe::publish_host_status(crate::pod::subscribe::HostStatusEvent {
+    crate::pod_native::subscribe::publish_host_status(crate::pod_native::subscribe::HostStatusEvent {
         peer_id,
         snapshot_at_unix: snapshot_at,
         payload,
@@ -167,7 +167,7 @@ async fn pull_one_peer_inner(peer_id: &str, addr: &str) -> Result<()> {
         let addr_owned = addr.to_string();
         tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
             let conn = db::open_default()?;
-            crate::pod::dialer::dial_targets_for_peer(&conn, &pid, &addr_owned)
+            crate::pod_native::dialer::dial_targets_for_peer(&conn, &pid, &addr_owned)
         })
         .await??
     };
@@ -177,7 +177,7 @@ async fn pull_one_peer_inner(peer_id: &str, addr: &str) -> Result<()> {
     // snapshot (display_name + per-channel addresses). Display name from the
     // snapshot wins; fall back to OS hostname for rc.≤24 peers.
     let ping_fut =
-        crate::pod::dialer::try_targets(&targets, |t| async move { crate::pod::ping(&t).await });
+        crate::pod_native::dialer::try_targets(&targets, |t| async move { crate::pod_native::ping(&t).await });
     if let Ok(Ok(pong)) = tokio::time::timeout(Duration::from_secs(5), ping_fut).await {
         let pid = peer_id.to_string();
         let host = pong
@@ -224,7 +224,7 @@ async fn pull_one_peer_inner(peer_id: &str, addr: &str) -> Result<()> {
     });
     let exec_res = tokio::time::timeout(
         Duration::from_secs(15),
-        crate::pod::exec(addr, "system.host.status.detail", args),
+        crate::pod_native::exec(addr, "system.host.status.detail", args),
     )
     .await
     .context("pod/exec timeout")??;
@@ -236,7 +236,7 @@ async fn pull_one_peer_inner(peer_id: &str, addr: &str) -> Result<()> {
     // cache entry is a UI nicety.
     if let Ok(Ok(detail_res)) = tokio::time::timeout(
         Duration::from_secs(5),
-        crate::pod::exec(addr, "system.detail", serde_json::json!({})),
+        crate::pod_native::exec(addr, "system.detail", serde_json::json!({})),
     )
     .await
         && let Ok(detail) = serde_json::from_value::<SystemStatusReport>(detail_res.result)

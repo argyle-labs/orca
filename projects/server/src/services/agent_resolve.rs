@@ -32,7 +32,7 @@ pub fn load_agent_prompt(name: &str, config: &Config) -> Option<String> {
 
 fn active_profile_agents_dir(config: &Config) -> Option<PathBuf> {
     let conn = db::open(&config.db_path).ok()?;
-    let mgr = crate::profile::ProfileManager::from_config(config);
+    let mgr = platform::profile_manager::ProfileManager::from_config(config);
     let active = mgr.resolve_active(&conn, LOCAL_USER).ok().flatten()?;
     Some(active.agents_dir())
 }

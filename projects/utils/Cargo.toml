@@ -33,6 +33,9 @@ rust-embed = { workspace = true }
 # Hashing (fs module)
 blake3 = "1"
 
+# Markdown stripping (markdown module)
+regex = { workspace = true }
+
 # Filesystem watch (fs module)
 notify = "8"
 

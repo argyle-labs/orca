@@ -21,14 +21,14 @@
 //! both as sources and as merge targets.
 
 use anyhow::Result;
-use fleet::pod::{PodPeerDto, PodPeerListOutput};
+use crate::pod::{PodPeerDto, PodPeerListOutput};
 use orca_sdk::pki;
 use rusqlite::OptionalExtension;
 use std::time::Duration;
 use tracing::{info, warn};
 
 use super::{db as pdb, pki_dir};
-use crate::periodic;
+use system::periodic;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(60);
 

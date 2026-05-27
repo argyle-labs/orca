@@ -10,7 +10,7 @@ use platform::profile::{
 };
 use std::sync::Arc;
 
-use crate::profile::{ProfileManager, Role};
+use platform::profile_manager::{ProfileManager, Role};
 
 fn user_id() -> String {
     LOCAL_USER.to_string()
@@ -27,7 +27,7 @@ impl ServerProfile {
         Ok((conn, mgr))
     }
 
-    fn summary(p: &crate::profile::Profile, active_id: Option<&str>) -> ProfileSummary {
+    fn summary(p: &platform::profile_manager::Profile, active_id: Option<&str>) -> ProfileSummary {
         ProfileSummary {
             id: p.id.clone(),
             name: p.name.clone(),

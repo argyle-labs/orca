@@ -283,7 +283,7 @@ pub fn refresh_and_persist(conn: &Connection) -> Result<()> {
 /// `fleet::host` so `host.refresh` can drive the real detect path
 /// without the domain crate depending on the server's process-level statics.
 pub struct ServerHostRefreshHook;
-impl fleet::host::HostRefreshHook for ServerHostRefreshHook {
+impl crate::host::HostRefreshHook for ServerHostRefreshHook {
     fn refresh(&self, conn: &db::Conn) -> Result<()> {
         refresh_and_persist(conn)
     }
@@ -295,13 +295,13 @@ impl fleet::host::HostRefreshHook for ServerHostRefreshHook {
 pub fn spawn_refresh_task() -> tokio::task::JoinHandle<()> {
     use std::time::Duration;
     const TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
-    crate::periodic::spawn(
-        crate::periodic::PeriodicSpec {
+    system::periodic::spawn(
+        system::periodic::PeriodicSpec {
             name: "host.identity.refresh.run",
             initial_delay: Duration::ZERO,
             interval: TICK_INTERVAL,
         },
-        crate::periodic::boxed(|| async move {
+        system::periodic::boxed(|| async move {
             let conn = db::open_default()?;
             refresh_and_persist(&conn)?;
             tracing::trace!("[host-addressing] refreshed");

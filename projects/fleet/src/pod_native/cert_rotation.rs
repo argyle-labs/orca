@@ -30,7 +30,7 @@ use tokio_rustls::TlsConnector;
 use tracing::{info, warn};
 
 use super::{db as pdb, pki_dir};
-use crate::periodic;
+use system::periodic;
 
 /// Once per day. Cheap (one cert parse + a comparison), and a stale cert
 /// check on this cadence covers a 7-day refresh threshold comfortably.

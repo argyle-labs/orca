@@ -22,6 +22,8 @@ mod erased;
 mod inventory_slice;
 pub mod openapi;
 mod registry;
+pub mod remote_ok;
+pub mod tool_roles;
 
 pub use erased::{ErasedTool, ToolWrapper, value_to_text};
 pub use inventory_slice::ToolRegistration;

@@ -27,7 +27,6 @@ pub mod daemon;
 pub mod dev_serve;
 pub mod hook_cmd;
 pub mod package;
-pub mod pod;
 pub mod spec;
 pub mod system;
 pub mod update;

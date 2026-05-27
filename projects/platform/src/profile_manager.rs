@@ -107,7 +107,7 @@ impl Profile {
         self.root.join("dashboards")
     }
 
-    fn from_row(row: db::profiles::ProfileRow, profiles_root: &Path) -> Self {
+    fn from_row(row: orca_db::profiles::ProfileRow, profiles_root: &Path) -> Self {
         let root = profiles_root.join(&row.id);
         Self {
             id: row.id,
@@ -157,13 +157,13 @@ impl ProfileManager {
         name: &str,
         description: Option<&str>,
     ) -> Result<Profile, ProfileError> {
-        if let Some(_existing) = db::profiles::get_by_owner_and_name(conn, owner_user_id, name)
+        if let Some(_existing) = orca_db::profiles::get_by_owner_and_name(conn, owner_user_id, name)
             .map_err(ProfileError::Other)?
         {
             return Err(ProfileError::NameTaken(name.to_string()));
         }
         let id = Uuid::now_v7().to_string();
-        let row = db::profiles::create(conn, &id, name, owner_user_id, description)
+        let row = orca_db::profiles::create(conn, &id, name, owner_user_id, description)
             .map_err(ProfileError::Other)?;
         let profile = Profile::from_row(row, &self.profiles_root);
         profile.ensure_dirs().map_err(ProfileError::Other)?;
@@ -186,7 +186,7 @@ impl ProfileManager {
                 profile: profile_id.to_string(),
             });
         }
-        let row = db::profiles::get(conn, profile_id)
+        let row = orca_db::profiles::get(conn, profile_id)
             .map_err(ProfileError::Other)?
             .ok_or_else(|| ProfileError::NotFound(profile_id.to_string()))?;
         Ok(Profile::from_row(row, &self.profiles_root))
@@ -201,7 +201,7 @@ impl ProfileManager {
         owner_user_id: &str,
         name: &str,
     ) -> Result<Option<Profile>, ProfileError> {
-        let row = db::profiles::get_by_owner_and_name(conn, owner_user_id, name)
+        let row = orca_db::profiles::get_by_owner_and_name(conn, owner_user_id, name)
             .map_err(ProfileError::Other)?;
         Ok(row.map(|r| Profile::from_row(r, &self.profiles_root)))
     }
@@ -212,7 +212,7 @@ impl ProfileManager {
         conn: &Connection,
         user_id: &str,
     ) -> Result<Vec<Profile>, ProfileError> {
-        let rows = db::profiles::list_for_user(conn, user_id).map_err(ProfileError::Other)?;
+        let rows = orca_db::profiles::list_for_user(conn, user_id).map_err(ProfileError::Other)?;
         Ok(rows
             .into_iter()
             .map(|r| Profile::from_row(r, &self.profiles_root))
@@ -227,7 +227,7 @@ impl ProfileManager {
         user_id: &str,
     ) -> Result<Access, ProfileError> {
         let role =
-            db::profiles::role_for_user(conn, profile_id, user_id).map_err(ProfileError::Other)?;
+            orca_db::profiles::role_for_user(conn, profile_id, user_id).map_err(ProfileError::Other)?;
         Ok(match role.as_deref() {
             Some("owner") => Access::Owner,
             Some("viewer") => Access::Viewer,
@@ -252,7 +252,7 @@ impl ProfileManager {
                 profile: profile_id.to_string(),
             });
         }
-        if !db::profiles::update(conn, profile_id, name, description)
+        if !orca_db::profiles::update(conn, profile_id, name, description)
             .map_err(ProfileError::Other)?
         {
             return Err(ProfileError::NotFound(profile_id.to_string()));
@@ -274,7 +274,7 @@ impl ProfileManager {
                 profile: profile_id.to_string(),
             });
         }
-        if !db::profiles::delete(conn, profile_id).map_err(ProfileError::Other)? {
+        if !orca_db::profiles::delete(conn, profile_id).map_err(ProfileError::Other)? {
             return Err(ProfileError::NotFound(profile_id.to_string()));
         }
         let dir = self.profiles_root.join(profile_id);
@@ -305,7 +305,7 @@ impl ProfileManager {
                 "cannot share with self (you are the owner)"
             )));
         }
-        db::profiles::share(conn, profile_id, with_user_id, role.as_str())
+        orca_db::profiles::share(conn, profile_id, with_user_id, role.as_str())
             .map_err(ProfileError::Other)?;
         Ok(())
     }
@@ -325,7 +325,7 @@ impl ProfileManager {
                 profile: profile_id.to_string(),
             });
         }
-        db::profiles::unshare(conn, profile_id, with_user_id).map_err(ProfileError::Other)
+        orca_db::profiles::unshare(conn, profile_id, with_user_id).map_err(ProfileError::Other)
     }
 
     /// List sharees and their roles. Requires admin (owner).
@@ -342,7 +342,7 @@ impl ProfileManager {
                 profile: profile_id.to_string(),
             });
         }
-        let rows = db::profiles::list_shares(conn, profile_id).map_err(ProfileError::Other)?;
+        let rows = orca_db::profiles::list_shares(conn, profile_id).map_err(ProfileError::Other)?;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let role = Role::parse(&row.role)
@@ -366,7 +366,7 @@ impl ProfileManager {
                 profile: profile_id.to_string(),
             });
         }
-        db::profiles::set_active(conn, user_id, profile_id).map_err(ProfileError::Other)?;
+        orca_db::profiles::set_active(conn, user_id, profile_id).map_err(ProfileError::Other)?;
         Ok(())
     }
 
@@ -384,7 +384,7 @@ impl ProfileManager {
             return Ok(Some(p));
         }
         // 2. Persisted active selection
-        if let Some(id) = db::profiles::get_active(conn, user_id).map_err(ProfileError::Other)? {
+        if let Some(id) = orca_db::profiles::get_active(conn, user_id).map_err(ProfileError::Other)? {
             // ACL-check; if access lapsed, fall through.
             if let Ok(p) = self.get(conn, &id, user_id) {
                 return Ok(Some(p));
@@ -428,7 +428,7 @@ impl ProfileManager {
             "default",
             Some("Default profile created on first run"),
         )?;
-        db::profiles::set_active(conn, owner_user_id, &p.id).map_err(ProfileError::Other)?;
+        orca_db::profiles::set_active(conn, owner_user_id, &p.id).map_err(ProfileError::Other)?;
         Ok(p)
     }
 
@@ -449,7 +449,7 @@ impl ProfileManager {
                 profile: profile_id.to_string(),
             });
         }
-        db::profile_creds::set(conn, profile_id, key, value).map_err(ProfileError::Other)?;
+        orca_db::profile_creds::set(conn, profile_id, key, value).map_err(ProfileError::Other)?;
         Ok(())
     }
 
@@ -468,7 +468,7 @@ impl ProfileManager {
                 profile: profile_id.to_string(),
             });
         }
-        db::profile_creds::get(conn, profile_id, key).map_err(ProfileError::Other)
+        orca_db::profile_creds::get(conn, profile_id, key).map_err(ProfileError::Other)
     }
 }
 
@@ -477,12 +477,12 @@ mod tests {
     use super::*;
 
     /// Open a fresh DB with full schema applied. Uses an unencrypted on-disk
-    /// file in a tempdir because `db::open_unencrypted` is the public entry
+    /// file in a tempdir because `orca_db::open_unencrypted` is the public entry
     /// point that runs both `apply_schema` and pending migrations.
     fn test_conn() -> (Connection, tempfile::TempDir) {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("test.db");
-        let conn = db::open_unencrypted(&path).expect("open_unencrypted");
+        let conn = orca_db::open_unencrypted(&path).expect("open_unencrypted");
         (conn, tmp)
     }
 

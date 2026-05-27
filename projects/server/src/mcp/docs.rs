@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::markdown::to_llm_text;
+use orca_utils::markdown::to_llm_text;
 use crate::serve::tree::{TreeNode, build_tree_raw};
 
 pub struct DocRoot {
@@ -171,7 +171,7 @@ pub fn list_roots(config: &Config) -> Result<String> {
         "root": "docs",
         "path": "(embedded in binary)",
         "exists": true,
-        "docs": crate::docs::file_count()
+        "docs": ::docs::embedded::file_count()
     }));
     Ok(serde_json::to_string_pretty(&entries)?)
 }
@@ -182,7 +182,7 @@ pub fn get_tree(args: &Value, config: &Config) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("root is required"))?;
 
     if root_name == "docs" {
-        return Ok(serde_json::to_string_pretty(&crate::docs::tree())?);
+        return Ok(serde_json::to_string_pretty(&::docs::embedded::tree())?);
     }
 
     let sub_path = args["path"].as_str();
@@ -212,7 +212,7 @@ pub fn read_doc(args: &Value, config: &Config) -> Result<String> {
     let apply = |s: String| if llm_mode { to_llm_text(&s) } else { s };
 
     if root_name == "docs" {
-        return crate::docs::read(doc_path)
+        return ::docs::embedded::read(doc_path)
             .map(apply)
             .ok_or_else(|| anyhow::anyhow!("not found: docs/{doc_path}"));
     }
@@ -277,7 +277,7 @@ pub fn search_docs(args: &Value, config: &Config) -> Result<String> {
     }
 
     if filter == "all" || filter == "docs" {
-        for (path, matches) in crate::docs::search(query) {
+        for (path, matches) in ::docs::embedded::search(query) {
             let matches: Vec<String> = matches
                 .into_iter()
                 .map(|l| {

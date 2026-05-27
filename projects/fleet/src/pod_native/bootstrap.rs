@@ -166,7 +166,7 @@ pub async fn handle_pod_bootstrap_connection(
     // Ack is on the wire — now safe to dial back for auto-accept.
     if let Some(code) = auto_accept_code {
         tokio::spawn(async move {
-            if let Err(e) = crate::commands::pod::cmd_pod_accept(&code).await {
+            if let Err(e) = crate::cli::cmd_pod_accept(&code).await {
                 warn!("[pod-bootstrap] auto-accept failed: {e:#}");
             } else {
                 info!("[pod-bootstrap] auto-accept succeeded");
@@ -408,10 +408,10 @@ fn handle_request_offer(
         );
     }
 
-    let code = crate::pod::scheduler::mint_pairing_code();
+    let code = crate::pod_native::scheduler::mint_pairing_code();
     let code_hash = pdb::hash_code(&code);
     let offer_id = Uuid::now_v7().to_string();
-    let expires_at = now_secs() + crate::pod::scheduler::OFFER_TTL_SECS;
+    let expires_at = now_secs() + crate::pod_native::scheduler::OFFER_TTL_SECS;
     // Persist the inviter's own peer_id on the pending offer so the matching
     // `pod/join-confirm` step can echo it back to the joiner. Without this
     // the joiner records the inviter as `"unknown"` and roster-sync skips
@@ -429,7 +429,7 @@ fn handle_request_offer(
         None,
         Some(&inviter_peer_id),
         None,
-        crate::pod::scheduler::OFFER_TTL_SECS,
+        crate::pod_native::scheduler::OFFER_TTL_SECS,
         None,
     )?;
 

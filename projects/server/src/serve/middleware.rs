@@ -485,11 +485,11 @@ pub(crate) fn check_tool_role(path: &str, caller_role: Option<&str>) -> ToolRole
     let Some(tool) = tool_name_from_path(path) else {
         return ToolRoleCheck::Pass;
     };
-    let required = crate::tool_roles::required_role(tool);
+    let required = orca_dispatch::tool_roles::required_role(tool);
     if required == "any" {
         return ToolRoleCheck::Pass;
     }
-    if crate::tool_roles::satisfies(caller_role.unwrap_or(""), required) {
+    if orca_dispatch::tool_roles::satisfies(caller_role.unwrap_or(""), required) {
         return ToolRoleCheck::Pass;
     }
     ToolRoleCheck::Forbidden {
@@ -1236,8 +1236,8 @@ mod tests {
     #[test]
     fn check_tool_role_admin_branches() {
         // Best-effort install; first-call-wins across the test binary.
-        crate::tool_roles::install([("check_tool_role_test.admin_only", "admin")]);
-        if crate::tool_roles::required_role("check_tool_role_test.admin_only") != "admin" {
+        orca_dispatch::tool_roles::install([("check_tool_role_test.admin_only", "admin")]);
+        if orca_dispatch::tool_roles::required_role("check_tool_role_test.admin_only") != "admin" {
             // Another test owned the global before us; can't drive the admin
             // branches deterministically. Pure-function correctness for the
             // admin paths is still covered via tool_roles::satisfies in

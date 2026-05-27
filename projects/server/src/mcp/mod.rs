@@ -66,12 +66,12 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     // Host-addressing refresh hook: host.refresh tool calls into this to
     // trigger a fresh detect + persist before reading host_addressing rows.
     let host_refresh: Arc<dyn fleet::host::HostRefreshHook + Send + Sync> =
-        Arc::new(crate::host_identity::ServerHostRefreshHook);
+        Arc::new(fleet::host_identity::ServerHostRefreshHook);
     ctx.register_service(host_refresh);
     let pod_svc: Arc<dyn fleet::pod::PodService> = Arc::new(crate::services::pod::ServerPod);
     ctx.register_service(pod_svc);
-    crate::remote_ok::install(orca_dispatch::remote_ok_names());
-    crate::tool_roles::install(orca_dispatch::role_table());
+    orca_dispatch::remote_ok::install(orca_dispatch::remote_ok_names());
+    orca_dispatch::tool_roles::install(orca_dispatch::role_table());
     ctx
 }
 

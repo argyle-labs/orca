@@ -11,7 +11,7 @@ use docs::docs::{
 use orca_utils::config::Config;
 use std::sync::Arc;
 
-use crate::markdown::to_llm_text;
+use orca_utils::markdown::to_llm_text;
 use crate::mcp::docs as docs_mod;
 use crate::serve::tree::{NodeType, TreeNode};
 use ::llm::local as local_llm;
@@ -67,15 +67,15 @@ impl DocsService for ServerDocs {
             name: "docs".to_string(),
             path: "(embedded in binary)".to_string(),
             exists: true,
-            doc_count: crate::docs::file_count(),
+            doc_count: ::docs::embedded::file_count(),
         });
         Ok(out)
     }
 
     async fn get_tree(&self, root: &str, path: Option<&str>) -> Result<Vec<DocTreeNodeData>> {
         if root == "docs" {
-            let tree_value = crate::docs::tree();
-            // crate::docs::tree() returns serde_json::Value array of nodes.
+            let tree_value = ::docs::embedded::tree();
+            // ::docs::embedded::tree() returns serde_json::Value array of nodes.
             let arr = tree_value.as_array().cloned().unwrap_or_default();
             return Ok(arr
                 .iter()
@@ -124,7 +124,7 @@ impl DocsService for ServerDocs {
         let apply = |s: String| if llm_format { to_llm_text(&s) } else { s };
 
         if root == "docs" {
-            return crate::docs::read(path)
+            return ::docs::embedded::read(path)
                 .map(apply)
                 .ok_or_else(|| anyhow::anyhow!("not found: docs/{path}"));
         }
@@ -194,7 +194,7 @@ impl DocsService for ServerDocs {
         }
 
         if filter == "all" || filter == "docs" {
-            for (path, line_matches) in crate::docs::search(query) {
+            for (path, line_matches) in ::docs::embedded::search(query) {
                 let matches: Vec<SearchDocMatch> = line_matches
                     .into_iter()
                     .enumerate()

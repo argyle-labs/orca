@@ -54,7 +54,7 @@ pub struct HostStatusDetailArgs {
 }
 
 #[cfg(feature = "native")]
-fn rows_to_dtos(rows: Vec<orca_db::host_status::HostStatusRow>) -> Vec<HostStatusRowDto> {
+fn rows_to_dtos(rows: Vec<db::host_status::HostStatusRow>) -> Vec<HostStatusRowDto> {
     rows.into_iter()
         .map(|r| {
             let system = serde_json::from_str::<SystemInfoReport>(&r.payload_json).ok();
@@ -75,8 +75,8 @@ async fn host_status_list(
     _args: HostStatusRowsArgs,
     _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<HostStatusRows> {
-    let conn = orca_db::open_default()?;
-    let rows = orca_db::host_status::latest_per_peer(&conn)?;
+    let conn = db::open_default()?;
+    let rows = db::host_status::latest_per_peer(&conn)?;
     Ok(HostStatusRows(rows_to_dtos(rows)))
 }
 
@@ -87,9 +87,9 @@ async fn host_status_detail(
     args: HostStatusDetailArgs,
     _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<HostStatusRows> {
-    let conn = orca_db::open_default()?;
+    let conn = db::open_default()?;
     let limit = args.limit.unwrap_or(256) as usize;
-    let rows = orca_db::host_status::rows_for_peer(&conn, &args.peer_id, args.since_unix, limit)?;
+    let rows = db::host_status::rows_for_peer(&conn, &args.peer_id, args.since_unix, limit)?;
     Ok(HostStatusRows(rows_to_dtos(rows)))
 }
 
@@ -102,16 +102,16 @@ mod tests {
         chrono::Utc::now().timestamp()
     }
 
-    fn seed(conn: &orca_db::Conn) {
+    fn seed(conn: &db::Conn) {
         // Two peers, multiple rows each, one with malformed payload to exercise
         // the `system = None` branch. Use recent timestamps so age-based pruning
         // doesn't evict them.
         let t = now();
-        orca_db::host_status::insert_status(conn, "alpha", t - 200, "not json at all", t, "local")
+        db::host_status::insert_status(conn, "alpha", t - 200, "not json at all", t, "local")
             .unwrap();
-        orca_db::host_status::insert_status(conn, "alpha", t - 100, "not json at all", t, "local")
+        db::host_status::insert_status(conn, "alpha", t - 100, "not json at all", t, "local")
             .unwrap();
-        orca_db::host_status::insert_status(conn, "beta", t - 150, "not json at all", t, "synced")
+        db::host_status::insert_status(conn, "beta", t - 150, "not json at all", t, "synced")
             .unwrap();
     }
 
@@ -119,9 +119,9 @@ mod tests {
     async fn host_status_list_returns_latest_per_peer() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = empty_ctx();
-        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+        db::with_db_path(tmp.path().to_path_buf(), async move {
             let t = now();
-            seed(&orca_db::open_default().unwrap());
+            seed(&db::open_default().unwrap());
             let out = host_status_list(HostStatusRowsArgs {}, &ctx).await.unwrap();
             let mut by_peer: std::collections::HashMap<_, _> =
                 out.0.iter().map(|r| (r.peer_id.clone(), r)).collect();
@@ -137,9 +137,9 @@ mod tests {
     async fn host_status_detail_returns_history_newest_first() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = empty_ctx();
-        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+        db::with_db_path(tmp.path().to_path_buf(), async move {
             let t = now();
-            seed(&orca_db::open_default().unwrap());
+            seed(&db::open_default().unwrap());
             let out = host_status_detail(
                 HostStatusDetailArgs {
                     peer_id: "alpha".into(),
@@ -162,9 +162,9 @@ mod tests {
     async fn host_status_detail_honors_since_unix_watermark() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = empty_ctx();
-        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+        db::with_db_path(tmp.path().to_path_buf(), async move {
             let t = now();
-            seed(&orca_db::open_default().unwrap());
+            seed(&db::open_default().unwrap());
             // watermark between the two alpha rows; only t-100 survives.
             let out = host_status_detail(
                 HostStatusDetailArgs {
@@ -186,9 +186,9 @@ mod tests {
     async fn host_status_detail_honors_limit() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = empty_ctx();
-        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+        db::with_db_path(tmp.path().to_path_buf(), async move {
             let t = now();
-            seed(&orca_db::open_default().unwrap());
+            seed(&db::open_default().unwrap());
             let out = host_status_detail(
                 HostStatusDetailArgs {
                     peer_id: "alpha".into(),
@@ -209,8 +209,8 @@ mod tests {
     async fn host_status_detail_unknown_peer_is_empty() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = empty_ctx();
-        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
-            seed(&orca_db::open_default().unwrap());
+        db::with_db_path(tmp.path().to_path_buf(), async move {
+            seed(&db::open_default().unwrap());
             let out = host_status_detail(
                 HostStatusDetailArgs {
                     peer_id: "nope".into(),

@@ -92,9 +92,9 @@ pub async fn handle_pod_connection(
     // pod/subscribe takes over the stream for the rest of the connection:
     // one request → ack → streamed events until close. The normal one-shot
     // request/response path below is bypassed.
-    if request.method == crate::pod::subscribe_wire::METHOD {
+    if request.method == crate::pod_native::subscribe_wire::METHOD {
         let own_peer_id = format!("peer.{}", crate::host_identity::machine_id_short());
-        return crate::pod::subscribe_wire::serve_session_with_request(tls, request, &own_peer_id)
+        return crate::pod_native::subscribe_wire::serve_session_with_request(tls, request, &own_peer_id)
             .await;
     }
 
@@ -353,15 +353,15 @@ async fn handle_exec(request: Request) -> Result<PodExecResult> {
 
     authorize_exec(
         &params.tool,
-        crate::remote_ok::is_allowed(&params.tool),
-        crate::tool_roles::required_role(&params.tool),
+        orca_dispatch::remote_ok::is_allowed(&params.tool),
+        orca_dispatch::tool_roles::required_role(&params.tool),
     )?;
 
     // Direct in-process dispatch through the shared registry — no HTTPS
     // loopback. Authorization is enforced by `authorize_exec` above (REMOTE_OK
     // allowlist + mTLS peer certificate). Admin-role tools tagged remote_ok are
     // reachable from trusted peers; the pod join handshake is the admin gate.
-    let result = crate::pod::dispatcher::dispatch(&params.tool, params.args.clone())
+    let result = crate::pod_native::dispatcher::dispatch(&params.tool, params.args.clone())
         .await
         .with_context(|| format!("dispatch pod-relayed tool '{}'", params.tool))?;
 

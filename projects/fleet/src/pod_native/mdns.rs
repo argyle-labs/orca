@@ -201,7 +201,7 @@ fn handle_event(event: ServiceEvent, our_instance: &str) {
             return;
         }
     };
-    if let Err(e) = crate::pod::db::upsert_discovery(
+    if let Err(e) = crate::pod_native::db::upsert_discovery(
         &conn,
         &pubkey_fp,
         peer_id.as_deref(),
@@ -231,7 +231,7 @@ pub fn build_advertisement(pki_dir: PathBuf, port: u16) -> Result<Advertisement>
     // pod_id + self_secure from DB; failures non-fatal (we just advertise unclaimed).
     let (pod_id, self_secure) = match db::open_default() {
         Ok(conn) => (
-            crate::pod::db::get_pod_id(&conn).unwrap_or(None),
+            crate::pod_native::db::get_pod_id(&conn).unwrap_or(None),
             db::pod::get_self_secure(&conn).unwrap_or(false),
         ),
         Err(_) => (None, false),

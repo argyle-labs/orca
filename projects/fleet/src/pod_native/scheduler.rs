@@ -29,7 +29,7 @@ use tokio_rustls::TlsConnector;
 use tracing::{info, warn};
 
 use super::{db as pdb, pki_dir};
-use crate::periodic;
+use system::periodic;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(15);
 pub const OFFER_TTL_SECS: i64 = 600;

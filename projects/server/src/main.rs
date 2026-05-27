@@ -352,7 +352,7 @@ async fn main() -> Result<()> {
                 // OrcaTool-routed CLI commands bypass the legacy main()
                 // path's init; do it here so any tool that touches
                 // host_identity (e.g. pod.offer → push_offer) is safe.
-                orca::host_identity::init(&config.app_dir)?;
+                fleet::host_identity::init(&config.app_dir)?;
                 let rest = rest_args.to_vec();
                 return dispatch_op(rest, config).await;
             }
@@ -372,7 +372,7 @@ async fn main() -> Result<()> {
     // Capture hostname + load/generate machine_id once at startup so all
     // downstream code (mDNS, pod scheduler, cert rotation) sees a stable
     // identity regardless of OS hostname churn.
-    orca::host_identity::init(&config.app_dir)?;
+    fleet::host_identity::init(&config.app_dir)?;
     // Run TOML → DB migrations and auto-registration of detected runtimes.
     db::startup::init(&config);
     // Load API key from encrypted DB when not set via environment variable.
@@ -449,22 +449,22 @@ async fn main() -> Result<()> {
         }
         Some(Command::Pod { action }) => match action {
             PodAction::Init => {
-                let pki = orca::pod::pki_dir();
+                let pki = fleet::pod_native::pki_dir();
                 // CN = stable machine_id (display hostname is held separately).
-                let host = orca::host_identity::machine_id_short().to_string();
+                let host = fleet::host_identity::machine_id_short().to_string();
                 orca_sdk::pki::init_mesh_ca(&pki, &host)?;
                 // Ensure the bootstrap identity (Ed25519 key + self-signed
                 // cert) is present from the moment this host is poddable.
                 orca_sdk::pki::load_or_init_bootstrap_cert(&pki)?;
                 let conn = db::open_default()?;
-                orca::pod::db::set_self_secure(&conn, true)?;
+                fleet::pod_native::db::set_self_secure(&conn, true)?;
                 let pod_id = uuid::Uuid::now_v7().to_string()[..8].to_string();
-                orca::pod::db::set_pod_id(&conn, &pod_id)?;
+                fleet::pod_native::db::set_pod_id(&conn, &pod_id)?;
                 println!("✓ mesh CA initialized at {}", pki.join("mesh").display());
                 println!("  pod id: {pod_id}");
                 println!(
                     "  founder peer id: peer.{host}  (machine_id; display: {})",
-                    orca::host_identity::hostname()
+                    fleet::host_identity::hostname()
                 );
                 println!("  self_secure: true (secrets storage enabled)");
                 println!(
@@ -475,39 +475,39 @@ async fn main() -> Result<()> {
                 Ok(())
             }
             PodAction::Ping { host } => {
-                let result = orca::pod::ping(&host).await?;
+                let result = fleet::pod_native::ping(&host).await?;
                 println!("✓ {host} responded:");
                 println!("  peer_id: {}", result.peer_id);
                 println!("  hostname: {}", result.hostname);
                 println!("  version: {}", result.version);
                 Ok(())
             }
-            PodAction::Discover => cmd::pod::cmd_pod_discover(),
-            PodAction::Pending => cmd::pod::cmd_pod_pending(),
-            PodAction::Accept { code } => cmd::pod::cmd_pod_accept(&code).await,
-            PodAction::Connect { addr } => cmd::pod::cmd_pod_connect(&addr).await,
-            PodAction::Join { addr } => cmd::pod::cmd_pod_join(&addr).await,
-            PodAction::Offer { addr } => cmd::pod::cmd_pod_offer(&addr).await,
-            PodAction::Pair { addr } => cmd::pod::cmd_pod_pair(&addr).await,
-            PodAction::List => cmd::pod::cmd_pod_list(),
+            PodAction::Discover => fleet::cli::cmd_pod_discover(),
+            PodAction::Pending => fleet::cli::cmd_pod_pending(),
+            PodAction::Accept { code } => fleet::cli::cmd_pod_accept(&code).await,
+            PodAction::Connect { addr } => fleet::cli::cmd_pod_connect(&addr).await,
+            PodAction::Join { addr } => fleet::cli::cmd_pod_join(&addr).await,
+            PodAction::Offer { addr } => fleet::cli::cmd_pod_offer(&addr).await,
+            PodAction::Pair { addr } => fleet::cli::cmd_pod_pair(&addr).await,
+            PodAction::List => fleet::cli::cmd_pod_list(),
             PodAction::Trust { peer_id, state } => {
-                cmd::pod::cmd_pod_trust(&peer_id, state == "on").await
+                fleet::cli::cmd_pod_trust(&peer_id, state == "on").await
             }
             PodAction::SelfSecure { state } => {
-                use cmd::pod::SelfSecureAction;
+                use fleet::cli::SelfSecureAction;
                 let action = match state.as_str() {
                     "on" => SelfSecureAction::On,
                     "off" => SelfSecureAction::Off,
                     _ => SelfSecureAction::Show,
                 };
-                cmd::pod::cmd_pod_self_secure(action)
+                fleet::cli::cmd_pod_self_secure(action)
             }
-            PodAction::CertStatus => cmd::pod::cmd_pod_cert_status(),
-            PodAction::CaRotate { overlap_days } => cmd::pod::cmd_pod_ca_rotate(overlap_days).await,
+            PodAction::CertStatus => fleet::cli::cmd_pod_cert_status(),
+            PodAction::CaRotate { overlap_days } => fleet::cli::cmd_pod_ca_rotate(overlap_days).await,
             PodAction::Leave {
                 wipe_secrets,
                 wipe_all,
-            } => cmd::pod::cmd_pod_leave(wipe_secrets, wipe_all).await,
+            } => fleet::cli::cmd_pod_leave(wipe_secrets, wipe_all).await,
         },
         Some(Command::Spec { action }) => match action {
             SpecAction::Dump => {
@@ -550,7 +550,7 @@ async fn main() -> Result<()> {
 /// Idempotent on subsequent invocations.
 fn bootstrap_default_profile(config: &Config) -> Result<()> {
     let conn = db::open(&config.db_path)?;
-    let mgr = orca::profile::ProfileManager::from_config(config);
+    let mgr = platform::profile_manager::ProfileManager::from_config(config);
     let p = mgr.ensure_default_for(&conn, orca_utils::config::LOCAL_USER)?;
     tracing::trace!(profile_id = %p.id, "active profile resolved");
     Ok(())
