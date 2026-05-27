@@ -54,7 +54,7 @@ async fn system_diagnostic_list(
         );
     }
 
-    let embedded = crate::agents::list_embedded_agents();
+    let embedded = agents::embedded::list_embedded_agents();
     push(
         &mut entries,
         "agents",

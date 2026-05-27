@@ -18,7 +18,7 @@ pub struct ServerAgents {
 #[async_trait]
 impl AgentsService for ServerAgents {
     async fn list_agents(&self) -> Result<Vec<AgentInfo>> {
-        Ok(crate::agents::list_embedded_agents()
+        Ok(agents::embedded::list_embedded_agents()
             .into_iter()
             .map(|(name, description)| AgentInfo { name, description })
             .collect())

@@ -55,7 +55,7 @@ pub fn migrate_personal_agents_to_profile(conn: &Connection, profile: &Profile) 
         if dest.exists() {
             continue;
         }
-        let Some(raw) = crate::agents::embedded_agent_raw(name) else {
+        let Some(raw) = agents::embedded::embedded_agent_raw(name) else {
             tracing::debug!(
                 agent = name,
                 "personal-agent migration: no embedded copy (already removed?)"
@@ -116,7 +116,7 @@ mod tests {
         // Each successfully-migrated agent now exists on disk.
         for name in PERSONAL_AGENTS {
             let path = p.agents_dir().join(format!("{name}.md"));
-            if crate::agents::embedded_agent_raw(name).is_some() {
+            if agents::embedded::embedded_agent_raw(name).is_some() {
                 assert!(path.exists(), "expected {name}.md on disk after migration");
             }
         }

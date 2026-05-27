@@ -2,6 +2,7 @@
 name = "agents"
 version.workspace = true
 edition.workspace = true
+build = "build.rs"
 
 [lib]
 name = "agents"

@@ -27,7 +27,7 @@ pub fn agent_search_dirs(config: &Config) -> Vec<PathBuf> {
 pub fn load_agent_prompt(name: &str, config: &Config) -> Option<String> {
     let dirs = agent_search_dirs(config);
     let refs: Vec<&std::path::Path> = dirs.iter().map(|p| p.as_path()).collect();
-    crate::agents::load_agent_prompt_from_dirs(name, &refs)
+    agents::embedded::load_agent_prompt_from_dirs(name, &refs)
 }
 
 fn active_profile_agents_dir(config: &Config) -> Option<PathBuf> {

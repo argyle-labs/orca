@@ -9,7 +9,6 @@
 //! - `tui`      — split-pane terminal UI (crossterm/ratatui), keybindings, layout
 
 // Absorbed crates — each previously had its own workspace member.
-pub mod agents;
 pub mod commands;
 pub mod conversation;
 pub mod docs;

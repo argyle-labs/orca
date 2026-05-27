@@ -18,17 +18,7 @@ fn main() {
     println!("cargo:rerun-if-changed={manifest}/../../.git/HEAD");
     println!("cargo:rerun-if-changed={manifest}/../../.git/index");
 
-    // Embed agent .md prompts (was projects/agents/build.rs).
-    let agents_dir =
-        env::var("ORCA_AGENTS_DIR").unwrap_or_else(|_| format!("{manifest}/src/agents/agents"));
-    write_embedded_map(
-        Path::new(&agents_dir),
-        Path::new(&out_dir).join("embedded_agents.rs"),
-        "embedded_agent",
-        "embedded_agent_names",
-        "Agent",
-    );
-    println!("cargo:rerun-if-env-changed=ORCA_AGENTS_DIR");
+    // Agent .md embedding moved to projects/agents/build.rs.
 
     // Embed slash-command .md prompts (was projects/commands/build.rs).
     let commands_dir = env::var("ORCA_COMMANDS_DIR")

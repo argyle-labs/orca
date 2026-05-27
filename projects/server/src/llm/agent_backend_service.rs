@@ -45,7 +45,7 @@ impl AgentBackendService for ServerAgentBackend {
     }
 
     async fn agent_exists(&self, agent: &str) -> Result<bool> {
-        Ok(crate::agents::list_embedded_agents()
+        Ok(agents::embedded::list_embedded_agents()
             .iter()
             .any(|(name, _)| name == agent))
     }
