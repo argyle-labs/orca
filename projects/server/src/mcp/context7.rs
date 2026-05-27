@@ -6,7 +6,7 @@ use serde_json::Value;
 /// Proxy a context7 tool call through the configured context7 MCP server.
 /// Discovers the server dynamically from the DB-backed McpPool.
 pub async fn proxy_context7(tool: &str, args: &Value, config: &Config) -> Result<String> {
-    use crate::serve::mcp_client::McpPool;
+    use ::mcp::client::McpPool;
 
     let pool = McpPool::new_with_db(config.db_path.clone());
     let server_name = pool.find_ctx7_server().await.ok_or_else(|| {

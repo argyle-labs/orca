@@ -55,7 +55,7 @@ async fn tick() -> Result<()> {
         return Ok(());
     }
     let conn = db::open_default()?;
-    if !pdb::get_self_secure(&conn)? {
+    if !db::pod::get_self_secure(&conn)? {
         return Ok(());
     }
     let pod_id = pdb::get_pod_id(&conn)?.unwrap_or_else(|| "default".to_string());

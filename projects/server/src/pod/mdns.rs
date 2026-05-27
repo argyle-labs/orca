@@ -232,7 +232,7 @@ pub fn build_advertisement(pki_dir: PathBuf, port: u16) -> Result<Advertisement>
     let (pod_id, self_secure) = match db::open_default() {
         Ok(conn) => (
             crate::pod::db::get_pod_id(&conn).unwrap_or(None),
-            crate::pod::db::get_self_secure(&conn).unwrap_or(false),
+            db::pod::get_self_secure(&conn).unwrap_or(false),
         ),
         Err(_) => (None, false),
     };

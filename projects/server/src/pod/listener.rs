@@ -13,8 +13,10 @@ use anyhow::{Context, Result};
 use orca_sdk::framing::{read_frame, write_frame};
 use orca_sdk::jsonrpc::{ErrorObject, Message, Request, Response};
 use orca_sdk::pki::{self, PeerRole};
+use orca_utils::state::DaemonMode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use system::dev::{cmd_dev_disable, cmd_dev_enable, cmd_dev_sync};
 use tokio_rustls::server::TlsStream;
 use tracing::warn;
 
@@ -237,9 +239,6 @@ fn handle_peer_leaving(peer_cn: &str) -> Result<()> {
 /// rebuilds. Skipped silently when the host isn't running a dev binary —
 /// dev_sync is a no-op on production-only peers, not an error.
 async fn handle_dev_sync() -> Result<PodDevSyncResult> {
-    use crate::commands::update::cmd_dev_sync;
-    use orca_utils::state::DaemonMode;
-
     let in_dev_mode = orca_utils::state::read()
         .ok()
         .flatten()
@@ -276,8 +275,6 @@ async fn handle_dev_sync() -> Result<PodDevSyncResult> {
 /// Handle `pod/dev-enable`: flip the peer into dev mode (clone repo if
 /// missing, park production daemon, spawn cargo-watch).
 async fn handle_dev_enable() -> Result<PodDevEnableResult> {
-    use crate::commands::update::cmd_dev_enable;
-
     match tokio::task::spawn_blocking(cmd_dev_enable).await {
         Ok(Ok(r)) => Ok(PodDevEnableResult {
             status: "enabled".into(),
@@ -306,8 +303,6 @@ async fn handle_dev_enable() -> Result<PodDevEnableResult> {
 /// Handle `pod/dev-disable`: stop cargo-watch and let the production daemon
 /// reclaim the port.
 async fn handle_dev_disable() -> Result<PodDevDisableResult> {
-    use crate::commands::update::cmd_dev_disable;
-
     match tokio::task::spawn_blocking(cmd_dev_disable).await {
         Ok(Ok(r)) => Ok(PodDevDisableResult {
             status: "disabled".into(),

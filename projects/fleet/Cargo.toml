@@ -30,6 +30,7 @@ cli = [
 orca-dispatch        = { path = "../orca-dispatch" }
 orca-contract    = { path = "../orca-contract", default-features = false }
 orca-macro       = { path = "../orca-macro" }
+system           = { path = "../system" }
 schemars         = { workspace = true }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
@@ -56,9 +57,10 @@ platform      = { path = "../platform", features = ["native"] }
 agents        = { path = "../agents",   features = ["native"] }
 plugins       = { path = "../plugins",  features = ["native"] }
 docs          = { path = "../docs",     features = ["native"] }
-mgmt          = { path = "../mgmt",     features = ["native"] }
+mcp           = { path = "../mcp",      features = ["native"] }
 homeassistant = { path = "../integrations/homeassistant", features = ["native"] }
 proxmox       = { path = "../integrations/proxmox",       features = ["native"] }
+system        = { path = "../system",                     features = ["native"] }
 
 [lints]
 workspace = true

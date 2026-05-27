@@ -676,7 +676,7 @@ pub fn cmd_pod_self_secure(action: SelfSecureAction) -> Result<()> {
     let conn = db::open_default()?;
     match action {
         SelfSecureAction::Show => {
-            let v = pdb::get_self_secure(&conn)?;
+            let v = db::pod::get_self_secure(&conn)?;
             println!("self_secure: {v}");
         }
         SelfSecureAction::On => {

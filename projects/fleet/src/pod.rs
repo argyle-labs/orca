@@ -85,7 +85,7 @@ pub struct PodPeerDto {
     /// Cross-platform OS / hardware / process / network snapshot reported
     /// by the peer's `system.runtime-spec`. `None` when the probe failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system: Option<crate::lifecycle::SystemInfoReport>,
+    pub system: Option<system::system_info_types::SystemInfoReport>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]

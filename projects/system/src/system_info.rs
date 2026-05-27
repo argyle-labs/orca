@@ -5,10 +5,12 @@
 //! `current()` returns the most recent snapshot — fast (<1µs lock-free read),
 //! never blocks on sysinfo. Bootstrapping callers that race the first refresh
 //! get `None`; the first snapshot lands ~immediately after `spawn_refresher`.
+//!
+//! Relocated from `server::system_info` in slice A3.
 
 pub mod system_type;
 
-use fleet::lifecycle::{GpuInfo, NetIfaceDto, SystemInfoReport};
+use crate::system_info_types::{GpuInfo, NetIfaceDto, SystemInfoReport};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -17,7 +19,7 @@ use sysinfo::{Disks, Networks, Pid, ProcessRefreshKind, RefreshKind, System};
 /// In-memory cache refresh interval. Short so any client poll (UI every
 /// ~1-10s, MCP, CLI) gets near-live data without re-running sysinfo on every
 /// call. DB persistence runs on its own slower cadence — see
-/// `crate::host_status_writer`.
+/// `server::host_status_writer`.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 
 static CACHE: OnceLock<Mutex<Option<Arc<SystemInfoReport>>>> = OnceLock::new();
@@ -255,7 +257,7 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
         );
     }
     if let Ok(conn) = db::open_default()
-        && let Ok(v) = crate::pod::db::get_self_secure(&conn)
+        && let Ok(v) = db::pod::get_self_secure(&conn)
     {
         report.self_secure = Some(v);
     }

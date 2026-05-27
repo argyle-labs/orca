@@ -127,7 +127,9 @@ members = [
     "projects/agents",
     "projects/plugins",
     "projects/docs",
-    "projects/mgmt",
+    "projects/mcp",
+    "projects/schema",
+    "projects/system",
     "projects/utils",
     # Per-backend integration crates — every backend builds + caches
     # independently. No facade.
@@ -153,7 +155,9 @@ default-members = [
     "projects/agents",
     "projects/plugins",
     "projects/docs",
-    "projects/mgmt",
+    "projects/mcp",
+    "projects/schema",
+    "projects/system",
     "projects/utils",
     "projects/integrations/docker",
     "projects/integrations/dockge",

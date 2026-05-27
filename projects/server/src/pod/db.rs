@@ -618,15 +618,6 @@ pub fn is_mutual_secure(t: TrustState) -> bool {
 
 // ── pod_self ─────────────────────────────────────────────────────────────────
 
-pub fn get_self_secure(conn: &Connection) -> Result<bool> {
-    let row = conn
-        .query_row("SELECT self_secure FROM pod_self WHERE id = 1", [], |r| {
-            r.get::<_, i64>(0)
-        })
-        .optional()?;
-    Ok(row.unwrap_or(0) != 0)
-}
-
 pub fn set_self_secure(conn: &Connection, secure: bool) -> Result<()> {
     let now = now_secs();
     conn.execute(
@@ -888,9 +879,9 @@ mod tests {
     #[test]
     fn self_secure_and_pod_id() {
         let (_d, c) = test_conn();
-        assert!(!get_self_secure(&c).unwrap());
+        assert!(!db::pod::get_self_secure(&c).unwrap());
         set_self_secure(&c, true).unwrap();
-        assert!(get_self_secure(&c).unwrap());
+        assert!(db::pod::get_self_secure(&c).unwrap());
         assert!(get_pod_id(&c).unwrap().is_none());
         set_pod_id(&c, "pod-xyz").unwrap();
         assert_eq!(get_pod_id(&c).unwrap().as_deref(), Some("pod-xyz"));
@@ -916,6 +907,6 @@ mod tests {
         wipe_pod_membership(&c).unwrap();
         assert!(list_peers(&c).unwrap().is_empty());
         assert!(list_discovery(&c).unwrap().is_empty());
-        assert!(!get_self_secure(&c).unwrap());
+        assert!(!db::pod::get_self_secure(&c).unwrap());
     }
 }
