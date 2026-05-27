@@ -10,8 +10,6 @@
 //!
 //! See `project_profile_path.md` for the design.
 
-pub mod migrate;
-
 use anyhow::{Result, anyhow};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};

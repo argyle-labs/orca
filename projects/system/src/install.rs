@@ -21,97 +21,99 @@ use std::path::{Path, PathBuf};
 /// only when working inside that repo.
 const GLOBAL_CLAUDE_MD: &str = include_str!("templates/global_claude_md.md");
 
-// Known project slugs to wire memory symlinks for.
-// Format: (macos_slug, linux_slug, vault_name)
-const MEMORY_PROJECTS: &[(&str, &str, &str)] = &[
-    ("-Users-scottkey", "-home-skey", "global"),
-    ("-Users-scottkey-code-orca", "-home-skey-code-orca", "orca"),
-    (
-        "-Users-scottkey-code-meerkat",
-        "-home-skey-code-meerkat",
-        "meerkat",
-    ),
-    (
-        "-Users-scottkey-code-bardbase",
-        "-home-skey-code-bardbase",
-        "bardbase",
-    ),
-    (
-        "-Users-scottkey-dotfiles",
-        "-home-skey-dotfiles",
-        "dotfiles",
-    ),
-    (
-        "-Users-scottkey-code-rebuy-bod",
-        "-home-skey-code-rebuy-bod",
-        "rebuy-bod-root",
-    ),
-    (
-        "-Users-scottkey-code-rebuy-bod-bod",
-        "-home-skey-code-rebuy-bod-bod",
-        "rebuy-bod",
-    ),
-    (
-        "-Users-scottkey-code-rebuy-bod-bod-api",
-        "-home-skey-code-rebuy-bod-bod-api",
-        "rebuy-bod-api",
-    ),
-    (
-        "-Users-scottkey-code-rebuy-bod-bod-dev",
-        "-home-skey-code-rebuy-bod-bod-dev",
-        "rebuy-bod-dev",
-    ),
-    (
-        "-Users-scottkey-code-rebuy-bod-tributary",
-        "-home-skey-code-rebuy-bod-tributary",
-        "rebuy-tributary",
-    ),
-    (
-        "-Users-scottkey-code-rebuy",
-        "-home-skey-code-rebuy",
-        "rebuy",
-    ),
-    (
-        "-Users-scottkey-code-rebuy-rebuy-cli",
-        "-home-skey-code-rebuy-rebuy-cli",
-        "rebuy-cli",
-    ),
-    (
-        "-Users-scottkey-code-rebuy-admin-api",
-        "-home-skey-code-rebuy-admin-api",
-        "admin-api",
-    ),
-    (
-        "-Users-scottkey-code-rebuy-admin-nextjs",
-        "-home-skey-code-rebuy-admin-nextjs",
-        "admin-nextjs",
-    ),
-    (
-        "-Users-scottkey-code-rebuy-apiv2",
-        "-home-skey-code-rebuy-apiv2",
-        "apiv2",
-    ),
-    (
-        "-Users-scottkey-code-rebuy-rebuy-db",
-        "-home-skey-code-rebuy-rebuy-db",
-        "rebuy-db",
-    ),
-    (
-        "-Users-scottkey-code-rebuy-onsite-js",
-        "-home-skey-code-rebuy-onsite-js",
-        "onsite-js",
-    ),
-    (
-        "-Users-scottkey-code-rebuy-installer",
-        "-home-skey-code-rebuy-installer",
-        "installer",
-    ),
-    (
-        "-Users-scottkey-code-rebuy-rebuyengine.com",
-        "-home-skey-code-rebuy-rebuyengine.com",
-        "rebuyengine",
-    ),
-];
+/// One project discovered on disk: a git repo somewhere under `~/code/` (or
+/// `$HOME` itself for the global vault). Used to wire per-project Claude
+/// Code memory symlinks and to materialize per-project agents.
+///
+/// Replaces the previous hardcoded `MEMORY_PROJECTS` list — projects are now
+/// discovered dynamically so orca contains no references to specific user
+/// repos.
+struct DiscoveredProject {
+    /// Absolute path to the project root (`$HOME` for the special `global`
+    /// entry, otherwise a directory under `~/code/`).
+    root: PathBuf,
+    /// Stable label used as the per-project subdir under `~/.orca/memory/`.
+    /// Derived from the path so it's reproducible across machines that share
+    /// the same `~/code/` layout.
+    vault_name: String,
+    /// Claude Code's encoding of `root` — absolute path with separators
+    /// replaced by `-`. Used as the subdir name under `~/.claude/projects/`.
+    slug: String,
+}
+
+/// Discover projects under `$HOME` whose memory we should wire up.
+///
+/// Always includes a `global` entry for `$HOME` itself. Then walks
+/// `$HOME/code/` and any subdir of `$HOME/code/<x>/` that looks like a
+/// git repo (has `.git/`). Two-level depth is enough for the common
+/// monorepo-of-repos layout (e.g. `~/code/rebuy/<repo>`) without
+/// recursing into `node_modules` style trees.
+fn discover_projects(home: &Path) -> Vec<DiscoveredProject> {
+    let mut out = vec![DiscoveredProject {
+        root: home.to_path_buf(),
+        vault_name: "global".to_string(),
+        slug: path_to_slug(home),
+    }];
+
+    let code = home.join("code");
+    let Ok(level1) = std::fs::read_dir(&code) else {
+        return out;
+    };
+
+    for e1 in level1.flatten() {
+        let p1 = e1.path();
+        if !p1.is_dir() {
+            continue;
+        }
+        let name1 = p1
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        if name1.is_empty() || name1.starts_with('.') {
+            continue;
+        }
+        if p1.join(".git").exists() {
+            out.push(DiscoveredProject {
+                root: p1.clone(),
+                vault_name: name1.clone(),
+                slug: path_to_slug(&p1),
+            });
+        }
+        // One level deeper for monorepo-of-repos layouts.
+        if let Ok(level2) = std::fs::read_dir(&p1) {
+            for e2 in level2.flatten() {
+                let p2 = e2.path();
+                if !p2.is_dir() {
+                    continue;
+                }
+                let name2 = p2
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if name2.is_empty() || name2.starts_with('.') {
+                    continue;
+                }
+                if p2.join(".git").exists() {
+                    out.push(DiscoveredProject {
+                        root: p2.clone(),
+                        vault_name: format!("{name1}-{name2}"),
+                        slug: path_to_slug(&p2),
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Claude Code encodes project paths by replacing `/` with `-` (and stripping
+/// the leading slash from the result, leaving a leading `-` from the empty
+/// first segment). This must match Claude Code's encoding exactly.
+fn path_to_slug(p: &Path) -> String {
+    p.to_string_lossy().replace('/', "-")
+}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct InstallReport {
@@ -429,17 +431,15 @@ fn step_claude_agents(home: &Path, report: &mut InstallReport) {
         report,
     );
 
-    for (macos_slug, linux_slug, vault_name) in MEMORY_PROJECTS {
-        let _ = (macos_slug, linux_slug);
-        let project_root = home.join("code").join(vault_name);
-        if !project_root.exists() {
+    for project in discover_projects(home) {
+        if project.vault_name == "global" {
             continue;
         }
-        let target = project_root.join(".claude/agents");
+        let target = project.root.join(".claude/agents");
         materialize_agents_to(
             &entries,
             &target,
-            &format!("~/code/{vault_name}/.claude/agents"),
+            &format!("{}/.claude/agents", project.root.display()),
             report,
         );
     }
@@ -486,8 +486,11 @@ fn materialize_agents_to(
 fn step_remove_claude_agents(home: &Path, report: &mut InstallReport) {
     let entries = collect_agent_entries(home);
     let mut targets: Vec<std::path::PathBuf> = vec![home.join(".claude/agents")];
-    for (_, _, vault_name) in MEMORY_PROJECTS {
-        let dir = home.join("code").join(vault_name).join(".claude/agents");
+    for project in discover_projects(home) {
+        if project.vault_name == "global" {
+            continue;
+        }
+        let dir = project.root.join(".claude/agents");
         if dir.exists() {
             targets.push(dir);
         }
@@ -510,10 +513,11 @@ fn step_remove_claude_agents(home: &Path, report: &mut InstallReport) {
 fn step_memory_symlinks(home: &Path, report: &mut InstallReport) {
     let claude_projects = home.join(".claude/projects");
     let orca_memory = home.join(APP_STATE_DIR).join("memory");
-    let on_macos = cfg!(target_os = "macos");
 
-    for (macos_slug, linux_slug, vault_name) in MEMORY_PROJECTS {
-        let slug = if on_macos { macos_slug } else { linux_slug };
+    for project in discover_projects(home) {
+        let DiscoveredProject {
+            slug, vault_name, ..
+        } = &project;
         let project_dir = claude_projects.join(slug);
         let memory_link = project_dir.join("memory");
         let vault_dir = orca_memory.join(vault_name);

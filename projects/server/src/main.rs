@@ -546,22 +546,12 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Direct Claude escalation — loads project context if provided, then sends question.
-/// On first run, ensure the implicit local user has a `default` profile and
-/// that personal-classified agents are migrated into it from the embedded
-/// baseline. Subsequent runs are a no-op once both have happened.
+/// Ensure the implicit local user has a `default` profile on first run.
+/// Idempotent on subsequent invocations.
 fn bootstrap_default_profile(config: &Config) -> Result<()> {
     let conn = db::open(&config.db_path)?;
     let mgr = orca::profile::ProfileManager::from_config(config);
     let p = mgr.ensure_default_for(&conn, orca_utils::config::LOCAL_USER)?;
-    let n = mgr.migrate_personal_agents(&conn, &p)?;
-    if n > 0 {
-        tracing::info!(
-            profile_id = %p.id,
-            agents = n,
-            "migrated personal agents into default profile"
-        );
-    }
     tracing::trace!(profile_id = %p.id, "active profile resolved");
     Ok(())
 }
