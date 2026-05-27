@@ -12,10 +12,7 @@
 pub mod commands;
 pub mod llm;
 
-pub mod auth_password;
-pub mod auth_throttle;
 pub mod diagnostic;
-pub mod loopback_token;
 pub mod mcp;
 pub mod plugin_host;
 pub mod serve;

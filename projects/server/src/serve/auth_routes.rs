@@ -230,7 +230,7 @@ pub async fn signup(Json(req): Json<SignupRequest>) -> Response {
         return err(StatusCode::CONFLICT, "username already taken");
     }
 
-    let hash = match crate::auth_password::hash_password(&req.password) {
+    let hash = match auth::password::hash_password(&req.password) {
         Ok(h) => h,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("hash: {e}")),
     };
@@ -260,8 +260,8 @@ pub async fn signin(
     Json(req): Json<SigninRequest>,
 ) -> Response {
     let ip = peer.ip().to_string();
-    if let crate::auth_throttle::CheckOutcome::Throttled { retry_after_secs } =
-        crate::auth_throttle::check(&ip, &req.username)
+    if let auth::throttle::CheckOutcome::Throttled { retry_after_secs } =
+        auth::throttle::check(&ip, &req.username)
     {
         tracing::warn!(
             ip = %ip,
@@ -279,7 +279,7 @@ pub async fn signin(
     let row = match db::users::find_auth_by_username(&conn, &req.username) {
         Ok(Some(r)) => r,
         Ok(None) => {
-            crate::auth_throttle::record_failure(&ip, &req.username);
+            auth::throttle::record_failure(&ip, &req.username);
             tracing::warn!(
                 ip = %ip,
                 username = %req.username,
@@ -290,9 +290,9 @@ pub async fn signin(
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("lookup: {e}")),
     };
     let ok =
-        crate::auth_password::verify_password(&req.password, &row.password_hash).unwrap_or(false);
+        auth::password::verify_password(&req.password, &row.password_hash).unwrap_or(false);
     if !ok {
-        crate::auth_throttle::record_failure(&ip, &req.username);
+        auth::throttle::record_failure(&ip, &req.username);
         tracing::warn!(
             ip = %ip,
             username = %req.username,
@@ -301,7 +301,7 @@ pub async fn signin(
         );
         return err(StatusCode::UNAUTHORIZED, "invalid credentials");
     }
-    crate::auth_throttle::record_success(&ip, &req.username);
+    auth::throttle::record_success(&ip, &req.username);
     tracing::info!(ip = %ip, username = %row.username, user_id = %row.id, "signin ok");
     issue_session(&conn, &row.id, &row.username, &row.role)
 }
@@ -404,13 +404,13 @@ pub async fn change_password(
         Ok(Some(a)) => a,
         _ => return err(StatusCode::UNAUTHORIZED, "user no longer exists"),
     };
-    let ok = crate::auth_password::verify_password(&body.current_password, &auth.password_hash)
+    let ok = auth::password::verify_password(&body.current_password, &auth.password_hash)
         .unwrap_or(false);
     if !ok {
         return err(StatusCode::UNAUTHORIZED, "current password incorrect");
     }
 
-    let hash = match crate::auth_password::hash_password(&body.new_password) {
+    let hash = match auth::password::hash_password(&body.new_password) {
         Ok(h) => h,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("hash: {e}")),
     };

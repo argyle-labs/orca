@@ -504,7 +504,7 @@ async fn scalar_handler(
 /// dev/stable can never silently diverge — adding a new background task
 /// here arms it everywhere.
 async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
-    if let Err(e) = crate::loopback_token::install_at_startup() {
+    if let Err(e) = auth::loopback_token::install_at_startup() {
         tracing::warn!("loopback token install failed: {e:#}");
     }
     system::system_info::spawn_refresher();

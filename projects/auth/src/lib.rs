@@ -6,3 +6,10 @@ pub mod auth;
 pub mod oauth;
 pub mod pki;
 pub mod secrets;
+
+#[cfg(feature = "native")]
+pub mod loopback_token;
+#[cfg(feature = "native")]
+pub mod password;
+#[cfg(feature = "native")]
+pub mod throttle;

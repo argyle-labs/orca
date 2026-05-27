@@ -390,7 +390,7 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
     if let Some(token) = extract_bearer(&req) {
         // Fast path: process-local loopback token minted at boot. Constant
         // string compare (no DB hit) for the high-volume in-process callers.
-        if let Some(lb) = crate::loopback_token::get()
+        if let Some(lb) = auth::loopback_token::get()
             && lb == token
         {
             let mut req = req;
@@ -1218,7 +1218,7 @@ mod tests {
     async fn require_auth_accepts_loopback_token_fast_path() {
         // Install a loopback token, then send it. The handler short-circuits
         // before any DB lookup.
-        crate::loopback_token::set_for_tests("x-lb-fixture".into());
+        auth::loopback_token::set_for_tests("x-lb-fixture".into());
         let req = AxumReq::builder()
             .uri("/api/agents")
             .header("authorization", "Bearer x-lb-fixture")
@@ -1228,7 +1228,7 @@ mod tests {
         // If another test set the loopback first, the comparison fails and we
         // get 401. In that case the fast-path branch is still exercised; we
         // just can't assert success.
-        if crate::loopback_token::get() == Some("x-lb-fixture") {
+        if auth::loopback_token::get() == Some("x-lb-fixture") {
             assert_eq!(resp.status(), axum::http::StatusCode::OK);
         }
     }
