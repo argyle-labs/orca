@@ -1,8 +1,9 @@
 use super::{Session, util};
+use crate::llm::Message;
 use crate::llm::tools::ToolRegistry;
-use crate::llm::{Message, types::ToolResult};
 use anyhow::Result;
 use colored::Colorize;
+use orca_contract::ToolResult;
 use tokio_util::sync::CancellationToken;
 
 impl Session {

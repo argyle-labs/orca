@@ -11,8 +11,8 @@ use docs::spec_registry::{
 };
 use serde_json::{Value, json};
 
-use crate::scanner::specs_dir;
-use crate::scanner::{
+use scanner::specs_dir;
+use scanner::{
     GraphQlEnum as ScannerEnum, GraphQlField as ScannerField, GraphQlInfo as ScannerInfo,
     GraphQlOperation as ScannerOp, GraphQlType as ScannerType,
 };
@@ -471,7 +471,7 @@ impl SpecRegistryService for ServerSpecRegistry {
         let path = specs_dir().join(format!("{repo}.graphql"));
         let sdl = std::fs::read_to_string(&path)
             .with_context(|| format!("no GraphQL schema for '{repo}'"))?;
-        let info = crate::scanner::parse_graphql_sdl(repo, &sdl)?;
+        let info = scanner::parse_graphql_sdl(repo, &sdl)?;
         Ok(map_info(info))
     }
 

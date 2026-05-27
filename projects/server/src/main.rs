@@ -3,13 +3,13 @@ use clap::{Parser, Subcommand};
 use orca::commands::{
     self as cmd, DaemonAction, HookAction, PackageAction, SpecAction, SystemAction,
 };
-use orca::context::ProjectContext;
+use orca::conversation::context::ProjectContext;
 use orca::conversation::session::Session;
 use orca::llm::{ClaudeBackend, Message, ModelBackend, stdout_sink};
 use orca::log_cmd::{LogAction, cmd_log};
 use orca::mcp;
 use orca::serve;
-use orca::serve::openapi_spec_json;
+use orca::serve::openapi::orca_spec_json;
 use orca_utils::config::Config;
 
 #[derive(Parser)]
@@ -511,7 +511,7 @@ async fn main() -> Result<()> {
         },
         Some(Command::Spec { action }) => match action {
             SpecAction::Dump => {
-                let spec = openapi_spec_json();
+                let spec = orca_spec_json();
                 println!("{}", serde_json::to_string_pretty(&spec)?);
                 Ok(())
             }
@@ -519,7 +519,7 @@ async fn main() -> Result<()> {
         },
         Some(Command::Openapi { action }) => match action {
             OpenapiAction::Emit => {
-                let spec = openapi_spec_json();
+                let spec = orca_spec_json();
                 println!("{}", serde_json::to_string_pretty(&spec)?);
                 Ok(())
             }

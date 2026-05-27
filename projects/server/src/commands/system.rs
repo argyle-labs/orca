@@ -8,6 +8,8 @@
 use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 #[derive(Subcommand, Debug)]
@@ -207,7 +209,6 @@ fn install_ssh_key(user: &str, home_dir: &str, pubkey: &str) -> Result<()> {
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700))?;
         std::fs::set_permissions(&auth, std::fs::Permissions::from_mode(0o600))?;
     }

@@ -23,8 +23,8 @@ use ::mcp::client::McpPool;
         description = "orca local dev tool — docs, services, schema, MCP proxy"
     ),
     components(schemas(
-        super::api::TreeNode,
-        super::api::NodeType,
+        super::tree::TreeNode,
+        super::tree::NodeType,
         super::api::SearchResult,
         super::api::McpToolInfo,
         super::api::McpRunRequest,
@@ -59,11 +59,11 @@ use ::mcp::client::McpPool;
         super::api::ConfluenceSearchQuery,
         super::api::RepoInfo,
         super::api::PrQuery,
-        super::api::GraphQlInfo,
-        super::api::GraphQlOperation,
-        super::api::GraphQlField,
-        super::api::GraphQlType,
-        super::api::GraphQlEnum,
+        scanner::GraphQlInfo,
+        scanner::GraphQlOperation,
+        scanner::GraphQlField,
+        scanner::GraphQlType,
+        scanner::GraphQlEnum,
         super::api::SystemStatusResponse,
         super::api::ComponentStatus,
         super::api::MpcStatus,
@@ -255,5 +255,5 @@ pub async fn openapi_handler() -> impl axum::response::IntoResponse {
 }
 
 pub async fn openapi_public_handler() -> impl axum::response::IntoResponse {
-    axum::Json(crate::scanner::filter_orca_public(orca_spec_json()))
+    axum::Json(scanner::filter_orca_public(orca_spec_json()))
 }

@@ -119,12 +119,6 @@ import type {
   GetLibraryDocsData,
   GetLibraryDocsErrors,
   GetLibraryDocsResponses,
-  GetLogsData,
-  GetLogsErrors,
-  GetLogServicesData,
-  GetLogServicesErrors,
-  GetLogServicesResponses,
-  GetLogsResponses,
   GetMcpToolsData,
   GetMcpToolsResponses,
   GetPluginDataData,
@@ -153,27 +147,6 @@ import type {
   GetTreeData,
   GetTreeErrors,
   GetTreeResponses,
-  HaAutomationListData,
-  HaAutomationListErrors,
-  HaAutomationListResponses,
-  HaEndpointCreateData,
-  HaEndpointCreateErrors,
-  HaEndpointCreateResponses,
-  HaEndpointDeleteData,
-  HaEndpointDeleteErrors,
-  HaEndpointDeleteResponses,
-  HaEndpointListData,
-  HaEndpointListErrors,
-  HaEndpointListResponses,
-  HaEntityDetailData,
-  HaEntityDetailErrors,
-  HaEntityDetailResponses,
-  HaEntityListData,
-  HaEntityListErrors,
-  HaEntityListResponses,
-  HaServiceUpdateData,
-  HaServiceUpdateErrors,
-  HaServiceUpdateResponses,
   InstallPluginData,
   InstallPluginErrors,
   InstallPluginResponses,
@@ -338,30 +311,6 @@ import type {
   NamespaceUseResponses,
   PingData,
   PingResponses,
-  ProxmoxContainerListData,
-  ProxmoxContainerListErrors,
-  ProxmoxContainerListResponses,
-  ProxmoxContainerUpdateData,
-  ProxmoxContainerUpdateErrors,
-  ProxmoxContainerUpdateResponses,
-  ProxmoxEndpointCreateData,
-  ProxmoxEndpointCreateErrors,
-  ProxmoxEndpointCreateResponses,
-  ProxmoxEndpointDeleteData,
-  ProxmoxEndpointDeleteErrors,
-  ProxmoxEndpointDeleteResponses,
-  ProxmoxEndpointListData,
-  ProxmoxEndpointListErrors,
-  ProxmoxEndpointListResponses,
-  ProxmoxNodeListData,
-  ProxmoxNodeListErrors,
-  ProxmoxNodeListResponses,
-  ProxmoxVmListData,
-  ProxmoxVmListErrors,
-  ProxmoxVmListResponses,
-  ProxmoxVmUpdateData,
-  ProxmoxVmUpdateErrors,
-  ProxmoxVmUpdateResponses,
   ProxyGraphqlData,
   ProxyGraphqlErrors,
   ProxyGraphqlResponses,
@@ -392,9 +341,6 @@ import type {
   RunMcpToolData,
   RunMcpToolErrors,
   RunMcpToolResponses,
-  RunTestsData,
-  RunTestsErrors,
-  RunTestsResponses,
   SaveLearningProgressData,
   SaveLearningProgressResponses,
   SearchConfluenceData,
@@ -632,9 +578,6 @@ import type {
   SystemPodUpdateData,
   SystemPodUpdateErrors,
   SystemPodUpdateResponses,
-  SystemRuntimeDetailData,
-  SystemRuntimeDetailErrors,
-  SystemRuntimeDetailResponses,
   SystemScheduleListData,
   SystemScheduleListErrors,
   SystemScheduleListResponses,
@@ -1023,22 +966,6 @@ export const saveLearningProgress = <ThrowOnError extends boolean = false>(
       'Content-Type': 'application/json',
       ...options.headers,
     },
-  });
-
-export const getLogs = <ThrowOnError extends boolean = false>(
-  options: Options<GetLogsData, ThrowOnError>,
-) =>
-  (options.client ?? client).get<GetLogsResponses, GetLogsErrors, ThrowOnError>({
-    url: '/api/logs',
-    ...options,
-  });
-
-export const getLogServices = <ThrowOnError extends boolean = false>(
-  options?: Options<GetLogServicesData, ThrowOnError>,
-) =>
-  (options?.client ?? client).get<GetLogServicesResponses, GetLogServicesErrors, ThrowOnError>({
-    url: '/api/logs/services',
-    ...options,
   });
 
 export const listMcpMappings = <ThrowOnError extends boolean = false>(
@@ -1474,14 +1401,6 @@ export const systemStatusHandler = <ThrowOnError extends boolean = false>(
     ThrowOnError
   >({ url: '/api/system/status', ...options });
 
-export const runTests = <ThrowOnError extends boolean = false>(
-  options: Options<RunTestsData, ThrowOnError>,
-) =>
-  (options.client ?? client).get<RunTestsResponses, RunTestsErrors, ThrowOnError>({
-    url: '/api/tests/run',
-    ...options,
-  });
-
 /**
  * Probe the local docker engine (colima | desktop | none) and whether it is running.
  *
@@ -1685,125 +1604,6 @@ export const dockerServiceUpdate = <ThrowOnError extends boolean = false>(
     ThrowOnError
   >({
     url: '/api/tools/docker.service.update',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * List Home Assistant automations for a registered endpoint.
- *
- * List Home Assistant automations for a registered endpoint.
- */
-export const haAutomationList = <ThrowOnError extends boolean = false>(
-  options: Options<HaAutomationListData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<HaAutomationListResponses, HaAutomationListErrors, ThrowOnError>({
-    url: '/api/tools/ha.automation.list',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Register or update a Home Assistant endpoint in orca.db. Auth uses a long-lived access token (Bearer header).
- *
- * [MUTATES STATE] Register or update a Home Assistant endpoint in orca.db. Auth uses a long-lived access token (Bearer header).
- */
-export const haEndpointCreate = <ThrowOnError extends boolean = false>(
-  options: Options<HaEndpointCreateData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<HaEndpointCreateResponses, HaEndpointCreateErrors, ThrowOnError>({
-    url: '/api/tools/ha.endpoint.create',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Remove a Home Assistant endpoint from orca.db by name.
- *
- * [MUTATES STATE] Remove a Home Assistant endpoint from orca.db by name.
- */
-export const haEndpointDelete = <ThrowOnError extends boolean = false>(
-  options: Options<HaEndpointDeleteData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<HaEndpointDeleteResponses, HaEndpointDeleteErrors, ThrowOnError>({
-    url: '/api/tools/ha.endpoint.delete',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * List all Home Assistant endpoints registered in orca.db (tokens are redacted).
- *
- * List all Home Assistant endpoints registered in orca.db (tokens are redacted).
- */
-export const haEndpointList = <ThrowOnError extends boolean = false>(
-  options: Options<HaEndpointListData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<HaEndpointListResponses, HaEndpointListErrors, ThrowOnError>({
-    url: '/api/tools/ha.endpoint.list',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Fetch the current state of a single Home Assistant entity.
- *
- * Fetch the current state of a single Home Assistant entity.
- */
-export const haEntityDetail = <ThrowOnError extends boolean = false>(
-  options: Options<HaEntityDetailData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<HaEntityDetailResponses, HaEntityDetailErrors, ThrowOnError>({
-    url: '/api/tools/ha.entity.detail',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * List Home Assistant entities for a registered endpoint, optionally filtered by domain.
- *
- * List Home Assistant entities for a registered endpoint, optionally filtered by domain.
- */
-export const haEntityList = <ThrowOnError extends boolean = false>(
-  options: Options<HaEntityListData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<HaEntityListResponses, HaEntityListErrors, ThrowOnError>({
-    url: '/api/tools/ha.entity.list',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Invoke a Home Assistant service (e.g. light.turn_on, switch.toggle). Returns the list of changed entity states.
- *
- * [MUTATES STATE] Invoke a Home Assistant service (e.g. light.turn_on, switch.toggle). Returns the list of changed entity states.
- */
-export const haServiceUpdate = <ThrowOnError extends boolean = false>(
-  options: Options<HaServiceUpdateData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<HaServiceUpdateResponses, HaServiceUpdateErrors, ThrowOnError>({
-    url: '/api/tools/ha.service.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2187,9 +1987,9 @@ export const namespaceSchemaDelete = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * List all MySQL/MariaDB schema databases registered in orca.db.
+ * List all MySQL/MariaDB/Postgres/SQLite schema databases registered in orca.db.
  *
- * List all MySQL/MariaDB schema databases registered in orca.db.
+ * List all MySQL/MariaDB/Postgres/SQLite schema databases registered in orca.db.
  */
 export const namespaceSchemaList = <ThrowOnError extends boolean = false>(
   options: Options<NamespaceSchemaListData, ThrowOnError>,
@@ -2528,162 +2328,6 @@ export const namespaceUse = <ThrowOnError extends boolean = false>(
 ) =>
   (options.client ?? client).post<NamespaceUseResponses, NamespaceUseErrors, ThrowOnError>({
     url: '/api/tools/namespace.use',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * List LXC containers on a Proxmox node.
- *
- * List LXC containers on a Proxmox node.
- */
-export const proxmoxContainerList = <ThrowOnError extends boolean = false>(
-  options: Options<ProxmoxContainerListData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    ProxmoxContainerListResponses,
-    ProxmoxContainerListErrors,
-    ThrowOnError
-  >({
-    url: '/api/tools/proxmox.container.list',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Run a lifecycle action on a Proxmox LXC container.
- *
- * [MUTATES STATE] Run a lifecycle action on a Proxmox LXC container.
- */
-export const proxmoxContainerUpdate = <ThrowOnError extends boolean = false>(
-  options: Options<ProxmoxContainerUpdateData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    ProxmoxContainerUpdateResponses,
-    ProxmoxContainerUpdateErrors,
-    ThrowOnError
-  >({
-    url: '/api/tools/proxmox.container.update',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Register or update a Proxmox VE endpoint in orca.db. Auth uses an API token (PVEAPIToken header).
- *
- * [MUTATES STATE] Register or update a Proxmox VE endpoint in orca.db. Auth uses an API token (PVEAPIToken header).
- */
-export const proxmoxEndpointCreate = <ThrowOnError extends boolean = false>(
-  options: Options<ProxmoxEndpointCreateData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    ProxmoxEndpointCreateResponses,
-    ProxmoxEndpointCreateErrors,
-    ThrowOnError
-  >({
-    url: '/api/tools/proxmox.endpoint.create',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Remove a Proxmox VE endpoint from orca.db by name.
- *
- * [MUTATES STATE] Remove a Proxmox VE endpoint from orca.db by name.
- */
-export const proxmoxEndpointDelete = <ThrowOnError extends boolean = false>(
-  options: Options<ProxmoxEndpointDeleteData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    ProxmoxEndpointDeleteResponses,
-    ProxmoxEndpointDeleteErrors,
-    ThrowOnError
-  >({
-    url: '/api/tools/proxmox.endpoint.delete',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * List all Proxmox VE endpoints registered in orca.db (token secrets are redacted).
- *
- * List all Proxmox VE endpoints registered in orca.db (token secrets are redacted).
- */
-export const proxmoxEndpointList = <ThrowOnError extends boolean = false>(
-  options: Options<ProxmoxEndpointListData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    ProxmoxEndpointListResponses,
-    ProxmoxEndpointListErrors,
-    ThrowOnError
-  >({
-    url: '/api/tools/proxmox.endpoint.list',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * List Proxmox VE cluster nodes for a registered endpoint.
- *
- * List Proxmox VE cluster nodes for a registered endpoint.
- */
-export const proxmoxNodeList = <ThrowOnError extends boolean = false>(
-  options: Options<ProxmoxNodeListData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<ProxmoxNodeListResponses, ProxmoxNodeListErrors, ThrowOnError>({
-    url: '/api/tools/proxmox.node.list',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * List QEMU VMs on a Proxmox node.
- *
- * List QEMU VMs on a Proxmox node.
- */
-export const proxmoxVmList = <ThrowOnError extends boolean = false>(
-  options: Options<ProxmoxVmListData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<ProxmoxVmListResponses, ProxmoxVmListErrors, ThrowOnError>({
-    url: '/api/tools/proxmox.vm.list',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Run a lifecycle action on a Proxmox VM (start/stop/shutdown/reboot).
- *
- * [MUTATES STATE] Run a lifecycle action on a Proxmox VM (start/stop/shutdown/reboot).
- */
-export const proxmoxVmUpdate = <ThrowOnError extends boolean = false>(
-  options: Options<ProxmoxVmUpdateData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<ProxmoxVmUpdateResponses, ProxmoxVmUpdateErrors, ThrowOnError>({
-    url: '/api/tools/proxmox.vm.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -4079,27 +3723,6 @@ export const systemPodUpdate = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * Report this binary's runtime composition: whether the web UI is embedded, build target triple. Used by installers to decide whether to fetch a JS runtime alongside the binary.
- *
- * Report this binary's runtime composition: whether the web UI is embedded, build target triple. Used by installers to decide whether to fetch a JS runtime alongside the binary.
- */
-export const systemRuntimeDetail = <ThrowOnError extends boolean = false>(
-  options: Options<SystemRuntimeDetailData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemRuntimeDetailResponses,
-    SystemRuntimeDetailErrors,
-    ThrowOnError
-  >({
-    url: '/api/tools/system.runtime.detail',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
  * List schedule rows with their next firing time.
  *
  * List schedule rows with their next firing time.
@@ -4243,9 +3866,9 @@ export const systemSecretList = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * [MUTATES STATE] Create or update a secret. For 'inline' backend, `value` is required; for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field').
+ * [MUTATES STATE] Create or update a secret. For 'inline' backend, `value` is required; for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field'). When `peer_id` is set the secret is written on the named peer instead of locally — same admin trust surface as `system.update`.
  *
- * [MUTATES STATE] Create or update a secret. For 'inline' backend, `value` is required; for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field').
+ * [MUTATES STATE] Create or update a secret. For 'inline' backend, `value` is required; for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field'). When `peer_id` is set the secret is written on the named peer instead of locally — same admin trust surface as `system.update`.
  */
 export const systemSecretSet = <ThrowOnError extends boolean = false>(
   options: Options<SystemSecretSetData, ThrowOnError>,

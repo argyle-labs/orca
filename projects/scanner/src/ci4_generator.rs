@@ -23,13 +23,13 @@
 //! ## AST-first, string fallback
 //!
 //! When the `php-ast` Cargo feature is enabled, each pass delegates to
-//! [`crate::scanner::php_parse::PhpFile`] for accurate tree-sitter-based extraction.
+//! [`crate::php_parse::PhpFile`] for accurate tree-sitter-based extraction.
 //! When the feature is disabled (or `PhpFile::parse` returns `None` due to a
 //! parse error), the string-scanning fallback functions below take over.
 //! This means the scanner compiles and works in all configurations; the AST
 //! path simply produces higher-fidelity results.
 #![allow(clippy::disallowed_types)] // OpenAPI document builder — dynamic JSON construction
-use crate::scanner::php_parse::PhpFile;
+use crate::php_parse::PhpFile;
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -369,8 +369,8 @@ pub fn generate(repo_path: &Path) -> Result<Value> {
                 let mut props = serde_json::Map::new();
                 for (k, v) in &casts {
                     props.insert(
-                        crate::scanner::php_parse::snake_to_camel(k),
-                        crate::scanner::php_parse::ci4_cast_to_json_schema(v),
+                        crate::php_parse::snake_to_camel(k),
+                        crate::php_parse::ci4_cast_to_json_schema(v),
                     );
                 }
                 json!({ "type": "object", "properties": props })
@@ -1882,8 +1882,8 @@ fn extract_casts_schema(entity_src: &str) -> Option<Value> {
             if let Some(val_end) = find_closing_quote(&val_src[1..], vq) {
                 let cast_type = &val_src[1..val_end + 1];
                 properties.insert(
-                    crate::scanner::php_parse::snake_to_camel(key),
-                    crate::scanner::php_parse::ci4_cast_to_json_schema(cast_type),
+                    crate::php_parse::snake_to_camel(key),
+                    crate::php_parse::ci4_cast_to_json_schema(cast_type),
                 );
                 remaining = skip_php_value_to_comma(&val_src[val_end + 2..]);
                 continue;

@@ -27,7 +27,9 @@ use orca_sdk::transport::{
     TypesDeclareParams, TypesDeclareResult,
 };
 use rustls::ServerConfig;
+use rustls::crypto::CryptoProvider;
 use rustls::server::WebPkiClientVerifier;
+use rustls_pemfile::certs;
 use serde_json::json;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -463,7 +465,6 @@ impl HotReloadResolver {
     }
 
     fn build_ck(cert_pem: &str, key_pem: &str) -> Result<rustls::sign::CertifiedKey> {
-        use rustls::crypto::CryptoProvider;
         let (chain, key) = pki::parse_cert_and_key(cert_pem, key_pem)?;
         let signing = CryptoProvider::get_default()
             .context("no rustls CryptoProvider installed")?
@@ -524,7 +525,6 @@ impl HotReloadClientVerifier {
         let mesh = pki::mesh_ca_cert_path(pki_dir);
         if mesh.exists() {
             let cur_ca = std::fs::read_to_string(&mesh).context("read current mesh CA cert")?;
-            use rustls_pemfile::certs;
             for der in certs(&mut cur_ca.as_bytes()) {
                 roots.add(der.context("parsing current mesh CA cert")?)?;
             }

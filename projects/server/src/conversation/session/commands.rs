@@ -1,6 +1,8 @@
-use super::{Session, util};
+use super::Session;
 use crate::conversation::ledger::fmt_tokens;
-use crate::llm::{ClaudeBackend, LMStudioBackend, Message, ModelBackend, build_backend};
+use crate::llm::{
+    ClaudeBackend, LMStudioBackend, Message, ModelBackend, build_backend, estimate_context_window,
+};
 use anyhow::{Context, Result};
 use colored::Colorize;
 use orca_utils::config::Model;
@@ -215,7 +217,7 @@ impl Session {
     async fn cmd_switch_model(&mut self, spec: &str) -> Result<()> {
         let model = Model::parse(spec);
         let new_backend = build_backend(&self.config, &model)?;
-        self.context_window = util::estimate_context_window(&model);
+        self.context_window = estimate_context_window(&model);
         self.out(
             &format!(
                 "switched to {}:{}",

@@ -16,13 +16,6 @@ pub mod docs;
 pub mod jobs;
 pub mod llm;
 pub mod profile;
-pub mod scanner;
-
-// Re-exports for compatibility with code that previously imported these
-// at the orca-conversation crate root.
-pub use crate::conversation::agent_backend;
-pub use crate::conversation::context;
-pub use crate::conversation::tui;
 
 pub mod auth_password;
 pub mod auth_throttle;

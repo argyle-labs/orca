@@ -5,6 +5,7 @@ use orca_utils::config::APP_NAME;
 use rand::Rng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::time::Duration;
@@ -252,7 +253,6 @@ fn random_hex(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     rand::rng().fill_bytes(&mut buf);
     buf.iter().fold(String::new(), |mut s, b| {
-        use std::fmt::Write;
         _ = write!(s, "{b:02x}");
         s
     })

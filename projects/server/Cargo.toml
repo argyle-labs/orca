@@ -29,8 +29,8 @@ ui = ["dep:mime_guess", "system/ui"]
 # Off by default; pulls ~10 MB of typst + font + WASM crates into the binary.
 pdf = ["dep:typst", "dep:typst-pdf", "dep:typst-assets", "dep:zip"]
 
-# Enable AST-based PHP analysis via tree-sitter-php (was scanner's php-ast feature).
-php-ast = ["dep:tree-sitter", "dep:tree-sitter-php"]
+# Enable AST-based PHP analysis via tree-sitter-php in the scanner crate.
+php-ast = ["scanner/php-ast"]
 
 [dependencies]
 # Workspace crates
@@ -50,6 +50,7 @@ agents   = { path = "../agents",   features = ["native", "cli"] }
 plugins  = { path = "../plugins",  features = ["native", "cli"] }
 docs     = { path = "../docs",     features = ["native", "cli"] }
 mcp      = { path = "../mcp",      features = ["native", "cli"] }
+scanner  = { path = "../scanner" }
 schema   = { path = "../schema",   features = ["native", "cli"] }
 # Integration crates (flat names, no facade)
 docker        = { path = "../integrations/docker",        features = ["native", "cli"] }
@@ -120,11 +121,6 @@ sysinfo = { workspace = true }
 
 # Text width measurement (TUI from merged conversation)
 unicode-width = "0.2"
-
-# Scanner deps (from merged scanner crate)
-graphql-parser  = "0.4"
-tree-sitter     = { version = "0.24", optional = true }
-tree-sitter-php = { version = "0.24", optional = true }
 
 # Terminal / readline
 rustyline = { workspace = true }

@@ -1,10 +1,10 @@
 // CLI spec command passing through spec/config blobs; HashMap/Value are protocol-level passthrough.
 #![allow(clippy::disallowed_types)]
-use crate::scanner;
 use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;
 use db;
+use scanner;
 use serde::Deserialize;
 
 #[derive(Subcommand)]

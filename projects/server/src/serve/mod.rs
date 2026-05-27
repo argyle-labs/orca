@@ -1,12 +1,10 @@
 pub mod api;
 pub mod auth_routes;
 pub mod middleware;
-mod openapi;
+pub mod openapi;
 #[cfg(feature = "pdf")]
 pub mod pdf_gen;
 pub mod tree;
-
-pub use openapi::orca_spec_json as openapi_spec_json;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -14,6 +12,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::Router;
+use axum::extract::FromRequest;
+use axum::http::{HeaderName, Method};
+use axum::response::IntoResponse;
 use axum::routing::get;
 use axum_server::tls_rustls::RustlsConfig;
 use orca_utils::state::{DaemonMode, DaemonState};
@@ -794,8 +795,6 @@ async fn dev_proxy_handler(req: axum::extract::Request) -> axum::response::Respo
             .map(|p| p.as_str())
             .unwrap_or("/")
             .to_string();
-        use axum::extract::FromRequest;
-        use axum::response::IntoResponse;
         return match WebSocketUpgrade::from_request(req, &()).await {
             Ok(ws) => ws.on_upgrade(move |sock| proxy_ws_to_vite(sock, path)),
             Err(e) => e.into_response(),
@@ -915,7 +914,6 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
     // cross-port), direct embedded UI (same-origin), and remote browser
     // access from another machine on the LAN.
     let cors = {
-        use axum::http::{HeaderName, Method};
         let _ = dev; // suppress unused warning if cfg changes
         CorsLayer::new()
             .allow_origin(AllowOrigin::mirror_request())
@@ -1004,7 +1002,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
 /// Write orca's generated OpenAPI spec to ~/.orca/specs/orca.json so it
 /// lives alongside rebuy's scanner-generated specs and can be compared to them.
 fn write_orca_spec_to_disk() {
-    let dir = crate::scanner::specs_dir();
+    let dir = scanner::specs_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!("could not create openapi dir {}: {e}", dir.display());
         return;

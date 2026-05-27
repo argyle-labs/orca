@@ -11,7 +11,8 @@ use crate::conversation::tui::{self, TuiAction, TuiApp};
 use crate::jobs::JobManager;
 use crate::llm::tools::ToolRegistry;
 use crate::llm::{
-    Message, ModelBackend, OutputSink, build_backend, sink_write, sink_writeln, stdout_sink,
+    Message, ModelBackend, OutputSink, build_backend, estimate_context_window, resolve_model,
+    sink_write, sink_writeln, stdout_sink,
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
@@ -64,9 +65,9 @@ impl Session {
 
         let model = match forced_model {
             Some(m) => m,
-            None => util::resolve_model(&config, None).await?,
+            None => resolve_model(&config, None).await?,
         };
-        let context_window = util::estimate_context_window(&model);
+        let context_window = estimate_context_window(&model);
         let backend = build_backend(&config, &model)?;
 
         // Claude and tool-capable backends get the full Wolf persona.

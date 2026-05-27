@@ -1,5 +1,6 @@
 #![allow(clippy::disallowed_types)] // OpenAPI document builder — dynamic JSON construction
 use anyhow::Result;
+use graphql_parser::query::Type as GqlType;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -309,17 +310,16 @@ pub fn parse_graphql_operations(repo: &str, src: &str) -> Result<GraphQlInfo> {
     use graphql_parser::query::{Definition, OperationDefinition, parse_query};
 
     fn op_type_str(t: &graphql_parser::query::Type<String>) -> (String, bool) {
-        use graphql_parser::query::Type;
         match t {
-            Type::NonNullType(inner) => {
+            GqlType::NonNullType(inner) => {
                 let (s, _) = op_type_str(inner);
                 (s, true)
             }
-            Type::ListType(inner) => {
+            GqlType::ListType(inner) => {
                 let (s, _) = op_type_str(inner);
                 (format!("[{s}]"), false)
             }
-            Type::NamedType(n) => (n.clone(), false),
+            GqlType::NamedType(n) => (n.clone(), false),
         }
     }
 

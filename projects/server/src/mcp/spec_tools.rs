@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use orca_contract::{OrcaTool, OrcaToolDef, ToolCtx};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::mcp::specs;
 
@@ -61,7 +62,6 @@ impl OrcaToolDef for GetRebuySpec {
 #[async_trait]
 impl OrcaTool for GetRebuySpec {
     async fn run(args: GetRebuySpecArgs, _ctx: &ToolCtx) -> Result<String> {
-        use serde_json::json;
         specs::get_rebuy_spec(&json!({ "repo": args.repo }))
     }
 }
@@ -87,7 +87,6 @@ impl OrcaToolDef for GetRebuySpecPublic {
 #[async_trait]
 impl OrcaTool for GetRebuySpecPublic {
     async fn run(args: GetRebuySpecPublicArgs, _ctx: &ToolCtx) -> Result<String> {
-        use serde_json::json;
         specs::get_rebuy_spec_public(&json!({ "repo": args.repo }))
     }
 }
@@ -113,7 +112,6 @@ impl OrcaToolDef for GetRebuyGraphqlSchema {
 #[async_trait]
 impl OrcaTool for GetRebuyGraphqlSchema {
     async fn run(args: GetRebuyGraphqlSchemaArgs, _ctx: &ToolCtx) -> Result<String> {
-        use serde_json::json;
         specs::get_rebuy_graphql_schema(&json!({ "repo": args.repo }))
     }
 }
@@ -141,7 +139,6 @@ impl OrcaToolDef for GetGraphqlInfo {
 #[async_trait]
 impl OrcaTool for GetGraphqlInfo {
     async fn run(args: GetGraphqlInfoArgs, _ctx: &ToolCtx) -> Result<String> {
-        use serde_json::json;
         specs::get_graphql_info(&json!({ "repo": args.repo }))
     }
 }

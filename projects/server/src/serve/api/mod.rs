@@ -66,12 +66,10 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
-pub use crate::serve::tree::{NodeType, TreeNode};
-
 // ── Shared spec/download helpers ─────────────────────────────────────────────
 
 pub(super) fn specs_dir() -> std::path::PathBuf {
-    crate::scanner::specs_dir()
+    scanner::specs_dir()
 }
 
 pub(super) fn validate_repo(repo: &str) -> bool {

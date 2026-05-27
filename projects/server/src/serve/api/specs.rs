@@ -31,7 +31,6 @@ fn shopify_admin_version() -> String {
 }
 
 use super::prelude::*;
-pub use crate::scanner::{GraphQlEnum, GraphQlField, GraphQlInfo, GraphQlOperation, GraphQlType};
 
 // ── External spec registry ────────────────────────────────────────────────────
 // Orca's own spec lives at /api/openapi.json and /api/openapi/public.json.
@@ -522,7 +521,7 @@ pub async fn specs_graphql_proxy_handler(
         ("repo" = String, Path, description = "Repository name (e.g. admin-api)"),
     ),
     responses(
-        (status = 200, description = "Parsed GraphQL schema — types, queries, mutations, subscriptions", body = GraphQlInfo),
+        (status = 200, description = "Parsed GraphQL schema — types, queries, mutations, subscriptions", body = scanner::GraphQlInfo),
         (status = 400, description = "Invalid repo name", body = ErrorResponse),
         (status = 404, description = "GraphQL schema not found", body = ErrorResponse),
         (status = 422, description = "SDL parse error", body = ErrorResponse),
@@ -543,7 +542,7 @@ pub async fn specs_graphql_info_handler(Path(repo): Path<String>) -> Response {
             );
         }
     };
-    match crate::scanner::parse_graphql_sdl(&repo, &sdl) {
+    match scanner::parse_graphql_sdl(&repo, &sdl) {
         Ok(info) => Json(info).into_response(),
         Err(e) => err(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string()),
     }

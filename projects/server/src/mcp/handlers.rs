@@ -4,9 +4,9 @@ use anyhow::Result;
 use orca_utils::config::Config;
 use serde_json::{Value, json};
 
-use crate::agent_backend::{self, Resolution};
-use crate::context::ProjectContext;
+use crate::conversation::context::ProjectContext;
 use crate::conversation::session::Session;
+use crate::llm::resolve::{self, Resolution};
 
 pub async fn run(args: &Value, config: &Config) -> Result<String> {
     let agent = args["agent"].as_str().unwrap_or("wolf");
@@ -20,7 +20,7 @@ pub async fn run(args: &Value, config: &Config) -> Result<String> {
         prompt.to_string()
     };
 
-    let resolution = agent_backend::resolve(agent, config)?;
+    let resolution = resolve::resolve(agent, config)?;
 
     match resolution {
         Resolution::Local(_) => {

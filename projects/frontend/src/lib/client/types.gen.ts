@@ -424,12 +424,6 @@ export type GraphqlProxyRequest = {
   variables?: unknown;
 };
 
-export type HaEndpointEntry = {
-  baseUrl: string;
-  enabled: boolean;
-  name: string;
-};
-
 export type HealthCheck = {
   label: string;
   ok: boolean;
@@ -550,28 +544,6 @@ export type LogMatchEntry = {
   session: string;
 };
 
-export type LogProject = {
-  path: string;
-  project: string;
-  services: Array<LogService>;
-};
-
-export type LogService = {
-  health: string;
-  name: string;
-  ports: Array<string>;
-  running: boolean;
-  state: string;
-};
-
-export type LogServicesResponse = {
-  projects: Array<LogProject>;
-};
-
-export type LogsResponse = {
-  output: string;
-};
-
 export type MacheteReport = {
   error?: string | null;
   findings: Array<UnusedDependency>;
@@ -651,15 +623,8 @@ export type McpServerInfo = {
   name: string;
 };
 
-/**
- * `input_schema` is JSON Schema from the upstream MCP server, typed via
- * `JsonSchemaNode` (full vocabulary + recursive typed extensions; no `Value` leak).
- */
 export type McpToolEntry = {
   description: string;
-  /**
-   * Typed JSON Schema as advertised by the upstream MCP server.
-   */
   inputSchema: JsonSchemaNode;
   name: string;
   server: string;
@@ -963,14 +928,6 @@ export type ProviderDto = {
   kind: string;
   name: string;
   url: string;
-};
-
-export type ProxmoxEndpointEntry = {
-  baseUrl: string;
-  enabled: boolean;
-  insecure: boolean;
-  name: string;
-  tokenId: string;
 };
 
 export type RepoInfo = {
@@ -1459,22 +1416,6 @@ export type SystemStatusResponse = {
   claude_md: ComponentStatus;
   mcp: MpcStatus;
   vault: ComponentStatus;
-};
-
-export type TestRunQuery = {
-  /**
-   * Which suite to run: rust | frontend | e2e | all
-   */
-  suite: string;
-};
-
-export type TestRunResponse = {
-  duration_ms: number;
-  exit_code: number;
-  failed: number;
-  output: string;
-  passed: number;
-  suite: string;
 };
 
 export type ToolStatus = 'ok' | 'not_installed' | 'errored';
@@ -2403,73 +2344,6 @@ export type SaveLearningProgressResponses = {
    */
   200: unknown;
 };
-
-export type GetLogsData = {
-  body?: never;
-  path?: never;
-  query: {
-    /**
-     * Absolute path to the project directory
-     */
-    project: string;
-    /**
-     * Specific service name (omit for all)
-     */
-    service?: string;
-    /**
-     * Number of log lines to return (default 200)
-     */
-    tail?: number;
-  };
-  url: '/api/logs';
-};
-
-export type GetLogsErrors = {
-  /**
-   * No compose file found
-   */
-  404: ErrorResponse;
-  /**
-   * Docker error
-   */
-  500: ErrorResponse;
-};
-
-export type GetLogsError = GetLogsErrors[keyof GetLogsErrors];
-
-export type GetLogsResponses = {
-  /**
-   * Log output
-   */
-  200: LogsResponse;
-};
-
-export type GetLogsResponse = GetLogsResponses[keyof GetLogsResponses];
-
-export type GetLogServicesData = {
-  body?: never;
-  path?: never;
-  query?: never;
-  url: '/api/logs/services';
-};
-
-export type GetLogServicesErrors = {
-  /**
-   * Rebuy root not found
-   */
-  404: ErrorResponse;
-};
-
-export type GetLogServicesError = GetLogServicesErrors[keyof GetLogServicesErrors];
-
-export type GetLogServicesResponses = {
-  /**
-   * All Docker projects and their service states
-   */
-  200: LogServicesResponse;
-};
-
-export type GetLogServicesResponse = GetLogServicesResponses[keyof GetLogServicesResponses];
 
 export type ListMcpMappingsData = {
   body?: never;
@@ -3717,36 +3591,6 @@ export type SystemStatusHandlerResponses = {
   200: unknown;
 };
 
-export type RunTestsData = {
-  body?: never;
-  path?: never;
-  query: {
-    /**
-     * Test suite to run: rust | frontend | e2e | all
-     */
-    suite: string;
-  };
-  url: '/api/tests/run';
-};
-
-export type RunTestsErrors = {
-  /**
-   * Runner error
-   */
-  500: ErrorResponse;
-};
-
-export type RunTestsError = RunTestsErrors[keyof RunTestsErrors];
-
-export type RunTestsResponses = {
-  /**
-   * Test run result
-   */
-  200: TestRunResponse;
-};
-
-export type RunTestsResponse = RunTestsResponses[keyof RunTestsResponses];
-
 export type DockerEngineDetailData = {
   /**
    * GetDockerEngineArgs
@@ -4206,326 +4050,6 @@ export type DockerServiceUpdateResponses = {
 
 export type DockerServiceUpdateResponse =
   DockerServiceUpdateResponses[keyof DockerServiceUpdateResponses];
-
-export type HaAutomationListData = {
-  /**
-   * HaAutomationListArgs
-   */
-  body: {
-    endpoint: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/ha.automation.list';
-};
-
-export type HaAutomationListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type HaAutomationListError = HaAutomationListErrors[keyof HaAutomationListErrors];
-
-export type HaAutomationListResponses = {
-  /**
-   * JsonAny
-   *
-   * Opaque JSON passthrough wrapper for genuinely free-form upstream payloads
-   * (e.g. Home Assistant entity dumps, Proxmox cluster listings, MCP structuredContent).
-   * Using `Value` here is intentional — the upstream schema is not owned by orca.
-   */
-  200: unknown;
-};
-
-export type HaEndpointCreateData = {
-  /**
-   * AddHomeAssistantEndpointArgs
-   */
-  body: {
-    baseUrl: string;
-    name: string;
-    token: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/ha.endpoint.create';
-};
-
-export type HaEndpointCreateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type HaEndpointCreateError = HaEndpointCreateErrors[keyof HaEndpointCreateErrors];
-
-export type HaEndpointCreateResponses = {
-  /**
-   * HaMutationResult
-   *
-   * Tool result
-   */
-  200: {
-    changed: boolean;
-    name: string;
-  };
-};
-
-export type HaEndpointCreateResponse = HaEndpointCreateResponses[keyof HaEndpointCreateResponses];
-
-export type HaEndpointDeleteData = {
-  /**
-   * RemoveHomeAssistantEndpointArgs
-   */
-  body: {
-    name: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/ha.endpoint.delete';
-};
-
-export type HaEndpointDeleteErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type HaEndpointDeleteError = HaEndpointDeleteErrors[keyof HaEndpointDeleteErrors];
-
-export type HaEndpointDeleteResponses = {
-  /**
-   * HaMutationResult
-   *
-   * Tool result
-   */
-  200: {
-    changed: boolean;
-    name: string;
-  };
-};
-
-export type HaEndpointDeleteResponse = HaEndpointDeleteResponses[keyof HaEndpointDeleteResponses];
-
-export type HaEndpointListData = {
-  /**
-   * ListHomeAssistantEndpointsArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/ha.endpoint.list';
-};
-
-export type HaEndpointListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type HaEndpointListError = HaEndpointListErrors[keyof HaEndpointListErrors];
-
-export type HaEndpointListResponses = {
-  /**
-   * ListHomeAssistantEndpointsOutput
-   *
-   * Tool result
-   */
-  200: {
-    endpoints: Array<HaEndpointEntry>;
-  };
-};
-
-export type HaEndpointListResponse = HaEndpointListResponses[keyof HaEndpointListResponses];
-
-export type HaEntityDetailData = {
-  /**
-   * HaEntityStateArgs
-   */
-  body: {
-    endpoint: string;
-    /**
-     * Entity ID (e.g. "light.living_room")
-     */
-    entity_id: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/ha.entity.detail';
-};
-
-export type HaEntityDetailErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type HaEntityDetailError = HaEntityDetailErrors[keyof HaEntityDetailErrors];
-
-export type HaEntityDetailResponses = {
-  /**
-   * JsonAny
-   *
-   * Opaque JSON passthrough wrapper for genuinely free-form upstream payloads
-   * (e.g. Home Assistant entity dumps, Proxmox cluster listings, MCP structuredContent).
-   * Using `Value` here is intentional — the upstream schema is not owned by orca.
-   */
-  200: unknown;
-};
-
-export type HaEntityListData = {
-  /**
-   * HaEntityListArgs
-   */
-  body: {
-    /**
-     * Optional domain filter (e.g. "light", "sensor", "switch")
-     */
-    domain?: string | null;
-    /**
-     * Name of a Home Assistant endpoint registered via add_home_assistant_endpoint
-     */
-    endpoint: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/ha.entity.list';
-};
-
-export type HaEntityListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type HaEntityListError = HaEntityListErrors[keyof HaEntityListErrors];
-
-export type HaEntityListResponses = {
-  /**
-   * JsonAny
-   *
-   * Opaque JSON passthrough wrapper for genuinely free-form upstream payloads
-   * (e.g. Home Assistant entity dumps, Proxmox cluster listings, MCP structuredContent).
-   * Using `Value` here is intentional — the upstream schema is not owned by orca.
-   */
-  200: unknown;
-};
-
-export type HaServiceUpdateData = {
-  /**
-   * HaServiceCallArgs
-   */
-  body: {
-    /**
-     * Optional service data payload merged into the request body.
-     * Shape is service-defined — HA does not publish a typed schema per service.
-     */
-    data?: {
-      [key: string]: unknown;
-    } | null;
-    /**
-     * Service domain (e.g. "light", "switch", "automation")
-     */
-    domain: string;
-    endpoint: string;
-    /**
-     * Optional entity_id target (e.g. "light.living_room")
-     */
-    entity_id?: string | null;
-    /**
-     * Service name (e.g. "turn_on", "toggle")
-     */
-    service: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/ha.service.update';
-};
-
-export type HaServiceUpdateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type HaServiceUpdateError = HaServiceUpdateErrors[keyof HaServiceUpdateErrors];
-
-export type HaServiceUpdateResponses = {
-  /**
-   * JsonAny
-   *
-   * Opaque JSON passthrough wrapper for genuinely free-form upstream payloads
-   * (e.g. Home Assistant entity dumps, Proxmox cluster listings, MCP structuredContent).
-   * Using `Value` here is intentional — the upstream schema is not owned by orca.
-   */
-  200: unknown;
-};
 
 export type NamespaceCreateData = {
   /**
@@ -5278,7 +4802,7 @@ export type NamespaceListResponse = NamespaceListResponses[keyof NamespaceListRe
 
 export type NamespaceProjectListData = {
   /**
-   * ProjectsListArgs
+   * EmptyArgs
    */
   body: {
     [key: string]: unknown;
@@ -5842,7 +5366,7 @@ export type NamespaceSpecDeleteResponse =
 
 export type NamespaceSpecDetailData = {
   /**
-   * SpecDumpArgs
+   * SpecDetailArgs
    */
   body: {
     [key: string]: unknown;
@@ -5871,7 +5395,7 @@ export type NamespaceSpecDetailError = NamespaceSpecDetailErrors[keyof Namespace
 
 export type NamespaceSpecDetailResponses = {
   /**
-   * SpecDumpReport
+   * SpecDetailReport
    *
    * Tool result
    */
@@ -6234,381 +5758,6 @@ export type NamespaceUseResponses = {
 };
 
 export type NamespaceUseResponse = NamespaceUseResponses[keyof NamespaceUseResponses];
-
-export type ProxmoxContainerListData = {
-  /**
-   * ProxmoxListContainersArgs
-   */
-  body: {
-    endpoint: string;
-    /**
-     * Node name (e.g. "pve1")
-     */
-    node: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/proxmox.container.list';
-};
-
-export type ProxmoxContainerListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type ProxmoxContainerListError =
-  ProxmoxContainerListErrors[keyof ProxmoxContainerListErrors];
-
-export type ProxmoxContainerListResponses = {
-  /**
-   * JsonAny
-   *
-   * Opaque JSON passthrough wrapper for genuinely free-form upstream payloads
-   * (e.g. Home Assistant entity dumps, Proxmox cluster listings, MCP structuredContent).
-   * Using `Value` here is intentional — the upstream schema is not owned by orca.
-   */
-  200: unknown;
-};
-
-export type ProxmoxContainerUpdateData = {
-  /**
-   * ProxmoxContainerActionArgs
-   */
-  body: {
-    /**
-     * One of: start | stop | shutdown | reboot
-     */
-    action: string;
-    endpoint: string;
-    node: string;
-    vmid: number;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/proxmox.container.update';
-};
-
-export type ProxmoxContainerUpdateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type ProxmoxContainerUpdateError =
-  ProxmoxContainerUpdateErrors[keyof ProxmoxContainerUpdateErrors];
-
-export type ProxmoxContainerUpdateResponses = {
-  /**
-   * ProxmoxActionResult
-   *
-   * Result of a Proxmox lifecycle action.
-   */
-  200: {
-    action: string;
-    node: string;
-    status: number;
-    upid?: string | null;
-    vmid: number;
-  };
-};
-
-export type ProxmoxContainerUpdateResponse =
-  ProxmoxContainerUpdateResponses[keyof ProxmoxContainerUpdateResponses];
-
-export type ProxmoxEndpointCreateData = {
-  /**
-   * AddProxmoxEndpointArgs
-   */
-  body: {
-    baseUrl: string;
-    insecure?: boolean | null;
-    name: string;
-    tokenId: string;
-    tokenSecret: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/proxmox.endpoint.create';
-};
-
-export type ProxmoxEndpointCreateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type ProxmoxEndpointCreateError =
-  ProxmoxEndpointCreateErrors[keyof ProxmoxEndpointCreateErrors];
-
-export type ProxmoxEndpointCreateResponses = {
-  /**
-   * ProxmoxMutationResult
-   *
-   * Tool result
-   */
-  200: {
-    changed: boolean;
-    name: string;
-  };
-};
-
-export type ProxmoxEndpointCreateResponse =
-  ProxmoxEndpointCreateResponses[keyof ProxmoxEndpointCreateResponses];
-
-export type ProxmoxEndpointDeleteData = {
-  /**
-   * RemoveProxmoxEndpointArgs
-   */
-  body: {
-    name: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/proxmox.endpoint.delete';
-};
-
-export type ProxmoxEndpointDeleteErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type ProxmoxEndpointDeleteError =
-  ProxmoxEndpointDeleteErrors[keyof ProxmoxEndpointDeleteErrors];
-
-export type ProxmoxEndpointDeleteResponses = {
-  /**
-   * ProxmoxMutationResult
-   *
-   * Tool result
-   */
-  200: {
-    changed: boolean;
-    name: string;
-  };
-};
-
-export type ProxmoxEndpointDeleteResponse =
-  ProxmoxEndpointDeleteResponses[keyof ProxmoxEndpointDeleteResponses];
-
-export type ProxmoxEndpointListData = {
-  /**
-   * ListProxmoxEndpointsArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/proxmox.endpoint.list';
-};
-
-export type ProxmoxEndpointListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type ProxmoxEndpointListError = ProxmoxEndpointListErrors[keyof ProxmoxEndpointListErrors];
-
-export type ProxmoxEndpointListResponses = {
-  /**
-   * ListProxmoxEndpointsOutput
-   *
-   * Tool result
-   */
-  200: {
-    endpoints: Array<ProxmoxEndpointEntry>;
-  };
-};
-
-export type ProxmoxEndpointListResponse =
-  ProxmoxEndpointListResponses[keyof ProxmoxEndpointListResponses];
-
-export type ProxmoxNodeListData = {
-  /**
-   * ProxmoxListNodesArgs
-   */
-  body: {
-    /**
-     * Name of a Proxmox endpoint registered via add_proxmox_endpoint
-     */
-    endpoint: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/proxmox.node.list';
-};
-
-export type ProxmoxNodeListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type ProxmoxNodeListError = ProxmoxNodeListErrors[keyof ProxmoxNodeListErrors];
-
-export type ProxmoxNodeListResponses = {
-  /**
-   * JsonAny
-   *
-   * Opaque JSON passthrough wrapper for genuinely free-form upstream payloads
-   * (e.g. Home Assistant entity dumps, Proxmox cluster listings, MCP structuredContent).
-   * Using `Value` here is intentional — the upstream schema is not owned by orca.
-   */
-  200: unknown;
-};
-
-export type ProxmoxVmListData = {
-  /**
-   * ProxmoxListVmsArgs
-   */
-  body: {
-    endpoint: string;
-    /**
-     * Node name (e.g. "pve1")
-     */
-    node: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/proxmox.vm.list';
-};
-
-export type ProxmoxVmListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type ProxmoxVmListError = ProxmoxVmListErrors[keyof ProxmoxVmListErrors];
-
-export type ProxmoxVmListResponses = {
-  /**
-   * JsonAny
-   *
-   * Opaque JSON passthrough wrapper for genuinely free-form upstream payloads
-   * (e.g. Home Assistant entity dumps, Proxmox cluster listings, MCP structuredContent).
-   * Using `Value` here is intentional — the upstream schema is not owned by orca.
-   */
-  200: unknown;
-};
-
-export type ProxmoxVmUpdateData = {
-  /**
-   * ProxmoxVmActionArgs
-   */
-  body: {
-    /**
-     * One of: start | stop | shutdown | reboot
-     */
-    action: string;
-    endpoint: string;
-    node: string;
-    vmid: number;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/proxmox.vm.update';
-};
-
-export type ProxmoxVmUpdateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type ProxmoxVmUpdateError = ProxmoxVmUpdateErrors[keyof ProxmoxVmUpdateErrors];
-
-export type ProxmoxVmUpdateResponses = {
-  /**
-   * ProxmoxActionResult
-   *
-   * Result of a Proxmox lifecycle action.
-   */
-  200: {
-    action: string;
-    node: string;
-    status: number;
-    upid?: string | null;
-    vmid: number;
-  };
-};
-
-export type ProxmoxVmUpdateResponse = ProxmoxVmUpdateResponses[keyof ProxmoxVmUpdateResponses];
 
 export type SystemAgentBackendClearKeyData = {
   /**
@@ -7674,7 +6823,7 @@ export type SystemConfigSetResponse = SystemConfigSetResponses[keyof SystemConfi
 
 export type SystemCreateData = {
   /**
-   * EmptyDeleteArgs
+   * EmptyArgs
    */
   body: {
     [key: string]: unknown;
@@ -7703,7 +6852,7 @@ export type SystemCreateError = SystemCreateErrors[keyof SystemCreateErrors];
 
 export type SystemCreateResponses = {
   /**
-   * LifecycleReport
+   * InstallReport
    *
    * Tool result
    */
@@ -7825,7 +6974,7 @@ export type SystemDbLifecycleUpdateResponse =
 
 export type SystemDeleteData = {
   /**
-   * EmptyDeleteArgs
+   * EmptyArgs
    */
   body: {
     [key: string]: unknown;
@@ -7854,7 +7003,7 @@ export type SystemDeleteError = SystemDeleteErrors[keyof SystemDeleteErrors];
 
 export type SystemDeleteResponses = {
   /**
-   * LifecycleReport
+   * InstallReport
    *
    * Tool result
    */
@@ -7905,10 +7054,41 @@ export type SystemDetailResponses = {
   200: {
     agents: PathLinked;
     binary: PathInstalled;
+    /**
+     * Release channel marker (`stable` | `rc` | `dev`). `None` when no
+     * channel marker has been written.
+     */
+    channel?: string | null;
     claude_md: PathLinked;
+    /**
+     * "embedded" when this binary was built with the `ui` feature on, "disabled" otherwise.
+     */
+    frontend: string;
     mcp: McpRegistration;
+    /**
+     * Daemon operating mode: "daemon" | "parked" | "dev". `None` when the
+     * state file is absent (binary not running as the registered daemon).
+     */
+    mode?: string | null;
+    /**
+     * Active version pin if any (`orca update --pin`).
+     */
+    pinned_to?: string | null;
     pki: PathInitialized;
+    /**
+     * Cross-platform OS / hardware / process / network snapshot. `None` only
+     * when the collector failed to initialise on this host.
+     */
+    system?: SystemInfoReport | null;
+    /**
+     * Build target triple of this binary (e.g. `aarch64-apple-darwin`).
+     */
+    target: string;
     vault: PathExists;
+    /**
+     * Orca version from `CARGO_PKG_VERSION` at build time.
+     */
+    version: string;
   };
 };
 
@@ -7916,7 +7096,7 @@ export type SystemDetailResponse = SystemDetailResponses[keyof SystemDetailRespo
 
 export type SystemDiagnosticListData = {
   /**
-   * SystemDoctorArgs
+   * DoctorArgs
    */
   body: {
     [key: string]: unknown;
@@ -8722,25 +7902,12 @@ export type SystemMcpFederationListToolsResponse =
 export type SystemMcpFederationRunData = {
   /**
    * RunMcpToolArgs
-   *
-   * `args` is passed straight through to the upstream MCP tool — its shape is
-   * dictated by each tool's own input schema and cannot be typed statically.
    */
   body: {
-    /**
-     * JSON arguments object passed straight through to the tool.
-     * Opaque by the MCP protocol — shape is dictated by each tool's own input schema.
-     */
     args?: {
       [key: string]: unknown;
     } | null;
-    /**
-     * Registered MCP server name.
-     */
     server: string;
-    /**
-     * Tool name on the server (the internal name, not an orca alias).
-     */
     tool: string;
   };
   path?: never;
@@ -8770,18 +7937,11 @@ export type SystemMcpFederationRunResponses = {
   /**
    * RunMcpToolOutput
    *
-   * `structured_content` is opaque — its shape is each tool's own output schema,
-   * which orca cannot know at this layer (MCP passthrough).
+   * Tool result
    */
   200: {
     content: Array<McpContent>;
     isError: boolean;
-    /**
-     * Structured tool result if the server provided one alongside `content`
-     * (MCP `structuredContent`). Kept as opaque JSON — its shape is the
-     * tool's own output schema, which orca cannot know at this layer.
-     */
-    structuredContent?: unknown;
   };
 };
 
@@ -10083,79 +9243,6 @@ export type SystemPodUpdateResponses = {
 
 export type SystemPodUpdateResponse = SystemPodUpdateResponses[keyof SystemPodUpdateResponses];
 
-export type SystemRuntimeDetailData = {
-  /**
-   * EmptyDeleteArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/system.runtime.detail';
-};
-
-export type SystemRuntimeDetailErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemRuntimeDetailError = SystemRuntimeDetailErrors[keyof SystemRuntimeDetailErrors];
-
-export type SystemRuntimeDetailResponses = {
-  /**
-   * RuntimeSpecReport
-   *
-   * Tool result
-   */
-  200: {
-    /**
-     * Release channel marker (`stable` | `rc` | `beta` | `alpha`). `None`
-     * when no channel marker has been written.
-     */
-    channel?: string | null;
-    /**
-     * "embedded" when this binary was built with the `ui` feature on, otherwise "disabled".
-     */
-    frontend: string;
-    /**
-     * Current daemon operating mode: "daemon" | "parked" | "dev". `None`
-     * when the state file is absent (binary not running as the registered daemon).
-     */
-    mode?: string | null;
-    /**
-     * Active version pin if any (`orca update --pin`).
-     */
-    pinned_to?: string | null;
-    /**
-     * Cross-platform system snapshot (OS / hardware / process / network).
-     * `None` only if the collector failed to initialise on the peer.
-     */
-    system?: SystemInfoReport | null;
-    /**
-     * Build target triple of this binary (e.g. `aarch64-apple-darwin`).
-     */
-    target: string;
-    /**
-     * Orca version from `CARGO_PKG_VERSION` at build time.
-     */
-    version: string;
-  };
-};
-
-export type SystemRuntimeDetailResponse =
-  SystemRuntimeDetailResponses[keyof SystemRuntimeDetailResponses];
-
 export type SystemScheduleListData = {
   /**
    * ScheduleListArgs
@@ -10486,6 +9573,11 @@ export type SystemSecretSetData = {
     description?: string | null;
     name: string;
     /**
+     * When set, proxy the call to the named remote peer via the pod mesh
+     * instead of writing the secret locally.
+     */
+    peer_id?: string | null;
+    /**
      * Required for external backends (e.g. `op://Personal/orca-gh/token`). Ignored for inline.
      */
     ref_path?: string | null;
@@ -10625,7 +9717,7 @@ export type SystemUpdateError = SystemUpdateErrors[keyof SystemUpdateErrors];
 
 export type SystemUpdateResponses = {
   /**
-   * LifecycleReport
+   * InstallReport
    *
    * Tool result
    */
