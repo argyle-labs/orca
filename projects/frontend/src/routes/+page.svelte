@@ -122,11 +122,11 @@
 
   async function refreshLocal(inst: Instance) {
     try {
-      const [health, detail] = await Promise.all([
-        callTool('ping', {}),
+      const [healthRes, detail] = await Promise.all([
+        fetch('/api/health', { credentials: 'include' }).catch(() => null),
         callTool('systemDetail', {}),
       ]);
-      inst.health = (health as { ok: boolean }).ok ? 'up' : 'down';
+      inst.health = healthRes && healthRes.ok ? 'up' : 'down';
       const s = detail as {
         version: string;
         target: string;
@@ -177,7 +177,7 @@
       const [listResult, statusResult] = await Promise.all([
         callTool<{ members: PodMember[] }>('podList', {}),
         callTool<{ peer_id: string; system?: SystemInfoReport | null }[]>(
-          'systemHostStatusList',
+          'podStatusList',
           {},
         ).catch(() => []),
       ]);

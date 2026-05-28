@@ -1,5 +1,4 @@
 import { writable } from 'svelte/store';
-import { ping } from '$lib/client/sdk.gen';
 
 export type ServerStatus = 'unknown' | 'up' | 'down';
 
@@ -16,8 +15,8 @@ function createServerHealth() {
     // elsewhere is "not signed in", NOT a backend outage.
     let ok: boolean;
     try {
-      const res = await ping();
-      ok = !!res.response;
+      const res = await fetch('/api/health', { credentials: 'include' });
+      ok = !!res;
     } catch {
       ok = false;
     }
