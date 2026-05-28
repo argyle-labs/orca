@@ -123,6 +123,7 @@ members = [
     # service trait live in the same module file.
     "projects/auth",
     "projects/fleet",
+    "projects/inventory-tests",
     "projects/platform",
     "projects/agents",
     "projects/plugins",
@@ -156,6 +157,7 @@ default-members = [
     "projects/orca-macro",
     "projects/auth",
     "projects/fleet",
+    "projects/inventory-tests",
     "projects/platform",
     "projects/agents",
     "projects/plugins",

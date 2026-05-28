@@ -49,17 +49,11 @@ rustls-pemfile = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
-# Inventory cross-bucket smoke tests link every domain in so the full
-# `#[orca_tool]` graph is exercised end-to-end in one test binary.
-auth          = { path = "../auth" }
-platform      = { path = "../platform" }
-agents        = { path = "../agents" }
-plugins       = { path = "../plugins" }
-docs          = { path = "../docs" }
-mcp           = { path = "../mcp" }
-homeassistant = { path = "../integrations/homeassistant" }
-proxmox       = { path = "../integrations/proxmox" }
-system        = { path = "../system" }
+# NOTE: cross-bucket inventory smoke tests moved to `projects/inventory-tests/`
+# (sibling crate). They can't live here because `plugins` depends on `fleet`,
+# so adding `plugins` as a dev-dep would link fleet twice in the test binary
+# (once as the lib under test, once via plugins), duplicating every
+# `#[orca_tool]` inventory registration and panicking `orca_dispatch::cache()`.
 
 [lints]
 workspace = true

@@ -1,0 +1,35 @@
+[package]
+name = "inventory-tests"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+# Sibling test-only crate that links every #[orca_tool] bucket and verifies
+# the inventory graph end-to-end. Lives outside fleet because fleet has no
+# safe place to put this: plugins depends on fleet, so any fleet test that
+# pulls plugins in via dev-deps would link fleet twice (once as the lib under
+# test, once transitively via plugins), duplicating every inventory::submit!
+# and panicking orca_dispatch::cache() with "duplicate tool name".
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+orca-dispatch = { path = "../orca-dispatch" }
+inventory     = { workspace = true }
+
+# Link every bucket so its inventory::submit! statics are pulled in.
+agents        = { path = "../agents" }
+auth          = { path = "../auth" }
+docs          = { path = "../docs" }
+fleet         = { path = "../fleet" }
+mcp           = { path = "../mcp" }
+platform      = { path = "../platform" }
+plugins       = { path = "../plugins" }
+system        = { path = "../system" }
+docker        = { path = "../integrations/docker" }
+homeassistant = { path = "../integrations/homeassistant" }
+proxmox       = { path = "../integrations/proxmox" }
+
+[lints]
+workspace = true
