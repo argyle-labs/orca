@@ -49,6 +49,7 @@ fn pod_tools_present_in_inventory_slice() {
     assert!(names.contains(&"pod.trust"), "{names:?}");
     assert!(names.contains(&"pod.ping"), "{names:?}");
     assert!(names.contains(&"pod.recover"), "{names:?}");
+    assert!(names.contains(&"pod.forget"), "{names:?}");
 }
 
 #[test]

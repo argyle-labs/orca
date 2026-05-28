@@ -696,6 +696,18 @@ async fn pod_recover(
     server_pod::recover(&args.peer_id)
 }
 
+/// Forget a stale/orphan peer_id mesh-wide: hard-delete it here AND fan a
+/// one-way notice to every live member so they drop it too. Use for orphans
+/// left by machine_id churn or decommissioned hosts — NOT for evicting a live
+/// peer (that's `pod kick`).
+#[orca_tool(domain = "pod", verb = "forget", role = "admin")]
+async fn pod_forget(
+    args: PodForgetArgs,
+    _ctx: &orca_contract::ToolCtx,
+) -> anyhow::Result<PodForgetOutput> {
+    server_pod::forget(&args.peer_id).await
+}
+
 /// Days-remaining + rotation state for every mesh cert on this host, plus
 /// the current `self_secure` (Tier-2 secrets-storage) setting.
 #[orca_tool(domain = "system.pod", verb = "detail")]
