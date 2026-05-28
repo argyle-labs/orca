@@ -318,7 +318,18 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
                     .service::<::std::sync::Arc<dyn ::orca_contract::RemoteExec>>()?;
                 let __args_value = ::serde_json::to_value(&__a)
                     .map_err(|e| ::anyhow::anyhow!("peer_dispatch: serialize args: {e}"))?;
-                let __out_value = __svc.exec(&__peer_id, #tool_name, __args_value).await?;
+                // Assert "admin" role: macro-emitted proxies fire from local
+                // CLI/REST entrypoints that already passed local auth.
+                // Real per-user caller_user_id replaces this in
+                // project-remote-exec-full-fix S1–S4.
+                let __out_value = __svc
+                    .exec(
+                        &__peer_id,
+                        #tool_name,
+                        __args_value,
+                        ::core::option::Option::Some(::std::string::String::from("admin")),
+                    )
+                    .await?;
                 let __out: #output_ty = ::serde_json::from_value(__out_value)
                     .map_err(|e| ::anyhow::anyhow!(
                         "peer_dispatch: decode {} output from peer {}: {}",
