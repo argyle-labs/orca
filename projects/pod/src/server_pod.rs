@@ -246,7 +246,7 @@ pub fn discover() -> Result<Vec<PodDiscoveryRowDto>> {
             hostname: r.hostname,
             addr: r.addr,
             port: r.port,
-            state: r.state,
+            discovery_state: r.state,
             can_invite: r.can_invite,
             first_seen_at: r.first_seen_at,
             last_seen_at: r.last_seen_at,

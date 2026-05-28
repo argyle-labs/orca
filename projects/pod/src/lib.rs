@@ -255,7 +255,11 @@ pub struct PodDiscoveryRowDto {
     pub hostname: String,
     pub addr: String,
     pub port: u16,
-    pub state: String,
+    /// mDNS-advertised membership: `"unclaimed"` or `"pod:<pod_id>"`. Named
+    /// `discovery_state` (not `state`) so it doesn't collide with the
+    /// `#[serde(tag = "state")]` discriminant on [`PodMember`], which would
+    /// otherwise clobber the `"discovered"` tag and break state filtering.
+    pub discovery_state: String,
     pub can_invite: bool,
     pub first_seen_at: i64,
     pub last_seen_at: i64,
