@@ -153,6 +153,7 @@ pub async fn push_trust(peer_id: &str, on: bool) -> Result<PodTrustOutput> {
         peer_id,
         "pod.trust",
         serde_json::json!({ "peer_id": own_id, "on": on, "push": false }),
+        Some("admin".to_string()),
     )
     .await?;
     let remote: PodTrustOutput = serde_json::from_value(dispatch.result)?;
