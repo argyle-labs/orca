@@ -90,6 +90,7 @@ mime_guess = "2"
 
 # Test
 tempfile = "3"
+serial_test = "3"
 tower = { version = "0.5", features = ["util"] }
 
 # Misc

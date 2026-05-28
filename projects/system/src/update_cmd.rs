@@ -307,13 +307,13 @@ pub async fn startup_update_check() {
 }
 
 #[cfg(test)]
-#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::update_state::read_version_pin;
     use orca_utils::config::{Config, Model};
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+    use serial_test::serial;
+    use std::sync::Arc;
 
     fn isolated_orca_home(scenario: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -322,11 +322,6 @@ mod tests {
             std::env::set_var("ORCA_TEST_SCENARIO", scenario);
         }
         dir
-    }
-
-    fn marker_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
     }
 
     fn ctx() -> ToolCtx {
@@ -346,8 +341,8 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(env)]
     async fn update_pin_normalises_version() {
-        let _g = marker_lock();
         let _dir = isolated_orca_home("pin_cmd");
         let out = update_pin(
             UpdatePinArgs {
@@ -362,8 +357,8 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(env)]
     async fn update_pin_preserves_v_prefix() {
-        let _g = marker_lock();
         let _dir = isolated_orca_home("pin_cmd_v");
         let out = update_pin(
             UpdatePinArgs {
@@ -385,8 +380,8 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(env)]
     async fn update_set_then_clear_source() {
-        let _g = marker_lock();
         let _dir = isolated_orca_home("set_source");
         update_set_source(
             UpdateSetSourceArgs {
@@ -404,8 +399,8 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(env)]
     async fn update_unpin_no_pin() {
-        let _g = marker_lock();
         let _dir = isolated_orca_home("unpin_noop");
         update_unpin(UpdateUnpinArgs {}, &ctx()).await.unwrap();
     }
