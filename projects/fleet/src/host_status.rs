@@ -53,7 +53,6 @@ pub struct HostStatusDetailArgs {
     pub limit: Option<u32>,
 }
 
-#[cfg(feature = "native")]
 fn rows_to_dtos(rows: Vec<db::host_status::HostStatusRow>) -> Vec<HostStatusRowDto> {
     rows.into_iter()
         .map(|r| {
@@ -93,7 +92,7 @@ async fn host_status_detail(
     Ok(HostStatusRows(rows_to_dtos(rows)))
 }
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::empty_ctx;

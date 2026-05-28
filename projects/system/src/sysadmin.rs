@@ -5,7 +5,6 @@
 //! install) are module-private helpers — there is no service trait.
 
 use anyhow::Result;
-#[cfg(feature = "native")]
 use colored::Colorize;
 use orca_contract::ToolCtx;
 use orca_macro::orca_tool;

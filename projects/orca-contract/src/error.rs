@@ -146,7 +146,6 @@ impl fmt::Display for OrcaError {
 
 impl std::error::Error for OrcaError {}
 
-#[cfg(feature = "native")]
 impl From<anyhow::Error> for OrcaError {
     fn from(e: anyhow::Error) -> Self {
         // anyhow::Error has no kind info — default to Internal. Tools that
@@ -209,7 +208,6 @@ mod tests {
         assert_eq!(ErrorKind::Internal.http_status(), 500);
     }
 
-    #[cfg(feature = "native")]
     #[test]
     fn anyhow_conversion_defaults_to_internal() {
         let e: OrcaError = anyhow::anyhow!("boom").into();

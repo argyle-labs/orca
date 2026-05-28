@@ -59,7 +59,6 @@ pub struct ProxmoxContainerActionArgs {
     pub action: String,
 }
 
-#[cfg(feature = "native")]
 mod native_support {
     use super::*;
     use crate::{Client, Config, ProxmoxActionResult as IntResult};

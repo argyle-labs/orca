@@ -13,13 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::system_info_types::SystemInfoReport;
 
-#[cfg(feature = "native")]
 use crate::install_status::install_status_report;
-#[cfg(feature = "native")]
 use crate::system_info::current_or_collect;
-#[cfg(feature = "native")]
 use crate::update_state::{read_channel_marker, read_version_pin};
-#[cfg(feature = "native")]
 use orca_macro::orca_tool;
 
 // ── Shared shapes ───────────────────────────────────────────────────────────
@@ -92,7 +88,6 @@ pub struct SystemStatusReport {
 pub struct SystemStatusArgs {}
 
 /// Snapshot of orca's installation: binary, ~/.claude/CLAUDE.md, vault dir, agents symlink, PKI init, MCP registration.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system", verb = "detail", remote_ok = true)]
 async fn system_detail(
     _args: SystemStatusArgs,
@@ -172,7 +167,7 @@ async fn system_detail(
     })
 }
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use orca_contract::ToolCtx;

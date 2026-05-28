@@ -3,10 +3,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "native")]
 use orca_macro::orca_tool;
 
-#[cfg(feature = "native")]
 fn run_migrate(
     direction: orca_db::MigrateDirection,
     steps: usize,
@@ -100,7 +98,7 @@ async fn db_lifecycle_update(
     }
 }
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::empty_ctx;

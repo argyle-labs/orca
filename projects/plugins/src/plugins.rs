@@ -3,7 +3,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "native")]
 use orca_macro::orca_tool;
 
 // ── Typed entities ──────────────────────────────────────────────────────────

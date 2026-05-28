@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 #[allow(clippy::disallowed_types)]
 use serde_json::Value;
 
-#[cfg(feature = "native")]
 use orca_macro::orca_tool;
 
 // ── Shared row shapes ───────────────────────────────────────────────────────
@@ -227,10 +226,8 @@ mod proxy_graphql_args_mod {
 
 pub use proxy_graphql_args_mod::ProxyGraphqlArgs;
 
-#[cfg(feature = "native")]
 mod native;
 
-#[cfg(feature = "native")]
 use native as imp;
 
 // ═══════════════════════════════════════════════════════════════════════════

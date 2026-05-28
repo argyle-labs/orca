@@ -7,8 +7,6 @@
 //!   - `host.refresh` — force a re-detect (LAN + Tailscale + manual rows).
 //!
 //! Migrated to the `#[orca_tool]` proc-macro as the proof-of-shape pilot.
-//! The macro emits `OrcaToolDef` + `OrcaOp` unconditionally and the
-//! `OrcaTool::run` thunk + inventory registration under `feature = "native"`.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -68,7 +66,6 @@ pub const ALLOWED_HOST_KEYS: &[&str] = &[
 
 // ── Native bodies + tool registrations ──────────────────────────────────────
 
-#[cfg(feature = "native")]
 mod native_support {
     use super::*;
     use anyhow::Result;
@@ -106,15 +103,12 @@ mod native_support {
     }
 }
 
-#[cfg(feature = "native")]
 pub use native_support::HostRefreshHook;
 
-#[cfg(feature = "native")]
 pub trait ProvideHostRefresh {
     fn host_refresh(&self) -> std::sync::Arc<dyn HostRefreshHook + Send + Sync>;
 }
 
-#[cfg(feature = "native")]
 pub fn register_host_refresh(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideHostRefresh) {
     ctx.register_service(p.host_refresh());
 }
@@ -190,7 +184,7 @@ async fn host_refresh(
     Ok(HostRefreshOutput { channels })
 }
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::empty_ctx as make_ctx;

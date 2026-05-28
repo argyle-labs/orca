@@ -8,7 +8,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "native")]
 use orca_macro::orca_tool;
 
 // ── Typed entities ──────────────────────────────────────────────────────────
@@ -82,7 +81,6 @@ pub struct GetContextOutput {
 // ── Native tool bodies ──────────────────────────────────────────────────────
 
 /// List all available orca agents with their names and descriptions.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.agent", verb = "list")]
 async fn list_agents(
     _args: ListAgentsArgs,
@@ -96,7 +94,6 @@ async fn list_agents(
 }
 
 /// Return the full system prompt for a named orca agent.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.agent", verb = "get")]
 async fn get_agent(
     args: GetAgentArgs,
@@ -111,7 +108,6 @@ async fn get_agent(
 }
 
 /// Read an orca configuration/reference document by name.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.agent", verb = "get-config")]
 async fn get_config(
     args: GetConfigArgs,
@@ -132,7 +128,6 @@ async fn get_config(
 }
 
 /// Load the memory context for an orca project.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.agent", verb = "get-context")]
 async fn get_context(
     args: GetContextArgs,

@@ -1,28 +1,22 @@
 //! Fleet domain — pod/mesh, host, meta. (lifecycle dissolved into `system` crate, slice B3.)
 
-#[cfg(feature = "native")]
 pub mod cli;
 pub mod host;
-#[cfg(feature = "native")]
 pub mod host_identity;
 pub mod host_status;
-#[cfg(feature = "native")]
 pub mod host_status_writer;
-#[cfg(feature = "native")]
 pub mod infra;
 pub mod meta;
-#[cfg(feature = "native")]
 pub mod native_support;
 pub mod pod;
-#[cfg(feature = "native")]
 pub mod pod_native;
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(test)]
 pub(crate) mod test_support;
 
 // Inventory-slice smoke tests — exercised in one binary that links every
 // bucket so the full `#[orca_tool]` graph is verifiable end-to-end.
-#[cfg(all(test, feature = "native"))]
+#[cfg(test)]
 mod inventory_tests {
     use orca_dispatch::ToolRegistration;
 

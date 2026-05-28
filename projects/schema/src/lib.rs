@@ -6,8 +6,6 @@
 
 pub mod types;
 
-#[cfg(feature = "native")]
 pub mod view;
 
-#[cfg(feature = "native")]
 pub mod tools;

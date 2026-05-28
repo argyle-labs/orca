@@ -382,7 +382,6 @@ pub struct PodUpdateOutput {
 
 // ── Native support: From impls, PodService trait, svc() helper ──────────────
 
-#[cfg(feature = "native")]
 pub mod native_support {
     use super::*;
     use anyhow::Result;
@@ -517,15 +516,12 @@ pub mod native_support {
     }
 }
 
-#[cfg(feature = "native")]
 pub use native_support::{PodExecDispatch, PodService};
 
-#[cfg(feature = "native")]
 pub trait ProvidePod {
     fn pod(&self) -> std::sync::Arc<dyn PodService>;
 }
 
-#[cfg(feature = "native")]
 pub fn register_pod(ctx: &mut orca_contract::ToolCtx, p: &impl ProvidePod) {
     let pod = p.pod();
     ctx.register_service(pod.clone());
@@ -744,7 +740,7 @@ async fn pod_update(
     Ok(PodUpdateOutput { self_secure })
 }
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(test)]
 mod tests {
     use super::native_support::PodExecDispatch;
     use super::*;

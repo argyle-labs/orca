@@ -20,7 +20,7 @@ async fn health(_args: HealthArgs, _ctx: &orca_contract::ToolCtx) -> anyhow::Res
     Ok(HealthOutput { ok: true })
 }
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::empty_ctx;

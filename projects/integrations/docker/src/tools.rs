@@ -4,14 +4,11 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "native")]
 use crate::{Compose, ComposeError, Engine};
-#[cfg(feature = "native")]
 use std::path::{Path, PathBuf};
 
 use orca_macro::orca_tool;
 
-#[cfg(feature = "native")]
 fn map_engine(e: Engine) -> DockerEngineKind {
     match e {
         Engine::Colima => DockerEngineKind::Colima,

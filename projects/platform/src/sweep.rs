@@ -129,7 +129,6 @@ async fn sweep_organization(
     })
 }
 
-#[cfg(feature = "native")]
 mod native {
     use super::*;
     use anyhow::{Context, Result};

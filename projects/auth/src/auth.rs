@@ -3,16 +3,11 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "native")]
 use anyhow::bail;
-#[cfg(feature = "native")]
 use orca_macro::orca_tool;
-#[cfg(feature = "native")]
 use rand::Rng;
-#[cfg(feature = "native")]
 use sha2::{Digest, Sha256};
 
-#[cfg(feature = "native")]
 const ANTHROPIC_KEY: &str = "anthropic_api_key";
 
 // ── Shared rows ─────────────────────────────────────────────────────────────
@@ -69,7 +64,6 @@ pub struct AuthLoginOutput {
 }
 
 /// Snapshot every configured credential the host knows about (Anthropic key + OAuth tokens).
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.auth.session", verb = "detail")]
 async fn auth_session_detail(
     _args: AuthStatusArgs,
@@ -101,7 +95,6 @@ async fn auth_session_detail(
 }
 
 /// [MUTATES STATE] Remove a stored credential. `removed=false` if nothing was stored.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.auth.session", verb = "delete")]
 async fn auth_session_delete(
     args: AuthLogoutArgs,
@@ -123,7 +116,6 @@ async fn auth_session_delete(
 }
 
 /// [MUTATES STATE] Authenticate with a provider. Anthropic: pass `key`. GitHub: device-flow. Atlassian: PKCE.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.auth.session", verb = "create")]
 async fn auth_session_create(
     args: AuthLoginArgs,
@@ -229,7 +221,6 @@ pub struct TokenRevokeOutput {
 /// [MUTATES STATE] Mint a new REST/MCP bearer token on THIS host. Plaintext is
 /// returned exactly once and cannot be recovered from the DB. Token only
 /// authenticates calls to this host's `:12000` — not to other peers.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.auth.token", verb = "create")]
 async fn auth_token_create(
     args: TokenCreateArgs,
@@ -269,7 +260,6 @@ async fn auth_token_create(
 }
 
 /// List all REST/MCP bearer tokens registered on this host. Token hashes are not returned.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.auth.token", verb = "list")]
 async fn auth_token_list(
     _args: TokenListArgs,
@@ -292,7 +282,6 @@ async fn auth_token_list(
 }
 
 /// [MUTATES STATE] Revoke a token by id. Returns `revoked=false` if the id wasn't found.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.auth.token", verb = "delete")]
 async fn auth_token_delete(
     args: TokenRevokeArgs,
@@ -305,7 +294,6 @@ async fn auth_token_delete(
 
 // ── Hex/sha helpers ─────────────────────────────────────────────────────────
 
-#[cfg(feature = "native")]
 fn hex_lower(bytes: &[u8]) -> String {
     use std::fmt::Write;
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -315,7 +303,6 @@ fn hex_lower(bytes: &[u8]) -> String {
     s
 }
 
-#[cfg(feature = "native")]
 fn sha256_hex(input: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(input);

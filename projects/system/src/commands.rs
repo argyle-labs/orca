@@ -9,18 +9,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::install::InstallReport;
 
-#[cfg(feature = "native")]
 use crate::dev::cmd_dev_enable;
-#[cfg(feature = "native")]
 use crate::install::{cmd_install_report, cmd_uninstall_report};
-#[cfg(feature = "native")]
 use crate::update::{apply_update, check_for_update, resolve_github_token};
-#[cfg(feature = "native")]
 use crate::update_state::{
     clear_version_pin, read_channel_marker, resolve_channel, resolve_pin_veto,
     write_channel_marker, write_version_pin,
 };
-#[cfg(feature = "native")]
 use orca_macro::orca_tool;
 
 // ── Args ────────────────────────────────────────────────────────────────────
@@ -55,7 +50,6 @@ pub struct ProjectsListReport {
 // ── Tools ───────────────────────────────────────────────────────────────────
 
 /// [MUTATES STATE] Install orca on this host: wire symlinks, register MCP server, install binary.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system", verb = "create")]
 async fn system_create(
     _args: EmptyArgs,
@@ -65,7 +59,6 @@ async fn system_create(
 }
 
 /// [MUTATES STATE] Uninstall orca from this host: remove binary, MCP registration, and CLAUDE.md symlinks.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system", verb = "delete")]
 async fn system_delete(
     _args: EmptyArgs,
@@ -79,7 +72,6 @@ async fn system_delete(
 /// "stable" | "rc" | "dev" | "<semver>". "dev" tracks GitHub HEAD via
 /// cargo-watch. Omit to apply the latest on the current channel.
 /// When `peer_id` is set the update runs on the named peer instead of locally.
-#[cfg(feature = "native")]
 #[orca_tool(
     domain = "system",
     verb = "update",
@@ -149,7 +141,6 @@ async fn system_update(
 }
 
 /// List projects (memory directories under the orca vault root).
-#[cfg(feature = "native")]
 #[orca_tool(domain = "namespace.project", verb = "list")]
 async fn projects_list(
     _args: EmptyArgs,
@@ -169,7 +160,7 @@ async fn projects_list(
     Ok(ProjectsListReport { projects: out })
 }
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use orca_contract::ToolCtx;

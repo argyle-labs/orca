@@ -7,5 +7,4 @@ pub mod agents;
 pub mod commands;
 pub mod embedded;
 
-#[cfg(feature = "native")]
 pub mod resolve;

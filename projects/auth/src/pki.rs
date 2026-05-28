@@ -3,16 +3,11 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "native")]
 use orca_macro::orca_tool;
-#[cfg(feature = "native")]
 use orca_sdk::pki::{self as sdk_pki, Capability};
-#[cfg(feature = "native")]
 use orca_utils::config::{APP_PKI_DIR, APP_STATE_DIR};
-#[cfg(feature = "native")]
 use std::path::PathBuf;
 
-#[cfg(feature = "native")]
 fn pki_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_default()

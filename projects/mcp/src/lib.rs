@@ -5,20 +5,14 @@
 
 pub mod types;
 
-#[cfg(feature = "native")]
 pub mod client;
 
-#[cfg(feature = "native")]
 pub mod sync;
 
-#[cfg(feature = "native")]
 pub mod tools;
 
-#[cfg(feature = "native")]
 pub mod context7;
 
-#[cfg(feature = "native")]
 pub mod specs;
 
-#[cfg(feature = "native")]
 pub mod spec_tools;

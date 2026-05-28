@@ -6,11 +6,9 @@ pub mod db_admin;
 pub mod engine;
 pub mod json_schema;
 pub mod profile;
-#[cfg(feature = "native")]
 pub mod profile_manager;
-#[cfg(feature = "native")]
 pub mod profile_native;
 pub mod sweep;
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(test)]
 pub(crate) mod test_support;

@@ -64,7 +64,6 @@ pub struct EngineOpResult {
 
 // ── Native helpers ──────────────────────────────────────────────────────────
 
-#[cfg(feature = "native")]
 impl From<orca_db::llm::Provider> for ProviderDto {
     fn from(p: orca_db::llm::Provider) -> Self {
         Self {
@@ -77,7 +76,6 @@ impl From<orca_db::llm::Provider> for ProviderDto {
     }
 }
 
-#[cfg(feature = "native")]
 fn infer_kind(url: &str, supplied: &str) -> anyhow::Result<String> {
     let kind = if supplied.is_empty() {
         if url.contains(":11434") {
@@ -159,7 +157,7 @@ async fn engine_update(
     }
 }
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::empty_ctx;

@@ -21,17 +21,15 @@ thiserror   = { workspace = true }
 urlencoding = { workspace = true }
 orca-utils  = { path = "../../utils" }
 
-# `#[orca_tool]` machinery — default tier carries the wasm-safe metadata
-# impls so anyone consuming this crate gets the tool Args/Output schema even
-# without the runtime.
+# `#[orca_tool]` machinery.
 orca-dispatch        = { path = "../../orca-dispatch" }
 orca-contract    = { path = "../../orca-contract", default-features = false }
 orca-macro       = { path = "../../orca-macro" }
 schemars         = { workspace = true }
 inventory        = { workspace = true }
 
-# native-only — DB lookup for registered HA endpoints + error type +
-# async-trait used by the macro-generated OrcaTool impl.
+# DB lookup for registered HA endpoints + error type + async-trait used by
+# the macro-generated OrcaTool impl.
 orca-db = { package = "orca-db", path = "../../db" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }

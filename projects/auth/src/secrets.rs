@@ -8,9 +8,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "native")]
 use anyhow::{anyhow, bail};
-#[cfg(feature = "native")]
 use orca_macro::orca_tool;
 
 // ── Shared types ────────────────────────────────────────────────────────────
@@ -126,7 +124,6 @@ pub struct SecretBackendsReport {
 // ── Inline backend (v1 — value lives in encrypted DB) ───────────────────────
 
 /// Available backend kinds on this host. v1 only knows `inline`.
-#[cfg(feature = "native")]
 fn known_backends() -> &'static [&'static str] {
     &["inline"]
 }
@@ -134,7 +131,6 @@ fn known_backends() -> &'static [&'static str] {
 /// Fetch a value by name. Returns `(backend_kind, value)`. Used by tools and by
 /// internal callers (e.g. lifecycle::resolve_github_token) that need a raw secret
 /// without going through `#[orca_tool]` dispatch.
-#[cfg(feature = "native")]
 pub async fn get_secret(name: &str) -> anyhow::Result<(String, String)> {
     let conn = db::open_default()?;
     let row = db::secrets::get(&conn, name)?.ok_or_else(|| anyhow!("no secret named '{name}'"))?;
@@ -149,7 +145,6 @@ pub async fn get_secret(name: &str) -> anyhow::Result<(String, String)> {
 // ── Native dispatch ─────────────────────────────────────────────────────────
 
 /// List configured secrets (names + backends + metadata). Never returns values.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.secret", verb = "list")]
 async fn secret_list(
     _args: SecretListArgs,
@@ -171,7 +166,6 @@ async fn secret_list(
 }
 
 /// [SENSITIVE] Fetch a secret value by name. Resolves via the configured backend.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.secret", verb = "detail")]
 async fn secret_detail(
     args: SecretGetArgs,
@@ -189,7 +183,6 @@ async fn secret_detail(
 /// for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field').
 /// When `peer_id` is set the secret is written on the named peer instead of locally
 /// — same admin trust surface as `system.update`.
-#[cfg(feature = "native")]
 #[orca_tool(
     domain = "system.secret",
     verb = "set",
@@ -246,7 +239,6 @@ async fn secret_set(
 
 /// [MUTATES STATE] Remove a secret. The inline value is zeroed; for external backends
 /// only the orca registration is removed (the upstream vault is untouched).
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.secret", verb = "delete")]
 async fn secret_delete(
     args: SecretDeleteArgs,
@@ -261,7 +253,6 @@ async fn secret_delete(
 }
 
 /// List backend kinds available on this host (lets the UI render a backend picker).
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.secret", verb = "backends")]
 async fn secret_backends(
     _args: SecretBackendsArgs,

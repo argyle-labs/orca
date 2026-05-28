@@ -10,12 +10,9 @@ use serde_json::{Map, Value};
 
 use orca_macro::orca_tool;
 
-#[cfg(feature = "native")]
 use anyhow::Context;
-#[cfg(feature = "native")]
 use orca_contract::JsonAny;
 
-#[cfg(feature = "native")]
 use crate::{Client, Config, ServiceCall};
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -57,7 +54,6 @@ pub struct HaServiceCallArgs {
     pub data: Option<Map<String, Value>>,
 }
 
-#[cfg(feature = "native")]
 fn make_client(name: &str) -> anyhow::Result<Client> {
     let conn = orca_db::open_default()?;
     let row = orca_db::home_assistant::get(&conn, name)?.with_context(|| {

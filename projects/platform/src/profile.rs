@@ -6,9 +6,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "native")]
 use orca_macro::orca_tool;
-#[cfg(feature = "native")]
 use std::sync::Arc;
 
 // ── Shared rows ─────────────────────────────────────────────────────────────

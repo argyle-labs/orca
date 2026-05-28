@@ -4,7 +4,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "native")]
 use orca_macro::orca_tool;
 
 // ── Doc roots ───────────────────────────────────────────────────────────────
@@ -72,7 +71,6 @@ pub struct DocIgnorePatternMutationResult {
 // ── Tools ───────────────────────────────────────────────────────────────────
 
 /// List all documentation roots registered in orca.db.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "namespace.doc.root", verb = "list")]
 async fn list_doc_roots(
     _args: ListDocRootsArgs,
@@ -92,7 +90,6 @@ async fn list_doc_roots(
 }
 
 /// [MUTATES STATE] Register a documentation root directory in orca.db.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "namespace.doc.root", verb = "create")]
 async fn add_doc_root(
     args: AddDocRootArgs,
@@ -113,7 +110,6 @@ async fn add_doc_root(
 }
 
 /// [MUTATES STATE] Remove a documentation root from orca.db by name.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "namespace.doc.root", verb = "delete")]
 async fn remove_doc_root(
     args: RemoveDocRootArgs,
@@ -128,7 +124,6 @@ async fn remove_doc_root(
 }
 
 /// List directory names excluded from all doc roots (e.g. node_modules, .git).
-#[cfg(feature = "native")]
 #[orca_tool(domain = "namespace.doc.pattern", verb = "list")]
 async fn list_doc_ignore_patterns(
     _args: ListDocIgnorePatternsArgs,
@@ -140,7 +135,6 @@ async fn list_doc_ignore_patterns(
 }
 
 /// [MUTATES STATE] Add a directory name to the global doc ignore list.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "namespace.doc.pattern", verb = "create")]
 async fn add_doc_ignore_pattern(
     args: DocIgnorePatternArgs,
@@ -155,7 +149,6 @@ async fn add_doc_ignore_pattern(
 }
 
 /// [MUTATES STATE] Remove a directory name from the global doc ignore list.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "namespace.doc.pattern", verb = "delete")]
 async fn remove_doc_ignore_pattern(
     args: DocIgnorePatternArgs,

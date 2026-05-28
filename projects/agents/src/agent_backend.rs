@@ -6,7 +6,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "native")]
 use orca_macro::orca_tool;
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -88,7 +87,6 @@ pub struct AgentBackendStatusOutput {
 }
 
 /// [MUTATES STATE] Remove the stored Anthropic API key from the encrypted orca DB.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.agent.backend", verb = "clear-key")]
 async fn agent_backend_clear_api_key(
     _args: ClearArgs,
@@ -108,7 +106,6 @@ async fn agent_backend_clear_api_key(
 }
 
 /// [MUTATES STATE] Store an Anthropic API key in the encrypted orca DB.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.agent.backend", verb = "set-key")]
 async fn agent_backend_set_api_key(
     args: SetArgs,
@@ -128,7 +125,6 @@ async fn agent_backend_set_api_key(
 }
 
 /// [MUTATES STATE] Set the global agent backend mode (local | claude | hybrid).
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.agent.backend", verb = "set-mode")]
 async fn agent_backend_set_mode(
     args: SetModeArgs,
@@ -142,7 +138,6 @@ async fn agent_backend_set_mode(
 }
 
 /// [MUTATES STATE] Set, change, or clear a per-agent backend override.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.agent.backend", verb = "override")]
 async fn agent_backend_override(
     args: OverrideArgs,
@@ -171,7 +166,6 @@ async fn agent_backend_override(
 }
 
 /// [MUTATES STATE] Toggle whether the orca server makes Anthropic API calls directly.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.agent.backend", verb = "use-server-anthropic")]
 async fn agent_backend_use_server_anthropic(
     args: UseServerAnthropicArgs,
@@ -184,7 +178,6 @@ async fn agent_backend_use_server_anthropic(
 }
 
 /// Show the current agent backend configuration.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.agent.backend", verb = "detail")]
 async fn agent_backend_detail(
     _args: AgentBackendStatusArgs,

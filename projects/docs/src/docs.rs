@@ -7,7 +7,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "native")]
 use orca_macro::orca_tool;
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -20,7 +19,6 @@ pub struct ListCommandsOutput {
 }
 
 /// List all Claude slash commands and skills embedded in the orca binary.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "namespace.doc", verb = "list-commands")]
 async fn list_commands(
     _args: ListCommandsArgs,

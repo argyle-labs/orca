@@ -16,9 +16,9 @@
 //!     annotated fn.
 //!   - `impl OrcaOp for HostInfo` (always — every annotated tool participates
 //!     in the unified domain/verb namespace).
-//!   - `#[cfg(feature = "native")] inventory::submit!` into the
-//!     `ToolRegistration` slice exposed by `orca-dispatch` so the
-//!     dispatchers pick it up at startup without any central enrollment list.
+//!   - `inventory::submit!` into the `ToolRegistration` slice exposed by
+//!     `orca-dispatch` so the dispatchers pick it up at startup without any
+//!     central enrollment list.
 //!   - An `OpenApiToolRegistration` inventory entry — the spec endpoint hoists
 //!     every tool path automatically (see `orca-dispatch::openapi`).
 //!
@@ -353,11 +353,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
         }
     };
 
-    // Wrap the user-authored fn in `#[cfg(feature = "native")]` — its body
-    // is what brings in the native deps (db, integrations, etc.). The
-    // OrcaToolDef emission stays unconditional.
     let expanded = quote! {
-        #[cfg(feature = "native")]
         #inner_fn
 
         #[allow(non_camel_case_types)]
@@ -377,7 +373,6 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             const VERB: &'static str = #verb;
         }
 
-        #[cfg(feature = "native")]
         #[::async_trait::async_trait]
         impl ::orca_contract::OrcaTool for #zst_ident {
             async fn run(
@@ -389,7 +384,6 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             }
         }
 
-        #[cfg(feature = "native")]
         ::inventory::submit! {
             ::orca_dispatch::ToolRegistration {
                 name: #tool_name,

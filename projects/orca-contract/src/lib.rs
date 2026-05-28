@@ -23,16 +23,10 @@ pub use json_any::JsonAny;
 mod types;
 pub use types::{ToolCall, ToolDef, ToolResult};
 
-#[cfg(feature = "native")]
 mod ctx;
-#[cfg(feature = "native")]
 mod remote;
-#[cfg(feature = "native")]
 mod tool;
 
-#[cfg(feature = "native")]
 pub use ctx::ToolCtx;
-#[cfg(feature = "native")]
 pub use remote::RemoteExec;
-#[cfg(feature = "native")]
 pub use tool::OrcaTool;

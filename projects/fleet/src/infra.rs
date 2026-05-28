@@ -5,7 +5,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "native")]
 use orca_macro::orca_tool;
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -72,7 +71,6 @@ pub struct RunTestsOutput {
 
 /// List all running docker compose services across all rebuy projects. Returns
 /// project name, path, and per-service state/health/ports.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.infra.service", verb = "list")]
 async fn infra_service_list(
     _args: ListServicesArgs,
@@ -144,7 +142,6 @@ async fn infra_service_list(
 
 /// Fetch docker compose logs for a running rebuy service. Specify the project
 /// path and service name.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.infra.service", verb = "detail")]
 async fn infra_service_detail(
     args: GetServiceLogsArgs,
@@ -165,7 +162,6 @@ async fn infra_service_detail(
 
 /// Run the orca project test suite. Returns test output with pass/fail counts.
 /// Suites: rust (cargo test), frontend (vitest), e2e (playwright), all.
-#[cfg(feature = "native")]
 #[orca_tool(domain = "system.infra.test", verb = "create")]
 async fn infra_test_create(
     args: RunTestsArgs,
@@ -185,7 +181,6 @@ async fn infra_test_create(
 
 // ─── Test runner — moved from server/serve/api/tests_handler.rs ────────────
 
-#[cfg(feature = "native")]
 struct TestRunResult {
     suite: String,
     output: String,
@@ -195,7 +190,6 @@ struct TestRunResult {
     duration_ms: u64,
 }
 
-#[cfg(feature = "native")]
 async fn run_test_suite(suite: &str) -> anyhow::Result<TestRunResult> {
     let source_root = std::env::var("ORCA_SOURCE_ROOT")
         .unwrap_or_else(|_| env!("CARGO_MANIFEST_DIR").to_string());
@@ -258,7 +252,6 @@ async fn run_test_suite(suite: &str) -> anyhow::Result<TestRunResult> {
     })
 }
 
-#[cfg(feature = "native")]
 async fn run_command(cmd: &str, args: &[&str], cwd: &str) -> anyhow::Result<(String, i32)> {
     let out = tokio::process::Command::new(cmd)
         .args(args)
@@ -274,7 +267,6 @@ async fn run_command(cmd: &str, args: &[&str], cwd: &str) -> anyhow::Result<(Str
     Ok((combined, code))
 }
 
-#[cfg(feature = "native")]
 fn parse_test_counts(output: &str, suite: &str) -> (u32, u32) {
     match suite {
         "rust" => {
@@ -306,7 +298,6 @@ fn parse_test_counts(output: &str, suite: &str) -> (u32, u32) {
     }
 }
 
-#[cfg(feature = "native")]
 fn extract_count(line: &str, keyword: &str) -> u32 {
     line.split_whitespace()
         .zip(line.split_whitespace().skip(1))
@@ -315,12 +306,11 @@ fn extract_count(line: &str, keyword: &str) -> u32 {
         .unwrap_or(0)
 }
 
-#[cfg(feature = "native")]
 fn extract_first_number(s: &str) -> Option<u32> {
     s.split_whitespace().find_map(|w| w.parse::<u32>().ok())
 }
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

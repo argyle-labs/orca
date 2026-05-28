@@ -4,9 +4,7 @@
 //!
 //! Moved from `server::commands::update` (slices A1 + B2a).
 
-#[cfg(feature = "native")]
 use anyhow::{Context, Result};
-#[cfg(feature = "native")]
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -14,7 +12,6 @@ use std::path::PathBuf;
 
 /// Path to the version pin file (`$ORCA_HOME/version-pin`, default `~/.orca/version-pin`).
 /// Returns None only if both `ORCA_HOME` and `HOME` are unset (CI sandboxes).
-#[cfg(feature = "native")]
 pub fn pin_path() -> Option<PathBuf> {
     Some(orca_utils::fs::orca_home()?.join("version-pin"))
 }
@@ -32,7 +29,6 @@ pub fn read_version_pin() -> Option<String> {
 }
 
 /// Write a version pin. The version is stored as-is (caller may include `v` prefix).
-#[cfg(feature = "native")]
 pub fn write_version_pin(version: &str) -> Result<()> {
     let path = pin_path().context("no ORCA_HOME or HOME set")?;
     if let Some(parent) = path.parent() {
@@ -44,7 +40,6 @@ pub fn write_version_pin(version: &str) -> Result<()> {
 }
 
 /// Remove the version pin. No-op if not set.
-#[cfg(feature = "native")]
 pub fn clear_version_pin() -> Result<()> {
     let path = pin_path().context("no ORCA_HOME or HOME set")?;
     if path.exists() {
@@ -114,7 +109,6 @@ impl Channel {
 
 /// Path to the channel marker file (`$ORCA_HOME/channel`, default `~/.orca/channel`).
 /// Returns None only if both `ORCA_HOME` and `HOME` are unset (CI sandboxes).
-#[cfg(feature = "native")]
 pub fn channel_marker_path() -> Option<PathBuf> {
     Some(orca_utils::fs::orca_home()?.join("channel"))
 }
@@ -133,7 +127,6 @@ pub fn read_channel_marker() -> Option<Channel> {
 
 /// Write the channel marker. Best-effort: errors are returned but callers
 /// typically log-and-continue (marker drift is recoverable on next install).
-#[cfg(feature = "native")]
 pub fn write_channel_marker(ch: &Channel) -> Result<()> {
     let path = channel_marker_path().context("no ORCA_HOME or HOME set")?;
     if let Some(parent) = path.parent() {
@@ -420,7 +413,6 @@ mod tests {
 
     // ── writers + veto (native feature only — they use anyhow) ────────────────
 
-    #[cfg(feature = "native")]
     mod native_tests {
         use super::*;
 

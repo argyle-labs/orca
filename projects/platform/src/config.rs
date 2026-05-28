@@ -95,7 +95,6 @@ pub struct ConfigDeleteOutput {
 
 // ── Native support ───────────────────────────────────────────────────────────
 
-#[cfg(feature = "native")]
 mod native_support {
     use super::*;
 
