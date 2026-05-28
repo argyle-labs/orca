@@ -154,10 +154,10 @@ fn read_os_machine_id() -> Option<String> {
             .ok()?;
         let s = String::from_utf8_lossy(&out.stdout);
         for line in s.lines() {
-            if let Some(rest) = line.trim().strip_prefix("\"IOPlatformUUID\" = \"") {
-                if let Some(id) = rest.strip_suffix('"') {
-                    return Some(id.to_ascii_lowercase());
-                }
+            if let Some(rest) = line.trim().strip_prefix("\"IOPlatformUUID\" = \"")
+                && let Some(id) = rest.strip_suffix('"')
+            {
+                return Some(id.to_ascii_lowercase());
             }
         }
         None
