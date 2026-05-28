@@ -101,8 +101,12 @@
   async function loadDiscovery() {
     discoveryLoading = true;
     try {
-      const rows = await callTool<DiscoveryRow[]>('systemPeerDiscoveryList', {});
-      discovery = (rows ?? []).filter((r) => r.can_invite);
+      type PodMember = { state: 'joined' | 'handshaking' | 'discovered' } & Partial<DiscoveryRow>;
+      const list = await callTool<{ members: PodMember[] }>('podList', {});
+      const rows = (list?.members ?? [])
+        .filter((m) => m.state === 'discovered')
+        .map((m) => m as unknown as DiscoveryRow);
+      discovery = rows.filter((r) => r.can_invite);
     } catch (e) {
       inviteError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -119,7 +123,7 @@
     acceptPending = true;
     acceptError = null;
     try {
-      const data = await callTool<AcceptResult>('systemPeerCreate', {
+      const data = await callTool<AcceptResult>('podJoin', {
         action: 'accept',
         code: trimmed,
       });
