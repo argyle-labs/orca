@@ -1,10 +1,9 @@
-//! Pod / mesh tools surfaced to the four-surface registry.
+//! Pod / mesh tools surfaced to every tool surface (CLI + REST + MCP).
 //!
 //! `pod.list` mirrors the CLI's `orca pod list` so the web overview can
-//! render paired peers without a bespoke REST endpoint. The remaining ops
-//! delegate to `PodService` (registered by the server) because they need
-//! mTLS dials, PKI material, and bootstrap signing — all server-side state
-//! that this crate must not touch directly.
+//! render paired peers without a bespoke REST endpoint. The mesh ops need
+//! mTLS dials, PKI material, and bootstrap signing — all of which live in
+//! `crate::native` + `crate::server_pod` within this crate.
 //!
 //! Tools call `crate::server_pod::*` free fns directly — no service trait
 //! (dissolved in slice 4 per [[feedback_no_indirection]]). The daemon only
