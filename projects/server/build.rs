@@ -5,7 +5,6 @@ use std::process::Command;
 
 fn main() {
     let manifest = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
-    let out_dir = env::var("OUT_DIR").expect("OUT_DIR not set");
 
     // Resolve a real runtime version from git so `orca` reports what it is.
     //   on a clean tag             → "0.0.3-rc.3"
