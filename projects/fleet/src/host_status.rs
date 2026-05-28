@@ -101,11 +101,12 @@ mod tests {
         chrono::Utc::now().timestamp()
     }
 
-    fn seed(conn: &db::Conn) {
+    fn seed(conn: &db::Conn, t: i64) {
         // Two peers, multiple rows each, one with malformed payload to exercise
         // the `system = None` branch. Use recent timestamps so age-based pruning
-        // doesn't evict them.
-        let t = now();
+        // doesn't evict them. Caller passes `t` so a single `now()` reading is
+        // shared between seed and the assertions — otherwise a wall-clock
+        // tick between the two calls produces off-by-one snapshot_at_unix.
         db::host_status::insert_status(conn, "alpha", t - 200, "not json at all", t, "local")
             .unwrap();
         db::host_status::insert_status(conn, "alpha", t - 100, "not json at all", t, "local")
@@ -120,7 +121,7 @@ mod tests {
         let ctx = empty_ctx();
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let t = now();
-            seed(&db::open_default().unwrap());
+            seed(&db::open_default().unwrap(), t);
             let out = host_status_list(HostStatusRowsArgs {}, &ctx).await.unwrap();
             let mut by_peer: std::collections::HashMap<_, _> =
                 out.0.iter().map(|r| (r.peer_id.clone(), r)).collect();
@@ -138,7 +139,7 @@ mod tests {
         let ctx = empty_ctx();
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let t = now();
-            seed(&db::open_default().unwrap());
+            seed(&db::open_default().unwrap(), t);
             let out = host_status_detail(
                 HostStatusDetailArgs {
                     peer_id: "alpha".into(),
@@ -163,7 +164,7 @@ mod tests {
         let ctx = empty_ctx();
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let t = now();
-            seed(&db::open_default().unwrap());
+            seed(&db::open_default().unwrap(), t);
             // watermark between the two alpha rows; only t-100 survives.
             let out = host_status_detail(
                 HostStatusDetailArgs {
@@ -187,7 +188,7 @@ mod tests {
         let ctx = empty_ctx();
         db::with_db_path(tmp.path().to_path_buf(), async move {
             let t = now();
-            seed(&db::open_default().unwrap());
+            seed(&db::open_default().unwrap(), t);
             let out = host_status_detail(
                 HostStatusDetailArgs {
                     peer_id: "alpha".into(),
@@ -209,7 +210,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = empty_ctx();
         db::with_db_path(tmp.path().to_path_buf(), async move {
-            seed(&db::open_default().unwrap());
+            seed(&db::open_default().unwrap(), t);
             let out = host_status_detail(
                 HostStatusDetailArgs {
                     peer_id: "nope".into(),
