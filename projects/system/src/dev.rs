@@ -453,6 +453,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(env)]
     fn dev_source_round_trips() {
         let _g = marker_lock();
         let _dir = isolated_orca_home("dev_src");
@@ -464,6 +465,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(env)]
     fn dev_source_clear_is_noop_when_absent() {
         let _g = marker_lock();
         let _dir = isolated_orca_home("dev_src_noop");

@@ -311,8 +311,8 @@ mod tests {
     use super::*;
     use crate::update_state::read_version_pin;
     use orca_utils::config::{Config, Model};
-    use std::path::PathBuf;
     use serial_test::serial;
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     fn isolated_orca_home(scenario: &str) -> tempfile::TempDir {
