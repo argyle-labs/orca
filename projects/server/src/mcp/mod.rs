@@ -24,8 +24,10 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     let host_refresh: Arc<dyn fleet::host::HostRefreshHook + Send + Sync> =
         Arc::new(fleet::host_identity::ServerHostRefreshHook);
     ctx.register_service(host_refresh);
-    let pod_svc: Arc<dyn pod::PodService> = Arc::new(pod::server_pod::ServerPod);
-    ctx.register_service(pod_svc);
+    // Peer transport for `cli::exec_remote` (orca-dispatch dispatches
+    // remote_ok tools through whatever RemoteExec the host registers).
+    let remote: Arc<dyn orca_contract::RemoteExec> = Arc::new(pod::PodRemoteExec);
+    ctx.register_service(remote);
     orca_dispatch::remote_ok::install(orca_dispatch::remote_ok_names());
     orca_dispatch::tool_roles::install(orca_dispatch::role_table());
     ctx

@@ -6,17 +6,16 @@
 //! mTLS dials, PKI material, and bootstrap signing — all server-side state
 //! that this crate must not touch directly.
 //!
-//! NOTE (slice 4 commit A): `PodService` + `ServerPod` are still here.
-//! Commit B dissolves the trait per [[feedback_no_indirection]] and inlines
-//! the free fns into `crate::native::*`.
+//! Tools call `crate::server_pod::*` free fns directly — no service trait
+//! (dissolved in slice 4 per [[feedback_no_indirection]]). The daemon only
+//! registers a `PodRemoteExec` transport so orca-dispatch can route
+//! `remote_ok` tools to peers.
 
 pub mod cli;
 pub mod host_status_writer;
 pub mod native;
 pub mod server_pod;
 
-#[cfg(test)]
-pub(crate) mod test_support;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -437,109 +436,38 @@ mod dto_conversions {
         }
     }
 
-    /// Service hook the server registers at startup. `fleet` stays
-    /// transport-neutral — every mTLS dial, PKI read, and bootstrap signing
-    /// op lives behind this trait so the daemon owns all the network/process
-    /// state.
-    #[async_trait]
-    pub trait PodService: Send + Sync {
-        /// Enriched peer list used by `pod.list`. Adds a synthetic local row
-        /// (built from this host's runtime spec) and fans out `pod/ping`,
-        /// `system.runtime-spec`, and `system.update-check` over the mesh to
-        /// fill the per-peer optional fields. Failed probes leave fields
-        /// `None` with `probe_error` populated; the call never errors solely
-        /// because a peer is unreachable.
-        async fn list_enriched(&self) -> Result<Vec<PodPeerDto>>;
-        async fn accept(&self, code: &str) -> Result<PodAcceptOutput>;
-        /// Update our local trust of a peer. Sets `local_secure`.
-        async fn trust(&self, peer_id: &str, on: bool) -> Result<PodTrustOutput>;
-        /// Push a trust update to a remote peer over mTLS, making THEM trust
-        /// US. Executes `pod.peer.update` on the remote host with our own
-        /// peer_id. Returns the merged trust state after the push.
-        async fn push_trust(&self, peer_id: &str, on: bool) -> Result<PodTrustOutput>;
-        async fn ping(&self, peer_id: &str) -> PodPingOutput;
-        fn discover(&self) -> Result<Vec<PodDiscoveryRowDto>>;
-        fn pending(&self) -> Result<Vec<PodPendingOfferDto>>;
-        async fn offer(&self, addr: &str, port: Option<u16>) -> Result<PodOfferOutput>;
-        async fn join(&self, inviter_addr: &str, port: Option<u16>) -> Result<PodJoinOutput>;
-        async fn leave_peer(&self, peer_id: &str) -> Result<PodLeaveOutput>;
-        fn cert_status(&self) -> Result<PodCertStatusOutput>;
-        /// Read `self_secure`. Used by `system.pod.detail` enrichment so the
-        /// UI shows the current Tier-2 secrets-storage state alongside cert
-        /// info.
-        fn get_self_secure(&self) -> Result<bool>;
-        /// Update `self_secure`. Idempotent: passing the current value is a
-        /// no-op. Returns the resulting value.
-        async fn set_self_secure(&self, on: bool) -> Result<bool>;
-        // Wire-level JSON-RPC dispatch — Value here is the on-wire payload,
-        // narrowed back to the tool's typed `OrcaToolDef::Output` inside
-        // [`crate::cli::exec_remote`] before reaching any user code.
-        #[allow(clippy::disallowed_types)]
-        async fn exec(
-            &self,
-            peer: &str,
-            tool: &str,
-            args: serde_json::Value,
-        ) -> Result<PodExecDispatch>;
-    }
+}
 
-    /// Internal-only envelope for [`PodService::exec`]. JSON `Value` here is
-    /// the JSON-RPC wire payload — type-erased only because the peer-side
-    /// registry dispatches by name. Callers go through
-    /// [`crate::cli::exec_remote`], which deserializes into the typed
-    /// `OrcaToolDef::Output` immediately on receipt, so no opaque value ever
-    /// reaches a user-facing type.
+/// Internal-only envelope for [`server_pod::exec`]. JSON `Value` here is the
+/// JSON-RPC wire payload — type-erased only because the peer-side registry
+/// dispatches by name. Callers go through [`crate::cli::exec_remote`], which
+/// deserializes into the typed `OrcaToolDef::Output` immediately on receipt,
+/// so no opaque value ever reaches a user-facing type.
+#[allow(clippy::disallowed_types)]
+pub struct PodExecDispatch {
+    pub peer: String,
+    pub tool: String,
+    pub result: serde_json::Value,
+}
+
+/// Transport that lets the generic `orca_contract::RemoteExec` trait dispatch
+/// through `server_pod::exec`. Registered in the daemon's `build_tool_ctx` so
+/// `cli::exec_remote::<T>(...)` (in orca-dispatch, which knows nothing about
+/// pod) finds a peer transport. Unit struct — no service indirection.
+#[cfg(feature = "cli")]
+pub struct PodRemoteExec;
+
+#[cfg(feature = "cli")]
+#[async_trait::async_trait]
+impl orca_contract::RemoteExec for PodRemoteExec {
     #[allow(clippy::disallowed_types)]
-    pub struct PodExecDispatch {
-        pub peer: String,
-        pub tool: String,
-        pub result: serde_json::Value,
-    }
-
-    pub fn svc(ctx: &ToolCtx) -> Result<Arc<dyn PodService>> {
-        ctx.service::<Arc<dyn PodService>>()
-    }
-
-    /// Adapter that lets the generic `orca_contract::RemoteExec` trait
-    /// dispatch through `PodService::exec`. Registered alongside the
-    /// `PodService` so `cli::exec_remote::<T>(...)` (which lives in
-    /// `orca-dispatch` and knows nothing about pod) finds a transport.
-    #[cfg(feature = "cli")]
-    pub struct PodRemoteExec(pub Arc<dyn PodService>);
-
-    #[cfg(feature = "cli")]
-    #[async_trait]
-    impl orca_contract::RemoteExec for PodRemoteExec {
-        #[allow(clippy::disallowed_types)]
-        async fn exec(
-            &self,
-            peer: &str,
-            tool: &str,
-            args: serde_json::Value,
-        ) -> Result<serde_json::Value> {
-            let dispatch = self.0.exec(peer, tool, args).await?;
-            Ok(dispatch.result)
-        }
-    }
-}
-
-pub use native_support::{PodExecDispatch, PodService};
-
-pub trait ProvidePod {
-    fn pod(&self) -> std::sync::Arc<dyn PodService>;
-}
-
-pub fn register_pod(ctx: &mut orca_contract::ToolCtx, p: &impl ProvidePod) {
-    let pod = p.pod();
-    ctx.register_service(pod.clone());
-    // Register the RemoteExec adapter so `cli::exec_remote::<T>(...)` (in
-    // orca-dispatch) can dispatch through PodService::exec without
-    // orca-dispatch depending on the `fleet` domain crate.
-    #[cfg(feature = "cli")]
-    {
-        let remote: std::sync::Arc<dyn orca_contract::RemoteExec> =
-            std::sync::Arc::new(native_support::PodRemoteExec(pod));
-        ctx.register_service(remote);
+    async fn exec(
+        &self,
+        peer: &str,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        Ok(server_pod::exec(peer, tool, args).await?.result)
     }
 }
 
@@ -549,11 +477,9 @@ pub fn register_pod(ctx: &mut orca_contract::ToolCtx, p: &impl ProvidePod) {
 #[orca_tool(domain = "system.peer", verb = "list", remote_ok = true)]
 async fn pod_peer_list(
     _args: EmptyArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodPeerListOutput> {
-    Ok(PodPeerListOutput(
-        native_support::svc(ctx)?.list_enriched().await?,
-    ))
+    Ok(PodPeerListOutput(server_pod::list_enriched().await?))
 }
 
 /// Initiate or complete a peer pairing.
@@ -571,16 +497,15 @@ async fn pod_peer_list(
 #[orca_tool(domain = "system.peer", verb = "create")]
 async fn peer_create(
     args: PeerCreateArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PeerCreateOutput> {
-    let svc = native_support::svc(ctx)?;
     match args.action.as_str() {
         "invite" => {
             let addr = args
                 .addr
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("invite requires addr"))?;
-            let out = svc.offer(addr, args.port).await?;
+            let out = server_pod::offer(addr, args.port).await?;
             Ok(PeerCreateOutput {
                 action: "invite".into(),
                 pairing_code: Some(out.code),
@@ -603,7 +528,7 @@ async fn peer_create(
                 .addr
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("join requires addr"))?;
-            let out = svc.join(addr, args.port).await?;
+            let out = server_pod::join(addr, args.port).await?;
             Ok(PeerCreateOutput {
                 action: "join".into(),
                 pairing_code: Some(out.code),
@@ -626,7 +551,7 @@ async fn peer_create(
                 .code
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("accept requires code"))?;
-            let out = svc.accept(code).await?;
+            let out = server_pod::accept(code).await?;
             Ok(PeerCreateOutput {
                 action: "accept".into(),
                 pairing_code: None,
@@ -655,51 +580,48 @@ async fn peer_create(
 #[orca_tool(domain = "system.peer", verb = "update")]
 async fn pod_peer_update(
     args: PodTrustArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodTrustOutput> {
-    let svc = native_support::svc(ctx)?;
     if args.push {
-        return svc.push_trust(&args.peer_id, args.on).await;
+        return server_pod::push_trust(&args.peer_id, args.on).await;
     }
-    svc.trust(&args.peer_id, args.on).await
+    server_pod::trust(&args.peer_id, args.on).await
 }
 
 /// mTLS ping a paired peer; returns latency + their self-reported identity.
 #[orca_tool(domain = "system.peer", verb = "detail")]
 async fn pod_peer_detail(
     args: PodPingArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodPingOutput> {
-    Ok(native_support::svc(ctx)?.ping(&args.peer_id).await)
+    Ok(server_pod::ping(&args.peer_id).await)
 }
 
 /// List orcas seen on the network via mDNS (paired + unclaimed).
 #[orca_tool(domain = "system.peer.discovery", verb = "list")]
 async fn pod_discovery_list(
     _args: EmptyArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodDiscoveryListOutput> {
-    Ok(PodDiscoveryListOutput(
-        native_support::svc(ctx)?.discover()?,
-    ))
+    Ok(PodDiscoveryListOutput(server_pod::discover()?))
 }
 
 /// List pending inbound pod-membership offers.
 #[orca_tool(domain = "system.peer.handshake", verb = "list")]
 async fn pod_handshake_list(
     _args: EmptyArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodPendingListOutput> {
-    Ok(PodPendingListOutput(native_support::svc(ctx)?.pending()?))
+    Ok(PodPendingListOutput(server_pod::pending()?))
 }
 
 /// Best-effort notify a peer we're leaving, then drop pod_peers + pod_trust rows for it.
 #[orca_tool(domain = "system.peer", verb = "delete")]
 async fn pod_peer_delete(
     args: PodLeaveArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodLeaveOutput> {
-    native_support::svc(ctx)?.leave_peer(&args.peer_id).await
+    server_pod::leave_peer(&args.peer_id).await
 }
 
 /// Days-remaining + rotation state for every mesh cert on this host, plus
@@ -707,11 +629,10 @@ async fn pod_peer_delete(
 #[orca_tool(domain = "system.pod", verb = "detail")]
 async fn pod_detail(
     _args: EmptyArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodCertStatusOutput> {
-    let svc = native_support::svc(ctx)?;
-    let mut out = svc.cert_status()?;
-    out.self_secure = svc.get_self_secure().unwrap_or(false);
+    let mut out = server_pod::cert_status()?;
+    out.self_secure = server_pod::get_self_secure().unwrap_or(false);
     Ok(out)
 }
 
@@ -727,205 +648,27 @@ async fn pod_detail(
 )]
 async fn pod_update(
     args: PodUpdateArgs,
-    ctx: &orca_contract::ToolCtx,
+    _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodUpdateOutput> {
     if let Some(ref peer_id) = args.peer_id {
-        let dispatch = native_support::svc(ctx)?
-            .exec(
-                peer_id,
-                "system.pod.update",
-                serde_json::json!({ "self_secure": args.self_secure }),
-            )
-            .await?;
+        let dispatch = server_pod::exec(
+            peer_id,
+            "system.pod.update",
+            serde_json::json!({ "self_secure": args.self_secure }),
+        )
+        .await?;
         return Ok(serde_json::from_value(dispatch.result)?);
     }
-    let svc = native_support::svc(ctx)?;
     let self_secure = match args.self_secure {
-        Some(v) => svc.set_self_secure(v).await?,
-        None => svc.get_self_secure()?,
+        Some(v) => server_pod::set_self_secure(v).await?,
+        None => server_pod::get_self_secure()?,
     };
     Ok(PodUpdateOutput { self_secure })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::native_support::PodExecDispatch;
     use super::*;
-    use crate::test_support::empty_ctx;
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use std::sync::{Arc, Mutex};
-
-    #[derive(Default)]
-    struct StubPod {
-        last_accept_code: Mutex<Option<String>>,
-        last_trust: Mutex<Option<(String, bool)>>,
-        last_ping_peer: Mutex<Option<String>>,
-        last_offer: Mutex<Option<(String, Option<u16>)>>,
-        last_join: Mutex<Option<(String, Option<u16>)>>,
-        last_leave_peer: Mutex<Option<String>>,
-        self_secure: Mutex<bool>,
-        // Mirrors PodService::exec — peer-mesh wire payload is type-erased
-        // at the dispatch boundary. Same justification as the trait method.
-        #[allow(clippy::disallowed_types)]
-        last_exec: Mutex<Option<(String, String, serde_json::Value)>>,
-    }
-
-    #[async_trait]
-    impl PodService for StubPod {
-        async fn list_enriched(&self) -> Result<Vec<PodPeerDto>> {
-            Ok(vec![PodPeerDto {
-                peer_id: "peer.abc".into(),
-                hostname: "host-e".into(),
-                addr: "10.0.0.1".into(),
-                port: 12002,
-                last_seen_at: 0,
-                local_secure: true,
-                peer_secure: true,
-                status: "active".into(),
-                addresses: vec![],
-                local: false,
-                reachable: Some(true),
-                latency_ms: Some(7),
-                probe_error: None,
-                version: None,
-                target: None,
-                frontend: None,
-                mode: None,
-                channel: None,
-                pinned_to: None,
-                update_latest: None,
-                update_available: None,
-                system: None,
-            }])
-        }
-        async fn accept(&self, code: &str) -> Result<PodAcceptOutput> {
-            *self.last_accept_code.lock().unwrap() = Some(code.into());
-            Ok(PodAcceptOutput {
-                pod_id: "pod-1".into(),
-                inviter_peer_id: "peer.inv".into(),
-                inviter_hostname: "host-i".into(),
-                inviter_addr: "10.0.0.2".into(),
-                inviter_port: 12002,
-                self_secure: false,
-            })
-        }
-        async fn trust(&self, peer_id: &str, on: bool) -> Result<PodTrustOutput> {
-            *self.last_trust.lock().unwrap() = Some((peer_id.into(), on));
-            Ok(PodTrustOutput {
-                peer_id: peer_id.into(),
-                local_secure: on,
-                peer_secure: true,
-                mutual: on,
-                notify_result: "ok".into(),
-            })
-        }
-        async fn push_trust(&self, peer_id: &str, on: bool) -> Result<PodTrustOutput> {
-            Ok(PodTrustOutput {
-                peer_id: peer_id.into(),
-                local_secure: false,
-                peer_secure: on,
-                mutual: on,
-                notify_result: "pushed".into(),
-            })
-        }
-        async fn ping(&self, peer_id: &str) -> PodPingOutput {
-            *self.last_ping_peer.lock().unwrap() = Some(peer_id.into());
-            PodPingOutput {
-                ok: true,
-                latency_ms: 3,
-                error: None,
-                peer_id: Some(peer_id.into()),
-                hostname: Some("host-h".into()),
-                version: Some("0.0.0".into()),
-            }
-        }
-        fn discover(&self) -> Result<Vec<PodDiscoveryRowDto>> {
-            Ok(vec![PodDiscoveryRowDto {
-                pubkey_fp: "fp".into(),
-                peer_id: None,
-                hostname: "host-c".into(),
-                addr: "10.0.0.3".into(),
-                port: 12002,
-                state: "seen".into(),
-                can_invite: true,
-                first_seen_at: 0,
-                last_seen_at: 0,
-            }])
-        }
-        fn pending(&self) -> Result<Vec<PodPendingOfferDto>> {
-            Ok(vec![])
-        }
-        async fn offer(&self, addr: &str, port: Option<u16>) -> Result<PodOfferOutput> {
-            *self.last_offer.lock().unwrap() = Some((addr.into(), port));
-            Ok(PodOfferOutput {
-                code: "ABC123".into(),
-                joiner_hostname: "host-g".into(),
-                joiner_addr: addr.into(),
-                joiner_port: port.unwrap_or(12002),
-                joiner_pubkey_fp: "fp".into(),
-                offer_id: "oid".into(),
-                expires_at: 0,
-            })
-        }
-        async fn join(&self, inviter_addr: &str, port: Option<u16>) -> Result<PodJoinOutput> {
-            *self.last_join.lock().unwrap() = Some((inviter_addr.into(), port));
-            Ok(PodJoinOutput {
-                code: "XYZ".into(),
-                inviter_addr: inviter_addr.into(),
-                inviter_port: port.unwrap_or(12002),
-            })
-        }
-        async fn leave_peer(&self, peer_id: &str) -> Result<PodLeaveOutput> {
-            *self.last_leave_peer.lock().unwrap() = Some(peer_id.into());
-            Ok(PodLeaveOutput {
-                peer_id: peer_id.into(),
-                notify_result: "ok".into(),
-                rows_removed: 2,
-            })
-        }
-        fn cert_status(&self) -> Result<PodCertStatusOutput> {
-            Ok(PodCertStatusOutput {
-                founder: true,
-                member: true,
-                self_secure: false,
-                mesh_ca: None,
-                leaf_server: None,
-                leaf_client: None,
-                ca_previous: None,
-                bootstrap: None,
-            })
-        }
-        fn get_self_secure(&self) -> Result<bool> {
-            Ok(*self.self_secure.lock().unwrap())
-        }
-        async fn set_self_secure(&self, on: bool) -> Result<bool> {
-            *self.self_secure.lock().unwrap() = on;
-            Ok(on)
-        }
-        #[allow(clippy::disallowed_types)] // mirrors trait — peer-mesh wire payload
-        async fn exec(
-            &self,
-            peer: &str,
-            tool: &str,
-            args: serde_json::Value,
-        ) -> Result<PodExecDispatch> {
-            *self.last_exec.lock().unwrap() = Some((peer.into(), tool.into(), args.clone()));
-            Ok(PodExecDispatch {
-                peer: peer.into(),
-                tool: tool.into(),
-                result: serde_json::json!({"ok": true}),
-            })
-        }
-    }
-
-    fn ctx_with_stub() -> (orca_contract::ToolCtx, Arc<StubPod>) {
-        let stub = Arc::new(StubPod::default());
-        let svc: Arc<dyn PodService> = stub.clone();
-        let mut ctx = empty_ctx();
-        ctx.register_service(svc);
-        (ctx, stub)
-    }
 
     #[test]
     fn pod_peer_address_from_db_row() {
@@ -962,272 +705,5 @@ mod tests {
         assert!(dto.reachable.is_none());
         assert!(dto.version.is_none());
         assert!(dto.system.is_none());
-    }
-
-    #[tokio::test]
-    async fn pod_list_forwards_to_service() {
-        let (ctx, _) = ctx_with_stub();
-        let out = pod_peer_list(EmptyArgs {}, &ctx).await.unwrap();
-        assert_eq!(out.0.len(), 1);
-        assert_eq!(out.0[0].peer_id, "peer.abc");
-    }
-
-    #[tokio::test]
-    async fn pod_accept_forwards_code() {
-        let (ctx, stub) = ctx_with_stub();
-        let out = peer_create(
-            PeerCreateArgs {
-                action: "accept".into(),
-                addr: None,
-                port: None,
-                code: Some("code1".into()),
-            },
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert_eq!(out.action, "accept");
-        assert_eq!(out.pod_id.as_deref(), Some("pod-1"));
-        assert_eq!(
-            stub.last_accept_code.lock().unwrap().as_deref(),
-            Some("code1")
-        );
-    }
-
-    #[tokio::test]
-    async fn pod_trust_forwards_peer_and_flag() {
-        let (ctx, stub) = ctx_with_stub();
-        let out = pod_peer_update(
-            PodTrustArgs {
-                peer_id: "peer.t".into(),
-                on: true,
-                push: false,
-            },
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert!(out.mutual);
-        let g = stub.last_trust.lock().unwrap();
-        assert_eq!(g.as_ref().unwrap(), &("peer.t".to_string(), true));
-    }
-
-    #[tokio::test]
-    async fn pod_trust_push_routes_to_push_trust() {
-        let (ctx, _) = ctx_with_stub();
-        let out = pod_peer_update(
-            PodTrustArgs {
-                peer_id: "peer.t".into(),
-                on: true,
-                push: true,
-            },
-            &ctx,
-        )
-        .await
-        .unwrap();
-        // StubPod::push_trust returns peer_secure=on (true), local_secure=false.
-        assert!(out.peer_secure);
-        assert!(!out.local_secure);
-        assert_eq!(out.notify_result, "pushed");
-    }
-
-    #[tokio::test]
-    async fn pod_ping_forwards_peer() {
-        let (ctx, stub) = ctx_with_stub();
-        let out = pod_peer_detail(
-            PodPingArgs {
-                peer_id: "peer.p".into(),
-            },
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert!(out.ok);
-        assert_eq!(
-            stub.last_ping_peer.lock().unwrap().as_deref(),
-            Some("peer.p")
-        );
-    }
-
-    #[tokio::test]
-    async fn pod_discover_wraps_service_rows() {
-        let (ctx, _) = ctx_with_stub();
-        let out = pod_discovery_list(EmptyArgs {}, &ctx).await.unwrap();
-        assert_eq!(out.0.len(), 1);
-        assert_eq!(out.0[0].hostname, "host-c");
-    }
-
-    #[tokio::test]
-    async fn pod_pending_wraps_service_rows() {
-        let (ctx, _) = ctx_with_stub();
-        let out = pod_handshake_list(EmptyArgs {}, &ctx).await.unwrap();
-        assert!(out.0.is_empty());
-    }
-
-    #[tokio::test]
-    async fn pod_offer_forwards_addr_and_port() {
-        let (ctx, stub) = ctx_with_stub();
-        let out = peer_create(
-            PeerCreateArgs {
-                action: "invite".into(),
-                addr: Some("1.2.3.4".into()),
-                port: Some(9999),
-                code: None,
-            },
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert_eq!(out.action, "invite");
-        assert_eq!(out.joiner_port, Some(9999));
-        let g = stub.last_offer.lock().unwrap();
-        assert_eq!(g.as_ref().unwrap(), &("1.2.3.4".to_string(), Some(9999)));
-    }
-
-    #[tokio::test]
-    async fn pod_join_forwards_inviter_and_port() {
-        let (ctx, stub) = ctx_with_stub();
-        let out = peer_create(
-            PeerCreateArgs {
-                action: "join".into(),
-                addr: Some("host.local".into()),
-                port: None,
-                code: None,
-            },
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert_eq!(out.action, "join");
-        assert_eq!(out.inviter_addr.as_deref(), Some("host.local"));
-        let g = stub.last_join.lock().unwrap();
-        assert_eq!(g.as_ref().unwrap(), &("host.local".to_string(), None));
-    }
-
-    #[tokio::test]
-    async fn peer_create_rejects_unknown_action() {
-        let (ctx, _) = ctx_with_stub();
-        let e = peer_create(
-            PeerCreateArgs {
-                action: "bogus".into(),
-                addr: None,
-                port: None,
-                code: None,
-            },
-            &ctx,
-        )
-        .await
-        .err()
-        .unwrap();
-        assert!(e.to_string().contains("unknown action"));
-    }
-
-    #[tokio::test]
-    async fn pod_leave_forwards_peer() {
-        let (ctx, stub) = ctx_with_stub();
-        let out = pod_peer_delete(
-            PodLeaveArgs {
-                peer_id: "peer.l".into(),
-            },
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert_eq!(out.rows_removed, 2);
-        assert_eq!(
-            stub.last_leave_peer.lock().unwrap().as_deref(),
-            Some("peer.l")
-        );
-    }
-
-    #[tokio::test]
-    async fn pod_cert_status_passthrough() {
-        let (ctx, _) = ctx_with_stub();
-        let out = pod_detail(EmptyArgs {}, &ctx).await.unwrap();
-        assert!(out.founder);
-        assert!(out.member);
-        assert!(!out.self_secure);
-    }
-
-    #[tokio::test]
-    async fn pod_detail_reflects_self_secure() {
-        let (ctx, stub) = ctx_with_stub();
-        *stub.self_secure.lock().unwrap() = true;
-        let out = pod_detail(EmptyArgs {}, &ctx).await.unwrap();
-        assert!(out.self_secure);
-    }
-
-    #[tokio::test]
-    async fn pod_update_sets_self_secure() {
-        let (ctx, stub) = ctx_with_stub();
-        let out = pod_update(
-            PodUpdateArgs {
-                self_secure: Some(true),
-                peer_id: None,
-            },
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert!(out.self_secure);
-        assert!(*stub.self_secure.lock().unwrap());
-    }
-
-    #[tokio::test]
-    async fn pod_update_none_is_read_only() {
-        let (ctx, stub) = ctx_with_stub();
-        *stub.self_secure.lock().unwrap() = true;
-        let out = pod_update(
-            PodUpdateArgs {
-                self_secure: None,
-                peer_id: None,
-            },
-            &ctx,
-        )
-        .await
-        .unwrap();
-        assert!(out.self_secure);
-        // unchanged
-        assert!(*stub.self_secure.lock().unwrap());
-    }
-
-    #[tokio::test]
-    async fn exec_dispatch_records_peer_tool_and_args() {
-        let stub = StubPod::default();
-        let out = stub
-            .exec("peer.x", "tool.y", serde_json::json!({"k": "v"}))
-            .await
-            .unwrap();
-        assert_eq!(out.peer, "peer.x");
-        assert_eq!(out.tool, "tool.y");
-        assert_eq!(out.result, serde_json::json!({"ok": true}));
-        let g = stub.last_exec.lock().unwrap();
-        let (p, t, a) = g.as_ref().unwrap();
-        assert_eq!(p, "peer.x");
-        assert_eq!(t, "tool.y");
-        assert_eq!(a, &serde_json::json!({"k": "v"}));
-    }
-
-    struct DummyProvider(Arc<StubPod>);
-    impl ProvidePod for DummyProvider {
-        fn pod(&self) -> Arc<dyn PodService> {
-            self.0.clone()
-        }
-    }
-
-    #[test]
-    fn register_pod_installs_service_into_ctx() {
-        let mut ctx = empty_ctx();
-        let stub = Arc::new(StubPod::default());
-        register_pod(&mut ctx, &DummyProvider(stub));
-        // svc() resolves only if register_pod actually installed it.
-        let _svc = native_support::svc(&ctx).expect("service registered");
-    }
-
-    #[tokio::test]
-    async fn svc_errors_when_service_not_registered() {
-        let ctx = empty_ctx();
-        let err = pod_peer_list(EmptyArgs {}, &ctx).await.err();
-        assert!(err.is_some(), "expected error when PodService missing");
     }
 }
