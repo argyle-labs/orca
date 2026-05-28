@@ -9,7 +9,6 @@ use std::net::SocketAddr;
 
 use orca_sdk::pki::{self, Capability};
 use orca_sdk::transport::{Sensitivity, TcpTransport, TypeDeclaration, TypedValue};
-use plugins::host;
 
 /// Point the db crate at an isolated SQLite file for the lifetime of the test.
 /// Must be called before any code path that opens the DB.

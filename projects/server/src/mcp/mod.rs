@@ -22,6 +22,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 /// `impl ProvideFoo for ServerEmbedder` is the single source of truth for
 /// which server-side type backs that service.
 struct ServerEmbedder {
+    #[allow(dead_code)]
     config: Arc<Config>,
 }
 

@@ -10,7 +10,6 @@ use orca::serve::openapi::orca_spec_json;
 use orca_utils::config::Config;
 use system::dev_serve as dev_serve_cmd;
 use system::hook::{self as hook_cmd, HookAction};
-use system::update_cmd;
 
 #[derive(Parser)]
 #[command(name = "orca", about = "Context-first AI agent orchestrator", version)]

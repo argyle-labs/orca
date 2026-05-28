@@ -58,13 +58,13 @@ async fn agent_run(args: AgentRunArgs, ctx: &ToolCtx) -> Result<AgentRunOutput> 
 
     match resolution {
         Resolution::Local(_) => {
-            let out = run_session(&full_prompt, &config, None).await?;
+            let out = run_session(&full_prompt, config, None).await?;
             Ok(AgentRunOutput {
                 output: out,
                 delegated: false,
             })
         }
-        Resolution::LocalThenClaude(_) => match run_session(&full_prompt, &config, None).await {
+        Resolution::LocalThenClaude(_) => match run_session(&full_prompt, config, None).await {
             Ok(out) => Ok(AgentRunOutput {
                 output: out,
                 delegated: false,
@@ -81,7 +81,7 @@ async fn agent_run(args: AgentRunArgs, ctx: &ToolCtx) -> Result<AgentRunOutput> 
             }
         },
         Resolution::ServerClaude(m) => {
-            let out = run_session(&full_prompt, &config, Some(m)).await?;
+            let out = run_session(&full_prompt, config, Some(m)).await?;
             Ok(AgentRunOutput {
                 output: out,
                 delegated: false,

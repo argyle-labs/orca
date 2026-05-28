@@ -307,6 +307,7 @@ pub async fn startup_update_check() {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::update_state::read_version_pin;

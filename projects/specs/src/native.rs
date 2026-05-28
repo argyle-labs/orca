@@ -353,7 +353,7 @@ pub async fn unregister_spec(name: &str) -> Result<bool> {
         return Err(anyhow!("invalid spec name"));
     }
     let conn = db::open_default()?;
-    Ok(db::openapi_specs::remove(&conn, name)?)
+    db::openapi_specs::remove(&conn, name)
 }
 
 pub async fn sync_mcp_specs(server: &str) -> Result<SyncMcpSpecsResult> {
