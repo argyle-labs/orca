@@ -239,14 +239,17 @@ run_release_checks() {
   if echo "$_sdk_tree" | grep -qE "orca-server|orca-commands|orca-conversation|orca-agents|orca-llm|orca-scanner|rust-embed"; then
     die "server-only crate found in orca-sdk dependency tree"
   fi
-  log "cargo test (workspace)"
+  # Tests run in dev profile — release optimisation gives no signal here and
+  # ~3-5x's the compile time. The release-artifact build that follows is the
+  # only thing that needs `--release`.
+  log "cargo test (workspace, dev profile)"
   if command -v cargo-nextest >/dev/null 2>&1; then
-    cargo nextest run --workspace --release --no-fail-fast
+    cargo nextest run --workspace --no-fail-fast
   else
-    cargo test --workspace --release --no-fail-fast
+    cargo test --workspace --no-fail-fast
   fi
-  log "doctests"
-  cargo test --doc --workspace --release --no-fail-fast
+  log "doctests (dev profile)"
+  cargo test --doc --workspace --no-fail-fast
 }
 
 # ── frontend ────────────────────────────────────────────────────────────────

@@ -156,11 +156,14 @@ jobs:
           shared-key: release-rust-x86_64-unknown-linux-gnu
           cache-on-failure: true
 
-      - name: Run workspace tests
-        run: cargo nextest run --workspace --release --no-fail-fast
+      # Tests run in dev profile — release optimisation gives no signal here
+      # and ~3-5x's the compile time. The release-artifact build job is the
+      # only one that needs `--release`.
+      - name: Run workspace tests (dev profile)
+        run: cargo nextest run --workspace --no-fail-fast
 
-      - name: Doctests
-        run: cargo test --doc --workspace --release --no-fail-fast
+      - name: Doctests (dev profile)
+        run: cargo test --doc --workspace --no-fail-fast
 
   # ── TS SDK ───────────────────────────────────────────────────────────────
   build-sdk-ts:
