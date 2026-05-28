@@ -73,7 +73,7 @@ mod daemon_signal_tests {
             // workstation. ORCA_HTTPS_PORT is the only knob (the test
             // doesn't expose a `--https-port` flag).
             .env("ORCA_HTTPS_PORT", TEST_HTTPS_PORT.to_string())
-            .args(["daemon", "start", "--port", &TEST_HTTP_PORT.to_string()])
+            .args(["daemon", "--port", &TEST_HTTP_PORT.to_string()])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
