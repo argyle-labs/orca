@@ -31,6 +31,7 @@ const POD_HAS_CA_KEY_METHOD: &str = "pod/has-ca-key";
 const POD_PUSH_CA_KEY_METHOD: &str = "pod/push-ca-key";
 const POD_PEER_LEAVING_METHOD: &str = "pod/peer-leaving";
 const POD_PEER_REMOVED_METHOD: &str = "pod/peer-removed";
+const POD_PEER_FORGET_METHOD: &str = "pod/peer-forget";
 const POD_REFRESH_CERT_METHOD: &str = "pod/refresh-cert";
 const POD_PUSH_CA_STATE_METHOD: &str = "pod/push-ca-state";
 
@@ -186,6 +187,10 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
             tracing::info!("[pod] peer {peer_cn} removed us from their pod");
             Response::ok(id, Value::Null)
         }
+        POD_PEER_FORGET_METHOD => match handle_peer_forget(peer_cn, request) {
+            Ok(removed) => value_response(id, &serde_json::json!({ "rows_removed": removed })),
+            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+        },
         POD_REFRESH_CERT_METHOD => match handle_refresh_cert(peer_cn, request) {
             Ok(r) => value_response(id, &r),
             Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
@@ -245,6 +250,27 @@ fn handle_peer_leaving(peer_cn: &str) -> Result<()> {
     let conn = db::open_default()?;
     pdb::mark_peer_departed(&conn, peer_cn)?;
     Ok(())
+}
+
+/// Handle `pod/peer-forget`: a pod member (validated by the mTLS CN against the
+/// mesh CA) is telling us to purge a stale/orphan peer_id from our local
+/// roster. Hard-delete every trace of it so the eviction propagates mesh-wide.
+fn handle_peer_forget(peer_cn: &str, request: Request) -> Result<u32> {
+    #[derive(serde::Deserialize)]
+    struct ForgetParams {
+        peer_id: String,
+    }
+    let params: ForgetParams = match request.params {
+        Some(v) => serde_json::from_value(v).context("parse pod/peer-forget params")?,
+        None => anyhow::bail!("pod/peer-forget requires params"),
+    };
+    let conn = db::open_default()?;
+    let removed = pdb::forget_peer(&conn, &params.peer_id)?;
+    tracing::info!(
+        "[pod] peer {peer_cn} asked us to forget {} ({removed} rows removed)",
+        params.peer_id
+    );
+    Ok(removed)
 }
 
 /// Handle `pod/dev-sync`: if this host is in dev mode, run `cmd_dev_sync`

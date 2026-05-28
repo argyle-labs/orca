@@ -107,18 +107,35 @@
     return window.location.origin;
   }
 
-  // Pick the most useful display URL for a card — prefer FQDN.
-  function primaryUrl(inst: Instance): string {
-    if (inst.role === 'local') return inst.origin;
+  function addrKindLabel(kind: string): string {
+    switch (kind) {
+      case 'lan_v4': return 'LAN IPv4';
+      case 'lan_v6': return 'LAN IPv6';
+      case 'tailscale_v4': return 'Tailscale IPv4';
+      case 'tailscale_v6': return 'Tailscale IPv6';
+      case 'fqdn': return 'FQDN';
+      default: return kind;
+    }
+  }
+
+  // Reachable LAN addresses for the card footer. Both IPv4 and IPv6 when
+  // available. FQDN and Tailscale addrs live in the drawer Addresses section.
+  function reachableAddrs(inst: Instance): string[] {
+    const port = inst.port;
     const addrs = inst.addresses ?? [];
-    const fqdnAddr = addrs.find((a) => a.kind === 'fqdn');
-    if (fqdnAddr) return fqdnAddr.value;
-    if (inst.sys?.fqdn) return `${inst.sys.fqdn}:${inst.port}`;
+    // Pod peers report lan_v4/lan_v6 channels; the local host doesn't go
+    // through pod discovery but systemDetail reports its primary IPs.
+    const v4 = addrs.find((a) => a.kind === 'lan_v4')?.value ?? inst.sys?.primary_ipv4 ?? undefined;
+    const v6 = addrs.find((a) => a.kind === 'lan_v6')?.value ?? inst.sys?.primary_ipv6 ?? undefined;
+    const out: string[] = [];
+    if (v4) out.push(`${v4}:${port}`);
+    if (v6) out.push(`[${v6}]:${port}`);
+    if (out.length > 0) return out;
+    // Fallbacks when no LAN addr is reported.
+    if (inst.sys?.fqdn) return [`${inst.sys.fqdn}:${port}`];
     const isIp = /^\d+\.\d+\.\d+\.\d+$|^[0-9a-f:]+$/i.test(inst.label);
-    if (!isIp) return `${inst.label}:${inst.port}`;
-    const lan = addrs.find((a) => a.kind === 'lan_v4');
-    if (lan) return `${lan.value}:${inst.port}`;
-    return inst.origin;
+    if (!isIp && inst.role !== 'local') return [`${inst.label}:${port}`];
+    return [inst.origin];
   }
 
   async function refreshLocal(inst: Instance) {
@@ -680,7 +697,11 @@
         {/if}
 
         <div class="card-footer">
-          <span class="primary-url">{primaryUrl(inst)}</span>
+          <div class="primary-urls">
+            {#each reachableAddrs(inst) as url (url)}
+              <span class="primary-url">{url}</span>
+            {/each}
+          </div>
           <span class="details-hint">Details →</span>
         </div>
       </div>
@@ -784,7 +805,7 @@
         <div class="section-head">Addresses</div>
         <dl class="addr-grid">
           {#each selectedInst.addresses ?? [] as a (a.kind + ':' + a.value)}
-            <dt>{a.kind}</dt>
+            <dt>{addrKindLabel(a.kind)}</dt>
             <dd><code>{a.value}</code></dd>
           {/each}
         </dl>
@@ -1248,6 +1269,13 @@
     color: var(--color-text-muted);
     gap: var(--space-2);
     margin-top: auto;
+  }
+  .primary-urls {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    flex: 1;
   }
   .primary-url {
     font-family: var(--font-mono);

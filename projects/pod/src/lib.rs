@@ -387,6 +387,33 @@ pub struct PodRecoverOutput {
     pub cleared: bool,
 }
 
+// ── pod.forget ───────────────────────────────────────────────────────────────
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodForgetArgs {
+    /// Stale/orphan peer_id to purge mesh-wide (e.g. an old identity left over
+    /// from a machine_id change, or a decommissioned host).
+    pub peer_id: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodForgetNotice {
+    /// A live member we asked to forget the target.
+    pub peer_id: String,
+    /// `"notified"` or `"warn: <err>"`.
+    pub result: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodForgetOutput {
+    pub peer_id: String,
+    /// Rows deleted on THIS host across pod_peers/pod_trust/pod_discovery/offers.
+    pub rows_removed: u32,
+    /// Per-member fan-out result.
+    pub notified: Vec<PodForgetNotice>,
+}
+
 // ── pod.cert-status ──────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema)]

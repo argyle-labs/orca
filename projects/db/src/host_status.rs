@@ -32,21 +32,36 @@ pub struct HostStatusRow {
     pub source: String,
 }
 
-/// Read the configured retention window in seconds from config_store,
-/// falling back to [`DEFAULT_RETENTION_SECS`] on absence or parse error.
-pub fn retention_seconds(conn: &Connection) -> i64 {
+/// Parse a `retention_days` config row into a clamped seconds window.
+/// 0 = "no history"; negative is invalid and yields `None` (fall through).
+fn parse_retention_days(json: &str) -> Option<i64> {
+    json.trim_matches('"')
+        .parse::<f64>()
+        .ok()
+        .map(|days| (days * 86_400.0) as i64)
+        .filter(|&s| s >= 0)
+}
+
+/// Read the retention window in seconds for a given peer. Resolution order:
+///   1. Per-peer override: config key `("host_status", "retention_days:<peer_id>")`
+///   2. Global default:    config key `("host_status", "retention_days")`
+///   3. [`DEFAULT_RETENTION_SECS`]
+///
+/// Per-system retention lets the UI keep, say, 7 days of mint but only 1 hour
+/// of a noisy edge node.
+pub fn retention_seconds(conn: &Connection, peer_id: &str) -> i64 {
+    let per_peer =
+        crate::config_store::get(conn, "host_status", &format!("retention_days:{peer_id}"))
+            .ok()
+            .flatten()
+            .and_then(|row| parse_retention_days(&row.json));
+    if let Some(secs) = per_peer {
+        return secs;
+    }
     crate::config_store::get(conn, "host_status", "retention_days")
         .ok()
         .flatten()
-        .and_then(|row| {
-            // config_store stores bare numbers or JSON-encoded numbers; strip
-            // surrounding quotes before parsing.
-            row.json.trim_matches('"').parse::<f64>().ok()
-        })
-        .map(|days| (days * 86_400.0) as i64)
-        // 0 = "no history" — keep only the snapshot just inserted; negative is
-        // invalid and falls back to the default.
-        .filter(|&s| s >= 0)
+        .and_then(|row| parse_retention_days(&row.json))
         .unwrap_or(DEFAULT_RETENTION_SECS)
 }
 
@@ -81,7 +96,7 @@ pub fn insert_status(
         return Ok(false);
     }
     // Age-based prune.
-    let cutoff = chrono::Utc::now().timestamp() - retention_seconds(conn);
+    let cutoff = chrono::Utc::now().timestamp() - retention_seconds(conn, peer_id);
     conn.execute(
         "DELETE FROM host_status WHERE peer_id = ?1 AND snapshot_at_unix < ?2",
         params![peer_id, cutoff],

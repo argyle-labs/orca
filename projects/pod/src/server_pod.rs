@@ -426,6 +426,49 @@ pub fn recover(peer_id: &str) -> Result<crate::PodRecoverOutput> {
     })
 }
 
+/// Pod-wide forget: hard-delete a stale/orphan peer_id locally AND tell every
+/// live member to drop it too. Unlike `kick` (targets one live peer) or
+/// `recover` (purely local), forget fans a one-way `pod/peer-forget` notice to
+/// each reachable member so an orphaned identity (machine_id churn,
+/// decommissioned host) disappears from the whole mesh, not just here.
+pub async fn forget(peer_id: &str) -> Result<crate::PodForgetOutput> {
+    let conn = db::open_default()?;
+    let members = pdb::list_peers(&conn)?;
+    drop(conn);
+
+    let mut notified = Vec::new();
+    for m in &members {
+        // Skip the target itself and any already-departed members.
+        if m.peer_id == peer_id || m.departed_at.is_some() {
+            continue;
+        }
+        let result = match crate::cli::call_pod_method_pub(
+            &m.peer_addr,
+            m.peer_port,
+            "pod/peer-forget",
+            serde_json::json!({ "peer_id": peer_id }),
+        )
+        .await
+        {
+            Ok(_) => "notified".to_string(),
+            Err(e) => format!("warn: {e}"),
+        };
+        notified.push(crate::PodForgetNotice {
+            peer_id: m.peer_id.clone(),
+            result,
+        });
+    }
+
+    let conn = db::open_default()?;
+    let rows_removed = pdb::forget_peer(&conn, peer_id)?;
+
+    Ok(crate::PodForgetOutput {
+        peer_id: peer_id.to_string(),
+        rows_removed,
+        notified,
+    })
+}
+
 pub async fn leave_self() -> Result<crate::PodLeaveSelfOutput> {
     let conn = db::open_default()?;
     let peers = pdb::list_peers(&conn)?;

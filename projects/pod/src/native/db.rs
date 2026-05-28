@@ -540,6 +540,29 @@ pub fn unmark_peer_departed(conn: &Connection, peer_id: &str) -> Result<bool> {
     Ok(updated > 0)
 }
 
+/// Hard-delete every local trace of a peer_id: pod_peers, pod_trust,
+/// pod_discovery, and any outbound offers tied to it. Unlike
+/// [`mark_peer_departed`] this leaves no audit row — it's the purge path for
+/// `pod forget`, used to evict stale/orphan identities (machine_id churn,
+/// decommissioned hosts) so they stop showing up in the roster. Returns the
+/// total number of rows removed across all four tables.
+pub fn forget_peer(conn: &Connection, peer_id: &str) -> Result<u32> {
+    let tx = conn.unchecked_transaction()?;
+    let mut removed = 0u32;
+    removed += tx.execute("DELETE FROM pod_trust WHERE peer_id = ?", params![peer_id])? as u32;
+    removed += tx.execute("DELETE FROM pod_peers WHERE peer_id = ?", params![peer_id])? as u32;
+    removed += tx.execute(
+        "DELETE FROM pod_discovery WHERE peer_id = ?",
+        params![peer_id],
+    )? as u32;
+    removed += tx.execute(
+        "DELETE FROM pod_pending_offers WHERE inviter_peer_id = ?",
+        params![peer_id],
+    )? as u32;
+    tx.commit()?;
+    Ok(removed)
+}
+
 pub fn is_peer_departed(conn: &Connection, peer_id: &str) -> Result<bool> {
     let v: Option<i64> = conn
         .query_row(
