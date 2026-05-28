@@ -10,7 +10,6 @@ path = "src/lib.rs"
 [features]
 cli = [
     "dep:clap",
-    "dep:colored",
     "dep:axum",
     "dep:regex",
 ]
