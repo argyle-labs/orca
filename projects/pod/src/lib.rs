@@ -370,6 +370,23 @@ pub struct PodLeaveSelfOutput {
     pub peers: Vec<PodLeaveSelfResult>,
 }
 
+// ── pod.recover ──────────────────────────────────────────────────────────────
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodRecoverArgs {
+    /// Peer whose stale `departed_at` flag should be cleared on THIS host.
+    pub peer_id: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodRecoverOutput {
+    pub peer_id: String,
+    /// `true` if a `departed_at` flag was actually cleared. `false` means the
+    /// peer either wasn't departed or doesn't exist locally.
+    pub cleared: bool,
+}
+
 // ── pod.cert-status ──────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -636,6 +653,17 @@ async fn pod_leave(
     _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodLeaveSelfOutput> {
     server_pod::leave_self().await
+}
+
+/// Clear a stale `departed_at` flag for a peer on THIS host. Recovery tool
+/// for the 2026-05-28 kick/peer-leaving bug (and any future false-depart).
+/// No network call — purely local row repair.
+#[orca_tool(domain = "pod", verb = "recover", role = "admin", local_only = true)]
+async fn pod_recover(
+    args: PodRecoverArgs,
+    _ctx: &orca_contract::ToolCtx,
+) -> anyhow::Result<PodRecoverOutput> {
+    server_pod::recover(&args.peer_id)
 }
 
 /// Days-remaining + rotation state for every mesh cert on this host, plus

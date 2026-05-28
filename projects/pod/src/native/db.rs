@@ -526,6 +526,20 @@ pub fn mark_peer_departed(conn: &Connection, peer_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Clear a stale `departed_at` flag for a peer that's actually still reachable.
+/// Used by `pod recover` after a misfired kick or a remote-driven false depart
+/// (the 2026-05-28 kick/peer-leaving bug). Trust bits are NOT touched — the
+/// operator must call `pod trust` separately if they want to re-establish
+/// mutual trust.
+pub fn unmark_peer_departed(conn: &Connection, peer_id: &str) -> Result<bool> {
+    let now = now_secs();
+    let updated = conn.execute(
+        "UPDATE pod_peers SET departed_at = NULL, last_seen_at = ? WHERE peer_id = ? AND departed_at IS NOT NULL",
+        params![now, peer_id],
+    )?;
+    Ok(updated > 0)
+}
+
 pub fn is_peer_departed(conn: &Connection, peer_id: &str) -> Result<bool> {
     let v: Option<i64> = conn
         .query_row(

@@ -276,11 +276,20 @@ mod exec_wire {
 
     /// Parameters for `pod/exec`. `tool` is a fully-qualified
     /// `<domain>.<verb>` name; `args` is the on-wire JSON args payload.
+    /// `caller_role` is the calling peer's assertion of the local user's
+    /// role at dispatch time (one of "any" | "user" | "admin"). The mesh
+    /// mTLS cert proves the *peer*; we trust the paired peer's role claim
+    /// for v0. A future slice replaces this with an HMAC-signed caller_token
+    /// (covering `caller_user_id`, `tool`, args-hash, expires_at, nonce)
+    /// validated against a replicated users table. Optional for back-compat
+    /// with rc.≤11 peers that don't send it; recipient treats absent as "any".
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct PodExecParams {
         pub tool: String,
         #[serde(default)]
         pub args: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub caller_role: Option<String>,
     }
 
     /// Wire result of `pod/exec` — `result` is the tool's serialized output.
@@ -298,12 +307,27 @@ pub use exec_wire::{PodExecParams, PodExecResult};
 /// `REMOTE_OK` flag and 401s anything not in its allowlist.
 #[allow(clippy::disallowed_types)]
 pub async fn exec(host: &str, tool: &str, args: serde_json::Value) -> Result<PodExecResult> {
+    exec_as(host, tool, args, None).await
+}
+
+/// Same as [`exec`] but lets the caller assert a role on behalf of a local user.
+/// CLI/REST entrypoints pass the caller's resolved role here so the recipient
+/// can enforce admin-gated tools. See [`PodExecParams::caller_role`] for the
+/// trust model.
+#[allow(clippy::disallowed_types)]
+pub async fn exec_as(
+    host: &str,
+    tool: &str,
+    args: serde_json::Value,
+    caller_role: Option<String>,
+) -> Result<PodExecResult> {
     call_typed(
         host,
         POD_EXEC_METHOD,
         Some(PodExecParams {
             tool: tool.to_string(),
             args,
+            caller_role,
         }),
         Duration::from_secs(120),
     )

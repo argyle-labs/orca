@@ -30,6 +30,7 @@ const POD_NOTIFY_TRUST_METHOD: &str = "pod/notify-trust";
 const POD_HAS_CA_KEY_METHOD: &str = "pod/has-ca-key";
 const POD_PUSH_CA_KEY_METHOD: &str = "pod/push-ca-key";
 const POD_PEER_LEAVING_METHOD: &str = "pod/peer-leaving";
+const POD_PEER_REMOVED_METHOD: &str = "pod/peer-removed";
 const POD_REFRESH_CERT_METHOD: &str = "pod/refresh-cert";
 const POD_PUSH_CA_STATE_METHOD: &str = "pod/push-ca-state";
 
@@ -177,6 +178,14 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
             Ok(()) => Response::ok(id, Value::Null),
             Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
         },
+        POD_PEER_REMOVED_METHOD => {
+            // Caller (peer_cn) is telling us they've kicked us from their pod.
+            // Log it; do NOT mark the caller as departed — that's
+            // `pod/peer-leaving`'s job. Reusing this method for kick was the
+            // 2026-05-28 bug that departed mint on willow/maple.
+            tracing::info!("[pod] peer {peer_cn} removed us from their pod");
+            Response::ok(id, Value::Null)
+        }
         POD_REFRESH_CERT_METHOD => match handle_refresh_cert(peer_cn, request) {
             Ok(r) => value_response(id, &r),
             Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
@@ -344,20 +353,42 @@ async fn handle_dev_disable() -> Result<PodDevDisableResult> {
 /// than the prior code (which accepted `_required_role` and dropped it);
 /// admin-tagged tools that need to be peer-callable will start working as
 /// soon as the per-user identity hop is plumbed through.
-fn authorize_exec(tool: &str, remote_ok: bool, required_role: &str) -> Result<()> {
+fn authorize_exec(
+    tool: &str,
+    remote_ok: bool,
+    required_role: &str,
+    caller_role: Option<&str>,
+) -> Result<()> {
     if !remote_ok {
         anyhow::bail!(
             "pod/exec refused: tool '{tool}' is not in the REMOTE_OK allowlist on this peer"
         );
     }
-    if required_role != "any" {
+    if required_role == "any" {
+        return Ok(());
+    }
+    let claim = caller_role.unwrap_or("any");
+    if !role_satisfies(claim, required_role) {
         anyhow::bail!(
-            "pod/exec refused: tool '{tool}' requires role '{required_role}'; per-user identity \
-             over pod/exec is not yet wired, so admin-gated tools are unreachable remotely until \
-             that lands"
+            "pod/exec refused: tool '{tool}' requires role '{required_role}' but caller asserted \
+             '{claim}'"
         );
     }
     Ok(())
+}
+
+/// Returns true when the caller's asserted role meets the required role. Order:
+/// `any` < `user` < `admin`. Unknown claims compare as `any`.
+fn role_rank(role: &str) -> u8 {
+    match role {
+        "admin" => 2,
+        "user" => 1,
+        _ => 0,
+    }
+}
+
+fn role_satisfies(claim: &str, required: &str) -> bool {
+    role_rank(claim) >= role_rank(required)
 }
 
 /// Handle `pod/exec`: dispatch an allowlisted local tool on this peer's
@@ -376,6 +407,7 @@ async fn handle_exec(request: Request) -> Result<PodExecResult> {
         &params.tool,
         orca_dispatch::remote_ok::is_allowed(&params.tool),
         orca_dispatch::tool_roles::required_role(&params.tool),
+        params.caller_role.as_deref(),
     )?;
 
     // Direct in-process dispatch through the shared registry — no HTTPS
@@ -505,26 +537,35 @@ mod tests {
 
     #[test]
     fn authorize_exec_refuses_when_not_remote_ok() {
-        let err = authorize_exec("system.dev_enable", false, "any").unwrap_err();
+        let err = authorize_exec("system.dev_enable", false, "any", None).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("REMOTE_OK allowlist"), "got: {msg}");
         assert!(msg.contains("system.dev_enable"), "got: {msg}");
     }
 
     #[test]
-    fn authorize_exec_refuses_non_any_role_until_user_identity_wired() {
-        // Today the wire format does not carry the invoking user's identity,
-        // so we cannot perform a per-user role check. Until that lands we
-        // refuse any tool with a non-`any` required role on the remote path.
-        let err = authorize_exec("system.update.create", true, "admin").unwrap_err();
+    fn authorize_exec_refuses_admin_required_without_claim() {
+        let err = authorize_exec("system.update.create", true, "admin", None).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("per-user identity"), "got: {msg}");
-        assert!(msg.contains("admin"), "got: {msg}");
+        assert!(msg.contains("requires role 'admin'"), "got: {msg}");
+        assert!(msg.contains("caller asserted 'any'"), "got: {msg}");
+    }
+
+    #[test]
+    fn authorize_exec_refuses_admin_required_with_user_claim() {
+        let err = authorize_exec("system.update.create", true, "admin", Some("user")).unwrap_err();
+        assert!(err.to_string().contains("caller asserted 'user'"));
+    }
+
+    #[test]
+    fn authorize_exec_passes_admin_required_with_admin_claim() {
+        authorize_exec("system.update.create", true, "admin", Some("admin"))
+            .expect("admin claim should satisfy admin requirement");
     }
 
     #[test]
     fn authorize_exec_passes_remote_ok_and_any_role() {
-        authorize_exec("fs.search", true, "any").expect("should pass");
+        authorize_exec("fs.search", true, "any", None).expect("should pass");
     }
 
     #[test]

@@ -344,6 +344,11 @@ pub async fn join(inviter_addr: &str, port: Option<u16>) -> Result<PodJoinReques
     })
 }
 
+/// Kick a peer: drop its rows locally and send a one-way "you've been removed"
+/// notice. The recipient logs the removal but does NOT mark the caller as
+/// departed (that's what `pod/peer-leaving` is for — the voluntary-exit path
+/// from `leave_self`). Reusing `pod/peer-leaving` here was the 2026-05-28
+/// bug that departed mint on willow/maple.
 pub async fn leave_peer(peer_id: &str) -> Result<PodLeaveOutput> {
     let conn = db::open_default()?;
     let peer = pdb::list_peers(&conn)?
@@ -355,7 +360,7 @@ pub async fn leave_peer(peer_id: &str) -> Result<PodLeaveOutput> {
     let notify_result = match crate::cli::call_pod_method_pub(
         &peer.peer_addr,
         peer.peer_port,
-        "pod/peer-leaving",
+        "pod/peer-removed",
         serde_json::json!({}),
     )
     .await
@@ -403,6 +408,18 @@ pub async fn exec(peer: &str, tool: &str, args: serde_json::Value) -> Result<Pod
 /// per peer), then drop all `pod_peers` + `pod_trust` rows. Returns a
 /// per-peer notify result so the operator can see who heard from us. PKI
 /// material is left in place — call `system bootstrap` to fully reset.
+/// Clear a stale `departed_at` flag for a peer on this host. Used to recover
+/// from the 2026-05-28 kick/peer-leaving bug (and any future false-depart).
+/// No network call — purely local row repair.
+pub fn recover(peer_id: &str) -> Result<crate::PodRecoverOutput> {
+    let conn = db::open_default()?;
+    let cleared = pdb::unmark_peer_departed(&conn, peer_id)?;
+    Ok(crate::PodRecoverOutput {
+        peer_id: peer_id.to_string(),
+        cleared,
+    })
+}
+
 pub async fn leave_self() -> Result<crate::PodLeaveSelfOutput> {
     let conn = db::open_default()?;
     let peers = pdb::list_peers(&conn)?;
