@@ -116,7 +116,9 @@ impl Parse for ToolAttr {
                         other => {
                             return Err(syn::Error::new_spanned(
                                 &nv.value,
-                                format!("role must be \"any\", \"read\", or \"admin\", got {other:?}"),
+                                format!(
+                                    "role must be \"any\", \"read\", or \"admin\", got {other:?}"
+                                ),
                             ));
                         }
                     }
