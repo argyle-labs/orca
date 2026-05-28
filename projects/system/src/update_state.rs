@@ -218,12 +218,11 @@ pub fn is_newer_full(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // set_var on multiple threads is unsound; serialize tests that touch env.
+    use serial_test::serial;
 
     fn isolated_orca_home(scenario: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
-        // SAFETY: tests in this module run serially via env_lock().
+        // SAFETY: tests touching ORCA_HOME are serialized via #[serial(env)].
         unsafe {
             std::env::set_var("ORCA_HOME", dir.path());
             std::env::set_var("ORCA_TEST_SCENARIO", scenario);
