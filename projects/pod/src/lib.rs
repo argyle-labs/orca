@@ -16,7 +16,6 @@ pub mod host_status_writer;
 pub mod native;
 pub mod server_pod;
 
-
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -433,7 +432,6 @@ mod dto_conversions {
             }
         }
     }
-
 }
 
 /// Internal-only envelope for [`server_pod::exec`]. JSON `Value` here is the

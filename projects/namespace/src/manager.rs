@@ -384,9 +384,7 @@ impl NamespaceManager {
             return Ok(Some(p));
         }
         // 2. Persisted active selection
-        if let Some(id) =
-            db::profiles::get_active(conn, user_id).map_err(NamespaceError::Other)?
-        {
+        if let Some(id) = db::profiles::get_active(conn, user_id).map_err(NamespaceError::Other)? {
             // ACL-check; if access lapsed, fall through.
             if let Ok(p) = self.get(conn, &id, user_id) {
                 return Ok(Some(p));

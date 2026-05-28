@@ -420,9 +420,7 @@ async fn main() -> Result<()> {
                 pod::cli::cmd_pod_self_secure(action)
             }
             PodAction::CertStatus => pod::cli::cmd_pod_cert_status(),
-            PodAction::CaRotate { overlap_days } => {
-                pod::cli::cmd_pod_ca_rotate(overlap_days).await
-            }
+            PodAction::CaRotate { overlap_days } => pod::cli::cmd_pod_ca_rotate(overlap_days).await,
             PodAction::Leave {
                 wipe_secrets,
                 wipe_all,

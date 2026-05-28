@@ -558,10 +558,7 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
         tracing::warn!("[pod] stale-cert check failed: {e:#}");
     }
 
-    match pod::native::mdns::build_advertisement(
-        pki_dir.to_path_buf(),
-        db::ports::mesh_port(),
-    ) {
+    match pod::native::mdns::build_advertisement(pki_dir.to_path_buf(), db::ports::mesh_port()) {
         Ok(ad) => match pod::native::mdns::Mdns::start(ad) {
             Ok(handle) => {
                 info!("[pod] mDNS responder + discoverer up");

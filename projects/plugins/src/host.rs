@@ -327,8 +327,7 @@ pub async fn serve(
                             // layer via pinned pubkey + pairing code.
                             if sni == pki::POD_BOOTSTRAP_SAN {
                                 if let Err(e) =
-                                    pod::native::handle_pod_bootstrap_connection(tls, peer)
-                                        .await
+                                    pod::native::handle_pod_bootstrap_connection(tls, peer).await
                                 {
                                     warn!("[plugin-host] {peer} bootstrap connection error: {e:#}");
                                 }
@@ -348,8 +347,7 @@ pub async fn serve(
 
                             if sni == pki::POD_SERVER_SAN {
                                 if let Err(e) =
-                                    pod::native::handle_pod_connection(tls, peer_cn, peer)
-                                        .await
+                                    pod::native::handle_pod_connection(tls, peer_cn, peer).await
                                 {
                                     warn!("[plugin-host] {peer} pod connection error: {e:#}");
                                 }
