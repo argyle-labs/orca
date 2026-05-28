@@ -41,7 +41,7 @@ chrono = { workspace = true }
 dirs = { workspace = true }
 sha2 = { workspace = true }
 cron         = { workspace = true }
-colored      = { workspace = true, optional = true }
+colored      = { workspace = true }
 axum         = { workspace = true, optional = true }
 regex        = { workspace = true, optional = true }
 
