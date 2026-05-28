@@ -693,6 +693,7 @@ async fn pod_update(
             peer_id,
             "system.pod.update",
             serde_json::json!({ "self_secure": args.self_secure }),
+            Some("admin".to_string()),
         )
         .await?;
         return Ok(serde_json::from_value(dispatch.result)?);

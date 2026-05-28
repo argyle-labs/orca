@@ -111,7 +111,14 @@ pub async fn exec_remote<T: orca_contract::OrcaToolDef>(
     let args_value =
         serde_json::to_value(&args).map_err(|e| anyhow::anyhow!("serialize args: {e}"))?;
     let svc = ctx.service::<Arc<dyn RemoteExec>>()?;
-    let result = svc.exec(peer, T::NAME, args_value).await?;
+    // Local CLI/REST entrypoints reach this path after passing their own auth
+    // gate (CLI has local DB/key access; REST has session middleware). Until
+    // ToolCtx carries an AuthContext, assert "admin" here so admin-gated remote
+    // tools (system.update, pod.kick, secrets.*) are reachable. Tightened in
+    // [[project-remote-exec-full-fix]] S1-S4 with a real per-user token.
+    let result = svc
+        .exec(peer, T::NAME, args_value, Some("admin".to_string()))
+        .await?;
     #[allow(clippy::disallowed_types)]
     let out: T::Output = serde_json::from_value(result)
         .map_err(|e| anyhow::anyhow!("decode {} output from peer {peer}: {e}", T::NAME))?;
