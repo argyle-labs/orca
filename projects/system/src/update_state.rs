@@ -220,11 +220,6 @@ mod tests {
     use super::*;
 
     // set_var on multiple threads is unsound; serialize tests that touch env.
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-    }
 
     fn isolated_orca_home(scenario: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -305,14 +300,12 @@ mod tests {
 
     #[test]
     fn read_channel_marker_returns_none_when_missing() {
-        let _g = env_lock();
         let _dir = isolated_orca_home("missing");
         assert!(read_channel_marker().is_none());
     }
 
     #[test]
     fn read_channel_marker_accepts_legacy_prerelease() {
-        let _g = env_lock();
         let dir = isolated_orca_home("legacy");
         std::fs::write(dir.path().join("channel"), "prerelease\n").unwrap();
         assert_eq!(read_channel_marker(), Some(Channel::Rc));
@@ -320,7 +313,6 @@ mod tests {
 
     #[test]
     fn read_channel_marker_empty_file_returns_none() {
-        let _g = env_lock();
         let dir = isolated_orca_home("marker_empty");
         std::fs::write(dir.path().join("channel"), "\n").unwrap();
         assert!(read_channel_marker().is_none());
@@ -328,7 +320,6 @@ mod tests {
 
     #[test]
     fn read_channel_marker_reads_written_value() {
-        let _g = env_lock();
         let dir = isolated_orca_home("marker_read");
         std::fs::write(dir.path().join("channel"), "rc\n").unwrap();
         assert_eq!(read_channel_marker(), Some(Channel::Rc));
@@ -338,14 +329,12 @@ mod tests {
 
     #[test]
     fn read_version_pin_returns_none_when_absent() {
-        let _g = env_lock();
         let _dir = isolated_orca_home("pin_absent");
         assert!(read_version_pin().is_none());
     }
 
     #[test]
     fn read_version_pin_reads_trimmed_value() {
-        let _g = env_lock();
         let dir = isolated_orca_home("pin_read");
         std::fs::write(dir.path().join("version-pin"), "v0.0.4-rc.1\n").unwrap();
         assert_eq!(read_version_pin(), Some("v0.0.4-rc.1".to_string()));
@@ -353,7 +342,6 @@ mod tests {
 
     #[test]
     fn read_version_pin_returns_none_for_empty_file() {
-        let _g = env_lock();
         let dir = isolated_orca_home("pin_empty");
         std::fs::write(dir.path().join("version-pin"), "   \n").unwrap();
         assert!(read_version_pin().is_none());
@@ -363,7 +351,6 @@ mod tests {
 
     #[test]
     fn pin_path_uses_orca_home() {
-        let _g = env_lock();
         let dir = isolated_orca_home("pin_path");
         let p = pin_path().expect("pin_path");
         assert_eq!(p, dir.path().join("version-pin"));
@@ -371,7 +358,6 @@ mod tests {
 
     #[test]
     fn channel_marker_path_uses_orca_home() {
-        let _g = env_lock();
         let dir = isolated_orca_home("ch_path");
         let p = channel_marker_path().expect("channel_marker_path");
         assert_eq!(p, dir.path().join("channel"));
@@ -418,7 +404,6 @@ mod tests {
 
         #[test]
         fn write_then_read_channel_marker_round_trips() {
-            let _g = env_lock();
             let _dir = isolated_orca_home("write");
             write_channel_marker(&Channel::Rc).unwrap();
             assert_eq!(read_channel_marker(), Some(Channel::Rc));
@@ -428,7 +413,6 @@ mod tests {
 
         #[test]
         fn resolve_channel_explicit_wins_over_marker() {
-            let _g = env_lock();
             let _dir = isolated_orca_home("explicit");
             write_channel_marker(&Channel::Stable).unwrap();
             assert_eq!(resolve_channel("rc"), Channel::Rc);
@@ -436,7 +420,6 @@ mod tests {
 
         #[test]
         fn resolve_channel_empty_reads_marker() {
-            let _g = env_lock();
             let _dir = isolated_orca_home("empty");
             write_channel_marker(&Channel::Rc).unwrap();
             assert_eq!(resolve_channel(""), Channel::Rc);
@@ -445,14 +428,12 @@ mod tests {
 
         #[test]
         fn resolve_channel_empty_falls_back_to_stable() {
-            let _g = env_lock();
             let _dir = isolated_orca_home("fallback");
             assert_eq!(resolve_channel(""), Channel::Stable);
         }
 
         #[test]
         fn write_channel_marker_noop_when_same() {
-            let _g = env_lock();
             let _dir = isolated_orca_home("marker_noop");
             write_channel_marker(&Channel::Rc).unwrap();
             write_channel_marker(&Channel::Rc).unwrap();
@@ -461,7 +442,6 @@ mod tests {
 
         #[test]
         fn write_then_read_version_pin_round_trips() {
-            let _g = env_lock();
             let _dir = isolated_orca_home("pin_write");
             write_version_pin("v0.0.4-rc.1").unwrap();
             assert_eq!(read_version_pin(), Some("v0.0.4-rc.1".to_string()));
@@ -469,7 +449,6 @@ mod tests {
 
         #[test]
         fn clear_version_pin_removes_file() {
-            let _g = env_lock();
             let _dir = isolated_orca_home("pin_clear");
             write_version_pin("v0.0.4-rc.1").unwrap();
             clear_version_pin().unwrap();
@@ -478,7 +457,6 @@ mod tests {
 
         #[test]
         fn resolve_pin_veto_blocks_newer_version() {
-            let _g = env_lock();
             let _dir = isolated_orca_home("pin_veto");
             write_version_pin("v0.0.4-rc.1").unwrap();
             assert_eq!(
@@ -489,7 +467,6 @@ mod tests {
 
         #[test]
         fn resolve_pin_veto_passes_within_pin() {
-            let _g = env_lock();
             let _dir = isolated_orca_home("pin_pass");
             write_version_pin("v0.0.4-rc.3").unwrap();
             assert!(resolve_pin_veto("0.0.4-rc.1").is_none());
