@@ -52,8 +52,12 @@
 
   async function refreshInboundOffers() {
     try {
-      const rows = await callTool<InboundOffer[]>('systemPeerHandshakeList', {});
-      inboundOffers = (rows ?? []).filter((r) => r.expires_at > Math.floor(Date.now() / 1000));
+      type PodMember = { state: 'joined' | 'handshaking' | 'discovered' } & Record<string, unknown>;
+      const list = await callTool<{ members: PodMember[] }>('podList', {});
+      const rows = (list?.members ?? [])
+        .filter((m): m is PodMember & InboundOffer => m.state === 'handshaking')
+        .map((m) => m as unknown as InboundOffer);
+      inboundOffers = rows.filter((r) => r.expires_at > Math.floor(Date.now() / 1000));
     } catch {
       // best-effort; this banner is informational
     }
@@ -150,31 +154,36 @@
 
   async function refreshPodPeers() {
     try {
-      const [peersResult, statusResult] = await Promise.all([
-        callTool<{
-          peer_id: string;
-          hostname: string;
-          addr: string;
-          port: number;
-          status: string;
-          local_secure: boolean;
-          peer_secure: boolean;
-          local: boolean;
-          version?: string | null;
-          target?: string | null;
-          mode?: string | null;
-          channel?: string | null;
-          update_available?: boolean | null;
-          update_latest?: string | null;
-          pinned_to?: string | null;
-          addresses?: { kind: string; value: string }[];
-          system?: SystemInfoReport | null;
-        }[]>('systemPeerList', {}),
+      type PodPeer = {
+        peer_id: string;
+        hostname: string;
+        addr: string;
+        port: number;
+        status: string;
+        local_secure: boolean;
+        peer_secure: boolean;
+        local: boolean;
+        version?: string | null;
+        target?: string | null;
+        mode?: string | null;
+        channel?: string | null;
+        update_available?: boolean | null;
+        update_latest?: string | null;
+        pinned_to?: string | null;
+        addresses?: { kind: string; value: string }[];
+        system?: SystemInfoReport | null;
+      };
+      type PodMember = { state: 'joined' | 'handshaking' | 'discovered' } & Partial<PodPeer>;
+      const [listResult, statusResult] = await Promise.all([
+        callTool<{ members: PodMember[] }>('podList', {}),
         callTool<{ peer_id: string; system?: SystemInfoReport | null }[]>(
           'systemHostStatusList',
           {},
         ).catch(() => []),
       ]);
+      const peersResult: PodPeer[] = (listResult?.members ?? [])
+        .filter((m) => m.state === 'joined')
+        .map((m) => m as unknown as PodPeer);
 
       const sysById = new Map<string, SystemInfoReport | null>();
       for (const row of statusResult ?? []) {
@@ -213,7 +222,7 @@
         });
       instances = local ? [local, ...podRows] : podRows;
     } catch (e) {
-      console.warn('pod.peer.list failed:', e);
+      console.warn('pod.list failed:', e);
     }
   }
 
