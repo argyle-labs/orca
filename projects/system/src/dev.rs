@@ -316,7 +316,7 @@ pub fn cmd_dev_enable() -> Result<DevEnableResult> {
         None => cargo_dir.as_os_str().to_owned(),
     };
     let child = Command::new(&cargo_bin)
-        .args(["watch", "-x", "run -- daemon start"])
+        .args(["watch", "-x", "run -- daemon"])
         .current_dir(&repo)
         .env("PATH", &augmented_path)
         .env("ORCA_DEV_PARENT_PID", "0")

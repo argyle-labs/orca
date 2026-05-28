@@ -402,7 +402,6 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     <array>
         <string>{binary}</string>
         <string>daemon</string>
-        <string>start</string>
         <string>--port</string>
         <string>{port}</string>
     </array>
@@ -488,7 +487,7 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
 
     let service = format!(
         "[Unit]\nDescription=Orca AI daemon\nAfter=network.target\n\n\
-         [Service]\nExecStart={binary} daemon start --port {port}\n\
+         [Service]\nExecStart={binary} daemon --port {port}\n\
          Environment=HOME={home}\nRestart=on-failure\nRestartSec=5\n\n\
          [Install]\nWantedBy=default.target\n"
     );
@@ -545,7 +544,7 @@ fn install_system_service(binary: &str, port: u16, user: &str, home: &str) -> Re
         LinuxInit::Unraid => install_unraid(binary, port, user, home),
         LinuxInit::Unknown => anyhow::bail!(
             "could not detect init system (not systemd, openrc, or unraid) — \
-             write a service unit manually and run `{binary} daemon start --port {port}` as {user}"
+             write a service unit manually and run `{binary} daemon --port {port}` as {user}"
         ),
     }
 }
@@ -556,7 +555,7 @@ fn install_systemd_system(binary: &str, port: u16, user: &str, home: &str) -> Re
     let unit = format!(
         "[Unit]\nDescription=Orca AI daemon\nAfter=network.target\n\n\
          [Service]\nType=simple\nUser={user}\n\
-         Environment=HOME={home}\nExecStart={binary} daemon start --port {port}\n\
+         Environment=HOME={home}\nExecStart={binary} daemon --port {port}\n\
          Restart=on-failure\nRestartSec=5\n\n\
          [Install]\nWantedBy=multi-user.target\n"
     );
@@ -589,7 +588,7 @@ fn install_openrc(binary: &str, port: u16, user: &str, home: &str) -> Result<()>
          name=\"{APP_NAME}\"\n\
          description=\"Orca AI daemon\"\n\
          command=\"{binary}\"\n\
-         command_args=\"daemon start --port {port}\"\n\
+         command_args=\"daemon --port {port}\"\n\
          command_user=\"{user}\"\n\
          supervisor=supervise-daemon\n\
          pidfile=\"/run/{APP_NAME}.pid\"\n\
@@ -658,7 +657,7 @@ fn install_unraid(binary: &str, port: u16, user: &str, home: &str) -> Result<()>
            fi\n\
          }}\n\
          case \"$1\" in\n\
-           start) stage_bin; runuser -u $USER -- $BIN daemon start --port {port} >>/var/log/orca.log 2>&1 &\n\
+           start) stage_bin; runuser -u $USER -- $BIN daemon --port {port} >>/var/log/orca.log 2>&1 &\n\
                   echo $! > /var/run/orca.pid ;;\n\
            stop)  [ -f /var/run/orca.pid ] && kill $(cat /var/run/orca.pid) ; rm -f /var/run/orca.pid ;;\n\
            restart) $0 stop; sleep 1; $0 start ;;\n\

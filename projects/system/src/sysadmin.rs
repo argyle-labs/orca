@@ -86,7 +86,7 @@ async fn bootstrap_tool(args: BootstrapArgs, _ctx: &ToolCtx) -> Result<Bootstrap
     })
 }
 
-const STALE_PATTERNS: &[&str] = &["orca mcp-serve", "orca daemon start"];
+const STALE_PATTERNS: &[&str] = &["orca mcp-serve", "orca daemon"];
 
 #[cfg(target_os = "linux")]
 fn bootstrap(admin_pubkey: Option<String>, user: &str, home_dir: &str) -> Result<()> {

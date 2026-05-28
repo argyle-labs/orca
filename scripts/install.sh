@@ -401,8 +401,8 @@ if [ "$RUN_AS_ORCA" = "1" ]; then
   fi
   echo "✓ installed: ${INSTALL_DIR}/orca  (channel: ${CHANNEL}, user: ${ORCA_USER})"
   echo "→ bootstrapping daemon as ${ORCA_USER} via system service"
-  "${INSTALL_DIR}/orca" daemon install --service-user "$ORCA_USER" \
-    || warn "daemon install failed — re-run: ${INSTALL_DIR}/orca daemon install --service-user $ORCA_USER"
+  "${INSTALL_DIR}/orca" system daemon install --service-user "$ORCA_USER" \
+    || warn "daemon install failed — re-run: ${INSTALL_DIR}/orca system daemon install --service-user $ORCA_USER"
   # Restart the service so it picks up the new binary instead of running the
   # old (now-deleted) inode kill-stale terminated above. Detects systemd,
   # openrc, and unraid rc scripts — silent no-op if none match.

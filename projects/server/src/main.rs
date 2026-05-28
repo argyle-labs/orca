@@ -621,7 +621,7 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
             if let Some(bin) = binary {
                 println!("[orca] daemon gone — respawning {bin}");
                 _ = Command::new(&bin)
-                    .args(["daemon", "start", "--port", &port.to_string()])
+                    .args(["daemon", "--port", &port.to_string()])
                     .spawn();
             }
         }
