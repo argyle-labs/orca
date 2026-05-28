@@ -5,6 +5,7 @@
   import StatusDot from '$lib/components/StatusDot.svelte';
   import Popover from '$lib/components/Popover.svelte';
   import PairingModal from '$lib/components/PairingModal.svelte';
+  import Drawer from '$lib/components/Drawer.svelte';
   import type { GpuInfo, SystemInfoReport } from '$lib/client/types.gen';
   interface Instance {
     id: string;
@@ -707,14 +708,12 @@
 />
 
 <!-- Drawer -->
-{#if selectedInst}
-  {@const sys = selectedInst.sys}
-  {@const typeBadge = sys?.system_type ? systemTypeLabel(sys.system_type) : ''}
-  {@const virtBadge = sys?.virtualization && sys.virtualization !== 'none' ? sys.virtualization : ''}
-  {@const capBadges = (sys?.detected_capabilities ?? []).map(capabilityLabel)}
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="backdrop" role="presentation" onclick={closeDrawer}></div>
-  <aside class="drawer">
+<Drawer open={!!selectedInst} side="right" onclose={closeDrawer} ariaLabel="Host details">
+  {#if selectedInst}
+    {@const sys = selectedInst.sys}
+    {@const typeBadge = sys?.system_type ? systemTypeLabel(sys.system_type) : ''}
+    {@const virtBadge = sys?.virtualization && sys.virtualization !== 'none' ? sys.virtualization : ''}
+    {@const capBadges = (sys?.detected_capabilities ?? []).map(capabilityLabel)}
     <div class="drawer-header">
       <div class="ident">
         <StatusDot
@@ -932,8 +931,8 @@
         <div class="err">{selectedInst.error}</div>
       {/if}
     </div>
-  </aside>
-{/if}
+  {/if}
+</Drawer>
 
 <style>
   .page {
@@ -1264,25 +1263,6 @@
   }
 
   /* ── drawer ───────────────────────────────────────────────────────────── */
-  .backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.4);
-    z-index: 100;
-  }
-  .drawer {
-    position: fixed;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    width: min(420px, 90vw);
-    background: var(--color-surface);
-    border-left: 1px solid var(--color-border);
-    z-index: 101;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
   .drawer-header {
     display: flex;
     align-items: center;
