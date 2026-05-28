@@ -409,6 +409,7 @@ mod tests {
 
     mod native_tests {
         use super::*;
+        use serial_test::serial;
 
         #[test]
         #[serial(env)]
