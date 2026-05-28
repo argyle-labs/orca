@@ -381,7 +381,12 @@ pub async fn leave_peer(peer_id: &str) -> Result<PodLeaveOutput> {
 }
 
 #[allow(clippy::disallowed_types)] // mirrors PodService::exec — peer-mesh wire payload
-pub async fn exec(peer: &str, tool: &str, args: serde_json::Value) -> Result<PodExecDispatch> {
+pub async fn exec(
+    peer: &str,
+    tool: &str,
+    args: serde_json::Value,
+    caller_role: Option<String>,
+) -> Result<PodExecDispatch> {
     // "local" / "localhost" → loopback round-trip via the same /api/tools
     // path peers use. Lets the same code path validate the allowlist
     // without leaving the host.
@@ -396,7 +401,7 @@ pub async fn exec(peer: &str, tool: &str, args: serde_json::Value) -> Result<Pod
         resolve_peer_addr(&peers, peer)?
     };
 
-    let r = crate::native::exec(&addr, tool, args).await?;
+    let r = crate::native::exec_as(&addr, tool, args, caller_role).await?;
     Ok(PodExecDispatch {
         peer: peer.to_string(),
         tool: r.tool,

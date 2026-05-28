@@ -517,8 +517,11 @@ impl orca_contract::RemoteExec for PodRemoteExec {
         peer: &str,
         tool: &str,
         args: serde_json::Value,
+        caller_role: Option<String>,
     ) -> anyhow::Result<serde_json::Value> {
-        Ok(server_pod::exec(peer, tool, args).await?.result)
+        Ok(server_pod::exec(peer, tool, args, caller_role)
+            .await?
+            .result)
     }
 }
 

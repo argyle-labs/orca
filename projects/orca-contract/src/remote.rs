@@ -12,12 +12,15 @@ pub trait RemoteExec: Send + Sync {
     /// Dispatch one tool call to `peer` over the host's mesh transport.
     /// Args/output are JSON-RPC wire payloads; callers deserialize the typed
     /// `OrcaToolDef::Output` immediately on receipt so opaque values never
-    /// reach user code.
+    /// reach user code. `caller_role` is the calling entrypoint's assertion
+    /// of the local user's role — `Some("admin")` from a CLI/REST call that
+    /// already passed local auth, `None` for unauthenticated paths.
     #[allow(clippy::disallowed_types)]
     async fn exec(
         &self,
         peer: &str,
         tool: &str,
         args: serde_json::Value,
+        caller_role: Option<String>,
     ) -> Result<serde_json::Value>;
 }
