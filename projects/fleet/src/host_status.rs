@@ -210,7 +210,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = empty_ctx();
         db::with_db_path(tmp.path().to_path_buf(), async move {
-            seed(&db::open_default().unwrap(), t);
+            seed(&db::open_default().unwrap(), now());
             let out = host_status_detail(
                 HostStatusDetailArgs {
                     peer_id: "nope".into(),
