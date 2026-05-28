@@ -77,7 +77,7 @@ pub struct BootstrapOutput {
 /// Create the orca service user and configure SSH access. Idempotent.
 /// Designed to run as root immediately after the binary is placed, before
 /// `daemon install --service-user orca`.
-#[orca_tool(domain = "system", verb = "bootstrap")]
+#[orca_tool(domain = "system", verb = "bootstrap", local_only = true)]
 async fn bootstrap_tool(args: BootstrapArgs, _ctx: &ToolCtx) -> Result<BootstrapOutput> {
     bootstrap(args.admin_pubkey, &args.service_user, &args.home_dir)?;
     Ok(BootstrapOutput {

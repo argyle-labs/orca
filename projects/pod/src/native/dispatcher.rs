@@ -8,9 +8,12 @@
 //! hop, no token impersonation. The dispatchers walk the `inventory` slice
 //! directly, so there's no registry to ship through this handle.
 //!
-//! Authorization still flows through `pod::listener::authorize_exec`, which
-//! enforces both the `REMOTE_OK` allowlist and `REQUIRED_ROLE == "any"`, so
-//! admin-role tools remain unreachable from any paired peer.
+//! Authorization flows through `pod::listener::authorize_exec`. It enforces
+//! the `REMOTE_OK` allowlist and (until per-user identity is wired over
+//! pod/exec) refuses any tool with a non-`"any"` required role. The target
+//! model is per-user role checks against a pod-replicated identity registry,
+//! not per-peer trust: mTLS proves who is on the wire, but admin delegation
+//! is a property of the invoking user, not the relaying peer.
 //!
 //! `serde_json::Value` is unavoidable here: `orca_dispatch::dispatch` is the
 //! heterogeneous-tool entry point and takes/returns opaque JSON by contract.

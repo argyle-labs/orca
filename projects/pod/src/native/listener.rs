@@ -329,15 +329,32 @@ async fn handle_dev_disable() -> Result<PodDevDisableResult> {
     }
 }
 
-/// Pure authorization gate for `pod/exec`. Refuses tools not in the
-/// `REMOTE_OK` allowlist. The mTLS peer certificate already proves the caller
-/// is a trusted pod member, so `remote_ok = true` is sufficient authorization
-/// — the local role check is bypassed because admin delegation flows through
-/// the pod trust established at join time.
-fn authorize_exec(tool: &str, remote_ok: bool, _required_role: &str) -> Result<()> {
+/// Authorization gate for `pod/exec`.
+///
+/// Target model: every host knows every user (pod-replicated identity
+/// registry). Each `pod/exec` request carries the invoking *user's* identity;
+/// the executing peer checks that user's role against the tool's required
+/// role at request time. The mTLS chain proves the *peer* on the wire is a
+/// paired pod member, but that is not, by itself, authorization — admin
+/// delegation is per-user, not per-peer.
+///
+/// Today the wire format does not yet carry user identity, so we cannot
+/// perform the per-user role check. Until that lands we refuse any tool with
+/// a non-`"any"` required role on the remote path. This is strictly safer
+/// than the prior code (which accepted `_required_role` and dropped it);
+/// admin-tagged tools that need to be peer-callable will start working as
+/// soon as the per-user identity hop is plumbed through.
+fn authorize_exec(tool: &str, remote_ok: bool, required_role: &str) -> Result<()> {
     if !remote_ok {
         anyhow::bail!(
             "pod/exec refused: tool '{tool}' is not in the REMOTE_OK allowlist on this peer"
+        );
+    }
+    if required_role != "any" {
+        anyhow::bail!(
+            "pod/exec refused: tool '{tool}' requires role '{required_role}'; per-user identity \
+             over pod/exec is not yet wired, so admin-gated tools are unreachable remotely until \
+             that lands"
         );
     }
     Ok(())
@@ -495,11 +512,14 @@ mod tests {
     }
 
     #[test]
-    fn authorize_exec_passes_admin_role_when_remote_ok() {
-        // Trusted pod peers may invoke admin-role tools tagged remote_ok.
-        // The mTLS peer cert is the authorization — local role checks don't
-        // apply to pod-relayed calls.
-        authorize_exec("system.update.create", true, "admin").expect("should pass");
+    fn authorize_exec_refuses_non_any_role_until_user_identity_wired() {
+        // Today the wire format does not carry the invoking user's identity,
+        // so we cannot perform a per-user role check. Until that lands we
+        // refuse any tool with a non-`any` required role on the remote path.
+        let err = authorize_exec("system.update.create", true, "admin").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("per-user identity"), "got: {msg}");
+        assert!(msg.contains("admin"), "got: {msg}");
     }
 
     #[test]
