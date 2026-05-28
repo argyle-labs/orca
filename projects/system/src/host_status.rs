@@ -69,7 +69,7 @@ fn rows_to_dtos(rows: Vec<db::host_status::HostStatusRow>) -> Vec<HostStatusRowD
 }
 
 /// Latest persisted snapshot per peer from the local DB. No network IO.
-#[orca_tool(domain = "system.host.status", verb = "list", remote_ok = true)]
+#[orca_tool(domain = "system.host.status", verb = "list")]
 async fn host_status_list(
     _args: HostStatusRowsArgs,
     _ctx: &orca_contract::ToolCtx,
@@ -81,7 +81,7 @@ async fn host_status_list(
 
 /// Snapshot history for one peer, newest-first. Both the UI (timeseries)
 /// and the sync puller (watermarked pull) use this.
-#[orca_tool(domain = "system.host.status", verb = "detail", remote_ok = true)]
+#[orca_tool(domain = "system.host.status", verb = "detail")]
 async fn host_status_detail(
     args: HostStatusDetailArgs,
     _ctx: &orca_contract::ToolCtx,

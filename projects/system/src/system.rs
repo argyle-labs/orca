@@ -88,7 +88,7 @@ pub struct SystemStatusReport {
 pub struct SystemStatusArgs {}
 
 /// Snapshot of orca's installation: binary, ~/.claude/CLAUDE.md, vault dir, agents symlink, PKI init, MCP registration.
-#[orca_tool(domain = "system", verb = "detail", remote_ok = true)]
+#[orca_tool(domain = "system", verb = "detail")]
 async fn system_detail(
     _args: SystemStatusArgs,
     _ctx: &orca_contract::ToolCtx,

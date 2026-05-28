@@ -469,7 +469,7 @@ impl orca_contract::RemoteExec for PodRemoteExec {
 // ── Tools ───────────────────────────────────────────────────────────────────
 
 /// List paired pod peers (mesh members).
-#[orca_tool(domain = "system.peer", verb = "list", remote_ok = true)]
+#[orca_tool(domain = "system.peer", verb = "list")]
 async fn pod_peer_list(
     _args: EmptyArgs,
     _ctx: &orca_contract::ToolCtx,
@@ -607,12 +607,7 @@ async fn pod_detail(
 /// on the named remote peer over the pod mesh. Currently exposes
 /// `self_secure` (Tier-2 secrets-storage permission). Admin-only because
 /// flipping it can authorize secrets replication into this host.
-#[orca_tool(
-    domain = "system.pod",
-    verb = "update",
-    role = "admin",
-    remote_ok = true
-)]
+#[orca_tool(domain = "system.pod", verb = "update", role = "admin")]
 async fn pod_update(
     args: PodUpdateArgs,
     _ctx: &orca_contract::ToolCtx,

@@ -50,7 +50,8 @@ pub struct ProjectsListReport {
 // ── Tools ───────────────────────────────────────────────────────────────────
 
 /// [MUTATES STATE] Install orca on this host: wire symlinks, register MCP server, install binary.
-#[orca_tool(domain = "system", verb = "create")]
+/// `local_only`: bootstrap-style op that wires local filesystem; not meaningful via pod/exec.
+#[orca_tool(domain = "system", verb = "create", local_only = true)]
 async fn system_create(
     _args: EmptyArgs,
     _ctx: &orca_contract::ToolCtx,
@@ -59,7 +60,8 @@ async fn system_create(
 }
 
 /// [MUTATES STATE] Uninstall orca from this host: remove binary, MCP registration, and CLAUDE.md symlinks.
-#[orca_tool(domain = "system", verb = "delete")]
+/// `local_only`: tears down local filesystem; not meaningful via pod/exec.
+#[orca_tool(domain = "system", verb = "delete", local_only = true)]
 async fn system_delete(
     _args: EmptyArgs,
     _ctx: &orca_contract::ToolCtx,
@@ -72,12 +74,7 @@ async fn system_delete(
 /// "stable" | "rc" | "dev" | "<semver>". "dev" tracks GitHub HEAD via
 /// cargo-watch. Omit to apply the latest on the current channel.
 /// When `peer_id` is set the update runs on the named peer instead of locally.
-#[orca_tool(
-    domain = "system",
-    verb = "update",
-    remote_ok = true,
-    peer_dispatch = true
-)]
+#[orca_tool(domain = "system", verb = "update", peer_dispatch = true)]
 async fn system_update(
     args: SystemUpdateArgs,
     _ctx: &orca_contract::ToolCtx,

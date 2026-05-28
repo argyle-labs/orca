@@ -183,12 +183,7 @@ async fn secret_detail(
 /// for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field').
 /// When `peer_id` is set the secret is written on the named peer instead of locally
 /// — same admin trust surface as `system.update`.
-#[orca_tool(
-    domain = "system.secret",
-    verb = "set",
-    remote_ok = true,
-    peer_dispatch = true
-)]
+#[orca_tool(domain = "system.secret", verb = "set", peer_dispatch = true)]
 async fn secret_set(
     args: SecretSetArgs,
     _ctx: &orca_contract::ToolCtx,

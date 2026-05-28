@@ -114,7 +114,7 @@ pub fn register_host_refresh(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideH
 }
 
 /// Local host snapshot: display name, machine_id, and every addressing channel.
-#[orca_tool(domain = "system.host", verb = "detail", remote_ok = true)]
+#[orca_tool(domain = "system.host", verb = "detail")]
 async fn host_detail(
     _args: EmptyArgs,
     _ctx: &orca_contract::ToolCtx,

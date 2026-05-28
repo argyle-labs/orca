@@ -15,7 +15,7 @@ pub struct HealthOutput {
 }
 
 /// Liveness probe — returns {ok: true} when the server is alive.
-#[orca_tool(domain = "system", verb = "health", remote_ok = true)]
+#[orca_tool(domain = "system", verb = "health")]
 async fn health(_args: HealthArgs, _ctx: &orca_contract::ToolCtx) -> anyhow::Result<HealthOutput> {
     Ok(HealthOutput { ok: true })
 }

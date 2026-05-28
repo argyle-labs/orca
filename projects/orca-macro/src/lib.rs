@@ -49,8 +49,11 @@ struct ToolAttr {
     domain: LitStr,
     verb: LitStr,
     cli_mode: Option<Ident>,
-    /// Opt-in: `#[orca_tool(..., remote_ok = true)]` makes this tool callable
-    /// by paired pod peers via `pod/exec`. Default false.
+    /// Whether this tool is callable by paired pod peers via `pod/exec`.
+    /// **Default: true.** Set `local_only = true` (or `remote_ok = false`)
+    /// for tools that genuinely can't run remotely — e.g. bootstrap, daemon
+    /// install/uninstall, package build. The dispatcher additionally requires
+    /// admin auth on every remote invocation regardless of this flag.
     remote_ok: bool,
     /// Opt-in: `#[orca_tool(..., peer_dispatch = true)]` auto-emits a proxy
     /// stanza inside `OrcaTool::run` that inspects `args.peer_id` and, when
@@ -71,7 +74,7 @@ impl Parse for ToolAttr {
         let mut domain = None;
         let mut verb = None;
         let mut cli_mode = None;
-        let mut remote_ok = false;
+        let mut remote_ok = true;
         let mut peer_dispatch = false;
         let mut role: Option<LitStr> = None;
         for nv in items {
@@ -95,6 +98,25 @@ impl Parse for ToolAttr {
                             ));
                         }
                     };
+                }
+                "local_only" => {
+                    // Inverse opt-out for the remote_ok=true default. Reads
+                    // more naturally at the call site for tools that genuinely
+                    // can't run remotely (bootstrap, daemon install, etc.).
+                    let v = match &nv.value {
+                        Expr::Lit(ExprLit {
+                            lit: Lit::Bool(b), ..
+                        }) => b.value,
+                        _ => {
+                            return Err(syn::Error::new_spanned(
+                                &nv.value,
+                                "local_only expects a bool literal",
+                            ));
+                        }
+                    };
+                    if v {
+                        remote_ok = false;
+                    }
                 }
                 "peer_dispatch" => {
                     peer_dispatch = match &nv.value {
@@ -595,9 +617,22 @@ mod tests {
         let attr = parse_attr(quote!(domain = "host", verb = "info")).unwrap();
         assert_eq!(attr.domain.value(), "host");
         assert_eq!(attr.verb.value(), "info");
-        assert!(!attr.remote_ok);
+        // remote_ok defaults to true (2026-05-28).
+        assert!(attr.remote_ok);
         assert!(attr.cli_mode.is_none());
         assert!(attr.role.is_none());
+    }
+
+    #[test]
+    fn tool_attr_local_only_flips_remote_ok_off() {
+        let attr = parse_attr(quote!(domain = "x", verb = "y", local_only = true)).unwrap();
+        assert!(!attr.remote_ok);
+    }
+
+    #[test]
+    fn tool_attr_local_only_false_is_noop() {
+        let attr = parse_attr(quote!(domain = "x", verb = "y", local_only = false)).unwrap();
+        assert!(attr.remote_ok);
     }
 
     #[test]
