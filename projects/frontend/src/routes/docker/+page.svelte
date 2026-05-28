@@ -1,7 +1,20 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { callTool } from '$lib/stores/runTool';
-  import type { DockerContainerStats } from '$lib/client/types.gen';
+
+  // Docker tools aren't currently included in the OpenAPI emission so they
+  // don't get typed SDK exports — inline the shape to mirror
+  // `DockerContainerStats` in projects/integrations/docker/src/tools.rs.
+  type DockerContainerStats = {
+    id: string;
+    name: string;
+    cpu_percent: number;
+    mem_usage_mb: number;
+    mem_limit_mb: number;
+    block_read_bytes: number;
+    block_write_bytes: number;
+    net_rx_bytes: number;
+    net_tx_bytes: number;
+  };
 
   let containers = $state<DockerContainerStats[]>([]);
   let loading = $state(true);
@@ -12,7 +25,17 @@
 
   async function refresh() {
     try {
-      const result = await callTool<{ containers: DockerContainerStats[] }>('dockerServiceListStats', {});
+      // Raw fetch: docker tools aren't currently in the OpenAPI emission so
+      // they don't have a typed SDK export. Switch to `callTool` once that
+      // gap is closed.
+      const res = await fetch('/api/tools/docker.service.list-stats', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      });
+      if (!res.ok) throw new Error(`docker.service.list-stats failed (${res.status})`);
+      const result = (await res.json()) as { containers?: DockerContainerStats[] };
       containers = result.containers ?? [];
       error = null;
     } catch (e) {
