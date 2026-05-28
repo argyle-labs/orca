@@ -279,7 +279,7 @@ pub fn refresh_and_persist(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Adapter implementing the wasm-safe `HostRefreshHook` trait from
+/// Adapter implementing the `HostRefreshHook` trait from
 /// `fleet::host` so `host.refresh` can drive the real detect path
 /// without the domain crate depending on the server's process-level statics.
 pub struct ServerHostRefreshHook;

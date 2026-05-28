@@ -7,6 +7,9 @@ edition.workspace = true
 name = "conversation"
 path = "src/lib.rs"
 
+[features]
+cli = []
+
 [dependencies]
 orca-contract = { path = "../orca-contract" }
 orca-macro    = { path = "../orca-macro" }
@@ -19,6 +22,7 @@ orca-utils    = { path = "../utils" }
 llm           = { path = "../llm" }
 
 anyhow        = { workspace = true }
+async-trait   = { workspace = true }
 chrono        = { workspace = true }
 clap          = { workspace = true }
 colored       = { workspace = true }

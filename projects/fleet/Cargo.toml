@@ -12,6 +12,8 @@ cli = [
     "dep:clap",
     "dep:colored",
 ]
+# Marker feature mirroring `orca/ui` — runtime check via `cfg!(feature = "ui")`.
+ui = []
 [dependencies]
 orca-dispatch        = { path = "../orca-dispatch" }
 orca-contract    = { path = "../orca-contract", default-features = false }
