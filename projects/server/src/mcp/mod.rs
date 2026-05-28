@@ -17,25 +17,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-/// Concrete embedder that satisfies the per-service `Provide*` traits in
-/// each domain crate (`agents::*`, `fleet::*`, `platform::*`, ...). Each
-/// `impl ProvideFoo for ServerEmbedder` is the single source of truth for
-/// which server-side type backs that service.
-struct ServerEmbedder {
-    #[allow(dead_code)]
-    config: Arc<Config>,
-}
-
 pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
-    let _embedder = ServerEmbedder {
-        config: config.clone(),
-    };
     let mut ctx = ToolCtx::new(config);
-    let profile_svc: Arc<dyn platform::profile::ProfileService> =
-        Arc::new(platform::profile_native::ServerProfile {
-            config: ctx.config.clone(),
-        });
-    ctx.register_service(profile_svc);
     // Host-addressing refresh hook: host.refresh tool calls into this to
     // trigger a fresh detect + persist before reading host_addressing rows.
     let host_refresh: Arc<dyn fleet::host::HostRefreshHook + Send + Sync> =

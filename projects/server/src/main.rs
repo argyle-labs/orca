@@ -461,7 +461,7 @@ async fn main() -> Result<()> {
 /// Idempotent on subsequent invocations.
 fn bootstrap_default_profile(config: &Config) -> Result<()> {
     let conn = db::open(&config.db_path)?;
-    let mgr = platform::profile_manager::ProfileManager::from_config(config);
+    let mgr = namespace::NamespaceManager::from_config(config);
     let p = mgr.ensure_default_for(&conn, orca_utils::config::LOCAL_USER)?;
     tracing::trace!(profile_id = %p.id, "active profile resolved");
     Ok(())

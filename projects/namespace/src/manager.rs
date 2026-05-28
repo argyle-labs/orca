@@ -67,11 +67,11 @@ impl Access {
 }
 
 #[derive(Debug, Error)]
-pub enum ProfileError {
-    #[error("profile not found: {0}")]
+pub enum NamespaceError {
+    #[error("namespace not found: {0}")]
     NotFound(String),
-    #[error("permission denied for user {user} on profile {profile}")]
-    PermissionDenied { user: String, profile: String },
+    #[error("permission denied for user {user} on namespace {namespace}")]
+    PermissionDenied { user: String, namespace: String },
     #[error("name '{0}' already taken for this owner")]
     NameTaken(String),
     #[error("invalid role: {0}")]
@@ -82,7 +82,7 @@ pub enum ProfileError {
 
 /// A profile's identity + metadata.
 #[derive(Debug, Clone)]
-pub struct Profile {
+pub struct Namespace {
     pub id: String,
     pub name: String,
     pub owner_user_id: String,
@@ -90,7 +90,7 @@ pub struct Profile {
     pub root: PathBuf,
 }
 
-impl Profile {
+impl Namespace {
     pub fn agents_dir(&self) -> PathBuf {
         self.root.join("agents")
     }
@@ -107,8 +107,8 @@ impl Profile {
         self.root.join("dashboards")
     }
 
-    fn from_row(row: orca_db::profiles::ProfileRow, profiles_root: &Path) -> Self {
-        let root = profiles_root.join(&row.id);
+    fn from_row(row: db::profiles::ProfileRow, namespaces_root: &Path) -> Self {
+        let root = namespaces_root.join(&row.id);
         Self {
             id: row.id,
             name: row.name,
@@ -131,43 +131,43 @@ impl Profile {
 ///
 /// Holds the filesystem root for profile content. Callers pass a DB connection
 /// per call so the manager doesn't own connection lifetime.
-pub struct ProfileManager {
-    profiles_root: PathBuf,
+pub struct NamespaceManager {
+    namespaces_root: PathBuf,
 }
 
-impl ProfileManager {
-    pub fn new(profiles_root: PathBuf) -> Self {
-        Self { profiles_root }
+impl NamespaceManager {
+    pub fn new(namespaces_root: PathBuf) -> Self {
+        Self { namespaces_root }
     }
 
     pub fn from_config(cfg: &orca_utils::config::Config) -> Self {
         Self::new(cfg.profiles_dir())
     }
 
-    pub fn profiles_root(&self) -> &Path {
-        &self.profiles_root
+    pub fn namespaces_root(&self) -> &Path {
+        &self.namespaces_root
     }
 
     /// Create a new profile owned by `owner_user_id`. Returns the new profile.
-    /// Errors with `ProfileError::NameTaken` if (owner, name) already exists.
+    /// Errors with `NamespaceError::NameTaken` if (owner, name) already exists.
     pub fn create(
         &self,
         conn: &Connection,
         owner_user_id: &str,
         name: &str,
         description: Option<&str>,
-    ) -> Result<Profile, ProfileError> {
-        if let Some(_existing) = orca_db::profiles::get_by_owner_and_name(conn, owner_user_id, name)
-            .map_err(ProfileError::Other)?
+    ) -> Result<Namespace, NamespaceError> {
+        if let Some(_existing) = db::profiles::get_by_owner_and_name(conn, owner_user_id, name)
+            .map_err(NamespaceError::Other)?
         {
-            return Err(ProfileError::NameTaken(name.to_string()));
+            return Err(NamespaceError::NameTaken(name.to_string()));
         }
         let id = Uuid::now_v7().to_string();
-        let row = orca_db::profiles::create(conn, &id, name, owner_user_id, description)
-            .map_err(ProfileError::Other)?;
-        let profile = Profile::from_row(row, &self.profiles_root);
-        profile.ensure_dirs().map_err(ProfileError::Other)?;
-        tracing::info!(profile_id = %profile.id, owner = %owner_user_id, name = %name, "created profile");
+        let row = db::profiles::create(conn, &id, name, owner_user_id, description)
+            .map_err(NamespaceError::Other)?;
+        let profile = Namespace::from_row(row, &self.namespaces_root);
+        profile.ensure_dirs().map_err(NamespaceError::Other)?;
+        tracing::info!(namespace_id = %profile.id, owner = %owner_user_id, name = %name, "created profile");
         Ok(profile)
     }
 
@@ -176,20 +176,20 @@ impl ProfileManager {
     pub fn get(
         &self,
         conn: &Connection,
-        profile_id: &str,
+        namespace_id: &str,
         requesting_user_id: &str,
-    ) -> Result<Profile, ProfileError> {
-        let access = self.access(conn, profile_id, requesting_user_id)?;
+    ) -> Result<Namespace, NamespaceError> {
+        let access = self.access(conn, namespace_id, requesting_user_id)?;
         if !access.can_read() {
-            return Err(ProfileError::PermissionDenied {
+            return Err(NamespaceError::PermissionDenied {
                 user: requesting_user_id.to_string(),
-                profile: profile_id.to_string(),
+                namespace: namespace_id.to_string(),
             });
         }
-        let row = orca_db::profiles::get(conn, profile_id)
-            .map_err(ProfileError::Other)?
-            .ok_or_else(|| ProfileError::NotFound(profile_id.to_string()))?;
-        Ok(Profile::from_row(row, &self.profiles_root))
+        let row = db::profiles::get(conn, namespace_id)
+            .map_err(NamespaceError::Other)?
+            .ok_or_else(|| NamespaceError::NotFound(namespace_id.to_string()))?;
+        Ok(Namespace::from_row(row, &self.namespaces_root))
     }
 
     /// Resolve a profile by name owned by `owner_user_id`. Skips ACL — the
@@ -200,10 +200,10 @@ impl ProfileManager {
         conn: &Connection,
         owner_user_id: &str,
         name: &str,
-    ) -> Result<Option<Profile>, ProfileError> {
-        let row = orca_db::profiles::get_by_owner_and_name(conn, owner_user_id, name)
-            .map_err(ProfileError::Other)?;
-        Ok(row.map(|r| Profile::from_row(r, &self.profiles_root)))
+    ) -> Result<Option<Namespace>, NamespaceError> {
+        let row = db::profiles::get_by_owner_and_name(conn, owner_user_id, name)
+            .map_err(NamespaceError::Other)?;
+        Ok(row.map(|r| Namespace::from_row(r, &self.namespaces_root)))
     }
 
     /// All profiles a user can access (owned + shared in any role).
@@ -211,11 +211,11 @@ impl ProfileManager {
         &self,
         conn: &Connection,
         user_id: &str,
-    ) -> Result<Vec<Profile>, ProfileError> {
-        let rows = orca_db::profiles::list_for_user(conn, user_id).map_err(ProfileError::Other)?;
+    ) -> Result<Vec<Namespace>, NamespaceError> {
+        let rows = db::profiles::list_for_user(conn, user_id).map_err(NamespaceError::Other)?;
         Ok(rows
             .into_iter()
-            .map(|r| Profile::from_row(r, &self.profiles_root))
+            .map(|r| Namespace::from_row(r, &self.namespaces_root))
             .collect())
     }
 
@@ -223,11 +223,11 @@ impl ProfileManager {
     pub fn access(
         &self,
         conn: &Connection,
-        profile_id: &str,
+        namespace_id: &str,
         user_id: &str,
-    ) -> Result<Access, ProfileError> {
-        let role = orca_db::profiles::role_for_user(conn, profile_id, user_id)
-            .map_err(ProfileError::Other)?;
+    ) -> Result<Access, NamespaceError> {
+        let role = db::profiles::role_for_user(conn, namespace_id, user_id)
+            .map_err(NamespaceError::Other)?;
         Ok(match role.as_deref() {
             Some("owner") => Access::Owner,
             Some("viewer") => Access::Viewer,
@@ -240,22 +240,22 @@ impl ProfileManager {
     pub fn update(
         &self,
         conn: &Connection,
-        profile_id: &str,
+        namespace_id: &str,
         requesting_user_id: &str,
         name: Option<&str>,
         description: Option<&str>,
-    ) -> Result<(), ProfileError> {
-        let access = self.access(conn, profile_id, requesting_user_id)?;
+    ) -> Result<(), NamespaceError> {
+        let access = self.access(conn, namespace_id, requesting_user_id)?;
         if !access.can_admin() {
-            return Err(ProfileError::PermissionDenied {
+            return Err(NamespaceError::PermissionDenied {
                 user: requesting_user_id.to_string(),
-                profile: profile_id.to_string(),
+                namespace: namespace_id.to_string(),
             });
         }
-        if !orca_db::profiles::update(conn, profile_id, name, description)
-            .map_err(ProfileError::Other)?
+        if !db::profiles::update(conn, namespace_id, name, description)
+            .map_err(NamespaceError::Other)?
         {
-            return Err(ProfileError::NotFound(profile_id.to_string()));
+            return Err(NamespaceError::NotFound(namespace_id.to_string()));
         }
         Ok(())
     }
@@ -264,22 +264,22 @@ impl ProfileManager {
     pub fn delete(
         &self,
         conn: &Connection,
-        profile_id: &str,
+        namespace_id: &str,
         requesting_user_id: &str,
-    ) -> Result<(), ProfileError> {
-        let access = self.access(conn, profile_id, requesting_user_id)?;
+    ) -> Result<(), NamespaceError> {
+        let access = self.access(conn, namespace_id, requesting_user_id)?;
         if !access.can_admin() {
-            return Err(ProfileError::PermissionDenied {
+            return Err(NamespaceError::PermissionDenied {
                 user: requesting_user_id.to_string(),
-                profile: profile_id.to_string(),
+                namespace: namespace_id.to_string(),
             });
         }
-        if !orca_db::profiles::delete(conn, profile_id).map_err(ProfileError::Other)? {
-            return Err(ProfileError::NotFound(profile_id.to_string()));
+        if !db::profiles::delete(conn, namespace_id).map_err(NamespaceError::Other)? {
+            return Err(NamespaceError::NotFound(namespace_id.to_string()));
         }
-        let dir = self.profiles_root.join(profile_id);
+        let dir = self.namespaces_root.join(namespace_id);
         if dir.exists() {
-            std::fs::remove_dir_all(&dir).map_err(|e| ProfileError::Other(e.into()))?;
+            std::fs::remove_dir_all(&dir).map_err(|e| NamespaceError::Other(e.into()))?;
         }
         Ok(())
     }
@@ -288,25 +288,25 @@ impl ProfileManager {
     pub fn share(
         &self,
         conn: &Connection,
-        profile_id: &str,
+        namespace_id: &str,
         requesting_user_id: &str,
         with_user_id: &str,
         role: Role,
-    ) -> Result<(), ProfileError> {
-        let access = self.access(conn, profile_id, requesting_user_id)?;
+    ) -> Result<(), NamespaceError> {
+        let access = self.access(conn, namespace_id, requesting_user_id)?;
         if !access.can_admin() {
-            return Err(ProfileError::PermissionDenied {
+            return Err(NamespaceError::PermissionDenied {
                 user: requesting_user_id.to_string(),
-                profile: profile_id.to_string(),
+                namespace: namespace_id.to_string(),
             });
         }
         if requesting_user_id == with_user_id {
-            return Err(ProfileError::Other(anyhow!(
+            return Err(NamespaceError::Other(anyhow!(
                 "cannot share with self (you are the owner)"
             )));
         }
-        orca_db::profiles::share(conn, profile_id, with_user_id, role.as_str())
-            .map_err(ProfileError::Other)?;
+        db::profiles::share(conn, namespace_id, with_user_id, role.as_str())
+            .map_err(NamespaceError::Other)?;
         Ok(())
     }
 
@@ -314,39 +314,39 @@ impl ProfileManager {
     pub fn unshare(
         &self,
         conn: &Connection,
-        profile_id: &str,
+        namespace_id: &str,
         requesting_user_id: &str,
         with_user_id: &str,
-    ) -> Result<bool, ProfileError> {
-        let access = self.access(conn, profile_id, requesting_user_id)?;
+    ) -> Result<bool, NamespaceError> {
+        let access = self.access(conn, namespace_id, requesting_user_id)?;
         if !access.can_admin() {
-            return Err(ProfileError::PermissionDenied {
+            return Err(NamespaceError::PermissionDenied {
                 user: requesting_user_id.to_string(),
-                profile: profile_id.to_string(),
+                namespace: namespace_id.to_string(),
             });
         }
-        orca_db::profiles::unshare(conn, profile_id, with_user_id).map_err(ProfileError::Other)
+        db::profiles::unshare(conn, namespace_id, with_user_id).map_err(NamespaceError::Other)
     }
 
     /// List sharees and their roles. Requires admin (owner).
     pub fn list_shares(
         &self,
         conn: &Connection,
-        profile_id: &str,
+        namespace_id: &str,
         requesting_user_id: &str,
-    ) -> Result<Vec<(String, Role)>, ProfileError> {
-        let access = self.access(conn, profile_id, requesting_user_id)?;
+    ) -> Result<Vec<(String, Role)>, NamespaceError> {
+        let access = self.access(conn, namespace_id, requesting_user_id)?;
         if !access.can_admin() {
-            return Err(ProfileError::PermissionDenied {
+            return Err(NamespaceError::PermissionDenied {
                 user: requesting_user_id.to_string(),
-                profile: profile_id.to_string(),
+                namespace: namespace_id.to_string(),
             });
         }
-        let rows = orca_db::profiles::list_shares(conn, profile_id).map_err(ProfileError::Other)?;
+        let rows = db::profiles::list_shares(conn, namespace_id).map_err(NamespaceError::Other)?;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let role = Role::parse(&row.role)
-                .ok_or_else(|| ProfileError::InvalidRole(row.role.clone()))?;
+                .ok_or_else(|| NamespaceError::InvalidRole(row.role.clone()))?;
             out.push((row.user_id, role));
         }
         Ok(out)
@@ -357,16 +357,16 @@ impl ProfileManager {
         &self,
         conn: &Connection,
         user_id: &str,
-        profile_id: &str,
-    ) -> Result<(), ProfileError> {
-        let access = self.access(conn, profile_id, user_id)?;
+        namespace_id: &str,
+    ) -> Result<(), NamespaceError> {
+        let access = self.access(conn, namespace_id, user_id)?;
         if !access.can_read() {
-            return Err(ProfileError::PermissionDenied {
+            return Err(NamespaceError::PermissionDenied {
                 user: user_id.to_string(),
-                profile: profile_id.to_string(),
+                namespace: namespace_id.to_string(),
             });
         }
-        orca_db::profiles::set_active(conn, user_id, profile_id).map_err(ProfileError::Other)?;
+        db::profiles::set_active(conn, user_id, namespace_id).map_err(NamespaceError::Other)?;
         Ok(())
     }
 
@@ -376,7 +376,7 @@ impl ProfileManager {
         &self,
         conn: &Connection,
         user_id: &str,
-    ) -> Result<Option<Profile>, ProfileError> {
+    ) -> Result<Option<Namespace>, NamespaceError> {
         // 1. ORCA_PROFILE env (id or name)
         if let Ok(spec) = std::env::var("ORCA_PROFILE")
             && let Some(p) = self.resolve_spec(conn, user_id, &spec)?
@@ -385,7 +385,7 @@ impl ProfileManager {
         }
         // 2. Persisted active selection
         if let Some(id) =
-            orca_db::profiles::get_active(conn, user_id).map_err(ProfileError::Other)?
+            db::profiles::get_active(conn, user_id).map_err(NamespaceError::Other)?
         {
             // ACL-check; if access lapsed, fall through.
             if let Ok(p) = self.get(conn, &id, user_id) {
@@ -404,7 +404,7 @@ impl ProfileManager {
         conn: &Connection,
         requesting_user_id: &str,
         spec: &str,
-    ) -> Result<Option<Profile>, ProfileError> {
+    ) -> Result<Option<Namespace>, NamespaceError> {
         // Try as id (with ACL check)
         if let Ok(p) = self.get(conn, spec, requesting_user_id) {
             return Ok(Some(p));
@@ -420,7 +420,7 @@ impl ProfileManager {
         &self,
         conn: &Connection,
         owner_user_id: &str,
-    ) -> Result<Profile, ProfileError> {
+    ) -> Result<Namespace, NamespaceError> {
         if let Some(active) = self.resolve_active(conn, owner_user_id)? {
             return Ok(active);
         }
@@ -430,7 +430,7 @@ impl ProfileManager {
             "default",
             Some("Default profile created on first run"),
         )?;
-        orca_db::profiles::set_active(conn, owner_user_id, &p.id).map_err(ProfileError::Other)?;
+        db::profiles::set_active(conn, owner_user_id, &p.id).map_err(NamespaceError::Other)?;
         Ok(p)
     }
 
@@ -439,19 +439,19 @@ impl ProfileManager {
     pub fn set_credential(
         &self,
         conn: &Connection,
-        profile_id: &str,
+        namespace_id: &str,
         requesting_user_id: &str,
         key: &str,
         value: &str,
-    ) -> Result<(), ProfileError> {
-        let access = self.access(conn, profile_id, requesting_user_id)?;
+    ) -> Result<(), NamespaceError> {
+        let access = self.access(conn, namespace_id, requesting_user_id)?;
         if !access.can_write() {
-            return Err(ProfileError::PermissionDenied {
+            return Err(NamespaceError::PermissionDenied {
                 user: requesting_user_id.to_string(),
-                profile: profile_id.to_string(),
+                namespace: namespace_id.to_string(),
             });
         }
-        orca_db::profile_creds::set(conn, profile_id, key, value).map_err(ProfileError::Other)?;
+        db::profile_creds::set(conn, namespace_id, key, value).map_err(NamespaceError::Other)?;
         Ok(())
     }
 
@@ -459,18 +459,18 @@ impl ProfileManager {
     pub fn get_credential(
         &self,
         conn: &Connection,
-        profile_id: &str,
+        namespace_id: &str,
         requesting_user_id: &str,
         key: &str,
-    ) -> Result<Option<String>, ProfileError> {
-        let access = self.access(conn, profile_id, requesting_user_id)?;
+    ) -> Result<Option<String>, NamespaceError> {
+        let access = self.access(conn, namespace_id, requesting_user_id)?;
         if !access.can_read() {
-            return Err(ProfileError::PermissionDenied {
+            return Err(NamespaceError::PermissionDenied {
                 user: requesting_user_id.to_string(),
-                profile: profile_id.to_string(),
+                namespace: namespace_id.to_string(),
             });
         }
-        orca_db::profile_creds::get(conn, profile_id, key).map_err(ProfileError::Other)
+        db::profile_creds::get(conn, namespace_id, key).map_err(NamespaceError::Other)
     }
 }
 
@@ -479,18 +479,18 @@ mod tests {
     use super::*;
 
     /// Open a fresh DB with full schema applied. Uses an unencrypted on-disk
-    /// file in a tempdir because `orca_db::open_unencrypted` is the public entry
+    /// file in a tempdir because `db::open_unencrypted` is the public entry
     /// point that runs both `apply_schema` and pending migrations.
     fn test_conn() -> (Connection, tempfile::TempDir) {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("test.db");
-        let conn = orca_db::open_unencrypted(&path).expect("open_unencrypted");
+        let conn = db::open_unencrypted(&path).expect("open_unencrypted");
         (conn, tmp)
     }
 
-    fn manager() -> (ProfileManager, tempfile::TempDir) {
+    fn manager() -> (NamespaceManager, tempfile::TempDir) {
         let tmp = tempfile::TempDir::new().unwrap();
-        (ProfileManager::new(tmp.path().join("profiles")), tmp)
+        (NamespaceManager::new(tmp.path().join("namespaces")), tmp)
     }
 
     #[test]
@@ -515,7 +515,7 @@ mod tests {
         let (mgr, _td) = manager();
         mgr.create(&conn, "alice", "homelab", None).unwrap();
         let err = mgr.create(&conn, "alice", "homelab", None).unwrap_err();
-        assert!(matches!(err, ProfileError::NameTaken(_)));
+        assert!(matches!(err, NamespaceError::NameTaken(_)));
     }
 
     #[test]
@@ -532,7 +532,7 @@ mod tests {
         let (mgr, _td) = manager();
         let p = mgr.create(&conn, "alice", "homelab", None).unwrap();
         let err = mgr.get(&conn, &p.id, "bob").unwrap_err();
-        assert!(matches!(err, ProfileError::PermissionDenied { .. }));
+        assert!(matches!(err, NamespaceError::PermissionDenied { .. }));
     }
 
     #[test]
@@ -584,11 +584,11 @@ mod tests {
         assert!(matches!(
             mgr.share(&conn, &p.id, "bob", "carol", Role::Viewer)
                 .unwrap_err(),
-            ProfileError::PermissionDenied { .. }
+            NamespaceError::PermissionDenied { .. }
         ));
         assert!(matches!(
             mgr.delete(&conn, &p.id, "bob").unwrap_err(),
-            ProfileError::PermissionDenied { .. }
+            NamespaceError::PermissionDenied { .. }
         ));
     }
 
@@ -659,7 +659,7 @@ mod tests {
         assert!(matches!(
             mgr.set_credential(&conn, &p.id, "bob", "api_token", "xyz")
                 .unwrap_err(),
-            ProfileError::PermissionDenied { .. }
+            NamespaceError::PermissionDenied { .. }
         ));
     }
 }

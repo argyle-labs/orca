@@ -1,0 +1,43 @@
+[package]
+name = "namespace"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "namespace"
+path = "src/lib.rs"
+
+# Namespace (formerly "profile") domain — per-user, shareable workspaces.
+# Each namespace owns filesystem content (`~/.orca/profiles/<id>/`) and
+# metadata in orca.db. Free fns called directly by `#[orca_tool]` sites
+# (no service trait, per feedback_no_indirection).
+
+[features]
+cli = ["dep:clap"]
+
+[dependencies]
+orca-dispatch = { path = "../orca-dispatch" }
+orca-contract = { path = "../orca-contract", default-features = false }
+orca-macro    = { path = "../orca-macro" }
+schemars      = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+inventory     = { workspace = true }
+
+orca-utils = { path = "../utils" }
+db         = { package = "orca-db", path = "../db" }
+anyhow     = { workspace = true }
+async-trait = { workspace = true }
+tokio      = { workspace = true }
+chrono     = { workspace = true }
+rusqlite   = { workspace = true }
+thiserror  = { workspace = true }
+uuid       = { workspace = true }
+tracing    = { workspace = true }
+clap       = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

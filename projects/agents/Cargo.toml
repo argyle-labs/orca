@@ -31,7 +31,7 @@ chrono = { workspace = true }
 clap        = { workspace = true,         optional = true }
 colored     = { workspace = true,         optional = true }
 llm = { path = "../llm" }
-platform = { path = "../platform" }
+namespace = { path = "../namespace" }
 
 [lints]
 workspace = true

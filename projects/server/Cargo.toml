@@ -38,6 +38,7 @@ auth     = { path = "../auth",     features = ["cli"] }
 fleet    = { path = "../fleet",    features = ["cli"] }
 system   = { path = "../system",   features = ["cli"] }
 platform = { path = "../platform", features = ["cli"] }
+namespace = { path = "../namespace", features = ["cli"] }
 agents   = { path = "../agents",   features = ["cli"] }
 plugins  = { path = "../plugins",  features = ["cli"] }
 docs     = { path = "../docs",     features = ["cli"] }
