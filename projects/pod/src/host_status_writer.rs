@@ -227,7 +227,7 @@ async fn pull_one_peer_inner(peer_id: &str, addr: &str) -> Result<()> {
     });
     let exec_res = tokio::time::timeout(
         Duration::from_secs(15),
-        crate::native::exec(addr, "system.host.status.detail", args),
+        crate::native::exec(addr, "pod.status.detail", args),
     )
     .await
     .context("pod/exec timeout")??;

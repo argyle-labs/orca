@@ -42,8 +42,12 @@ fn pod_tools_present_in_inventory_slice() {
         .into_iter()
         .map(|e| e.name)
         .collect();
-    assert!(names.contains(&"system.peer.list"), "{names:?}");
-    assert!(names.contains(&"system.peer.create"), "{names:?}");
+    assert!(names.contains(&"pod.list"), "{names:?}");
+    assert!(names.contains(&"pod.join"), "{names:?}");
+    assert!(names.contains(&"pod.leave"), "{names:?}");
+    assert!(names.contains(&"pod.kick"), "{names:?}");
+    assert!(names.contains(&"pod.trust"), "{names:?}");
+    assert!(names.contains(&"pod.ping"), "{names:?}");
 }
 
 #[test]

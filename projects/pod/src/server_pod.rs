@@ -1,6 +1,6 @@
 use crate::{
     CertInfo, PodAcceptOutput, PodCertStatusOutput, PodDiscoveryRowDto, PodExecDispatch,
-    PodJoinOutput, PodLeaveOutput, PodOfferOutput, PodPeerAddressDto, PodPeerDto,
+    PodJoinRequestOutput, PodLeaveOutput, PodOfferOutput, PodPeerAddressDto, PodPeerDto,
     PodPendingOfferDto, PodPingOutput, PodTrustOutput,
 };
 use anyhow::{Context, Result};
@@ -146,12 +146,12 @@ pub async fn trust(peer_id: &str, on: bool) -> Result<PodTrustOutput> {
 pub async fn push_trust(peer_id: &str, on: bool) -> Result<PodTrustOutput> {
     // Our own peer_id as the remote knows us.
     let own_id = format!("peer.{}", system::host_identity::machine_id_short());
-    // Execute pod.peer.update on the remote host, making THEM set their
+    // Execute pod.trust on the remote host, making THEM set their
     // local_secure for us. `push: false` prevents recursion.
     #[allow(clippy::disallowed_types)] // exec is the wire-level dispatch boundary
     let dispatch = exec(
         peer_id,
-        "system.peer.update",
+        "pod.trust",
         serde_json::json!({ "peer_id": own_id, "on": on, "push": false }),
     )
     .await?;
@@ -335,9 +335,9 @@ pub async fn offer(addr: &str, port: Option<u16>) -> Result<PodOfferOutput> {
     })
 }
 
-pub async fn join(inviter_addr: &str, port: Option<u16>) -> Result<PodJoinOutput> {
+pub async fn join(inviter_addr: &str, port: Option<u16>) -> Result<PodJoinRequestOutput> {
     let port = port.unwrap_or_else(mesh_port);
-    Ok(PodJoinOutput {
+    Ok(PodJoinRequestOutput {
         code: String::new(),
         inviter_addr: inviter_addr.to_string(),
         inviter_port: port,
@@ -396,6 +396,31 @@ pub async fn exec(peer: &str, tool: &str, args: serde_json::Value) -> Result<Pod
         peer: peer.to_string(),
         tool: r.tool,
         result: r.result,
+    })
+}
+
+/// Voluntary pod exit: notify every paired peer we're leaving (best-effort
+/// per peer), then drop all `pod_peers` + `pod_trust` rows. Returns a
+/// per-peer notify result so the operator can see who heard from us. PKI
+/// material is left in place — call `system bootstrap` to fully reset.
+pub async fn leave_self() -> Result<crate::PodLeaveSelfOutput> {
+    let conn = db::open_default()?;
+    let peers = pdb::list_peers(&conn)?;
+    drop(conn);
+    let mut results = Vec::with_capacity(peers.len());
+    for p in &peers {
+        let r = leave_peer(&p.peer_id).await;
+        results.push(crate::PodLeaveSelfResult {
+            peer_id: p.peer_id.clone(),
+            notify_result: match &r {
+                Ok(o) => o.notify_result.clone(),
+                Err(e) => format!("error: {e:#}"),
+            },
+        });
+    }
+    Ok(crate::PodLeaveSelfOutput {
+        rows_removed: results.len() as u32,
+        peers: results,
     })
 }
 

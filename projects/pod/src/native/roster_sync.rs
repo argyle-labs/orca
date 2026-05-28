@@ -1,8 +1,8 @@
-//! Auto-mesh: every paired peer periodically pulls `system.peer.list` from
-//! every other peer it knows about and merges new entries into its own
-//! `pod_peers`. The result is an eventually-consistent full mesh from any
-//! starting topology — once one peer in the pod knows about a new joiner,
-//! the next tick propagates that fact to every other peer.
+//! Auto-mesh: every paired peer periodically pulls `pod.list` from every other
+//! peer it knows about and merges joined entries into its own `pod_peers`.
+//! The result is an eventually-consistent full mesh from any starting
+//! topology — once one peer in the pod knows about a new joiner, the next
+//! tick propagates that fact to every other peer.
 //!
 //! **Why this works without a CA private-key signing roundtrip**: the mesh
 //! CA cert is already on every paired host (it was delivered with the
@@ -20,7 +20,7 @@
 //! seconds; before that fix, peers with `peer_id="unknown"` are skipped
 //! both as sources and as merge targets.
 
-use crate::{PodPeerDto, PodPeerListOutput};
+use crate::{PodListOutput, PodMember, PodPeerDto};
 use anyhow::Result;
 use orca_sdk::pki;
 use rusqlite::OptionalExtension;
@@ -121,27 +121,37 @@ pub(crate) fn is_ingestable(entry: &PodPeerDto, own_peer_id: &str) -> bool {
     true
 }
 
-async fn fetch_roster(addr: &str) -> Result<PodPeerListOutput> {
+async fn fetch_roster(addr: &str) -> Result<Vec<PodPeerDto>> {
     let result = super::exec(
         addr,
-        "system.peer.list",
+        "pod.list",
         serde_json::Value::Object(Default::default()),
     )
     .await?;
-    Ok(serde_json::from_value(result.result)?)
+    let list: PodListOutput = serde_json::from_value(result.result)?;
+    // Auto-mesh only consumes paired members; handshaking + discovered rows
+    // are surfaced for UI/operator use, not for address propagation.
+    Ok(list
+        .members
+        .into_iter()
+        .filter_map(|m| match m {
+            PodMember::Joined(p) => Some(*p),
+            _ => None,
+        })
+        .collect())
 }
 
 async fn ingest_roster(
     own_peer_id: &str,
     source_label: &str,
-    list: PodPeerListOutput,
+    list: Vec<PodPeerDto>,
 ) -> Result<usize> {
     let pki_d = pki_dir();
     let ca_cert_pem = std::fs::read_to_string(pki::mesh_ca_cert_path(&pki_d))?;
     let conn = db::open_default()?;
 
     let mut added = 0;
-    for entry in list.0 {
+    for entry in list {
         if !is_ingestable(&entry, own_peer_id) {
             continue;
         }

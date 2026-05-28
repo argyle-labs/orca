@@ -97,11 +97,32 @@ pub struct PodPeerDto {
     pub system: Option<system::system_info_types::SystemInfoReport>,
 }
 
+/// Unified pod-membership view. Every row carries a `state` discriminant so
+/// callers see joined members, in-flight handshakes, and mDNS-discovered
+/// candidates in one shape. Replaces the previous trio of `system.peer.list`,
+/// `system.peer.discovery.list`, and `system.peer.handshake.list` (2026-05-28
+/// consolidation — see project_pod_peer_system_consolidation.md).
 #[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(transparent)]
-pub struct PodPeerListOutput(pub Vec<PodPeerDto>);
+#[serde(tag = "state", rename_all = "lowercase")]
+pub enum PodMember {
+    /// Paired pod member — full mTLS peer with addressing, runtime info, and
+    /// (when probed) ping latency + system snapshot. Boxed because the joined
+    /// row carries an optional `SystemInfoReport` that's ~1 KB larger than
+    /// the other variants; without the indirection the whole enum pays that
+    /// size on every row.
+    Joined(Box<PodPeerDto>),
+    /// Pending inbound or outbound offer — pairing handshake in progress.
+    Handshaking(PodPendingOfferDto),
+    /// mDNS-discovered orca that is not yet paired.
+    Discovered(PodDiscoveryRowDto),
+}
 
-// ── system.peer.create — unified pairing entry point ─────────────────────────
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodListOutput {
+    pub members: Vec<PodMember>,
+}
+
+// ── pod.join — unified pairing entry point ───────────────────────────────────
 //
 // `action` selects the pairing role:
 //   "invite"  — inviter pushes offer to a discovered joiner  (needs `addr`)
@@ -110,7 +131,7 @@ pub struct PodPeerListOutput(pub Vec<PodPeerDto>);
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PeerCreateArgs {
+pub struct PodJoinArgs {
     /// "invite" | "join" | "accept"
     pub action: String,
     /// Target address (host or host:port). Required for "invite" and "join".
@@ -127,12 +148,11 @@ pub struct PeerCreateArgs {
     pub code: Option<String>,
 }
 
-/// Output for `system.peer.create`, tagged by the pairing `action`. Each
-/// variant carries exactly the fields its role produces — no cross-variant
-/// `Option` soup.
+/// Output for `pod.join`, tagged by the pairing `action`. Each variant carries
+/// exactly the fields its role produces — no cross-variant `Option` soup.
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "lowercase")]
-pub enum PeerCreateOutput {
+pub enum PodJoinOutput {
     /// Inviter pushed an offer to a discovered joiner.
     Invite {
         pairing_code: String,
@@ -295,11 +315,15 @@ pub struct PodOfferOutput {
     pub expires_at: i64,
 }
 
-// ── pod.join ─────────────────────────────────────────────────────────────────
+// ── pod.join "join" sub-action — internal types ──────────────────────────────
+//
+// Used by the `pod.join` tool when `action="join"`: the joiner pulls an offer
+// from an inviter not yet in mDNS. Renamed from PodJoinArgs/Output (2026-05-28)
+// because the user-facing umbrella tool now owns the `PodJoin*` names.
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodJoinArgs {
+pub struct PodJoinRequestArgs {
     /// Inviter's address (host or host:port).
     pub inviter_addr: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -307,7 +331,7 @@ pub struct PodJoinArgs {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PodJoinOutput {
+pub struct PodJoinRequestOutput {
     pub code: String,
     pub inviter_addr: String,
     pub inviter_port: u16,
@@ -329,6 +353,21 @@ pub struct PodLeaveOutput {
     pub peer_id: String,
     pub notify_result: String,
     pub rows_removed: u32,
+}
+
+// ── pod.leave (voluntary self exit) ──────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodLeaveSelfResult {
+    pub peer_id: String,
+    pub notify_result: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodLeaveSelfOutput {
+    /// Number of peer rows removed from `pod_peers` (one per paired peer).
+    pub rows_removed: u32,
+    pub peers: Vec<PodLeaveSelfResult>,
 }
 
 // ── pod.cert-status ──────────────────────────────────────────────────────────
@@ -468,16 +507,26 @@ impl orca_contract::RemoteExec for PodRemoteExec {
 
 // ── Tools ───────────────────────────────────────────────────────────────────
 
-/// List paired pod peers (mesh members).
-#[orca_tool(domain = "system.peer", verb = "list")]
-async fn pod_peer_list(
+/// Unified pod-membership view: joined members + in-flight handshakes +
+/// mDNS-discovered candidates, each row tagged by `state`. Replaces the trio
+/// of `system.peer.list`, `system.peer.discovery.list`, and
+/// `system.peer.handshake.list` (2026-05-28 consolidation).
+#[orca_tool(domain = "pod", verb = "list")]
+async fn pod_list(
     _args: EmptyArgs,
     _ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<PodPeerListOutput> {
-    Ok(PodPeerListOutput(server_pod::list_enriched().await?))
+) -> anyhow::Result<PodListOutput> {
+    let joined = server_pod::list_enriched().await?;
+    let handshaking = server_pod::pending().unwrap_or_default();
+    let discovered = server_pod::discover().unwrap_or_default();
+    let mut members = Vec::with_capacity(joined.len() + handshaking.len() + discovered.len());
+    members.extend(joined.into_iter().map(|p| PodMember::Joined(Box::new(p))));
+    members.extend(handshaking.into_iter().map(PodMember::Handshaking));
+    members.extend(discovered.into_iter().map(PodMember::Discovered));
+    Ok(PodListOutput { members })
 }
 
-/// Initiate or complete a peer pairing.
+/// Initiate or complete a pod-membership pairing.
 ///
 /// `action`:
 /// - `"invite"` — inviter pushes an offer to a discovered joiner. Requires
@@ -489,11 +538,11 @@ async fn pod_peer_list(
 ///   inviter will display.
 /// - `"accept"` — joiner accepts a pending inbound offer by its 6-char code.
 ///   Requires `code`. Returns the inviter identity after join.
-#[orca_tool(domain = "system.peer", verb = "create")]
-async fn peer_create(
-    args: PeerCreateArgs,
+#[orca_tool(domain = "pod", verb = "join")]
+async fn pod_join(
+    args: PodJoinArgs,
     _ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<PeerCreateOutput> {
+) -> anyhow::Result<PodJoinOutput> {
     match args.action.as_str() {
         "invite" => {
             let addr = args
@@ -501,7 +550,7 @@ async fn peer_create(
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("invite requires addr"))?;
             let out = server_pod::offer(addr, args.port).await?;
-            Ok(PeerCreateOutput::Invite {
+            Ok(PodJoinOutput::Invite {
                 pairing_code: out.code,
                 joiner_hostname: out.joiner_hostname,
                 joiner_addr: out.joiner_addr,
@@ -517,7 +566,7 @@ async fn peer_create(
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("join requires addr"))?;
             let out = server_pod::join(addr, args.port).await?;
-            Ok(PeerCreateOutput::Join {
+            Ok(PodJoinOutput::Join {
                 pairing_code: out.code,
                 inviter_addr: out.inviter_addr,
                 inviter_port: out.inviter_port,
@@ -529,7 +578,7 @@ async fn peer_create(
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("accept requires code"))?;
             let out = server_pod::accept(code).await?;
-            Ok(PeerCreateOutput::Accept {
+            Ok(PodJoinOutput::Accept {
                 pod_id: out.pod_id,
                 inviter_peer_id: out.inviter_peer_id,
                 inviter_hostname: out.inviter_hostname,
@@ -542,12 +591,11 @@ async fn peer_create(
     }
 }
 
-/// Update trust for a paired peer.
-/// Without `push`: sets OUR local trust of the peer (`local_secure`).
-/// With `push: true`: executes the update on the remote peer over mTLS so
-/// THEY trust US (`peer_secure` from our perspective).
-#[orca_tool(domain = "system.peer", verb = "update")]
-async fn pod_peer_update(
+/// Set trust for a paired peer. Without `push`, mutates OUR local trust
+/// (`local_secure`). With `push: true`, executes on the remote peer over
+/// mTLS so THEY trust US (`peer_secure` from our perspective).
+#[orca_tool(domain = "pod", verb = "trust")]
+async fn pod_trust(
     args: PodTrustArgs,
     _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodTrustOutput> {
@@ -558,39 +606,36 @@ async fn pod_peer_update(
 }
 
 /// mTLS ping a paired peer; returns latency + their self-reported identity.
-#[orca_tool(domain = "system.peer", verb = "detail")]
-async fn pod_peer_detail(
+/// Kept distinct from `system.detail --peer <id>` because ping latency is a
+/// *relationship* measurement between this host and the peer, not a property
+/// of the peer itself.
+#[orca_tool(domain = "pod", verb = "ping")]
+async fn pod_ping(
     args: PodPingArgs,
     _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodPingOutput> {
     Ok(server_pod::ping(&args.peer_id).await)
 }
 
-/// List orcas seen on the network via mDNS (paired + unclaimed).
-#[orca_tool(domain = "system.peer.discovery", verb = "list")]
-async fn pod_discovery_list(
-    _args: EmptyArgs,
-    _ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<PodDiscoveryListOutput> {
-    Ok(PodDiscoveryListOutput(server_pod::discover()?))
-}
-
-/// List pending inbound pod-membership offers.
-#[orca_tool(domain = "system.peer.handshake", verb = "list")]
-async fn pod_handshake_list(
-    _args: EmptyArgs,
-    _ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<PodPendingListOutput> {
-    Ok(PodPendingListOutput(server_pod::pending()?))
-}
-
-/// Best-effort notify a peer we're leaving, then drop pod_peers + pod_trust rows for it.
-#[orca_tool(domain = "system.peer", verb = "delete")]
-async fn pod_peer_delete(
+/// Evict a paired peer: best-effort notify, then drop `pod_peers` + `pod_trust`
+/// rows for it. Mirrors today's `system.peer.delete` semantics.
+#[orca_tool(domain = "pod", verb = "kick", role = "admin")]
+async fn pod_kick(
     args: PodLeaveArgs,
     _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodLeaveOutput> {
     server_pod::leave_peer(&args.peer_id).await
+}
+
+/// Voluntary pod exit: notify every paired peer we're leaving (best-effort),
+/// then drop all `pod_peers` + `pod_trust` rows on this host. PKI material is
+/// left in place — call `system bootstrap` to fully reset.
+#[orca_tool(domain = "pod", verb = "leave", role = "admin", local_only = true)]
+async fn pod_leave(
+    _args: EmptyArgs,
+    _ctx: &orca_contract::ToolCtx,
+) -> anyhow::Result<PodLeaveSelfOutput> {
+    server_pod::leave_self().await
 }
 
 /// Days-remaining + rotation state for every mesh cert on this host, plus
