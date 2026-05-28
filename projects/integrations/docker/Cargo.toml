@@ -8,17 +8,9 @@ name = "docker"
 path = "src/lib.rs"
 
 [features]
-default = ["native"]
-native = [
-    "orca-contract/native",
-    "dep:orca-db",
-    "dep:async-trait",
-]
 cli = [
-    "native",
     "dep:clap",
 ]
-
 [dependencies]
 anyhow      = { workspace = true }
 serde       = { workspace = true }
@@ -32,8 +24,8 @@ orca-macro       = { path = "../../orca-macro" }
 schemars         = { workspace = true }
 inventory        = { workspace = true }
 
-orca-db     = { package = "orca-db", path = "../../db", optional = true }
-async-trait = { workspace = true, optional = true }
+orca-db = { package = "orca-db", path = "../../db" }
+async-trait = { workspace = true }
 clap        = { workspace = true, optional = true }
 
 [dev-dependencies]

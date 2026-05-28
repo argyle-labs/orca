@@ -9,24 +9,10 @@ name = "agents"
 path = "src/lib.rs"
 
 [features]
-default = ["native"]
-native = [
-    "orca-contract/native",
-    "dep:orca-utils",
-    "dep:orca-db",
-    "dep:anyhow",
-    "dep:async-trait",
-    "dep:tokio",
-    "dep:chrono",
-    "dep:llm",
-    "dep:platform",
-]
 cli = [
-    "native",
     "dep:clap",
     "dep:colored",
 ]
-
 [dependencies]
 orca-dispatch        = { path = "../orca-dispatch" }
 orca-contract    = { path = "../orca-contract", default-features = false }
@@ -36,16 +22,16 @@ serde            = { workspace = true }
 serde_json       = { workspace = true }
 inventory        = { workspace = true }
 
-orca-utils  = { path = "../utils",        optional = true }
-orca-db     = { package = "orca-db", path = "../db", optional = true }
-anyhow      = { workspace = true,         optional = true }
-async-trait = { workspace = true,         optional = true }
-tokio       = { workspace = true,         optional = true }
-chrono      = { workspace = true,         optional = true }
+orca-utils = { path = "../utils" }
+orca-db = { package = "orca-db", path = "../db" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
 clap        = { workspace = true,         optional = true }
 colored     = { workspace = true,         optional = true }
-llm         = { path = "../llm",          optional = true }
-platform    = { path = "../platform",     optional = true }
+llm = { path = "../llm" }
+platform = { path = "../platform" }
 
 [lints]
 workspace = true

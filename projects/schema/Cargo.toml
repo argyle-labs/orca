@@ -8,25 +8,10 @@ name = "schema"
 path = "src/lib.rs"
 
 [features]
-default = ["native"]
-native = [
-    "orca-contract/native",
-    "dep:orca-utils",
-    "dep:db",
-    "dep:anyhow",
-    "dep:async-trait",
-    "dep:tokio",
-    "dep:mysql_async",
-    "dep:tokio-postgres",
-    "dep:rusqlite",
-    "dep:toml",
-]
 cli = [
-    "native",
     "dep:clap",
     "dep:colored",
 ]
-
 [dependencies]
 orca-dispatch    = { path = "../orca-dispatch" }
 orca-contract    = { path = "../orca-contract", default-features = false }
@@ -36,15 +21,15 @@ serde            = { workspace = true }
 serde_json       = { workspace = true }
 inventory        = { workspace = true }
 
-orca-utils     = { path = "../utils",        optional = true }
-db             = { package = "orca-db", path = "../db", optional = true }
-anyhow         = { workspace = true,         optional = true }
-async-trait    = { workspace = true,         optional = true }
-tokio          = { workspace = true,         optional = true }
-mysql_async    = { version = "0.36", default-features = false, features = ["default-rustls-ring"], optional = true }
-tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"], optional = true }
-rusqlite       = { workspace = true,         optional = true }
-toml           = { workspace = true,         optional = true }
+orca-utils = { path = "../utils" }
+db = { package = "orca-db", path = "../db" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+mysql_async = { version = "0.36", default-features = false, features = ["default-rustls-ring"] }
+tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
+rusqlite = { workspace = true }
+toml = { workspace = true }
 clap           = { workspace = true,         optional = true }
 colored        = { workspace = true,         optional = true }
 

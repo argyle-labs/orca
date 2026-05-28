@@ -8,7 +8,7 @@ name = "llm"
 path = "src/lib.rs"
 
 [dependencies]
-orca-contract = { path = "../orca-contract", features = ["native"] }
+orca-contract = { path = "../orca-contract" }
 orca-utils    = { path = "../utils" }
 db            = { package = "orca-db", path = "../db" }
 

@@ -8,36 +8,10 @@ name = "fleet"
 path = "src/lib.rs"
 
 [features]
-default = ["native"]
-native = [
-    "orca-contract/native",
-    "dep:orca-utils",
-    "dep:db",
-    "dep:anyhow",
-    "dep:async-trait",
-    "dep:tokio",
-    "dep:chrono",
-    "dep:docker",
-    "docker/native",
-    "dep:orca-sdk",
-    "dep:tracing",
-    "dep:rustls",
-    "dep:tokio-rustls",
-    "dep:rusqlite",
-    "dep:mdns-sd",
-    "dep:sha2",
-    "dep:rand",
-    "dep:uuid",
-    "dep:if-addrs",
-    "dep:rustls-pemfile",
-    "system/native",
-]
 cli = [
-    "native",
     "dep:clap",
     "dep:colored",
 ]
-
 [dependencies]
 orca-dispatch        = { path = "../orca-dispatch" }
 orca-contract    = { path = "../orca-contract", default-features = false }
@@ -48,42 +22,42 @@ serde            = { workspace = true }
 serde_json       = { workspace = true }
 inventory        = { workspace = true }
 
-orca-utils        = { path = "../utils",        optional = true }
-db                = { package = "orca-db", path = "../db", optional = true }
-anyhow            = { workspace = true,         optional = true }
-async-trait       = { workspace = true,         optional = true }
-tokio             = { workspace = true,         optional = true }
-chrono            = { workspace = true,         optional = true }
+orca-utils = { path = "../utils" }
+db = { package = "orca-db", path = "../db" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
 cron              = { workspace = true,         optional = true }
 clap              = { workspace = true,         optional = true }
 colored           = { workspace = true,         optional = true }
-docker            = { path = "../integrations/docker", optional = true, default-features = false }
-orca-sdk          = { path = "../sdk/rust", optional = true }
-tracing           = { workspace = true, optional = true }
-rustls            = { workspace = true, optional = true }
-tokio-rustls      = { workspace = true, optional = true }
-rusqlite          = { workspace = true, optional = true }
-mdns-sd           = { version = "0.19", optional = true }
-sha2              = { workspace = true, optional = true }
-rand              = { workspace = true, optional = true }
-uuid              = { workspace = true, optional = true }
-if-addrs          = { version = "0.14", optional = true }
-rustls-pemfile    = { workspace = true, optional = true }
+docker = { path = "../integrations/docker", default-features = false }
+orca-sdk = { path = "../sdk/rust" }
+tracing = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rusqlite = { workspace = true }
+mdns-sd = { version = "0.19" }
+sha2 = { workspace = true }
+rand = { workspace = true }
+uuid = { workspace = true }
+if-addrs = { version = "0.14" }
+rustls-pemfile = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio    = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 # Inventory cross-bucket smoke tests link every domain in so the full
 # `#[orca_tool]` graph is exercised end-to-end in one test binary.
-auth          = { path = "../auth",     features = ["native"] }
-platform      = { path = "../platform", features = ["native"] }
-agents        = { path = "../agents",   features = ["native"] }
-plugins       = { path = "../plugins",  features = ["native"] }
-docs          = { path = "../docs",     features = ["native"] }
-mcp           = { path = "../mcp",      features = ["native"] }
-homeassistant = { path = "../integrations/homeassistant", features = ["native"] }
-proxmox       = { path = "../integrations/proxmox",       features = ["native"] }
-system        = { path = "../system",                     features = ["native"] }
+auth          = { path = "../auth" }
+platform      = { path = "../platform" }
+agents        = { path = "../agents" }
+plugins       = { path = "../plugins" }
+docs          = { path = "../docs" }
+mcp           = { path = "../mcp" }
+homeassistant = { path = "../integrations/homeassistant" }
+proxmox       = { path = "../integrations/proxmox" }
+system        = { path = "../system" }
 
 [lints]
 workspace = true

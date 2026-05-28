@@ -15,18 +15,9 @@ path = "src/lib.rs"
 #   - cli:            adds clap derives on Args so the tools surface in the
 #                     unified `orca` CLI binary. Implies `native`.
 [features]
-default = ["native"]
-native = [
-    "orca-contract/native",
-    "dep:orca-db",
-    "dep:anyhow",
-    "dep:async-trait",
-]
 cli = [
-    "native",
     "dep:clap",
 ]
-
 [dependencies]
 serde       = { workspace = true }
 serde_json  = { workspace = true }
@@ -45,9 +36,9 @@ inventory        = { workspace = true }
 
 # native-only — DB lookup for registered HA endpoints + error type +
 # async-trait used by the macro-generated OrcaTool impl.
-orca-db     = { package = "orca-db", path = "../../db", optional = true }
-anyhow      = { workspace = true, optional = true }
-async-trait = { workspace = true, optional = true }
+orca-db = { package = "orca-db", path = "../../db" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
 
 # cli-only — clap derives on Args.
 clap = { workspace = true, optional = true }

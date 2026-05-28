@@ -8,23 +8,7 @@ name = "specs"
 path = "src/lib.rs"
 
 [features]
-default = ["native"]
-native = [
-    "orca-contract/native",
-    "dep:db",
-    "dep:anyhow",
-    "dep:async-trait",
-    "dep:tokio",
-    "dep:chrono",
-    "dep:scanner",
-    "dep:mcp",
-    "dep:reqwest",
-    "dep:dirs",
-    "dep:toml",
-    "dep:orca-utils",
-]
-cli = ["native", "dep:clap"]
-
+cli = ["dep:clap"]
 [dependencies]
 orca-dispatch = { path = "../orca-dispatch" }
 orca-contract = { path = "../orca-contract", default-features = false }
@@ -34,18 +18,18 @@ serde         = { workspace = true }
 serde_json    = { workspace = true }
 inventory     = { workspace = true }
 
-orca-utils = { path = "../utils",        optional = true }
-db         = { package = "orca-db", path = "../db", optional = true }
-anyhow      = { workspace = true,        optional = true }
-async-trait = { workspace = true,        optional = true }
-tokio       = { workspace = true,        optional = true }
-chrono     = { workspace = true,         optional = true }
+orca-utils = { path = "../utils" }
+db = { package = "orca-db", path = "../db" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
 clap       = { workspace = true,         optional = true }
-scanner    = { path = "../scanner",      optional = true }
-mcp        = { path = "../mcp",          optional = true }
-reqwest    = { workspace = true,         optional = true }
-dirs       = { workspace = true,         optional = true }
-toml       = { workspace = true,         optional = true }
+scanner = { path = "../scanner" }
+mcp = { path = "../mcp" }
+reqwest = { workspace = true }
+dirs = { workspace = true }
+toml = { workspace = true }
 
 [lints]
 workspace = true

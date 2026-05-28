@@ -8,31 +8,10 @@ name = "docs"
 path = "src/lib.rs"
 
 [features]
-default = ["native"]
-native = [
-    "orca-contract/native",
-    "dep:orca-utils",
-    "dep:db",
-    "dep:anyhow",
-    "dep:async-trait",
-    "dep:tokio",
-    "dep:chrono",
-    "dep:agents",
-    "dep:llm",
-    "dep:scanner",
-    "dep:utoipa",
-    "dep:mcp",
-    "dep:reqwest",
-    "dep:tracing",
-    "dep:dirs",
-    "dep:toml",
-]
 cli = [
-    "native",
     "dep:clap",
     "dep:colored",
 ]
-
 [dependencies]
 orca-dispatch        = { path = "../orca-dispatch" }
 orca-contract    = { path = "../orca-contract", default-features = false }
@@ -42,24 +21,24 @@ serde            = { workspace = true }
 serde_json       = { workspace = true }
 inventory        = { workspace = true }
 
-orca-utils  = { path = "../utils",        optional = true }
-db          = { package = "orca-db", path = "../db", optional = true }
-anyhow      = { workspace = true,         optional = true }
-async-trait = { workspace = true,         optional = true }
-tokio       = { workspace = true,         optional = true }
-chrono      = { workspace = true,         optional = true }
+orca-utils = { path = "../utils" }
+db = { package = "orca-db", path = "../db" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
 clap        = { workspace = true,         optional = true }
 colored     = { workspace = true,         optional = true }
 rust-embed  = { workspace = true }
-agents      = { path = "../agents",       optional = true }
-llm         = { path = "../llm",          optional = true }
-scanner     = { path = "../scanner",      optional = true }
-utoipa      = { workspace = true,         optional = true }
-mcp         = { path = "../mcp",          optional = true }
-reqwest     = { workspace = true,         optional = true }
-tracing     = { workspace = true,         optional = true }
-dirs        = { workspace = true,         optional = true }
-toml        = { workspace = true,         optional = true }
+agents = { path = "../agents" }
+llm = { path = "../llm" }
+scanner = { path = "../scanner" }
+utoipa = { workspace = true }
+mcp = { path = "../mcp" }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+dirs = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

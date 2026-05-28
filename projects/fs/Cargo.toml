@@ -8,19 +8,7 @@ name = "fs"
 path = "src/lib.rs"
 
 [features]
-default = ["native"]
-native = [
-    "orca-contract/native",
-    "dep:orca-utils",
-    "dep:anyhow",
-    "dep:async-trait",
-    "dep:tokio",
-    "dep:tracing",
-    "dep:docs",
-    "dep:llm",
-]
-cli = ["native", "dep:clap"]
-
+cli = ["dep:clap"]
 [dependencies]
 orca-dispatch = { path = "../orca-dispatch" }
 orca-contract = { path = "../orca-contract", default-features = false }
@@ -30,13 +18,13 @@ serde         = { workspace = true }
 serde_json    = { workspace = true }
 inventory     = { workspace = true }
 
-orca-utils  = { path = "../utils", optional = true }
-docs        = { path = "../docs",  optional = true }
-llm         = { path = "../llm",   optional = true }
-anyhow      = { workspace = true,  optional = true }
-async-trait = { workspace = true,  optional = true }
-tokio       = { workspace = true,  optional = true }
-tracing     = { workspace = true,  optional = true }
+orca-utils = { path = "../utils" }
+docs = { path = "../docs" }
+llm = { path = "../llm" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
 clap        = { workspace = true,  optional = true }
 
 [lints]

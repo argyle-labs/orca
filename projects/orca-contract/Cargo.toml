@@ -7,19 +7,11 @@ edition.workspace = true
 name = "orca_contract"
 path = "src/lib.rs"
 
-# Leaf "cold types" crate — the wasm-safe contract shared across every layer
-# (def + error + JsonAny + protocol types) plus the native-only runtime trait
+# Leaf "cold types" crate — the contract shared across every layer
+# (def + error + JsonAny + protocol types) plus the runtime trait
 # anchors (OrcaTool, ToolCtx, RemoteExec). `orca-dispatch` depends on this
 # crate for its runtime; the proc-macro (`orca-macro`) emits paths into this
 # crate so generated code never sees the runtime's modules.
-
-[features]
-default = ["native"]
-native = [
-    "dep:orca-utils",
-    "dep:anyhow",
-    "dep:async-trait",
-]
 
 [dependencies]
 schemars = { workspace = true }
@@ -27,10 +19,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 
-# native-only
-orca-utils  = { path = "../utils", optional = true }
-anyhow      = { workspace = true, optional = true }
-async-trait = { workspace = true, optional = true }
+orca-utils = { path = "../utils" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
 
 [lints]
 workspace = true

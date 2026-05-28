@@ -7,14 +7,13 @@ edition.workspace = true
 name = "orca_dispatch"
 path = "src/lib.rs"
 
-# Native runtime for the OrcaTool surface: walks the `inventory` slice
-# populated by `#[orca_tool]` annotations to drive MCP + REST + CLI +
-# OpenAPI spec emission. The wasm-safe metadata contract (OrcaToolDef,
-# OrcaTool/ToolCtx/RemoteExec anchors, OrcaError, JsonAny) lives in
-# `orca-contract`. This crate is always native — no feature flavors.
+# Runtime for the OrcaTool surface: walks the `inventory` slice populated by
+# `#[orca_tool]` annotations to drive MCP + REST + CLI + OpenAPI spec
+# emission. The metadata contract (OrcaToolDef, OrcaTool/ToolCtx/RemoteExec
+# anchors, OrcaError, JsonAny) lives in `orca-contract`.
 
 [dependencies]
-orca-contract = { path = "../orca-contract", features = ["native"] }
+orca-contract = { path = "../orca-contract" }
 orca-utils    = { path = "../utils" }
 anyhow        = { workspace = true }
 async-trait   = { workspace = true }

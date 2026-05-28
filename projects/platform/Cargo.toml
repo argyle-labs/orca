@@ -8,29 +8,10 @@ name = "platform"
 path = "src/lib.rs"
 
 [features]
-default = ["native"]
-native = [
-    "orca-contract/native",
-    "dep:orca-utils",
-    "dep:orca-db",
-    "dep:anyhow",
-    "dep:async-trait",
-    "dep:tokio",
-    "dep:chrono",
-
-    "dep:cron",
-    "dep:rusqlite",
-    "dep:thiserror",
-    "dep:uuid",
-    "dep:tracing",
-]
 cli = [
-    "native",
-
     "dep:clap",
     "dep:colored",
 ]
-
 [dependencies]
 orca-dispatch        = { path = "../orca-dispatch" }
 orca-contract    = { path = "../orca-contract", default-features = false }
@@ -40,23 +21,23 @@ serde            = { workspace = true }
 serde_json       = { workspace = true }
 inventory        = { workspace = true }
 
-orca-utils        = { path = "../utils",        optional = true }
-orca-db           = { package = "orca-db", path = "../db", optional = true }
-anyhow            = { workspace = true,         optional = true }
-async-trait       = { workspace = true,         optional = true }
-tokio             = { workspace = true,         optional = true }
-chrono            = { workspace = true,         optional = true }
-cron              = { workspace = true,         optional = true }
+orca-utils = { path = "../utils" }
+orca-db = { package = "orca-db", path = "../db" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+cron = { workspace = true }
 clap              = { workspace = true,         optional = true }
 colored           = { workspace = true,         optional = true }
-rusqlite          = { workspace = true,         optional = true }
-thiserror         = { workspace = true,         optional = true }
-uuid              = { workspace = true,         optional = true }
-tracing           = { workspace = true,         optional = true }
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio    = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 
 [lints]
 workspace = true

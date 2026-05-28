@@ -8,7 +8,7 @@ name = "conversation"
 path = "src/lib.rs"
 
 [dependencies]
-orca-contract = { path = "../orca-contract", features = ["native"] }
+orca-contract = { path = "../orca-contract" }
 orca-macro    = { path = "../orca-macro" }
 orca-dispatch = { path = "../orca-dispatch" }
 schemars      = { workspace = true }
@@ -32,9 +32,9 @@ tokio-util    = { workspace = true }
 unicode-width = "0.2"
 uuid          = { workspace = true }
 dirs          = { workspace = true }
-agents        = { path = "../agents", features = ["native"] }
+agents        = { path = "../agents" }
 db            = { package = "orca-db", path = "../db" }
-platform      = { path = "../platform", features = ["native"] }
+platform      = { path = "../platform" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
