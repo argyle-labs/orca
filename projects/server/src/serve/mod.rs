@@ -507,8 +507,8 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
         tracing::warn!("loopback token install failed: {e:#}");
     }
     system::system_info::spawn_refresher();
-    fleet::host_status_writer::spawn_local_writer();
-    fleet::host_status_writer::spawn_sync_puller();
+    pod::host_status_writer::spawn_local_writer();
+    pod::host_status_writer::spawn_sync_puller();
     pod::native::host_status_replica::spawn_fleet_replicator();
     plugins::host::start(
         pki_dir,

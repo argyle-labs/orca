@@ -36,6 +36,7 @@ db         = { package = "orca-db", path = "../db" }
 # Domain crates
 auth     = { path = "../auth",     features = ["cli"] }
 fleet    = { path = "../fleet",    features = ["cli"] }
+pod      = { path = "../pod",      features = ["cli"] }
 system   = { path = "../system",   features = ["cli"] }
 platform = { path = "../platform", features = ["cli"] }
 namespace = { path = "../namespace", features = ["cli"] }

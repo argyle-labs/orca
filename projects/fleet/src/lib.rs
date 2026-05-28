@@ -5,7 +5,6 @@
 pub mod host;
 pub mod host_identity;
 pub mod host_status;
-pub mod host_status_writer;
 pub mod infra;
 pub mod meta;
 

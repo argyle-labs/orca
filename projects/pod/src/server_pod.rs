@@ -457,11 +457,7 @@ impl PodService for ServerPod {
 /// service so the synthetic local entry stays in lock-step with what every
 /// remote peer would self-report via `system.runtime-spec`.
 async fn local_peer_row() -> PodPeerDto {
-    let frontend = if cfg!(feature = "ui") {
-        "embedded"
-    } else {
-        "disabled"
-    };
+    let frontend = "embedded";
     let mode = orca_utils::state::read()
         .ok()
         .flatten()

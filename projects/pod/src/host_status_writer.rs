@@ -12,14 +12,14 @@
 //! Both tasks are idempotent: callers can fire `spawn_…` more than once and
 //! only the first invocation actually starts a task.
 
-use crate::host_status::HostStatusRows;
+use fleet::host_status::HostStatusRows;
 use anyhow::{Context, Result};
 use std::sync::OnceLock;
 use std::time::Duration;
 use system::system::SystemStatusReport;
 use system::system_info_types::SystemInfoReport;
 
-use crate::pod_native::runtime_cache;
+use crate::native::runtime_cache;
 
 /// How often the sync puller asks each peer for new status rows. Matches
 /// the persist cadence — pulling more often than peers write just burns
@@ -45,10 +45,10 @@ pub fn spawn_local_writer() {
             if let Err(e) = persist_local_snapshot().await {
                 tracing::warn!("host_status local writer: {e:#}");
             }
-            let next = crate::pod_native::subscribe_demand::choose_cadence(
-                crate::pod_native::subscribe_demand::is_live(),
-                crate::pod_native::subscribe_demand::FAST_CADENCE,
-                crate::pod_native::subscribe_demand::SLOW_CADENCE,
+            let next = crate::native::subscribe_demand::choose_cadence(
+                crate::native::subscribe_demand::is_live(),
+                crate::native::subscribe_demand::FAST_CADENCE,
+                crate::native::subscribe_demand::SLOW_CADENCE,
             );
             tokio::time::sleep(next).await;
         }
@@ -76,7 +76,7 @@ pub fn spawn_sync_puller() {
 /// Own-peer id used as the row key. `peer.<machine_id_short>` matches the
 /// canonical pod-mesh identity used everywhere else.
 fn own_peer_id() -> String {
-    format!("peer.{}", crate::host_identity::machine_id_short())
+    format!("peer.{}", fleet::host_identity::machine_id_short())
 }
 
 async fn persist_local_snapshot() -> Result<()> {
@@ -113,8 +113,8 @@ async fn persist_local_snapshot() -> Result<()> {
 
     // Fan out to in-process subscribers (UI sessions, mesh forwarder).
     // Best-effort: failures here don't roll back the DB write.
-    crate::pod_native::subscribe::publish_host_status(
-        crate::pod_native::subscribe::HostStatusEvent {
+    crate::native::subscribe::publish_host_status(
+        crate::native::subscribe::HostStatusEvent {
             peer_id,
             snapshot_at_unix: snapshot_at,
             payload,
@@ -169,7 +169,7 @@ async fn pull_one_peer_inner(peer_id: &str, addr: &str) -> Result<()> {
         let addr_owned = addr.to_string();
         tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
             let conn = db::open_default()?;
-            crate::pod_native::dialer::dial_targets_for_peer(&conn, &pid, &addr_owned)
+            crate::native::dialer::dial_targets_for_peer(&conn, &pid, &addr_owned)
         })
         .await??
     };
@@ -178,8 +178,8 @@ async fn pull_one_peer_inner(peer_id: &str, addr: &str) -> Result<()> {
     // returns the OS hostname, and rc.25+ peers also include a full addressing
     // snapshot (display_name + per-channel addresses). Display name from the
     // snapshot wins; fall back to OS hostname for rc.≤24 peers.
-    let ping_fut = crate::pod_native::dialer::try_targets(&targets, |t| async move {
-        crate::pod_native::ping(&t).await
+    let ping_fut = crate::native::dialer::try_targets(&targets, |t| async move {
+        crate::native::ping(&t).await
     });
     if let Ok(Ok(pong)) = tokio::time::timeout(Duration::from_secs(5), ping_fut).await {
         let pid = peer_id.to_string();
@@ -227,7 +227,7 @@ async fn pull_one_peer_inner(peer_id: &str, addr: &str) -> Result<()> {
     });
     let exec_res = tokio::time::timeout(
         Duration::from_secs(15),
-        crate::pod_native::exec(addr, "system.host.status.detail", args),
+        crate::native::exec(addr, "system.host.status.detail", args),
     )
     .await
     .context("pod/exec timeout")??;
@@ -239,7 +239,7 @@ async fn pull_one_peer_inner(peer_id: &str, addr: &str) -> Result<()> {
     // cache entry is a UI nicety.
     if let Ok(Ok(detail_res)) = tokio::time::timeout(
         Duration::from_secs(5),
-        crate::pod_native::exec(addr, "system.detail", serde_json::json!({})),
+        crate::native::exec(addr, "system.detail", serde_json::json!({})),
     )
     .await
         && let Ok(detail) = serde_json::from_value::<SystemStatusReport>(detail_res.result)

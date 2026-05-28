@@ -11,6 +11,7 @@
 //! the free fns into `crate::native::*`.
 
 pub mod cli;
+pub mod host_status_writer;
 pub mod native;
 pub mod server_pod;
 
