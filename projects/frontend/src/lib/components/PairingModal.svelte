@@ -142,7 +142,7 @@
     try {
       const args: Record<string, unknown> = { action: 'invite', addr: target.addr };
       if (target.port) args.port = target.port;
-      const data = await callTool<InviteResult>('systemPeerCreate', args);
+      const data = await callTool<InviteResult>('podJoin', args);
       inviteResult = data;
       waitingForJoiner = true;
       startPolling(target.fp ?? data.joiner_pubkey_fp ?? null);
@@ -166,10 +166,19 @@
     if (!fp) return;
     pollHandle = setInterval(async () => {
       try {
-        const peers = await callTool<{ peer_id: string; hostname: string; pubkey_fp?: string }[]>(
-          'systemPeerList',
-          {},
-        );
+        type PodMember = { state: 'joined' | 'handshaking' | 'discovered' } & {
+          peer_id?: string;
+          hostname?: string;
+          pubkey_fp?: string;
+        };
+        const list = await callTool<{ members: PodMember[] }>('podList', {});
+        const peers = (list?.members ?? [])
+          .filter((m) => m.state === 'joined')
+          .map((m) => ({
+            peer_id: m.peer_id ?? '',
+            hostname: m.hostname ?? '',
+            pubkey_fp: m.pubkey_fp,
+          }));
         // Peer service builds `peer_id` from the joiner's CN (machine_id_short).
         // We match by hostname here because pubkey_fp isn't on PodPeerDto;
         // the inviter row uses the joiner's reported hostname.
