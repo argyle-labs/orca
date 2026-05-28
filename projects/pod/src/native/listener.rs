@@ -92,9 +92,9 @@ pub async fn handle_pod_connection(
     // pod/subscribe takes over the stream for the rest of the connection:
     // one request → ack → streamed events until close. The normal one-shot
     // request/response path below is bypassed.
-    if request.method == crate::pod_native::subscribe_wire::METHOD {
-        let own_peer_id = format!("peer.{}", crate::host_identity::machine_id_short());
-        return crate::pod_native::subscribe_wire::serve_session_with_request(
+    if request.method == crate::native::subscribe_wire::METHOD {
+        let own_peer_id = format!("peer.{}", fleet::host_identity::machine_id_short());
+        return crate::native::subscribe_wire::serve_session_with_request(
             tls,
             request,
             &own_peer_id,
@@ -140,7 +140,7 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
             let result = PodPingResult {
                 peer_id: peer_cn.to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
-                hostname: crate::host_identity::hostname().to_string(),
+                hostname: fleet::host_identity::hostname().to_string(),
                 addressing: build_addressing_snapshot(),
             };
             value_response(id, &result)
@@ -365,7 +365,7 @@ async fn handle_exec(request: Request) -> Result<PodExecResult> {
     // loopback. Authorization is enforced by `authorize_exec` above (REMOTE_OK
     // allowlist + mTLS peer certificate). Admin-role tools tagged remote_ok are
     // reachable from trusted peers; the pod join handshake is the admin gate.
-    let result = crate::pod_native::dispatcher::dispatch(&params.tool, params.args.clone())
+    let result = crate::native::dispatcher::dispatch(&params.tool, params.args.clone())
         .await
         .with_context(|| format!("dispatch pod-relayed tool '{}'", params.tool))?;
 
@@ -474,7 +474,7 @@ fn build_addressing_snapshot() -> Option<HostAddressingSnapshot> {
         }
     }
     if display_name.is_empty() {
-        display_name = crate::host_identity::display_hostname().to_string();
+        display_name = fleet::host_identity::display_hostname().to_string();
     }
     Some(HostAddressingSnapshot {
         display_name,

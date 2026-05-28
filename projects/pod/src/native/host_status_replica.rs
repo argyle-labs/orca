@@ -123,7 +123,7 @@ pub fn spawn_fleet_replicator() {
 }
 
 async fn reconcile_once(registry: &Mutex<HashMap<String, JoinHandle<()>>>) -> Result<()> {
-    let own = format!("peer.{}", crate::host_identity::machine_id_short());
+    let own = format!("peer.{}", fleet::host_identity::machine_id_short());
     let peers = tokio::task::spawn_blocking(move || -> Result<Vec<(String, String)>> {
         let conn = ::db::open_default()?;
         let rows = ::db::pod::list_peers(&conn)?;

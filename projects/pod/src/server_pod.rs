@@ -1,4 +1,4 @@
-use crate::pod::{
+use crate::{
     CertInfo, PodAcceptOutput, PodCertStatusOutput, PodDiscoveryRowDto, PodExecDispatch,
     PodJoinOutput, PodLeaveOutput, PodOfferOutput, PodPeerAddressDto, PodPeerDto,
     PodPendingOfferDto, PodPingOutput, PodService, PodTrustOutput,
@@ -11,8 +11,8 @@ use std::time::Instant;
 use system::update_state::{read_channel_marker, read_version_pin};
 
 use crate::cli::dial_bootstrap_pub;
-use crate::pod_native::scheduler::{OFFER_TTL_SECS, mint_pairing_code, push_offer};
-use crate::pod_native::{db as pdb, pki_dir};
+use crate::native::scheduler::{OFFER_TTL_SECS, mint_pairing_code, push_offer};
+use crate::native::{db as pdb, pki_dir};
 
 pub struct ServerPod;
 
@@ -36,8 +36,8 @@ impl PodService for ServerPod {
             .context("offer has no mesh CA cert")?;
         std::fs::write(pki::mesh_ca_cert_path(&pki_d), ca_pem.as_bytes())?;
 
-        let peer_cn = crate::host_identity::machine_id_short().to_string();
-        let display_name = crate::host_identity::display_hostname().to_string();
+        let peer_cn = fleet::host_identity::machine_id_short().to_string();
+        let display_name = fleet::host_identity::display_hostname().to_string();
         let (csr_client_pem, client_key_pem) =
             pki::build_peer_csr(&peer_cn, pki::PeerRole::Client)?;
         let (csr_server_pem, server_key_pem) =
@@ -152,7 +152,7 @@ impl PodService for ServerPod {
 
     async fn push_trust(&self, peer_id: &str, on: bool) -> Result<PodTrustOutput> {
         // Our own peer_id as the remote knows us.
-        let own_id = format!("peer.{}", crate::host_identity::machine_id_short());
+        let own_id = format!("peer.{}", fleet::host_identity::machine_id_short());
         // Execute pod.peer.update on the remote host, making THEM set their
         // local_secure for us. `push: false` prevents recursion.
         #[allow(clippy::disallowed_types)] // exec is the wire-level dispatch boundary
@@ -215,11 +215,11 @@ impl PodService for ServerPod {
         };
 
         let targets =
-            crate::pod_native::dialer::dial_targets_for_peer(&conn, peer_id, &peer.peer_addr)
+            crate::native::dialer::dial_targets_for_peer(&conn, peer_id, &peer.peer_addr)
                 .unwrap_or_else(|_| vec![peer.peer_addr.clone()]);
         let start = Instant::now();
-        match crate::pod_native::dialer::try_targets(&targets, |t| async move {
-            crate::pod_native::ping(&t).await
+        match crate::native::dialer::try_targets(&targets, |t| async move {
+            crate::native::ping(&t).await
         })
         .await
         {
@@ -404,7 +404,7 @@ impl PodService for ServerPod {
             resolve_peer_addr(&peers, peer)?
         };
 
-        let r = crate::pod_native::exec(&addr, tool, args).await?;
+        let r = crate::native::exec(&addr, tool, args).await?;
         Ok(PodExecDispatch {
             peer: peer.to_string(),
             tool: r.tool,
@@ -479,7 +479,7 @@ async fn local_peer_row() -> PodPeerDto {
     // available for them via the fanout path.
     PodPeerDto {
         peer_id: "local".into(),
-        hostname: crate::host_identity::display_hostname().to_string(),
+        hostname: fleet::host_identity::display_hostname().to_string(),
         addr: "127.0.0.1".into(),
         port: db::ports::mesh_port(),
         last_seen_at: chrono::Utc::now().timestamp(),
@@ -540,7 +540,7 @@ fn enrich_from_local_db(base: &mut PodPeerDto, latest: &db::host_status::HostSta
 /// any DB row matching this id is unambiguously a self-reference (e.g. mDNS
 /// discovered us at our own LAN IP and stub'd us in via `ensure_peer_stub`).
 pub fn local_peer_id() -> String {
-    format!("peer.{}", crate::host_identity::machine_id_short())
+    format!("peer.{}", fleet::host_identity::machine_id_short())
 }
 
 /// Read pod_peers + local host_status; merge into enriched DTOs.
@@ -590,7 +590,7 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
         if let Some(latest) = status_by_peer.get(&p.peer_id) {
             enrich_from_local_db(&mut p, latest);
         }
-        if let Some(rt) = crate::pod_native::runtime_cache::get(&p.peer_id) {
+        if let Some(rt) = crate::native::runtime_cache::get(&p.peer_id) {
             p.version = rt.version;
             p.target = rt.target;
             p.frontend = rt.frontend;

@@ -366,7 +366,7 @@ async fn main() -> Result<()> {
         }
         Some(Command::Pod { action }) => match action {
             PodAction::Init => {
-                let pki = fleet::pod_native::pki_dir();
+                let pki = pod::native::pki_dir();
                 // CN = stable machine_id (display hostname is held separately).
                 let host = fleet::host_identity::machine_id_short().to_string();
                 orca_sdk::pki::init_mesh_ca(&pki, &host)?;
@@ -374,9 +374,9 @@ async fn main() -> Result<()> {
                 // cert) is present from the moment this host is poddable.
                 orca_sdk::pki::load_or_init_bootstrap_cert(&pki)?;
                 let conn = db::open_default()?;
-                fleet::pod_native::db::set_self_secure(&conn, true)?;
+                pod::native::db::set_self_secure(&conn, true)?;
                 let pod_id = uuid::Uuid::now_v7().to_string()[..8].to_string();
-                fleet::pod_native::db::set_pod_id(&conn, &pod_id)?;
+                pod::native::db::set_pod_id(&conn, &pod_id)?;
                 println!("✓ mesh CA initialized at {}", pki.join("mesh").display());
                 println!("  pod id: {pod_id}");
                 println!(
@@ -392,41 +392,41 @@ async fn main() -> Result<()> {
                 Ok(())
             }
             PodAction::Ping { host } => {
-                let result = fleet::pod_native::ping(&host).await?;
+                let result = pod::native::ping(&host).await?;
                 println!("✓ {host} responded:");
                 println!("  peer_id: {}", result.peer_id);
                 println!("  hostname: {}", result.hostname);
                 println!("  version: {}", result.version);
                 Ok(())
             }
-            PodAction::Discover => fleet::cli::cmd_pod_discover(),
-            PodAction::Pending => fleet::cli::cmd_pod_pending(),
-            PodAction::Accept { code } => fleet::cli::cmd_pod_accept(&code).await,
-            PodAction::Connect { addr } => fleet::cli::cmd_pod_connect(&addr).await,
-            PodAction::Join { addr } => fleet::cli::cmd_pod_join(&addr).await,
-            PodAction::Offer { addr } => fleet::cli::cmd_pod_offer(&addr).await,
-            PodAction::Pair { addr } => fleet::cli::cmd_pod_pair(&addr).await,
-            PodAction::List => fleet::cli::cmd_pod_list(),
+            PodAction::Discover => pod::cli::cmd_pod_discover(),
+            PodAction::Pending => pod::cli::cmd_pod_pending(),
+            PodAction::Accept { code } => pod::cli::cmd_pod_accept(&code).await,
+            PodAction::Connect { addr } => pod::cli::cmd_pod_connect(&addr).await,
+            PodAction::Join { addr } => pod::cli::cmd_pod_join(&addr).await,
+            PodAction::Offer { addr } => pod::cli::cmd_pod_offer(&addr).await,
+            PodAction::Pair { addr } => pod::cli::cmd_pod_pair(&addr).await,
+            PodAction::List => pod::cli::cmd_pod_list(),
             PodAction::Trust { peer_id, state } => {
-                fleet::cli::cmd_pod_trust(&peer_id, state == "on").await
+                pod::cli::cmd_pod_trust(&peer_id, state == "on").await
             }
             PodAction::SelfSecure { state } => {
-                use fleet::cli::SelfSecureAction;
+                use pod::cli::SelfSecureAction;
                 let action = match state.as_str() {
                     "on" => SelfSecureAction::On,
                     "off" => SelfSecureAction::Off,
                     _ => SelfSecureAction::Show,
                 };
-                fleet::cli::cmd_pod_self_secure(action)
+                pod::cli::cmd_pod_self_secure(action)
             }
-            PodAction::CertStatus => fleet::cli::cmd_pod_cert_status(),
+            PodAction::CertStatus => pod::cli::cmd_pod_cert_status(),
             PodAction::CaRotate { overlap_days } => {
-                fleet::cli::cmd_pod_ca_rotate(overlap_days).await
+                pod::cli::cmd_pod_ca_rotate(overlap_days).await
             }
             PodAction::Leave {
                 wipe_secrets,
                 wipe_all,
-            } => fleet::cli::cmd_pod_leave(wipe_secrets, wipe_all).await,
+            } => pod::cli::cmd_pod_leave(wipe_secrets, wipe_all).await,
         },
         Some(Command::Openapi { action }) => match action {
             OpenapiAction::Emit => {

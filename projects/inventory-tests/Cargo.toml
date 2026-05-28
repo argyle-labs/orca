@@ -26,6 +26,7 @@ fleet         = { path = "../fleet" }
 mcp           = { path = "../mcp" }
 platform      = { path = "../platform" }
 plugins       = { path = "../plugins" }
+pod           = { path = "../pod" }
 system        = { path = "../system" }
 docker        = { path = "../integrations/docker" }
 homeassistant = { path = "../integrations/homeassistant" }

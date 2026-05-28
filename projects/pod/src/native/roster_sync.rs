@@ -20,7 +20,7 @@
 //! seconds; before that fix, peers with `peer_id="unknown"` are skipped
 //! both as sources and as merge targets.
 
-use crate::pod::{PodPeerDto, PodPeerListOutput};
+use crate::{PodPeerDto, PodPeerListOutput};
 use anyhow::Result;
 use orca_sdk::pki;
 use rusqlite::OptionalExtension;
@@ -53,7 +53,7 @@ async fn tick() -> Result<()> {
         return Ok(());
     }
 
-    let own_peer_id = format!("peer.{}", crate::host_identity::machine_id_short());
+    let own_peer_id = format!("peer.{}", fleet::host_identity::machine_id_short());
 
     let peers = {
         let conn = db::open_default()?;

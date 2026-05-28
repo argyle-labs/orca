@@ -5,6 +5,17 @@
 //! delegate to `PodService` (registered by the server) because they need
 //! mTLS dials, PKI material, and bootstrap signing — all server-side state
 //! that this crate must not touch directly.
+//!
+//! NOTE (slice 4 commit A): `PodService` + `ServerPod` are still here.
+//! Commit B dissolves the trait per [[feedback_no_indirection]] and inlines
+//! the free fns into `crate::native::*`.
+
+pub mod cli;
+pub mod native;
+pub mod server_pod;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
-use crate::pod_native::{db as pdb, pki_dir};
+use crate::native::{db as pdb, pki_dir};
 
 // ── pod discover ─────────────────────────────────────────────────────────────
 
@@ -128,8 +128,8 @@ pub async fn cmd_pod_accept(code: &str) -> Result<()> {
     // `joiner_hostname`; `display_name` is the human label that lands in
     // `pod_peers.peer_hostname` on the inviter side via the new
     // `joiner_display_name` wire field.
-    let peer_cn = crate::host_identity::machine_id_short().to_string();
-    let display_name = crate::host_identity::display_hostname().to_string();
+    let peer_cn = fleet::host_identity::machine_id_short().to_string();
+    let display_name = fleet::host_identity::display_hostname().to_string();
     let (csr_client_pem, client_key_pem) = pki::build_peer_csr(&peer_cn, PeerRole::Client)?;
     let (csr_server_pem, server_key_pem) = pki::build_peer_csr(&peer_cn, PeerRole::Server)?;
 
@@ -251,9 +251,9 @@ pub async fn cmd_pod_join(addr: &str) -> Result<()> {
     let pki_d = pki_dir();
     let signing = pki::load_or_init_bootstrap_key(&pki_d)?;
     let joiner_fp = pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
-    let joiner_peer_id = format!("peer.{}", crate::host_identity::machine_id_short());
-    let joiner_hostname = crate::host_identity::machine_id_short().to_string();
-    let joiner_display_name = crate::host_identity::display_hostname().to_string();
+    let joiner_peer_id = format!("peer.{}", fleet::host_identity::machine_id_short());
+    let joiner_hostname = fleet::host_identity::machine_id_short().to_string();
+    let joiner_display_name = fleet::host_identity::display_hostname().to_string();
 
     #[derive(serde::Serialize)]
     struct RequestBody<'a> {
@@ -477,7 +477,7 @@ pub async fn push_pairing_offer(addr: &str) -> Result<(pdb::DiscoveryRow, String
         );
     }
 
-    let code = crate::pod_native::scheduler::mint_pairing_code();
+    let code = crate::native::scheduler::mint_pairing_code();
     let code_hash = pdb::hash_code(&code);
     let offer_id = uuid::Uuid::now_v7().to_string();
     pdb::insert_pending_offer(
@@ -492,12 +492,12 @@ pub async fn push_pairing_offer(addr: &str) -> Result<(pdb::DiscoveryRow, String
         None,
         None,
         None,
-        crate::pod_native::scheduler::OFFER_TTL_SECS,
+        crate::native::scheduler::OFFER_TTL_SECS,
         None,
     )?;
     drop(conn);
 
-    crate::pod_native::scheduler::push_offer(
+    crate::native::scheduler::push_offer(
         &target.hostname,
         &target.addr,
         target.port,
@@ -520,7 +520,7 @@ pub async fn cmd_pod_offer(addr: &str) -> Result<()> {
     println!("  pairing code: {code}");
     println!(
         "  the joiner has {}s to run `orca pod accept {code}`",
-        crate::pod_native::scheduler::OFFER_TTL_SECS
+        crate::native::scheduler::OFFER_TTL_SECS
     );
     Ok(())
 }
@@ -539,18 +539,18 @@ pub async fn cmd_pod_pair(addr: &str) -> Result<()> {
     println!(
         "  waiting up to {}s for the joiner to accept (`orca pod accept {code}` on the other host, \
          or paste the code into the Orca UI)…",
-        crate::pod_native::scheduler::OFFER_TTL_SECS
+        crate::native::scheduler::OFFER_TTL_SECS
     );
 
     let deadline = std::time::Instant::now()
-        + Duration::from_secs(crate::pod_native::scheduler::OFFER_TTL_SECS as u64);
+        + Duration::from_secs(crate::native::scheduler::OFFER_TTL_SECS as u64);
     loop {
         if std::time::Instant::now() >= deadline {
             bail!(
                 "timed out after {}s waiting for {} to accept; the code is still valid until expiry — \
                  retry `orca pod pair {}` once the joiner is ready, or run `orca pod accept {}` \
                  directly on the joiner.",
-                crate::pod_native::scheduler::OFFER_TTL_SECS,
+                crate::native::scheduler::OFFER_TTL_SECS,
                 target.hostname,
                 addr,
                 code,
@@ -768,7 +768,7 @@ pub async fn cmd_pod_ca_rotate(overlap_days: i64) -> Result<()> {
     // Reissue our own peer certs immediately under the new CA so we present
     // current-CA-signed material to peers as soon as possible.
     // CN is the stable machine_id (see pod accept).
-    let host = crate::host_identity::machine_id_short().to_string();
+    let host = fleet::host_identity::machine_id_short().to_string();
     pki::reissue_mesh_server_cert(&pki_d)?;
     pki::reissue_mesh_client_cert(&pki_d, &host)?;
 

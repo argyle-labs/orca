@@ -298,7 +298,7 @@ mod tests {
     // `unused_mut` is allowed because several duplex bindings need `mut` only
     // inside a `tokio::spawn`-moved closure; clippy can't see across the move.
     use super::*;
-    use crate::pod_native::subscribe::publish_host_status;
+    use crate::native::subscribe::publish_host_status;
     use std::time::Duration;
 
     fn req(method: &str, params: Option<Value>) -> Request {
@@ -499,11 +499,11 @@ mod tests {
             s
         });
 
-        let before = crate::pod_native::subscribe_demand::heartbeats_seen();
+        let before = crate::native::subscribe_demand::heartbeats_seen();
         let _client_io = driver.await.unwrap();
         // Give the server task a tick to process the heartbeat.
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let after = crate::pod_native::subscribe_demand::heartbeats_seen();
+        let after = crate::native::subscribe_demand::heartbeats_seen();
         assert!(
             after > before,
             "expected heartbeats_seen to advance; before={before} after={after}"

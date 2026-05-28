@@ -24,7 +24,7 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     let host_refresh: Arc<dyn fleet::host::HostRefreshHook + Send + Sync> =
         Arc::new(fleet::host_identity::ServerHostRefreshHook);
     ctx.register_service(host_refresh);
-    let pod_svc: Arc<dyn fleet::pod::PodService> = Arc::new(fleet::native_support::ServerPod);
+    let pod_svc: Arc<dyn pod::PodService> = Arc::new(pod::server_pod::ServerPod);
     ctx.register_service(pod_svc);
     orca_dispatch::remote_ok::install(orca_dispatch::remote_ok_names());
     orca_dispatch::tool_roles::install(orca_dispatch::role_table());

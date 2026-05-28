@@ -201,7 +201,7 @@ fn handle_event(event: ServiceEvent, our_instance: &str) {
             return;
         }
     };
-    if let Err(e) = crate::pod_native::db::upsert_discovery(
+    if let Err(e) = crate::native::db::upsert_discovery(
         &conn,
         &pubkey_fp,
         peer_id.as_deref(),
@@ -226,19 +226,19 @@ pub fn build_advertisement(pki_dir: PathBuf, port: u16) -> Result<Advertisement>
     let signing = pki::load_or_init_bootstrap_key(&pki_dir)?;
     let pubkey_fp = pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
 
-    let hostname = crate::host_identity::hostname().to_string();
+    let hostname = fleet::host_identity::hostname().to_string();
     let can_invite = pki::has_mesh_ca_key(&pki_dir);
     // pod_id + self_secure from DB; failures non-fatal (we just advertise unclaimed).
     let (pod_id, self_secure) = match db::open_default() {
         Ok(conn) => (
-            crate::pod_native::db::get_pod_id(&conn).unwrap_or(None),
+            crate::native::db::get_pod_id(&conn).unwrap_or(None),
             db::pod::get_self_secure(&conn).unwrap_or(false),
         ),
         Err(_) => (None, false),
     };
     let can_invite = can_invite && self_secure;
     Ok(Advertisement::from_local(
-        crate::host_identity::machine_id_short(),
+        fleet::host_identity::machine_id_short(),
         &hostname,
         &pubkey_fp,
         pod_id.as_deref(),

@@ -119,7 +119,7 @@ pub fn pki_dir() -> PathBuf {
 /// logged at warn and returns `Ok(false)` so daemon startup proceeds.
 pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
     let cert_path = pki::mesh_client_cert_path(pki_dir);
-    let expected = format!("peer.{}", crate::host_identity::machine_id_short());
+    let expected = format!("peer.{}", fleet::host_identity::machine_id_short());
 
     // Classify current state into one of:
     //   "ok"     – cert present, CN matches expected. No-op.
@@ -183,7 +183,7 @@ pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
     // keep operating without an external re-pair. Joiner-only hosts have
     // to wait for an inviter; log the path so the operator knows.
     if pki::has_mesh_ca_key(pki_dir) {
-        let host = crate::host_identity::machine_id_short().to_string();
+        let host = fleet::host_identity::machine_id_short().to_string();
         pki::reissue_mesh_server_cert(pki_dir).context("self-reissue mesh server cert")?;
         pki::reissue_mesh_client_cert(pki_dir, &host).context("self-reissue mesh client cert")?;
         tracing::warn!(

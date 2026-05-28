@@ -343,7 +343,7 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
     let inviter_peer_id = offer
         .inviter_peer_id
         .clone()
-        .unwrap_or_else(|| format!("peer.{}", crate::host_identity::machine_id_short()));
+        .unwrap_or_else(|| format!("peer.{}", fleet::host_identity::machine_id_short()));
     let pod_id = offer
         .pod_id
         .clone()
@@ -408,15 +408,15 @@ fn handle_request_offer(
         );
     }
 
-    let code = crate::pod_native::scheduler::mint_pairing_code();
+    let code = crate::native::scheduler::mint_pairing_code();
     let code_hash = pdb::hash_code(&code);
     let offer_id = Uuid::now_v7().to_string();
-    let expires_at = now_secs() + crate::pod_native::scheduler::OFFER_TTL_SECS;
+    let expires_at = now_secs() + crate::native::scheduler::OFFER_TTL_SECS;
     // Persist the inviter's own peer_id on the pending offer so the matching
     // `pod/join-confirm` step can echo it back to the joiner. Without this
     // the joiner records the inviter as `"unknown"` and roster-sync skips
     // every row that references it.
-    let inviter_peer_id = format!("peer.{}", crate::host_identity::machine_id_short());
+    let inviter_peer_id = format!("peer.{}", fleet::host_identity::machine_id_short());
     pdb::insert_pending_offer(
         &conn,
         &offer_id,
@@ -429,7 +429,7 @@ fn handle_request_offer(
         None,
         Some(&inviter_peer_id),
         None,
-        crate::pod_native::scheduler::OFFER_TTL_SECS,
+        crate::native::scheduler::OFFER_TTL_SECS,
         None,
     )?;
 
@@ -442,8 +442,8 @@ fn handle_request_offer(
 
     let signing = pki::load_or_init_bootstrap_key(&pki_d)?;
     let inviter_fp = pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
-    let inviter_hostname = crate::host_identity::hostname().to_string();
-    let inviter_display_name = crate::host_identity::display_hostname().to_string();
+    let inviter_hostname = fleet::host_identity::hostname().to_string();
+    let inviter_display_name = fleet::host_identity::display_hostname().to_string();
 
     Ok(RequestOfferResult {
         inviter_pubkey_fp: inviter_fp,
