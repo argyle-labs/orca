@@ -405,6 +405,15 @@ pub async fn exec(
         })
     }
 
+/// Full pod-detail status: every mesh cert's rotation state plus the current
+/// `self_secure` (Tier-2 secrets-storage) flag, in one read. Single entry
+/// point for `system.pod.detail` — no separate cert/self_secure round-trip.
+pub fn status() -> Result<PodCertStatusOutput> {
+    let mut out = cert_status()?;
+    out.self_secure = get_self_secure().unwrap_or(false);
+    Ok(out)
+}
+
 pub fn cert_status() -> Result<PodCertStatusOutput> {
         let pki_d = pki_dir();
         let founder = pki::has_mesh_ca_key(&pki_d);

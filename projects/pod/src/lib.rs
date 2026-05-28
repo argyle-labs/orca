@@ -129,39 +129,37 @@ pub struct PeerCreateArgs {
     pub code: Option<String>,
 }
 
-/// Unified output for all three pairing roles. Only the fields relevant to
-/// the chosen `action` are populated; the rest are omitted.
+/// Output for `system.peer.create`, tagged by the pairing `action`. Each
+/// variant carries exactly the fields its role produces — no cross-variant
+/// `Option` soup.
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct PeerCreateOutput {
-    pub action: String,
-    // invite fields
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pairing_code: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub joiner_hostname: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub joiner_addr: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub joiner_port: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub joiner_pubkey_fp: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub offer_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<i64>,
-    // accept fields
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pod_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub inviter_peer_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub inviter_hostname: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub inviter_addr: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub inviter_port: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub self_secure: Option<bool>,
+#[serde(tag = "action", rename_all = "lowercase")]
+pub enum PeerCreateOutput {
+    /// Inviter pushed an offer to a discovered joiner.
+    Invite {
+        pairing_code: String,
+        joiner_hostname: String,
+        joiner_addr: String,
+        joiner_port: u16,
+        joiner_pubkey_fp: String,
+        offer_id: String,
+        expires_at: i64,
+    },
+    /// Joiner requested an offer from an out-of-mDNS inviter.
+    Join {
+        pairing_code: String,
+        inviter_addr: String,
+        inviter_port: u16,
+    },
+    /// Joiner accepted a pending inbound offer; pod membership established.
+    Accept {
+        pod_id: String,
+        inviter_peer_id: String,
+        inviter_hostname: String,
+        inviter_addr: String,
+        inviter_port: u16,
+        self_secure: bool,
+    },
 }
 
 // kept for internal use by accept path
@@ -506,21 +504,14 @@ async fn peer_create(
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("invite requires addr"))?;
             let out = server_pod::offer(addr, args.port).await?;
-            Ok(PeerCreateOutput {
-                action: "invite".into(),
-                pairing_code: Some(out.code),
-                joiner_hostname: Some(out.joiner_hostname),
-                joiner_addr: Some(out.joiner_addr),
-                joiner_port: Some(out.joiner_port),
-                joiner_pubkey_fp: Some(out.joiner_pubkey_fp),
-                offer_id: Some(out.offer_id),
-                expires_at: Some(out.expires_at),
-                pod_id: None,
-                inviter_peer_id: None,
-                inviter_hostname: None,
-                inviter_addr: None,
-                inviter_port: None,
-                self_secure: None,
+            Ok(PeerCreateOutput::Invite {
+                pairing_code: out.code,
+                joiner_hostname: out.joiner_hostname,
+                joiner_addr: out.joiner_addr,
+                joiner_port: out.joiner_port,
+                joiner_pubkey_fp: out.joiner_pubkey_fp,
+                offer_id: out.offer_id,
+                expires_at: out.expires_at,
             })
         }
         "join" => {
@@ -529,21 +520,10 @@ async fn peer_create(
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("join requires addr"))?;
             let out = server_pod::join(addr, args.port).await?;
-            Ok(PeerCreateOutput {
-                action: "join".into(),
-                pairing_code: Some(out.code),
-                joiner_hostname: None,
-                joiner_addr: None,
-                joiner_port: None,
-                joiner_pubkey_fp: None,
-                offer_id: None,
-                expires_at: None,
-                pod_id: None,
-                inviter_peer_id: None,
-                inviter_hostname: None,
-                inviter_addr: Some(out.inviter_addr),
-                inviter_port: Some(out.inviter_port),
-                self_secure: None,
+            Ok(PeerCreateOutput::Join {
+                pairing_code: out.code,
+                inviter_addr: out.inviter_addr,
+                inviter_port: out.inviter_port,
             })
         }
         "accept" => {
@@ -552,21 +532,13 @@ async fn peer_create(
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("accept requires code"))?;
             let out = server_pod::accept(code).await?;
-            Ok(PeerCreateOutput {
-                action: "accept".into(),
-                pairing_code: None,
-                joiner_hostname: None,
-                joiner_addr: None,
-                joiner_port: None,
-                joiner_pubkey_fp: None,
-                offer_id: None,
-                expires_at: None,
-                pod_id: Some(out.pod_id),
-                inviter_peer_id: Some(out.inviter_peer_id),
-                inviter_hostname: Some(out.inviter_hostname),
-                inviter_addr: Some(out.inviter_addr),
-                inviter_port: Some(out.inviter_port),
-                self_secure: Some(out.self_secure),
+            Ok(PeerCreateOutput::Accept {
+                pod_id: out.pod_id,
+                inviter_peer_id: out.inviter_peer_id,
+                inviter_hostname: out.inviter_hostname,
+                inviter_addr: out.inviter_addr,
+                inviter_port: out.inviter_port,
+                self_secure: out.self_secure,
             })
         }
         other => anyhow::bail!("unknown action '{other}' (expected invite|join|accept)"),
@@ -631,9 +603,7 @@ async fn pod_detail(
     _args: EmptyArgs,
     _ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodCertStatusOutput> {
-    let mut out = server_pod::cert_status()?;
-    out.self_secure = server_pod::get_self_secure().unwrap_or(false);
-    Ok(out)
+    server_pod::status()
 }
 
 /// Update pod-level settings on this host or — when `peer_id` is set —
