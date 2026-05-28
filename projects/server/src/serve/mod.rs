@@ -592,7 +592,7 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
     std::mem::drop(pod::native::roster_sync::spawn());
     info!("[pod] roster-sync armed (60s) — auto-fills pod_peers from any paired peer");
 
-    std::mem::drop(fleet::host_identity::spawn_refresh_task());
+    std::mem::drop(system::host_identity::spawn_refresh_task());
     info!("[host-addressing] refresh task armed (5m)");
 }
 

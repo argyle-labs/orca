@@ -83,7 +83,7 @@ async fn tick() -> Result<()> {
 
     if pki::has_mesh_ca_key(&pki_d) {
         // Cert CN must be stable across hostname flaps — use machine_id.
-        let host = fleet::host_identity::machine_id_short().to_string();
+        let host = system::host_identity::machine_id_short().to_string();
         if need_server {
             pki::reissue_mesh_server_cert(&pki_d).context("self-sign mesh server cert")?;
             info!("[cert-rotation] self-reissued mesh server cert");
@@ -113,7 +113,7 @@ async fn refresh_via_peer() -> Result<()> {
     // Most-recently-seen first to maximize success likelihood.
     candidates.sort_by_key(|p| std::cmp::Reverse(p.last_seen_at));
 
-    let host = fleet::host_identity::machine_id_short().to_string();
+    let host = system::host_identity::machine_id_short().to_string();
     let (csr_client, key_client, csr_server, key_server) = pki::build_refresh_csrs(&host)?;
 
     for p in candidates {

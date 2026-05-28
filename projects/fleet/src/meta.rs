@@ -23,7 +23,26 @@ async fn health(_args: HealthArgs, _ctx: &orca_contract::ToolCtx) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::empty_ctx;
+    use orca_contract::ToolCtx;
+    use orca_utils::config::{Config, Model};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn empty_ctx() -> ToolCtx {
+        ToolCtx::new(Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: PathBuf::from("/tmp"),
+            memory_root: PathBuf::from("/tmp"),
+            db_path: PathBuf::from("/tmp/orca-fleet-meta-test.db"),
+            ports: Default::default(),
+        }))
+    }
 
     #[tokio::test]
     async fn health_returns_ok_true() {

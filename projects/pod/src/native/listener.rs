@@ -93,7 +93,7 @@ pub async fn handle_pod_connection(
     // one request → ack → streamed events until close. The normal one-shot
     // request/response path below is bypassed.
     if request.method == crate::native::subscribe_wire::METHOD {
-        let own_peer_id = format!("peer.{}", fleet::host_identity::machine_id_short());
+        let own_peer_id = format!("peer.{}", system::host_identity::machine_id_short());
         return crate::native::subscribe_wire::serve_session_with_request(
             tls,
             request,
@@ -140,7 +140,7 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
             let result = PodPingResult {
                 peer_id: peer_cn.to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
-                hostname: fleet::host_identity::hostname().to_string(),
+                hostname: system::host_identity::hostname().to_string(),
                 addressing: build_addressing_snapshot(),
             };
             value_response(id, &result)
@@ -474,7 +474,7 @@ fn build_addressing_snapshot() -> Option<HostAddressingSnapshot> {
         }
     }
     if display_name.is_empty() {
-        display_name = fleet::host_identity::display_hostname().to_string();
+        display_name = system::host_identity::display_hostname().to_string();
     }
     Some(HostAddressingSnapshot {
         display_name,

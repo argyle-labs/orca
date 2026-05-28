@@ -12,8 +12,8 @@ path = "src/lib.rs"
 # directly by `#[orca_tool]` sites (no service trait, per
 # feedback_no_indirection — dissolution lands in slice 4 commit B).
 #
-# Depends on `fleet` for `host_identity` only. That direction reverses when
-# fleet is dissolved into `system` in slice 5/6.
+# Host identity / addressing / status types live in `system` (slice 5,
+# 2026-05-28). The pod ↔ fleet dep is gone; fleet dissolves entirely next.
 
 [features]
 cli = ["dep:clap", "dep:colored"]
@@ -22,7 +22,6 @@ cli = ["dep:clap", "dep:colored"]
 orca-dispatch    = { path = "../orca-dispatch" }
 orca-contract   = { path = "../orca-contract", default-features = false }
 orca-macro      = { path = "../orca-macro" }
-fleet           = { path = "../fleet" }
 system          = { path = "../system" }
 schemars        = { workspace = true }
 serde           = { workspace = true }

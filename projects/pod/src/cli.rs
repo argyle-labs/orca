@@ -128,8 +128,8 @@ pub async fn cmd_pod_accept(code: &str) -> Result<()> {
     // `joiner_hostname`; `display_name` is the human label that lands in
     // `pod_peers.peer_hostname` on the inviter side via the new
     // `joiner_display_name` wire field.
-    let peer_cn = fleet::host_identity::machine_id_short().to_string();
-    let display_name = fleet::host_identity::display_hostname().to_string();
+    let peer_cn = system::host_identity::machine_id_short().to_string();
+    let display_name = system::host_identity::display_hostname().to_string();
     let (csr_client_pem, client_key_pem) = pki::build_peer_csr(&peer_cn, PeerRole::Client)?;
     let (csr_server_pem, server_key_pem) = pki::build_peer_csr(&peer_cn, PeerRole::Server)?;
 
@@ -251,9 +251,9 @@ pub async fn cmd_pod_join(addr: &str) -> Result<()> {
     let pki_d = pki_dir();
     let signing = pki::load_or_init_bootstrap_key(&pki_d)?;
     let joiner_fp = pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
-    let joiner_peer_id = format!("peer.{}", fleet::host_identity::machine_id_short());
-    let joiner_hostname = fleet::host_identity::machine_id_short().to_string();
-    let joiner_display_name = fleet::host_identity::display_hostname().to_string();
+    let joiner_peer_id = format!("peer.{}", system::host_identity::machine_id_short());
+    let joiner_hostname = system::host_identity::machine_id_short().to_string();
+    let joiner_display_name = system::host_identity::display_hostname().to_string();
 
     #[derive(serde::Serialize)]
     struct RequestBody<'a> {
@@ -768,7 +768,7 @@ pub async fn cmd_pod_ca_rotate(overlap_days: i64) -> Result<()> {
     // Reissue our own peer certs immediately under the new CA so we present
     // current-CA-signed material to peers as soon as possible.
     // CN is the stable machine_id (see pod accept).
-    let host = fleet::host_identity::machine_id_short().to_string();
+    let host = system::host_identity::machine_id_short().to_string();
     pki::reissue_mesh_server_cert(&pki_d)?;
     pki::reissue_mesh_client_cert(&pki_d, &host)?;
 

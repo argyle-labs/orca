@@ -53,7 +53,7 @@ async fn tick() -> Result<()> {
         return Ok(());
     }
 
-    let own_peer_id = format!("peer.{}", fleet::host_identity::machine_id_short());
+    let own_peer_id = format!("peer.{}", system::host_identity::machine_id_short());
 
     let peers = {
         let conn = db::open_default()?;

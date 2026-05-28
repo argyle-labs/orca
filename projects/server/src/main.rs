@@ -301,7 +301,7 @@ async fn main() -> Result<()> {
                 // OrcaTool-routed CLI commands bypass the legacy main()
                 // path's init; do it here so any tool that touches
                 // host_identity (e.g. pod.offer → push_offer) is safe.
-                fleet::host_identity::init(&config.app_dir)?;
+                system::host_identity::init(&config.app_dir)?;
                 let rest = rest_args.to_vec();
                 return dispatch_op(rest, config).await;
             }
@@ -321,7 +321,7 @@ async fn main() -> Result<()> {
     // Capture hostname + load/generate machine_id once at startup so all
     // downstream code (mDNS, pod scheduler, cert rotation) sees a stable
     // identity regardless of OS hostname churn.
-    fleet::host_identity::init(&config.app_dir)?;
+    system::host_identity::init(&config.app_dir)?;
     // Run TOML → DB migrations and auto-registration of detected runtimes.
     db::startup::init(&config);
     // Load API key from encrypted DB when not set via environment variable.
@@ -368,7 +368,7 @@ async fn main() -> Result<()> {
             PodAction::Init => {
                 let pki = pod::native::pki_dir();
                 // CN = stable machine_id (display hostname is held separately).
-                let host = fleet::host_identity::machine_id_short().to_string();
+                let host = system::host_identity::machine_id_short().to_string();
                 orca_sdk::pki::init_mesh_ca(&pki, &host)?;
                 // Ensure the bootstrap identity (Ed25519 key + self-signed
                 // cert) is present from the moment this host is poddable.
@@ -381,7 +381,7 @@ async fn main() -> Result<()> {
                 println!("  pod id: {pod_id}");
                 println!(
                     "  founder peer id: peer.{host}  (machine_id; display: {})",
-                    fleet::host_identity::hostname()
+                    system::host_identity::hostname()
                 );
                 println!("  self_secure: true (secrets storage enabled)");
                 println!(

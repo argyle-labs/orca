@@ -13,9 +13,9 @@
 //! only the first invocation actually starts a task.
 
 use anyhow::{Context, Result};
-use fleet::host_status::HostStatusRows;
 use std::sync::OnceLock;
 use std::time::Duration;
+use system::host_status::HostStatusRows;
 use system::system::SystemStatusReport;
 use system::system_info_types::SystemInfoReport;
 
@@ -76,7 +76,7 @@ pub fn spawn_sync_puller() {
 /// Own-peer id used as the row key. `peer.<machine_id_short>` matches the
 /// canonical pod-mesh identity used everywhere else.
 fn own_peer_id() -> String {
-    format!("peer.{}", fleet::host_identity::machine_id_short())
+    format!("peer.{}", system::host_identity::machine_id_short())
 }
 
 async fn persist_local_snapshot() -> Result<()> {

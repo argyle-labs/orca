@@ -31,8 +31,8 @@ pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
         .context("offer has no mesh CA cert")?;
     std::fs::write(pki::mesh_ca_cert_path(&pki_d), ca_pem.as_bytes())?;
 
-    let peer_cn = fleet::host_identity::machine_id_short().to_string();
-    let display_name = fleet::host_identity::display_hostname().to_string();
+    let peer_cn = system::host_identity::machine_id_short().to_string();
+    let display_name = system::host_identity::display_hostname().to_string();
     let (csr_client_pem, client_key_pem) = pki::build_peer_csr(&peer_cn, pki::PeerRole::Client)?;
     let (csr_server_pem, server_key_pem) = pki::build_peer_csr(&peer_cn, pki::PeerRole::Server)?;
 
@@ -145,7 +145,7 @@ pub async fn trust(peer_id: &str, on: bool) -> Result<PodTrustOutput> {
 
 pub async fn push_trust(peer_id: &str, on: bool) -> Result<PodTrustOutput> {
     // Our own peer_id as the remote knows us.
-    let own_id = format!("peer.{}", fleet::host_identity::machine_id_short());
+    let own_id = format!("peer.{}", system::host_identity::machine_id_short());
     // Execute pod.peer.update on the remote host, making THEM set their
     // local_secure for us. `push: false` prevents recursion.
     #[allow(clippy::disallowed_types)] // exec is the wire-level dispatch boundary
@@ -470,7 +470,7 @@ async fn local_peer_row() -> PodPeerDto {
     // available for them via the fanout path.
     PodPeerDto {
         peer_id: "local".into(),
-        hostname: fleet::host_identity::display_hostname().to_string(),
+        hostname: system::host_identity::display_hostname().to_string(),
         addr: "127.0.0.1".into(),
         port: db::ports::mesh_port(),
         last_seen_at: chrono::Utc::now().timestamp(),
@@ -531,7 +531,7 @@ fn enrich_from_local_db(base: &mut PodPeerDto, latest: &db::host_status::HostSta
 /// any DB row matching this id is unambiguously a self-reference (e.g. mDNS
 /// discovered us at our own LAN IP and stub'd us in via `ensure_peer_stub`).
 pub fn local_peer_id() -> String {
-    format!("peer.{}", fleet::host_identity::machine_id_short())
+    format!("peer.{}", system::host_identity::machine_id_short())
 }
 
 /// Read pod_peers + local host_status; merge into enriched DTOs.

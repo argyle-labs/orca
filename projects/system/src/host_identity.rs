@@ -295,13 +295,13 @@ impl crate::host::HostRefreshHook for ServerHostRefreshHook {
 pub fn spawn_refresh_task() -> tokio::task::JoinHandle<()> {
     use std::time::Duration;
     const TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
-    system::periodic::spawn(
-        system::periodic::PeriodicSpec {
+    crate::periodic::spawn(
+        crate::periodic::PeriodicSpec {
             name: "host.identity.refresh.run",
             initial_delay: Duration::ZERO,
             interval: TICK_INTERVAL,
         },
-        system::periodic::boxed(|| async move {
+        crate::periodic::boxed(|| async move {
             let conn = db::open_default()?;
             refresh_and_persist(&conn)?;
             tracing::trace!("[host-addressing] refreshed");

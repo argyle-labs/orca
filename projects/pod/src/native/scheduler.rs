@@ -71,7 +71,7 @@ async fn tick() -> Result<()> {
         let code = mint_pairing_code();
         let code_hash = pdb::hash_code(&code);
         let offer_id = uuid::Uuid::now_v7().to_string();
-        let inviter_peer_id = format!("peer.{}", fleet::host_identity::machine_id_short());
+        let inviter_peer_id = format!("peer.{}", system::host_identity::machine_id_short());
         pdb::insert_pending_offer(
             &conn,
             &offer_id,
@@ -141,8 +141,8 @@ pub async fn push_offer(
     let mesh_ca_cert_pem =
         std::fs::read_to_string(pki::mesh_ca_cert_path(&pki_d)).context("read mesh CA cert")?;
 
-    let inviter_hostname = fleet::host_identity::hostname().to_string();
-    let inviter_peer_id = format!("peer.{}", fleet::host_identity::machine_id_short());
+    let inviter_hostname = system::host_identity::hostname().to_string();
+    let inviter_peer_id = format!("peer.{}", system::host_identity::machine_id_short());
 
     #[derive(serde::Serialize)]
     struct OfferBody<'a> {

@@ -343,7 +343,7 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
     let inviter_peer_id = offer
         .inviter_peer_id
         .clone()
-        .unwrap_or_else(|| format!("peer.{}", fleet::host_identity::machine_id_short()));
+        .unwrap_or_else(|| format!("peer.{}", system::host_identity::machine_id_short()));
     let pod_id = offer
         .pod_id
         .clone()
@@ -416,7 +416,7 @@ fn handle_request_offer(
     // `pod/join-confirm` step can echo it back to the joiner. Without this
     // the joiner records the inviter as `"unknown"` and roster-sync skips
     // every row that references it.
-    let inviter_peer_id = format!("peer.{}", fleet::host_identity::machine_id_short());
+    let inviter_peer_id = format!("peer.{}", system::host_identity::machine_id_short());
     pdb::insert_pending_offer(
         &conn,
         &offer_id,
@@ -442,8 +442,8 @@ fn handle_request_offer(
 
     let signing = pki::load_or_init_bootstrap_key(&pki_d)?;
     let inviter_fp = pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
-    let inviter_hostname = fleet::host_identity::hostname().to_string();
-    let inviter_display_name = fleet::host_identity::display_hostname().to_string();
+    let inviter_hostname = system::host_identity::hostname().to_string();
+    let inviter_display_name = system::host_identity::display_hostname().to_string();
 
     Ok(RequestOfferResult {
         inviter_pubkey_fp: inviter_fp,

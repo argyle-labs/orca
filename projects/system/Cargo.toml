@@ -29,6 +29,8 @@ orca-utils = { path = "../utils" }
 orca-sdk = { path = "../sdk/rust" }
 agents = { path = "../agents", default-features = false }
 db = { package = "orca-db", path = "../db" }
+rusqlite = { workspace = true }
+uuid = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }

@@ -226,7 +226,7 @@ pub fn build_advertisement(pki_dir: PathBuf, port: u16) -> Result<Advertisement>
     let signing = pki::load_or_init_bootstrap_key(&pki_dir)?;
     let pubkey_fp = pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
 
-    let hostname = fleet::host_identity::hostname().to_string();
+    let hostname = system::host_identity::hostname().to_string();
     let can_invite = pki::has_mesh_ca_key(&pki_dir);
     // pod_id + self_secure from DB; failures non-fatal (we just advertise unclaimed).
     let (pod_id, self_secure) = match db::open_default() {
@@ -238,7 +238,7 @@ pub fn build_advertisement(pki_dir: PathBuf, port: u16) -> Result<Advertisement>
     };
     let can_invite = can_invite && self_secure;
     Ok(Advertisement::from_local(
-        fleet::host_identity::machine_id_short(),
+        system::host_identity::machine_id_short(),
         &hostname,
         &pubkey_fp,
         pod_id.as_deref(),

@@ -14,8 +14,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::system_info_types::SystemInfoReport;
 use orca_macro::orca_tool;
-use system::system_info_types::SystemInfoReport;
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct HostStatusRowDto {

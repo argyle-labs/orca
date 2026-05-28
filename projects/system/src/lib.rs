@@ -12,8 +12,14 @@
 //!
 //! Modules will be filled in by subsequent slices.
 
+pub mod host;
+pub mod host_identity;
+pub mod host_status;
 pub mod system_info_types;
 pub mod update_state;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub mod update;
 

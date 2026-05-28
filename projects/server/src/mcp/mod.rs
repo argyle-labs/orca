@@ -21,8 +21,8 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     let mut ctx = ToolCtx::new(config);
     // Host-addressing refresh hook: host.refresh tool calls into this to
     // trigger a fresh detect + persist before reading host_addressing rows.
-    let host_refresh: Arc<dyn fleet::host::HostRefreshHook + Send + Sync> =
-        Arc::new(fleet::host_identity::ServerHostRefreshHook);
+    let host_refresh: Arc<dyn system::host::HostRefreshHook + Send + Sync> =
+        Arc::new(system::host_identity::ServerHostRefreshHook);
     ctx.register_service(host_refresh);
     // Peer transport for `cli::exec_remote` (orca-dispatch dispatches
     // remote_ok tools through whatever RemoteExec the host registers).
