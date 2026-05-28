@@ -435,10 +435,11 @@ pub fn cmd_dev_sync() -> Result<DevSyncResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     fn isolated_orca_home(scenario: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
-        // SAFETY: tests in this module run serially via the shared lock below.
+        // SAFETY: tests touching ORCA_HOME are serialized via #[serial(env)].
         unsafe {
             std::env::set_var("ORCA_HOME", dir.path());
             std::env::set_var("ORCA_TEST_SCENARIO", scenario);
@@ -446,16 +447,9 @@ mod tests {
         dir
     }
 
-    fn marker_lock() -> std::sync::MutexGuard<'static, ()> {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-    }
-
     #[test]
     #[serial(env)]
     fn dev_source_round_trips() {
-        let _g = marker_lock();
         let _dir = isolated_orca_home("dev_src");
         assert!(read_dev_source().is_none());
         write_dev_source("http://localhost:9999").unwrap();
@@ -467,7 +461,6 @@ mod tests {
     #[test]
     #[serial(env)]
     fn dev_source_clear_is_noop_when_absent() {
-        let _g = marker_lock();
         let _dir = isolated_orca_home("dev_src_noop");
         clear_dev_source().unwrap();
     }
