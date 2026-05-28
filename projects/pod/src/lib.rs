@@ -392,15 +392,10 @@ pub struct PodUpdateOutput {
     pub self_secure: bool,
 }
 
-// ── Native support: From impls, PodService trait, svc() helper ──────────────
+// ── DTO conversions + wire-dispatch types ───────────────────────────────────
 
-pub mod native_support {
+mod dto_conversions {
     use super::*;
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use db;
-    use orca_contract::ToolCtx;
-    use std::sync::Arc;
 
     impl From<db::host_addressing::PodPeerAddress> for PodPeerAddressDto {
         fn from(a: db::host_addressing::PodPeerAddress) -> Self {

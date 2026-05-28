@@ -1,10 +1,9 @@
 use crate::{
     CertInfo, PodAcceptOutput, PodCertStatusOutput, PodDiscoveryRowDto, PodExecDispatch,
     PodJoinOutput, PodLeaveOutput, PodOfferOutput, PodPeerAddressDto, PodPeerDto,
-    PodPendingOfferDto, PodPingOutput, PodService, PodTrustOutput,
+    PodPendingOfferDto, PodPingOutput, PodTrustOutput,
 };
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use db::ports::mesh_port;
 use orca_sdk::pki;
 use std::time::Instant;
@@ -14,15 +13,11 @@ use crate::cli::dial_bootstrap_pub;
 use crate::native::scheduler::{OFFER_TTL_SECS, mint_pairing_code, push_offer};
 use crate::native::{db as pdb, pki_dir};
 
-pub struct ServerPod;
-
-#[async_trait]
-impl PodService for ServerPod {
-    async fn list_enriched(&self) -> Result<Vec<PodPeerDto>> {
+pub async fn list_enriched() -> Result<Vec<PodPeerDto>> {
         list_enriched_impl().await
     }
 
-    async fn accept(&self, code: &str) -> Result<PodAcceptOutput> {
+pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
         let conn = db::open_default()?;
         let offer = pdb::find_pending_offer_by_code(&conn, code)?
             .context("no pending offer matches that code (mistyped, expired, or already used?)")?;
@@ -114,7 +109,7 @@ impl PodService for ServerPod {
         })
     }
 
-    async fn trust(&self, peer_id: &str, on: bool) -> Result<PodTrustOutput> {
+pub async fn trust(peer_id: &str, on: bool) -> Result<PodTrustOutput> {
         let conn = db::open_default()?;
         let peer = pdb::list_peers(&conn)?
             .into_iter()
@@ -150,7 +145,7 @@ impl PodService for ServerPod {
         })
     }
 
-    async fn push_trust(&self, peer_id: &str, on: bool) -> Result<PodTrustOutput> {
+pub async fn push_trust(peer_id: &str, on: bool) -> Result<PodTrustOutput> {
         // Our own peer_id as the remote knows us.
         let own_id = format!("peer.{}", fleet::host_identity::machine_id_short());
         // Execute pod.peer.update on the remote host, making THEM set their
@@ -183,7 +178,7 @@ impl PodService for ServerPod {
         })
     }
 
-    async fn ping(&self, peer_id: &str) -> PodPingOutput {
+pub async fn ping(peer_id: &str) -> PodPingOutput {
         let conn = match db::open_default() {
             Ok(c) => c,
             Err(e) => {
@@ -242,7 +237,7 @@ impl PodService for ServerPod {
         }
     }
 
-    fn discover(&self) -> Result<Vec<PodDiscoveryRowDto>> {
+pub fn discover() -> Result<Vec<PodDiscoveryRowDto>> {
         let conn = db::open_default()?;
         let rows = pdb::list_discovery(&conn)?;
         Ok(rows
@@ -261,7 +256,7 @@ impl PodService for ServerPod {
             .collect())
     }
 
-    fn pending(&self) -> Result<Vec<PodPendingOfferDto>> {
+pub fn pending() -> Result<Vec<PodPendingOfferDto>> {
         let conn = db::open_default()?;
         let rows = pdb::list_pending_offers(&conn, "in")?;
         let now = std::time::SystemTime::now()
@@ -286,7 +281,7 @@ impl PodService for ServerPod {
             .collect())
     }
 
-    async fn offer(&self, addr: &str, port: Option<u16>) -> Result<PodOfferOutput> {
+pub async fn offer(addr: &str, port: Option<u16>) -> Result<PodOfferOutput> {
         let port = port.unwrap_or_else(mesh_port);
 
         // Look up the joiner in the discovery table by addr.
@@ -343,7 +338,7 @@ impl PodService for ServerPod {
         })
     }
 
-    async fn join(&self, inviter_addr: &str, port: Option<u16>) -> Result<PodJoinOutput> {
+pub async fn join(inviter_addr: &str, port: Option<u16>) -> Result<PodJoinOutput> {
         let port = port.unwrap_or_else(mesh_port);
         Ok(PodJoinOutput {
             code: String::new(),
@@ -352,7 +347,7 @@ impl PodService for ServerPod {
         })
     }
 
-    async fn leave_peer(&self, peer_id: &str) -> Result<PodLeaveOutput> {
+pub async fn leave_peer(peer_id: &str) -> Result<PodLeaveOutput> {
         let conn = db::open_default()?;
         let peer = pdb::list_peers(&conn)?
             .into_iter()
@@ -384,8 +379,7 @@ impl PodService for ServerPod {
     }
 
     #[allow(clippy::disallowed_types)] // mirrors PodService::exec — peer-mesh wire payload
-    async fn exec(
-        &self,
+pub async fn exec(
         peer: &str,
         tool: &str,
         args: serde_json::Value,
@@ -412,7 +406,7 @@ impl PodService for ServerPod {
         })
     }
 
-    fn cert_status(&self) -> Result<PodCertStatusOutput> {
+pub fn cert_status() -> Result<PodCertStatusOutput> {
         let pki_d = pki_dir();
         let founder = pki::has_mesh_ca_key(&pki_d);
         let member = pki::mesh_ca_cert_path(&pki_d).exists();
@@ -441,17 +435,16 @@ impl PodService for ServerPod {
         })
     }
 
-    fn get_self_secure(&self) -> Result<bool> {
+pub fn get_self_secure() -> Result<bool> {
         let conn = db::open_default()?;
         db::pod::get_self_secure(&conn)
     }
 
-    async fn set_self_secure(&self, on: bool) -> Result<bool> {
+pub async fn set_self_secure(on: bool) -> Result<bool> {
         let conn = db::open_default()?;
         pdb::set_self_secure(&conn, on)?;
         Ok(on)
     }
-}
 
 /// Build the local-host row for `pod.list`. Uses the in-process lifecycle
 /// service so the synthetic local entry stays in lock-step with what every
