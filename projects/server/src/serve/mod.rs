@@ -450,6 +450,18 @@ struct BootstrapStatus {
     available: bool,
 }
 
+/// Open liveness probe consumed by the web UI's local-host card and any
+/// external monitor. Unauthenticated (listed in middleware open paths) so a
+/// down/locked daemon is still distinguishable from a healthy one.
+#[derive(serde::Serialize)]
+struct Health {
+    ok: bool,
+}
+
+async fn ping_handler() -> axum::Json<Health> {
+    axum::Json(Health { ok: true })
+}
+
 async fn bootstrap_status_handler(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
 ) -> axum::Json<BootstrapStatus> {
@@ -942,6 +954,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
     let api = api
         // Spec endpoints — registered after split so they are not themselves
         // documented in the spec (would be circular and noisy).
+        .route("/api/health", get(ping_handler))
         .route("/api/openapi.json", get(openapi::openapi_handler))
         .route(
             "/api/openapi/public.json",
