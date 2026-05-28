@@ -1,8 +1,7 @@
-//! `OrcaToolDef` — wasm-safe metadata trait. The native `OrcaTool`
-//! supertrait (defined in this same crate) and any future wasm client
-//! codegen both anchor on it.
+//! `OrcaToolDef` — metadata trait. The `OrcaTool` supertrait (defined in
+//! this same crate) anchors on it.
 //!
-//! Carries only types/consts — no `run` method, no async, no native deps.
+//! Carries only types/consts — no `run` method, no async.
 
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -10,9 +9,8 @@ use serde::de::DeserializeOwned;
 
 /// Compile-time metadata for an OrcaTool — everything except `run`.
 ///
-/// Implementations of this trait are wasm-safe by construction. The native
-/// `OrcaTool` trait in `orca-utils` requires this as a supertrait, so every
-/// tool's NAME / DESCRIPTION / Args / Output live here exactly once.
+/// The `OrcaTool` trait requires this as a supertrait, so every tool's
+/// NAME / DESCRIPTION / Args / Output live here exactly once.
 pub trait OrcaToolDef: Send + Sync + 'static {
     const NAME: &'static str;
     const DESCRIPTION: &'static str;

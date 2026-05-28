@@ -1,10 +1,9 @@
-//! `orca-contract` — wasm-safe contract shared across every OrcaTool surface.
+//! `orca-contract` — contract shared across every OrcaTool surface.
 //!
-//! Default feature: wasm-safe metadata (`OrcaToolDef`, `OrcaOp`), `OrcaError` /
-//! `ErrorKind` / `OrcaResult`, `JsonAny`, and the LLM protocol types
-//! (`ToolCall`, `ToolDef`, `ToolResult`).
-//! `native` feature: native-only trait anchors — `OrcaTool`, `ToolCtx`,
-//! `RemoteExec`. Brings `orca-utils` (for `Config`), `anyhow`, `async-trait`.
+//! Exposes the metadata traits (`OrcaToolDef`, `OrcaOp`), `OrcaError` /
+//! `ErrorKind` / `OrcaResult`, `JsonAny`, the LLM protocol types
+//! (`ToolCall`, `ToolDef`, `ToolResult`), and the runtime trait anchors —
+//! `OrcaTool`, `ToolCtx`, `RemoteExec`.
 //!
 //! No inventory, no axum, no tokio — those live in `orca-dispatch`.
 

@@ -1,5 +1,5 @@
-//! Native-only runner trait — implementations carry the async `run` body.
-//! See `OrcaToolDef` for the wasm-safe metadata supertrait.
+//! Runner trait — implementations carry the async `run` body.
+//! See `OrcaToolDef` for the metadata supertrait.
 //!
 //! # Implementing
 //!

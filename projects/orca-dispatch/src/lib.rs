@@ -1,6 +1,6 @@
-//! `orca-dispatch` — native runtime for OrcaTool.
+//! `orca-dispatch` — runtime for OrcaTool.
 //!
-//! The wasm-safe contract (metadata traits, error, JsonAny, protocol types,
+//! The contract (metadata traits, error, JsonAny, protocol types,
 //! ToolCtx/OrcaTool/RemoteExec trait anchors) lives in `orca-contract`. The
 //! proc-macro that emits per-tool scaffolding is `orca-macro`. This crate
 //! provides:

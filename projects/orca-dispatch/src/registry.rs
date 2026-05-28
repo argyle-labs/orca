@@ -93,7 +93,7 @@ pub async fn dispatch(name: &str, args: Value, ctx: &ToolCtx) -> Result<Value> {
 }
 
 /// Dispatch and render the result as plain text. MCP + CLI use this; REST
-/// + WASM use `dispatch` directly so they get the structured JSON.
+/// uses `dispatch` directly so it gets the structured JSON.
 pub async fn dispatch_text(name: &str, args: Value, ctx: &ToolCtx) -> Result<String> {
     let value = dispatch(name, args, ctx).await?;
     Ok(value_to_text(&value))

@@ -9,8 +9,7 @@ use std::sync::Arc;
 /// services injected by the host. Tools whose `run` bodies need
 /// server-internal behavior (agent_backend, docs, agents, etc.) fetch a
 /// trait-object handle via `ctx.service::<Arc<dyn FooService>>()`
-/// instead of calling server-internal modules directly — keeps tool
-/// definitions wasm-safe.
+/// instead of calling server-internal modules directly.
 pub struct ToolCtx {
     pub config: Arc<orca_utils::config::Config>,
     services: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
