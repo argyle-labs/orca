@@ -126,42 +126,68 @@ pub fn strip_multipart_operations(spec: &mut OpenAPI, report: &mut NormalizeRepo
 /// the same payload as `application/json` + `text/json` + `application/*+json`
 /// — orca only ever wants the JSON one. Keep the first JSON-ish entry and
 /// drop the rest.
-pub fn collapse_response_media_types(spec: &mut OpenAPI) {
-    for_each_op_mut(spec, |_m, _p, op| {
+pub fn collapse_response_media_types(spec: &mut OpenAPI, report: &mut NormalizeReport) {
+    let mut hits: Vec<(String, String, Vec<String>)> = Vec::new();
+    for_each_op_mut(spec, |method, path, op| {
         let Some(op) = op else { return };
-        for resp in op.responses.responses.values_mut() {
-            if let ReferenceOr::Item(r) = resp {
-                keep_one_json_media_type(&mut r.content);
+        let label = format!("{} {}", method.to_uppercase(), path);
+        let statuses: Vec<_> = op
+            .responses
+            .responses
+            .keys()
+            .map(|s| format!("{s:?}"))
+            .collect();
+        for (status_str, resp) in op
+            .responses
+            .responses
+            .values_mut()
+            .zip(statuses.iter())
+            .map(|(r, s)| (s, r))
+        {
+            if let ReferenceOr::Item(r) = resp
+                && let Some((kept, dropped)) = keep_one_json_media_type(&mut r.content)
+            {
+                hits.push((format!("{label} -> {status_str}"), kept, dropped));
             }
         }
-        if let Some(ReferenceOr::Item(r)) = op.responses.default.as_mut() {
-            keep_one_json_media_type(&mut r.content);
+        if let Some(ReferenceOr::Item(r)) = op.responses.default.as_mut()
+            && let Some((kept, dropped)) = keep_one_json_media_type(&mut r.content)
+        {
+            hits.push((format!("{label} -> default"), kept, dropped));
         }
     });
+    report.collapsed_responses.extend(hits);
 }
 
 /// Same idea as `collapse_response_media_types`, applied to request bodies.
-pub fn collapse_request_media_types(spec: &mut OpenAPI) {
-    for_each_op_mut(spec, |_m, _p, op| {
+pub fn collapse_request_media_types(spec: &mut OpenAPI, report: &mut NormalizeReport) {
+    let mut hits: Vec<(String, String, Vec<String>)> = Vec::new();
+    for_each_op_mut(spec, |method, path, op| {
         if let Some(op) = op
             && let Some(ReferenceOr::Item(body)) = op.request_body.as_mut()
+            && let Some((kept, dropped)) = keep_one_json_media_type(&mut body.content)
         {
-            keep_one_json_media_type(&mut body.content);
+            hits.push((format!("{} {}", method.to_uppercase(), path), kept, dropped));
         }
     });
+    report.collapsed_requests.extend(hits);
 }
 
-fn keep_one_json_media_type(content: &mut indexmap::IndexMap<String, openapiv3::MediaType>) {
+/// Returns `Some((kept, dropped))` if anything was removed.
+fn keep_one_json_media_type(
+    content: &mut indexmap::IndexMap<String, openapiv3::MediaType>,
+) -> Option<(String, Vec<String>)> {
     if content.len() <= 1 {
-        return;
+        return None;
     }
-    let json_key = content
+    let json_key = content.keys().find(|k| k.contains("json")).cloned()?;
+    let dropped: Vec<String> = content
         .keys()
-        .find(|k| k.contains("json"))
+        .filter(|k| **k != json_key)
         .cloned()
-        .or_else(|| content.keys().next().cloned());
-    let Some(json_key) = json_key else { return };
+        .collect();
     content.retain(|k, _| *k == json_key);
+    Some((json_key, dropped))
 }
 
 fn synth_id(method: &str, path: &str) -> String {
