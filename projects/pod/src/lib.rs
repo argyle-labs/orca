@@ -811,7 +811,7 @@ mod tests {
     }
 }
 
-// ── mesh networking (flattened from the former `native` module) ─────────
+// ── mesh networking: mTLS dials, PKI, bootstrap signing, pod-wire methods ──
 mod bootstrap;
 pub mod caller_token;
 pub mod cert_rotation;
