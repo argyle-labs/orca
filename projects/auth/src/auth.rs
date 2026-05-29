@@ -224,7 +224,7 @@ pub struct TokenRevokeOutput {
 #[orca_tool(domain = "system.auth.token", verb = "create")]
 async fn auth_token_create(
     args: TokenCreateArgs,
-    _ctx: &orca_contract::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<TokenCreateOutput> {
     if !matches!(args.role.as_str(), "admin" | "read") {
         bail!("role must be 'admin' or 'read', got '{}'", args.role);
@@ -242,6 +242,11 @@ async fn auth_token_create(
         .expires_in_days
         .map(|d| (chrono::Utc::now() + chrono::Duration::days(d as i64)).to_rfc3339());
 
+    // Bind the new token to the authenticated operator so later bearer-auth
+    // requests resolve to a real user (S4 of [[project-remote-exec-full-fix]]).
+    // The bootstrap path (first token, no auth yet) has no caller → user_id
+    // is NULL and that token authenticates only locally.
+    let caller_user_id = ctx.caller().map(|c| c.user_id);
     let conn = db::open_default()?;
     db::api_tokens::insert(
         &conn,
@@ -251,6 +256,7 @@ async fn auth_token_create(
         &args.role,
         &now,
         expires_at.as_deref(),
+        caller_user_id.as_deref(),
     )?;
     Ok(TokenCreateOutput {
         id,

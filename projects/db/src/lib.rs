@@ -999,7 +999,12 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             role         TEXT NOT NULL CHECK (role IN ('admin','read')),
             created_at   TEXT NOT NULL,
             last_used_at TEXT,
-            expires_at   TEXT
+            expires_at   TEXT,
+            -- Issuing user. NULL for tokens minted before user binding existed
+            -- (pre-2026-05-29). New tokens record the authenticated operator
+            -- so REST bearer-auth produces a CallerIdentity for pod/exec
+            -- caller-token minting. See [[project-remote-exec-full-fix]] S4.
+            user_id      TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 

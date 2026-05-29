@@ -153,8 +153,15 @@ pub struct AuthIdentity {
 
 #[derive(Clone, Debug)]
 pub enum AuthKind {
-    /// Bearer token from `api_tokens`. Carries the token row id.
-    Token { id: String, name: String },
+    /// Bearer token from `api_tokens`. Carries the token row id and (for
+    /// tokens minted post-user-binding) the issuing user_id; the middleware
+    /// builds a CallerIdentity from this so pod/exec dispatch resolves to a
+    /// real operator. Legacy rows have `user_id = None`.
+    Token {
+        id: String,
+        name: String,
+        user_id: Option<String>,
+    },
     /// Browser cookie session from `sessions`. Carries the session id + user id.
     Session {
         session_id: String,
@@ -307,8 +314,32 @@ fn try_token_auth_with(
         kind: AuthKind::Token {
             id: row.id,
             name: row.name,
+            user_id: row.user_id,
         },
         role: row.role,
+    })
+}
+
+/// Issuing user_id for a token-kind identity, if any. Session kinds carry
+/// user_id directly on the variant; Bootstrap and legacy tokens return None.
+fn identity_user_id(ident: &AuthIdentity) -> Option<String> {
+    match &ident.kind {
+        AuthKind::Token { user_id, .. } => user_id.clone(),
+        AuthKind::Session { user_id, .. } => Some(user_id.clone()),
+        AuthKind::Bootstrap => None,
+    }
+}
+
+/// Build a CallerIdentity from a replicated `users` row. Returns `None` if
+/// the user has been deleted out from under the token (treat as legacy:
+/// fall back to the ctx's ambient host-admin).
+fn caller_from_user_id(user_id: &str) -> Option<orca_contract::CallerIdentity> {
+    let conn = db::open_default().ok()?;
+    let u = db::users::find_by_id(&conn, user_id).ok()??;
+    Some(orca_contract::CallerIdentity {
+        user_id: u.id,
+        username: u.username,
+        role: u.role,
     })
 }
 
@@ -359,6 +390,16 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
         match try_session_auth(sid) {
             Some(ident) => {
                 let mut req = req;
+                if let AuthKind::Session {
+                    user_id, username, ..
+                } = &ident.kind
+                {
+                    req.extensions_mut().insert(orca_contract::CallerIdentity {
+                        user_id: user_id.clone(),
+                        username: username.clone(),
+                        role: ident.role.clone(),
+                    });
+                }
                 req.extensions_mut().insert(ident);
                 return next.run(req).await;
             }
@@ -398,6 +439,7 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
                 kind: AuthKind::Token {
                     id: "tok_loopback".into(),
                     name: "loopback".into(),
+                    user_id: None,
                 },
                 role: "admin".into(),
             });
@@ -405,6 +447,15 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
         }
         if let Some(ident) = try_token_auth(token) {
             let mut req = req;
+            // Token rows minted post-2026-05-29 carry the issuer's user_id;
+            // resolve to a CallerIdentity so REST→pod dispatch mints a token
+            // bound to the actual operator. Legacy NULL → no override; the
+            // shared ctx's ambient host-admin identity stays in effect.
+            if let Some(uid) = identity_user_id(&ident)
+                && let Some(c) = caller_from_user_id(&uid)
+            {
+                req.extensions_mut().insert(c);
+            }
             req.extensions_mut().insert(ident);
             return next.run(req).await;
         }
@@ -770,7 +821,8 @@ mod tests {
     fn insert_token(conn: &db::Conn, role: &str, hash: &str, expires_at: Option<&str>) -> String {
         let now = chrono::Utc::now().to_rfc3339();
         let id = uuid::Uuid::now_v7().to_string();
-        db::api_tokens::insert(conn, &id, "test-token", hash, role, &now, expires_at).unwrap();
+        db::api_tokens::insert(conn, &id, "test-token", hash, role, &now, expires_at, None)
+            .unwrap();
         id
     }
 

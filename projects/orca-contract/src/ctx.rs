@@ -78,3 +78,63 @@ impl ToolCtx {
             .ok_or_else(|| anyhow!("service downcast failed for {}", std::any::type_name::<T>()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orca_utils::config::{Config, Model};
+    use std::path::PathBuf;
+
+    fn cfg() -> Arc<Config> {
+        Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: "http://localhost:1234".into(),
+            ollama_url: "http://localhost:11434".into(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: PathBuf::from("/tmp"),
+            memory_root: PathBuf::from("/tmp"),
+            db_path: PathBuf::from("/tmp/test.db"),
+            ports: Default::default(),
+        })
+    }
+
+    fn id(user: &str) -> crate::CallerIdentity {
+        crate::CallerIdentity {
+            user_id: format!("u_{user}"),
+            username: user.into(),
+            role: "admin".into(),
+        }
+    }
+
+    #[test]
+    fn clone_preserves_services_and_independent_caller_override() {
+        // Shared base ctx with one service + the host-admin ambient identity.
+        let mut base = ToolCtx::new(cfg()).with_auth(id("host_admin"));
+        base.register_service::<Arc<str>>("svc_value".into());
+
+        // REST hot path: clone the shared ctx and swap the caller for this
+        // request's authenticated session user.
+        let mut per_req = base.clone();
+        per_req.set_caller(Some(id("alice")));
+
+        assert_eq!(per_req.caller().unwrap().username, "alice");
+        assert_eq!(base.caller().unwrap().username, "host_admin");
+
+        // Services survive the clone — Arc storage shares without copying.
+        let from_base: Arc<str> = base.service().unwrap();
+        let from_clone: Arc<str> = per_req.service().unwrap();
+        assert_eq!(&*from_base, "svc_value");
+        assert_eq!(&*from_clone, "svc_value");
+        assert!(Arc::ptr_eq(&from_base, &from_clone));
+    }
+
+    #[test]
+    fn set_caller_clears_with_none() {
+        let mut ctx = ToolCtx::new(cfg()).with_auth(id("host_admin"));
+        ctx.set_caller(None);
+        assert!(ctx.caller().is_none());
+    }
+}

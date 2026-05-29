@@ -439,7 +439,7 @@ pub async fn me(req: Request) -> Response {
                 AuthKind::Session {
                     user_id, username, ..
                 } => (user_id.clone(), username.clone()),
-                AuthKind::Token { id, name } => (id.clone(), name.clone()),
+                AuthKind::Token { id, name, .. } => (id.clone(), name.clone()),
                 AuthKind::Bootstrap => ("bootstrap".into(), "bootstrap".into()),
             };
             Json(MeOk {
