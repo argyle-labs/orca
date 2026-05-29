@@ -125,11 +125,17 @@ allow`).
   retire the hand-maintained config until orca-rendered output is
   byte-verified equivalent and all three clients (a Mac, a Windows box,
   a Linux NFS client) are confirmed to mount/browse.
-- **Boot ordering:** re-export hosts must order `nfs-server`
-  `RequiresMountsFor=` their upstream mounts (the gateway hit exactly
-  this — nfsd raced ahead of its willow mounts and came up dead). The
-  reconciler should emit that drop-in automatically for re-export
-  shares.
+- **Boot ordering (re-export hosts):** a host that is BOTH an NFS
+  client (mounting upstream backends) AND NFS server (re-exporting
+  them) hits a cycle: `nfsd-generator` adds implicit
+  `RequiresMountsFor=` for every export path, while `_netdev` mounts
+  pull into `remote-fs.target` which `nfs-server` is `Before=`. No
+  combination of drop-ins / automount / noauto on its own breaks it.
+  **The reconciler must emit a custom orchestrator unit** (Type=oneshot
+  After=network-online.target) that explicitly mounts upstreams,
+  `exportfs -ra`s, then `systemctl start nfs-server`, with the fstab
+  entries set to `noauto` and `nfs-server.service` *disabled* (the
+  orchestrator owns its lifecycle). Verified on tyr 2026-05-29.
 
 ---
 
