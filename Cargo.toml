@@ -119,6 +119,7 @@ members = [
     "projects/orca-contract",
     "projects/orca-dispatch",
     "projects/orca-macro",
+    "projects/replicate",
     # Domain crates — one per cohesive surface. HARD RULE: keep flat names
     # (no `orca-tools-` prefix). Each crate's `#[orca_tool]` fns and their
     # service trait live in the same module file.

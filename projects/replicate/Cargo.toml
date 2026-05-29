@@ -1,0 +1,24 @@
+[package]
+name = "orca-replicate"
+version.workspace = true
+edition.workspace = true
+
+# Generic shared-state replication registry. Row types opt in via
+# `#[derive(Replicated)]` (orca-macro), which emits one `inventory::submit!`
+# per type into the slice this crate collects. The pod mesh engine walks the
+# slice to export/merge every shared entity through a single signed bundle —
+# no per-entity wire method. See project_unified_mesh_state.md.
+
+[lib]
+name = "replicate"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow     = { workspace = true }
+serde_json = { workspace = true }
+rusqlite   = { workspace = true }
+inventory  = { workspace = true }
+tracing    = { workspace = true }
+
+[lints]
+workspace = true
