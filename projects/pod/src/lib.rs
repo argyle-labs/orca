@@ -570,6 +570,29 @@ async fn pod_list(
     let joined = server_pod::list_enriched().await?;
     let handshaking = server_pod::pending().unwrap_or_default();
     let discovered = server_pod::discover().unwrap_or_default();
+
+    // Dedup the mDNS discovery layer against the membership layer. A peer that
+    // is already joined keeps re-advertising over mDNS as `unclaimed.<mid>`;
+    // without this filter every joined host also shows a phantom "unclaimed"
+    // row. Collapse `peer.<mid>` and `unclaimed.<mid>` to the shared `<mid>`
+    // key, and drop our own self-sighting.
+    fn machine_key(peer_id: &str) -> &str {
+        peer_id.split_once('.').map_or(peer_id, |(_, mid)| mid)
+    }
+    let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    claimed.insert(system::host_identity::machine_id_short().to_string());
+    for p in &joined {
+        claimed.insert(machine_key(&p.peer_id).to_string());
+    }
+    let discovered: Vec<_> = discovered
+        .into_iter()
+        .filter(|d| {
+            d.peer_id
+                .as_deref()
+                .map_or(true, |pid| !claimed.contains(machine_key(pid)))
+        })
+        .collect();
+
     let mut members = Vec::with_capacity(joined.len() + handshaking.len() + discovered.len());
     members.extend(joined.into_iter().map(|p| PodMember::Joined(Box::new(p))));
     members.extend(handshaking.into_iter().map(PodMember::Handshaking));

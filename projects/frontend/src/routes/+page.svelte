@@ -51,6 +51,63 @@
   };
   let inboundOffers = $state<InboundOffer[]>([]);
 
+  // Un-joined systems split into two buckets so the operator can act:
+  //   candidates → mDNS-discovered, unclaimed orcas we can ADD (join)
+  //   stale      → departed peers + orphan identities (machine_id churn,
+  //                decommissioned hosts) we can REMOVE (pod forget)
+  type Candidate = {
+    pubkey_fp: string;
+    peer_id: string | null;
+    hostname: string;
+    addr: string;
+    port: number;
+    can_invite: boolean;
+  };
+  type StaleRow = {
+    peer_id: string;
+    hostname: string;
+    addr: string;
+    port: number;
+    reason: string;
+    last_seen_at: number | null;
+  };
+  let candidates = $state<Candidate[]>([]);
+  let staleRows = $state<StaleRow[]>([]);
+  let joiningFp = $state<string | null>(null);
+  let forgettingId = $state<string | null>(null);
+
+  async function joinCandidate(c: Candidate) {
+    if (joiningFp) return;
+    joiningFp = c.pubkey_fp;
+    try {
+      await callTool('podJoin', { action: 'invite', addr: c.addr, port: c.port });
+      notifications.info(`Invite sent to ${c.hostname || c.addr}`);
+      await refreshPodPeers();
+    } catch (e) {
+      notifications.error(`Join failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      joiningFp = null;
+    }
+  }
+
+  async function forgetPeer(s: StaleRow) {
+    if (forgettingId) return;
+    forgettingId = s.peer_id;
+    try {
+      const r = await callTool<{ rows_removed: number; notified: unknown[] }>('podForget', {
+        peer_id: s.peer_id,
+      });
+      notifications.info(
+        `Forgot ${s.hostname || s.peer_id} (${r.rows_removed} rows, ${r.notified.length} peers notified)`,
+      );
+      await refreshPodPeers();
+    } catch (e) {
+      notifications.error(`Forget failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      forgettingId = null;
+    }
+  }
+
   async function refreshInboundOffers() {
     try {
       type PodMember = { state: 'joined' | 'handshaking' | 'discovered' } & Record<string, unknown>;
@@ -199,9 +256,74 @@
           {},
         ).catch(() => []),
       ]);
-      const peersResult: PodPeer[] = (listResult?.members ?? [])
+      const members = listResult?.members ?? [];
+      const joined = members
         .filter((m) => m.state === 'joined')
         .map((m) => m as unknown as PodPeer);
+      const peersResult: PodPeer[] = joined.filter((p) => p.status === 'active');
+
+      // Identify "self" so we can hide this host's own mDNS echoes.
+      const selfPeer = joined.find((p) => p.local);
+      const ownHostname = (selfPeer?.hostname ?? '').toLowerCase();
+      const activePeerIds = new Set(peersResult.map((p) => p.peer_id));
+
+      // Stale: departed/inactive joined peers — removable.
+      const staleFromJoined: StaleRow[] = joined
+        .filter((p) => !p.local && p.status !== 'active')
+        .map((p) => ({
+          peer_id: p.peer_id,
+          hostname: p.hostname ?? p.peer_id,
+          addr: p.addr ?? '',
+          port: p.port ?? 0,
+          reason: 'departed',
+          last_seen_at: null,
+        }));
+
+      type DiscRow = {
+        state: 'discovered';
+        pubkey_fp: string;
+        peer_id: string | null;
+        hostname: string;
+        addr: string;
+        port: number;
+        discovery_state: string;
+        can_invite: boolean;
+        last_seen_at: number;
+      };
+      const discovered = members
+        .filter((m) => m.state === 'discovered')
+        .map((m) => m as unknown as DiscRow)
+        // Drop live echoes of peers we're already paired with.
+        .filter((d) => !(d.peer_id && activePeerIds.has(d.peer_id)));
+
+      const nextCandidates: Candidate[] = [];
+      const staleFromDiscovery: StaleRow[] = [];
+      for (const d of discovered) {
+        const isSelfEcho = (d.hostname ?? '').toLowerCase() === ownHostname && !!ownHostname;
+        const unclaimed = d.discovery_state === 'unclaimed';
+        if (unclaimed && !isSelfEcho) {
+          nextCandidates.push({
+            pubkey_fp: d.pubkey_fp,
+            peer_id: d.peer_id,
+            hostname: d.hostname,
+            addr: d.addr,
+            port: d.port,
+            can_invite: d.can_invite,
+          });
+        } else if (d.peer_id) {
+          // pod:<id> orphan, or this host's own stale unclaimed identity.
+          staleFromDiscovery.push({
+            peer_id: d.peer_id,
+            hostname: d.hostname,
+            addr: d.addr,
+            port: d.port,
+            reason: isSelfEcho ? 'stale self identity' : 'orphan',
+            last_seen_at: d.last_seen_at,
+          });
+        }
+      }
+      candidates = nextCandidates;
+      staleRows = [...staleFromJoined, ...staleFromDiscovery];
 
       const sysById = new Map<string, SystemInfoReport | null>();
       for (const row of statusResult ?? []) {
@@ -242,12 +364,6 @@
     } catch (e) {
       console.warn('pod.list failed:', e);
     }
-  }
-
-  function refresh(inst: Instance, e?: MouseEvent) {
-    e?.stopPropagation();
-    if (inst.role === 'local') return refreshLocal(inst);
-    return refreshPodPeers();
   }
 
   // Friendly label for the canonical system_type tag. Every detected host
@@ -608,7 +724,6 @@
               <span class="update-badge" title="Update available: {inst.updateLatest ?? 'newer version'}">↑ {inst.updateLatest ?? 'update'}</span>
             {/if}
           </div>
-          <button class="icon-btn" onclick={(e) => refresh(inst, e)} title="Refresh">↻</button>
         </div>
 
         {#if inst.sys}
@@ -714,6 +829,51 @@
       or click <strong>+ Pair with code</strong> above and paste a code from
       <code>orca pod pair &lt;this-host&gt;</code> on the inviter.
     </p>
+  {/if}
+
+  {#if candidates.length > 0}
+    <div class="aux-section">
+      <div class="aux-head">Discovered — not yet joined</div>
+      <div class="aux-list">
+        {#each candidates as c (c.pubkey_fp)}
+          <div class="aux-row">
+            <div class="aux-ident">
+              <StatusDot ok={null} />
+              <span class="aux-name">{c.hostname || c.addr}</span>
+              <span class="dim">{c.addr}:{c.port}</span>
+            </div>
+            <button
+              class="btn primary sm"
+              disabled={joiningFp === c.pubkey_fp}
+              onclick={() => joinCandidate(c)}
+            >{joiningFp === c.pubkey_fp ? 'Adding…' : '+ Add'}</button>
+          </div>
+        {/each}
+      </div>
+    </div>
+  {/if}
+
+  {#if staleRows.length > 0}
+    <div class="aux-section">
+      <div class="aux-head">Dead / stale — safe to remove</div>
+      <div class="aux-list">
+        {#each staleRows as s (s.peer_id)}
+          <div class="aux-row">
+            <div class="aux-ident">
+              <StatusDot ok={false} />
+              <span class="aux-name">{s.hostname || s.peer_id}</span>
+              <span class="dim">{s.addr}{s.port ? `:${s.port}` : ''}</span>
+              <span class="aux-tag">{s.reason}</span>
+            </div>
+            <button
+              class="btn danger sm"
+              disabled={forgettingId === s.peer_id}
+              onclick={() => forgetPeer(s)}
+            >{forgettingId === s.peer_id ? 'Removing…' : 'Forget'}</button>
+          </div>
+        {/each}
+      </div>
+    </div>
   {/if}
 </section>
 
@@ -1020,6 +1180,51 @@
   .inbound-row .dim { color: var(--color-text-dim); font-family: var(--font-mono); margin-left: var(--space-1); }
   .inbound-row .btn { padding: var(--space-1) var(--space-3); font-size: var(--text-xs); border-radius: var(--radius-md); border: 1px solid var(--color-accent); cursor: pointer; }
   .inbound-row .btn.primary { background: var(--color-accent); color: var(--color-on-accent, #fff); }
+
+  /* ── auxiliary system sections (discovered candidates + stale rows) ── */
+  .aux-section {
+    margin-top: var(--space-4);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+  }
+  .aux-head {
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    color: var(--color-text-dim);
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    border-bottom: 1px solid var(--color-border);
+  }
+  .aux-list { display: flex; flex-direction: column; }
+  .aux-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+  }
+  .aux-row:last-child { border-bottom: none; }
+  .aux-ident { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); }
+  .aux-name { font-weight: var(--weight-semibold); }
+  .aux-ident .dim { color: var(--color-text-dim); font-family: var(--font-mono); font-size: var(--text-xs); }
+  .aux-tag {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-text-dim);
+    border: 1px solid var(--color-border);
+    border-radius: 3px;
+    padding: 1px 5px;
+  }
+  .btn.sm { padding: var(--space-1) var(--space-3); font-size: var(--text-xs); border-radius: var(--radius-md); border: 1px solid var(--color-border); background: var(--color-surface); color: var(--color-text); cursor: pointer; }
+  .btn.sm:hover:not(:disabled) { background: var(--color-surface-2); }
+  .btn.sm:disabled { opacity: 0.5; cursor: default; }
+  .btn.primary.sm { background: var(--color-accent); color: var(--color-on-accent, #fff); border-color: var(--color-accent); }
+  .btn.danger.sm { color: var(--color-error); border-color: var(--color-error); }
+  .btn.danger.sm:hover:not(:disabled) { background: color-mix(in srgb, var(--color-error) 14%, transparent); }
 
   .retention-picker {
     display: flex;
