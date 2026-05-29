@@ -47,9 +47,8 @@ specs    = { path = "../specs",    features = ["cli"] }
 mcp      = { path = "../mcp",      features = ["cli"] }
 llm      = { path = "../llm" }
 conversation = { path = "../conversation" }
-scanner  = { path = "../scanner" }
-schema   = { path = "../schema",   features = ["cli"] }
 # Integration crates (flat names, no facade)
+integrations-db = { path = "../integrations/db",          features = ["cli"] }
 docker        = { path = "../integrations/docker",        features = ["cli"] }
 dockge        = { path = "../integrations/dockge" }
 homeassistant = { path = "../integrations/homeassistant", features = ["cli"] }

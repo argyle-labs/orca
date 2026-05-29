@@ -75,5 +75,5 @@ pub async fn openapi_handler() -> impl axum::response::IntoResponse {
 }
 
 pub async fn openapi_public_handler() -> impl axum::response::IntoResponse {
-    axum::Json(scanner::filter_orca_public(orca_spec_json()))
+    axum::Json(specs::scanner::filter_orca_public(orca_spec_json()))
 }

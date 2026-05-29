@@ -3,16 +3,16 @@
 //! [[feedback_no_indirection]].
 #![allow(clippy::disallowed_types)] // OpenAPI registry — dynamic JSON construction for spec blobs
 
+use crate::scanner::specs_dir;
+use crate::scanner::{
+    GraphQlEnum as ScannerEnum, GraphQlField as ScannerField, GraphQlInfo as ScannerInfo,
+    GraphQlOperation as ScannerOp, GraphQlType as ScannerType,
+};
 use crate::{
     DbSpecRow, GraphQlEnum, GraphQlField, GraphQlInfoData, GraphQlOperation, GraphQlType,
     GraphqlProxyResult, RegisterSpecResult, SpecFilesPresence, SpecMetaRow, SyncMcpSpecsResult,
 };
 use anyhow::{Context, Result, anyhow};
-use scanner::specs_dir;
-use scanner::{
-    GraphQlEnum as ScannerEnum, GraphQlField as ScannerField, GraphQlInfo as ScannerInfo,
-    GraphQlOperation as ScannerOp, GraphQlType as ScannerType,
-};
 use serde_json::{Value, json};
 
 fn validate_repo(repo: &str) -> bool {
@@ -463,7 +463,7 @@ pub async fn graphql_info(repo: &str) -> Result<GraphQlInfoData> {
     let path = specs_dir().join(format!("{repo}.graphql"));
     let sdl = std::fs::read_to_string(&path)
         .with_context(|| format!("no GraphQL schema for '{repo}'"))?;
-    let info = scanner::parse_graphql_sdl(repo, &sdl)?;
+    let info = crate::scanner::parse_graphql_sdl(repo, &sdl)?;
     Ok(map_info(info))
 }
 

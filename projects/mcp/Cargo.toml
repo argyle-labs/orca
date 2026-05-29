@@ -16,7 +16,6 @@ dispatch    = { path = "../dispatch" }
 contract   = { path = "../contract", default-features = false }
 derive      = { path = "../derive" }
 platform        = { path = "../platform", default-features = false }
-scanner         = { path = "../scanner" }
 schemars        = { workspace = true }
 serde           = { workspace = true }
 serde_json      = { workspace = true }

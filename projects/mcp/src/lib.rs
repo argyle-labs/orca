@@ -12,7 +12,3 @@ pub mod sync;
 pub mod tools;
 
 pub mod context7;
-
-pub mod specs;
-
-pub mod spec_tools;

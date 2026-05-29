@@ -227,6 +227,7 @@ mod proxy_graphql_args_mod {
 pub use proxy_graphql_args_mod::ProxyGraphqlArgs;
 
 mod native;
+pub mod scanner;
 
 use native as imp;
 

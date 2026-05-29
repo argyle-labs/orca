@@ -32,7 +32,6 @@ colored     = { workspace = true,         optional = true }
 rust-embed  = { workspace = true }
 agents = { path = "../agents" }
 llm = { path = "../llm" }
-scanner = { path = "../scanner" }
 utoipa = { workspace = true }
 mcp = { path = "../mcp" }
 reqwest = { workspace = true }

@@ -1016,7 +1016,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
 /// Write orca's generated OpenAPI spec to ~/.orca/specs/orca.json so it
 /// lives alongside rebuy's scanner-generated specs and can be compared to them.
 fn write_orca_spec_to_disk() {
-    let dir = scanner::specs_dir();
+    let dir = specs::scanner::specs_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!("could not create openapi dir {}: {e}", dir.display());
         return;

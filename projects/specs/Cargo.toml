@@ -25,7 +25,9 @@ async-trait = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
 clap       = { workspace = true,         optional = true }
-scanner = { path = "../scanner" }
+graphql-parser = "0.4"
+regex = { workspace = true }
+utoipa = { workspace = true }
 mcp = { path = "../mcp" }
 reqwest = { workspace = true }
 dirs = { workspace = true }
