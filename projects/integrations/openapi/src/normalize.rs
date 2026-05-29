@@ -16,13 +16,54 @@
 
 use openapiv3::{OpenAPI, Operation, ReferenceOr};
 
+/// What `for_progenitor` had to change. Surfaced so consumer build scripts
+/// can `cargo:warning=` each entry — that way a new upstream spec version
+/// adding a multipart endpoint (or any other normalization hit) shows up in
+/// the build log instead of silently disappearing from the generated client.
+#[derive(Debug, Default, Clone)]
+pub struct NormalizeReport {
+    /// Synthesized operationIds: `(method, path, generated_id)`.
+    pub synthesized_ids: Vec<(String, String, String)>,
+    /// Operations dropped because they used a multipart request body.
+    pub dropped_multipart: Vec<String>,
+    /// Request bodies whose alternate media types were collapsed away.
+    /// `(op_label, kept, dropped)`.
+    pub collapsed_requests: Vec<(String, String, Vec<String>)>,
+    /// Responses whose alternate media types were collapsed away.
+    /// `(op_label + status, kept, dropped)`.
+    pub collapsed_responses: Vec<(String, String, Vec<String>)>,
+}
+
+impl NormalizeReport {
+    /// Emit `cargo:warning=` lines so each item appears in the build log.
+    /// Intended for use from a consumer's build.rs.
+    pub fn emit_cargo_warnings(&self, crate_name: &str) {
+        for op in &self.dropped_multipart {
+            println!("cargo:warning={crate_name}: dropped multipart op {op}");
+        }
+        for (op, kept, dropped) in &self.collapsed_requests {
+            println!(
+                "cargo:warning={crate_name}: collapsed request {op} kept={kept} dropped={dropped:?}"
+            );
+        }
+        for (op, kept, dropped) in &self.collapsed_responses {
+            println!(
+                "cargo:warning={crate_name}: collapsed response {op} kept={kept} dropped={dropped:?}"
+            );
+        }
+    }
+}
+
 /// Run the full preprocessor chain that maps "imperfect but valid OpenAPI"
-/// to "what progenitor accepts." Idempotent.
-pub fn for_progenitor(spec: &mut OpenAPI) {
-    synthesize_operation_ids(spec);
-    strip_multipart_operations(spec);
-    collapse_response_media_types(spec);
-    collapse_request_media_types(spec);
+/// to "what progenitor accepts." Idempotent. Returns a report of every
+/// change made — `()`-discard if you don't care.
+pub fn for_progenitor(spec: &mut OpenAPI) -> NormalizeReport {
+    let mut r = NormalizeReport::default();
+    synthesize_operation_ids(spec, &mut r);
+    strip_multipart_operations(spec, &mut r);
+    collapse_response_media_types(spec, &mut r);
+    collapse_request_media_types(spec, &mut r);
+    r
 }
 
 fn for_each_op_mut(spec: &mut OpenAPI, mut f: impl FnMut(&str, &str, &mut Option<Operation>)) {
