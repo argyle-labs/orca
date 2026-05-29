@@ -73,6 +73,19 @@ pub fn args_hash(args: &serde_json::Value) -> String {
     s
 }
 
+/// Synthetic identity for host-internal system operations (e.g. the mutual
+/// pod-trust push) that aren't driven by a logged-in user. `caller_user_id`
+/// will not resolve in the recipient's replicated `users` table, so the
+/// recipient falls back to the trusted-peer path (signer fp pinned to a paired
+/// peer) and honors the asserted admin role.
+pub fn system_operator() -> CallerIdentity {
+    CallerIdentity {
+        user_id: "system".to_string(),
+        username: "system".to_string(),
+        role: "admin".to_string(),
+    }
+}
+
 /// Mint and sign a token for `tool`+`args` on behalf of `identity`, valid for
 /// `ttl_secs`. Signed with the host bootstrap key (`pki_dir`).
 pub fn mint(
