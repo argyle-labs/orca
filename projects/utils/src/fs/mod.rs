@@ -1,15 +1,15 @@
-//! Filesystem and search helpers.
+//! Low-level filesystem path/io primitives. Generic content/algorithm
+//! helpers that *happen* to operate on files (hashing, search) used to
+//! live here; they were promoted to top-level `orca_utils::hash` and
+//! `orca_utils::search` so the `fs` namespace doesn't shadow the `fs`
+//! platform crate.
 //!
 //! Modules:
-//! - [`fs`] — read/write/edit/exists/mkdir/remove + tilde expansion
+//! - [`ops`] (re-exported flat) — read/write/edit/exists/mkdir/remove + tilde expansion + orca_home
 //! - [`atomic`] — atomic write (temp + rename)
-//! - [`hash`] — sha256 / blake3 file hashing
 //! - [`watch`] — async filesystem change notifications
-//! - [`search`] — glob + grep helpers
 
 pub mod atomic;
 pub mod ops;
 pub use ops::*;
-pub mod hash;
-pub mod search;
 pub mod watch;

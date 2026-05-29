@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use anyhow::bail;
 use orca_macro::orca_tool;
+use orca_utils::hash;
 use rand::Rng;
-use sha2::{Digest, Sha256};
 
 const ANTHROPIC_KEY: &str = "anthropic_api_key";
 
@@ -233,8 +233,8 @@ async fn auth_token_create(
     // self-identifying in logs/secret-scanners.
     let mut raw = [0u8; 16];
     rand::rng().fill_bytes(&mut raw);
-    let plaintext = format!("orca_{}", hex_lower(&raw));
-    let token_hash = sha256_hex(plaintext.as_bytes());
+    let plaintext = format!("orca_{}", hash::hex_encode(&raw));
+    let token_hash = hash::sha256_hex(plaintext.as_bytes());
 
     let id = uuid::Uuid::now_v7().to_string();
     let now = chrono::Utc::now().to_rfc3339();
