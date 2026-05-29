@@ -155,7 +155,7 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
             Ok(r) => value_response(id, &r),
             Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
         },
-        POD_EXEC_METHOD => match handle_exec(request).await {
+        POD_EXEC_METHOD => match handle_exec(request, peer_cn).await {
             Ok(r) => value_response(id, &r),
             Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
         },
@@ -364,83 +364,126 @@ async fn handle_dev_disable() -> Result<PodDevDisableResult> {
     }
 }
 
-/// Authorization gate for `pod/exec`.
-///
-/// Target model: every host knows every user (pod-replicated identity
-/// registry). Each `pod/exec` request carries the invoking *user's* identity;
-/// the executing peer checks that user's role against the tool's required
-/// role at request time. The mTLS chain proves the *peer* on the wire is a
-/// paired pod member, but that is not, by itself, authorization — admin
-/// delegation is per-user, not per-peer.
-///
-/// Interim (v0): the wire frame carries the caller's *asserted* role
-/// (`caller_role`) but no signed proof of it, so we trust the assertion and
-/// check it against the tool's required role. This is functional but not yet
-/// secure — a modified peer could assert `admin`. S1 of
-/// [[project-remote-exec-full-fix]] replaces the bare assertion with an
-/// HMAC-signed `caller_token` (caller_user_id, tool, args-hash, expires_at,
-/// nonce) verified against the pod-replicated users table (S2).
-fn authorize_exec(
-    tool: &str,
-    remote_ok: bool,
-    required_role: &str,
-    caller_role: Option<&str>,
-) -> Result<()> {
+/// Whether `tool` is callable at all over `pod/exec` (in the REMOTE_OK
+/// allowlist) and whether it needs an authenticated caller (role-gated).
+/// Pure so the gate logic is unit-testable without a DB or PKI.
+fn remote_ok_gate(tool: &str, remote_ok: bool, required_role: &str) -> Result<bool> {
     if !remote_ok {
         anyhow::bail!(
             "pod/exec refused: tool '{tool}' is not in the REMOTE_OK allowlist on this peer"
         );
     }
-    if required_role == "any" {
-        return Ok(());
-    }
-    let claim = caller_role.unwrap_or("any");
-    if !role_satisfies(claim, required_role) {
-        anyhow::bail!(
-            "pod/exec refused: tool '{tool}' requires role '{required_role}' but caller asserted \
-             '{claim}'"
-        );
-    }
+    // "any" tools are authorized by pod membership alone (the mTLS chain already
+    // proved a paired peer). Role-gated tools additionally require a verified
+    // caller token bound to a user whose replicated role satisfies the gate.
+    Ok(required_role != "any")
+}
+
+/// Zero-trust authorization gate for a role-gated `pod/exec` call.
+///
+/// The mTLS chain proves which *peer* is on the wire; this proves which *user*
+/// the call acts for and that the executing host independently agrees they may.
+/// Nothing the caller asserts is trusted — every decision is re-derived here:
+///   1. the caller token signature verifies AND covers this exact tool + args,
+///      and has not expired (`caller_token::verify`);
+///   2. the token's signer fingerprint equals the authenticated peer's *pinned*
+///      `pod_peers.pubkey_fp` (a valid sig from an unpinned key is rejected);
+///   3. the token nonce has not been seen before (replay guard);
+///   4. the effective role comes ONLY from this host's own (replicated) `users`
+///      row for `caller_user_id` — never the token's asserted `role`. Unknown
+///      user or insufficient role → refuse.
+///
+/// See feedback_zero_trust_no_blind_trust.md + project_remote_exec_full_fix.md.
+fn authorize_role_gated(
+    conn: &rusqlite::Connection,
+    peer_cn: &str,
+    tool: &str,
+    args: &serde_json::Value,
+    required_role: &str,
+    caller_token: Option<&pki::SignedEnvelope>,
+    now: i64,
+) -> Result<()> {
+    let env = caller_token.ok_or_else(|| {
+        anyhow::anyhow!(
+            "pod/exec refused: tool '{tool}' requires role '{required_role}' but no signed caller \
+             token was presented"
+        )
+    })?;
+
+    let verified = crate::caller_token::verify(env, tool, args, now)
+        .context("pod/exec refused: caller token verification failed")?;
+
+    let pinned = crate::peerdb::pinned_pubkey_fp(conn, peer_cn)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "pod/exec refused: peer {peer_cn} has no pinned bootstrap key to verify against"
+        )
+    })?;
+    anyhow::ensure!(
+        verified.signer_fp == pinned,
+        "pod/exec refused: caller token signer fp does not match peer {peer_cn}'s pinned key"
+    );
+
+    crate::caller_token::check_replay(&verified.token.nonce, verified.token.expires_at, now)?;
+
+    let user = db::users::find_by_id(conn, &verified.token.caller_user_id)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "pod/exec refused: caller user {} is not in this host's replicated users",
+            verified.token.caller_user_id
+        )
+    })?;
+    anyhow::ensure!(
+        role_satisfies(&user.role, required_role),
+        "pod/exec refused: tool '{tool}' requires role '{required_role}' but user {} has role '{}'",
+        user.username,
+        user.role
+    );
     Ok(())
 }
 
-/// Returns true when the caller's asserted role meets the required role. Order:
-/// `any` < `user` < `admin`. Unknown claims compare as `any`.
+/// Returns true when the user's *replicated* role meets the required role.
+/// Order: `any` < `member` < `admin`. Unknown roles compare as `any`.
 fn role_rank(role: &str) -> u8 {
     match role {
         "admin" => 2,
-        "user" => 1,
+        "member" | "user" => 1,
         _ => 0,
     }
 }
 
-fn role_satisfies(claim: &str, required: &str) -> bool {
-    role_rank(claim) >= role_rank(required)
+fn role_satisfies(role: &str, required: &str) -> bool {
+    role_rank(role) >= role_rank(required)
 }
 
-/// Handle `pod/exec`: dispatch an allowlisted local tool on this peer's
-/// behalf. The mesh mTLS chain already proves the caller is a paired peer;
-/// the additional `REMOTE_OK` allowlist check guards which tools that
-/// identity may invoke. We relay to our own loopback `/api/tools/<name>`
-/// rather than touching the registry directly so the relay benefits from
-/// the same auth/log/middleware stack as any other API call.
-async fn handle_exec(request: Request) -> Result<PodExecResult> {
+/// Handle `pod/exec`: dispatch an allowlisted local tool on this peer's behalf.
+/// The mesh mTLS chain proves the caller is a paired peer; the REMOTE_OK
+/// allowlist guards which tools are reachable, and role-gated tools require a
+/// verified caller token bound to a replicated user (zero-trust, no asserted
+/// role). Dispatch is direct in-process through the shared registry.
+async fn handle_exec(request: Request, peer_cn: &str) -> Result<PodExecResult> {
     let params: PodExecParams = match request.params {
         Some(v) => serde_json::from_value(v).context("parse pod/exec params")?,
         None => anyhow::bail!("pod/exec requires params"),
     };
 
-    authorize_exec(
+    let required_role = orca_dispatch::tool_roles::required_role(&params.tool);
+    let needs_auth = remote_ok_gate(
         &params.tool,
         orca_dispatch::remote_ok::is_allowed(&params.tool),
-        orca_dispatch::tool_roles::required_role(&params.tool),
-        params.caller_role.as_deref(),
+        required_role,
     )?;
+    if needs_auth {
+        let conn = db::open_default()?;
+        authorize_role_gated(
+            &conn,
+            peer_cn,
+            &params.tool,
+            &params.args,
+            required_role,
+            params.caller_token.as_ref(),
+            chrono::Utc::now().timestamp(),
+        )?;
+    }
 
-    // Direct in-process dispatch through the shared registry — no HTTPS
-    // loopback. Authorization is enforced by `authorize_exec` above (REMOTE_OK
-    // allowlist + mTLS peer certificate). Admin-role tools tagged remote_ok are
-    // reachable from trusted peers; the pod join handshake is the admin gate.
     let result = crate::dispatcher::dispatch(&params.tool, params.args.clone())
         .await
         .with_context(|| format!("dispatch pod-relayed tool '{}'", params.tool))?;
@@ -580,36 +623,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn authorize_exec_refuses_when_not_remote_ok() {
-        let err = authorize_exec("system.dev_enable", false, "any", None).unwrap_err();
+    fn remote_ok_gate_refuses_when_not_remote_ok() {
+        let err = remote_ok_gate("system.dev_enable", false, "any").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("REMOTE_OK allowlist"), "got: {msg}");
         assert!(msg.contains("system.dev_enable"), "got: {msg}");
     }
 
     #[test]
-    fn authorize_exec_refuses_admin_required_without_claim() {
-        let err = authorize_exec("system.update.create", true, "admin", None).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("requires role 'admin'"), "got: {msg}");
-        assert!(msg.contains("caller asserted 'any'"), "got: {msg}");
+    fn remote_ok_gate_any_role_needs_no_auth() {
+        // Allowlisted + "any" → pod membership is sufficient, no token needed.
+        assert!(!remote_ok_gate("fs.search", true, "any").unwrap());
     }
 
     #[test]
-    fn authorize_exec_refuses_admin_required_with_user_claim() {
-        let err = authorize_exec("system.update.create", true, "admin", Some("user")).unwrap_err();
-        assert!(err.to_string().contains("caller asserted 'user'"));
+    fn remote_ok_gate_admin_role_needs_auth() {
+        // Allowlisted + role-gated → a verified caller token is required.
+        assert!(remote_ok_gate("system.update.create", true, "admin").unwrap());
     }
 
     #[test]
-    fn authorize_exec_passes_admin_required_with_admin_claim() {
-        authorize_exec("system.update.create", true, "admin", Some("admin"))
-            .expect("admin claim should satisfy admin requirement");
-    }
-
-    #[test]
-    fn authorize_exec_passes_remote_ok_and_any_role() {
-        authorize_exec("fs.search", true, "any", None).expect("should pass");
+    fn role_satisfies_ranks_admin_above_member() {
+        assert!(role_satisfies("admin", "admin"));
+        assert!(role_satisfies("admin", "any"));
+        assert!(!role_satisfies("member", "admin"));
+        assert!(role_satisfies("member", "any"));
+        assert!(!role_satisfies("bogus", "admin"));
     }
 
     #[test]

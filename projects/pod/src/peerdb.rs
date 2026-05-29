@@ -479,6 +479,22 @@ pub fn ensure_peer_stub(
     Ok(())
 }
 
+/// The pinned bootstrap-pubkey fingerprint for a non-departed paired peer, if
+/// recorded. Used by `pod/exec` authorization to bind a caller token's signer
+/// to the peer authenticated on the mTLS wire. Returns `None` when the peer is
+/// unknown, departed, or has no pinned fp (→ caller is unverifiable, refuse).
+pub fn pinned_pubkey_fp(conn: &Connection, peer_id: &str) -> Result<Option<String>> {
+    let fp = conn
+        .query_row(
+            "SELECT pubkey_fp FROM pod_peers WHERE peer_id = ? AND departed_at IS NULL",
+            params![peer_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(fp)
+}
+
 pub fn list_peers(conn: &Connection) -> Result<Vec<PeerRow>> {
     let mut stmt = conn.prepare(
         "SELECT p.peer_id,

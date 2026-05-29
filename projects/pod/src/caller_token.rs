@@ -145,6 +145,39 @@ pub fn verify(
     Ok(Verified { token, signer_fp })
 }
 
+/// In-memory replay guard for caller-token nonces. Tokens are short-lived
+/// (`DEFAULT_TTL_SECS`), so a process-local cache is sufficient: a captured
+/// token can only be replayed within its expiry window, and a daemon restart
+/// drops the cache only after every cached token would already have expired.
+mod replay {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    // nonce → expiry (unix seconds). Pruned opportunistically on each insert.
+    static SEEN: Mutex<Option<HashMap<String, i64>>> = Mutex::new(None);
+
+    /// Record an unseen `nonce` (valid until `expires_at`). Returns true if it
+    /// was new; false if the nonce was already used (i.e. a replay).
+    pub fn record_unseen(nonce: &str, expires_at: i64, now: i64) -> bool {
+        let mut guard = SEEN.lock().unwrap();
+        let map = guard.get_or_insert_with(HashMap::new);
+        map.retain(|_, exp| *exp > now);
+        if map.contains_key(nonce) {
+            return false;
+        }
+        map.insert(nonce.to_string(), expires_at);
+        true
+    }
+}
+
+/// Reject a token whose nonce has already been seen within its validity window.
+pub fn check_replay(nonce: &str, expires_at: i64, now: i64) -> Result<()> {
+    if !replay::record_unseen(nonce, expires_at, now) {
+        anyhow::bail!("caller token nonce {nonce} was already used (replay rejected)");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +185,26 @@ mod tests {
 
     fn tmp_pki() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
+    }
+
+    #[test]
+    fn replay_guard_rejects_second_use() {
+        let nonce = format!("nonce-{}", uuid::Uuid::now_v7());
+        // First use within validity → accepted.
+        check_replay(&nonce, 1000, 0).unwrap();
+        // Same nonce again → rejected as a replay.
+        let err = check_replay(&nonce, 1000, 0).unwrap_err();
+        assert!(err.to_string().contains("replay rejected"), "{err}");
+    }
+
+    #[test]
+    fn replay_guard_forgets_expired_nonces() {
+        let nonce = format!("nonce-{}", uuid::Uuid::now_v7());
+        check_replay(&nonce, 100, 0).unwrap();
+        // Once `now` passes the expiry, the nonce is pruned and may reappear
+        // (a fresh token with the same nonce is implausible, but this proves
+        // the cache doesn't grow without bound).
+        check_replay(&nonce, 300, 200).unwrap();
     }
 
     fn ident() -> CallerIdentity {
