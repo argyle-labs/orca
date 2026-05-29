@@ -109,6 +109,9 @@ import type {
   NamespaceUseData,
   NamespaceUseErrors,
   NamespaceUseResponses,
+  PodForgetData,
+  PodForgetErrors,
+  PodForgetResponses,
   PodJoinData,
   PodJoinErrors,
   PodJoinResponses,
@@ -124,6 +127,9 @@ import type {
   PodPingData,
   PodPingErrors,
   PodPingResponses,
+  PodRecoverData,
+  PodRecoverErrors,
+  PodRecoverResponses,
   PodStatusDetailData,
   PodStatusDetailErrors,
   PodStatusDetailResponses,
@@ -1042,6 +1048,23 @@ export const namespaceUse = <ThrowOnError extends boolean = false>(
   });
 
 /**
+ * Forget a stale/orphan peer_id mesh-wide: hard-delete it here AND fan a one-way notice to every live member so they drop it too. Use for orphans left by machine_id churn or decommissioned hosts — NOT for evicting a live peer (that's `pod kick`).
+ *
+ * Forget a stale/orphan peer_id mesh-wide: hard-delete it here AND fan a one-way notice to every live member so they drop it too. Use for orphans left by machine_id churn or decommissioned hosts — NOT for evicting a live peer (that's `pod kick`).
+ */
+export const podForget = <ThrowOnError extends boolean = false>(
+  options: Options<PodForgetData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodForgetResponses, PodForgetErrors, ThrowOnError>({
+    url: '/api/tools/pod.forget',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
  * Initiate or complete a pod-membership pairing.  `action`: - `"invite"` — inviter pushes an offer to a discovered joiner. Requires `addr` (joiner's host or host:port from mDNS discovery). Returns a pairing code to show the operator; the joiner auto-accepts if its daemon received the code in-band. - `"join"` — joiner requests an offer from an inviter not yet in mDNS. Requires `addr` (inviter's host or host:port). Returns the code the inviter will display. - `"accept"` — joiner accepts a pending inbound offer by its 6-char code. Requires `code`. Returns the inviter identity after join.
  *
  * Initiate or complete a pod-membership pairing.  `action`: - `"invite"` — inviter pushes an offer to a discovered joiner. Requires `addr` (joiner's host or host:port from mDNS discovery). Returns a pairing code to show the operator; the joiner auto-accepts if its daemon received the code in-band. - `"join"` — joiner requests an offer from an inviter not yet in mDNS. Requires `addr` (inviter's host or host:port). Returns the code the inviter will display. - `"accept"` — joiner accepts a pending inbound offer by its 6-char code. Requires `code`. Returns the inviter identity after join.
@@ -1119,6 +1142,23 @@ export const podPing = <ThrowOnError extends boolean = false>(
 ) =>
   (options.client ?? client).post<PodPingResponses, PodPingErrors, ThrowOnError>({
     url: '/api/tools/pod.ping',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Clear a stale `departed_at` flag for a peer on THIS host. Recovery tool for the 2026-05-28 kick/peer-leaving bug (and any future false-depart). No network call — purely local row repair.
+ *
+ * Clear a stale `departed_at` flag for a peer on THIS host. Recovery tool for the 2026-05-28 kick/peer-leaving bug (and any future false-depart). No network call — purely local row repair.
+ */
+export const podRecover = <ThrowOnError extends boolean = false>(
+  options: Options<PodRecoverData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodRecoverResponses, PodRecoverErrors, ThrowOnError>({
+    url: '/api/tools/pod.recover',
     ...options,
     headers: {
       'Content-Type': 'application/json',

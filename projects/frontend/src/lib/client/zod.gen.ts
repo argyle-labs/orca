@@ -365,6 +365,7 @@ export const zPluginEntry = z.object({
 export const zPodDiscoveryRowDto = z.object({
   addr: z.string(),
   can_invite: z.boolean(),
+  discovery_state: z.string(),
   first_seen_at: z.coerce
     .bigint()
     .min(BigInt('-9223372036854775808'), {
@@ -385,7 +386,11 @@ export const zPodDiscoveryRowDto = z.object({
   peer_id: z.string().nullish(),
   port: z.int().gte(0).lte(65535),
   pubkey_fp: z.string(),
-  state: z.string(),
+});
+
+export const zPodForgetNotice = z.object({
+  peer_id: z.string(),
+  result: z.string(),
 });
 
 export const zPodLeaveSelfResult = z.object({
@@ -1525,6 +1530,27 @@ export const zNamespaceUseResponse = z.object({
 });
 
 /**
+ * PodForgetArgs
+ */
+export const zPodForgetBody = z.object({
+  peer_id: z.string(),
+});
+
+/**
+ * PodForgetOutput
+ *
+ * Tool result
+ */
+export const zPodForgetResponse = z.object({
+  notified: z.array(zPodForgetNotice),
+  peer_id: z.string(),
+  rows_removed: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+});
+
+/**
  * PodJoinArgs
  */
 export const zPodJoinBody = z.object({
@@ -1650,6 +1676,23 @@ export const zPodPingResponse = z.object({
   ok: z.boolean(),
   peer_id: z.string().nullish(),
   version: z.string().nullish(),
+});
+
+/**
+ * PodRecoverArgs
+ */
+export const zPodRecoverBody = z.object({
+  peer_id: z.string(),
+});
+
+/**
+ * PodRecoverOutput
+ *
+ * Tool result
+ */
+export const zPodRecoverResponse = z.object({
+  cleared: z.boolean(),
+  peer_id: z.string(),
 });
 
 /**
