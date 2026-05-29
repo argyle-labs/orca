@@ -12,7 +12,8 @@ fn main() {
 
     let raw = fs::read_to_string(&spec_path).expect("read sonarr.openapi.json");
     let mut spec: openapiv3::OpenAPI = serde_json::from_str(&raw).expect("parse sonarr openapi");
-    integrations_openapi::normalize::for_progenitor(&mut spec);
+    let report = integrations_openapi::normalize::for_progenitor(&mut spec);
+    report.emit_cargo_warnings("sonarr");
 
     let mut generator = progenitor::Generator::default();
     let tokens = generator

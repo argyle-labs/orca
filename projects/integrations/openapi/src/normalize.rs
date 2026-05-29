@@ -131,23 +131,11 @@ pub fn collapse_response_media_types(spec: &mut OpenAPI, report: &mut NormalizeR
     for_each_op_mut(spec, |method, path, op| {
         let Some(op) = op else { return };
         let label = format!("{} {}", method.to_uppercase(), path);
-        let statuses: Vec<_> = op
-            .responses
-            .responses
-            .keys()
-            .map(|s| format!("{s:?}"))
-            .collect();
-        for (status_str, resp) in op
-            .responses
-            .responses
-            .values_mut()
-            .zip(statuses.iter())
-            .map(|(r, s)| (s, r))
-        {
+        for (status, resp) in op.responses.responses.iter_mut() {
             if let ReferenceOr::Item(r) = resp
                 && let Some((kept, dropped)) = keep_one_json_media_type(&mut r.content)
             {
-                hits.push((format!("{label} -> {status_str}"), kept, dropped));
+                hits.push((format!("{label} -> {status:?}"), kept, dropped));
             }
         }
         if let Some(ReferenceOr::Item(r)) = op.responses.default.as_mut()
