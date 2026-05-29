@@ -19,6 +19,12 @@ serde_json  = { workspace = true }
 serde_yaml  = { workspace = true }
 reqwest     = { workspace = true, features = ["blocking"] }
 oas3        = "0.22"
+# `openapiv3` is the type system used by progenitor — included so the
+# `normalize` module can preprocess specs before codegen. Pulling it into
+# this crate keeps every "patch the upstream spec so progenitor accepts it"
+# fix in ONE place instead of duplicated across each integration build.rs.
+openapiv3   = "2"
+indexmap    = "2"
 
 [lints]
 workspace = true

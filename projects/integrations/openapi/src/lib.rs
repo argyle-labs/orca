@@ -18,6 +18,8 @@ use oas3::Spec;
 use serde::Serialize;
 use std::path::Path;
 
+pub mod normalize;
+
 /// Lightweight per-operation view used by the spec registry / MCP / UI.
 #[derive(Debug, Clone, Serialize)]
 pub struct OperationSummary {
