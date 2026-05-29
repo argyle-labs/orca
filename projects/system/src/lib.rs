@@ -52,3 +52,8 @@ pub mod hook;
 pub mod package;
 pub mod sysadmin;
 pub mod update_cmd;
+
+// Docker-compose service listing + test runner (system.infra.*) and the
+// liveness probe (system.health). Absorbed from the dissolved `fleet` crate.
+pub mod infra;
+pub mod meta;

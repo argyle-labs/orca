@@ -33,7 +33,6 @@ rusqlite = { workspace = true }
 toml = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
 orca-sdk = { path = "../sdk/rust" }
-fleet = { path = "../fleet" }
 pod = { path = "../pod" }
 uuid = { workspace = true }
 rustls = { workspace = true }

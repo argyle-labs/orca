@@ -9,7 +9,6 @@ use agents as _;
 use auth as _;
 use docker as _;
 use docs as _;
-use fleet as _;
 use homeassistant as _;
 use mcp as _;
 use platform as _;

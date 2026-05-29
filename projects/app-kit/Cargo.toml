@@ -51,7 +51,7 @@ path = "bin/uniffi-bindgen.rs"
 # orca core in-process — peer/HTTP transports are not used; UI ↔ core is a
 # direct UniFFI call (see project_mobile_as_standalone_orca.md).
 auth     = { path = "../auth" }
-fleet    = { path = "../fleet" }
+system   = { path = "../system" }
 platform = { path = "../platform" }
 agents   = { path = "../agents" }
 plugins  = { path = "../plugins" }
