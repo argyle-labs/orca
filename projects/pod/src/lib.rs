@@ -669,10 +669,10 @@ async fn pod_join(
 #[orca_tool(domain = "pod", verb = "trust")]
 async fn pod_trust(
     args: PodTrustArgs,
-    _ctx: &orca_contract::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodTrustOutput> {
     if args.push {
-        return server_pod::push_trust(&args.peer_id, args.on).await;
+        return server_pod::push_trust(&args.peer_id, args.on, ctx.caller()).await;
     }
     server_pod::trust(&args.peer_id, args.on).await
 }

@@ -143,17 +143,24 @@ pub async fn trust(peer_id: &str, on: bool) -> Result<PodTrustOutput> {
     })
 }
 
-pub async fn push_trust(peer_id: &str, on: bool) -> Result<PodTrustOutput> {
+pub async fn push_trust(
+    peer_id: &str,
+    on: bool,
+    caller: Option<orca_contract::CallerIdentity>,
+) -> Result<PodTrustOutput> {
     // Our own peer_id as the remote knows us.
     let own_id = format!("peer.{}", system::host_identity::machine_id_short());
     // Execute pod.trust on the remote host, making THEM set their
-    // local_secure for us. `push: false` prevents recursion.
+    // local_secure for us. `push: false` prevents recursion. The caller is the
+    // local admin who invoked `pod.trust` — the recipient authorizes the
+    // mutating handshake against that admin's replicated users row (zero-trust:
+    // no synthetic/asserted identity).
     #[allow(clippy::disallowed_types)] // exec is the wire-level dispatch boundary
     let dispatch = exec(
         peer_id,
         "pod.trust",
         serde_json::json!({ "peer_id": own_id, "on": on, "push": false }),
-        Some("admin".to_string()),
+        caller,
     )
     .await?;
     let remote: PodTrustOutput = serde_json::from_value(dispatch.result)?;
