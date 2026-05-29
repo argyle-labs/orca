@@ -26,6 +26,21 @@ pub struct UserAuth {
     pub password_hash: String,
 }
 
+/// Full replicable user row. `users` is ONE shared pool replicated across every
+/// paired host (last-write-wins on `updated_at`), so any admin can sign in on
+/// any machine/UI. The whole row — including `password_hash` and `role` — is
+/// shared among paired peers. See project_unified_mesh_state.md (shared policy).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplicaUser {
+    pub id: String,
+    pub username: String,
+    pub password_hash: String,
+    pub role: String,
+    pub created_at: String,
+    pub password_updated_at: String,
+    pub updated_at: String,
+}
+
 pub fn insert(
     conn: &Connection,
     id: &str,
@@ -38,8 +53,8 @@ pub fn insert(
     conn.execute(
         "INSERT INTO users
             (id, username, username_lower, password_hash, role,
-             created_at, password_updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+             created_at, password_updated_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6)",
         params![id, username, username_lower, password_hash, role, now],
     )?;
     Ok(User {
@@ -87,7 +102,7 @@ pub fn find_auth_by_username(conn: &Connection, username: &str) -> Result<Option
 
 pub fn set_password_hash(conn: &Connection, id: &str, new_hash: &str, now: &str) -> Result<bool> {
     let n = conn.execute(
-        "UPDATE users SET password_hash = ?2, password_updated_at = ?3 WHERE id = ?1",
+        "UPDATE users SET password_hash = ?2, password_updated_at = ?3, updated_at = ?3 WHERE id = ?1",
         params![id, new_hash, now],
     )?;
     Ok(n > 0)
@@ -120,6 +135,73 @@ pub fn list(conn: &Connection) -> Result<Vec<User>> {
     )?;
     let rows = stmt.query_map([], row_user)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Every user row in full, for publishing this host's view of the shared pool
+/// to paired peers. Includes `password_hash` so a user can sign in on any host.
+pub fn export_all(conn: &Connection) -> Result<Vec<ReplicaUser>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, username, password_hash, role, created_at, password_updated_at, updated_at
+         FROM users ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(ReplicaUser {
+            id: r.get(0)?,
+            username: r.get(1)?,
+            password_hash: r.get(2)?,
+            role: r.get(3)?,
+            created_at: r.get(4)?,
+            password_updated_at: r.get(5)?,
+            updated_at: r.get(6)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Merge a replicated user row into the shared pool, last-write-wins on
+/// `updated_at`. Returns true if the local row was created or updated. A row
+/// with an `updated_at` not strictly newer than the local copy is ignored.
+///
+/// `users` is a shared pool with no per-row owner, so any paired host may
+/// publish any user; convergence is by the `updated_at` clock alone.
+pub fn upsert_replica(conn: &Connection, u: &ReplicaUser) -> Result<bool> {
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT updated_at FROM users WHERE id = ?1",
+            params![u.id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(local_updated) = &existing
+        && u.updated_at <= *local_updated
+    {
+        return Ok(false);
+    }
+    let username_lower = u.username.to_lowercase();
+    conn.execute(
+        "INSERT INTO users
+            (id, username, username_lower, password_hash, role,
+             created_at, password_updated_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(id) DO UPDATE SET
+            username            = excluded.username,
+            username_lower      = excluded.username_lower,
+            password_hash       = excluded.password_hash,
+            role                = excluded.role,
+            password_updated_at = excluded.password_updated_at,
+            updated_at          = excluded.updated_at",
+        params![
+            u.id,
+            u.username,
+            username_lower,
+            u.password_hash,
+            u.role,
+            u.created_at,
+            u.password_updated_at,
+            u.updated_at,
+        ],
+    )?;
+    Ok(true)
 }
 
 fn row_user(r: &rusqlite::Row<'_>) -> rusqlite::Result<User> {

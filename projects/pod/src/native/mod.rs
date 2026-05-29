@@ -30,6 +30,7 @@ pub mod subscribe;
 pub mod subscribe_client;
 pub mod subscribe_demand;
 pub mod subscribe_wire;
+pub mod users_sync;
 
 pub use bootstrap::handle_pod_bootstrap_connection;
 pub use listener::handle_pod_connection;
@@ -54,6 +55,19 @@ pub const POD_DEV_SYNC_METHOD: &str = "pod/dev-sync";
 pub const POD_DEV_ENABLE_METHOD: &str = "pod/dev-enable";
 pub const POD_DEV_DISABLE_METHOD: &str = "pod/dev-disable";
 pub const POD_EXEC_METHOD: &str = "pod/exec";
+pub const POD_USERS_EXPORT_METHOD: &str = "pod/users-export";
+
+/// Body of `pod/users-export`: this host's full view of the shared `users`
+/// pool. Signed with the host's bootstrap key so the puller can verify the
+/// payload against the source peer's pinned `pod_peers.pubkey_fp` before
+/// merging. `users` is a shared pool (any paired host may publish), so this is
+/// not ownership — it's authenticated transport. See project_unified_mesh_state.md.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsersExport {
+    pub peer_id: String,
+    pub issued_at: i64,
+    pub users: Vec<::db::users::ReplicaUser>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PodPingResult {
@@ -346,6 +360,18 @@ pub async fn exec_as(
             caller_token,
         }),
         Duration::from_secs(120),
+    )
+    .await
+}
+
+/// Pull a peer's signed view of the shared `users` pool. The returned envelope
+/// is verified + merged by [`users_sync`]; this fn just performs the dial.
+pub async fn fetch_users_export(host: &str) -> Result<pki::SignedEnvelope> {
+    call_typed(
+        host,
+        POD_USERS_EXPORT_METHOD,
+        None::<()>,
+        Duration::from_secs(30),
     )
     .await
 }

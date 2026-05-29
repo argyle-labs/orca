@@ -22,8 +22,9 @@ use tracing::warn;
 
 use super::{
     AddressChannel, HostAddressingSnapshot, POD_DEV_DISABLE_METHOD, POD_DEV_ENABLE_METHOD,
-    POD_DEV_SYNC_METHOD, POD_EXEC_METHOD, POD_PING_METHOD, PodDevDisableResult, PodDevEnableResult,
-    PodDevSyncResult, PodExecParams, PodExecResult, PodPingResult, db as pdb, pki_dir,
+    POD_DEV_SYNC_METHOD, POD_EXEC_METHOD, POD_PING_METHOD, POD_USERS_EXPORT_METHOD,
+    PodDevDisableResult, PodDevEnableResult, PodDevSyncResult, PodExecParams, PodExecResult,
+    PodPingResult, UsersExport, db as pdb, pki_dir,
 };
 
 const POD_NOTIFY_TRUST_METHOD: &str = "pod/notify-trust";
@@ -161,6 +162,10 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
         },
         POD_EXEC_METHOD => match handle_exec(request).await {
             Ok(r) => value_response(id, &r),
+            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+        },
+        POD_USERS_EXPORT_METHOD => match handle_users_export() {
+            Ok(env) => value_response(id, &env),
             Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
         },
         POD_NOTIFY_TRUST_METHOD => match handle_notify_trust(peer_cn, peer_addr, request) {
@@ -449,6 +454,22 @@ async fn handle_exec(request: Request) -> Result<PodExecResult> {
         tool: params.tool,
         result,
     })
+}
+
+/// Handle `pod/users-export`: return this host's full view of the shared
+/// `users` pool, signed with the host bootstrap key. The mTLS chain already
+/// authenticated the requesting peer; the signature lets the puller bind the
+/// payload to this host's pinned bootstrap fp before merging.
+fn handle_users_export() -> Result<pki::SignedEnvelope> {
+    let conn = db::open_default()?;
+    let users = db::users::export_all(&conn)?;
+    let body = UsersExport {
+        peer_id: format!("peer.{}", system::host_identity::machine_id_short()),
+        issued_at: chrono::Utc::now().timestamp(),
+        users,
+    };
+    let signing = pki::load_or_init_bootstrap_key(&pki_dir())?;
+    pki::sign_envelope(&signing, &body).context("sign users export")
 }
 
 fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {

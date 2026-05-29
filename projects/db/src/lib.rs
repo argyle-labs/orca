@@ -1007,6 +1007,9 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         --   * username UNIQUE is case-insensitive — username_lower is the canonical key.
         --   * password_hash is argon2id (encoded form: \"$argon2id$...\").
         --   * sessions slide on every authenticated request (last_used_at, expires_at refresh).
+        -- users is ONE shared pool replicated across every paired host (any host
+        -- may write; last-write-wins on `updated_at`), so any admin can sign in
+        -- on any machine/UI. See project_unified_mesh_state.md (shared policy).
         CREATE TABLE IF NOT EXISTS users (
             id                  TEXT PRIMARY KEY,
             username            TEXT NOT NULL,
@@ -1014,7 +1017,8 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             password_hash       TEXT NOT NULL,
             role                TEXT NOT NULL CHECK (role IN ('admin','member')),
             created_at          TEXT NOT NULL,
-            password_updated_at TEXT NOT NULL
+            password_updated_at TEXT NOT NULL,
+            updated_at          TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z'
         );
 
         CREATE TABLE IF NOT EXISTS sessions (
