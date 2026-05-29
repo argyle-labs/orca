@@ -18,7 +18,7 @@
 
 use anyhow::Result;
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, State},
     http::StatusCode,
     routing::post,
@@ -120,6 +120,7 @@ struct ToolHttpState {
 async fn http_dispatch(
     State(state): State<ToolHttpState>,
     Path(name): Path<String>,
+    caller: Option<Extension<orca_contract::CallerIdentity>>,
     Json(args): Json<Value>,
 ) -> std::result::Result<Json<Value>, (StatusCode, Json<Value>)> {
     if find(&name).is_none() {
@@ -127,22 +128,29 @@ async fn http_dispatch(
             .with_code("tool.unknown");
         return Err(orca_error_response(oe));
     }
-    dispatch(&name, args, &state.ctx)
-        .await
-        .map(Json)
-        .map_err(|e| {
-            if let Some(oe) = e.downcast_ref::<orca_contract::OrcaError>() {
-                let kind = oe.kind;
-                let body = serde_json::to_value(oe).unwrap_or_else(
-                    |_| json!({ "kind": "internal", "message": "serialize failure" }),
-                );
-                let status = StatusCode::from_u16(kind.http_status())
-                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-                return (status, Json(body));
-            }
-            let oe = orca_contract::OrcaError::internal(e.to_string());
-            orca_error_response(oe)
-        })
+    // Per-request identity overlay: when the auth middleware resolved the
+    // request to a real user (session today), swap the host-admin default on
+    // the shared ctx for this user's identity so any pod/exec dispatch the
+    // tool fires mints a caller token bound to the actual operator. No
+    // override → use the shared ctx as-is (token / loopback / bootstrap).
+    let ctx_owned = caller.map(|Extension(c)| {
+        let mut ctx = (*state.ctx).clone();
+        ctx.set_caller(Some(c));
+        ctx
+    });
+    let ctx_ref: &ToolCtx = ctx_owned.as_ref().unwrap_or(&state.ctx);
+    dispatch(&name, args, ctx_ref).await.map(Json).map_err(|e| {
+        if let Some(oe) = e.downcast_ref::<orca_contract::OrcaError>() {
+            let kind = oe.kind;
+            let body = serde_json::to_value(oe)
+                .unwrap_or_else(|_| json!({ "kind": "internal", "message": "serialize failure" }));
+            let status = StatusCode::from_u16(kind.http_status())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            return (status, Json(body));
+        }
+        let oe = orca_contract::OrcaError::internal(e.to_string());
+        orca_error_response(oe)
+    })
 }
 
 fn orca_error_response(oe: orca_contract::OrcaError) -> (StatusCode, Json<Value>) {

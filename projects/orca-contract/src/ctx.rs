@@ -10,14 +10,16 @@ use std::sync::Arc;
 /// server-internal behavior (agent_backend, docs, agents, etc.) fetch a
 /// trait-object handle via `ctx.service::<Arc<dyn FooService>>()`
 /// instead of calling server-internal modules directly.
+#[derive(Clone)]
 pub struct ToolCtx {
     pub config: Arc<orca_utils::config::Config>,
     /// Ambient operator identity for this ctx. Set at `build_tool_ctx` to the
-    /// host admin operator on the CLI/daemon path; used to mint the signed
-    /// caller token when a tool dispatches to a remote peer. `None` on
-    /// unauthenticated/bootstrap paths.
+    /// host admin operator on the CLI/daemon path; overridden per-request on
+    /// REST via `set_caller` when the request carries a session identity.
+    /// Used to mint the signed caller token when a tool dispatches to a remote
+    /// peer. `None` on unauthenticated/bootstrap paths.
     auth: Option<crate::CallerIdentity>,
-    services: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
+    services: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
 }
 
 impl ToolCtx {
@@ -36,6 +38,14 @@ impl ToolCtx {
         self
     }
 
+    /// Replace the ambient operator identity in-place. Used by REST
+    /// `http_dispatch` to swap the host-admin default for the authenticated
+    /// session user before invoking a tool — that user's role is what the
+    /// recipient peer will resolve from its replicated `users` table.
+    pub fn set_caller(&mut self, auth: Option<crate::CallerIdentity>) {
+        self.auth = auth;
+    }
+
     /// The ambient operator identity, if one was set.
     pub fn caller(&self) -> Option<crate::CallerIdentity> {
         self.auth.clone()
@@ -51,7 +61,7 @@ impl ToolCtx {
     /// ctx.register_service(svc);
     /// ```
     pub fn register_service<T: Clone + Send + Sync + 'static>(&mut self, svc: T) -> &mut Self {
-        self.services.insert(TypeId::of::<T>(), Box::new(svc));
+        self.services.insert(TypeId::of::<T>(), Arc::new(svc));
         self
     }
 
