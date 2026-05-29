@@ -38,8 +38,8 @@ use quote::quote;
 #[cfg(not(test))]
 use syn::parse_macro_input;
 use syn::{
-    Attribute, Expr, ExprLit, FnArg, Ident, ItemFn, Lit, LitStr, Meta, MetaNameValue, Pat, PatType,
-    ReturnType, Token, Type,
+    Attribute, Data, DeriveInput, Expr, ExprLit, Fields, FnArg, Ident, ItemFn, Lit, LitStr, Meta,
+    MetaNameValue, Pat, PatType, ReturnType, Token, Type,
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
 };

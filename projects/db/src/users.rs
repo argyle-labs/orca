@@ -30,10 +30,16 @@ pub struct UserAuth {
 /// paired host (last-write-wins on `updated_at`), so any admin can sign in on
 /// any machine/UI. The whole row — including `password_hash` and `role` — is
 /// shared among paired peers. See project_unified_mesh_state.md (shared policy).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Field order mirrors the `users` table columns exactly (the `Replicated`
+/// derive maps fields ↔ columns 1:1), so `username_lower` is carried even
+/// though it is just `lower(username)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, orca_macro::Replicated)]
+#[replicate(table = "users", lww = "updated_at")]
 pub struct ReplicaUser {
     pub id: String,
     pub username: String,
+    pub username_lower: String,
     pub password_hash: String,
     pub role: String,
     pub created_at: String,
@@ -135,73 +141,6 @@ pub fn list(conn: &Connection) -> Result<Vec<User>> {
     )?;
     let rows = stmt.query_map([], row_user)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-/// Every user row in full, for publishing this host's view of the shared pool
-/// to paired peers. Includes `password_hash` so a user can sign in on any host.
-pub fn export_all(conn: &Connection) -> Result<Vec<ReplicaUser>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, username, password_hash, role, created_at, password_updated_at, updated_at
-         FROM users ORDER BY id ASC",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok(ReplicaUser {
-            id: r.get(0)?,
-            username: r.get(1)?,
-            password_hash: r.get(2)?,
-            role: r.get(3)?,
-            created_at: r.get(4)?,
-            password_updated_at: r.get(5)?,
-            updated_at: r.get(6)?,
-        })
-    })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-/// Merge a replicated user row into the shared pool, last-write-wins on
-/// `updated_at`. Returns true if the local row was created or updated. A row
-/// with an `updated_at` not strictly newer than the local copy is ignored.
-///
-/// `users` is a shared pool with no per-row owner, so any paired host may
-/// publish any user; convergence is by the `updated_at` clock alone.
-pub fn upsert_replica(conn: &Connection, u: &ReplicaUser) -> Result<bool> {
-    let existing: Option<String> = conn
-        .query_row(
-            "SELECT updated_at FROM users WHERE id = ?1",
-            params![u.id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if let Some(local_updated) = &existing
-        && u.updated_at <= *local_updated
-    {
-        return Ok(false);
-    }
-    let username_lower = u.username.to_lowercase();
-    conn.execute(
-        "INSERT INTO users
-            (id, username, username_lower, password_hash, role,
-             created_at, password_updated_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT(id) DO UPDATE SET
-            username            = excluded.username,
-            username_lower      = excluded.username_lower,
-            password_hash       = excluded.password_hash,
-            role                = excluded.role,
-            password_updated_at = excluded.password_updated_at,
-            updated_at          = excluded.updated_at",
-        params![
-            u.id,
-            u.username,
-            username_lower,
-            u.password_hash,
-            u.role,
-            u.created_at,
-            u.password_updated_at,
-            u.updated_at,
-        ],
-    )?;
-    Ok(true)
 }
 
 fn row_user(r: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
