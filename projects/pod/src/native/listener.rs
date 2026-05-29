@@ -373,12 +373,13 @@ async fn handle_dev_disable() -> Result<PodDevDisableResult> {
 /// paired pod member, but that is not, by itself, authorization — admin
 /// delegation is per-user, not per-peer.
 ///
-/// Today the wire format does not yet carry user identity, so we cannot
-/// perform the per-user role check. Until that lands we refuse any tool with
-/// a non-`"any"` required role on the remote path. This is strictly safer
-/// than the prior code (which accepted `_required_role` and dropped it);
-/// admin-tagged tools that need to be peer-callable will start working as
-/// soon as the per-user identity hop is plumbed through.
+/// Interim (v0): the wire frame carries the caller's *asserted* role
+/// (`caller_role`) but no signed proof of it, so we trust the assertion and
+/// check it against the tool's required role. This is functional but not yet
+/// secure — a modified peer could assert `admin`. S1 of
+/// [[project-remote-exec-full-fix]] replaces the bare assertion with an
+/// HMAC-signed `caller_token` (caller_user_id, tool, args-hash, expires_at,
+/// nonce) verified against the pod-replicated users table (S2).
 fn authorize_exec(
     tool: &str,
     remote_ok: bool,

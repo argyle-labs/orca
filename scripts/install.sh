@@ -139,6 +139,37 @@ http_get_asset() {
 # it stays consistent across install.sh, deploy-host.sh, and package postinst.
 ORCA_USER="orca"
 ORCA_HOME_DIR="/var/lib/orca"
+ORCA_SERVICE_BIN="${ORCA_HOME_DIR}/.local/bin/orca"
+
+# ── privilege escalation for service-user installs ──────────────────────────
+# When the controller deploys as a non-root login user (e.g. `ssh skey@host`)
+# but this host runs orca as the `orca` service user, a plain non-root install
+# would land in the login user's $HOME and leave the daemon stale (the bug that
+# stranded the rc.11 fleet rollout). Detect that case — `--admin-pubkey` was
+# passed (controller deploy intent) or a daemon binary already exists at the
+# service path — and re-exec under sudo so the install targets /var/lib/orca
+# and can restart the system service. ORCA_DEV_SETUP_ONLY re-invocations run as
+# the orca user by design and must not escalate.
+if [ "$(id -u)" != 0 ] \
+   && [ "${ORCA_DEV_SETUP_ONLY:-0}" != "1" ] \
+   && { [ -n "$ADMIN_PUBKEY" ] || [ -x "$ORCA_SERVICE_BIN" ]; }; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    warn "service install detected (daemon at $ORCA_SERVICE_BIN or --admin-pubkey set) — re-executing under sudo to target the service user"
+    exec sudo env \
+      ORCA_VERSION="$VERSION" \
+      ORCA_TARGET="$TARGET" \
+      ORCA_INSTALL_DIR="$INSTALL_DIR" \
+      ORCA_PRERELEASE="$PRERELEASE" \
+      GITHUB_TOKEN="$GITHUB_TOKEN" \
+      ORCA_FROM_FILE="$FROM_FILE" \
+      ORCA_SKIP_SHA="$SKIP_SHA" \
+      ORCA_ADMIN_PUBKEY="$ADMIN_PUBKEY" \
+      ORCA_DEV_SETUP="$DEV_SETUP" \
+      sh "$0"
+  else
+    die "service daemon detected at $ORCA_SERVICE_BIN but not running as root and passwordless sudo is unavailable — re-run as root (ssh root@host) or grant sudo"
+  fi
+fi
 
 if [ "$(id -u)" = 0 ]; then
   warn "running as root — installing for service user '$ORCA_USER'"

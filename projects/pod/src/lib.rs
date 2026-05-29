@@ -589,7 +589,7 @@ async fn pod_list(
         .filter(|d| {
             d.peer_id
                 .as_deref()
-                .map_or(true, |pid| !claimed.contains(machine_key(pid)))
+                .is_none_or(|pid| !claimed.contains(machine_key(pid)))
         })
         .collect();
 
