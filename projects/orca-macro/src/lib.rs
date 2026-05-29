@@ -38,11 +38,13 @@ use quote::quote;
 #[cfg(not(test))]
 use syn::parse_macro_input;
 use syn::{
-    Attribute, Data, DeriveInput, Expr, ExprLit, Fields, FnArg, Ident, ItemFn, Lit, LitStr, Meta,
-    MetaNameValue, Pat, PatType, ReturnType, Token, Type,
+    Attribute, Expr, ExprLit, FnArg, Ident, ItemFn, Lit, LitStr, Meta, MetaNameValue, Pat, PatType,
+    ReturnType, Token, Type,
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
 };
+#[cfg(not(test))]
+use syn::{Data, DeriveInput, Fields};
 
 /// Parsed contents of `#[orca_tool(domain = "...", verb = "...", cli = ident)]`.
 struct ToolAttr {
@@ -234,6 +236,7 @@ pub fn derive_replicated(item: TokenStream) -> TokenStream {
     expand_replicated_to_tokens(input).into()
 }
 
+#[cfg(not(test))]
 fn expand_replicated_to_tokens(input: DeriveInput) -> TokenStream2 {
     match expand_replicated(input) {
         Ok(ts) => ts,
@@ -242,12 +245,14 @@ fn expand_replicated_to_tokens(input: DeriveInput) -> TokenStream2 {
 }
 
 /// Parsed `#[replicate(table = "...", lww = "...", pk = "...")]`.
+#[cfg(not(test))]
 struct ReplicateAttr {
     table: String,
     lww: String,
     pk: String,
 }
 
+#[cfg(not(test))]
 fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
     let attr = attrs
         .iter()
@@ -300,6 +305,7 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
     })
 }
 
+#[cfg(not(test))]
 fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
     let cfg = parse_replicate_attr(&input.attrs)?;
     let ty = &input.ident;
