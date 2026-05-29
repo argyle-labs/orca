@@ -277,13 +277,17 @@ mod exec_wire {
 
     /// Parameters for `pod/exec`. `tool` is a fully-qualified
     /// `<domain>.<verb>` name; `args` is the on-wire JSON args payload.
-    /// `caller_role` is the calling peer's assertion of the local user's
-    /// role at dispatch time (one of "any" | "user" | "admin"). The mesh
-    /// mTLS cert proves the *peer*; we trust the paired peer's role claim
-    /// for v0. A future slice replaces this with an HMAC-signed caller_token
-    /// (covering `caller_user_id`, `tool`, args-hash, expires_at, nonce)
-    /// validated against a replicated users table. Optional for back-compat
-    /// with rc.≤11 peers that don't send it; recipient treats absent as "any".
+    ///
+    /// `caller_token` is an Ed25519-signed [`crate::native::caller_token::CallerToken`]
+    /// minted by the calling peer's bootstrap key. The recipient verifies the
+    /// signature, binds the signer fp to the authenticated peer, checks
+    /// expiry/replay/args, and derives the effective role from its own
+    /// replicated `users` table. Optional for back-compat with rc.≤11 peers.
+    ///
+    /// `caller_role` is the legacy unsigned role assertion, retained so newly
+    /// updated peers can still drive rc.≤11 recipients that don't understand
+    /// the token. New recipients prefer `caller_token` and ignore this when a
+    /// valid token is present.
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct PodExecParams {
         pub tool: String,
@@ -291,6 +295,8 @@ mod exec_wire {
         pub args: serde_json::Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub caller_role: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub caller_token: Option<orca_sdk::pki::SignedEnvelope>,
     }
 
     /// Wire result of `pod/exec` — `result` is the tool's serialized output.
