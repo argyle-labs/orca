@@ -15,6 +15,7 @@
 //! v2 will add `pod/join`, `pod/list`, and the trust-promotion methods.
 
 mod bootstrap;
+pub mod caller_token;
 pub mod cert_rotation;
 pub mod db;
 pub mod dialer;

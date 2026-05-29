@@ -12,6 +12,11 @@ use std::sync::Arc;
 /// instead of calling server-internal modules directly.
 pub struct ToolCtx {
     pub config: Arc<orca_utils::config::Config>,
+    /// Ambient operator identity for this ctx. Set at `build_tool_ctx` to the
+    /// host admin operator on the CLI/daemon path; used to mint the signed
+    /// caller token when a tool dispatches to a remote peer. `None` on
+    /// unauthenticated/bootstrap paths.
+    auth: Option<crate::CallerIdentity>,
     services: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
 }
 
@@ -19,8 +24,21 @@ impl ToolCtx {
     pub fn new(config: Arc<orca_utils::config::Config>) -> Self {
         Self {
             config,
+            auth: None,
             services: HashMap::new(),
         }
+    }
+
+    /// Set the ambient operator identity. Builder-style; called once at
+    /// `build_tool_ctx`.
+    pub fn with_auth(mut self, auth: crate::CallerIdentity) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+
+    /// The ambient operator identity, if one was set.
+    pub fn caller(&self) -> Option<crate::CallerIdentity> {
+        self.auth.clone()
     }
 
     /// Insert a service handle. `T` is typically `Arc<dyn FooService>` —

@@ -27,5 +27,5 @@ mod remote;
 mod tool;
 
 pub use ctx::ToolCtx;
-pub use remote::RemoteExec;
+pub use remote::{CallerIdentity, RemoteExec};
 pub use tool::OrcaTool;
