@@ -1,19 +1,19 @@
-//! Native GraphQL client primitive. Replaces the former `graphql` plugin.
-//!
-//! Stateless: every call carries the endpoint, headers, query, and variables.
-//! Bug fixes to GraphQL transport land here once and propagate to every
-//! consumer (e.g. unraid). Composes with [`orca_http`] underneath.
+//! Generic GraphQL client integration. The one place in the workspace that
+//! speaks GraphQL transport — every consumer (specs/Shopify proxy, unraid,
+//! future Sonarr/Radarr, etc.) calls through here so transport fixes land once
+//! and propagate everywhere. Stateless: every call carries the endpoint,
+//! headers, query, and variables. Composes with [`utils::http`] underneath.
 //!
 //! `serde_json::Value` is used throughout because GraphQL response envelopes
 //! are schemaless at this transport layer — `data`, `errors`, `extensions`,
 //! `path`, `locations` all have shapes that vary per-server and per-query.
 #![allow(clippy::disallowed_types)]
 
-use crate::http::{Client as HttpClient, HttpError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use thiserror::Error;
+use utils::http::{Client as HttpClient, HttpError};
 
 /// Standard GraphQL response envelope: `data` + optional `errors`.
 #[derive(Debug, Clone, Serialize, Deserialize)]

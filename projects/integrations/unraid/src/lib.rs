@@ -5,10 +5,10 @@
 // to callers who select fields via query strings.
 #![allow(clippy::disallowed_types)]
 
+use graphql::{Client as GraphQlClient, GraphQlErrors, GraphQlResponse, QueryRequest};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use thiserror::Error;
-use utils::graphql::{Client as GraphQlClient, GraphQlErrors, GraphQlResponse, QueryRequest};
 
 #[derive(Debug, Clone)]
 pub struct Config {

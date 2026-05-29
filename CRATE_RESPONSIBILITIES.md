@@ -30,7 +30,7 @@ A crate **MAY** depend on anything strictly below it. It **MUST NOT** depend on 
 
 ## Core layer
 
-### `orca-utils` (`orca_utils`)
+### `orca-utils` (`orca_utils`)j
 Pure utilities with no business logic. Config struct, path helpers (`expand_tilde`), content hashing (`fs::hash::{sha256, sha256_bytes, blake3_file}`), file I/O helpers, time helpers, env loading. **No DB. No network. No tools.** Every other crate may import this.
 
 ### `orca-db` (`db`)
