@@ -548,11 +548,9 @@ impl orca_contract::RemoteExec for PodRemoteExec {
         peer: &str,
         tool: &str,
         args: serde_json::Value,
-        caller_role: Option<String>,
+        caller: Option<orca_contract::CallerIdentity>,
     ) -> anyhow::Result<serde_json::Value> {
-        Ok(server_pod::exec(peer, tool, args, caller_role)
-            .await?
-            .result)
+        Ok(server_pod::exec(peer, tool, args, caller).await?.result)
     }
 }
 
@@ -752,14 +750,14 @@ async fn pod_detail(
 #[orca_tool(domain = "system.pod", verb = "update", role = "admin")]
 async fn pod_update(
     args: PodUpdateArgs,
-    _ctx: &orca_contract::ToolCtx,
+    ctx: &orca_contract::ToolCtx,
 ) -> anyhow::Result<PodUpdateOutput> {
     if let Some(ref peer_id) = args.peer_id {
         let dispatch = server_pod::exec(
             peer_id,
             "system.pod.update",
             serde_json::json!({ "self_secure": args.self_secure }),
-            Some("admin".to_string()),
+            ctx.caller(),
         )
         .await?;
         return Ok(serde_json::from_value(dispatch.result)?);

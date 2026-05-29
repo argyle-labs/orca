@@ -30,7 +30,26 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     ctx.register_service(remote);
     orca_dispatch::remote_ok::install(orca_dispatch::remote_ok_names());
     orca_dispatch::tool_roles::install(orca_dispatch::role_table());
-    ctx
+    match resolve_host_operator() {
+        Some(id) => ctx.with_auth(id),
+        None => ctx,
+    }
+}
+
+/// Resolve the host's ambient operator identity for minting signed caller
+/// tokens on the CLI/daemon remote-dispatch path. Uses the earliest-created
+/// admin web user; that user is replicated to every peer, so the recipient can
+/// look it up. Returns `None` when the host has no admin user yet (fresh /
+/// headless host) — remote dispatch then sends no token and falls back to the
+/// recipient's trusted-peer handling.
+fn resolve_host_operator() -> Option<orca_contract::CallerIdentity> {
+    let conn = db::open_default().ok()?;
+    let admin = db::users::first_admin(&conn).ok().flatten()?;
+    Some(orca_contract::CallerIdentity {
+        user_id: admin.id,
+        username: admin.username,
+        role: admin.role,
+    })
 }
 
 /// Servers whose tools orca already exposes natively or that must not be proxied back.

@@ -98,6 +98,21 @@ pub fn count(conn: &Connection) -> Result<i64> {
     Ok(n)
 }
 
+/// The earliest-created admin user, if any. Used to resolve the host's
+/// ambient operator identity for minting signed caller tokens on the
+/// CLI/daemon remote-dispatch path.
+pub fn first_admin(conn: &Connection) -> Result<Option<User>> {
+    let r = conn
+        .query_row(
+            "SELECT id, username, role, created_at, password_updated_at
+             FROM users WHERE role = 'admin' ORDER BY created_at ASC LIMIT 1",
+            [],
+            row_user,
+        )
+        .optional()?;
+    Ok(r)
+}
+
 pub fn list(conn: &Connection) -> Result<Vec<User>> {
     let mut stmt = conn.prepare(
         "SELECT id, username, role, created_at, password_updated_at
