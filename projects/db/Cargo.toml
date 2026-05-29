@@ -17,6 +17,7 @@ orca-utils       = { path = "../utils" }
 orca-dispatch    = { path = "../orca-dispatch" }
 orca-contract    = { path = "../orca-contract" }
 orca-macro       = { path = "../orca-macro" }
+orca-replicate   = { path = "../replicate" }
 
 anyhow      = { workspace = true }
 tracing     = { workspace = true }

@@ -215,6 +215,220 @@ fn expand_to_tokens(attr: ToolAttr, item: ItemFn) -> TokenStream2 {
     }
 }
 
+/// `#[derive(Replicated)]` — opt a row struct into mesh replication.
+///
+/// ```rust,ignore
+/// #[derive(Serialize, Deserialize, Replicated)]
+/// #[replicate(table = "users", lww = "updated_at")]   // pk defaults to "id"
+/// pub struct ReplicaUser { pub id: String, /* … one field per column … */ }
+/// ```
+///
+/// Generates `export`/`merge` fns over the named struct fields (each field maps
+/// 1:1 to a column of `table`, in declaration order) and submits a
+/// `::replicate::ReplicatedRegistration` into the inventory slice the pod mesh
+/// engine walks. Merge is last-write-wins on the `lww` column, keyed by `pk`.
+#[cfg(not(test))]
+#[proc_macro_derive(Replicated, attributes(replicate))]
+pub fn derive_replicated(item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as DeriveInput);
+    expand_replicated_to_tokens(input).into()
+}
+
+fn expand_replicated_to_tokens(input: DeriveInput) -> TokenStream2 {
+    match expand_replicated(input) {
+        Ok(ts) => ts,
+        Err(e) => e.to_compile_error(),
+    }
+}
+
+/// Parsed `#[replicate(table = "...", lww = "...", pk = "...")]`.
+struct ReplicateAttr {
+    table: String,
+    lww: String,
+    pk: String,
+}
+
+fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
+    let attr = attrs
+        .iter()
+        .find(|a| a.path().is_ident("replicate"))
+        .ok_or_else(|| {
+            syn::Error::new(
+                Span::call_site(),
+                "#[derive(Replicated)] requires a #[replicate(table = \"...\", lww = \"...\")] attribute",
+            )
+        })?;
+    let items = attr.parse_args_with(Punctuated::<MetaNameValue, Token![,]>::parse_terminated)?;
+    let mut table = None;
+    let mut lww = None;
+    let mut pk = None;
+    for nv in items {
+        let val = match &nv.value {
+            Expr::Lit(ExprLit {
+                lit: Lit::Str(s), ..
+            }) => s.value(),
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    &nv.value,
+                    "expected a string literal",
+                ));
+            }
+        };
+        let key = nv
+            .path
+            .get_ident()
+            .map(|i| i.to_string())
+            .unwrap_or_default();
+        match key.as_str() {
+            "table" => table = Some(val),
+            "lww" => lww = Some(val),
+            "pk" => pk = Some(val),
+            other => {
+                return Err(syn::Error::new_spanned(
+                    &nv.path,
+                    format!("unknown #[replicate] key '{other}'"),
+                ));
+            }
+        }
+    }
+    Ok(ReplicateAttr {
+        table: table
+            .ok_or_else(|| syn::Error::new(Span::call_site(), "#[replicate] requires `table`"))?,
+        lww: lww
+            .ok_or_else(|| syn::Error::new(Span::call_site(), "#[replicate] requires `lww`"))?,
+        pk: pk.unwrap_or_else(|| "id".to_string()),
+    })
+}
+
+fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
+    let cfg = parse_replicate_attr(&input.attrs)?;
+    let ty = &input.ident;
+
+    let named = match &input.data {
+        Data::Struct(s) => match &s.fields {
+            Fields::Named(n) => &n.named,
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    ty,
+                    "#[derive(Replicated)] requires a struct with named fields",
+                ));
+            }
+        },
+        _ => {
+            return Err(syn::Error::new_spanned(
+                ty,
+                "#[derive(Replicated)] can only be applied to structs",
+            ));
+        }
+    };
+
+    let field_idents: Vec<&Ident> = named
+        .iter()
+        .map(|f| f.ident.as_ref().expect("named field"))
+        .collect();
+    let field_names: Vec<String> = field_idents.iter().map(|i| i.to_string()).collect();
+
+    if !field_names.iter().any(|f| *f == cfg.pk) {
+        return Err(syn::Error::new_spanned(
+            ty,
+            format!("#[replicate] pk '{}' is not a field of the struct", cfg.pk),
+        ));
+    }
+    if !field_names.iter().any(|f| *f == cfg.lww) {
+        return Err(syn::Error::new_spanned(
+            ty,
+            format!(
+                "#[replicate] lww '{}' is not a field of the struct",
+                cfg.lww
+            ),
+        ));
+    }
+
+    let table = &cfg.table;
+    let pk = &cfg.pk;
+    let lww_ident = Ident::new(&cfg.lww, Span::call_site());
+
+    // SELECT col0, col1, … FROM table ORDER BY pk ASC
+    let columns_csv = field_names.join(", ");
+    let select_sql = format!("SELECT {columns_csv} FROM {table} ORDER BY {pk} ASC");
+
+    // Row construction in the query_map closure: Self { f0: r.get(0)?, … }.
+    let get_indices: Vec<syn::Index> = (0..field_idents.len()).map(syn::Index::from).collect();
+
+    // INSERT … VALUES (?1, …) ON CONFLICT(pk) DO UPDATE SET <non-pk cols>.
+    let placeholders = (1..=field_idents.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let update_set = field_names
+        .iter()
+        .filter(|f| **f != cfg.pk)
+        .map(|f| format!("{f} = excluded.{f}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let insert_sql = format!(
+        "INSERT INTO {table} ({columns_csv}) VALUES ({placeholders}) \
+         ON CONFLICT({pk}) DO UPDATE SET {update_set}"
+    );
+    let lww_select_sql = format!("SELECT {} FROM {table} WHERE {pk} = ?1", cfg.lww);
+    let pk_ident = Ident::new(&cfg.pk, Span::call_site());
+
+    let expanded = quote! {
+        const _: () = {
+            impl #ty {
+                fn __replicate_export(
+                    conn: &::rusqlite::Connection,
+                ) -> ::anyhow::Result<::serde_json::Value> {
+                    let mut stmt = conn.prepare(#select_sql)?;
+                    let rows = stmt.query_map([], |row| {
+                        ::std::result::Result::Ok(#ty {
+                            #( #field_idents: row.get(#get_indices)?, )*
+                        })
+                    })?;
+                    let all: ::std::vec::Vec<#ty> =
+                        rows.collect::<::rusqlite::Result<::std::vec::Vec<_>>>()?;
+                    ::std::result::Result::Ok(::serde_json::to_value(all)?)
+                }
+
+                fn __replicate_merge(
+                    conn: &::rusqlite::Connection,
+                    rows: ::serde_json::Value,
+                ) -> ::anyhow::Result<usize> {
+                    use ::rusqlite::OptionalExtension;
+                    let rows: ::std::vec::Vec<#ty> = ::serde_json::from_value(rows)?;
+                    let mut merged = 0usize;
+                    for row in &rows {
+                        let existing: ::std::option::Option<::std::string::String> = conn
+                            .query_row(#lww_select_sql, ::rusqlite::params![row.#pk_ident], |r| r.get(0))
+                            .optional()?;
+                        // Last-write-wins: skip when our copy is at least as new.
+                        if let ::std::option::Option::Some(local) = &existing
+                            && row.#lww_ident <= *local
+                        {
+                            continue;
+                        }
+                        conn.execute(
+                            #insert_sql,
+                            ::rusqlite::params![ #( row.#field_idents, )* ],
+                        )?;
+                        merged += 1;
+                    }
+                    ::std::result::Result::Ok(merged)
+                }
+            }
+
+            ::inventory::submit! {
+                ::replicate::ReplicatedRegistration {
+                    name: #table,
+                    export: #ty::__replicate_export,
+                    merge: #ty::__replicate_merge,
+                }
+            }
+        };
+    };
+    Ok(expanded)
+}
+
 fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     if item.sig.asyncness.is_none() {
         return Err(syn::Error::new_spanned(

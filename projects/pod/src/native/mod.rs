@@ -23,6 +23,7 @@ pub mod dispatcher;
 pub mod host_status_replica;
 mod listener;
 pub mod mdns;
+pub mod replication_sync;
 pub mod roster_sync;
 pub mod runtime_cache;
 pub mod scheduler;
@@ -30,7 +31,6 @@ pub mod subscribe;
 pub mod subscribe_client;
 pub mod subscribe_demand;
 pub mod subscribe_wire;
-pub mod users_sync;
 
 pub use bootstrap::handle_pod_bootstrap_connection;
 pub use listener::handle_pod_connection;
@@ -55,18 +55,20 @@ pub const POD_DEV_SYNC_METHOD: &str = "pod/dev-sync";
 pub const POD_DEV_ENABLE_METHOD: &str = "pod/dev-enable";
 pub const POD_DEV_DISABLE_METHOD: &str = "pod/dev-disable";
 pub const POD_EXEC_METHOD: &str = "pod/exec";
-pub const POD_USERS_EXPORT_METHOD: &str = "pod/users-export";
+pub const POD_REPLICATE_EXPORT_METHOD: &str = "pod/replicate-export";
 
-/// Body of `pod/users-export`: this host's full view of the shared `users`
-/// pool. Signed with the host's bootstrap key so the puller can verify the
-/// payload against the source peer's pinned `pod_peers.pubkey_fp` before
-/// merging. `users` is a shared pool (any paired host may publish), so this is
-/// not ownership — it's authenticated transport. See project_unified_mesh_state.md.
+/// Body of `pod/replicate-export`: this host's full view of every shared-state
+/// entity registered via `#[derive(Replicated)]` — `{ entity_name -> rows }`.
+/// Signed with the host's bootstrap key so the puller can verify the payload
+/// against the source peer's pinned `pod_peers.pubkey_fp` before merging.
+/// Shared entities have no per-row owner (any paired host may publish), so the
+/// signature is authenticated transport, not ownership. ONE bundle covers
+/// users + (later) configs + settings. See project_unified_mesh_state.md.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UsersExport {
+pub struct ReplicateBundle {
     pub peer_id: String,
     pub issued_at: i64,
-    pub users: Vec<::db::users::ReplicaUser>,
+    pub entities: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -364,12 +366,12 @@ pub async fn exec_as(
     .await
 }
 
-/// Pull a peer's signed view of the shared `users` pool. The returned envelope
-/// is verified + merged by [`users_sync`]; this fn just performs the dial.
-pub async fn fetch_users_export(host: &str) -> Result<pki::SignedEnvelope> {
+/// Pull a peer's signed bundle of all shared-state entities. The returned
+/// envelope is verified + merged by [`replication_sync`]; this fn just dials.
+pub async fn fetch_replicate_bundle(host: &str) -> Result<pki::SignedEnvelope> {
     call_typed(
         host,
-        POD_USERS_EXPORT_METHOD,
+        POD_REPLICATE_EXPORT_METHOD,
         None::<()>,
         Duration::from_secs(30),
     )

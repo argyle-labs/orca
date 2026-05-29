@@ -22,9 +22,9 @@ use tracing::warn;
 
 use super::{
     AddressChannel, HostAddressingSnapshot, POD_DEV_DISABLE_METHOD, POD_DEV_ENABLE_METHOD,
-    POD_DEV_SYNC_METHOD, POD_EXEC_METHOD, POD_PING_METHOD, POD_USERS_EXPORT_METHOD,
+    POD_DEV_SYNC_METHOD, POD_EXEC_METHOD, POD_PING_METHOD, POD_REPLICATE_EXPORT_METHOD,
     PodDevDisableResult, PodDevEnableResult, PodDevSyncResult, PodExecParams, PodExecResult,
-    PodPingResult, UsersExport, db as pdb, pki_dir,
+    PodPingResult, ReplicateBundle, db as pdb, pki_dir,
 };
 
 const POD_NOTIFY_TRUST_METHOD: &str = "pod/notify-trust";
@@ -164,7 +164,7 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
             Ok(r) => value_response(id, &r),
             Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
         },
-        POD_USERS_EXPORT_METHOD => match handle_users_export() {
+        POD_REPLICATE_EXPORT_METHOD => match handle_replicate_export() {
             Ok(env) => value_response(id, &env),
             Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
         },
@@ -456,20 +456,21 @@ async fn handle_exec(request: Request) -> Result<PodExecResult> {
     })
 }
 
-/// Handle `pod/users-export`: return this host's full view of the shared
-/// `users` pool, signed with the host bootstrap key. The mTLS chain already
-/// authenticated the requesting peer; the signature lets the puller bind the
-/// payload to this host's pinned bootstrap fp before merging.
-fn handle_users_export() -> Result<pki::SignedEnvelope> {
+/// Handle `pod/replicate-export`: return this host's full view of every shared
+/// entity registered via `#[derive(Replicated)]`, signed with the host
+/// bootstrap key. The mTLS chain already authenticated the requesting peer; the
+/// signature lets the puller bind the payload to this host's pinned bootstrap
+/// fp before merging.
+fn handle_replicate_export() -> Result<pki::SignedEnvelope> {
     let conn = db::open_default()?;
-    let users = db::users::export_all(&conn)?;
-    let body = UsersExport {
+    let entities = replicate::export_all(&conn)?;
+    let body = ReplicateBundle {
         peer_id: format!("peer.{}", system::host_identity::machine_id_short()),
         issued_at: chrono::Utc::now().timestamp(),
-        users,
+        entities,
     };
     let signing = pki::load_or_init_bootstrap_key(&pki_dir())?;
-    pki::sign_envelope(&signing, &body).context("sign users export")
+    pki::sign_envelope(&signing, &body).context("sign replicate bundle")
 }
 
 fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {

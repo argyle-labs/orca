@@ -30,6 +30,7 @@ inventory       = { workspace = true }
 
 orca-utils = { path = "../utils" }
 db = { package = "orca-db", path = "../db" }
+replicate = { package = "orca-replicate", path = "../replicate" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }

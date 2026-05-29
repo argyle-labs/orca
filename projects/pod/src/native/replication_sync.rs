@@ -1,24 +1,25 @@
-//! Shared-users replication: every paired peer periodically pulls every other
-//! peer's `pod/users-export` and merges it into its own `users` table.
+//! Shared-state replication: every paired peer periodically pulls every other
+//! peer's `pod/replicate-export` bundle and merges it locally. Generic over all
+//! entities registered via `#[derive(Replicated)]` — `users` today, configs +
+//! settings later — through one signed bundle per peer.
 //!
-//! `users` is ONE shared pool — every user accessible on every host, writable
-//! by ANY paired host, converging last-write-wins on `updated_at`. So any admin
-//! can sign in on any machine/UI. See project_unified_mesh_state.md.
+//! `users` is ONE shared pool: every user accessible on every host, writable by
+//! ANY paired host, converging last-write-wins. So any admin can sign in on any
+//! machine/UI. See project_unified_mesh_state.md.
 //!
-//! **Trust:** the export is signed with the source host's bootstrap key. We
+//! **Trust:** the bundle is signed with the source host's bootstrap key. We
 //! verify the signature AND require the signer fp to equal the source peer's
-//! *pinned* `pod_peers.pubkey_fp` before merging a single row — a valid sig
-//! from an unpinned key is rejected. This authenticates the transport; it is
-//! not per-user ownership (the pool has no owner). See
-//! feedback_zero_trust_no_blind_trust.md.
+//! *pinned* `pod_peers.pubkey_fp` before merging — a valid sig from an unpinned
+//! key is rejected. This authenticates the transport; it is not per-row
+//! ownership (shared pools have no owner). See feedback_zero_trust_no_blind_trust.md.
 
-use crate::UsersExport;
+use crate::native::ReplicateBundle;
 use anyhow::{Context, Result};
 use orca_sdk::pki;
 use std::time::Duration;
 use tracing::{info, warn};
 
-use super::{db as pdb, fetch_users_export, pki_dir};
+use super::{db as pdb, fetch_replicate_bundle, pki_dir};
 use system::periodic;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(60);
@@ -26,7 +27,7 @@ const TICK_INTERVAL: Duration = Duration::from_secs(60);
 pub fn spawn() -> tokio::task::JoinHandle<()> {
     periodic::spawn(
         periodic::PeriodicSpec {
-            name: "pod.users_sync.run",
+            name: "pod.replication_sync.run",
             initial_delay: Duration::from_secs(25),
             interval: TICK_INTERVAL,
         },
@@ -54,26 +55,26 @@ async fn tick() -> Result<()> {
         }
         let pinned_fp = match &src.pubkey_fp {
             Some(fp) => fp.clone(),
-            // No pinned bootstrap fp → we can't authenticate the export's
+            // No pinned bootstrap fp → we can't authenticate the bundle's
             // origin. Skip rather than trust an unpinned payload.
             None => continue,
         };
-        match fetch_users_export(&src.peer_addr).await {
-            Ok(env) => match merge_export(&env, &pinned_fp) {
+        match fetch_replicate_bundle(&src.peer_addr).await {
+            Ok(env) => match merge_bundle(&env, &pinned_fp) {
                 Ok(merged) if merged > 0 => {
                     info!(
-                        "[users-sync] merged {merged} user(s) from {}",
+                        "[replication-sync] merged {merged} row(s) from {}",
                         src.peer_hostname
                     );
                 }
                 Ok(_) => {}
                 Err(e) => warn!(
-                    "[users-sync] merge from {} failed: {e:#}",
+                    "[replication-sync] merge from {} failed: {e:#}",
                     src.peer_hostname
                 ),
             },
             Err(e) => warn!(
-                "[users-sync] fetch from {} failed: {e:#}",
+                "[replication-sync] fetch from {} failed: {e:#}",
                 src.peer_hostname
             ),
         }
@@ -93,29 +94,19 @@ fn is_usable_source(p: &pdb::PeerRow, own_peer_id: &str) -> bool {
     true
 }
 
-/// Verify the signed export against the source's pinned bootstrap fp, then
-/// upsert every row last-write-wins. Returns the number of rows created/updated.
-fn merge_export(env: &pki::SignedEnvelope, pinned_fp: &str) -> Result<usize> {
-    let (export, verifying) =
-        pki::verify_envelope::<UsersExport>(env).context("verify users export envelope")?;
+/// Verify the signed bundle against the source's pinned bootstrap fp, then
+/// dispatch each entity to its registered LWW merge. Returns rows merged.
+fn merge_bundle(env: &pki::SignedEnvelope, pinned_fp: &str) -> Result<usize> {
+    let (bundle, verifying) =
+        pki::verify_envelope::<ReplicateBundle>(env).context("verify replicate bundle envelope")?;
     let signer_fp = pki::bootstrap_pubkey_fingerprint(&verifying);
     anyhow::ensure!(
         signer_fp == pinned_fp,
-        "users export signer fp {signer_fp} does not match pinned peer fp {pinned_fp}"
+        "replicate bundle signer fp {signer_fp} does not match pinned peer fp {pinned_fp}"
     );
 
     let conn = db::open_default()?;
-    let mut merged = 0;
-    for u in &export.users {
-        match db::users::upsert_replica(&conn, u) {
-            Ok(true) => merged += 1,
-            Ok(false) => {}
-            // A single bad row (e.g. username_lower collision) must not abort
-            // the whole merge — log and continue.
-            Err(e) => warn!("[users-sync] skip user {}: {e:#}", u.id),
-        }
-    }
-    Ok(merged)
+    replicate::merge_bundle(&conn, bundle.entities)
 }
 
 #[cfg(test)]
@@ -173,14 +164,13 @@ mod tests {
     fn merge_rejects_wrong_signer_fp() {
         let dir = tempfile::tempdir().unwrap();
         let signing = pki::load_or_init_bootstrap_key(dir.path()).unwrap();
-        let body = UsersExport {
+        let body = ReplicateBundle {
             peer_id: "peer.src".into(),
             issued_at: 0,
-            users: vec![],
+            entities: std::collections::BTreeMap::new(),
         };
         let env = pki::sign_envelope(&signing, &body).unwrap();
-        // Pinned fp is some other peer's fp → must reject.
-        let err = merge_export(&env, "not-the-signer-fp").unwrap_err();
+        let err = merge_bundle(&env, "not-the-signer-fp").unwrap_err();
         assert!(err.to_string().contains("does not match pinned"), "{err}");
     }
 }
