@@ -90,12 +90,16 @@ fn for_each_op_mut(spec: &mut OpenAPI, mut f: impl FnMut(&str, &str, &mut Option
 /// operation that doesn't already have one. Progenitor uses operationId as
 /// the function name on the generated `Client`, so deterministic naming
 /// matters: the same spec across builds → the same client API.
-pub fn synthesize_operation_ids(spec: &mut OpenAPI) {
+pub fn synthesize_operation_ids(spec: &mut OpenAPI, report: &mut NormalizeReport) {
     for_each_op_mut(spec, |method, path, op| {
         if let Some(op) = op
             && op.operation_id.is_none()
         {
-            op.operation_id = Some(synth_id(method, path));
+            let id = synth_id(method, path);
+            report
+                .synthesized_ids
+                .push((method.to_string(), path.to_string(), id.clone()));
+            op.operation_id = Some(id);
         }
     });
 }
@@ -103,12 +107,15 @@ pub fn synthesize_operation_ids(spec: &mut OpenAPI) {
 /// Drop any operation that uses a `multipart/*` request body. Progenitor
 /// doesn't support multipart codegen; callers that need file-upload
 /// endpoints (e.g. Sonarr's manual-import) fall back to raw reqwest.
-pub fn strip_multipart_operations(spec: &mut OpenAPI) {
-    for_each_op_mut(spec, |_method, _path, op| {
+pub fn strip_multipart_operations(spec: &mut OpenAPI, report: &mut NormalizeReport) {
+    for_each_op_mut(spec, |method, path, op| {
         if let Some(o) = op.as_ref()
             && let Some(ReferenceOr::Item(body)) = &o.request_body
             && body.content.keys().any(|k| k.starts_with("multipart/"))
         {
+            report
+                .dropped_multipart
+                .push(format!("{} {}", method.to_uppercase(), path));
             *op = None;
         }
     });

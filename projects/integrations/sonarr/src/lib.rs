@@ -2,6 +2,12 @@
 //! from `sonarr.openapi.json` — see `build.rs`. Re-export the generated
 //! `Client` and types so callers don't see the codegen module name.
 
-#![allow(clippy::all, dead_code, unused_imports, non_snake_case)]
+#![allow(
+    clippy::all,
+    dead_code,
+    unused_imports,
+    unused_variables,
+    non_snake_case
+)]
 
 include!(concat!(env!("OUT_DIR"), "/sonarr_codegen.rs"));
