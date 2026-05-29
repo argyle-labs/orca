@@ -11,7 +11,7 @@ use system::update_state::{read_channel_marker, read_version_pin};
 
 use crate::cli::dial_bootstrap_pub;
 use crate::scheduler::{OFFER_TTL_SECS, mint_pairing_code, push_offer};
-use crate::{db as pdb, pki_dir};
+use crate::{peerdb as pdb, pki_dir};
 
 pub async fn list_enriched() -> Result<Vec<PodPeerDto>> {
     list_enriched_impl().await

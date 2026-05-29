@@ -29,7 +29,7 @@ use tokio_rustls::server::TlsStream;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use super::{db as pdb, pki_dir};
+use super::{peerdb as pdb, pki_dir};
 
 const POD_OFFER_METHOD: &str = "pod/offer";
 const POD_JOIN_CONFIRM_METHOD: &str = "pod/join-confirm";

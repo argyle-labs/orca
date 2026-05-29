@@ -29,7 +29,7 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tracing::{info, warn};
 
-use super::{db as pdb, pki_dir};
+use super::{peerdb as pdb, pki_dir};
 use system::periodic;
 
 /// Once per day. Cheap (one cert parse + a comparison), and a stale cert

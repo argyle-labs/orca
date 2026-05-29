@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
-use crate::{db as pdb, pki_dir};
+use crate::{peerdb as pdb, pki_dir};
 
 // ── pod discover ─────────────────────────────────────────────────────────────
 

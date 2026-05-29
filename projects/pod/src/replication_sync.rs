@@ -19,7 +19,7 @@ use orca_sdk::pki;
 use std::time::Duration;
 use tracing::{info, warn};
 
-use super::{db as pdb, fetch_replicate_bundle, pki_dir};
+use super::{fetch_replicate_bundle, peerdb as pdb, pki_dir};
 use system::periodic;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(60);

@@ -24,7 +24,7 @@ use super::{
     AddressChannel, HostAddressingSnapshot, POD_DEV_DISABLE_METHOD, POD_DEV_ENABLE_METHOD,
     POD_DEV_SYNC_METHOD, POD_EXEC_METHOD, POD_PING_METHOD, POD_REPLICATE_EXPORT_METHOD,
     PodDevDisableResult, PodDevEnableResult, PodDevSyncResult, PodExecParams, PodExecResult,
-    PodPingResult, ReplicateBundle, db as pdb, pki_dir,
+    PodPingResult, ReplicateBundle, peerdb as pdb, pki_dir,
 };
 
 const POD_NOTIFY_TRUST_METHOD: &str = "pod/notify-trust";

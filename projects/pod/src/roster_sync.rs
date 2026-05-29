@@ -27,7 +27,7 @@ use rusqlite::OptionalExtension;
 use std::time::Duration;
 use tracing::{info, warn};
 
-use super::{db as pdb, pki_dir};
+use super::{peerdb as pdb, pki_dir};
 use system::periodic;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(60);
