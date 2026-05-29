@@ -386,7 +386,7 @@ pub async fn exec(
     peer: &str,
     tool: &str,
     args: serde_json::Value,
-    caller_role: Option<String>,
+    caller: Option<orca_contract::CallerIdentity>,
 ) -> Result<PodExecDispatch> {
     // "local" / "localhost" → loopback round-trip via the same /api/tools
     // path peers use. Lets the same code path validate the allowlist
@@ -402,7 +402,7 @@ pub async fn exec(
         resolve_peer_addr(&peers, peer)?
     };
 
-    let r = crate::native::exec_as(&addr, tool, args, caller_role).await?;
+    let r = crate::native::exec_as(&addr, tool, args, caller).await?;
     Ok(PodExecDispatch {
         peer: peer.to_string(),
         tool: r.tool,

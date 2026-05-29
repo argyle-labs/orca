@@ -317,17 +317,25 @@ pub async fn exec(host: &str, tool: &str, args: serde_json::Value) -> Result<Pod
     exec_as(host, tool, args, None).await
 }
 
-/// Same as [`exec`] but lets the caller assert a role on behalf of a local user.
-/// CLI/REST entrypoints pass the caller's resolved role here so the recipient
-/// can enforce admin-gated tools. See [`PodExecParams::caller_role`] for the
-/// trust model.
+/// Same as [`exec`] but on behalf of a local operator. Mints an Ed25519-signed
+/// [`caller_token`] from `caller` so the recipient can verify origin + derive
+/// the role from its own replicated `users` table. `caller_role` is also set
+/// (advisory) for back-compat with rc.≤11 recipients that predate the token.
 #[allow(clippy::disallowed_types)]
 pub async fn exec_as(
     host: &str,
     tool: &str,
     args: serde_json::Value,
-    caller_role: Option<String>,
+    caller: Option<orca_contract::CallerIdentity>,
 ) -> Result<PodExecResult> {
+    let (caller_role, caller_token) = match caller {
+        Some(id) => {
+            let token =
+                caller_token::mint(&pki_dir(), &id, tool, &args, caller_token::DEFAULT_TTL_SECS)?;
+            (Some(id.role), Some(token))
+        }
+        None => (None, None),
+    };
     call_typed(
         host,
         POD_EXEC_METHOD,
@@ -335,6 +343,7 @@ pub async fn exec_as(
             tool: tool.to_string(),
             args,
             caller_role,
+            caller_token,
         }),
         Duration::from_secs(120),
     )
