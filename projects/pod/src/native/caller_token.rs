@@ -21,6 +21,11 @@
 //! `users` table keyed by `caller_user_id` (S2/S3) — the `role` field here is
 //! advisory only and is never trusted for the authorization decision.
 
+// Caller-token args are the tool's on-wire JSON payload — genuinely free-form
+// at this boundary (hashed, not interpreted). Typed shapes are deserialized by
+// the dispatcher after authorization.
+#![allow(clippy::disallowed_types)]
+
 use anyhow::{Context, Result};
 use orca_contract::CallerIdentity;
 use orca_sdk::pki;
@@ -67,8 +72,7 @@ pub fn args_hash(args: &serde_json::Value) -> String {
     let d = h.finalize();
     let mut s = String::with_capacity(64);
     for b in d.iter() {
-        use std::fmt::Write as _;
-        let _ = write!(s, "{b:02x}");
+        s.push_str(&format!("{b:02x}"));
     }
     s
 }

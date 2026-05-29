@@ -175,6 +175,51 @@ mod tests {
     }
 
     #[test]
+    fn replicated_derive_export_then_merge_lww() {
+        // Source host has one user; export the shared pool, merge into a fresh
+        // host, and confirm the row lands (any host can write the pool).
+        let src = test_conn();
+        insert(
+            &src,
+            "u1",
+            "Scott",
+            "hash-v1",
+            "admin",
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+        let bundle = replicate::export_all(&src).unwrap();
+        assert!(
+            bundle.contains_key("users"),
+            "users entity must be registered"
+        );
+
+        let dst = test_conn();
+        let merged = replicate::merge_bundle(&dst, bundle).unwrap();
+        assert_eq!(merged, 1);
+        let got = find_auth_by_username(&dst, "scott").unwrap().unwrap();
+        assert_eq!(got.id, "u1");
+        assert_eq!(got.password_hash, "hash-v1");
+        assert_eq!(got.role, "admin");
+
+        // A newer write (bumped updated_at via password change) propagates.
+        set_password_hash(&src, "u1", "hash-v2", "2026-02-01T00:00:00Z").unwrap();
+        let n = replicate::merge_bundle(&dst, replicate::export_all(&src).unwrap()).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(
+            find_auth_by_username(&dst, "scott")
+                .unwrap()
+                .unwrap()
+                .password_hash,
+            "hash-v2"
+        );
+
+        // Re-merging the same (now stale) bundle is a no-op — LWW guards it.
+        let n2 = replicate::merge_bundle(&dst, replicate::export_all(&src).unwrap()).unwrap();
+        assert_eq!(n2, 0);
+    }
+
+    #[test]
     fn password_update_bumps_timestamp() {
         let conn = test_conn();
         insert(&conn, "u1", "alice", "h1", "member", "t0").unwrap();

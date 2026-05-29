@@ -64,12 +64,21 @@ pub const POD_REPLICATE_EXPORT_METHOD: &str = "pod/replicate-export";
 /// Shared entities have no per-row owner (any paired host may publish), so the
 /// signature is authenticated transport, not ownership. ONE bundle covers
 /// users + (later) configs + settings. See project_unified_mesh_state.md.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReplicateBundle {
-    pub peer_id: String,
-    pub issued_at: i64,
-    pub entities: std::collections::BTreeMap<String, serde_json::Value>,
+mod replicate_wire {
+    // Heterogeneous registry: each entity has its own typed row, so the common
+    // bundle map is free-form JSON here (typed inside each entity's merge).
+    #![allow(clippy::disallowed_types)]
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ReplicateBundle {
+        pub peer_id: String,
+        pub issued_at: i64,
+        pub entities: std::collections::BTreeMap<String, serde_json::Value>,
+    }
 }
+
+pub use replicate_wire::ReplicateBundle;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PodPingResult {

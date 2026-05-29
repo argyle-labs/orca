@@ -23,6 +23,11 @@
 //! `rusqlite::Connection`) but transport-agnostic — signing, the mTLS dial,
 //! and the periodic schedule all live in the pod crate.
 
+// This crate is a registry of *heterogeneous* entity rows — each entity has a
+// different typed row, so the common bundle boundary is genuinely free-form
+// JSON. The concrete typing happens inside each entity's generated export/merge.
+#![allow(clippy::disallowed_types)]
+
 use std::collections::BTreeMap;
 
 use anyhow::Result;

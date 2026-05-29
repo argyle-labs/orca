@@ -328,13 +328,13 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
         .collect();
     let field_names: Vec<String> = field_idents.iter().map(|i| i.to_string()).collect();
 
-    if !field_names.iter().any(|f| *f == cfg.pk) {
+    if !field_names.contains(&cfg.pk) {
         return Err(syn::Error::new_spanned(
             ty,
             format!("#[replicate] pk '{}' is not a field of the struct", cfg.pk),
         ));
     }
-    if !field_names.iter().any(|f| *f == cfg.lww) {
+    if !field_names.contains(&cfg.lww) {
         return Err(syn::Error::new_spanned(
             ty,
             format!(
@@ -375,6 +375,9 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
 
     let expanded = quote! {
         const _: () = {
+            // The replication bundle is a heterogeneous registry of entity rows,
+            // so the wire payload is genuinely free-form JSON at this boundary.
+            #[allow(clippy::disallowed_types)]
             impl #ty {
                 fn __replicate_export(
                     conn: &::rusqlite::Connection,
