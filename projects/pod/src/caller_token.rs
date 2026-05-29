@@ -61,13 +61,36 @@ pub struct CallerToken {
     pub nonce: String,
 }
 
-/// Hex SHA-256 of the canonical-JSON encoding of `args`. Both peers derive the
-/// `serde_json::Value` from the same wire JSON, and `serde_json::Map` is a
-/// sorted `BTreeMap` (no `preserve_order` feature), so the re-serialized bytes
-/// match on both ends.
+/// Hex SHA-256 of the canonical-JSON encoding of `args`. Object keys are
+/// recursively sorted before serialization so the hash is stable regardless
+/// of feature unification (e.g. `serde_json/preserve_order` pulled in by
+/// `oas3` via `integrations/openapi`).
 pub fn args_hash(args: &serde_json::Value) -> String {
-    let bytes = serde_json::to_vec(args).unwrap_or_default();
+    // Canonicalize: recursively sort object keys before serializing. We can't
+    // rely on `serde_json::Map`'s natural order because workspace feature
+    // unification may pull in `serde_json/preserve_order` via deps like
+    // `oas3` (integrations/openapi), flipping Map from BTreeMap to IndexMap.
+    // Sorting here keeps the hash stable across any feature combination.
+    let canonical = canonicalize(args);
+    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
     hash::sha256_hex(&bytes)
+}
+
+fn canonicalize(v: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let mut out = serde_json::Map::new();
+            for k in keys {
+                out.insert(k.clone(), canonicalize(&map[k]));
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(canonicalize).collect()),
+        other => other.clone(),
+    }
 }
 
 /// Mint and sign a token for `tool`+`args` on behalf of `identity`, valid for
