@@ -147,8 +147,10 @@ members = [
     "projects/integrations/homeassistant",
     "projects/integrations/nfs",
     "projects/integrations/ntfy",
+    "projects/integrations/openapi",
     "projects/integrations/proxmox",
     "projects/integrations/smb",
+    "projects/integrations/sonarr",
     "projects/integrations/unraid",
 ]
 default-members = [
@@ -179,8 +181,10 @@ default-members = [
     "projects/integrations/homeassistant",
     "projects/integrations/nfs",
     "projects/integrations/ntfy",
+    "projects/integrations/openapi",
     "projects/integrations/proxmox",
     "projects/integrations/smb",
+    "projects/integrations/sonarr",
     "projects/integrations/unraid",
 ]
 resolver = "2"

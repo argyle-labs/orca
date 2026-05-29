@@ -1,0 +1,24 @@
+[package]
+name = "integrations-openapi"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "integrations_openapi"
+path = "src/lib.rs"
+
+# Runtime OpenAPI parser. Consumers that want a typed client add
+# `progenitor` to their own [build-dependencies] and call generate_from_spec
+# below from their build.rs — progenitor itself isn't re-exported because
+# it must run in the consumer's build script.
+
+[dependencies]
+anyhow      = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+serde_yaml  = { workspace = true }
+reqwest     = { workspace = true, features = ["blocking"] }
+oas3        = "0.22"
+
+[lints]
+workspace = true
