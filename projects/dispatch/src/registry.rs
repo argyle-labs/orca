@@ -29,7 +29,7 @@ use std::sync::{Arc, OnceLock};
 
 use crate::erased::{ErasedTool, value_to_text};
 use crate::inventory_slice::ToolRegistration;
-use orca_contract::ToolCtx;
+use contract::ToolCtx;
 
 // ── Cache ────────────────────────────────────────────────────────────────────
 
@@ -120,11 +120,11 @@ struct ToolHttpState {
 async fn http_dispatch(
     State(state): State<ToolHttpState>,
     Path(name): Path<String>,
-    caller: Option<Extension<orca_contract::CallerIdentity>>,
+    caller: Option<Extension<contract::CallerIdentity>>,
     Json(args): Json<Value>,
 ) -> std::result::Result<Json<Value>, (StatusCode, Json<Value>)> {
     if find(&name).is_none() {
-        let oe = orca_contract::OrcaError::not_found(format!("unknown tool: {name}"))
+        let oe = contract::OrcaError::not_found(format!("unknown tool: {name}"))
             .with_code("tool.unknown");
         return Err(orca_error_response(oe));
     }
@@ -140,7 +140,7 @@ async fn http_dispatch(
     });
     let ctx_ref: &ToolCtx = ctx_owned.as_ref().unwrap_or(&state.ctx);
     dispatch(&name, args, ctx_ref).await.map(Json).map_err(|e| {
-        if let Some(oe) = e.downcast_ref::<orca_contract::OrcaError>() {
+        if let Some(oe) = e.downcast_ref::<contract::OrcaError>() {
             let kind = oe.kind;
             let body = serde_json::to_value(oe)
                 .unwrap_or_else(|_| json!({ "kind": "internal", "message": "serialize failure" }));
@@ -148,12 +148,12 @@ async fn http_dispatch(
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             return (status, Json(body));
         }
-        let oe = orca_contract::OrcaError::internal(e.to_string());
+        let oe = contract::OrcaError::internal(e.to_string());
         orca_error_response(oe)
     })
 }
 
-fn orca_error_response(oe: orca_contract::OrcaError) -> (StatusCode, Json<Value>) {
+fn orca_error_response(oe: contract::OrcaError) -> (StatusCode, Json<Value>) {
     let status =
         StatusCode::from_u16(oe.kind.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let body = serde_json::to_value(&oe)
@@ -249,7 +249,7 @@ mod tests {
     use crate::erased::ToolWrapper;
     use anyhow::Result;
     use async_trait::async_trait;
-    use orca_contract::{OrcaTool, OrcaToolDef, ToolCtx};
+    use contract::{OrcaTool, OrcaToolDef, ToolCtx};
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
     use std::marker::PhantomData;
@@ -278,8 +278,8 @@ mod tests {
     }
 
     fn make_ctx() -> ToolCtx {
-        use orca_utils::config::{Config, Model};
         use std::path::PathBuf;
+        use utils::config::{Config, Model};
         ToolCtx::new(Arc::new(Config {
             anthropic_api_key: None,
             lmstudio_url: "http://localhost:1234".into(),

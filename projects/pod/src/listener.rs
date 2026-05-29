@@ -13,12 +13,12 @@ use anyhow::{Context, Result};
 use orca_sdk::framing::{read_frame, write_frame};
 use orca_sdk::jsonrpc::{ErrorObject, Message, Request, Response};
 use orca_sdk::pki::{self, PeerRole};
-use orca_utils::state::DaemonMode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use system::dev::{cmd_dev_disable, cmd_dev_enable, cmd_dev_sync};
 use tokio_rustls::server::TlsStream;
 use tracing::warn;
+use utils::state::DaemonMode;
 
 use super::{
     AddressChannel, HostAddressingSnapshot, POD_DEV_DISABLE_METHOD, POD_DEV_ENABLE_METHOD,
@@ -278,7 +278,7 @@ fn handle_peer_forget(peer_cn: &str, request: Request) -> Result<u32> {
 /// rebuilds. Skipped silently when the host isn't running a dev binary —
 /// dev_sync is a no-op on production-only peers, not an error.
 async fn handle_dev_sync() -> Result<PodDevSyncResult> {
-    let in_dev_mode = orca_utils::state::read()
+    let in_dev_mode = utils::state::read()
         .ok()
         .flatten()
         .map(|s| matches!(s.mode, DaemonMode::Dev | DaemonMode::Parked))
@@ -465,10 +465,10 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<PodExecResult> {
         None => anyhow::bail!("pod/exec requires params"),
     };
 
-    let required_role = orca_dispatch::tool_roles::required_role(&params.tool);
+    let required_role = dispatch::tool_roles::required_role(&params.tool);
     let needs_auth = remote_ok_gate(
         &params.tool,
-        orca_dispatch::remote_ok::is_allowed(&params.tool),
+        dispatch::remote_ok::is_allowed(&params.tool),
         required_role,
     )?;
     if needs_auth {

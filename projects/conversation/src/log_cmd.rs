@@ -2,7 +2,7 @@ use crate::sessions::log;
 use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;
-use orca_utils::config::Config;
+use utils::config::Config;
 
 #[derive(Subcommand)]
 pub enum LogAction {

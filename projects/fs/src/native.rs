@@ -11,10 +11,10 @@ use docs::embedded;
 use docs::mcp_helpers as roots_helper;
 use docs::tree::{NodeType, TreeNode};
 use llm::local as local_llm;
-use orca_utils::config::Config;
-use orca_utils::fs::expand_tilde;
-use orca_utils::markdown::to_llm_text;
 use std::path::{Path, PathBuf};
+use utils::config::Config;
+use utils::fs::expand_tilde;
+use utils::markdown::to_llm_text;
 
 const EMBEDDED_ROOT: &str = "docs";
 

@@ -18,13 +18,13 @@ serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 tokio       = { workspace = true }
 
-orca-dispatch        = { path = "../../orca-dispatch" }
-orca-contract    = { path = "../../orca-contract", default-features = false }
-orca-macro       = { path = "../../orca-macro" }
+dispatch        = { path = "../../dispatch" }
+contract    = { path = "../../contract", default-features = false }
+derive       = { path = "../../derive" }
 schemars         = { workspace = true }
 inventory        = { workspace = true }
 
-orca-db = { package = "orca-db", path = "../../db" }
+db = { package = "db", path = "../../db" }
 async-trait = { workspace = true }
 clap        = { workspace = true, optional = true }
 

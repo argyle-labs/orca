@@ -1,10 +1,10 @@
 //! Shared test helpers for in-crate unit tests.
 //! `native`+`test` only.
 
-use orca_contract::ToolCtx;
-use orca_utils::config::{Config, Model};
+use contract::ToolCtx;
 use std::path::PathBuf;
 use std::sync::Arc;
+use utils::config::{Config, Model};
 
 pub fn empty_ctx() -> ToolCtx {
     ToolCtx::new(Arc::new(Config {

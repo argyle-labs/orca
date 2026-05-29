@@ -1,12 +1,12 @@
 //! Agent-backend tools — manage the LLM resolution config (mode, per-agent
 //! overrides, server-side Anthropic toggle, encrypted API key). Tool bodies
-//! call `llm::resolve` and `orca_db::settings` directly — no service-trait
+//! call `llm::resolve` and `db::settings` directly — no service-trait
 //! indirection.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -90,10 +90,10 @@ pub struct AgentBackendStatusOutput {
 #[orca_tool(domain = "system.agent.backend", verb = "clear-key")]
 async fn agent_backend_clear_api_key(
     _args: ClearArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ApiKeyMutationResult> {
-    let conn = orca_db::open_default()?;
-    let removed = orca_db::settings::secret_delete(&conn, "anthropic_api_key")?;
+    let conn = db::open_default()?;
+    let removed = db::settings::secret_delete(&conn, "anthropic_api_key")?;
     Ok(ApiKeyMutationResult {
         present: false,
         message: if removed {
@@ -109,14 +109,14 @@ async fn agent_backend_clear_api_key(
 #[orca_tool(domain = "system.agent.backend", verb = "set-key")]
 async fn agent_backend_set_api_key(
     args: SetArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ApiKeyMutationResult> {
     if args.key.trim().is_empty() {
         anyhow::bail!("key must not be empty");
     }
-    let conn = orca_db::open_default()?;
-    orca_db::settings::secret_set(&conn, "anthropic_api_key", &args.key)?;
-    let masked = orca_db::settings::mask_key(&args.key);
+    let conn = db::open_default()?;
+    db::settings::secret_set(&conn, "anthropic_api_key", &args.key)?;
+    let masked = db::settings::mask_key(&args.key);
     Ok(ApiKeyMutationResult {
         present: true,
         message: format!("stored Anthropic API key in encrypted orca DB ({masked})"),
@@ -128,7 +128,7 @@ async fn agent_backend_set_api_key(
 #[orca_tool(domain = "system.agent.backend", verb = "set-mode")]
 async fn agent_backend_set_mode(
     args: SetModeArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SetModeResult> {
     let parsed = llm::resolve::Mode::parse(&args.mode)?;
     llm::resolve::set_mode(parsed)?;
@@ -141,7 +141,7 @@ async fn agent_backend_set_mode(
 #[orca_tool(domain = "system.agent.backend", verb = "override")]
 async fn agent_backend_override(
     args: OverrideArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<OverrideResult> {
     if args.backend == "clear" {
         let removed = llm::resolve::clear_override(&args.agent)?;
@@ -169,7 +169,7 @@ async fn agent_backend_override(
 #[orca_tool(domain = "system.agent.backend", verb = "use-server-anthropic")]
 async fn agent_backend_use_server_anthropic(
     args: UseServerAnthropicArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<UseServerAnthropicResult> {
     llm::resolve::set_use_server_anthropic(args.enabled)?;
     Ok(UseServerAnthropicResult {
@@ -181,14 +181,14 @@ async fn agent_backend_use_server_anthropic(
 #[orca_tool(domain = "system.agent.backend", verb = "detail")]
 async fn agent_backend_detail(
     _args: AgentBackendStatusArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<AgentBackendStatusOutput> {
     let mode = llm::resolve::current_mode()?.as_str().to_string();
     let use_server_anthropic = llm::resolve::use_server_anthropic()?;
-    let conn = orca_db::open_default()?;
-    let stored = orca_db::settings::secret_get(&conn, "anthropic_api_key")?;
+    let conn = db::open_default()?;
+    let stored = db::settings::secret_get(&conn, "anthropic_api_key")?;
     let api_key_in_db = stored.is_some();
-    let api_key_masked = stored.as_deref().map(orca_db::settings::mask_key);
+    let api_key_masked = stored.as_deref().map(db::settings::mask_key);
     let overrides = llm::resolve::list_overrides()?
         .into_iter()
         .map(|(agent, backend)| AgentBackendOverrideEntry { agent, backend })

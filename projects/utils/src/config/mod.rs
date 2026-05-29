@@ -43,8 +43,8 @@ pub struct Config {
 /// concurrently on distinct ports; nothing collapses them.
 ///
 /// `Ports` is a value type — resolution (DB settings + env override) lives
-/// in `orca_db::ports` because `orca-utils` cannot depend on the DB crate.
-/// Server code should call `orca_db::ports::current()` instead of
+/// in `db::ports` because `orca-utils` cannot depend on the DB crate.
+/// Server code should call `db::ports::current()` instead of
 /// constructing `Ports` directly.
 #[derive(Debug, Clone, Copy)]
 pub struct Ports {
@@ -68,7 +68,7 @@ impl Default for Ports {
 
 impl Ports {
     /// Layer env-var overrides onto a base set. Used by the DB-backed
-    /// resolver in `orca_db::ports` after it reads the persisted ports
+    /// resolver in `db::ports` after it reads the persisted ports
     /// — env vars are the highest-precedence runtime knob and apply on
     /// top of whatever was stored.
     ///
@@ -174,7 +174,7 @@ impl Config {
             memory_root,
             db_path,
             // Compile-time-default ports. Runtime callers must read from
-            // `orca_db::ports::current()` to see operator overrides.
+            // `db::ports::current()` to see operator overrides.
             ports: Ports::default(),
         })
     }
@@ -254,7 +254,7 @@ mod tests {
         );
     }
 
-    // Ports resolution lives in `orca_db::ports` because the DB is the
+    // Ports resolution lives in `db::ports` because the DB is the
     // source of truth. See that module's tests for the precedence chain
     // (env > DB > const). `apply_env_overrides` is the only pure piece
     // that's testable here without a DB connection.

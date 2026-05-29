@@ -43,9 +43,9 @@
 //! need a service will fail at dispatch with "no service registered". This
 //! is the explicit design-pass deliverable for #4.
 
-use orca_contract::ToolCtx;
-use orca_utils::config::Config;
+use contract::ToolCtx;
 use std::sync::Arc;
+use utils::config::Config;
 
 /// Configuration passed from the native UI at construction time.
 ///

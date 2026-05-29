@@ -12,10 +12,10 @@
 //! permissions, not network namespace.
 
 use anyhow::{Context, Result};
-use orca_utils::fs::chmod_dir_owner_only;
 use rand::Rng;
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use utils::fs::chmod_dir_owner_only;
 
 #[cfg(unix)]
 use std::io::Write;
@@ -29,9 +29,7 @@ const TOKEN_FILENAME: &str = "loopback.token";
 
 fn secrets_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("no home dir")?;
-    Ok(home
-        .join(orca_utils::config::APP_STATE_DIR)
-        .join(SECRETS_SUBDIR))
+    Ok(home.join(utils::config::APP_STATE_DIR).join(SECRETS_SUBDIR))
 }
 
 fn token_path() -> Result<PathBuf> {
@@ -46,7 +44,7 @@ fn token_path() -> Result<PathBuf> {
 pub fn install_at_startup() -> Result<()> {
     let mut buf = [0u8; 32];
     rand::rng().fill_bytes(&mut buf);
-    let plaintext = format!("orca_loopback_{}", hex(&buf));
+    let plaintext = format!("orca_loopback_{}", utils::hash::hex_encode(&buf));
 
     // Claim memory FIRST. If a prior call already claimed it (test harness
     // reuses the static across many `tokio::test` cases in one binary),
@@ -125,14 +123,6 @@ pub fn read_from_disk() -> Option<String> {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
-}
-
 #[cfg(unix)]
 pub(crate) fn write_secret_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     let mut f = std::fs::OpenOptions::new()
@@ -153,12 +143,6 @@ pub(crate) fn write_secret_file(path: &std::path::Path, content: &str) -> std::i
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hex_produces_lowercase_hexdigits() {
-        let s = hex(&[0x00, 0xff, 0xab, 0x12]);
-        assert_eq!(s, "00ffab12");
-    }
 
     #[test]
     fn get_returns_none_before_install() {

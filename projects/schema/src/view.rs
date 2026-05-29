@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use orca_utils::fs::expand_tilde;
+use utils::fs::expand_tilde;
 
 use mysql_async::Pool;
 use mysql_async::prelude::Queryable;

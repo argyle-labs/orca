@@ -2,7 +2,7 @@
 //! orca's own OpenAPI JSON. Lives in the server crate because the spec is
 //! built from `crate::serve::openapi::orca_spec_json()`.
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +20,7 @@ pub struct SpecDetailArgs {}
 #[orca_tool(domain = "namespace.spec", verb = "detail")]
 async fn spec_detail(
     _args: SpecDetailArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SpecDetailReport> {
     let spec = crate::serve::openapi::orca_spec_json();
     Ok(SpecDetailReport {

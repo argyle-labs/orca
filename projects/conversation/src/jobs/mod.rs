@@ -8,11 +8,11 @@ use ::llm::tools::ToolRegistry;
 use ::llm::{Message, ModelBackend, OutputSink, buffer_sink, sink_write};
 use anyhow::Result;
 use colored::Colorize;
-use orca_contract::ToolResult;
-use orca_utils::config::{Config, Model};
+use contract::ToolResult;
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use utils::config::{Config, Model};
 
 /// A background agent job that runs independently of the foreground session.
 pub struct BackgroundJob {

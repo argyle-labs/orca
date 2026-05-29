@@ -1,6 +1,6 @@
 //! LLM backend types — message history, backend response, stop conditions.
 
-use orca_contract::{ToolCall, ToolResult};
+use contract::{ToolCall, ToolResult};
 
 /// Canonical internal message representation.
 /// Each backend converts to/from its own wire format.

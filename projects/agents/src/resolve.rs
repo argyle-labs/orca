@@ -9,8 +9,8 @@
 //! filesystem fallback. Profile lookup failures (DB unavailable, no active
 //! profile) degrade gracefully to the embedded baseline.
 
-use orca_utils::config::{Config, LOCAL_USER};
 use std::path::PathBuf;
+use utils::config::{Config, LOCAL_USER};
 
 /// Compute the prioritized list of agent search dirs for the current user.
 /// Returns the active profile's override dir if present; otherwise empty
@@ -31,7 +31,7 @@ pub fn load_agent_prompt(name: &str, config: &Config) -> Option<String> {
 }
 
 fn active_profile_agents_dir(config: &Config) -> Option<PathBuf> {
-    let conn = orca_db::open(&config.db_path).ok()?;
+    let conn = db::open(&config.db_path).ok()?;
     let mgr = namespace::NamespaceManager::from_config(config);
     let active = mgr.resolve_active(&conn, LOCAL_USER).ok().flatten()?;
     Some(active.agents_dir())

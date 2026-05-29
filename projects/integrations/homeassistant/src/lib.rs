@@ -5,10 +5,10 @@
 
 pub mod tools;
 
-use orca_utils::http::{Client as HttpClient, HttpError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
+use utils::http::{Client as HttpClient, HttpError};
 
 #[derive(Debug, Clone)]
 pub struct Config {

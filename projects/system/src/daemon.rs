@@ -4,17 +4,17 @@
 
 use anyhow::Result;
 use colored::Colorize;
-use orca_contract::ToolCtx;
-use orca_macro::orca_tool;
-#[cfg(target_os = "linux")]
-use orca_utils::config::APP_SYSTEMD_SERVICE;
-#[cfg(target_os = "macos")]
-use orca_utils::config::{APP_DAEMON_LOG, APP_PLIST_LABEL};
-use orca_utils::config::{APP_NAME, APP_STATE_DIR};
-use orca_utils::state::DaemonMode;
+use contract::ToolCtx;
+use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::process::Command;
+#[cfg(target_os = "linux")]
+use utils::config::APP_SYSTEMD_SERVICE;
+#[cfg(target_os = "macos")]
+use utils::config::{APP_DAEMON_LOG, APP_PLIST_LABEL};
+use utils::config::{APP_NAME, APP_STATE_DIR};
+use utils::state::DaemonMode;
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -34,7 +34,7 @@ pub struct DaemonStatusOutput {
 /// Show daemon status (mode, pid, port, version, uptime).
 #[orca_tool(domain = "system.daemon", verb = "status")]
 async fn daemon_status_tool(_args: DaemonStatusArgs, _ctx: &ToolCtx) -> Result<DaemonStatusOutput> {
-    let Some(s) = orca_utils::state::read()? else {
+    let Some(s) = utils::state::read()? else {
         println!("{} daemon not running", "●".dimmed());
         return Ok(DaemonStatusOutput {
             running: false,
@@ -102,7 +102,7 @@ async fn daemon_reclaim_tool(
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DaemonInstallArgs {
     /// HTTP port to bind.
-    #[cfg_attr(feature = "cli", arg(short, long, default_value_t = orca_utils::config::APP_REST_HTTP_PORT))]
+    #[cfg_attr(feature = "cli", arg(short, long, default_value_t = utils::config::APP_REST_HTTP_PORT))]
     #[serde(default = "default_http_port")]
     pub port: u16,
     /// Install as a SYSTEM service running as this user (requires root).
@@ -111,7 +111,7 @@ pub struct DaemonInstallArgs {
 }
 
 fn default_http_port() -> u16 {
-    orca_utils::config::APP_REST_HTTP_PORT
+    utils::config::APP_REST_HTTP_PORT
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
@@ -153,7 +153,7 @@ async fn daemon_uninstall_tool(
 
 // ── internal helpers (status print + signal/install/uninstall) ──────────────
 
-fn status_print(s: &orca_utils::state::DaemonState) {
+fn status_print(s: &utils::state::DaemonState) {
     let mode_label = match s.mode {
         DaemonMode::Daemon => "running".green().to_string(),
         DaemonMode::Parked => "parked (port released)".yellow().to_string(),
@@ -194,7 +194,7 @@ fn status_print(s: &orca_utils::state::DaemonState) {
 }
 
 fn stop() -> Result<DaemonSignalOutput> {
-    let s = orca_utils::state::read()?
+    let s = utils::state::read()?
         .ok_or_else(|| anyhow::anyhow!("daemon not running (no state file)"))?;
     send_signal(s.daemon_pid, "TERM")?;
     println!(
@@ -206,7 +206,7 @@ fn stop() -> Result<DaemonSignalOutput> {
 }
 
 fn park() -> Result<DaemonSignalOutput> {
-    let s = orca_utils::state::read()?
+    let s = utils::state::read()?
         .ok_or_else(|| anyhow::anyhow!("daemon not running (no state file)"))?;
     if s.mode != DaemonMode::Daemon {
         anyhow::bail!("daemon is not in running mode (current: {:?})", s.mode);
@@ -222,7 +222,7 @@ fn park() -> Result<DaemonSignalOutput> {
 }
 
 fn reclaim() -> Result<DaemonSignalOutput> {
-    let s = orca_utils::state::read()?
+    let s = utils::state::read()?
         .ok_or_else(|| anyhow::anyhow!("daemon not running (no state file)"))?;
     if s.mode == DaemonMode::Daemon {
         println!(
@@ -302,7 +302,7 @@ fn install(port: u16, service_user: Option<String>) -> Result<()> {
             // chown the PKI tree to the service user so the daemon can read it.
             let pki_dir = std::path::PathBuf::from(&home)
                 .join(APP_STATE_DIR)
-                .join(orca_utils::config::APP_PKI_DIR);
+                .join(utils::config::APP_PKI_DIR);
             chown_recursive(&pki_dir, &user)?;
             install_system_service(&binary, port, &user, &home)
         }
@@ -312,7 +312,7 @@ fn install(port: u16, service_user: Option<String>) -> Result<()> {
 fn ensure_pki_for_home(home: &str) -> Result<()> {
     let pki_dir = std::path::PathBuf::from(home)
         .join(APP_STATE_DIR)
-        .join(orca_utils::config::APP_PKI_DIR);
+        .join(utils::config::APP_PKI_DIR);
     orca_sdk::pki::init(&pki_dir)?;
     Ok(())
 }
@@ -366,7 +366,7 @@ fn resolve_binary() -> Result<String> {
     {
         return Ok(s.to_string());
     }
-    if let Some(s) = orca_utils::state::read()?
+    if let Some(s) = utils::state::read()?
         && !s.binary.is_empty()
     {
         return Ok(s.binary);

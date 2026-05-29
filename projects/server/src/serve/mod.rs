@@ -15,9 +15,9 @@ use axum::http::{HeaderName, Method};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum_server::tls_rustls::RustlsConfig;
-use orca_utils::state::{DaemonMode, DaemonState};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::info;
+use utils::state::{DaemonMode, DaemonState};
 
 /// Guard for `--dev`: refuse if more than one user is registered.
 /// Plain-HTTP + relaxed cookie attrs are only safe on a single-user host.
@@ -44,7 +44,7 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     let pki_dir = db_path
         .parent()
         .unwrap_or(std::path::Path::new("."))
-        .join(orca_utils::config::APP_PKI_DIR);
+        .join(utils::config::APP_PKI_DIR);
     let app = build_router(dev, db_path);
 
     let addr: SocketAddr = if dev {
@@ -70,12 +70,12 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     // Register as the active dev process so the parked daemon won't auto-reclaim.
     // Use ORCA_DEV_PARENT_PID (the shell script PID) so the registration stays
     // valid across cargo-watch rebuilds — the shell script outlives each server instance.
-    if dev && let Ok(Some(s)) = orca_utils::state::read() {
+    if dev && let Ok(Some(s)) = utils::state::read() {
         let active_pid = std::env::var("ORCA_DEV_PARENT_PID")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(std::process::id);
-        if let Err(e) = orca_utils::state::write(&DaemonState {
+        if let Err(e) = utils::state::write(&DaemonState {
             mode: DaemonMode::Dev,
             active_pid,
             ..s
@@ -117,7 +117,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     let pki_dir = db_path
         .parent()
         .unwrap_or(std::path::Path::new("."))
-        .join(orca_utils::config::APP_PKI_DIR);
+        .join(utils::config::APP_PKI_DIR);
     // `port` is the HTTP bind (CLI `--port`, default APP_REST_HTTP_PORT).
     // HTTPS uses the Config-resolved https port (env-overridable). Both
     // listen concurrently — homelab clients without an internal CA reach
@@ -140,7 +140,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     let dev_spawn = std::env::var("ORCA_DEV_PARENT_PID").is_ok() || spawned_by_cargo_watch();
 
     if dev_spawn {
-        if let Ok(Some(mut s)) = orca_utils::state::read() {
+        if let Ok(Some(mut s)) = utils::state::read() {
             // If production thinks it's still in Daemon mode, send SIGUSR1 to park.
             if matches!(s.mode, DaemonMode::Daemon) {
                 tracing::info!(
@@ -152,7 +152,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                     .status();
                 for _ in 0..30 {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    if let Ok(Some(s2)) = orca_utils::state::read()
+                    if let Ok(Some(s2)) = utils::state::read()
                         && matches!(s2.mode, DaemonMode::Parked)
                     {
                         s = s2;
@@ -174,7 +174,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             }
             s.active_pid = std::process::id();
             s.mode = DaemonMode::Dev;
-            if let Err(e) = orca_utils::state::write(&s) {
+            if let Err(e) = utils::state::write(&s) {
                 tracing::warn!("failed to update dev state: {e}");
             }
         } else {
@@ -185,7 +185,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or_else(std::process::id);
-            if let Err(e) = orca_utils::state::write(&DaemonState {
+            if let Err(e) = utils::state::write(&DaemonState {
                 daemon_pid: std::process::id(),
                 active_pid: parent_pid,
                 port,
@@ -231,7 +231,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         return Ok(());
     }
 
-    if let Err(e) = orca_utils::state::write(&DaemonState {
+    if let Err(e) = utils::state::write(&DaemonState {
         daemon_pid: std::process::id(),
         active_pid: std::process::id(),
         port,
@@ -254,12 +254,12 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
 
     // Crash-restart recovery: if launchd restarted us while a dev session was active,
     // wait for the dev server to finish rather than immediately fighting it for the port.
-    if let Ok(Some(mut s)) = orca_utils::state::read()
+    if let Ok(Some(mut s)) = utils::state::read()
         && s.mode == DaemonMode::Dev
     {
         info!("[orca] restarted while dev session active — waiting for dev to exit");
         s.daemon_pid = std::process::id();
-        if let Err(e) = orca_utils::state::write(&s) {
+        if let Err(e) = utils::state::write(&s) {
             tracing::warn!("failed to update daemon_pid in state: {e}");
         }
 
@@ -269,11 +269,11 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             tokio::select! {
                 _ = sigusr2.recv() => break,
                 _ = sigterm.recv() => {
-                    _ = orca_utils::state::clear();
+                    _ = utils::state::clear();
                     return Ok(());
                 }
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                    if let Ok(Some(s)) = orca_utils::state::read() {
+                    if let Ok(Some(s)) = utils::state::read() {
                         if s.mode != DaemonMode::Dev || !pid_alive(s.active_pid) { break; }
                     } else {
                         break;
@@ -290,10 +290,10 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             "[orca] daemon listening on http://localhost:{port} + https://localhost:{}",
             ports.https
         );
-        if let Err(e) = orca_utils::state::set_mode(DaemonMode::Daemon) {
+        if let Err(e) = utils::state::set_mode(DaemonMode::Daemon) {
             tracing::warn!("failed to set daemon mode: {e}");
         }
-        if let Err(e) = orca_utils::state::set_active_pid(std::process::id()) {
+        if let Err(e) = utils::state::set_active_pid(std::process::id()) {
             tracing::warn!("failed to set active_pid: {e}");
         }
 
@@ -327,14 +327,14 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                 info!("[orca] daemon shutting down");
                 https_handle.graceful_shutdown(Some(Duration::from_secs(1)));
                 http_handle.graceful_shutdown(Some(Duration::from_secs(1)));
-                _ = orca_utils::state::clear();
+                _ = utils::state::clear();
                 return Ok(());
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("[orca] daemon shutting down");
                 https_handle.graceful_shutdown(Some(Duration::from_secs(1)));
                 http_handle.graceful_shutdown(Some(Duration::from_secs(1)));
-                _ = orca_utils::state::clear();
+                _ = utils::state::clear();
                 return Ok(());
             }
         };
@@ -349,7 +349,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         let mut sigusr2 = signal(SignalKind::user_defined2())?;
 
         // Port released (listener dropped by select! cancellation)
-        if let Err(e) = orca_utils::state::set_mode(DaemonMode::Parked) {
+        if let Err(e) = utils::state::set_mode(DaemonMode::Parked) {
             tracing::warn!("failed to set parked mode: {e}");
         }
         info!("[orca] daemon parked — port {port} released");
@@ -368,12 +368,12 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                 }
                 _ = sigterm.recv() => {
                     info!("[orca] daemon shutting down (while parked)");
-                    _ = orca_utils::state::clear();
+                    _ = utils::state::clear();
                     return Ok(());
                 }
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {
                     // Auto-reclaim if dev process died OR nobody ever took the port
-                    if let Ok(Some(s)) = orca_utils::state::read() {
+                    if let Ok(Some(s)) = utils::state::read() {
                         let abandoned = match s.mode {
                             DaemonMode::Dev => !pid_alive(s.active_pid),
                             // Parked with active_pid still pointing at daemon → dev never started
@@ -396,7 +396,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
         // Outer loop: rebind and serve again
     }
 
-    _ = orca_utils::state::clear();
+    _ = utils::state::clear();
     Ok(())
 }
 
@@ -601,11 +601,11 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
 
 /// Build the tool ctx and spawn the in-process cron scheduler. Nested tool
 /// dispatch (e.g. `schedule.run` invoking another tool) goes through the
-/// shared `orca_dispatch::dispatch` free fn, which walks the inventory
+/// shared `dispatch::dispatch` free fn, which walks the inventory
 /// directly. Best-effort: a config-load failure disables the scheduler but
 /// does not abort the daemon.
 fn spawn_scheduler_runtime() {
-    match orca_utils::config::Config::load() {
+    match utils::config::Config::load() {
         Ok(cfg) => {
             let cfg = Arc::new(cfg);
             let ctx = Arc::new(crate::mcp::build_tool_ctx(cfg));
@@ -976,7 +976,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
 
     // Mount the OrcaTool registry under /api/tools. Same registry as MCP stdio
     // and CLI — one trait impl, three live surfaces (REST + MCP + CLI).
-    let api = match orca_utils::config::Config::load() {
+    let api = match utils::config::Config::load() {
         Ok(cfg) => {
             // Reuse the same registry + service-trait setup that the CLI and
             // MCP-stdio surfaces use, otherwise tools that look up services on
@@ -988,7 +988,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
             // the admin token (M4 in the v1 hardening punch list). Dispatch
             // walks the inventory directly — no registry to ship.
             pod::dispatcher::install(ctx.clone());
-            api.nest("/api/tools", orca_dispatch::axum_router(ctx))
+            api.nest("/api/tools", dispatch::axum_router(ctx))
         }
         Err(e) => {
             tracing::warn!("Config::load failed, /api/tools disabled: {e}");

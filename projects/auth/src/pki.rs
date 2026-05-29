@@ -3,10 +3,10 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 use orca_sdk::pki::{self as sdk_pki, Capability};
-use orca_utils::config::{APP_PKI_DIR, APP_STATE_DIR};
 use std::path::PathBuf;
+use utils::config::{APP_PKI_DIR, APP_STATE_DIR};
 
 fn pki_dir() -> PathBuf {
     dirs::home_dir()
@@ -66,7 +66,7 @@ pub struct PkiListArgs {}
 #[orca_tool(domain = "system.pki.ca", verb = "create")]
 async fn pki_ca_create(
     _args: PkiCaInitArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<PkiInitReport> {
     let dir = pki_dir();
     let ca_path = sdk_pki::ca_cert_path(&dir);
@@ -84,7 +84,7 @@ async fn pki_ca_create(
 #[orca_tool(domain = "system.pki.cert", verb = "create")]
 async fn pki_cert_create(
     args: PkiCertIssueArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<PkiCertReport> {
     let dir = pki_dir();
     let cap: Capability = args.capability.parse()?;
@@ -103,10 +103,7 @@ async fn pki_cert_create(
 
 /// List all issued plugin certs.
 #[orca_tool(domain = "system.pki", verb = "list")]
-async fn pki_list(
-    _args: PkiListArgs,
-    _ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<PkiListReport> {
+async fn pki_list(_args: PkiListArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PkiListReport> {
     let dir = pki_dir();
     let certs = sdk_pki::list_plugins(&dir)
         .into_iter()

@@ -11,14 +11,14 @@ path = "src/lib.rs"
 cli = []
 
 [dependencies]
-orca-contract = { path = "../orca-contract" }
-orca-macro    = { path = "../orca-macro" }
-orca-dispatch = { path = "../orca-dispatch" }
+contract = { path = "../contract" }
+derive    = { path = "../derive" }
+dispatch = { path = "../dispatch" }
 schemars      = { workspace = true }
 serde         = { workspace = true }
 inventory     = { workspace = true }
 tracing       = { workspace = true }
-orca-utils    = { path = "../utils" }
+utils    = { path = "../utils" }
 llm           = { path = "../llm" }
 
 anyhow        = { workspace = true }
@@ -37,7 +37,7 @@ unicode-width = "0.2"
 uuid          = { workspace = true }
 dirs          = { workspace = true }
 agents        = { path = "../agents" }
-db            = { package = "orca-db", path = "../db" }
+db            = { package = "db", path = "../db" }
 platform      = { path = "../platform" }
 
 [dev-dependencies]

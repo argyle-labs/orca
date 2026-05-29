@@ -14,8 +14,8 @@ use crate::update_state::{
     write_channel_marker, write_version_pin,
 };
 use anyhow::Result;
-use orca_contract::ToolCtx;
-use orca_macro::orca_tool;
+use contract::ToolCtx;
+use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -156,8 +156,7 @@ async fn update_check(args: UpdateCheckArgs, _ctx: &ToolCtx) -> Result<UpdateChe
                 println!("[orca] pinned to {pin} — `orca update --unpin` to upgrade");
                 pinned = Some(pin);
             }
-            match download_asset(&orca_utils::http::Client::new(), &info.checksum_url, &token).await
-            {
+            match download_asset(&utils::http::Client::new(), &info.checksum_url, &token).await {
                 Ok(bytes) => match write_cached_sha256(&info.version, &bytes) {
                     Ok(path) => println!("[orca] cached sha256 → {}", path.display()),
                     Err(e) => eprintln!("[orca] warning: cache write failed: {e}"),
@@ -310,10 +309,10 @@ pub async fn startup_update_check() {
 mod tests {
     use super::*;
     use crate::update_state::read_version_pin;
-    use orca_utils::config::{Config, Model};
     use serial_test::serial;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use utils::config::{Config, Model};
 
     fn isolated_orca_home(scenario: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");

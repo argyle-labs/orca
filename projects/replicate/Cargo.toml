@@ -1,5 +1,5 @@
 [package]
-name = "orca-replicate"
+name = "replicate"
 version.workspace = true
 edition.workspace = true
 

@@ -5,19 +5,19 @@
 //! `server/src/commands/update.rs`; everything dev-runtime-related lives here.
 
 use anyhow::{Context, Result};
-use orca_utils::fs::chmod_dir_owner_only;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
+use utils::fs::chmod_dir_owner_only;
 
 use crate::update::{
-    current_binary_path, require_sha256_nonempty, resolve_github_token, sha2_digest, verify_sha256,
+    current_binary_path, require_sha256_nonempty, resolve_github_token, verify_sha256,
 };
 
 // ── Dev source (local serve) ──────────────────────────────────────────────────
 
 fn dev_source_path() -> Option<PathBuf> {
-    Some(orca_utils::fs::orca_home()?.join("dev-source"))
+    Some(utils::fs::orca_home()?.join("dev-source"))
 }
 
 pub fn read_dev_source() -> Option<String> {
@@ -53,17 +53,11 @@ pub struct DevVersionInfo {
     pub sha256: String,
 }
 
-fn sha256_of_file(path: &Path) -> Result<String> {
-    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    let digest = sha2_digest(&bytes);
-    Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
-}
-
 /// Check a local dev-serve endpoint for a newer binary.
 /// Returns `Some` if the sha256 on the server differs from the running binary.
 pub async fn check_for_update_dev(source_url: &str) -> Result<Option<String>> {
     let url = format!("{}/version.json", source_url.trim_end_matches('/'));
-    let client = orca_utils::http::Client::new();
+    let client = utils::http::Client::new();
     let info: DevVersionInfo = client
         .get(url)
         .send()
@@ -73,7 +67,7 @@ pub async fn check_for_update_dev(source_url: &str) -> Result<Option<String>> {
         .context("dev-source returned invalid version.json")?;
 
     let current = current_binary_path()?;
-    let current_sha = sha256_of_file(&current).unwrap_or_default();
+    let current_sha = utils::hash::sha256_file(&current).unwrap_or_default();
     if info.sha256 == current_sha {
         Ok(None)
     } else {
@@ -86,7 +80,7 @@ pub async fn check_for_update_dev(source_url: &str) -> Result<Option<String>> {
 /// downloaded bytes before writing — fail-closed, no install without match.
 pub async fn apply_update_dev(source_url: &str) -> Result<()> {
     let base = source_url.trim_end_matches('/');
-    let client = orca_utils::http::Client::new();
+    let client = utils::http::Client::new();
 
     let info: DevVersionInfo = client
         .get(format!("{base}/version.json"))
@@ -148,11 +142,11 @@ pub async fn apply_update_dev(source_url: &str) -> Result<()> {
 const DEV_REPO_SUBDIR: &str = "dev/orca";
 
 fn dev_repo_path() -> Option<PathBuf> {
-    Some(orca_utils::fs::orca_home()?.join(DEV_REPO_SUBDIR))
+    Some(utils::fs::orca_home()?.join(DEV_REPO_SUBDIR))
 }
 
 fn dev_pid_path() -> Option<PathBuf> {
-    Some(orca_utils::fs::orca_home()?.join("dev.pid"))
+    Some(utils::fs::orca_home()?.join("dev.pid"))
 }
 
 /// Find `cargo` for `dev_enable` — daemon-inherited PATH typically lacks
@@ -229,12 +223,12 @@ pub struct DevEnableResult {
 }
 
 pub fn cmd_dev_enable() -> Result<DevEnableResult> {
-    use orca_utils::config::APP_REPO_URL;
+    use utils::config::APP_REPO_URL;
 
     let repo = dev_repo_path().context("no ORCA_HOME or HOME")?;
 
-    if let Ok(Some(s)) = orca_utils::state::read()
-        && matches!(s.mode, orca_utils::state::DaemonMode::Dev)
+    if let Ok(Some(s)) = utils::state::read()
+        && matches!(s.mode, utils::state::DaemonMode::Dev)
         && pid_alive(s.daemon_pid)
     {
         return Ok(DevEnableResult {
@@ -247,12 +241,12 @@ pub fn cmd_dev_enable() -> Result<DevEnableResult> {
     if let Some(pid) = read_dev_pid()
         && pid_alive(pid)
     {
-        let daemon_state = orca_utils::state::read()?;
+        let daemon_state = utils::state::read()?;
         let daemon_parked = daemon_state
             .as_ref()
             .map(|s| {
-                s.mode == orca_utils::state::DaemonMode::Parked
-                    || s.mode == orca_utils::state::DaemonMode::Dev
+                s.mode == utils::state::DaemonMode::Parked
+                    || s.mode == utils::state::DaemonMode::Dev
             })
             .unwrap_or(false);
         return Ok(DevEnableResult {
@@ -293,8 +287,8 @@ pub fn cmd_dev_enable() -> Result<DevEnableResult> {
         false
     };
 
-    let daemon_parked = match orca_utils::state::read()? {
-        Some(s) if s.mode == orca_utils::state::DaemonMode::Daemon => {
+    let daemon_parked = match utils::state::read()? {
+        Some(s) if s.mode == utils::state::DaemonMode::Daemon => {
             Command::new("kill")
                 .args(["-USR1", &s.daemon_pid.to_string()])
                 .status()?;
@@ -325,9 +319,9 @@ pub fn cmd_dev_enable() -> Result<DevEnableResult> {
     let watch_pid = child.id();
     write_dev_pid(watch_pid)?;
 
-    if daemon_parked && let Ok(Some(mut s)) = orca_utils::state::read() {
+    if daemon_parked && let Ok(Some(mut s)) = utils::state::read() {
         s.active_pid = watch_pid;
-        _ = orca_utils::state::write(&s);
+        _ = utils::state::write(&s);
     }
 
     Ok(DevEnableResult {
@@ -340,8 +334,8 @@ pub fn cmd_dev_enable() -> Result<DevEnableResult> {
 fn tokio_block_on_park(daemon_pid: u32) -> Result<()> {
     for _ in 0..50 {
         std::thread::sleep(std::time::Duration::from_millis(100));
-        if let Ok(Some(s)) = orca_utils::state::read() {
-            if s.daemon_pid == daemon_pid && s.mode == orca_utils::state::DaemonMode::Parked {
+        if let Ok(Some(s)) = utils::state::read() {
+            if s.daemon_pid == daemon_pid && s.mode == utils::state::DaemonMode::Parked {
                 return Ok(());
             }
             if s.daemon_pid != daemon_pid {
@@ -374,8 +368,8 @@ pub fn cmd_dev_disable() -> Result<DevDisableResult> {
         false
     };
 
-    let daemon_reclaimed = match orca_utils::state::read()? {
-        Some(s) if s.mode != orca_utils::state::DaemonMode::Daemon => Command::new("kill")
+    let daemon_reclaimed = match utils::state::read()? {
+        Some(s) if s.mode != utils::state::DaemonMode::Daemon => Command::new("kill")
             .args(["-USR2", &s.daemon_pid.to_string()])
             .status()
             .map(|st| st.success())

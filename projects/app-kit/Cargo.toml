@@ -1,5 +1,5 @@
 [package]
-name = "orca-app-kit"
+name = "app-kit"
 version.workspace = true
 edition.workspace = true
 
@@ -33,7 +33,7 @@ edition.workspace = true
 # rlib     — Rust UIs link this in normally; also lets workspace `cargo check`
 #            work without forcing a dylib link step.
 [lib]
-name = "orca_app_kit"
+name = "app_kit"
 path = "src/lib.rs"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
@@ -60,9 +60,9 @@ mcp      = { path = "../mcp" }
 docker        = { path = "../integrations/docker" }
 homeassistant = { path = "../integrations/homeassistant" }
 proxmox       = { path = "../integrations/proxmox" }
-orca-dispatch = { path = "../orca-dispatch" }
-orca-contract = { path = "../orca-contract" }
-orca-utils    = { path = "../utils" }
+dispatch = { path = "../dispatch" }
+contract = { path = "../contract" }
+utils    = { path = "../utils" }
 
 uniffi    = { workspace = true, features = ["cli"] }
 tokio     = { workspace = true }

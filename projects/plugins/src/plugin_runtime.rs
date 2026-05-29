@@ -10,7 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -43,11 +43,11 @@ pub struct SetPluginDataOutput {
 #[orca_tool(domain = "system.plugin.data", verb = "get")]
 async fn get_plugin_data(
     args: GetPluginDataArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<GetPluginDataOutput> {
     use anyhow::Context;
-    let conn = orca_db::open_default()?;
-    let value = match orca_db::plugin_data::get(&conn, &args.plugin, &args.key)? {
+    let conn = db::open_default()?;
+    let value = match db::plugin_data::get(&conn, &args.plugin, &args.key)? {
         Some(row) => serde_json::from_str::<Value>(&row.value).with_context(|| {
             format!(
                 "plugin_data row for {}/{} is not valid JSON",
@@ -63,10 +63,10 @@ async fn get_plugin_data(
 #[orca_tool(domain = "system.plugin.data", verb = "set", cli = skip)]
 async fn set_plugin_data(
     args: SetPluginDataArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SetPluginDataOutput> {
-    let conn = orca_db::open_default()?;
+    let conn = db::open_default()?;
     let text = serde_json::to_string(&args.value)?;
-    orca_db::plugin_data::set(&conn, &args.plugin, &args.key, &text)?;
+    db::plugin_data::set(&conn, &args.plugin, &args.key, &text)?;
     Ok(SetPluginDataOutput { ok: true })
 }

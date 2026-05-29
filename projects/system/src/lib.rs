@@ -1,5 +1,5 @@
 //! System domain — installation lifecycle, runtime/system snapshot, and
-//! profile management. Leaf crate: tools call `db::*` / `orca_utils::*`
+//! profile management. Leaf crate: tools call `db::*` / `utils::*`
 //! directly inside the fn body. No service traits.
 //!
 //! Module migration plan:

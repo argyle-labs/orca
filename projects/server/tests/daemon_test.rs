@@ -8,10 +8,10 @@
 #[cfg(unix)]
 #[cfg(test)]
 mod daemon_signal_tests {
-    use orca_utils::state::DaemonMode;
     use std::path::Path;
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
+    use utils::state::DaemonMode;
 
     /// HTTP port for the test daemon. Picked well above the orca default
     /// (`APP_REST_HTTP_PORT=12000`) so dev daemons on the workstation don't
@@ -38,7 +38,7 @@ mod daemon_signal_tests {
                 panic!("timed out waiting for mode={target:?}");
             }
             std::thread::sleep(POLL);
-            if let Ok(Some(s)) = orca_utils::state::read_from(state_path)
+            if let Ok(Some(s)) = utils::state::read_from(state_path)
                 && s.mode == target
             {
                 return s.daemon_pid;

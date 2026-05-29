@@ -1,14 +1,14 @@
 #![allow(clippy::disallowed_types)] // doc tree helpers return Vec<Value> — forced by this module's contract
 use agents::commands::list_embedded_commands;
 use anyhow::Result;
-use orca_utils::config::Config;
-use orca_utils::fs::expand_tilde;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use utils::config::Config;
+use utils::fs::expand_tilde;
 
 use crate::tree::{TreeNode, build_tree_raw};
-use orca_utils::markdown::to_llm_text;
+use utils::markdown::to_llm_text;
 
 pub struct DocRoot {
     pub name: String,

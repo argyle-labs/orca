@@ -4,7 +4,7 @@ use super::{Session, util};
 use ::llm::Message;
 use ::llm::tools::ToolRegistry;
 use colored::Colorize;
-use orca_contract::ToolResult;
+use contract::ToolResult;
 use tokio_util::sync::CancellationToken;
 
 impl Session {

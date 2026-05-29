@@ -7,19 +7,10 @@
 
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
-use sha2::{Digest, Sha256};
-use std::fmt::Write as _;
 
 /// SHA-256 of a raw pairing code, hex-encoded (lowercase, 64 chars).
 pub fn hash_code(raw: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(raw.as_bytes());
-    let d = h.finalize();
-    let mut s = String::with_capacity(64);
-    for b in &d[..] {
-        write!(s, "{b:02x}").unwrap();
-    }
-    s
+    utils::hash::sha256_hex(raw.as_bytes())
 }
 
 fn now_secs() -> i64 {

@@ -5,7 +5,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ServiceState {
@@ -74,7 +74,7 @@ pub struct RunTestsOutput {
 #[orca_tool(domain = "system.infra.service", verb = "list")]
 async fn infra_service_list(
     _args: ListServicesArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ListServicesOutput> {
     use std::path::PathBuf;
 
@@ -145,7 +145,7 @@ async fn infra_service_list(
 #[orca_tool(domain = "system.infra.service", verb = "detail")]
 async fn infra_service_detail(
     args: GetServiceLogsArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<GetServiceLogsOutput> {
     use std::path::Path;
 
@@ -165,7 +165,7 @@ async fn infra_service_detail(
 #[orca_tool(domain = "system.infra.test", verb = "create")]
 async fn infra_test_create(
     args: RunTestsArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<RunTestsOutput> {
     let suite = args.suite.as_deref().unwrap_or("rust").to_string();
     let r = run_test_suite(&suite).await?;

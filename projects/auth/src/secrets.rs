@@ -9,7 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use anyhow::{anyhow, bail};
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 // ── Shared types ────────────────────────────────────────────────────────────
 
@@ -148,7 +148,7 @@ pub async fn get_secret(name: &str) -> anyhow::Result<(String, String)> {
 #[orca_tool(domain = "system.secret", verb = "list")]
 async fn secret_list(
     _args: SecretListArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SecretListReport> {
     let conn = db::open_default()?;
     let rows = db::secrets::list(&conn)?;
@@ -169,7 +169,7 @@ async fn secret_list(
 #[orca_tool(domain = "system.secret", verb = "detail")]
 async fn secret_detail(
     args: SecretGetArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SecretGetReport> {
     let (backend, value) = get_secret(&args.name).await?;
     Ok(SecretGetReport {
@@ -186,7 +186,7 @@ async fn secret_detail(
 #[orca_tool(domain = "system.secret", verb = "set", peer_dispatch = true)]
 async fn secret_set(
     args: SecretSetArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SecretMutationReport> {
     if !known_backends().contains(&args.backend.as_str()) {
         bail!(
@@ -237,7 +237,7 @@ async fn secret_set(
 #[orca_tool(domain = "system.secret", verb = "delete")]
 async fn secret_delete(
     args: SecretDeleteArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SecretDeleteReport> {
     let conn = db::open_default()?;
     let removed = db::secrets::delete(&conn, &args.name)?;
@@ -251,7 +251,7 @@ async fn secret_delete(
 #[orca_tool(domain = "system.secret", verb = "backends")]
 async fn secret_backends(
     _args: SecretBackendsArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SecretBackendsReport> {
     // v1: inline only, supports store.
     let backends = vec![BackendInfo {

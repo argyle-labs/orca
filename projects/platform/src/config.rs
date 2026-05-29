@@ -13,7 +13,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 // ── Args / Output ────────────────────────────────────────────────
 
@@ -98,8 +98,8 @@ pub struct ConfigDeleteOutput {
 mod native_support {
     use super::*;
 
-    impl From<orca_db::config_store::ConfigRow> for ConfigRowOut {
-        fn from(r: orca_db::config_store::ConfigRow) -> Self {
+    impl From<db::config_store::ConfigRow> for ConfigRowOut {
+        fn from(r: db::config_store::ConfigRow) -> Self {
             ConfigRowOut {
                 id: r.id,
                 host_owner: r.host_owner,
@@ -116,8 +116,8 @@ mod native_support {
     /// Resolve this host's canonical name for config-row ownership.
     /// Prefers the `host.display_name` setting (operator-set), falls back
     /// to the OS hostname. Mirrors what `host.info` reports.
-    pub(super) fn local_host(conn: &orca_db::Conn) -> String {
-        orca_db::settings::get(conn, "host.display_name")
+    pub(super) fn local_host(conn: &db::Conn) -> String {
+        db::settings::get(conn, "host.display_name")
             .ok()
             .flatten()
             .filter(|s| !s.is_empty())
@@ -139,10 +139,10 @@ mod native_support {
 #[orca_tool(domain = "system.config", verb = "list")]
 async fn config_list(
     args: ConfigListArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ConfigListOutput> {
-    let conn = orca_db::open_default()?;
-    let rows = orca_db::config_store::list(&conn, args.noun.as_deref(), args.host.as_deref())?
+    let conn = db::open_default()?;
+    let rows = db::config_store::list(&conn, args.noun.as_deref(), args.host.as_deref())?
         .into_iter()
         .map(Into::into)
         .collect();
@@ -153,10 +153,10 @@ async fn config_list(
 #[orca_tool(domain = "system.config", verb = "get")]
 async fn config_get(
     args: ConfigGetArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ConfigGetOutput> {
-    let conn = orca_db::open_default()?;
-    let row = orca_db::config_store::get(&conn, &args.noun, &args.name)?.map(Into::into);
+    let conn = db::open_default()?;
+    let row = db::config_store::get(&conn, &args.noun, &args.name)?.map(Into::into);
     Ok(ConfigGetOutput { row })
 }
 
@@ -166,15 +166,15 @@ async fn config_get(
 #[orca_tool(domain = "system.config", verb = "set")]
 async fn config_set(
     args: ConfigSetArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ConfigSetOutput> {
-    let conn = orca_db::open_default()?;
+    let conn = db::open_default()?;
     let local = native_support::local_host(&conn);
     let owner = args.host.unwrap_or_else(|| local.clone());
-    let created = orca_db::config_store::set(
+    let created = db::config_store::set(
         &conn, &local, &owner, &args.noun, &args.name, &args.json, "cli",
     )?;
-    let row = orca_db::config_store::get(&conn, &args.noun, &args.name)?
+    let row = db::config_store::get(&conn, &args.noun, &args.name)?
         .ok_or_else(|| anyhow::anyhow!("row vanished after write"))?
         .into();
     Ok(ConfigSetOutput { row, created })
@@ -184,12 +184,11 @@ async fn config_set(
 #[orca_tool(domain = "system.config", verb = "delete")]
 async fn config_delete(
     args: ConfigDeleteArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ConfigDeleteOutput> {
-    let conn = orca_db::open_default()?;
+    let conn = db::open_default()?;
     let local = native_support::local_host(&conn);
     let owner = args.host.unwrap_or_else(|| local.clone());
-    let removed =
-        orca_db::config_store::delete(&conn, &local, &owner, &args.noun, &args.name, "cli")?;
+    let removed = db::config_store::delete(&conn, &local, &owner, &args.noun, &args.name, "cli")?;
     Ok(ConfigDeleteOutput { removed })
 }

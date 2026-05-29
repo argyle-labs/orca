@@ -55,7 +55,7 @@ impl Srv {
 
         let bytes = std::fs::read(&*self.binary_path)
             .with_context(|| format!("read {}", self.binary_path.display()))?;
-        let sha256 = hex_sha256(&bytes);
+        let sha256 = utils::hash::sha256_hex(&bytes);
         let mut cached = self.cache.write().await;
         *cached = BinaryCache {
             mtime: current_mtime,
@@ -64,13 +64,6 @@ impl Srv {
         };
         Ok(())
     }
-}
-
-fn hex_sha256(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(data);
-    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 async fn version_handler(State(srv): State<Srv>) -> impl IntoResponse {

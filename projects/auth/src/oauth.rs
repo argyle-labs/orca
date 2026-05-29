@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use orca_utils::config::APP_NAME;
+use utils::config::APP_NAME;
 // rand 0.10: fill_bytes is on the `Rng` trait (was on `RngCore`).
 use rand::Rng;
 use serde::Deserialize;
@@ -91,7 +91,7 @@ pub async fn cmd_oauth_github() -> Result<()> {
     let client_id = std::env::var("GITHUB_OAUTH_CLIENT_ID")
         .context("GITHUB_OAUTH_CLIENT_ID not set — add to .env.orca.tpl and 1Password")?;
 
-    let client = orca_utils::http::Client::new();
+    let client = utils::http::Client::new();
 
     let resp: DeviceCodeResponse = client
         .post("https://github.com/login/device/code")
@@ -207,7 +207,7 @@ pub async fn cmd_oauth_atlassian() -> Result<()> {
 
     let code = receive_callback(listener, &state)?;
 
-    let token_resp: AtlassianTokenResponse = orca_utils::http::Client::new()
+    let token_resp: AtlassianTokenResponse = utils::http::Client::new()
         .post(ATLASSIAN_TOKEN_URL)
         .form(vec![
             ("grant_type".into(), "authorization_code".into()),

@@ -1,10 +1,10 @@
 [package]
-name = "orca-dispatch"
+name = "dispatch"
 version.workspace = true
 edition.workspace = true
 
 [lib]
-name = "orca_dispatch"
+name = "dispatch"
 path = "src/lib.rs"
 
 # Runtime for the OrcaTool surface: walks the `inventory` slice populated by
@@ -13,8 +13,8 @@ path = "src/lib.rs"
 # anchors, OrcaError, JsonAny) lives in `orca-contract`.
 
 [dependencies]
-orca-contract = { path = "../orca-contract" }
-orca-utils    = { path = "../utils" }
+contract = { path = "../contract" }
+utils    = { path = "../utils" }
 anyhow        = { workspace = true }
 async-trait   = { workspace = true }
 axum          = { workspace = true }

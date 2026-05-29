@@ -11,7 +11,7 @@
 
 use crate::backend::{ClaudeBackend, LMStudioBackend, OllamaBackend};
 use futures_util::future::join_all;
-use orca_utils::config::Config;
+use utils::config::Config;
 
 // ── Task classification ───────────────────────────────────────────────────────
 
@@ -305,16 +305,16 @@ pub fn select_for_task(models: &[DiscoveredModel], task: TaskKind) -> Option<&Di
 
 // ── Build a Model from a DiscoveredModel ─────────────────────────────────────
 
-/// Convert a DiscoveredModel back into the orca_utils::config::Model enum so it can be
+/// Convert a DiscoveredModel back into the utils::config::Model enum so it can be
 /// passed to `build_backend`.
-pub fn to_config_model(discovered: &DiscoveredModel) -> orca_utils::config::Model {
+pub fn to_config_model(discovered: &DiscoveredModel) -> utils::config::Model {
     match discovered.backend.as_str() {
-        "claude" => orca_utils::config::Model::Claude(discovered.id.clone()),
-        "ollama" => orca_utils::config::Model::Ollama {
+        "claude" => utils::config::Model::Claude(discovered.id.clone()),
+        "ollama" => utils::config::Model::Ollama {
             id: discovered.id.clone(),
             url: discovered.url.clone(),
         },
-        _ => orca_utils::config::Model::LMStudio {
+        _ => utils::config::Model::LMStudio {
             id: discovered.id.clone(),
             url: discovered.url.clone(),
         },
@@ -516,7 +516,7 @@ mod tests {
     fn claude_backend_maps_to_claude_model() {
         let d = make_model("claude-sonnet-4-6", "claude");
         let m = to_config_model(&d);
-        assert!(matches!(m, orca_utils::config::Model::Claude(ref s) if s == "claude-sonnet-4-6"));
+        assert!(matches!(m, utils::config::Model::Claude(ref s) if s == "claude-sonnet-4-6"));
     }
 
     #[test]
@@ -524,7 +524,7 @@ mod tests {
         let d = make_model("qwen/qwen3-8b", "lmstudio");
         let m = to_config_model(&d);
         assert!(
-            matches!(m, orca_utils::config::Model::LMStudio { ref id, .. } if id == "qwen/qwen3-8b")
+            matches!(m, utils::config::Model::LMStudio { ref id, .. } if id == "qwen/qwen3-8b")
         );
     }
 
@@ -532,8 +532,6 @@ mod tests {
     fn ollama_backend_maps_to_ollama_model() {
         let d = make_model("some-model", "ollama");
         let m = to_config_model(&d);
-        assert!(
-            matches!(m, orca_utils::config::Model::Ollama { ref id, .. } if id == "some-model")
-        );
+        assert!(matches!(m, utils::config::Model::Ollama { ref id, .. } if id == "some-model"));
     }
 }

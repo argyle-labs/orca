@@ -4,10 +4,10 @@
 // opaque JSON passed through from the upstream Dockge API.
 #![allow(clippy::disallowed_types)]
 
-use orca_utils::http::{Client as HttpClient, HttpError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+use utils::http::{Client as HttpClient, HttpError};
 
 #[derive(Debug, Clone)]
 pub struct Config {

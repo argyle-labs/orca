@@ -1,7 +1,7 @@
 //! Cross-bucket inventory smoke tests. Links every #[orca_tool] bucket and
 //! verifies the registry sees them all without panicking on duplicates.
 
-use orca_dispatch::ToolRegistration;
+use dispatch::ToolRegistration;
 
 // Side-effect imports — link the buckets in so their inventory::submit!
 // registrations are pulled into this test binary.
@@ -29,7 +29,7 @@ fn host_tools_present_in_inventory_slice() {
 
 #[test]
 fn dispatch_names_includes_host_tools() {
-    let names = orca_dispatch::names();
+    let names = dispatch::names();
     assert!(names.contains(&"system.host.detail"));
     assert!(names.contains(&"system.host.set"));
     assert!(names.contains(&"system.host.refresh"));

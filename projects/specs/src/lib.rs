@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 #[allow(clippy::disallowed_types)]
 use serde_json::Value;
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 // ── Shared row shapes ───────────────────────────────────────────────────────
 
@@ -238,7 +238,7 @@ use native as imp;
 #[orca_tool(domain = "namespace.spec", verb = "list")]
 async fn list_specs(
     _args: ListSpecsArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ListSpecsOutput> {
     Ok(ListSpecsOutput {
         specs: imp::list_specs().await?,
@@ -249,7 +249,7 @@ async fn list_specs(
 #[orca_tool(domain = "namespace.spec", verb = "list-db")]
 async fn list_db_specs(
     _args: ListDbSpecsArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ListDbSpecsOutput> {
     Ok(ListDbSpecsOutput {
         specs: imp::list_db_specs().await?,
@@ -260,7 +260,7 @@ async fn list_db_specs(
 #[orca_tool(domain = "namespace.spec", verb = "create")]
 async fn spec_create(
     args: RegisterSpecArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<RegisterSpecResult> {
     imp::register_spec(&args.name, &args.url).await
 }
@@ -269,7 +269,7 @@ async fn spec_create(
 #[orca_tool(domain = "namespace.spec", verb = "refresh")]
 async fn refresh_spec(
     args: RefreshSpecArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<RegisterSpecResult> {
     imp::refresh_spec(&args.name).await
 }
@@ -278,7 +278,7 @@ async fn refresh_spec(
 #[orca_tool(domain = "namespace.spec", verb = "delete")]
 async fn spec_delete(
     args: UnregisterSpecArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<UnregisterSpecOutput> {
     Ok(UnregisterSpecOutput {
         removed: imp::unregister_spec(&args.name).await?,
@@ -289,7 +289,7 @@ async fn spec_delete(
 #[orca_tool(domain = "namespace.spec", verb = "sync-mcp")]
 async fn sync_mcp_specs(
     args: SyncMcpSpecsArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SyncMcpSpecsResult> {
     imp::sync_mcp_specs(&args.server).await
 }
@@ -298,7 +298,7 @@ async fn sync_mcp_specs(
 #[orca_tool(domain = "namespace.spec.graphql", verb = "detail")]
 async fn spec_graphql_detail(
     args: GetSpecGraphqlInfoArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<GraphQlInfoData> {
     imp::graphql_info(&args.repo).await
 }
@@ -307,7 +307,7 @@ async fn spec_graphql_detail(
 #[orca_tool(domain = "namespace.spec.graphql", verb = "update", cli = skip)]
 async fn spec_graphql_update(
     args: ProxyGraphqlArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<GraphqlProxyResult> {
     imp::proxy_graphql(
         &args.repo,

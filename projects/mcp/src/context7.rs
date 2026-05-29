@@ -1,7 +1,7 @@
 #![allow(clippy::disallowed_types)] // mirrors trait signature — see trait-level allow
 use anyhow::Result;
-use orca_utils::config::Config;
 use serde_json::Value;
+use utils::config::Config;
 
 /// Proxy a context7 tool call through the configured context7 MCP server.
 /// Discovers the server dynamically from the DB-backed McpPool.

@@ -1,7 +1,7 @@
 // LLM wire-format serialization helpers; HashMap/Value are protocol-level passthrough.
 #![allow(clippy::disallowed_types)]
 use crate::types::Message;
-use orca_contract::ToolDef;
+use contract::ToolDef;
 use serde_json::{Value, json};
 
 // ── Anthropic wire format ─────────────────────────────────────────────────────
@@ -144,7 +144,7 @@ pub fn openai_tools(tools: &[ToolDef]) -> Value {
 mod tests {
     use super::*;
     use crate::types::Message;
-    use orca_contract::{ToolCall, ToolResult};
+    use contract::{ToolCall, ToolResult};
 
     fn user(s: &str) -> Message {
         Message::User {

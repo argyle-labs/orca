@@ -8,9 +8,9 @@ name = "llm"
 path = "src/lib.rs"
 
 [dependencies]
-orca-contract = { path = "../orca-contract" }
-orca-utils    = { path = "../utils" }
-db            = { package = "orca-db", path = "../db" }
+contract = { path = "../contract" }
+utils    = { path = "../utils" }
+db            = { package = "db", path = "../db" }
 
 anyhow       = { workspace = true }
 async-trait  = { workspace = true }

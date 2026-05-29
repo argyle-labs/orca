@@ -15,7 +15,7 @@ publish = false
 path = "src/lib.rs"
 
 [dev-dependencies]
-orca-dispatch = { path = "../orca-dispatch" }
+dispatch = { path = "../dispatch" }
 inventory     = { workspace = true }
 
 # Link every bucket so its inventory::submit! statics are pulled in.

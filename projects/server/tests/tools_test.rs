@@ -3,7 +3,8 @@ use tempfile::tempdir;
 
 use ::llm::tools::bash::BashPermissions;
 use agents::embedded::{list_embedded_agents, load_agent_prompt};
-use orca_utils::fs::{ops, search};
+use utils::fs::ops;
+use utils::search;
 
 // These tests verify the tool implementations work correctly.
 // They use real filesystem operations via the tempfile crate (no race conditions).

@@ -13,7 +13,7 @@
 //! Moved from `platform::profile` + `platform::profile_native` + `platform::profile_manager`
 //! in slice 3 of crate-topology-v2 (2026-05-27).
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -132,7 +132,7 @@ pub struct NamespaceUnshareArgs {
 #[orca_tool(domain = "namespace", verb = "list")]
 async fn namespace_list(
     _args: NamespaceListArgs,
-    ctx: &orca_contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<NamespaceListReport> {
     native::list(&ctx.config).await
 }
@@ -141,7 +141,7 @@ async fn namespace_list(
 #[orca_tool(domain = "namespace", verb = "show")]
 async fn namespace_show(
     args: NamespaceShowArgs,
-    ctx: &orca_contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<NamespaceDetail> {
     native::show(&ctx.config, args.spec.as_deref()).await
 }
@@ -150,7 +150,7 @@ async fn namespace_show(
 #[orca_tool(domain = "namespace", verb = "current")]
 async fn namespace_current(
     _args: NamespaceCurrentArgs,
-    ctx: &orca_contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<NamespaceCurrentReport> {
     native::current(&ctx.config).await
 }
@@ -159,7 +159,7 @@ async fn namespace_current(
 #[orca_tool(domain = "namespace", verb = "create")]
 async fn namespace_create(
     args: NamespaceCreateArgs,
-    ctx: &orca_contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<NamespaceDetail> {
     native::create(&ctx.config, &args.name, args.description.as_deref()).await
 }
@@ -168,7 +168,7 @@ async fn namespace_create(
 #[orca_tool(domain = "namespace", verb = "delete")]
 async fn namespace_delete(
     args: NamespaceSpecArgs,
-    ctx: &orca_contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<NamespaceMutationResult> {
     native::delete(&ctx.config, &args.spec).await
 }
@@ -177,7 +177,7 @@ async fn namespace_delete(
 #[orca_tool(domain = "namespace", verb = "use")]
 async fn namespace_use(
     args: NamespaceSpecArgs,
-    ctx: &orca_contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<NamespaceMutationResult> {
     native::use_namespace(&ctx.config, &args.spec).await
 }
@@ -186,7 +186,7 @@ async fn namespace_use(
 #[orca_tool(domain = "namespace.share", verb = "create")]
 async fn namespace_share_create(
     args: NamespaceShareArgs,
-    ctx: &orca_contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<NamespaceMutationResult> {
     native::share(&ctx.config, &args.spec, &args.user, &args.role).await
 }
@@ -195,7 +195,7 @@ async fn namespace_share_create(
 #[orca_tool(domain = "namespace.share", verb = "delete")]
 async fn namespace_share_delete(
     args: NamespaceUnshareArgs,
-    ctx: &orca_contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<NamespaceMutationResult> {
     native::unshare(&ctx.config, &args.spec, &args.user).await
 }
@@ -204,7 +204,7 @@ async fn namespace_share_delete(
 #[orca_tool(domain = "namespace.share", verb = "list")]
 async fn namespace_share_list(
     args: NamespaceSpecArgs,
-    ctx: &orca_contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<NamespaceSharesReport> {
     native::shares(&ctx.config, &args.spec).await
 }

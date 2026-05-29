@@ -3,7 +3,7 @@
 //! tools use [`crate::client::McpPool`].
 #![allow(clippy::disallowed_types)] // MCP `arguments` blob — opaque per the MCP spec
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -19,7 +19,7 @@ use crate::types::{
 
 /// Build an `McpPool` rooted at orca's default DB path.
 fn make_mcp_pool() -> McpPool {
-    use orca_utils::config::{APP_DB_FILE, APP_STATE_DIR};
+    use utils::config::{APP_DB_FILE, APP_STATE_DIR};
     if let Ok(path) = std::env::var("ORCA_DB_PATH") {
         return McpPool::new_with_db(std::path::PathBuf::from(path));
     }
@@ -35,7 +35,7 @@ fn make_mcp_pool() -> McpPool {
 #[orca_tool(domain = "system.mcp", verb = "list")]
 async fn list_mcp_servers(
     _args: ListMcpServersArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ListMcpServersOutput> {
     let conn = db::open_default()?;
     let servers = db::mcp_servers::list(&conn)?
@@ -55,7 +55,7 @@ async fn list_mcp_servers(
 #[orca_tool(domain = "system.mcp", verb = "create")]
 async fn add_mcp_server(
     args: AddMcpServerArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<McpServerMutationResult> {
     let row = db::mcp_servers::ServerRow {
         name: args.name.clone(),
@@ -76,7 +76,7 @@ async fn add_mcp_server(
 #[orca_tool(domain = "system.mcp", verb = "delete")]
 async fn remove_mcp_server(
     args: RemoveMcpServerArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<McpServerMutationResult> {
     let conn = db::open_default()?;
     let changed = db::mcp_servers::remove(&conn, &args.name)?;
@@ -90,7 +90,7 @@ async fn remove_mcp_server(
 #[orca_tool(domain = "system.mcp.mapping", verb = "create")]
 async fn mcp_mapping_create(
     args: MapToolArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<MapToolResult> {
     let conn = db::open_default()?;
     let servers = db::mcp_servers::list(&conn)?;
@@ -120,7 +120,7 @@ async fn mcp_mapping_create(
 #[orca_tool(domain = "system.mcp.mapping", verb = "delete")]
 async fn mcp_mapping_delete(
     args: UnmapToolArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<UnmapToolResult> {
     let conn = db::open_default()?;
     let changed = db::tool_mappings::remove(&conn, &args.orca_tool)?;
@@ -134,7 +134,7 @@ async fn mcp_mapping_delete(
 #[orca_tool(domain = "system.mcp", verb = "sync")]
 async fn sync_tools(
     args: SyncToolsArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SyncToolsOutput> {
     let threshold = args.threshold.unwrap_or(0.8);
     let all = args.all.unwrap_or(false);
@@ -179,7 +179,7 @@ async fn sync_tools(
 #[orca_tool(domain = "system.mcp.mapping", verb = "list")]
 async fn mcp_mapping_list(
     args: ListToolMappingsArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ListToolMappingsOutput> {
     let conn = db::open_default()?;
     let rows = if let Some(n) = args.name.as_deref() {
@@ -207,7 +207,7 @@ async fn mcp_mapping_list(
 #[orca_tool(domain = "system.mcp.federation", verb = "list-tools")]
 async fn list_mcp_tools(
     _args: ListMcpToolsArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ListMcpToolsOutput> {
     let pool = make_mcp_pool();
     let raw = pool.all_tools().await;
@@ -243,7 +243,7 @@ async fn list_mcp_tools(
 #[orca_tool(domain = "system.mcp.federation", verb = "run", cli = skip)]
 async fn run_mcp_tool(
     args: RunMcpToolArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<RunMcpToolOutput> {
     let arguments = match args.args {
         Some(m) => Value::Object(m),

@@ -11,7 +11,7 @@ path = "src/lib.rs"
 serde       = { workspace = true }
 thiserror   = { workspace = true }
 urlencoding = { workspace = true }
-orca-utils  = { path = "../../utils" }
+utils  = { path = "../../utils" }
 
 [dev-dependencies]
 tokio       = { workspace = true }

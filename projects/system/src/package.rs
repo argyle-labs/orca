@@ -6,8 +6,8 @@
 
 use anyhow::Result;
 use colored::Colorize;
-use orca_contract::ToolCtx;
-use orca_macro::orca_tool;
+use contract::ToolCtx;
+use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;

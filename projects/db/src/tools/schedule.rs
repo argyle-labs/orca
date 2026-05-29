@@ -12,7 +12,7 @@
 //! `crate::config_store` / `crate::scheduler_runs` directly without going
 //! through any service trait.
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -97,7 +97,7 @@ mod native_support {
     use cron::Schedule;
     use serde::Deserialize;
 
-    use orca_contract::JsonAny;
+    use contract::JsonAny;
 
     #[derive(Deserialize)]
     pub(super) struct ScheduleRow {
@@ -134,7 +134,7 @@ mod native_support {
 #[orca_tool(domain = "system.schedule", verb = "list")]
 async fn schedule_list(
     args: ScheduleListArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ScheduleListOutput> {
     let conn = crate::open_default()?;
     let rows = crate::config_store::list(&conn, Some("schedule"), args.host.as_deref())?;
@@ -159,7 +159,7 @@ async fn schedule_list(
 #[orca_tool(domain = "system.schedule", verb = "status")]
 async fn schedule_status(
     args: ScheduleStatusArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ScheduleStatusOutput> {
     let conn = crate::open_default()?;
     let runs = match args.job {
@@ -187,7 +187,7 @@ async fn schedule_status(
 #[orca_tool(domain = "system.schedule", verb = "run")]
 async fn schedule_run(
     args: ScheduleRunArgs,
-    ctx: &orca_contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ScheduleRunOutput> {
     let conn = crate::open_default()?;
     let row = crate::config_store::get(&conn, "schedule", &args.name)?
@@ -206,7 +206,7 @@ async fn schedule_run(
         .map(|j| j.0)
         .unwrap_or_else(|| serde_json::json!({}));
     let t0 = std::time::Instant::now();
-    let outcome = orca_dispatch::dispatch(&parsed.job, args_value, ctx).await;
+    let outcome = dispatch::dispatch(&parsed.job, args_value, ctx).await;
     let duration_ms = t0.elapsed().as_millis() as i64;
     let (ok, error) = match &outcome {
         Ok(_) => (true, None),
@@ -224,7 +224,7 @@ async fn schedule_run(
 mod tests {
     #[test]
     fn schedule_tools_register_from_db_crate() {
-        let names = orca_dispatch::names();
+        let names = dispatch::names();
         assert!(names.contains(&"system.schedule.list"), "got: {names:?}");
         assert!(names.contains(&"system.schedule.status"), "got: {names:?}");
         assert!(names.contains(&"system.schedule.run"), "got: {names:?}");

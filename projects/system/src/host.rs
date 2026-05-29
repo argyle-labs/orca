@@ -11,7 +11,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 // ── Args / Output types (shared by every surface) ────────────────
 
@@ -109,16 +109,13 @@ pub trait ProvideHostRefresh {
     fn host_refresh(&self) -> std::sync::Arc<dyn HostRefreshHook + Send + Sync>;
 }
 
-pub fn register_host_refresh(ctx: &mut orca_contract::ToolCtx, p: &impl ProvideHostRefresh) {
+pub fn register_host_refresh(ctx: &mut contract::ToolCtx, p: &impl ProvideHostRefresh) {
     ctx.register_service(p.host_refresh());
 }
 
 /// Local host snapshot: display name, machine_id, and every addressing channel.
 #[orca_tool(domain = "system.host", verb = "detail")]
-async fn host_detail(
-    _args: EmptyArgs,
-    _ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<HostInfoOutput> {
+async fn host_detail(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<HostInfoOutput> {
     let conn = db::open_default()?;
     let channels: Vec<HostChannel> = db::host_addressing::list_host_addressing(&conn)?
         .into_iter()
@@ -129,7 +126,7 @@ async fn host_detail(
         .find(|c| c.key == "display_name")
         .map(|c| c.value.clone())
         .unwrap_or_else(native_support::os_hostname);
-    let machine_id = orca_utils::config::Config::load()
+    let machine_id = utils::config::Config::load()
         .ok()
         .and_then(|c| std::fs::read_to_string(c.app_dir.join("machine_id")).ok())
         .map(|s| s.trim().to_string())
@@ -144,10 +141,7 @@ async fn host_detail(
 
 /// Write a manual host addressing override (display_name, fqdn, or a channel value).
 #[orca_tool(domain = "system.host", verb = "set")]
-async fn host_set(
-    args: HostSetArgs,
-    _ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<HostSetOutput> {
+async fn host_set(args: HostSetArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<HostSetOutput> {
     if !ALLOWED_HOST_KEYS.contains(&args.key.as_str()) {
         anyhow::bail!(
             "host.set: key '{}' is not in the allowlist ({:?})",
@@ -171,7 +165,7 @@ async fn host_set(
 #[orca_tool(domain = "system.host", verb = "refresh")]
 async fn host_refresh(
     _args: EmptyArgs,
-    ctx: &orca_contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<HostRefreshOutput> {
     let conn = db::open_default()?;
     if let Ok(hook) = ctx.service::<std::sync::Arc<dyn HostRefreshHook + Send + Sync>>() {

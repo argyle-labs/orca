@@ -3,9 +3,9 @@
 //!
 //! Composes with [`orca_http`] for transport so HTTP bug fixes propagate.
 
-use orca_utils::http::{Client as HttpClient, HttpError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use utils::http::{Client as HttpClient, HttpError};
 
 /// Stable connection config. Cheap to clone (`base` + `topic` + optional
 /// bearer token).

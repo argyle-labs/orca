@@ -16,7 +16,7 @@ use crate::system_info_types::SystemInfoReport;
 use crate::install_status::install_status_report;
 use crate::system_info::current_or_collect;
 use crate::update_state::{read_channel_marker, read_version_pin};
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 // ── Shared shapes ───────────────────────────────────────────────────────────
 
@@ -91,7 +91,7 @@ pub struct SystemStatusArgs {}
 #[orca_tool(domain = "system", verb = "detail")]
 async fn system_detail(
     _args: SystemStatusArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SystemStatusReport> {
     let report = install_status_report()?;
 
@@ -105,14 +105,11 @@ async fn system_detail(
     let mode = if is_dev_build {
         Some("dev".to_string())
     } else {
-        orca_utils::state::read()
-            .ok()
-            .flatten()
-            .map(|s| match s.mode {
-                orca_utils::state::DaemonMode::Daemon => "daemon".to_string(),
-                orca_utils::state::DaemonMode::Parked => "parked".to_string(),
-                orca_utils::state::DaemonMode::Dev => "dev".to_string(),
-            })
+        utils::state::read().ok().flatten().map(|s| match s.mode {
+            utils::state::DaemonMode::Daemon => "daemon".to_string(),
+            utils::state::DaemonMode::Parked => "parked".to_string(),
+            utils::state::DaemonMode::Dev => "dev".to_string(),
+        })
     };
     let channel = read_channel_marker().map(|c| c.as_marker().to_string());
     let pinned_to = read_version_pin();
@@ -170,10 +167,10 @@ async fn system_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orca_contract::ToolCtx;
-    use orca_utils::config::{Config, Model};
+    use contract::ToolCtx;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use utils::config::{Config, Model};
 
     fn empty_ctx() -> ToolCtx {
         ToolCtx::new(Arc::new(Config {

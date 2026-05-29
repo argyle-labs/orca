@@ -1,7 +1,7 @@
 //! `namespace.schema` CRUD + `namespace.schema.view` tools. CRUD reaches
 //! straight into `db::schema_databases::*`; view tools call into [`crate::view`].
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 use crate::types::{
     AddSchemaArgs, GetSchemaArgs, GetSchemaDomainsArgs, GetSchemaDomainsOutput, GetSchemaOutput,
@@ -15,7 +15,7 @@ use crate::view;
 #[orca_tool(domain = "namespace.schema", verb = "list")]
 async fn list_schemas(
     _args: ListSchemasArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ListSchemasOutput> {
     let conn = db::open_default()?;
     let schemas = db::schema_databases::list(&conn)?
@@ -39,7 +39,7 @@ async fn list_schemas(
 #[orca_tool(domain = "namespace.schema", verb = "create")]
 async fn add_schema(
     args: AddSchemaArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SchemaMutationResult> {
     let row = db::schema_databases::SchemaDbRow {
         name: args.name.clone(),
@@ -65,7 +65,7 @@ async fn add_schema(
 #[orca_tool(domain = "namespace.schema", verb = "delete")]
 async fn remove_schema(
     args: RemoveSchemaArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SchemaMutationResult> {
     let conn = db::open_default()?;
     let changed = db::schema_databases::remove(&conn, &args.name)?;
@@ -81,7 +81,7 @@ async fn remove_schema(
 #[orca_tool(domain = "namespace.schema.view", verb = "detail")]
 async fn schema_view_detail(
     _args: GetSchemaArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<GetSchemaOutput> {
     view::build_schema_response()
         .await
@@ -92,7 +92,7 @@ async fn schema_view_detail(
 #[orca_tool(domain = "namespace.schema.view", verb = "list")]
 async fn schema_view_list(
     _args: GetSchemaDomainsArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<GetSchemaDomainsOutput> {
     Ok(GetSchemaDomainsOutput {
         domains: view::build_schema_domains(),

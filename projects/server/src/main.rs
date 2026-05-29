@@ -7,9 +7,9 @@ use conversation::sessions::session::Session;
 use orca::mcp;
 use orca::serve;
 use orca::serve::openapi::orca_spec_json;
-use orca_utils::config::Config;
 use system::dev_serve as dev_serve_cmd;
 use system::hook::{self as hook_cmd, HookAction};
+use utils::config::Config;
 
 #[derive(Parser)]
 #[command(name = "orca", about = "Context-first AI agent orchestrator", version)]
@@ -65,14 +65,14 @@ enum Command {
         dev: bool,
         /// HTTP port to bind. Defaults to `APP_REST_HTTP_PORT` (12000);
         /// override with `--port`, `ORCA_HTTP_PORT=<n>`, or orca.toml.
-        #[arg(short, long, default_value_t = orca_utils::config::APP_REST_HTTP_PORT)]
+        #[arg(short, long, default_value_t = utils::config::APP_REST_HTTP_PORT)]
         port: u16,
     },
 
     /// Run as daemon with cooperative port handoff (SIGUSR1 park / SIGUSR2 reclaim).
     /// `system.daemon.{status,stop,park,reclaim,install,uninstall}` are tools.
     Daemon {
-        #[arg(short, long, default_value_t = orca_utils::config::APP_REST_HTTP_PORT)]
+        #[arg(short, long, default_value_t = utils::config::APP_REST_HTTP_PORT)]
         port: u16,
     },
 
@@ -80,7 +80,7 @@ enum Command {
     /// Parks the stable daemon, runs dev mode, reclaims on exit.
     Dev {
         /// HTTP port to bind. Defaults to `APP_REST_HTTP_PORT` (12000).
-        #[arg(short, long, default_value_t = orca_utils::config::APP_REST_HTTP_PORT)]
+        #[arg(short, long, default_value_t = utils::config::APP_REST_HTTP_PORT)]
         port: u16,
     },
 
@@ -128,7 +128,7 @@ enum Command {
 
     /// Passthrough for `OrcaOp`-migrated domains — dispatched via inventory.
     /// Captures any first arg not matching a derive variant above; the
-    /// `orca_dispatch::cli` inventory routes it to the right tool.
+    /// `dispatch::cli` inventory routes it to the right tool.
     #[command(external_subcommand)]
     Op(Vec<String>),
 }
@@ -289,7 +289,7 @@ async fn main() -> Result<()> {
                 let verb_opt = rest_args.get(depth);
                 let is_domain_help =
                     matches!(verb_opt.map(String::as_str), Some("--help") | Some("-h"));
-                orca_dispatch::cli::ops().any(|o| {
+                dispatch::cli::ops().any(|o| {
                     o.domain == dom
                         && (is_domain_help
                             || verb_opt.is_none()
@@ -460,7 +460,7 @@ async fn main() -> Result<()> {
 fn bootstrap_default_profile(config: &Config) -> Result<()> {
     let conn = db::open(&config.db_path)?;
     let mgr = namespace::NamespaceManager::from_config(config);
-    let p = mgr.ensure_default_for(&conn, orca_utils::config::LOCAL_USER)?;
+    let p = mgr.ensure_default_for(&conn, utils::config::LOCAL_USER)?;
     tracing::trace!(profile_id = %p.id, "active profile resolved");
     Ok(())
 }
@@ -508,8 +508,8 @@ fn port_in_use(port: u16) -> bool {
 
 /// Park the stable daemon (if running), start dev server, reclaim on exit.
 async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
-    use orca_utils::state::DaemonMode;
     use std::process::Command;
+    use utils::state::DaemonMode;
 
     // Spawn Vite dev server if not already running on 12001
     let vite_child = if !port_in_use(12001) {
@@ -555,7 +555,7 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
     };
 
     // Park daemon if it's running
-    let (daemon_pid, daemon_binary) = match orca_utils::state::read()? {
+    let (daemon_pid, daemon_binary) = match utils::state::read()? {
         Some(s) if s.mode == DaemonMode::Daemon => {
             // Capture binary now — state file may be gone by the time we need it
             let binary = s.binary.clone();
@@ -563,7 +563,7 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
             Command::new("kill")
                 .args(["-USR1", &pid.to_string()])
                 .status()?;
-            if let Err(e) = orca_utils::state::wait_for_mode(DaemonMode::Parked, 5).await {
+            if let Err(e) = utils::state::wait_for_mode(DaemonMode::Parked, 5).await {
                 // Parking timed out — reclaim immediately so daemon isn't stuck parked
                 _ = Command::new("kill")
                     .args(["-USR2", &pid.to_string()])
@@ -577,10 +577,10 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
     };
 
     // Mark ourselves as the active dev process
-    if let Some(mut s) = orca_utils::state::read()? {
+    if let Some(mut s) = utils::state::read()? {
         s.mode = DaemonMode::Dev;
         s.active_pid = std::process::id();
-        _ = orca_utils::state::write(&s);
+        _ = utils::state::write(&s);
     }
 
     // Run dev server (Ctrl-C will exit)
@@ -592,7 +592,7 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
 
     // Reclaim: read current state (daemon may have been restarted by launchd with a new PID)
     if daemon_pid.is_some() {
-        let current_pid = orca_utils::state::read()
+        let current_pid = utils::state::read()
             .ok()
             .flatten()
             .map(|s| s.daemon_pid)
@@ -613,7 +613,7 @@ async fn cmd_dev(port: u16, config: &Config) -> Result<()> {
             println!("[orca] daemon reclaimed port {port}");
         } else {
             // Daemon is not alive and was not restarted by launchd — spawn fresh
-            let binary = orca_utils::state::read()
+            let binary = utils::state::read()
                 .ok()
                 .flatten()
                 .map(|s| s.binary)
@@ -643,10 +643,10 @@ fn detect_project_from_cwd(config: &Config) -> Option<String> {
 }
 
 /// Dispatch a passthrough subcommand (`orca <domain> <verb> [args]`) to the
-/// `OrcaOp` inventory in `orca_dispatch::cli`. Returns an error if no
+/// `OrcaOp` inventory in `dispatch::cli`. Returns an error if no
 /// (domain, verb) pair matches; clap printed help is preferred over this.
 async fn dispatch_op(mut argv: Vec<String>, config: Config) -> Result<()> {
-    use orca_dispatch::cli as op_cli;
+    use dispatch::cli as op_cli;
     use std::sync::Arc;
 
     argv.insert(0, "orca".to_string());

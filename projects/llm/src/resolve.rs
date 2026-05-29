@@ -11,7 +11,7 @@
 use crate::discovery::{TaskKind, discover_all, select_for_task, to_config_model};
 use anyhow::{Context, Result};
 use db;
-use orca_utils::config::{Config, Model};
+use utils::config::{Config, Model};
 
 const KEY_MODE: &str = "agent_backend.mode";
 const KEY_USE_SERVER_ANTHROPIC: &str = "agent_backend.use_server_anthropic";

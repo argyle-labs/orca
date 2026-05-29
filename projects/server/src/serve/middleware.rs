@@ -7,7 +7,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use http_body_util::BodyExt;
-use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use uuid::Uuid;
 
@@ -206,16 +205,7 @@ fn is_api_path(path: &str) -> bool {
     path.starts_with("/api/")
 }
 
-fn sha256_hex(input: &[u8]) -> String {
-    let mut h = Sha256::new();
-    h.update(input);
-    let out = h.finalize();
-    let mut s = String::with_capacity(out.len() * 2);
-    for b in out {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
-}
+use utils::hash::sha256_hex;
 
 /// Extract a single named cookie value from the request's `Cookie:` headers.
 /// HTTP/1.1 sends a single `Cookie:` header with `name=val; name=val` pairs;
@@ -333,10 +323,10 @@ fn identity_user_id(ident: &AuthIdentity) -> Option<String> {
 /// Build a CallerIdentity from a replicated `users` row. Returns `None` if
 /// the user has been deleted out from under the token (treat as legacy:
 /// fall back to the ctx's ambient host-admin).
-fn caller_from_user_id(user_id: &str) -> Option<orca_contract::CallerIdentity> {
+fn caller_from_user_id(user_id: &str) -> Option<contract::CallerIdentity> {
     let conn = db::open_default().ok()?;
     let u = db::users::find_by_id(&conn, user_id).ok()??;
-    Some(orca_contract::CallerIdentity {
+    Some(contract::CallerIdentity {
         user_id: u.id,
         username: u.username,
         role: u.role,
@@ -394,7 +384,7 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
                     user_id, username, ..
                 } = &ident.kind
                 {
-                    req.extensions_mut().insert(orca_contract::CallerIdentity {
+                    req.extensions_mut().insert(contract::CallerIdentity {
                         user_id: user_id.clone(),
                         username: username.clone(),
                         role: ident.role.clone(),
@@ -536,11 +526,11 @@ pub(crate) fn check_tool_role(path: &str, caller_role: Option<&str>) -> ToolRole
     let Some(tool) = tool_name_from_path(path) else {
         return ToolRoleCheck::Pass;
     };
-    let required = orca_dispatch::tool_roles::required_role(tool);
+    let required = dispatch::tool_roles::required_role(tool);
     if required == "any" {
         return ToolRoleCheck::Pass;
     }
-    if orca_dispatch::tool_roles::satisfies(caller_role.unwrap_or(""), required) {
+    if dispatch::tool_roles::satisfies(caller_role.unwrap_or(""), required) {
         return ToolRoleCheck::Pass;
     }
     ToolRoleCheck::Forbidden {
@@ -1288,8 +1278,8 @@ mod tests {
     #[test]
     fn check_tool_role_admin_branches() {
         // Best-effort install; first-call-wins across the test binary.
-        orca_dispatch::tool_roles::install([("check_tool_role_test.admin_only", "admin")]);
-        if orca_dispatch::tool_roles::required_role("check_tool_role_test.admin_only") != "admin" {
+        dispatch::tool_roles::install([("check_tool_role_test.admin_only", "admin")]);
+        if dispatch::tool_roles::required_role("check_tool_role_test.admin_only") != "admin" {
             // Another test owned the global before us; can't drive the admin
             // branches deterministically. Pure-function correctness for the
             // admin paths is still covered via tool_roles::satisfies in

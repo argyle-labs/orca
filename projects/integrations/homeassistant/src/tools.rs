@@ -8,10 +8,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 use anyhow::Context;
-use orca_contract::JsonAny;
+use contract::JsonAny;
 
 use crate::{Client, Config, ServiceCall};
 
@@ -55,8 +55,8 @@ pub struct HaServiceCallArgs {
 }
 
 fn make_client(name: &str) -> anyhow::Result<Client> {
-    let conn = orca_db::open_default()?;
-    let row = orca_db::home_assistant::get(&conn, name)?.with_context(|| {
+    let conn = db::open_default()?;
+    let row = db::home_assistant::get(&conn, name)?.with_context(|| {
         format!("home assistant endpoint '{name}' not registered (use add_home_assistant_endpoint)")
     })?;
     if !row.enabled {
@@ -69,7 +69,7 @@ fn make_client(name: &str) -> anyhow::Result<Client> {
 #[orca_tool(domain = "ha.entity", verb = "list")]
 async fn ha_entity_list(
     args: HaEntityListArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<JsonAny> {
     let client = make_client(&args.endpoint)?;
     Ok(client.entity_list(args.domain.as_deref()).await?.into())
@@ -79,7 +79,7 @@ async fn ha_entity_list(
 #[orca_tool(domain = "ha.entity", verb = "detail")]
 async fn ha_entity_detail(
     args: HaEntityStateArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<JsonAny> {
     let client = make_client(&args.endpoint)?;
     Ok(client.entity_state(&args.entity_id).await?.into())
@@ -89,7 +89,7 @@ async fn ha_entity_detail(
 #[orca_tool(domain = "ha.automation", verb = "list")]
 async fn ha_automation_list(
     args: HaAutomationListArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<JsonAny> {
     let client = make_client(&args.endpoint)?;
     Ok(client.automation_list().await?.into())
@@ -99,7 +99,7 @@ async fn ha_automation_list(
 #[orca_tool(domain = "ha.service", verb = "update")]
 async fn ha_service_update(
     args: HaServiceCallArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<JsonAny> {
     let client = make_client(&args.endpoint)?;
     let call = ServiceCall {
@@ -155,10 +155,10 @@ pub struct RemoveHomeAssistantEndpointArgs {
 #[orca_tool(domain = "ha.endpoint", verb = "list")]
 async fn ha_endpoint_list(
     _args: ListHomeAssistantEndpointsArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ListHomeAssistantEndpointsOutput> {
-    let conn = orca_db::open_default()?;
-    let endpoints = orca_db::home_assistant::list(&conn)?
+    let conn = db::open_default()?;
+    let endpoints = db::home_assistant::list(&conn)?
         .into_iter()
         .map(|r| HaEndpointEntry {
             name: r.name,
@@ -173,16 +173,16 @@ async fn ha_endpoint_list(
 #[orca_tool(domain = "ha.endpoint", verb = "create")]
 async fn ha_endpoint_create(
     args: AddHomeAssistantEndpointArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<HaMutationResult> {
-    let row = orca_db::home_assistant::EndpointRow {
+    let row = db::home_assistant::EndpointRow {
         name: args.name.clone(),
         base_url: args.base_url,
         token: args.token,
         enabled: true,
     };
-    let conn = orca_db::open_default()?;
-    orca_db::home_assistant::upsert(&conn, &row)?;
+    let conn = db::open_default()?;
+    db::home_assistant::upsert(&conn, &row)?;
     Ok(HaMutationResult {
         name: args.name,
         changed: true,
@@ -193,10 +193,10 @@ async fn ha_endpoint_create(
 #[orca_tool(domain = "ha.endpoint", verb = "delete")]
 async fn ha_endpoint_delete(
     args: RemoveHomeAssistantEndpointArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<HaMutationResult> {
-    let conn = orca_db::open_default()?;
-    let changed = orca_db::home_assistant::remove(&conn, &args.name)?;
+    let conn = db::open_default()?;
+    let changed = db::home_assistant::remove(&conn, &args.name)?;
     Ok(HaMutationResult {
         name: args.name,
         changed,

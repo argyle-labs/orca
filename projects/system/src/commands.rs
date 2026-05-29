@@ -16,7 +16,7 @@ use crate::update_state::{
     clear_version_pin, read_channel_marker, resolve_channel, resolve_pin_veto,
     write_channel_marker, write_version_pin,
 };
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 // ── Args ────────────────────────────────────────────────────────────────────
 
@@ -54,7 +54,7 @@ pub struct ProjectsListReport {
 #[orca_tool(domain = "system", verb = "create", local_only = true)]
 async fn system_create(
     _args: EmptyArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<InstallReport> {
     Ok(cmd_install_report())
 }
@@ -64,7 +64,7 @@ async fn system_create(
 #[orca_tool(domain = "system", verb = "delete", local_only = true)]
 async fn system_delete(
     _args: EmptyArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<InstallReport> {
     Ok(cmd_uninstall_report())
 }
@@ -77,7 +77,7 @@ async fn system_delete(
 #[orca_tool(domain = "system", verb = "update", peer_dispatch = true)]
 async fn system_update(
     args: SystemUpdateArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<InstallReport> {
     if let Some(ref v) = args.version {
         match v.as_str() {
@@ -141,7 +141,7 @@ async fn system_update(
 #[orca_tool(domain = "namespace.project", verb = "list")]
 async fn projects_list(
     _args: EmptyArgs,
-    ctx: &orca_contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ProjectsListReport> {
     let mut out = Vec::new();
     if ctx.config.memory_root.exists() {
@@ -160,10 +160,10 @@ async fn projects_list(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orca_contract::ToolCtx;
-    use orca_utils::config::{Config, Model};
+    use contract::ToolCtx;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use utils::config::{Config, Model};
 
     fn ctx_with_memory(root: PathBuf) -> ToolCtx {
         ToolCtx::new(Arc::new(Config {

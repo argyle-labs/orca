@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{Compose, ComposeError, Engine};
 use std::path::{Path, PathBuf};
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 fn map_engine(e: Engine) -> DockerEngineKind {
     match e {
@@ -163,7 +163,7 @@ pub struct DockerStatsOutput {
 #[orca_tool(domain = "docker.engine", verb = "detail")]
 async fn docker_engine_detail(
     _args: GetDockerEngineArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<DockerEngineStatus> {
     let s = crate::engine::status().await;
     Ok(DockerEngineStatus {
@@ -176,7 +176,7 @@ async fn docker_engine_detail(
 #[orca_tool(domain = "docker.engine", verb = "update")]
 async fn docker_engine_update(
     _args: StartDockerEngineArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<StartDockerEngineOutput> {
     let output = crate::engine::start().await?;
     Ok(StartDockerEngineOutput { output })
@@ -187,7 +187,7 @@ async fn docker_engine_update(
 #[orca_tool(domain = "docker.service", verb = "list")]
 async fn docker_service_list(
     args: GetDockerServicesArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<DockerServicesView> {
     let Some(compose) = Compose::find(Path::new(&args.path)) else {
         return Ok(DockerServicesView {
@@ -216,7 +216,7 @@ async fn docker_service_list(
 #[orca_tool(domain = "docker.service", verb = "update")]
 async fn docker_service_update(
     args: RunDockerActionArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<DockerActionResult> {
     let compose = Compose::find(Path::new(&args.project_path))
         .ok_or_else(|| anyhow::anyhow!("no compose file under {}", args.project_path))?;
@@ -238,7 +238,7 @@ async fn docker_service_update(
 #[orca_tool(domain = "docker.service", verb = "detail")]
 async fn docker_service_detail(
     args: GetLogsArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<GetLogsOutput> {
     let tail = args.tail.unwrap_or(200);
     let compose = Compose::find(Path::new(&args.project))
@@ -257,7 +257,7 @@ async fn docker_service_detail(
 #[orca_tool(domain = "docker.service", verb = "list-logs")]
 async fn docker_service_list_logs(
     _args: GetLogServicesArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<GetLogServicesOutput> {
     let home = std::env::var("HOME").unwrap_or_default();
     let rebuy_root = std::env::var("REBUY_ROOT").unwrap_or_else(|_| format!("{home}/code/rebuy"));
@@ -323,7 +323,7 @@ async fn docker_service_list_logs(
 #[orca_tool(domain = "docker.service", verb = "list-stats")]
 async fn docker_service_list_stats(
     _args: DockerStatsArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<DockerStatsOutput> {
     let raw = crate::containers::live_stats().await?;
     let containers = raw
@@ -396,10 +396,10 @@ pub struct RemoveDockerRuntimeArgs {
 #[orca_tool(domain = "docker.runtime", verb = "list")]
 async fn docker_runtime_list(
     _args: ListDockerRuntimesArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ListDockerRuntimesOutput> {
-    let conn = orca_db::open_default()?;
-    let runtimes = orca_db::docker_runtimes::list(&conn)?
+    let conn = db::open_default()?;
+    let runtimes = db::docker_runtimes::list(&conn)?
         .into_iter()
         .map(|r| DockerRuntimeEntry {
             name: r.name,
@@ -416,20 +416,20 @@ async fn docker_runtime_list(
 #[orca_tool(domain = "docker.runtime", verb = "create")]
 async fn docker_runtime_create(
     args: AddDockerRuntimeArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<DockerRuntimeMutationResult> {
     if args.socket_path.is_none() && args.host.is_none() && args.url.is_none() {
         anyhow::bail!("provide socket_path, host, or url");
     }
-    let row = orca_db::docker_runtimes::RuntimeRow {
+    let row = db::docker_runtimes::RuntimeRow {
         name: args.name.clone(),
         socket_path: args.socket_path,
         host: args.host,
         url: args.url,
         enabled: true,
     };
-    let conn = orca_db::open_default()?;
-    orca_db::docker_runtimes::upsert(&conn, &row)?;
+    let conn = db::open_default()?;
+    db::docker_runtimes::upsert(&conn, &row)?;
     Ok(DockerRuntimeMutationResult {
         name: args.name,
         changed: true,
@@ -440,10 +440,10 @@ async fn docker_runtime_create(
 #[orca_tool(domain = "docker.runtime", verb = "delete")]
 async fn docker_runtime_delete(
     args: RemoveDockerRuntimeArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<DockerRuntimeMutationResult> {
-    let conn = orca_db::open_default()?;
-    let changed = orca_db::docker_runtimes::remove(&conn, &args.name)?;
+    let conn = db::open_default()?;
+    let changed = db::docker_runtimes::remove(&conn, &args.name)?;
     Ok(DockerRuntimeMutationResult {
         name: args.name,
         changed,

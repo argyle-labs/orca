@@ -1,5 +1,5 @@
 use anyhow::Result;
-use orca_utils::config::Config;
+use utils::config::Config;
 
 /// Resolved project context: system prompt + memory content.
 #[derive(Debug, Default)]
@@ -100,8 +100,8 @@ fn local_model_prompt() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orca_utils::config::Model;
     use std::path::PathBuf;
+    use utils::config::Model;
 
     fn test_config(memory_root: PathBuf) -> Config {
         Config {

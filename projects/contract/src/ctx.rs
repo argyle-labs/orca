@@ -12,7 +12,7 @@ use std::sync::Arc;
 /// instead of calling server-internal modules directly.
 #[derive(Clone)]
 pub struct ToolCtx {
-    pub config: Arc<orca_utils::config::Config>,
+    pub config: Arc<utils::config::Config>,
     /// Ambient operator identity for this ctx. Set at `build_tool_ctx` to the
     /// host admin operator on the CLI/daemon path; overridden per-request on
     /// REST via `set_caller` when the request carries a session identity.
@@ -23,7 +23,7 @@ pub struct ToolCtx {
 }
 
 impl ToolCtx {
-    pub fn new(config: Arc<orca_utils::config::Config>) -> Self {
+    pub fn new(config: Arc<utils::config::Config>) -> Self {
         Self {
             config,
             auth: None,
@@ -82,8 +82,8 @@ impl ToolCtx {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orca_utils::config::{Config, Model};
     use std::path::PathBuf;
+    use utils::config::{Config, Model};
 
     fn cfg() -> Arc<Config> {
         Arc::new(Config {

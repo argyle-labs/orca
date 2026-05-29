@@ -4,7 +4,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 // ── Doc roots ───────────────────────────────────────────────────────────────
 
@@ -74,7 +74,7 @@ pub struct DocIgnorePatternMutationResult {
 #[orca_tool(domain = "namespace.doc.root", verb = "list")]
 async fn list_doc_roots(
     _args: ListDocRootsArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ListDocRootsOutput> {
     let conn = db::open_default()?;
     let roots = db::docs::list_roots(&conn)?
@@ -93,7 +93,7 @@ async fn list_doc_roots(
 #[orca_tool(domain = "namespace.doc.root", verb = "create")]
 async fn add_doc_root(
     args: AddDocRootArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<DocRootMutationResult> {
     let row = db::docs::RootRow {
         name: args.name.clone(),
@@ -113,7 +113,7 @@ async fn add_doc_root(
 #[orca_tool(domain = "namespace.doc.root", verb = "delete")]
 async fn remove_doc_root(
     args: RemoveDocRootArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<DocRootMutationResult> {
     let conn = db::open_default()?;
     let changed = db::docs::remove_root(&conn, &args.name)?;
@@ -127,7 +127,7 @@ async fn remove_doc_root(
 #[orca_tool(domain = "namespace.doc.pattern", verb = "list")]
 async fn list_doc_ignore_patterns(
     _args: ListDocIgnorePatternsArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ListDocIgnorePatternsOutput> {
     let conn = db::open_default()?;
     let patterns = db::docs::list_ignore_patterns(&conn)?;
@@ -138,7 +138,7 @@ async fn list_doc_ignore_patterns(
 #[orca_tool(domain = "namespace.doc.pattern", verb = "create")]
 async fn add_doc_ignore_pattern(
     args: DocIgnorePatternArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<DocIgnorePatternMutationResult> {
     let conn = db::open_default()?;
     let changed = db::docs::add_ignore_pattern(&conn, &args.pattern)?;
@@ -152,7 +152,7 @@ async fn add_doc_ignore_pattern(
 #[orca_tool(domain = "namespace.doc.pattern", verb = "delete")]
 async fn remove_doc_ignore_pattern(
     args: DocIgnorePatternArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<DocIgnorePatternMutationResult> {
     let conn = db::open_default()?;
     let changed = db::docs::remove_ignore_pattern(&conn, &args.pattern)?;

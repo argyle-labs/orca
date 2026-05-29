@@ -2,11 +2,11 @@
 // `MgmtService` impl, the `/api/plugins` REST handler, and tests.
 #![allow(clippy::disallowed_types)]
 use anyhow::{Context, Result};
-use orca_db::{self as db, plugins::PluginRow};
-use orca_utils::fs::expand_tilde;
+use db::{self as db, plugins::PluginRow};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
+use utils::fs::expand_tilde;
 
 // ── Manifest parsing ──────────────────────────────────────────────────────────
 

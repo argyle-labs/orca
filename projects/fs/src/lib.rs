@@ -12,7 +12,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 // ── Typed entities ──────────────────────────────────────────────────────────
 
@@ -183,7 +183,7 @@ mod native;
 #[orca_tool(domain = "fs.roots", verb = "list", role = "read")]
 async fn fs_roots_list(
     _args: FsRootsListArgs,
-    ctx: &orca_contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<FsRootsListOutput> {
     Ok(FsRootsListOutput {
         roots: native::roots_list(&ctx.config).await?,
@@ -192,7 +192,7 @@ async fn fs_roots_list(
 
 /// One-level directory listing. Provide `root` for a named alias or omit it for an absolute / `~/`-prefixed path.
 #[orca_tool(domain = "fs", verb = "list", role = "read")]
-async fn fs_list(args: FsListArgs, ctx: &orca_contract::ToolCtx) -> anyhow::Result<FsListOutput> {
+async fn fs_list(args: FsListArgs, ctx: &contract::ToolCtx) -> anyhow::Result<FsListOutput> {
     Ok(FsListOutput {
         entries: native::list(&ctx.config, args.root.as_deref(), &args.path).await?,
     })
@@ -200,7 +200,7 @@ async fn fs_list(args: FsListArgs, ctx: &orca_contract::ToolCtx) -> anyhow::Resu
 
 /// Recursive directory tree. Compacted by default; pass `raw=true` for the unmodified filesystem layout.
 #[orca_tool(domain = "fs", verb = "tree", role = "read")]
-async fn fs_tree(args: FsTreeArgs, ctx: &orca_contract::ToolCtx) -> anyhow::Result<FsTreeOutput> {
+async fn fs_tree(args: FsTreeArgs, ctx: &contract::ToolCtx) -> anyhow::Result<FsTreeOutput> {
     Ok(FsTreeOutput {
         nodes: native::tree(
             &ctx.config,
@@ -214,7 +214,7 @@ async fn fs_tree(args: FsTreeArgs, ctx: &orca_contract::ToolCtx) -> anyhow::Resu
 
 /// Read a text file. `format="llm"` strips decorative markdown; binary/multi-format reads are deferred to v2.
 #[orca_tool(domain = "fs", verb = "read", role = "read")]
-async fn fs_read(args: FsReadArgs, ctx: &orca_contract::ToolCtx) -> anyhow::Result<FsReadOutput> {
+async fn fs_read(args: FsReadArgs, ctx: &contract::ToolCtx) -> anyhow::Result<FsReadOutput> {
     let llm = args.format.as_deref() == Some("llm");
     let content = native::read(&ctx.config, args.root.as_deref(), &args.path, llm).await?;
     Ok(FsReadOutput {
@@ -226,10 +226,7 @@ async fn fs_read(args: FsReadArgs, ctx: &orca_contract::ToolCtx) -> anyhow::Resu
 
 /// Case-insensitive line search across one or all registered roots. Optionally summarised by a local LLM.
 #[orca_tool(domain = "fs", verb = "search", role = "read")]
-async fn fs_search(
-    args: FsSearchArgs,
-    ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<FsSearchOutput> {
+async fn fs_search(args: FsSearchArgs, ctx: &contract::ToolCtx) -> anyhow::Result<FsSearchOutput> {
     let llm = args.format.as_deref() == Some("llm");
     let filter = args.root.as_deref().unwrap_or("all");
     let (hits, summary) = native::search(&ctx.config, &args.query, filter, llm).await?;
@@ -242,6 +239,6 @@ async fn fs_search(
 
 /// Metadata for a single path — kind (file/dir), byte size, existence flag.
 #[orca_tool(domain = "fs", verb = "stat", role = "read")]
-async fn fs_stat(args: FsStatArgs, ctx: &orca_contract::ToolCtx) -> anyhow::Result<FsStatOutput> {
+async fn fs_stat(args: FsStatArgs, ctx: &contract::ToolCtx) -> anyhow::Result<FsStatOutput> {
     native::stat(&ctx.config, args.root.as_deref(), &args.path).await
 }

@@ -8,7 +8,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 // ── Typed entities ──────────────────────────────────────────────────────────
 
@@ -84,7 +84,7 @@ pub struct GetContextOutput {
 #[orca_tool(domain = "system.agent", verb = "list")]
 async fn list_agents(
     _args: ListAgentsArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ListAgentsOutput> {
     let agents = crate::embedded::list_embedded_agents()
         .into_iter()
@@ -95,10 +95,7 @@ async fn list_agents(
 
 /// Return the full system prompt for a named orca agent.
 #[orca_tool(domain = "system.agent", verb = "get")]
-async fn get_agent(
-    args: GetAgentArgs,
-    ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<GetAgentOutput> {
+async fn get_agent(args: GetAgentArgs, ctx: &contract::ToolCtx) -> anyhow::Result<GetAgentOutput> {
     let prompt = crate::resolve::load_agent_prompt(&args.name, &ctx.config)
         .ok_or_else(|| anyhow::anyhow!("agent not found: {}", args.name))?;
     Ok(GetAgentOutput {
@@ -111,15 +108,15 @@ async fn get_agent(
 #[orca_tool(domain = "system.agent", verb = "get-config")]
 async fn get_config(
     args: GetConfigArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<GetConfigOutput> {
-    let available = orca_utils::config::docs::list_basenames();
+    let available = utils::config::docs::list_basenames();
     let content = args
         .name
         .as_deref()
         .map(str::trim)
         .filter(|n| !n.is_empty())
-        .and_then(orca_utils::config::docs::get);
+        .and_then(utils::config::docs::get);
     Ok(GetConfigOutput {
         available,
         name: args.name,
@@ -131,7 +128,7 @@ async fn get_config(
 #[orca_tool(domain = "system.agent", verb = "get-context")]
 async fn get_context(
     args: GetContextArgs,
-    ctx: &orca_contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<GetContextOutput> {
     let dir = ctx.config.memory_root.join(&args.project);
     if !dir.exists() {

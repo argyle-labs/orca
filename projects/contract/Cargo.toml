@@ -1,10 +1,10 @@
 [package]
-name = "orca-contract"
+name = "contract"
 version.workspace = true
 edition.workspace = true
 
 [lib]
-name = "orca_contract"
+name = "contract"
 path = "src/lib.rs"
 
 # Leaf "cold types" crate — the contract shared across every layer
@@ -19,7 +19,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 
-orca-utils = { path = "../utils" }
+utils = { path = "../utils" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 

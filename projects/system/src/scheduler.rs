@@ -1,6 +1,6 @@
 //! In-process cron scheduler. Replaces system cron entirely — single
 //! source of truth (the `config_rows` table) and uniform dispatch
-//! (calls into the same `orca_dispatch::dispatch` the CLI/MCP/REST use).
+//! (calls into the same `dispatch::dispatch` the CLI/MCP/REST use).
 //!
 //! See `docs/planned/orca-v1-scope.md` §3.4.
 //!
@@ -12,7 +12,7 @@
 //!      last completed run (or daemon start, whichever is later),
 //!      should we have fired by now?".
 //!   3. If yes, dispatches the row's `job` (canonical tool name) by
-//!      calling `orca_dispatch::dispatch`. Records the run history.
+//!      calling `dispatch::dispatch`. Records the run history.
 //!
 //! ## Row shape (config_rows.json)
 //!
@@ -41,8 +41,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use contract::ToolCtx;
 use cron::Schedule;
-use orca_contract::ToolCtx;
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::{info, warn};
@@ -126,7 +126,7 @@ async fn tick(ctx: &ToolCtx, daemon_start: DateTime<Utc>) -> Result<()> {
         let job_name = parsed.job.clone();
         let started_at = Utc::now();
         let t0 = std::time::Instant::now();
-        let outcome = orca_dispatch::dispatch(&job_name, args, ctx).await;
+        let outcome = dispatch::dispatch(&job_name, args, ctx).await;
         let finished_at = Utc::now();
         let ok = outcome.is_ok();
         let error = outcome.as_ref().err().map(|e| format!("{e:#}"));

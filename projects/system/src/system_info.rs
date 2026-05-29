@@ -415,7 +415,7 @@ fn collect_intel_gpus() -> Vec<GpuInfo> {
 }
 
 fn orca_dir() -> Option<PathBuf> {
-    orca_utils::fs::orca_home()
+    utils::fs::orca_home()
 }
 
 /// Returns `(virtualization, dmi_vendor, dmi_product)`.

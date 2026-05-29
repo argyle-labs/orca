@@ -1,6 +1,6 @@
 //! Process-global allowlist of tools that paired pod peers may invoke via
 //! `pod/exec`. Populated once at startup from
-//! `orca_dispatch::remote_ok_names` so the pod listener can authorize
+//! `dispatch::remote_ok_names` so the pod listener can authorize
 //! without walking the inventory on every request.
 
 use std::collections::HashSet;

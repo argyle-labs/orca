@@ -4,7 +4,7 @@
 //! using the loopback admin token. That impersonated `role=admin` for every
 //! peer-relayed call (M4 in the v1 hardening punch list). Now: the daemon
 //! installs the shared `ToolCtx` here at startup, and `handle_exec`
-//! dispatches directly via the free-fn `orca_dispatch::dispatch` — no HTTP
+//! dispatches directly via the free-fn `dispatch::dispatch` — no HTTP
 //! hop, no token impersonation. The dispatchers walk the `inventory` slice
 //! directly, so there's no registry to ship through this handle.
 //!
@@ -15,14 +15,14 @@
 //! not per-peer trust: mTLS proves who is on the wire, but admin delegation
 //! is a property of the invoking user, not the relaying peer.
 //!
-//! `serde_json::Value` is unavoidable here: `orca_dispatch::dispatch` is the
+//! `serde_json::Value` is unavoidable here: `dispatch::dispatch` is the
 //! heterogeneous-tool entry point and takes/returns opaque JSON by contract.
 //! Callers serialize the typed Args before this hop and deserialize the typed
 //! Output immediately after, so opaque JSON never escapes the wire boundary.
 #![allow(clippy::disallowed_types)]
 
 use anyhow::Result;
-use orca_contract::ToolCtx;
+use contract::ToolCtx;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 
@@ -49,7 +49,7 @@ pub async fn dispatch(name: &str, args: Value) -> Result<Value> {
             .ok_or_else(|| anyhow::anyhow!("pod dispatcher not installed yet"))?
             .clone()
     };
-    orca_dispatch::dispatch(name, args, &ctx).await
+    dispatch::dispatch(name, args, &ctx).await
 }
 
 #[cfg(test)]
@@ -69,8 +69,8 @@ mod tests {
     }
 
     fn make_ctx() -> Arc<ToolCtx> {
-        use orca_utils::config::{Config, Model};
         use std::path::PathBuf;
+        use utils::config::{Config, Model};
         let cfg = Arc::new(Config {
             anthropic_api_key: None,
             lmstudio_url: "http://localhost:1234".into(),

@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -16,17 +16,17 @@ pub struct HealthOutput {
 
 /// Liveness probe — returns {ok: true} when the server is alive.
 #[orca_tool(domain = "system", verb = "health")]
-async fn health(_args: HealthArgs, _ctx: &orca_contract::ToolCtx) -> anyhow::Result<HealthOutput> {
+async fn health(_args: HealthArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<HealthOutput> {
     Ok(HealthOutput { ok: true })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orca_contract::ToolCtx;
-    use orca_utils::config::{Config, Model};
+    use contract::ToolCtx;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use utils::config::{Config, Model};
 
     fn empty_ctx() -> ToolCtx {
         ToolCtx::new(Arc::new(Config {

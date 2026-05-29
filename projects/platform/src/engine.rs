@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 // ── Args ────────────────────────────────────────────────────────────────────
 
@@ -64,8 +64,8 @@ pub struct EngineOpResult {
 
 // ── Native helpers ──────────────────────────────────────────────────────────
 
-impl From<orca_db::llm::Provider> for ProviderDto {
-    fn from(p: orca_db::llm::Provider) -> Self {
+impl From<db::llm::Provider> for ProviderDto {
+    fn from(p: db::llm::Provider) -> Self {
         Self {
             name: p.name,
             url: p.url,
@@ -97,28 +97,19 @@ fn infer_kind(url: &str, supplied: &str) -> anyhow::Result<String> {
 
 /// List registered LLM backends (LM Studio, Ollama).
 #[orca_tool(domain = "system.engine", verb = "list", cli = manual)]
-async fn engine_list(
-    _args: EmptyArgs,
-    _ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<ProviderList> {
-    let conn = orca_db::open_default()?;
+async fn engine_list(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<ProviderList> {
+    let conn = db::open_default()?;
     Ok(ProviderList(
-        orca_db::llm::list(&conn)?
-            .into_iter()
-            .map(Into::into)
-            .collect(),
+        db::llm::list(&conn)?.into_iter().map(Into::into).collect(),
     ))
 }
 
 /// Register a new LLM backend. Kind auto-inferred from URL if not supplied.
 #[orca_tool(domain = "system.engine", verb = "create", cli = manual)]
-async fn engine_create(
-    args: AddArgs,
-    _ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<EngineOpResult> {
-    let conn = orca_db::open_default()?;
+async fn engine_create(args: AddArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<EngineOpResult> {
+    let conn = db::open_default()?;
     let kind = infer_kind(&args.url, &args.kind)?;
-    orca_db::llm::upsert(&conn, &args.name, &args.url, &kind)?;
+    db::llm::upsert(&conn, &args.name, &args.url, &kind)?;
     Ok(EngineOpResult {
         message: format!("registered {kind} {} ({})", args.name, args.url),
     })
@@ -126,12 +117,9 @@ async fn engine_create(
 
 /// Remove a registered LLM backend.
 #[orca_tool(domain = "system.engine", verb = "delete", cli = manual)]
-async fn engine_delete(
-    args: NameArgs,
-    _ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<EngineOpResult> {
-    let conn = orca_db::open_default()?;
-    if orca_db::llm::remove(&conn, &args.name)? {
+async fn engine_delete(args: NameArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<EngineOpResult> {
+    let conn = db::open_default()?;
+    if db::llm::remove(&conn, &args.name)? {
         Ok(EngineOpResult {
             message: format!("removed {}", args.name),
         })
@@ -144,10 +132,10 @@ async fn engine_delete(
 #[orca_tool(domain = "system.engine", verb = "update", cli = manual)]
 async fn engine_update(
     args: UpdateArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<EngineOpResult> {
-    let conn = orca_db::open_default()?;
-    if orca_db::llm::set_enabled(&conn, &args.name, args.enabled)? {
+    let conn = db::open_default()?;
+    if db::llm::set_enabled(&conn, &args.name, args.enabled)? {
         let state = if args.enabled { "enabled" } else { "disabled" };
         Ok(EngineOpResult {
             message: format!("{} {state}", args.name),
@@ -186,7 +174,7 @@ mod tests {
 
     #[test]
     fn provider_dto_from_db_row_copies_fields() {
-        let dto: ProviderDto = orca_db::llm::Provider {
+        let dto: ProviderDto = db::llm::Provider {
             name: "n".into(),
             url: "u".into(),
             kind: "ollama".into(),
@@ -205,7 +193,7 @@ mod tests {
     async fn engine_lifecycle_add_list_disable_remove() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = empty_ctx();
-        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+        db::with_db_path(tmp.path().to_path_buf(), async move {
             // empty initially
             let list0 = engine_list(EmptyArgs {}, &ctx).await.unwrap();
             assert!(list0.0.is_empty());
@@ -273,7 +261,7 @@ mod tests {
     async fn engine_delete_unknown_errors() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = empty_ctx();
-        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+        db::with_db_path(tmp.path().to_path_buf(), async move {
             let e = engine_delete(
                 NameArgs {
                     name: "ghost".into(),
@@ -292,7 +280,7 @@ mod tests {
     async fn engine_enable_unknown_errors() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = empty_ctx();
-        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+        db::with_db_path(tmp.path().to_path_buf(), async move {
             assert!(
                 engine_update(
                     UpdateArgs {
@@ -323,7 +311,7 @@ mod tests {
     async fn engine_create_rejects_unknown_kind() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let ctx = empty_ctx();
-        orca_db::with_db_path(tmp.path().to_path_buf(), async move {
+        db::with_db_path(tmp.path().to_path_buf(), async move {
             let e = engine_create(
                 AddArgs {
                     name: "x".into(),
@@ -347,7 +335,7 @@ mod cli_register {
     use super::*;
     use colored::Colorize;
 
-    ::orca_dispatch::register_op! {
+    ::dispatch::register_op! {
         tool: EngineList,
         domain: "engine",
         verb: "list",
@@ -372,7 +360,7 @@ mod cli_register {
         }
     }
 
-    ::orca_dispatch::register_op! {
+    ::dispatch::register_op! {
         tool: EngineCreate,
         domain: "engine",
         verb: "create",
@@ -380,7 +368,7 @@ mod cli_register {
         render: |out| { println!("{}", out.message); }
     }
 
-    ::orca_dispatch::register_op! {
+    ::dispatch::register_op! {
         tool: EngineDelete,
         domain: "engine",
         verb: "delete",
@@ -388,7 +376,7 @@ mod cli_register {
         render: |out| { println!("{}", out.message); }
     }
 
-    ::orca_dispatch::register_op! {
+    ::dispatch::register_op! {
         tool: EngineUpdate,
         domain: "engine",
         verb: "update",

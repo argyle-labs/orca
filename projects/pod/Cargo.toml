@@ -19,18 +19,18 @@ path = "src/lib.rs"
 cli = ["dep:clap", "dep:colored"]
 
 [dependencies]
-orca-dispatch    = { path = "../orca-dispatch" }
-orca-contract   = { path = "../orca-contract", default-features = false }
-orca-macro      = { path = "../orca-macro" }
+dispatch    = { path = "../dispatch" }
+contract   = { path = "../contract", default-features = false }
+derive      = { path = "../derive" }
 system          = { path = "../system" }
 schemars        = { workspace = true }
 serde           = { workspace = true }
 serde_json      = { workspace = true }
 inventory       = { workspace = true }
 
-orca-utils = { path = "../utils" }
-db = { package = "orca-db", path = "../db" }
-replicate = { package = "orca-replicate", path = "../replicate" }
+utils = { path = "../utils" }
+db = { package = "db", path = "../db" }
+replicate = { package = "replicate", path = "../replicate" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }

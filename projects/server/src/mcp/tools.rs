@@ -1,6 +1,6 @@
 //! Context7 federation tool defs. `run_agent` was moved to the
 //! `agent.run` `#[orca_tool]` in `conversation/src/run.rs` — picked up by
-//! `orca_dispatch::mcp_definitions()`. The two entries below proxy to a
+//! `dispatch::mcp_definitions()`. The two entries below proxy to a
 //! remote Context7 MCP server and have no native counterpart in orca's tool
 //! inventory.
 

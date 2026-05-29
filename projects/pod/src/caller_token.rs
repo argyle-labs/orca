@@ -27,10 +27,10 @@
 #![allow(clippy::disallowed_types)]
 
 use anyhow::{Context, Result};
-use orca_contract::CallerIdentity;
+use contract::CallerIdentity;
 use orca_sdk::pki;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use utils::hash;
 
 /// Default token lifetime. Tokens are minted per request immediately before
 /// dispatch, so a tight window is fine and limits replay exposure.
@@ -67,14 +67,7 @@ pub struct CallerToken {
 /// match on both ends.
 pub fn args_hash(args: &serde_json::Value) -> String {
     let bytes = serde_json::to_vec(args).unwrap_or_default();
-    let mut h = Sha256::new();
-    h.update(&bytes);
-    let d = h.finalize();
-    let mut s = String::with_capacity(64);
-    for b in d.iter() {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
+    hash::sha256_hex(&bytes)
 }
 
 /// Mint and sign a token for `tool`+`args` on behalf of `identity`, valid for

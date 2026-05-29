@@ -13,7 +13,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 // ── Args ────────────────────────────────────────────────────────────────────
 
@@ -113,7 +113,7 @@ pub struct DenyReport {
 #[orca_tool(domain = "system.sweep", verb = "organization")]
 async fn sweep_organization(
     args: SweepOrganizationArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SweepOrganizationOutput> {
     let start = std::time::Instant::now();
     let workspace_root = native::resolve_workspace_root(args.workspace_root.as_deref())?;

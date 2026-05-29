@@ -9,7 +9,7 @@ use crate::{
     NamespaceShareEntry, NamespaceSharesReport, NamespaceSummary,
 };
 use anyhow::{Context, Result, anyhow};
-use orca_utils::config::{Config, LOCAL_USER};
+use utils::config::{Config, LOCAL_USER};
 
 fn user_id() -> String {
     LOCAL_USER.to_string()

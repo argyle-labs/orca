@@ -15,7 +15,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::system_info_types::SystemInfoReport;
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct HostStatusRowDto {
@@ -72,7 +72,7 @@ fn rows_to_dtos(rows: Vec<db::host_status::HostStatusRow>) -> Vec<HostStatusRowD
 #[orca_tool(domain = "pod.status", verb = "list")]
 async fn host_status_list(
     _args: HostStatusRowsArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<HostStatusRows> {
     let conn = db::open_default()?;
     let rows = db::host_status::latest_per_peer(&conn)?;
@@ -84,7 +84,7 @@ async fn host_status_list(
 #[orca_tool(domain = "pod.status", verb = "detail")]
 async fn host_status_detail(
     args: HostStatusDetailArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<HostStatusRows> {
     let conn = db::open_default()?;
     let limit = args.limit.unwrap_or(256) as usize;

@@ -27,12 +27,12 @@ pdf = ["dep:typst", "dep:typst-pdf", "dep:typst-assets", "dep:zip"]
 [dependencies]
 # Workspace crates
 orca-sdk   = { path = "../sdk/rust" }
-orca-utils = { path = "../utils" }
-orca-dispatch = { path = "../orca-dispatch" }
-orca-macro    = { path = "../orca-macro" }
+utils = { path = "../utils" }
+dispatch = { path = "../dispatch" }
+derive    = { path = "../derive" }
 inventory     = { workspace = true }
-orca-contract = { path = "../orca-contract" }
-db         = { package = "orca-db", path = "../db" }
+contract = { path = "../contract" }
+db         = { package = "db", path = "../db" }
 # Domain crates
 auth     = { path = "../auth",     features = ["cli"] }
 pod      = { path = "../pod",      features = ["cli"] }
@@ -179,7 +179,7 @@ tracing-subscriber = { workspace = true }
 tempfile   = { workspace = true }
 tower      = { workspace = true }
 serde_json = { workspace = true }
-db = { package = "orca-db", path = "../db" }
+db = { package = "db", path = "../db" }
 
 [lints]
 workspace = true

@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 // ── Typed entities ──────────────────────────────────────────────────────────
 
@@ -129,10 +129,10 @@ pub struct SyncPluginCredsOutput {
 #[orca_tool(domain = "system.plugin", verb = "list")]
 async fn list_plugins(
     args: ListPluginsArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ListPluginsOutput> {
-    let conn = orca_db::open_default()?;
-    let rows = orca_db::plugins::list(&conn)?;
+    let conn = db::open_default()?;
+    let rows = db::plugins::list(&conn)?;
     let plugins = rows
         .into_iter()
         .filter(|p| args.workspace.as_deref().is_none_or(|w| p.tier == w))
@@ -151,7 +151,7 @@ async fn list_plugins(
 #[orca_tool(domain = "system.plugin", verb = "create")]
 async fn add_plugin(
     args: AddPluginArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<AddPluginOutput> {
     let id = crate::install::install_plugin(&args.manifest, args.instance_id.as_deref())?;
     Ok(AddPluginOutput { id })
@@ -161,7 +161,7 @@ async fn add_plugin(
 #[orca_tool(domain = "system.plugin", verb = "delete")]
 async fn remove_plugin(
     args: PluginIdArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<PluginMutationResult> {
     let changed = crate::install::remove_plugin(&args.id)?;
     Ok(PluginMutationResult {
@@ -174,10 +174,10 @@ async fn remove_plugin(
 #[orca_tool(domain = "system.plugin", verb = "update")]
 async fn update_plugin(
     args: UpdatePluginArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<PluginMutationResult> {
-    let conn = orca_db::open_default()?;
-    let changed = orca_db::plugins::set_enabled(&conn, &args.id, args.enabled)?;
+    let conn = db::open_default()?;
+    let changed = db::plugins::set_enabled(&conn, &args.id, args.enabled)?;
     Ok(PluginMutationResult {
         id: args.id,
         changed,
@@ -188,10 +188,10 @@ async fn update_plugin(
 #[orca_tool(domain = "system.plugin.cred", verb = "list")]
 async fn plugin_cred_list(
     args: ListPluginCredsArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ListPluginCredsOutput> {
-    let conn = orca_db::open_default()?;
-    let creds = orca_db::plugin_creds::list(&conn, &args.plugin)?;
+    let conn = db::open_default()?;
+    let creds = db::plugin_creds::list(&conn, &args.plugin)?;
     let credentials = creds
         .into_iter()
         .map(|c| PluginCredEntry {
@@ -210,10 +210,10 @@ async fn plugin_cred_list(
 #[orca_tool(domain = "system.plugin.cred", verb = "create")]
 async fn plugin_cred_create(
     args: SetPluginCredArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<PluginCredMutationResult> {
-    let conn = orca_db::open_default()?;
-    orca_db::plugin_creds::set(&conn, &args.plugin, &args.key, &args.value)?;
+    let conn = db::open_default()?;
+    db::plugin_creds::set(&conn, &args.plugin, &args.key, &args.value)?;
     Ok(PluginCredMutationResult {
         plugin: args.plugin,
         key: args.key,
@@ -225,10 +225,10 @@ async fn plugin_cred_create(
 #[orca_tool(domain = "system.plugin.cred", verb = "delete")]
 async fn plugin_cred_delete(
     args: RemovePluginCredArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<PluginCredMutationResult> {
-    let conn = orca_db::open_default()?;
-    let changed = orca_db::plugin_creds::delete(&conn, &args.plugin, &args.key)?;
+    let conn = db::open_default()?;
+    let changed = db::plugin_creds::delete(&conn, &args.plugin, &args.key)?;
     Ok(PluginCredMutationResult {
         plugin: args.plugin,
         key: args.key,
@@ -240,7 +240,7 @@ async fn plugin_cred_delete(
 #[orca_tool(domain = "system.plugin.cred", verb = "sync")]
 async fn plugin_cred_sync(
     args: SyncPluginCredsArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SyncPluginCredsOutput> {
     crate::creds::sync_plugin_creds(&args.plugin)?;
     Ok(SyncPluginCredsOutput {

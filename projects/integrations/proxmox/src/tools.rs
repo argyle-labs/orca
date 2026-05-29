@@ -1,7 +1,7 @@
 //! Proxmox tool defs + native impls.
 #![allow(clippy::disallowed_types)] // Proxmox API shapes are upstream-defined; JsonAny outputs are intentional
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -63,7 +63,7 @@ mod native_support {
     use super::*;
     use crate::{Client, Config, ProxmoxActionResult as IntResult};
     use anyhow::{Context, Result};
-    use orca_db as db;
+    use db;
 
     impl From<IntResult> for ProxmoxActionResult {
         fn from(r: IntResult) -> Self {
@@ -94,8 +94,8 @@ mod native_support {
 #[orca_tool(domain = "proxmox.node", verb = "list")]
 async fn proxmox_node_list(
     args: ProxmoxListNodesArgs,
-    _ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<::orca_contract::JsonAny> {
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<::contract::JsonAny> {
     let client = native_support::make_client(&args.endpoint)?;
     Ok(client.nodes().await?.into())
 }
@@ -104,8 +104,8 @@ async fn proxmox_node_list(
 #[orca_tool(domain = "proxmox.vm", verb = "list")]
 async fn proxmox_vm_list(
     args: ProxmoxListVmsArgs,
-    _ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<::orca_contract::JsonAny> {
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<::contract::JsonAny> {
     let client = native_support::make_client(&args.endpoint)?;
     Ok(client.vms(&args.node).await?.into())
 }
@@ -114,8 +114,8 @@ async fn proxmox_vm_list(
 #[orca_tool(domain = "proxmox.container", verb = "list")]
 async fn proxmox_container_list(
     args: ProxmoxListContainersArgs,
-    _ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<::orca_contract::JsonAny> {
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<::contract::JsonAny> {
     let client = native_support::make_client(&args.endpoint)?;
     Ok(client.containers(&args.node).await?.into())
 }
@@ -124,7 +124,7 @@ async fn proxmox_container_list(
 #[orca_tool(domain = "proxmox.vm", verb = "update")]
 async fn proxmox_vm_update(
     args: ProxmoxVmActionArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ProxmoxActionResult> {
     let client = native_support::make_client(&args.endpoint)?;
     let action: crate::ProxmoxAction = args.action.parse()?;
@@ -138,7 +138,7 @@ async fn proxmox_vm_update(
 #[orca_tool(domain = "proxmox.container", verb = "update")]
 async fn proxmox_container_update(
     args: ProxmoxContainerActionArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ProxmoxActionResult> {
     let client = native_support::make_client(&args.endpoint)?;
     let action: crate::ProxmoxAction = args.action.parse()?;
@@ -197,10 +197,10 @@ pub struct RemoveProxmoxEndpointArgs {
 #[orca_tool(domain = "proxmox.endpoint", verb = "list")]
 async fn proxmox_endpoint_list(
     _args: ListProxmoxEndpointsArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ListProxmoxEndpointsOutput> {
-    let conn = orca_db::open_default()?;
-    let endpoints = orca_db::proxmox::list(&conn)?
+    let conn = db::open_default()?;
+    let endpoints = db::proxmox::list(&conn)?
         .into_iter()
         .map(|r| ProxmoxEndpointEntry {
             name: r.name,
@@ -217,9 +217,9 @@ async fn proxmox_endpoint_list(
 #[orca_tool(domain = "proxmox.endpoint", verb = "create")]
 async fn proxmox_endpoint_create(
     args: AddProxmoxEndpointArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ProxmoxMutationResult> {
-    let row = orca_db::proxmox::EndpointRow {
+    let row = db::proxmox::EndpointRow {
         name: args.name.clone(),
         base_url: args.base_url,
         token_id: args.token_id,
@@ -227,8 +227,8 @@ async fn proxmox_endpoint_create(
         insecure: args.insecure.unwrap_or(false),
         enabled: true,
     };
-    let conn = orca_db::open_default()?;
-    orca_db::proxmox::upsert(&conn, &row)?;
+    let conn = db::open_default()?;
+    db::proxmox::upsert(&conn, &row)?;
     Ok(ProxmoxMutationResult {
         name: args.name,
         changed: true,
@@ -239,10 +239,10 @@ async fn proxmox_endpoint_create(
 #[orca_tool(domain = "proxmox.endpoint", verb = "delete")]
 async fn proxmox_endpoint_delete(
     args: RemoveProxmoxEndpointArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ProxmoxMutationResult> {
-    let conn = orca_db::open_default()?;
-    let changed = orca_db::proxmox::remove(&conn, &args.name)?;
+    let conn = db::open_default()?;
+    let changed = db::proxmox::remove(&conn, &args.name)?;
     Ok(ProxmoxMutationResult {
         name: args.name,
         changed,

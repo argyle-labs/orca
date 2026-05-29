@@ -10,12 +10,12 @@ mod tools;
 use ::mcp::context7;
 
 use anyhow::Result;
-use orca_contract::ToolCtx;
-use orca_utils::config::Config;
+use contract::ToolCtx;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use utils::config::Config;
 
 pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     let mut ctx = ToolCtx::new(config);
@@ -26,10 +26,10 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     ctx.register_service(host_refresh);
     // Peer transport for `cli::exec_remote` (orca-dispatch dispatches
     // remote_ok tools through whatever RemoteExec the host registers).
-    let remote: Arc<dyn orca_contract::RemoteExec> = Arc::new(pod::PodRemoteExec);
+    let remote: Arc<dyn contract::RemoteExec> = Arc::new(pod::PodRemoteExec);
     ctx.register_service(remote);
-    orca_dispatch::remote_ok::install(orca_dispatch::remote_ok_names());
-    orca_dispatch::tool_roles::install(orca_dispatch::role_table());
+    dispatch::remote_ok::install(dispatch::remote_ok_names());
+    dispatch::tool_roles::install(dispatch::role_table());
     match resolve_host_operator() {
         Some(id) => ctx.with_auth(id),
         None => ctx,
@@ -42,10 +42,10 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
 /// look it up. Returns `None` when the host has no admin user yet (fresh /
 /// headless host) — remote dispatch then sends no token and falls back to the
 /// recipient's trusted-peer handling.
-fn resolve_host_operator() -> Option<orca_contract::CallerIdentity> {
+fn resolve_host_operator() -> Option<contract::CallerIdentity> {
     let conn = db::open_default().ok()?;
     let admin = db::users::first_admin(&conn).ok().flatten()?;
-    Some(orca_contract::CallerIdentity {
+    Some(contract::CallerIdentity {
         user_id: admin.id,
         username: admin.username,
         role: admin.role,
@@ -109,7 +109,7 @@ pub async fn serve(config: &Config) -> Result<()> {
             "tools/list" => {
                 // Registry-derived tools replace the corresponding static entries in tools.rs.
                 // During migration: registry names shadow the static list.
-                let registry_defs = orca_dispatch::mcp_definitions();
+                let registry_defs = dispatch::mcp_definitions();
                 let registry_names: std::collections::HashSet<String> = registry_defs
                     .iter()
                     .filter_map(|t| t["name"].as_str().map(str::to_string))
@@ -232,9 +232,9 @@ pub async fn serve(config: &Config) -> Result<()> {
                             }
                         }
                     }
-                } else if orca_dispatch::names().contains(&name) {
+                } else if dispatch::names().contains(&name) {
                     // MCP wants text — Value::String passes through, structs pretty-print.
-                    let result = orca_dispatch::dispatch_text(name, args.clone(), &tool_ctx).await;
+                    let result = dispatch::dispatch_text(name, args.clone(), &tool_ctx).await;
                     match result {
                         Ok(text) => reply(
                             id,

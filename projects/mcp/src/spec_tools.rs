@@ -10,7 +10,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use orca_contract::{OrcaTool, OrcaToolDef, ToolCtx};
+use contract::{OrcaTool, OrcaToolDef, ToolCtx};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -150,10 +150,10 @@ impl OrcaTool for GetGraphqlInfo {
 macro_rules! register_spec_tool {
     ($tool:ty) => {
         ::inventory::submit! {
-            ::orca_dispatch::ToolRegistration {
-                name: <$tool as ::orca_contract::OrcaToolDef>::NAME,
+            ::dispatch::ToolRegistration {
+                name: <$tool as ::contract::OrcaToolDef>::NAME,
                 make_erased: || ::std::boxed::Box::new(
-                    ::orca_dispatch::ToolWrapper::<$tool>(::std::marker::PhantomData)
+                    ::dispatch::ToolWrapper::<$tool>(::std::marker::PhantomData)
                 ),
             }
         }

@@ -34,7 +34,7 @@ pub struct UserAuth {
 /// Field order mirrors the `users` table columns exactly (the `Replicated`
 /// derive maps fields ↔ columns 1:1), so `username_lower` is carried even
 /// though it is just `lower(username)`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, orca_macro::Replicated)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, derive::Replicated)]
 #[replicate(table = "users", lww = "updated_at")]
 pub struct ReplicaUser {
     pub id: String,

@@ -3,18 +3,18 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 fn run_migrate(
-    direction: orca_db::MigrateDirection,
+    direction: db::MigrateDirection,
     steps: usize,
     label: &str,
 ) -> anyhow::Result<DbMigrateReport> {
-    let conn = orca_db::open_default()?;
-    let before_applied = orca_db::applied_count(&conn)?;
-    let before = orca_db::schema_version(&conn)?;
-    let after = orca_db::migrate(&conn, direction, steps)?;
-    let after_applied = orca_db::applied_count(&conn)?;
+    let conn = db::open_default()?;
+    let before_applied = db::applied_count(&conn)?;
+    let before = db::schema_version(&conn)?;
+    let after = db::migrate(&conn, direction, steps)?;
+    let after_applied = db::applied_count(&conn)?;
     let applied = after_applied.abs_diff(before_applied);
     Ok(DbMigrateReport {
         before,
@@ -68,12 +68,12 @@ pub struct DbLifecycleUpdateArgs {
 #[orca_tool(domain = "system.db", verb = "detail")]
 async fn db_detail(
     _args: DbStatusArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<DbStatusReport> {
-    let conn = orca_db::open_default()?;
-    let current = orca_db::schema_version(&conn)?;
-    let total = orca_db::migration_count() as u32;
-    let applied = orca_db::applied_count(&conn)?;
+    let conn = db::open_default()?;
+    let current = db::schema_version(&conn)?;
+    let total = db::migration_count() as u32;
+    let applied = db::applied_count(&conn)?;
     Ok(DbStatusReport {
         current,
         total,
@@ -88,12 +88,12 @@ async fn db_detail(
 #[orca_tool(domain = "system.db.lifecycle", verb = "update")]
 async fn db_lifecycle_update(
     args: DbLifecycleUpdateArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<DbMigrateReport> {
     match args.action.as_str() {
-        "migrate" => run_migrate(orca_db::MigrateDirection::Up, usize::MAX, "up-all"),
-        "up" => run_migrate(orca_db::MigrateDirection::Up, 1, "up"),
-        "down" => run_migrate(orca_db::MigrateDirection::Down, 1, "down"),
+        "migrate" => run_migrate(db::MigrateDirection::Up, usize::MAX, "up-all"),
+        "up" => run_migrate(db::MigrateDirection::Up, 1, "up"),
+        "down" => run_migrate(db::MigrateDirection::Down, 1, "down"),
         other => anyhow::bail!("unknown action '{other}' (expected migrate|up|down)"),
     }
 }

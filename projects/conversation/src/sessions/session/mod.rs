@@ -18,9 +18,9 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use crossterm::event::{Event, EventStream};
 use futures_util::StreamExt;
-use orca_utils::config::{Config, Model};
 use rustyline::DefaultEditor;
 use tokio::sync::mpsc;
+use utils::config::{Config, Model};
 
 pub struct Session {
     pub(super) config: Config,

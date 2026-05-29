@@ -4,9 +4,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use anyhow::bail;
-use orca_macro::orca_tool;
-use orca_utils::hash;
+use derive::orca_tool;
 use rand::Rng;
+use utils::hash;
 
 const ANTHROPIC_KEY: &str = "anthropic_api_key";
 
@@ -67,7 +67,7 @@ pub struct AuthLoginOutput {
 #[orca_tool(domain = "system.auth.session", verb = "detail")]
 async fn auth_session_detail(
     _args: AuthStatusArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<AuthStatusReport> {
     let conn = db::open_default()?;
     let anthropic = db::settings::secret_get(&conn, ANTHROPIC_KEY)?;
@@ -98,7 +98,7 @@ async fn auth_session_detail(
 #[orca_tool(domain = "system.auth.session", verb = "delete")]
 async fn auth_session_delete(
     args: AuthLogoutArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<AuthLogoutOutput> {
     let removed = match args.provider.as_str() {
         "anthropic" => {
@@ -119,7 +119,7 @@ async fn auth_session_delete(
 #[orca_tool(domain = "system.auth.session", verb = "create")]
 async fn auth_session_create(
     args: AuthLoginArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<AuthLoginOutput> {
     let provider = args.provider.as_str();
     match provider {
@@ -224,7 +224,7 @@ pub struct TokenRevokeOutput {
 #[orca_tool(domain = "system.auth.token", verb = "create")]
 async fn auth_token_create(
     args: TokenCreateArgs,
-    ctx: &orca_contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<TokenCreateOutput> {
     if !matches!(args.role.as_str(), "admin" | "read") {
         bail!("role must be 'admin' or 'read', got '{}'", args.role);
@@ -269,7 +269,7 @@ async fn auth_token_create(
 #[orca_tool(domain = "system.auth.token", verb = "list")]
 async fn auth_token_list(
     _args: TokenListArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<TokenListOutput> {
     let conn = db::open_default()?;
     let rows = db::api_tokens::list(&conn)?;
@@ -291,26 +291,11 @@ async fn auth_token_list(
 #[orca_tool(domain = "system.auth.token", verb = "delete")]
 async fn auth_token_delete(
     args: TokenRevokeArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<TokenRevokeOutput> {
     let conn = db::open_default()?;
     let revoked = db::api_tokens::revoke(&conn, &args.id)?;
     Ok(TokenRevokeOutput { revoked })
 }
 
-// ── Hex/sha helpers ─────────────────────────────────────────────────────────
-
-fn hex_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        _ = write!(s, "{b:02x}");
-    }
-    s
-}
-
-fn sha256_hex(input: &[u8]) -> String {
-    let mut h = Sha256::new();
-    h.update(input);
-    hex_lower(&h.finalize())
-}
+// Hex / sha helpers used to live here; replaced by utils::hash::*.

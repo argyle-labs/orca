@@ -9,10 +9,10 @@
 #![allow(clippy::disallowed_types)]
 use anyhow::{Context, Result};
 use orca_sdk::pki;
-use orca_utils::config::{APP_MCP_SERVER, APP_NAME, APP_PKI_DIR, APP_STATE_DIR};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use utils::config::{APP_MCP_SERVER, APP_NAME, APP_PKI_DIR, APP_STATE_DIR};
 
 /// Global directive written to `~/.claude/CLAUDE.md` by `orca install`.
 /// Tells Claude Code to invoke the `orca` agent first and delegate from

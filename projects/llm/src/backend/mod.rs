@@ -10,11 +10,11 @@
 use crate::types::{BackendResponse, Message};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use orca_contract::ToolDef;
-use orca_utils::config::{Config, Model};
+use contract::ToolDef;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
+use utils::config::{Config, Model};
 
 pub mod claude;
 pub mod lmstudio;

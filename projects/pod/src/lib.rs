@@ -18,7 +18,7 @@ pub mod server_pod;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 
 // ── Args / Output types (shared by every surface) ────────────────
 
@@ -532,7 +532,7 @@ pub struct PodExecDispatch {
     pub result: serde_json::Value,
 }
 
-/// Transport that lets the generic `orca_contract::RemoteExec` trait dispatch
+/// Transport that lets the generic `contract::RemoteExec` trait dispatch
 /// through `server_pod::exec`. Registered in the daemon's `build_tool_ctx` so
 /// `cli::exec_remote::<T>(...)` (in orca-dispatch, which knows nothing about
 /// pod) finds a peer transport. Unit struct — no service indirection.
@@ -541,14 +541,14 @@ pub struct PodRemoteExec;
 
 #[cfg(feature = "cli")]
 #[async_trait::async_trait]
-impl orca_contract::RemoteExec for PodRemoteExec {
+impl contract::RemoteExec for PodRemoteExec {
     #[allow(clippy::disallowed_types)]
     async fn exec(
         &self,
         peer: &str,
         tool: &str,
         args: serde_json::Value,
-        caller: Option<orca_contract::CallerIdentity>,
+        caller: Option<contract::CallerIdentity>,
     ) -> anyhow::Result<serde_json::Value> {
         Ok(server_pod::exec(peer, tool, args, caller).await?.result)
     }
@@ -561,10 +561,7 @@ impl orca_contract::RemoteExec for PodRemoteExec {
 /// of `system.peer.list`, `system.peer.discovery.list`, and
 /// `system.peer.handshake.list` (2026-05-28 consolidation).
 #[orca_tool(domain = "pod", verb = "list")]
-async fn pod_list(
-    _args: EmptyArgs,
-    _ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<PodListOutput> {
+async fn pod_list(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodListOutput> {
     let joined = server_pod::list_enriched().await?;
     let handshaking = server_pod::pending().unwrap_or_default();
     let discovered = server_pod::discover().unwrap_or_default();
@@ -611,10 +608,7 @@ async fn pod_list(
 /// - `"accept"` — joiner accepts a pending inbound offer by its 6-char code.
 ///   Requires `code`. Returns the inviter identity after join.
 #[orca_tool(domain = "pod", verb = "join")]
-async fn pod_join(
-    args: PodJoinArgs,
-    _ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<PodJoinOutput> {
+async fn pod_join(args: PodJoinArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodJoinOutput> {
     match args.action.as_str() {
         "invite" => {
             let addr = args
@@ -667,10 +661,7 @@ async fn pod_join(
 /// (`local_secure`). With `push: true`, executes on the remote peer over
 /// mTLS so THEY trust US (`peer_secure` from our perspective).
 #[orca_tool(domain = "pod", verb = "trust")]
-async fn pod_trust(
-    args: PodTrustArgs,
-    ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<PodTrustOutput> {
+async fn pod_trust(args: PodTrustArgs, ctx: &contract::ToolCtx) -> anyhow::Result<PodTrustOutput> {
     if args.push {
         return server_pod::push_trust(&args.peer_id, args.on, ctx.caller()).await;
     }
@@ -682,20 +673,14 @@ async fn pod_trust(
 /// *relationship* measurement between this host and the peer, not a property
 /// of the peer itself.
 #[orca_tool(domain = "pod", verb = "ping")]
-async fn pod_ping(
-    args: PodPingArgs,
-    _ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<PodPingOutput> {
+async fn pod_ping(args: PodPingArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodPingOutput> {
     Ok(server_pod::ping(&args.peer_id).await)
 }
 
 /// Evict a paired peer: best-effort notify, then drop `pod_peers` + `pod_trust`
 /// rows for it. Mirrors today's `system.peer.delete` semantics.
 #[orca_tool(domain = "pod", verb = "kick", role = "admin")]
-async fn pod_kick(
-    args: PodLeaveArgs,
-    _ctx: &orca_contract::ToolCtx,
-) -> anyhow::Result<PodLeaveOutput> {
+async fn pod_kick(args: PodLeaveArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodLeaveOutput> {
     server_pod::leave_peer(&args.peer_id).await
 }
 
@@ -705,7 +690,7 @@ async fn pod_kick(
 #[orca_tool(domain = "pod", verb = "leave", role = "admin", local_only = true)]
 async fn pod_leave(
     _args: EmptyArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<PodLeaveSelfOutput> {
     server_pod::leave_self().await
 }
@@ -716,7 +701,7 @@ async fn pod_leave(
 #[orca_tool(domain = "pod", verb = "recover", role = "admin", local_only = true)]
 async fn pod_recover(
     args: PodRecoverArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<PodRecoverOutput> {
     server_pod::recover(&args.peer_id)
 }
@@ -728,7 +713,7 @@ async fn pod_recover(
 #[orca_tool(domain = "pod", verb = "forget", role = "admin")]
 async fn pod_forget(
     args: PodForgetArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<PodForgetOutput> {
     server_pod::forget(&args.peer_id).await
 }
@@ -738,7 +723,7 @@ async fn pod_forget(
 #[orca_tool(domain = "system.pod", verb = "detail")]
 async fn pod_detail(
     _args: EmptyArgs,
-    _ctx: &orca_contract::ToolCtx,
+    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<PodCertStatusOutput> {
     server_pod::status()
 }
@@ -750,7 +735,7 @@ async fn pod_detail(
 #[orca_tool(domain = "system.pod", verb = "update", role = "admin")]
 async fn pod_update(
     args: PodUpdateArgs,
-    ctx: &orca_contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<PodUpdateOutput> {
     if let Some(ref peer_id) = args.peer_id {
         let dispatch = server_pod::exec(
@@ -838,7 +823,6 @@ use anyhow::{Context, Result};
 use orca_sdk::framing::{read_frame, write_frame};
 use orca_sdk::jsonrpc::{Message, Request, Response};
 use orca_sdk::pki;
-use orca_utils::config::{APP_PKI_DIR, APP_STATE_DIR};
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
 use std::path::PathBuf;
@@ -846,6 +830,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
+use utils::config::{APP_PKI_DIR, APP_STATE_DIR};
 
 pub const POD_PING_METHOD: &str = "pod/ping";
 pub const POD_DEV_SYNC_METHOD: &str = "pod/dev-sync";
@@ -1090,7 +1075,7 @@ pub async fn dev_enable(host: &str) -> Result<PodDevEnableResult> {
 
 // `pod/exec` is the wire-level JSON-RPC dispatch for cross-peer OrcaTool
 // invocation. The Value fields here are strictly the JSON-RPC wire payload —
-// the caller (`orca_dispatch::cli::exec_remote`) serializes the tool's
+// the caller (`dispatch::cli::exec_remote`) serializes the tool's
 // typed Args before this point and deserializes the typed Output immediately
 // after, so opaque JSON never reaches any user-facing type.
 mod exec_wire {
@@ -1148,7 +1133,7 @@ pub async fn exec_as(
     host: &str,
     tool: &str,
     args: serde_json::Value,
-    caller: Option<orca_contract::CallerIdentity>,
+    caller: Option<contract::CallerIdentity>,
 ) -> Result<PodExecResult> {
     let (caller_role, caller_token) = match caller {
         Some(id) => {

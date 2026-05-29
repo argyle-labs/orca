@@ -146,7 +146,7 @@ pub async fn trust(peer_id: &str, on: bool) -> Result<PodTrustOutput> {
 pub async fn push_trust(
     peer_id: &str,
     on: bool,
-    caller: Option<orca_contract::CallerIdentity>,
+    caller: Option<contract::CallerIdentity>,
 ) -> Result<PodTrustOutput> {
     // Our own peer_id as the remote knows us.
     let own_id = format!("peer.{}", system::host_identity::machine_id_short());
@@ -388,7 +388,7 @@ pub async fn exec(
     peer: &str,
     tool: &str,
     args: serde_json::Value,
-    caller: Option<orca_contract::CallerIdentity>,
+    caller: Option<contract::CallerIdentity>,
 ) -> Result<PodExecDispatch> {
     // "local" / "localhost" → loopback round-trip via the same /api/tools
     // path peers use. Lets the same code path validate the allowlist
@@ -546,14 +546,11 @@ pub async fn set_self_secure(on: bool) -> Result<bool> {
 /// remote peer would self-report via `system.runtime-spec`.
 async fn local_peer_row() -> PodPeerDto {
     let frontend = "embedded";
-    let mode = orca_utils::state::read()
-        .ok()
-        .flatten()
-        .map(|s| match s.mode {
-            orca_utils::state::DaemonMode::Daemon => "daemon".to_string(),
-            orca_utils::state::DaemonMode::Parked => "parked".to_string(),
-            orca_utils::state::DaemonMode::Dev => "dev".to_string(),
-        });
+    let mode = utils::state::read().ok().flatten().map(|s| match s.mode {
+        utils::state::DaemonMode::Daemon => "daemon".to_string(),
+        utils::state::DaemonMode::Parked => "parked".to_string(),
+        utils::state::DaemonMode::Dev => "dev".to_string(),
+    });
     let channel = read_channel_marker().map(|c| c.as_marker().to_string());
     let pinned_to = read_version_pin();
     // update-check is intentionally skipped for the local row: it requires

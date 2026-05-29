@@ -13,9 +13,9 @@
 //! orca.db; falls back to `$GITHUB_TOKEN` for bootstrap / CI.
 
 use anyhow::{Context, Result, bail};
-use orca_utils::config::{APP_NAME, APP_REPO_API_URL};
 use serde::Deserialize;
 use std::path::PathBuf;
+use utils::config::{APP_NAME, APP_REPO_API_URL};
 
 use crate::update_state::{Channel, is_newer_full};
 
@@ -68,7 +68,7 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
         bail!("no github token available — set secret 'github_token' or export GITHUB_TOKEN");
     }
 
-    let client = orca_utils::http::Client::new();
+    let client = utils::http::Client::new();
     let user_agent = format!("{APP_NAME}/{CURRENT_VERSION}");
 
     let github_req = |url: String| {
@@ -86,7 +86,7 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
         let url = format!("{APP_REPO_API_URL}/releases/latest");
         match github_req(url).send().await {
             Ok(resp) => vec![resp.json().context("failed to parse release JSON")?],
-            Err(orca_utils::http::HttpError::Status { status: 404, .. }) => return Ok(None),
+            Err(utils::http::HttpError::Status { status: 404, .. }) => return Ok(None),
             Err(e) => return Err(anyhow::Error::from(e).context("GitHub API request failed")),
         }
     } else {
@@ -172,7 +172,7 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
     if token.is_empty() {
         bail!("no github token available for binary download");
     }
-    let client = orca_utils::http::Client::new();
+    let client = utils::http::Client::new();
 
     require_checksum_url(&info.version, &info.checksum_url)?;
 
@@ -296,7 +296,7 @@ fn schedule_self_restart() {
 }
 
 pub async fn download_asset(
-    client: &orca_utils::http::Client,
+    client: &utils::http::Client,
     url: &str,
     token: &str,
 ) -> Result<Vec<u8>> {
@@ -322,20 +322,9 @@ pub fn current_binary_path() -> Result<PathBuf> {
 
 // ── sha256 helpers ────────────────────────────────────────────────────────────
 
-/// Hex-encode a sha256 digest.
-fn hex_sha256(data: &[u8]) -> String {
-    use std::fmt::Write;
-    let digest = sha256_bytes(data);
-    let mut hex = String::with_capacity(64);
-    for b in &digest {
-        write!(hex, "{b:02x}").unwrap();
-    }
-    hex
-}
-
 /// Verify `data` matches `expected` hex sha256. Returns `Err` on mismatch.
 pub fn verify_sha256(data: &[u8], expected: &str) -> Result<()> {
-    let got = hex_sha256(data);
+    let got = utils::hash::sha256_hex(data);
     if got != expected {
         bail!("checksum mismatch — expected {expected}, got {got}");
     }
@@ -358,17 +347,6 @@ pub fn require_sha256_nonempty(sha256: &str) -> Result<()> {
     Ok(())
 }
 
-fn sha256_bytes(data: &[u8]) -> [u8; 32] {
-    sha2_digest(data)
-}
-
-pub fn sha2_digest(data: &[u8]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hasher.finalize().into()
-}
-
 // ── sha256 cache for `--check` ───────────────────────────────────────────────
 //
 // `orca update --check` is a cheap preview: it resolves the target version
@@ -386,7 +364,7 @@ pub fn sha2_digest(data: &[u8]) -> [u8; 32] {
 const CHECK_CACHE_TTL_SECS: u64 = 14 * 24 * 3600;
 
 fn check_cache_dir() -> Option<PathBuf> {
-    Some(orca_utils::fs::orca_home()?.join("cache").join("sha256"))
+    Some(utils::fs::orca_home()?.join("cache").join("sha256"))
 }
 
 /// Drop any cached sha256 files older than `CHECK_CACHE_TTL_SECS`. Best-effort
@@ -432,27 +410,6 @@ pub fn write_cached_sha256(version: &str, body: &[u8]) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sha256_known_hash() {
-        // SHA-256 of empty string is well-known.
-        let digest = sha2_digest(b"");
-        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(
-            hex,
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-    }
-
-    #[test]
-    fn sha256_nonempty() {
-        let digest = sha2_digest(b"hello");
-        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(
-            hex,
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-        );
-    }
 
     #[test]
     fn verify_sha256_matches() {

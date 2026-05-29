@@ -2,7 +2,7 @@
 //! compute SHA-256 and BLAKE3 digests. **Every callsite that used to inline
 //! `Sha256::new()` should call through here** (see
 //! `project_crate_audit_2026_05_29` P1 #3). Lives at top-level
-//! `orca_utils::hash` (not under `utils::fs`) because the algorithm is
+//! `utils::hash` (not under `utils::fs`) because the algorithm is
 //! generic — files are just one possible input.
 //!
 //! Picking a flavor:
@@ -73,7 +73,7 @@ pub fn hex_encode(b: &[u8]) -> String {
     use std::fmt::Write;
     let mut s = String::with_capacity(b.len() * 2);
     for byte in b {
-        let _ = write!(s, "{byte:02x}");
+        write!(s, "{byte:02x}").expect("write to String is infallible");
     }
     s
 }

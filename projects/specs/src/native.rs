@@ -70,7 +70,7 @@ fn map_info(info: ScannerInfo) -> GraphQlInfoData {
 }
 
 fn make_mcp_pool() -> ::mcp::client::McpPool {
-    use orca_utils::config::{APP_DB_FILE, APP_STATE_DIR};
+    use utils::config::{APP_DB_FILE, APP_STATE_DIR};
     if let Ok(path) = std::env::var("ORCA_DB_PATH") {
         return ::mcp::client::McpPool::new_with_db(std::path::PathBuf::from(path));
     }

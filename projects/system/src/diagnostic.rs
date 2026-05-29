@@ -2,7 +2,7 @@
 //! Lives in the server crate because the report scans embedded agents,
 //! per-profile agent override dirs, and `Config`-derived paths.
 
-use orca_macro::orca_tool;
+use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -26,7 +26,7 @@ pub struct DoctorArgs {}
 #[orca_tool(domain = "system.diagnostic", verb = "list")]
 async fn system_diagnostic_list(
     _args: DoctorArgs,
-    ctx: &orca_contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<DoctorReport> {
     let cfg = &ctx.config;
     let mut entries: Vec<DoctorEntry> = Vec::new();
