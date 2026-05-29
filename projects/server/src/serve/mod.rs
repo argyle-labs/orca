@@ -521,7 +521,7 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     system::system_info::spawn_refresher();
     pod::host_status_writer::spawn_local_writer();
     pod::host_status_writer::spawn_sync_puller();
-    pod::native::host_status_replica::spawn_fleet_replicator();
+    pod::host_status_replica::spawn_fleet_replicator();
     plugins::host::start(
         pki_dir,
         db::ports::mesh_port(),
@@ -566,12 +566,12 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
     // convention and reset them. Mixing CN conventions on the same host
     // produces duplicate pod_peers rows (one keyed on the old CN via the
     // listener stub, one on the new machine_id_short CN via join-confirm).
-    if let Err(e) = pod::native::reset_if_stale_mesh_identity(pki_dir) {
+    if let Err(e) = pod::reset_if_stale_mesh_identity(pki_dir) {
         tracing::warn!("[pod] stale-cert check failed: {e:#}");
     }
 
-    match pod::native::mdns::build_advertisement(pki_dir.to_path_buf(), db::ports::mesh_port()) {
-        Ok(ad) => match pod::native::mdns::Mdns::start(ad) {
+    match pod::mdns::build_advertisement(pki_dir.to_path_buf(), db::ports::mesh_port()) {
+        Ok(ad) => match pod::mdns::Mdns::start(ad) {
             Ok(handle) => {
                 info!("[pod] mDNS responder + discoverer up");
                 // Leak the handle for daemon lifetime — the discovery task
@@ -583,16 +583,16 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
         Err(e) => tracing::warn!("[pod] cannot build mDNS advertisement: {e:#}"),
     }
 
-    std::mem::drop(pod::native::scheduler::spawn());
+    std::mem::drop(pod::scheduler::spawn());
     info!("[pod] auto-offer scheduler armed");
 
-    std::mem::drop(pod::native::cert_rotation::spawn());
+    std::mem::drop(pod::cert_rotation::spawn());
     info!("[pod] cert-rotation scheduler armed (daily)");
 
-    std::mem::drop(pod::native::roster_sync::spawn());
+    std::mem::drop(pod::roster_sync::spawn());
     info!("[pod] roster-sync armed (60s) — auto-fills pod_peers from any paired peer");
 
-    std::mem::drop(pod::native::replication_sync::spawn());
+    std::mem::drop(pod::replication_sync::spawn());
     info!("[pod] replication-sync armed (60s) — merges shared users/configs from paired peers");
 
     std::mem::drop(system::host_identity::spawn_refresh_task());
@@ -987,7 +987,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
             // dispatch in-process instead of looping back over HTTPS with
             // the admin token (M4 in the v1 hardening punch list). Dispatch
             // walks the inventory directly — no registry to ship.
-            pod::native::dispatcher::install(ctx.clone());
+            pod::dispatcher::install(ctx.clone());
             api.nest("/api/tools", orca_dispatch::axum_router(ctx))
         }
         Err(e) => {

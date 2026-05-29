@@ -10,8 +10,8 @@ use std::time::Instant;
 use system::update_state::{read_channel_marker, read_version_pin};
 
 use crate::cli::dial_bootstrap_pub;
-use crate::native::scheduler::{OFFER_TTL_SECS, mint_pairing_code, push_offer};
-use crate::native::{db as pdb, pki_dir};
+use crate::scheduler::{OFFER_TTL_SECS, mint_pairing_code, push_offer};
+use crate::{db as pdb, pki_dir};
 
 pub async fn list_enriched() -> Result<Vec<PodPeerDto>> {
     list_enriched_impl().await
@@ -214,15 +214,10 @@ pub async fn ping(peer_id: &str) -> PodPingOutput {
         }
     };
 
-    let targets = crate::native::dialer::dial_targets_for_peer(&conn, peer_id, &peer.peer_addr)
+    let targets = crate::dialer::dial_targets_for_peer(&conn, peer_id, &peer.peer_addr)
         .unwrap_or_else(|_| vec![peer.peer_addr.clone()]);
     let start = Instant::now();
-    match crate::native::dialer::try_targets(
-        &targets,
-        |t| async move { crate::native::ping(&t).await },
-    )
-    .await
-    {
+    match crate::dialer::try_targets(&targets, |t| async move { crate::ping(&t).await }).await {
         Ok(r) => PodPingOutput {
             ok: true,
             latency_ms: start.elapsed().as_millis() as u32,
@@ -409,7 +404,7 @@ pub async fn exec(
         resolve_peer_addr(&peers, peer)?
     };
 
-    let r = crate::native::exec_as(&addr, tool, args, caller).await?;
+    let r = crate::exec_as(&addr, tool, args, caller).await?;
     Ok(PodExecDispatch {
         peer: peer.to_string(),
         tool: r.tool,
@@ -679,7 +674,7 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
         if let Some(latest) = status_by_peer.get(&p.peer_id) {
             enrich_from_local_db(&mut p, latest);
         }
-        if let Some(rt) = crate::native::runtime_cache::get(&p.peer_id) {
+        if let Some(rt) = crate::runtime_cache::get(&p.peer_id) {
             p.version = rt.version;
             p.target = rt.target;
             p.frontend = rt.frontend;

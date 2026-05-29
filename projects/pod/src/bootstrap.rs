@@ -408,10 +408,10 @@ fn handle_request_offer(
         );
     }
 
-    let code = crate::native::scheduler::mint_pairing_code();
+    let code = crate::scheduler::mint_pairing_code();
     let code_hash = pdb::hash_code(&code);
     let offer_id = Uuid::now_v7().to_string();
-    let expires_at = now_secs() + crate::native::scheduler::OFFER_TTL_SECS;
+    let expires_at = now_secs() + crate::scheduler::OFFER_TTL_SECS;
     // Persist the inviter's own peer_id on the pending offer so the matching
     // `pod/join-confirm` step can echo it back to the joiner. Without this
     // the joiner records the inviter as `"unknown"` and roster-sync skips
@@ -429,7 +429,7 @@ fn handle_request_offer(
         None,
         Some(&inviter_peer_id),
         None,
-        crate::native::scheduler::OFFER_TTL_SECS,
+        crate::scheduler::OFFER_TTL_SECS,
         None,
     )?;
 

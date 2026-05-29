@@ -13,7 +13,7 @@
 //! key is rejected. This authenticates the transport; it is not per-row
 //! ownership (shared pools have no owner). See feedback_zero_trust_no_blind_trust.md.
 
-use crate::native::ReplicateBundle;
+use crate::ReplicateBundle;
 use anyhow::{Context, Result};
 use orca_sdk::pki;
 use std::time::Duration;

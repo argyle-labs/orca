@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
-use crate::native::{db as pdb, pki_dir};
+use crate::{db as pdb, pki_dir};
 
 // ── pod discover ─────────────────────────────────────────────────────────────
 
@@ -477,7 +477,7 @@ pub async fn push_pairing_offer(addr: &str) -> Result<(pdb::DiscoveryRow, String
         );
     }
 
-    let code = crate::native::scheduler::mint_pairing_code();
+    let code = crate::scheduler::mint_pairing_code();
     let code_hash = pdb::hash_code(&code);
     let offer_id = uuid::Uuid::now_v7().to_string();
     pdb::insert_pending_offer(
@@ -492,12 +492,12 @@ pub async fn push_pairing_offer(addr: &str) -> Result<(pdb::DiscoveryRow, String
         None,
         None,
         None,
-        crate::native::scheduler::OFFER_TTL_SECS,
+        crate::scheduler::OFFER_TTL_SECS,
         None,
     )?;
     drop(conn);
 
-    crate::native::scheduler::push_offer(
+    crate::scheduler::push_offer(
         &target.hostname,
         &target.addr,
         target.port,
@@ -520,7 +520,7 @@ pub async fn cmd_pod_offer(addr: &str) -> Result<()> {
     println!("  pairing code: {code}");
     println!(
         "  the joiner has {}s to run `orca pod accept {code}`",
-        crate::native::scheduler::OFFER_TTL_SECS
+        crate::scheduler::OFFER_TTL_SECS
     );
     Ok(())
 }
@@ -539,18 +539,18 @@ pub async fn cmd_pod_pair(addr: &str) -> Result<()> {
     println!(
         "  waiting up to {}s for the joiner to accept (`orca pod accept {code}` on the other host, \
          or paste the code into the Orca UI)…",
-        crate::native::scheduler::OFFER_TTL_SECS
+        crate::scheduler::OFFER_TTL_SECS
     );
 
-    let deadline = std::time::Instant::now()
-        + Duration::from_secs(crate::native::scheduler::OFFER_TTL_SECS as u64);
+    let deadline =
+        std::time::Instant::now() + Duration::from_secs(crate::scheduler::OFFER_TTL_SECS as u64);
     loop {
         if std::time::Instant::now() >= deadline {
             bail!(
                 "timed out after {}s waiting for {} to accept; the code is still valid until expiry — \
                  retry `orca pod pair {}` once the joiner is ready, or run `orca pod accept {}` \
                  directly on the joiner.",
-                crate::native::scheduler::OFFER_TTL_SECS,
+                crate::scheduler::OFFER_TTL_SECS,
                 target.hostname,
                 addr,
                 code,

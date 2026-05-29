@@ -366,7 +366,7 @@ async fn main() -> Result<()> {
         }
         Some(Command::Pod { action }) => match action {
             PodAction::Init => {
-                let pki = pod::native::pki_dir();
+                let pki = pod::pki_dir();
                 // CN = stable machine_id (display hostname is held separately).
                 let host = system::host_identity::machine_id_short().to_string();
                 orca_sdk::pki::init_mesh_ca(&pki, &host)?;
@@ -374,9 +374,9 @@ async fn main() -> Result<()> {
                 // cert) is present from the moment this host is poddable.
                 orca_sdk::pki::load_or_init_bootstrap_cert(&pki)?;
                 let conn = db::open_default()?;
-                pod::native::db::set_self_secure(&conn, true)?;
+                pod::db::set_self_secure(&conn, true)?;
                 let pod_id = uuid::Uuid::now_v7().to_string()[..8].to_string();
-                pod::native::db::set_pod_id(&conn, &pod_id)?;
+                pod::db::set_pod_id(&conn, &pod_id)?;
                 println!("✓ mesh CA initialized at {}", pki.join("mesh").display());
                 println!("  pod id: {pod_id}");
                 println!(
@@ -392,7 +392,7 @@ async fn main() -> Result<()> {
                 Ok(())
             }
             PodAction::Ping { host } => {
-                let result = pod::native::ping(&host).await?;
+                let result = pod::ping(&host).await?;
                 println!("✓ {host} responded:");
                 println!("  peer_id: {}", result.peer_id);
                 println!("  hostname: {}", result.hostname);
