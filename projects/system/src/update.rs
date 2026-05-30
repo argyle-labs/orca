@@ -60,7 +60,8 @@ struct Asset {
 
 /// Check GitHub for a newer release on the given channel.
 /// Stable channel: skips any pre-release tags.
-/// Rc/beta/alpha: also accepts pre-releases of that tier and below.
+/// Rc: also accepts `-rc.N` pre-releases.
+/// Dev: returns None — dev channel updates via git, not GitHub releases.
 /// Caller supplies the GitHub bearer token (resolved via the secrets service
 /// or env fallback).
 pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<UpdateInfo>> {

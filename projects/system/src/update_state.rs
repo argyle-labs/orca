@@ -62,12 +62,17 @@ pub fn resolve_pin_veto(available_version: &str) -> Option<String> {
 
 // ── Channel ───────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum Channel {
+    /// Released tags with no pre-release suffix (e.g. `v0.0.4`).
     Stable,
+    /// Stable + `-rc.N` tags.
     Rc,
-    Beta,
-    Alpha,
+    /// Local git HEAD; not a GitHub release. No version list available.
+    Dev,
 }
 
 impl Channel {
@@ -78,8 +83,7 @@ impl Channel {
             // accepting it so existing installations don't silently
             // downgrade to stable on next `orca update`.
             "rc" | "prerelease" => Self::Rc,
-            "beta" => Self::Beta,
-            "alpha" => Self::Alpha,
+            "dev" => Self::Dev,
             _ => Self::Stable,
         }
     }
@@ -88,8 +92,7 @@ impl Channel {
         match self {
             Self::Stable => "stable",
             Self::Rc => "rc",
-            Self::Beta => "beta",
-            Self::Alpha => "alpha",
+            Self::Dev => "dev",
         }
     }
 
@@ -99,10 +102,8 @@ impl Channel {
             Self::Stable => !tag.contains('-'),
             // rc: stable + rc tags
             Self::Rc => !tag.contains('-') || tag.contains("-rc."),
-            // beta: stable + rc + beta
-            Self::Beta => !tag.contains('-') || tag.contains("-rc.") || tag.contains("-beta."),
-            // alpha: everything
-            Self::Alpha => true,
+            // dev: no released tags — git HEAD only
+            Self::Dev => false,
         }
     }
 }
@@ -157,9 +158,9 @@ pub fn resolve_channel(explicit: &str) -> Channel {
 
 // ── Semver comparator ─────────────────────────────────────────────────────────
 
-/// Full semver comparison that handles pre-release suffixes (rc/beta/alpha).
+/// Full semver comparison that handles pre-release suffixes (rc).
 /// Returns true if `a` is strictly newer than `b`.
-/// Pre-release ordering within same core: alpha < beta < rc < stable.
+/// Pre-release ordering within same core: any unknown < rc < stable.
 pub fn is_newer_full(a: &str, b: &str) -> bool {
     let a = a.trim_start_matches('v');
     let b = b.trim_start_matches('v');
@@ -236,8 +237,7 @@ mod tests {
     fn channel_from_str_known() {
         assert_eq!(Channel::parse("stable"), Channel::Stable);
         assert_eq!(Channel::parse("rc"), Channel::Rc);
-        assert_eq!(Channel::parse("beta"), Channel::Beta);
-        assert_eq!(Channel::parse("alpha"), Channel::Alpha);
+        assert_eq!(Channel::parse("dev"), Channel::Dev);
     }
 
     #[test]
@@ -254,9 +254,16 @@ mod tests {
 
     #[test]
     fn channel_as_marker_round_trips() {
-        for ch in [Channel::Stable, Channel::Rc, Channel::Beta, Channel::Alpha] {
+        for ch in [Channel::Stable, Channel::Rc, Channel::Dev] {
             assert_eq!(Channel::parse(ch.as_marker()), ch);
         }
+    }
+
+    #[test]
+    fn channel_dropped_beta_alpha_now_default_to_stable() {
+        // Old markers should never crash — silently downgrade to Stable.
+        assert_eq!(Channel::parse("beta"), Channel::Stable);
+        assert_eq!(Channel::parse("alpha"), Channel::Stable);
     }
 
     // ── Channel::accepts ──────────────────────────────────────────────────────
@@ -279,20 +286,10 @@ mod tests {
     }
 
     #[test]
-    fn beta_accepts_stable_rc_beta() {
-        assert!(Channel::Beta.accepts("v1.0.0"));
-        assert!(Channel::Beta.accepts("v1.0.0-rc.1"));
-        assert!(Channel::Beta.accepts("v1.0.0-beta.1"));
-        assert!(!Channel::Beta.accepts("v1.0.0-alpha.1"));
-    }
-
-    #[test]
-    fn alpha_accepts_everything() {
-        assert!(Channel::Alpha.accepts("v1.0.0"));
-        assert!(Channel::Alpha.accepts("v1.0.0-rc.1"));
-        assert!(Channel::Alpha.accepts("v1.0.0-beta.1"));
-        assert!(Channel::Alpha.accepts("v1.0.0-alpha.1"));
-        assert!(Channel::Alpha.accepts("v0.0.1-alpha.99"));
+    fn dev_accepts_no_released_tags() {
+        // Dev channel = local git HEAD; no GitHub releases are part of it.
+        assert!(!Channel::Dev.accepts("v1.0.0"));
+        assert!(!Channel::Dev.accepts("v1.0.0-rc.1"));
     }
 
     // ── channel marker readers ────────────────────────────────────────────────
