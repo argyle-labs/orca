@@ -102,6 +102,14 @@ object ManifestParser {
         checkSemver(version, "plugin.version")
         checkSemver(minOrca, "plugin.min_orca_version")
 
+        val namespace = pluginTable.getString("namespace")
+        if (namespace != null) {
+            if (namespace.trim().isEmpty()) error("plugin.namespace must not be empty when set")
+            if (namespace.any { it == ' ' || it == '\t' || it == '\n' || it == '/' || it == '\\' }) {
+                error("plugin.namespace \"$namespace\" contains invalid characters (whitespace or path separators)")
+            }
+        }
+
         val runtimeTable = parsed.getTable("runtime") ?: error("missing [runtime]")
         denyUnknown(runtimeTable.keySet(), ALLOWED_RUNTIME, "[runtime]")
         val binary = runtimeTable.getString("binary")
@@ -164,7 +172,7 @@ object ManifestParser {
         }
 
         return Manifest(
-            plugin = PluginSection(id, version, minOrca),
+            plugin = PluginSection(id, version, minOrca, namespace),
             runtime = RuntimeSection(binary, image, mode, eager),
             surfaces = surfaces,
             capabilities = capabilities,

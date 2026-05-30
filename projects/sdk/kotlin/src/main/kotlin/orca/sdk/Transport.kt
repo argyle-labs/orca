@@ -62,6 +62,12 @@ data class HelloOptions(
     val methodsOptional: List<String> = emptyList(),
     val pluginsRequired: List<String> = emptyList(),
     val pluginsOptional: List<String> = emptyList(),
+    /**
+     * Namespace this plugin owns (from manifest.plugin.namespace, falling
+     * back to plugin_id). All tool/type ids are stamped with this prefix
+     * instead of plugin_id. Empty = host uses plugin_id.
+     */
+    val pluginNamespace: String = "",
 )
 
 @Serializable
@@ -248,6 +254,7 @@ class Transport private constructor(
                 put("plugins_required", json.encodeToJsonElement(opts.pluginsRequired))
             if (opts.pluginsOptional.isNotEmpty())
                 put("plugins_optional", json.encodeToJsonElement(opts.pluginsOptional))
+            if (opts.pluginNamespace.isNotEmpty()) put("plugin_namespace", opts.pluginNamespace)
         }
         val resp = call("orca/hello", params)
         if (resp.isError) error("orca/hello rejected: ${resp.error?.message}")
