@@ -74,6 +74,20 @@ type PluginSection struct {
 	ID             string `toml:"id"`
 	Version        string `toml:"version"`
 	MinOrcaVersion string `toml:"min_orca_version"`
+	// Namespace this plugin owns. Tool names, db rows, specs, and config all
+	// scope under it. Empty = falls back to ID (see EffectiveNamespace).
+	// Plugins targeting an existing namespace (e.g. multiple HomeAssistant
+	// instances under "home") declare it explicitly.
+	Namespace string `toml:"namespace"`
+}
+
+// EffectiveNamespace returns the namespace to use for stamping tools and
+// rows — explicit Namespace, falling back to ID.
+func (p PluginSection) EffectiveNamespace() string {
+	if p.Namespace != "" {
+		return p.Namespace
+	}
+	return p.ID
 }
 
 // RuntimeSection — `[runtime]`. Exactly one of Binary / Image must be set.
