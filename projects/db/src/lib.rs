@@ -26,6 +26,7 @@ pub mod openapi_specs_registry;
 pub mod plugin_creds;
 pub mod plugin_data;
 pub mod plugin_installs;
+pub mod plugin_manifest;
 pub mod plugin_tools;
 pub mod plugin_types;
 pub mod plugins;
@@ -689,6 +690,12 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             id                TEXT PRIMARY KEY,
             manifest_path     TEXT NOT NULL,
             tier              TEXT NOT NULL DEFAULT 'personal',
+            -- Transport columns (mcp_command/mcp_args/mcp_env/mcp_url/mcp_token_env)
+            -- and `mode` are dropped by migrations:
+            --   20260530130000__plugins_drop_mode
+            --   20260530140000__plugins_drop_mcp_transport
+            -- Kept in CREATE TABLE so fresh + migrated dbs converge on the same
+            -- final schema after migrations run.
             mcp_command       TEXT,
             mcp_args          TEXT NOT NULL DEFAULT '[]',
             mcp_env           TEXT NOT NULL DEFAULT '{}',
@@ -696,9 +703,6 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             mcp_token_env     TEXT,
             context_injection TEXT NOT NULL DEFAULT 'minimal',
             command_map       TEXT NOT NULL DEFAULT '{}',
-            -- `mode` is dropped by migration 20260530130000__plugins_drop_mode.
-            -- Kept in CREATE TABLE so fresh + migrated dbs converge on the same
-            -- final schema after migrations run.
             mode              TEXT NOT NULL DEFAULT 'orca',
             nav_links         TEXT NOT NULL DEFAULT '[]',
             search_tools      TEXT NOT NULL DEFAULT '[]',

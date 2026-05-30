@@ -1,0 +1,5 @@
+ALTER TABLE plugins ADD COLUMN mcp_command TEXT;
+ALTER TABLE plugins ADD COLUMN mcp_args TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE plugins ADD COLUMN mcp_env TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE plugins ADD COLUMN mcp_url TEXT;
+ALTER TABLE plugins ADD COLUMN mcp_token_env TEXT;

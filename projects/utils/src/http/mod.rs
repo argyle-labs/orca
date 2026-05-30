@@ -459,6 +459,226 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn put_patch_delete_dispatch_correct_methods() {
+        let server = MockServer::start().await;
+        for m in ["PUT", "PATCH", "DELETE"] {
+            Mock::given(method(m))
+                .and(path("/resource"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"m": m})))
+                .mount(&server)
+                .await;
+        }
+        let c = Client::new();
+        let url = format!("{}/resource", server.uri());
+        assert_eq!(c.put(&url).send().await.unwrap().status, 200);
+        assert_eq!(c.patch(&url).send().await.unwrap().status, 200);
+        assert_eq!(c.delete(&url).send().await.unwrap().status, 200);
+    }
+
+    #[tokio::test]
+    async fn headers_iter_applies_multiple_headers() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/h"))
+            .and(header("X-A", "1"))
+            .and(header("X-B", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&server)
+            .await;
+        let r = Client::new()
+            .get(format!("{}/h", server.uri()))
+            .headers([("X-A", "1"), ("X-B", "2")])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status, 200);
+    }
+
+    #[tokio::test]
+    async fn form_body_is_url_encoded() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/f"))
+            .and(wiremock::matchers::body_string("k=v&x=y"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&server)
+            .await;
+        let r = Client::new()
+            .post(format!("{}/f", server.uri()))
+            .form(vec![("k".into(), "v".into()), ("x".into(), "y".into())])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status, 200);
+    }
+
+    #[tokio::test]
+    async fn bytes_body_uses_supplied_content_type() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/b"))
+            .and(header("Content-Type", "application/octet-stream"))
+            .and(wiremock::matchers::body_bytes(vec![1u8, 2, 3]))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&server)
+            .await;
+        let r = Client::new()
+            .post(format!("{}/b", server.uri()))
+            .bytes(vec![1, 2, 3], "application/octet-stream")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status, 200);
+    }
+
+    #[tokio::test]
+    async fn invalid_url_returns_invalid_url_error() {
+        let err = Client::new().get("not a url").send().await.unwrap_err();
+        assert!(matches!(err, HttpError::InvalidUrl(_)));
+    }
+
+    #[tokio::test]
+    async fn response_too_large_when_body_exceeds_cap() {
+        let server = MockServer::start().await;
+        let big = "x".repeat(1024);
+        Mock::given(method("GET"))
+            .and(path("/big"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(big))
+            .mount(&server)
+            .await;
+        let err = Client::new()
+            .get(format!("{}/big", server.uri()))
+            .max_body(100)
+            .send()
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HttpError::ResponseTooLarge));
+    }
+
+    #[tokio::test]
+    async fn send_bytes_returns_raw_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bin"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![9u8, 8, 7]))
+            .mount(&server)
+            .await;
+        let r = Client::new()
+            .get(format!("{}/bin", server.uri()))
+            .send_bytes()
+            .await
+            .unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.body, vec![9, 8, 7]);
+    }
+
+    #[tokio::test]
+    async fn send_bytes_status_error_on_non_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/nope"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+        let err = Client::new()
+            .get(format!("{}/nope", server.uri()))
+            .send_bytes()
+            .await
+            .unwrap_err();
+        match err {
+            HttpError::Status { status, .. } => assert_eq!(status, 500),
+            other => panic!("expected Status, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_bytes_too_large_when_over_cap() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/big2"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0u8; 1024]))
+            .mount(&server)
+            .await;
+        let err = Client::new()
+            .get(format!("{}/big2", server.uri()))
+            .max_body(10)
+            .send_bytes()
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HttpError::ResponseTooLarge));
+    }
+
+    #[tokio::test]
+    async fn insecure_and_timeout_builders_compose() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/x"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&server)
+            .await;
+        let r = Client::new()
+            .get(format!("{}/x", server.uri()))
+            .insecure(true)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status, 200);
+    }
+
+    #[test]
+    fn response_summary_truncates_long_text() {
+        let long = "a".repeat(300);
+        let r = Response {
+            status: 200,
+            headers: HashMap::new(),
+            body: ResponseBody::Text { text: long },
+        };
+        let s = r.summary();
+        // 256 chars + the ellipsis.
+        assert!(s.ends_with('…'));
+        assert_eq!(s.chars().count(), 257);
+    }
+
+    #[test]
+    fn response_json_decodes_text_body_holding_json() {
+        let r = Response {
+            status: 200,
+            headers: HashMap::new(),
+            body: ResponseBody::Text {
+                text: r#"{"n":42}"#.into(),
+            },
+        };
+        let v: serde_json::Value = r.json().unwrap();
+        assert_eq!(v["n"], 42);
+    }
+
+    #[test]
+    fn response_json_decode_error_when_invalid() {
+        let r = Response {
+            status: 200,
+            headers: HashMap::new(),
+            body: ResponseBody::Text {
+                text: "not json".into(),
+            },
+        };
+        let res: Result<serde_json::Value, _> = r.json();
+        assert!(matches!(res, Err(HttpError::Decode(_))));
+    }
+
+    #[test]
+    fn response_text_serializes_json_body() {
+        let r = Response {
+            status: 200,
+            headers: HashMap::new(),
+            body: ResponseBody::Json {
+                json: serde_json::json!({"a": 1}),
+            },
+        };
+        assert_eq!(r.text(), r#"{"a":1}"#);
+    }
+
+    #[tokio::test]
     async fn text_response_when_not_json() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))

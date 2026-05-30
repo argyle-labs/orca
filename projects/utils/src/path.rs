@@ -24,3 +24,46 @@ pub fn which(name: &str) -> Option<String> {
     let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if path.is_empty() { None } else { Some(path) }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_tilde_replaces_leading_tilde_with_home() {
+        // SAFETY: setting HOME for the duration of this test; restored after.
+        let prev = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", "/tmp/fakehome") };
+        assert_eq!(expand_tilde("~/foo/bar"), "/tmp/fakehome/foo/bar");
+        assert_eq!(expand_tilde("/abs/path"), "/abs/path");
+        assert_eq!(expand_tilde("relative/path"), "relative/path");
+        match prev {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    fn expand_tilde_without_home_uses_empty_string() {
+        let prev = std::env::var("HOME").ok();
+        unsafe { std::env::remove_var("HOME") };
+        assert_eq!(expand_tilde("~/x"), "/x");
+        if let Some(v) = prev {
+            unsafe { std::env::set_var("HOME", v) }
+        }
+    }
+
+    #[test]
+    fn which_finds_common_binary() {
+        // `sh` exists on every supported platform.
+        let result = which("sh");
+        assert!(result.is_some(), "expected to resolve `sh` on PATH");
+        let path = result.unwrap();
+        assert!(path.ends_with("sh"), "unexpected path: {path}");
+    }
+
+    #[test]
+    fn which_returns_none_for_missing_binary() {
+        assert!(which("this-binary-should-not-exist-orca-test-xyz").is_none());
+    }
+}
