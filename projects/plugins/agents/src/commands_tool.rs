@@ -28,3 +28,35 @@ async fn list_commands(
         commands: crate::commands::list_embedded_commands(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use contract::ToolCtx;
+    use contract::config::{Config, Model};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn empty_ctx() -> ToolCtx {
+        ToolCtx::new(Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: PathBuf::from("/tmp"),
+            memory_root: PathBuf::from("/tmp"),
+            db_path: PathBuf::from("/tmp/orca-list-commands-test.db"),
+            ports: Default::default(),
+        }))
+    }
+
+    #[tokio::test]
+    async fn list_commands_returns_embedded_set() {
+        let ctx = empty_ctx();
+        let out = list_commands(ListCommandsArgs {}, &ctx).await.unwrap();
+        assert_eq!(out.commands, crate::commands::list_embedded_commands());
+    }
+}

@@ -505,6 +505,206 @@ mod tests {
     }
 
     #[test]
+    fn bool_false_shorthand_roundtrip() {
+        let s: JsonSchemaNode = serde_json::from_str("false").unwrap();
+        assert!(matches!(s, JsonSchemaNode::Bool(false)));
+        assert_eq!(serde_json::to_string(&s).unwrap(), "false");
+    }
+
+    #[test]
+    fn default_node_is_object() {
+        let n = JsonSchemaNode::default();
+        assert!(matches!(n, JsonSchemaNode::Object(_)));
+    }
+
+    #[test]
+    fn every_known_keyword_round_trips_through_serde() {
+        // One giant document touching every keyword the serialize/deserialize
+        // matches handle. Round-trip parse → serialize → parse and assert
+        // structural equality so any keyword we forget to wire up surfaces.
+        let raw = r##"{
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "https://example.com/s",
+            "$anchor": "a",
+            "$ref": "#/$defs/x",
+            "$dynamicRef": "#meta",
+            "$defs": { "x": { "type": "string" } },
+            "definitions": { "y": true },
+            "$comment": "hi",
+            "title": "T",
+            "description": "D",
+            "default": {"a": [1, "x", null, true, 1.5]},
+            "deprecated": false,
+            "readOnly": true,
+            "writeOnly": false,
+            "examples": [1, "x", null],
+            "type": "object",
+            "enum": [1, 2, 3],
+            "const": "k",
+            "minLength": 1, "maxLength": 10,
+            "pattern": "^x",
+            "format": "uuid",
+            "contentEncoding": "base64",
+            "contentMediaType": "application/json",
+            "multipleOf": 2.5,
+            "minimum": 0.0, "maximum": 100.0,
+            "exclusiveMinimum": 0.0,
+            "exclusiveMaximum": true,
+            "properties": { "k": { "type": "integer" } },
+            "patternProperties": { "^x": true },
+            "additionalProperties": { "type": "string" },
+            "unevaluatedProperties": false,
+            "required": ["k"],
+            "propertyNames": { "pattern": "^[a-z]+$" },
+            "minProperties": 1, "maxProperties": 5,
+            "dependentRequired": { "k": ["m"] },
+            "dependentSchemas": { "k": { "type": "object" } },
+            "dependencies": { "a": ["b"], "c": { "type": "object" } },
+            "items": [{"type": "string"}, {"type": "integer"}],
+            "prefixItems": [{"type": "string"}],
+            "contains": { "type": "string" },
+            "minContains": 1, "maxContains": 3,
+            "minItems": 0, "maxItems": 10,
+            "uniqueItems": true,
+            "unevaluatedItems": true,
+            "allOf": [{"type": "string"}],
+            "anyOf": [{"type": "string"}],
+            "oneOf": [{"type": "string"}],
+            "not": { "type": "null" },
+            "if":   { "type": "object" },
+            "then": { "type": "object" },
+            "else": { "type": "object" },
+            "x-vendor": { "type": "string" }
+        }"##;
+        let first: JsonSchemaNode = serde_json::from_str(raw).unwrap();
+        let s = serde_json::to_string(&first).unwrap();
+        let again: JsonSchemaNode = serde_json::from_str(&s).unwrap();
+        assert_eq!(first, again);
+
+        let JsonSchemaNode::Object(obj) = &again else {
+            panic!()
+        };
+        // Sanity-check a representative subset of the keyword routing.
+        assert_eq!(
+            obj.schema_uri.as_deref(),
+            Some("https://json-schema.org/draft/2020-12/schema")
+        );
+        assert_eq!(obj.id.as_deref(), Some("https://example.com/s"));
+        assert_eq!(obj.anchor.as_deref(), Some("a"));
+        assert_eq!(obj.reference.as_deref(), Some("#/$defs/x"));
+        assert_eq!(obj.dynamic_ref.as_deref(), Some("#meta"));
+        assert!(obj.defs.is_some());
+        assert!(obj.definitions.is_some());
+        assert_eq!(obj.comment.as_deref(), Some("hi"));
+        assert_eq!(obj.read_only, Some(true));
+        assert_eq!(obj.write_only, Some(false));
+        assert!(matches!(
+            obj.exclusive_minimum,
+            Some(ExclusiveLimit::Number(_))
+        ));
+        assert!(matches!(
+            obj.exclusive_maximum,
+            Some(ExclusiveLimit::Legacy(true))
+        ));
+        assert!(matches!(obj.items, Some(Items::Tuple(_))));
+        assert!(obj.prefix_items.is_some());
+        assert!(obj.contains.is_some());
+        assert!(obj.property_names.is_some());
+        assert!(obj.dependent_required.is_some());
+        assert!(obj.dependent_schemas.is_some());
+        let deps = obj.dependencies.as_ref().unwrap();
+        assert!(matches!(deps.get("a"), Some(Dependency::Keys(_))));
+        assert!(matches!(deps.get("c"), Some(Dependency::Schema(_))));
+        assert!(matches!(
+            obj.additional_properties,
+            Some(AdditionalProperties::Schema(_))
+        ));
+        assert!(matches!(
+            obj.unevaluated_properties,
+            Some(AdditionalProperties::Bool(false))
+        ));
+        assert!(matches!(
+            obj.unevaluated_items,
+            Some(AdditionalProperties::Bool(true))
+        ));
+        assert!(obj.all_of.is_some());
+        assert!(obj.any_of.is_some());
+        assert!(obj.one_of.is_some());
+        assert!(obj.not.is_some());
+        assert!(obj.r#if.is_some());
+        assert!(obj.then.is_some());
+        assert!(obj.r#else.is_some());
+        assert!(obj.extensions.contains_key("x-vendor"));
+    }
+
+    #[test]
+    fn items_single_form_parses() {
+        let raw = r#"{"items": {"type": "string"}}"#;
+        let n: JsonSchemaNode = serde_json::from_str(raw).unwrap();
+        let JsonSchemaNode::Object(obj) = n else {
+            panic!()
+        };
+        assert!(matches!(obj.items, Some(Items::Single(_))));
+    }
+
+    #[test]
+    fn additional_properties_bool_true_form() {
+        let raw = r#"{"additionalProperties": true}"#;
+        let n: JsonSchemaNode = serde_json::from_str(raw).unwrap();
+        let JsonSchemaNode::Object(obj) = n else {
+            panic!()
+        };
+        assert!(matches!(
+            obj.additional_properties,
+            Some(AdditionalProperties::Bool(true))
+        ));
+    }
+
+    #[test]
+    fn json_literal_covers_every_variant() {
+        let cases = vec![
+            ("null", JsonLiteral::Null),
+            ("true", JsonLiteral::Bool(true)),
+            ("42", JsonLiteral::Number(serde_json::Number::from(42))),
+            (r#""hi""#, JsonLiteral::String("hi".into())),
+            (
+                r#"[1,"x"]"#,
+                JsonLiteral::Array(vec![
+                    JsonLiteral::Number(serde_json::Number::from(1)),
+                    JsonLiteral::String("x".into()),
+                ]),
+            ),
+        ];
+        for (raw, expected) in cases {
+            let got: JsonLiteral = serde_json::from_str(raw).unwrap();
+            assert_eq!(got, expected);
+            let back = serde_json::to_string(&got).unwrap();
+            let again: JsonLiteral = serde_json::from_str(&back).unwrap();
+            assert_eq!(again, expected);
+        }
+        let obj: JsonLiteral = serde_json::from_str(r#"{"a":1}"#).unwrap();
+        if let JsonLiteral::Object(m) = &obj {
+            assert!(matches!(m.get("a"), Some(JsonLiteral::Number(_))));
+        } else {
+            panic!("expected object literal");
+        }
+    }
+
+    #[test]
+    fn instance_type_lowercase_serde() {
+        let raw = r#"["null","boolean","object","array","number","integer","string"]"#;
+        let parsed: Vec<InstanceType> = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.len(), 7);
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), raw);
+    }
+
+    #[test]
+    fn deserialize_rejects_non_object_non_bool() {
+        let err = serde_json::from_str::<JsonSchemaNode>("42").unwrap_err();
+        assert!(err.to_string().contains("JSON Schema"));
+    }
+
+    #[test]
     fn multi_type_array() {
         let raw = r#"{"type":["string","null"]}"#;
         let parsed: JsonSchemaNode = serde_json::from_str(raw).unwrap();

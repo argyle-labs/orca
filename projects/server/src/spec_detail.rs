@@ -27,3 +27,39 @@ async fn spec_detail(
         spec: serde_json::to_string_pretty(&spec)?,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use contract::ToolCtx;
+    use contract::config::{Config, Model};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn empty_ctx() -> ToolCtx {
+        ToolCtx::new(Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: PathBuf::from("/tmp"),
+            memory_root: PathBuf::from("/tmp"),
+            db_path: PathBuf::from("/tmp/orca-spec-detail-test.db"),
+            ports: Default::default(),
+        }))
+    }
+
+    #[tokio::test]
+    async fn spec_detail_returns_valid_json_openapi_doc() {
+        let ctx = empty_ctx();
+        let out = spec_detail(SpecDetailArgs {}, &ctx).await.unwrap();
+        // Round-trip through serde_json — proves we emitted valid JSON.
+        let v: serde_json::Value = serde_json::from_str(&out.spec).unwrap();
+        // Sanity check: top-level OpenAPI shape includes `openapi` + `paths`.
+        assert!(v.get("openapi").is_some(), "missing openapi field");
+        assert!(v.get("paths").is_some(), "missing paths field");
+    }
+}
