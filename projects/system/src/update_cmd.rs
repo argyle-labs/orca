@@ -30,7 +30,7 @@ const BUILD_TARGET: &str = match option_env!("ORCA_BUILD_TARGET") {
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct UpdateApplyArgs {
-    /// Channel override: stable | rc | beta | alpha. Falls back to channel marker.
+    /// Channel override: stable | rc | dev. Falls back to channel marker.
     #[cfg_attr(feature = "cli", arg(long, default_value = ""))]
     #[serde(default)]
     pub channel: String,
