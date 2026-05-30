@@ -560,25 +560,34 @@ impl McpPool {
                     if !p.enabled {
                         continue;
                     }
-                    // mcp_urls (priority-ordered list) override stdio command.
+                    // Transport lives in the manifest, not the row — re-parse on demand.
+                    let Ok((manifest, _)) = db::plugin_manifest::parse_path(&p.manifest_path)
+                    else {
+                        continue;
+                    };
+                    let Some(mcp) = manifest.plugin.mcp else {
+                        continue;
+                    };
+                    // urls (priority-ordered list) override stdio command.
                     // All URLs are passed; connect() tries them in order.
-                    let (cmd, fallback_urls) = if !p.mcp_urls.is_empty() {
-                        let mut urls = p.mcp_urls.into_iter();
-                        let primary = urls.next().unwrap();
-                        (primary, urls.collect::<Vec<_>>())
-                    } else if let Some(cmd) = p.mcp_command.filter(|c| !c.is_empty()) {
-                        (cmd, vec![])
+                    let urls = mcp.urls();
+                    let (cmd, fallback_urls) = if !urls.is_empty() {
+                        let mut it = urls.into_iter();
+                        let primary = it.next().unwrap();
+                        (primary, it.collect::<Vec<_>>())
+                    } else if let Some(c) = mcp.command_nonempty() {
+                        (c.to_string(), vec![])
                     } else {
                         continue;
                     };
                     // Merge stored credentials (orca creds set) into env so the subprocess
                     // receives them without requiring the caller to export them manually.
-                    let mut env = p.mcp_env;
+                    let mut env = mcp.env;
                     let mut token: Option<String> = None;
                     if let Ok(creds) = db::plugin_creds::list(&conn, &p.id) {
                         for c in creds {
                             // If this credential matches token_env, use it as Bearer token.
-                            if p.mcp_token_env.as_deref() == Some(c.key.as_str()) {
+                            if mcp.token_env.as_deref() == Some(c.key.as_str()) {
                                 token = Some(c.value.clone());
                             }
                             env.insert(c.key, c.value);
@@ -586,7 +595,7 @@ impl McpPool {
                     }
                     configs.entry(p.id).or_insert(McpServerConfig {
                         command: cmd,
-                        args: p.mcp_args,
+                        args: mcp.args,
                         env,
                         token,
                         fallback_urls,
