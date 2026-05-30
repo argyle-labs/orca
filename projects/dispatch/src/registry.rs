@@ -20,9 +20,17 @@ use anyhow::Result;
 use axum::{
     Extension, Json, Router,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::post,
 };
+
+/// Per-request header that routes a `/api/v1/<name>` call to a remote
+/// peer over the pod mesh. Mirrors the CLI `--peer <h>` flag — same
+/// universal opt-out (local_only tools reject), same `ToolCtx::peer_target`
+/// pathway. The web UI sets this header on per-peer actions like
+/// "update this system" so the same REST surface that does local work also
+/// drives the fleet.
+const PEER_HEADER: &str = "x-orca-peer";
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -104,7 +112,7 @@ pub async fn dispatch_text(name: &str, args: Value, ctx: &ToolCtx) -> Result<Str
 /// Build an axum router that exposes every registered tool as
 /// `POST /<name>` with a JSON body matching `input_schema()` and a JSON
 /// response matching `output_schema()`. The caller decides where to mount
-/// it (typically `.nest("/api/tools", axum_router(ctx))`).
+/// it (typically `.nest("/api/v1", axum_router(ctx))`).
 pub fn axum_router(ctx: Arc<ToolCtx>) -> Router {
     // Single wildcard route — the path segment is the tool name.
     Router::new()
@@ -121,6 +129,7 @@ async fn http_dispatch(
     State(state): State<ToolHttpState>,
     Path(name): Path<String>,
     caller: Option<Extension<contract::CallerIdentity>>,
+    headers: HeaderMap,
     Json(args): Json<Value>,
 ) -> std::result::Result<Json<Value>, (StatusCode, Json<Value>)> {
     if find(&name).is_none() {
@@ -128,16 +137,30 @@ async fn http_dispatch(
             .with_code("tool.unknown");
         return Err(orca_error_response(oe));
     }
-    // Per-request identity overlay: when the auth middleware resolved the
-    // request to a real user (session today), swap the host-admin default on
-    // the shared ctx for this user's identity so any pod/exec dispatch the
-    // tool fires mints a caller token bound to the actual operator. No
-    // override → use the shared ctx as-is (token / loopback / bootstrap).
-    let ctx_owned = caller.map(|Extension(c)| {
+    // Per-request identity + peer-routing overlay. Both come off the shared
+    // ctx via clone-and-mutate so the base ctx stays immutable across
+    // concurrent requests. Caller swap: auth middleware → real user identity
+    // for caller-token minting on any pod/exec the tool fires. Peer swap:
+    // `X-Orca-Peer: <hostname>` header → universal peer-dispatch trigger,
+    // same pathway as the CLI `--peer` flag.
+    let peer = headers
+        .get(PEER_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let ctx_owned = if caller.is_some() || peer.is_some() {
         let mut ctx = (*state.ctx).clone();
-        ctx.set_caller(Some(c));
-        ctx
-    });
+        if let Some(Extension(c)) = caller {
+            ctx.set_caller(Some(c));
+        }
+        if let Some(p) = peer {
+            ctx.set_peer(Some(p));
+        }
+        Some(ctx)
+    } else {
+        None
+    };
     let ctx_ref: &ToolCtx = ctx_owned.as_ref().unwrap_or(&state.ctx);
     dispatch(&name, args, ctx_ref).await.map(Json).map_err(|e| {
         if let Some(oe) = e.downcast_ref::<contract::OrcaError>() {
@@ -181,7 +204,7 @@ pub fn remote_ok_names() -> Vec<&'static str> {
 
 /// `(name, required_role)` pairs for every registered tool. Used to install
 /// the process-global role lookup the REST middleware consults to gate
-/// `/api/tools/*` invocations.
+/// `/api/v1/*` invocations.
 pub fn role_table() -> Vec<(&'static str, &'static str)> {
     cache()
         .ordered

@@ -28,7 +28,7 @@
       // Raw fetch: docker tools aren't currently in the OpenAPI emission so
       // they don't have a typed SDK export. Switch to `callTool` once that
       // gap is closed.
-      const res = await fetch('/api/tools/docker.service.list-stats', {
+      const res = await fetch('/api/v1/docker.service.list-stats', {
         method: 'POST',
         credentials: 'include',
         headers: { 'content-type': 'application/json' },

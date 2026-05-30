@@ -2,7 +2,7 @@
 //!
 //! Counterpart to `ToolRegistration` (which drives MCP/REST dispatch and CLI):
 //! every annotated tool *also* submits an `OpenApiToolRegistration` so the
-//! generated OpenAPI 3.1 spec includes a `POST /api/tools/<name>` entry with
+//! generated OpenAPI 3.1 spec includes a `POST /api/v1/<name>` entry with
 //! the Args request body schema and the Output 200-response schema — both
 //! derived from schemars JSON Schema (Draft 2020-12, native to OpenAPI 3.1).
 
@@ -23,7 +23,7 @@ pub struct OpenApiToolRegistration {
 
 inventory::collect!(OpenApiToolRegistration);
 
-/// Walk every inventory entry and inject a `POST /api/tools/<name>` path into
+/// Walk every inventory entry and inject a `POST /api/v1/<name>` path into
 /// the given spec value. Mutates `spec` in place.
 pub fn inject_tool_paths(spec: &mut Value) {
     let Some(obj) = spec.as_object_mut() else {
@@ -42,7 +42,7 @@ pub fn inject_tool_paths(spec: &mut Value) {
     let mut tags_seen = std::collections::BTreeSet::<String>::new();
 
     for entry in inventory::iter::<OpenApiToolRegistration> {
-        let path = format!("/api/tools/{}", entry.name);
+        let path = format!("/api/v1/{}", entry.name);
         let mut args_schema = (entry.args_schema)();
         let mut output_schema = (entry.output_schema)();
         let domain = entry.domain.to_string();

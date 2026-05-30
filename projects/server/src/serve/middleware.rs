@@ -193,9 +193,9 @@ const AUTH_OPEN_PREFIXES: &[&str] = &[
     "/api/auth/signup_status",
 ];
 
-/// Tool name inside the `/api/tools/` namespace that the bootstrap window is
+/// Tool name inside the `/api/v1/` namespace that the bootstrap window is
 /// allowed to invoke. Anything else requires a real token.
-const BOOTSTRAP_ALLOWED_TOOL: &str = "/api/tools/auth.token_create";
+const BOOTSTRAP_ALLOWED_TOOL: &str = "/api/v1/auth.token_create";
 
 fn is_open_path(path: &str) -> bool {
     AUTH_OPEN_PREFIXES.iter().any(|p| path.starts_with(p))
@@ -470,12 +470,12 @@ pub async fn require_auth(req: Request, next: Next) -> Response {
     (StatusCode::UNAUTHORIZED, "auth required").into_response()
 }
 
-/// Prefix under which `/api/tools/<tool_name>` is mounted. The role gate parses
+/// Prefix under which `/api/v1/<tool_name>` is mounted. The role gate parses
 /// the tool name off the tail of the path.
-const TOOLS_PREFIX: &str = "/api/tools/";
+const TOOLS_PREFIX: &str = "/api/v1/";
 
-/// Extract the tool name from a `/api/tools/<name>` path, if any. Returns None
-/// for non-tools paths or the bare `/api/tools/` prefix with no name.
+/// Extract the tool name from a `/api/v1/<name>` path, if any. Returns None
+/// for non-tools paths or the bare `/api/v1/` prefix with no name.
 fn tool_name_from_path(path: &str) -> Option<&str> {
     let rest = path.strip_prefix(TOOLS_PREFIX)?;
     if rest.is_empty() {
@@ -486,7 +486,7 @@ fn tool_name_from_path(path: &str) -> Option<&str> {
     Some(rest.split('/').next().unwrap_or(rest))
 }
 
-/// Authorization layer for `/api/tools/*` that enforces per-tool role
+/// Authorization layer for `/api/v1/*` that enforces per-tool role
 /// requirements declared via `#[orca_tool(role = "admin")]`. Runs INSIDE
 /// `require_auth`, so an `AuthIdentity` is always present for tool paths that
 /// reach it.
@@ -610,7 +610,7 @@ mod tests {
     #[test]
     fn tool_name_from_path_extracts_single_segment() {
         assert_eq!(
-            tool_name_from_path("/api/tools/system.dev_enable"),
+            tool_name_from_path("/api/v1/system.dev_enable"),
             Some("system.dev_enable")
         );
     }
@@ -618,7 +618,7 @@ mod tests {
     #[test]
     fn tool_name_from_path_ignores_trailing_segments() {
         assert_eq!(
-            tool_name_from_path("/api/tools/system.dev_enable/extra"),
+            tool_name_from_path("/api/v1/system.dev_enable/extra"),
             Some("system.dev_enable")
         );
     }
@@ -626,13 +626,13 @@ mod tests {
     #[test]
     fn tool_name_from_path_returns_none_for_non_tools_paths() {
         assert!(tool_name_from_path("/api/health").is_none());
-        assert!(tool_name_from_path("/api/tools").is_none());
+        assert!(tool_name_from_path("/api/v1").is_none());
         assert!(tool_name_from_path("/").is_none());
     }
 
     #[test]
     fn tool_name_from_path_returns_none_for_bare_prefix() {
-        assert!(tool_name_from_path("/api/tools/").is_none());
+        assert!(tool_name_from_path("/api/v1/").is_none());
     }
 
     // ── check_tool_role (pure decision) ───────────────────────────────────────
@@ -650,20 +650,20 @@ mod tests {
             ToolRoleCheck::Pass
         );
         assert_eq!(check_tool_role("/", None), ToolRoleCheck::Pass);
-        // Bare /api/tools/ with no name is non-routable; treat as pass and
+        // Bare /api/v1/ with no name is non-routable; treat as pass and
         // let the registry's own 404 handle it downstream.
-        assert_eq!(check_tool_role("/api/tools/", None), ToolRoleCheck::Pass);
+        assert_eq!(check_tool_role("/api/v1/", None), ToolRoleCheck::Pass);
     }
 
     #[test]
     fn check_tool_role_passes_unknown_tool_under_any_caller() {
         // Unknown tool name → required_role falls open to "any".
         assert_eq!(
-            check_tool_role("/api/tools/__no_such_tool__", Some("member")),
+            check_tool_role("/api/v1/__no_such_tool__", Some("member")),
             ToolRoleCheck::Pass
         );
         assert_eq!(
-            check_tool_role("/api/tools/__no_such_tool__", None),
+            check_tool_role("/api/v1/__no_such_tool__", None),
             ToolRoleCheck::Pass
         );
     }
@@ -701,7 +701,7 @@ mod tests {
 
     #[test]
     fn is_open_path_rejects_random_api_paths() {
-        assert!(!is_open_path("/api/tools/foo"));
+        assert!(!is_open_path("/api/v1/foo"));
         assert!(!is_open_path("/api/agents"));
     }
 
@@ -919,11 +919,7 @@ mod tests {
     fn bootstrap_allowed_with_requires_specific_tool_path() {
         let (_d, c) = test_db();
         let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
-        assert!(!bootstrap_allowed_with(
-            &c,
-            "/api/tools/something_else",
-            peer
-        ));
+        assert!(!bootstrap_allowed_with(&c, "/api/v1/something_else", peer));
     }
 
     #[test]
@@ -1240,13 +1236,13 @@ mod tests {
         // bootstrap_allowed returns true → identity = Bootstrap/admin → pass.
         let router = axum::Router::new()
             .route(
-                "/api/tools/auth.token_create",
+                "/api/v1/auth.token_create",
                 axum::routing::post(|| async { (axum::http::StatusCode::OK, "ok") }),
             )
             .layer(axum::middleware::from_fn(require_auth));
         let mut req = AxumReq::builder()
             .method("POST")
-            .uri("/api/tools/auth.token_create")
+            .uri("/api/v1/auth.token_create")
             .body(Body::empty())
             .unwrap();
         req.extensions_mut()
@@ -1286,7 +1282,7 @@ mod tests {
             // tool_roles.rs.
             return;
         }
-        let path = "/api/tools/check_tool_role_test.admin_only";
+        let path = "/api/v1/check_tool_role_test.admin_only";
         assert_eq!(check_tool_role(path, Some("admin")), ToolRoleCheck::Pass);
         assert_eq!(
             check_tool_role(path, Some("member")),

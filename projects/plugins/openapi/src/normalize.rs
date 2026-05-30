@@ -261,23 +261,41 @@ fn keep_one_json_media_type(
 /// Progenitor sees one unified success type across statuses → emits an
 /// enum where each upstream response shape becomes a callable variant.
 pub fn merge_success_response_schemas(spec: &mut OpenAPI, report: &mut NormalizeReport) {
+    let hits = merge_bucket(spec, is_progenitor_success);
+    report.merged_success_responses.extend(hits);
+}
+
+/// Sibling of [`merge_success_response_schemas`] for progenitor's error
+/// bucket (4xx/5xx + `default`). Progenitor runs the same
+/// `response_types.len() <= 1` assertion across error responses, so
+/// divergent shapes (e.g. `404` returns a body, `500` is empty) still
+/// crash codegen without this pass.
+pub fn merge_error_response_schemas(spec: &mut OpenAPI, report: &mut NormalizeReport) {
+    let hits = merge_bucket(spec, is_progenitor_error);
+    report.merged_error_responses.extend(hits);
+}
+
+fn merge_bucket(
+    spec: &mut OpenAPI,
+    in_bucket: fn(&StatusCode) -> bool,
+) -> Vec<(String, Vec<String>, usize)> {
     let mut hits: Vec<(String, Vec<String>, usize)> = Vec::new();
     for_each_op_mut(spec, |method, path, op| {
         let Some(op) = op else { return };
-        // Progenitor's success bucket includes 2xx codes, the `2XX` range,
-        // status 101, AND the `default` response. We have to unify schemas
-        // across the same bucket, otherwise its `response_types.len() <= 1`
-        // assertion fires on the divergent shapes.
-        let success_statuses: Vec<SuccessKey> = op
+        // Both buckets include the `default` response (progenitor's
+        // `is_success_or_default` / `is_error_or_default`). Unify schemas
+        // across the whole bucket, otherwise progenitor's
+        // `response_types.len() <= 1` assertion fires on divergent shapes.
+        let statuses: Vec<SuccessKey> = op
             .responses
             .responses
             .keys()
-            .filter(|s| is_progenitor_success(s))
+            .filter(|s| in_bucket(s))
             .cloned()
             .map(SuccessKey::Status)
             .chain(op.responses.default.as_ref().map(|_| SuccessKey::Default))
             .collect();
-        if success_statuses.len() <= 1 {
+        if statuses.len() <= 1 {
             return;
         }
 
@@ -286,7 +304,7 @@ pub fn merge_success_response_schemas(spec: &mut OpenAPI, report: &mut Normalize
         // variant so empty-body successes still round-trip.
         let mut variants: Vec<ReferenceOr<Schema>> = Vec::new();
         let mut had_empty = false;
-        for key in &success_statuses {
+        for key in &statuses {
             let Some(resp) = get_success_response(op, key) else {
                 continue;
             };
@@ -308,7 +326,7 @@ pub fn merge_success_response_schemas(spec: &mut OpenAPI, report: &mut Normalize
                 one_of: variants.clone(),
             },
         });
-        for key in &success_statuses {
+        for key in &statuses {
             let Some(resp) = get_success_response_mut(op, key) else {
                 continue;
             };
@@ -317,11 +335,21 @@ pub fn merge_success_response_schemas(spec: &mut OpenAPI, report: &mut Normalize
 
         hits.push((
             format!("{} {}", method.to_uppercase(), path),
-            success_statuses.iter().map(|k| k.label()).collect(),
+            statuses.iter().map(|k| k.label()).collect(),
             variants.len(),
         ));
     });
-    report.merged_success_responses.extend(hits);
+    hits
+}
+
+/// Mirror of `OperationResponseStatus::is_error_or_default` from
+/// progenitor's method.rs (sans `Default`, which is tracked separately).
+fn is_progenitor_error(s: &StatusCode) -> bool {
+    match s {
+        StatusCode::Code(c) => (400..600).contains(c),
+        StatusCode::Range(4) | StatusCode::Range(5) => true,
+        _ => false,
+    }
 }
 
 #[derive(Clone, Debug)]

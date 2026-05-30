@@ -1,6 +1,6 @@
 //! Process-global handle for in-process tool dispatch from the pod relay.
 //!
-//! Was: pod/exec POSTed back to `https://127.0.0.1:12000/api/tools/<name>`
+//! Was: pod/exec POSTed back to `https://127.0.0.1:12000/api/v1/<name>`
 //! using the loopback admin token. That impersonated `role=admin` for every
 //! peer-relayed call (M4 in the v1 hardening punch list). Now: the daemon
 //! installs the shared `ToolCtx` here at startup, and `handle_exec`

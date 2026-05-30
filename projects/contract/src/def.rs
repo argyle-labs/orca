@@ -22,7 +22,7 @@ pub trait OrcaToolDef: Send + Sync + 'static {
     /// (REST, MCP-over-HTTP). `"any"` (default) means any authenticated identity
     /// passes; `"admin"` requires the caller's `AuthIdentity::role == "admin"`.
     ///
-    /// Enforcement points: REST middleware on `/api/tools/*`, and `pod/exec`
+    /// Enforcement points: REST middleware on `/api/v1/*`, and `pod/exec`
     /// (which has no human identity and therefore refuses any admin-role tool).
     /// CLI / loopback / MCP-stdio run in-process as the daemon owner and are
     /// not gated here.

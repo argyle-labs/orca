@@ -1,6 +1,6 @@
 //! Process-global lookup of `tool_name → required_role`. Populated once at
 //! startup from `dispatch::role_table` so the REST middleware can gate
-//! `/api/tools/*` without walking the inventory on every request.
+//! `/api/v1/*` without walking the inventory on every request.
 //!
 //! Sibling of `remote_ok`: same OnceLock pattern, different axis (per-caller
 //! authorization vs peer-callable allowlist).

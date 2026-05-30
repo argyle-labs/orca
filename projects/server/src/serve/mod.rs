@@ -974,7 +974,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         // the emitted OpenAPI spec for the hey-api codegen pipeline.
         .with_state(mcp_pool);
 
-    // Mount the OrcaTool registry under /api/tools. Same registry as MCP stdio
+    // Mount the OrcaTool registry under /api/v1. Same registry as MCP stdio
     // and CLI — one trait impl, three live surfaces (REST + MCP + CLI).
     let api = match contract::config::Config::load() {
         Ok(cfg) => {
@@ -988,15 +988,15 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
             // the admin token (M4 in the v1 hardening punch list). Dispatch
             // walks the inventory directly — no registry to ship.
             pod::dispatcher::install(ctx.clone());
-            api.nest("/api/tools", dispatch::axum_router(ctx))
+            api.nest("/api/v1", dispatch::axum_router(ctx))
         }
         Err(e) => {
-            tracing::warn!("Config::load failed, /api/tools disabled: {e}");
+            tracing::warn!("Config::load failed, /api/v1/* disabled: {e}");
             api
         }
     };
 
-    // Layers apply AFTER all nesting so /api/tools/* inherits auth + logging.
+    // Layers apply AFTER all nesting so /api/v1/* inherits auth + logging.
     // Outermost to innermost (last added = outermost): CORS → log_requests →
     // require_auth → handler. Logging sits OUTSIDE auth so 401s are still
     // logged — otherwise rejected requests vanish silently from the log.

@@ -642,7 +642,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     };
 
     // OpenAPI emission — unconditional (the spec is built from schemars, no
-    // native deps needed). Every tool gets one `/api/tools/<NAME>` POST entry
+    // native deps needed). Every tool gets one `/api/v1/<NAME>` POST entry
     // injected into the spec at runtime.
     let openapi_block = quote! {
         ::inventory::submit! {

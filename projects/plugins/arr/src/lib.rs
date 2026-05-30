@@ -10,16 +10,17 @@
 //! `arr::radarr::Client`, …) — the *arr forks diverge enough that a unified
 //! trait would lie about which endpoints exist on which server.
 
-#![allow(
-    clippy::all,
-    dead_code,
-    unused_imports,
-    unused_variables,
-    non_snake_case
-)]
+pub mod auth;
 
 macro_rules! flavor {
     ($name:ident) => {
+        #[allow(
+            clippy::all,
+            dead_code,
+            unused_imports,
+            unused_variables,
+            non_snake_case
+        )]
         pub mod $name {
             include!(concat!(
                 env!("OUT_DIR"),

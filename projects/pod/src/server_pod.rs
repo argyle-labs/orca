@@ -390,7 +390,7 @@ pub async fn exec(
     args: serde_json::Value,
     caller: Option<contract::CallerIdentity>,
 ) -> Result<PodExecDispatch> {
-    // "local" / "localhost" → loopback round-trip via the same /api/tools
+    // "local" / "localhost" → loopback round-trip via the same /api/v1
     // path peers use. Lets the same code path validate the allowlist
     // without leaving the host.
     let is_local = matches!(peer.to_ascii_lowercase().as_str(), "local" | "localhost");
