@@ -217,7 +217,16 @@ fn keep_one_json_media_type(
     if content.len() <= 1 {
         return None;
     }
-    let json_key = content.keys().find(|k| k.contains("json")).cloned()?;
+    // Prefer the exact `application/json` media type — progenitor only
+    // typecodes that one (or `application/json;…` parameterized variants).
+    // Anything else (`text/json`, `application/*+json`) gets categorized as
+    // Raw, which breaks the success-type unification this whole pass is
+    // trying to achieve.
+    let json_key = content
+        .keys()
+        .find(|k| *k == "application/json" || k.starts_with("application/json;"))
+        .or_else(|| content.keys().find(|k| k.contains("json")))
+        .cloned()?;
     let dropped: Vec<String> = content
         .keys()
         .filter(|k| **k != json_key)
@@ -245,12 +254,18 @@ pub fn merge_success_response_schemas(spec: &mut OpenAPI, report: &mut Normalize
     let mut hits: Vec<(String, Vec<String>, usize)> = Vec::new();
     for_each_op_mut(spec, |method, path, op| {
         let Some(op) = op else { return };
-        let success_statuses: Vec<StatusCode> = op
+        // Progenitor's success bucket includes 2xx codes, the `2XX` range,
+        // status 101, AND the `default` response. We have to unify schemas
+        // across the same bucket, otherwise its `response_types.len() <= 1`
+        // assertion fires on the divergent shapes.
+        let success_statuses: Vec<SuccessKey> = op
             .responses
             .responses
             .keys()
-            .filter(|s| is_success_status(s))
+            .filter(|s| is_progenitor_success(s))
             .cloned()
+            .map(SuccessKey::Status)
+            .chain(op.responses.default.as_ref().map(|_| SuccessKey::Default))
             .collect();
         if success_statuses.len() <= 1 {
             return;
@@ -258,11 +273,11 @@ pub fn merge_success_response_schemas(spec: &mut OpenAPI, report: &mut Normalize
 
         // Collect distinct response shapes by serde-value identity. A
         // missing JSON content entry contributes a synthetic `null`
-        // variant so empty-body 2xx responses still round-trip.
+        // variant so empty-body successes still round-trip.
         let mut variants: Vec<ReferenceOr<Schema>> = Vec::new();
         let mut had_empty = false;
-        for s in &success_statuses {
-            let Some(ReferenceOr::Item(resp)) = op.responses.responses.get(s) else {
+        for key in &success_statuses {
+            let Some(resp) = get_success_response(op, key) else {
                 continue;
             };
             match json_schema(resp) {
@@ -283,8 +298,8 @@ pub fn merge_success_response_schemas(spec: &mut OpenAPI, report: &mut Normalize
                 one_of: variants.clone(),
             },
         });
-        for s in &success_statuses {
-            let Some(ReferenceOr::Item(resp)) = op.responses.responses.get_mut(s) else {
+        for key in &success_statuses {
+            let Some(resp) = get_success_response_mut(op, key) else {
                 continue;
             };
             set_json_schema(resp, union.clone());
@@ -292,15 +307,61 @@ pub fn merge_success_response_schemas(spec: &mut OpenAPI, report: &mut Normalize
 
         hits.push((
             format!("{} {}", method.to_uppercase(), path),
-            success_statuses.iter().map(status_label).collect(),
+            success_statuses.iter().map(|k| k.label()).collect(),
             variants.len(),
         ));
     });
     report.merged_success_responses.extend(hits);
 }
 
-fn is_success_status(s: &StatusCode) -> bool {
+#[derive(Clone, Debug)]
+enum SuccessKey {
+    Status(StatusCode),
+    Default,
+}
+
+impl SuccessKey {
+    fn label(&self) -> String {
+        match self {
+            SuccessKey::Status(s) => status_label(s),
+            SuccessKey::Default => "default".into(),
+        }
+    }
+}
+
+fn get_success_response<'a>(
+    op: &'a Operation,
+    key: &SuccessKey,
+) -> Option<&'a openapiv3::Response> {
+    let r = match key {
+        SuccessKey::Status(s) => op.responses.responses.get(s)?,
+        SuccessKey::Default => op.responses.default.as_ref()?,
+    };
+    match r {
+        ReferenceOr::Item(resp) => Some(resp),
+        ReferenceOr::Reference { .. } => None,
+    }
+}
+
+fn get_success_response_mut<'a>(
+    op: &'a mut Operation,
+    key: &SuccessKey,
+) -> Option<&'a mut openapiv3::Response> {
+    let r = match key {
+        SuccessKey::Status(s) => op.responses.responses.get_mut(s)?,
+        SuccessKey::Default => op.responses.default.as_mut()?,
+    };
+    match r {
+        ReferenceOr::Item(resp) => Some(resp),
+        ReferenceOr::Reference { .. } => None,
+    }
+}
+
+/// Mirror of `OperationResponseStatus::is_success_or_default` from
+/// progenitor's method.rs (sans `Default`, which is tracked separately).
+fn is_progenitor_success(s: &StatusCode) -> bool {
     match s {
+        StatusCode::Code(101) => true,
         StatusCode::Code(c) => (200..300).contains(c),
         StatusCode::Range(2) => true,
         StatusCode::Range(_) => false,

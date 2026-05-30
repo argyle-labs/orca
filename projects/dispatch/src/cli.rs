@@ -163,6 +163,15 @@ pub async fn exec_remote<T: contract::OrcaToolDef>(
 pub async fn try_dispatch(matches: &ArgMatches, ctx: Arc<ToolCtx>) -> Option<Result<()>> {
     let (domain, verb, op_matches) = walk_to_verb(matches)?;
     let op = ops().find(|o| o.domain == domain.as_str() && o.verb == verb)?;
+    // Lift the per-invocation peer target onto a fresh ctx clone so the
+    // shared base ctx stays immutable (REST hot-path pattern).
+    let ctx = if let Some(peer) = extract_peer_flag(matches) {
+        let mut owned = (*ctx).clone();
+        owned.set_peer(Some(peer));
+        Arc::new(owned)
+    } else {
+        ctx
+    };
     Some((op.run)(op_matches, ctx).await)
 }
 

@@ -572,6 +572,21 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     } else {
         quote! {}
     };
+    // local_only tools must reject `--peer <h>` clearly rather than silently
+    // running on the controller. The opt-out is intentional, the user's
+    // intent isn't — surface it.
+    let local_only_reject_stanza = if !emit_peer_dispatch {
+        quote! {
+            if let ::core::option::Option::Some(__peer) = #ctx_param_name.peer() {
+                return ::core::result::Result::Err(::anyhow::anyhow!(
+                    "tool `{}` is local_only and cannot be dispatched to peer `{}`",
+                    #tool_name, __peer,
+                ));
+            }
+        }
+    } else {
+        quote! {}
+    };
     let peer_dispatch_stanza = if emit_peer_dispatch {
         quote! {
             if let ::core::option::Option::Some(__peer_id) =
