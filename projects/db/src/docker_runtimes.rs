@@ -6,7 +6,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::expand_tilde;
+use utils::path::expand_tilde;
 
 #[derive(Debug, Clone)]
 pub struct RuntimeRow {

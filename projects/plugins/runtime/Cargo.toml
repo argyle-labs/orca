@@ -49,6 +49,7 @@ jsonschema = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+wiremock = "0.6"
 
 [lints]
 workspace = true

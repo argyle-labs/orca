@@ -99,15 +99,6 @@ pub fn reset_schema_init_cache() {
     }
 }
 
-pub(crate) fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        let home = std::env::var("HOME").unwrap_or_default();
-        format!("{home}/{rest}")
-    } else {
-        path.to_string()
-    }
-}
-
 pub(crate) fn to_json_arr<T: serde::Serialize>(v: &T) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "[]".into())
 }

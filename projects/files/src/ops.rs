@@ -1,15 +1,7 @@
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
-/// Expand a leading `~/` to the user's home directory.
-pub fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        let home = std::env::var("HOME").unwrap_or_default();
-        format!("{home}/{rest}")
-    } else {
-        path.to_string()
-    }
-}
+pub use utils::path::expand_tilde;
 
 /// Resolve orca's state dir: `$ORCA_HOME` if set, else `$HOME/.orca`.
 /// Returns `None` when neither env var is set (test sandboxes, sealed CI).

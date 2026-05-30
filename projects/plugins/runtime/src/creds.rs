@@ -162,4 +162,177 @@ mod tests {
     fn resolve_plugin_url_returns_none_when_empty() {
         assert!(resolve_plugin_url(&base_plugin("p")).is_none());
     }
+
+    fn open_test_db(dir: &std::path::Path) -> (std::path::PathBuf, rusqlite::Connection) {
+        let path = dir.join("test.db");
+        let conn = db::open_unencrypted(&path).unwrap();
+        (path, conn)
+    }
+
+    fn install_http_plugin(conn: &rusqlite::Connection, id: &str, base_url: &str) {
+        let mut row = base_plugin(id);
+        row.mcp_command = Some(base_url.to_string());
+        db::plugins::upsert(conn, &row).unwrap();
+    }
+
+    #[test]
+    fn sync_plugin_creds_no_creds_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, conn) = open_test_db(dir.path());
+        install_http_plugin(&conn, "p-nocreds", "http://127.0.0.1:1");
+        drop(conn);
+        db::set_thread_db_path(Some(path.to_str().unwrap()));
+        sync_plugin_creds("p-nocreds").unwrap();
+        db::set_thread_db_path(None);
+    }
+
+    #[test]
+    fn sync_plugin_creds_errors_when_plugin_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, conn) = open_test_db(dir.path());
+        // Plugin doesn't exist; add a stray credential so we get past empty-check.
+        db::plugin_creds::set(&conn, "ghost", "API_KEY", "v").unwrap();
+        drop(conn);
+        db::set_thread_db_path(Some(path.to_str().unwrap()));
+        let err = sync_plugin_creds("ghost").err().unwrap();
+        db::set_thread_db_path(None);
+        assert!(
+            format!("{err:#}").contains("not registered"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn sync_plugin_creds_errors_without_resolvable_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, conn) = open_test_db(dir.path());
+        let mut row = base_plugin("stdio-plugin");
+        row.mcp_command = Some("node".into());
+        row.mcp_args = vec!["server.js".into()];
+        db::plugins::upsert(&conn, &row).unwrap();
+        db::plugin_creds::set(&conn, "stdio-plugin", "MEERKAT_TOKEN", "tok").unwrap();
+        db::plugin_creds::set(&conn, "stdio-plugin", "API_KEY", "v").unwrap();
+        drop(conn);
+        db::set_thread_db_path(Some(path.to_str().unwrap()));
+        let err = sync_plugin_creds("stdio-plugin").err().unwrap();
+        db::set_thread_db_path(None);
+        assert!(format!("{err:#}").contains("HTTP URL"), "got: {err:#}");
+    }
+
+    #[test]
+    fn sync_plugin_creds_errors_without_meerkat_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, conn) = open_test_db(dir.path());
+        install_http_plugin(&conn, "p-notok", "http://127.0.0.1:1");
+        db::plugin_creds::set(&conn, "p-notok", "API_KEY", "v").unwrap();
+        drop(conn);
+        db::set_thread_db_path(Some(path.to_str().unwrap()));
+        let err = sync_plugin_creds("p-notok").err().unwrap();
+        db::set_thread_db_path(None);
+        assert!(format!("{err:#}").contains("MEERKAT_TOKEN"), "got: {err:#}");
+    }
+
+    #[test]
+    fn sync_plugin_creds_pushes_each_and_marks_synced() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (base_url, _server) = rt.block_on(async {
+            let server = wiremock::MockServer::start().await;
+            wiremock::Mock::given(wiremock::matchers::method("PUT"))
+                .and(wiremock::matchers::path("/creds"))
+                .respond_with(wiremock::ResponseTemplate::new(204))
+                .mount(&server)
+                .await;
+            (server.uri(), server)
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let (path, conn) = open_test_db(dir.path());
+        install_http_plugin(&conn, "p-sync", &base_url);
+        db::plugin_creds::set(&conn, "p-sync", "MEERKAT_TOKEN", "secret").unwrap();
+        db::plugin_creds::set(&conn, "p-sync", "API_KEY", "v1").unwrap();
+        db::plugin_creds::set(&conn, "p-sync", "OTHER", "v2").unwrap();
+        drop(conn);
+
+        db::set_thread_db_path(Some(path.to_str().unwrap()));
+        sync_plugin_creds("p-sync").unwrap();
+        db::set_thread_db_path(None);
+
+        // mark_synced flipped synced_at on all stored rows.
+        let conn = db::open_unencrypted(&path).unwrap();
+        let creds = db::plugin_creds::list(&conn, "p-sync").unwrap();
+        let api = creds.iter().find(|c| c.key == "API_KEY").unwrap();
+        assert!(api.synced_at.is_some(), "expected synced_at to be set");
+    }
+
+    #[test]
+    fn sync_plugin_creds_token_from_mcp_env_when_not_stored() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (base_url, _server) = rt.block_on(async {
+            let server = wiremock::MockServer::start().await;
+            wiremock::Mock::given(wiremock::matchers::method("PUT"))
+                .respond_with(wiremock::ResponseTemplate::new(200))
+                .mount(&server)
+                .await;
+            (server.uri(), server)
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let (path, conn) = open_test_db(dir.path());
+        let mut row = base_plugin("p-envtok");
+        row.mcp_command = Some(base_url);
+        row.mcp_env
+            .insert("MEERKAT_TOKEN".into(), "env-secret".into());
+        db::plugins::upsert(&conn, &row).unwrap();
+        db::plugin_creds::set(&conn, "p-envtok", "API_KEY", "v").unwrap();
+        drop(conn);
+
+        db::set_thread_db_path(Some(path.to_str().unwrap()));
+        sync_plugin_creds("p-envtok").unwrap();
+        db::set_thread_db_path(None);
+    }
+
+    #[test]
+    fn sync_plugin_creds_reports_failure_without_mark() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (base_url, _server) = rt.block_on(async {
+            let server = wiremock::MockServer::start().await;
+            wiremock::Mock::given(wiremock::matchers::method("PUT"))
+                .respond_with(wiremock::ResponseTemplate::new(500))
+                .mount(&server)
+                .await;
+            (server.uri(), server)
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let (path, conn) = open_test_db(dir.path());
+        install_http_plugin(&conn, "p-fail", &base_url);
+        db::plugin_creds::set(&conn, "p-fail", "MEERKAT_TOKEN", "tok").unwrap();
+        db::plugin_creds::set(&conn, "p-fail", "API_KEY", "v").unwrap();
+        drop(conn);
+
+        db::set_thread_db_path(Some(path.to_str().unwrap()));
+        sync_plugin_creds("p-fail").unwrap();
+        db::set_thread_db_path(None);
+
+        // 500 → not marked synced.
+        let conn = db::open_unencrypted(&path).unwrap();
+        let creds = db::plugin_creds::list(&conn, "p-fail").unwrap();
+        let api = creds.iter().find(|c| c.key == "API_KEY").unwrap();
+        assert!(
+            api.synced_at.is_none(),
+            "expected synced_at to remain None on 500"
+        );
+    }
 }

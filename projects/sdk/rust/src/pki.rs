@@ -1879,6 +1879,320 @@ mod tests {
     }
 
     #[test]
+    fn capability_round_trip_and_display() {
+        assert_eq!(Capability::General.as_str(), "general");
+        assert_eq!(Capability::Sensitive.as_str(), "sensitive");
+        assert_eq!(format!("{}", Capability::General), "general");
+        assert_eq!(format!("{}", Capability::Sensitive), "sensitive");
+        assert!(matches!(
+            "general".parse::<Capability>().unwrap(),
+            Capability::General
+        ));
+        assert!(matches!(
+            "sensitive".parse::<Capability>().unwrap(),
+            Capability::Sensitive
+        ));
+        assert!("bogus".parse::<Capability>().is_err());
+    }
+
+    #[test]
+    fn load_mesh_bundles_errors_when_uninitialized() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_mesh_server(dir.path()).is_err());
+        assert!(load_mesh_client(dir.path()).is_err());
+        assert!(!has_mesh_ca_key(dir.path()));
+    }
+
+    #[test]
+    fn load_mesh_bundles_succeed_after_init() {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "host-load").unwrap();
+        let s = load_mesh_server(dir.path()).unwrap();
+        assert!(s.cert_pem.contains("BEGIN CERTIFICATE"));
+        assert!(s.key_pem.contains("BEGIN"));
+        let c = load_mesh_client(dir.path()).unwrap();
+        assert!(c.cert_pem.contains("BEGIN CERTIFICATE"));
+        assert!(has_mesh_ca_key(dir.path()));
+    }
+
+    #[test]
+    fn build_peer_csr_both_roles_and_sign_full_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "founder").unwrap();
+        let (csr_c, key_c) = build_peer_csr("joiner", PeerRole::Client).unwrap();
+        assert!(csr_c.contains("CERTIFICATE REQUEST"));
+        assert!(key_c.contains("BEGIN"));
+        let (csr_s, _) = build_peer_csr("joiner", PeerRole::Server).unwrap();
+        assert!(csr_s.contains("CERTIFICATE REQUEST"));
+
+        let (cert_c, ca_c) = sign_peer_csr(dir.path(), &csr_c, "joiner", PeerRole::Client).unwrap();
+        assert!(cert_c.contains("BEGIN CERTIFICATE"));
+        assert!(ca_c.contains("BEGIN CERTIFICATE"));
+        let (cert_s, _) = sign_peer_csr(dir.path(), &csr_s, "joiner", PeerRole::Server).unwrap();
+        assert!(cert_s.contains("BEGIN CERTIFICATE"));
+
+        // Verify CN was rewritten per role regardless of CSR contents.
+        let summary_c = cert_summary(&cert_c).unwrap();
+        assert_eq!(summary_c.cn, "peer.joiner");
+        let summary_s = cert_summary(&cert_s).unwrap();
+        assert_eq!(summary_s.cn, "orca-pod-server");
+    }
+
+    #[test]
+    fn sign_peer_csr_rejects_without_ca_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let (csr, _) = build_peer_csr("x", PeerRole::Client).unwrap();
+        let err = sign_peer_csr(dir.path(), &csr, "x", PeerRole::Client)
+            .err()
+            .unwrap();
+        assert!(format!("{err}").contains("mesh CA private key"));
+    }
+
+    #[test]
+    fn export_and_import_mesh_ca_keypair_round_trip() {
+        let src = tempfile::tempdir().unwrap();
+        init_mesh_ca(src.path(), "founder").unwrap();
+        let (cert_pem, key_pem) = export_mesh_ca_keypair(src.path()).unwrap();
+
+        // Set up a destination that already has the SAME CA cert (typical
+        // post-join state) but no key.
+        let dst = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(mesh_dir(dst.path())).unwrap();
+        std::fs::write(mesh_ca_cert_path(dst.path()), &cert_pem).unwrap();
+        assert!(!has_mesh_ca_key(dst.path()));
+        import_mesh_ca_keypair(dst.path(), &cert_pem, &key_pem).unwrap();
+        assert!(has_mesh_ca_key(dst.path()));
+    }
+
+    #[test]
+    fn import_mesh_ca_rejects_mismatched_cert() {
+        let src = tempfile::tempdir().unwrap();
+        init_mesh_ca(src.path(), "founder").unwrap();
+        let (_, real_key) = export_mesh_ca_keypair(src.path()).unwrap();
+
+        let other = tempfile::tempdir().unwrap();
+        init_mesh_ca(other.path(), "founder").unwrap();
+        let (other_cert, _) = export_mesh_ca_keypair(other.path()).unwrap();
+
+        // dst has src's cert but we hand it other's cert during import
+        let dst = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(mesh_dir(dst.path())).unwrap();
+        let (src_cert, _) = export_mesh_ca_keypair(src.path()).unwrap();
+        std::fs::write(mesh_ca_cert_path(dst.path()), &src_cert).unwrap();
+
+        let err = import_mesh_ca_keypair(dst.path(), &other_cert, &real_key)
+            .err()
+            .unwrap();
+        assert!(format!("{err}").contains("does not match"));
+    }
+
+    #[test]
+    fn export_mesh_ca_keypair_errors_when_no_key() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(export_mesh_ca_keypair(dir.path()).is_err());
+    }
+
+    #[test]
+    fn reissue_mesh_client_cert_swaps_and_validates() {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "host-cli").unwrap();
+        let before = std::fs::read_to_string(mesh_client_cert_path(dir.path())).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        reissue_mesh_client_cert(dir.path(), "host-cli").unwrap();
+        let after = std::fs::read_to_string(mesh_client_cert_path(dir.path())).unwrap();
+        assert_ne!(before, after);
+        assert_eq!(cert_summary(&after).unwrap().cn, "peer.host-cli");
+    }
+
+    #[test]
+    fn reissue_client_errors_without_ca_key() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(reissue_mesh_client_cert(dir.path(), "x").is_err());
+    }
+
+    #[test]
+    fn build_refresh_csrs_then_install_refreshed_peer_certs() {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "host-r").unwrap();
+        let (csr_c, key_c, csr_s, key_s) = build_refresh_csrs("host-r").unwrap();
+        let (cert_c, _) = sign_peer_csr(dir.path(), &csr_c, "host-r", PeerRole::Client).unwrap();
+        let (cert_s, _) = sign_peer_csr(dir.path(), &csr_s, "host-r", PeerRole::Server).unwrap();
+        install_refreshed_peer_certs(dir.path(), &cert_c, &key_c, &cert_s, &key_s).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(mesh_client_cert_path(dir.path())).unwrap(),
+            cert_c
+        );
+        assert_eq!(
+            std::fs::read_to_string(mesh_server_cert_path(dir.path())).unwrap(),
+            cert_s
+        );
+    }
+
+    #[test]
+    fn peer_common_name_extracts_cn_from_signed_cert() {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "founder").unwrap();
+        let (csr, _) = build_peer_csr("alice", PeerRole::Client).unwrap();
+        let (cert_pem, _) = sign_peer_csr(dir.path(), &csr, "alice", PeerRole::Client).unwrap();
+        let (chain, _) = parse_cert_and_key(
+            &cert_pem,
+            &std::fs::read_to_string(mesh_client_key_path(dir.path())).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(peer_common_name(&chain[0]).unwrap(), "peer.alice");
+    }
+
+    #[test]
+    fn peer_common_name_errors_on_garbage() {
+        assert!(peer_common_name(&[0u8; 4]).is_err());
+    }
+
+    #[test]
+    fn cert_summary_returns_populated_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        init_mesh_ca(dir.path(), "host-cs").unwrap();
+        let pem = std::fs::read_to_string(mesh_server_cert_path(dir.path())).unwrap();
+        let s = cert_summary(&pem).unwrap();
+        assert_eq!(s.cn, "orca-pod-server");
+        assert!(!s.fingerprint.is_empty());
+        assert!(s.expires_at > s.issued_at);
+        assert!(s.days_remaining > 0);
+    }
+
+    #[test]
+    fn cert_summary_errors_on_empty_pem() {
+        assert!(cert_summary("").is_err());
+    }
+
+    #[test]
+    fn rest_server_cert_localhost_san_and_browser_compat_true() {
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path()).unwrap();
+        let pem = std::fs::read_to_string(server_cert_path(dir.path())).unwrap();
+        assert!(rest_server_cert_has_localhost_san(&pem));
+        assert!(rest_server_cert_is_browser_compatible(&pem));
+    }
+
+    #[test]
+    fn rest_server_cert_predicates_false_on_garbage() {
+        assert!(!rest_server_cert_has_localhost_san("not a pem"));
+        assert!(!rest_server_cert_is_browser_compatible("not a pem"));
+    }
+
+    #[test]
+    fn refresh_rest_server_cert_swaps_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path()).unwrap();
+        let before = std::fs::read_to_string(server_cert_path(dir.path())).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        refresh_rest_server_cert(dir.path()).unwrap();
+        let after = std::fs::read_to_string(server_cert_path(dir.path())).unwrap();
+        assert_ne!(before, after);
+        assert!(rest_server_cert_has_localhost_san(&after));
+    }
+
+    #[test]
+    fn refresh_rest_server_cert_errors_without_ca() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(refresh_rest_server_cert(dir.path()).is_err());
+    }
+
+    #[test]
+    fn issue_cli_client_cert_creates_and_then_reuses() {
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path()).unwrap();
+        let b1 = issue_cli_client_cert(dir.path(), "myhost").unwrap();
+        assert!(b1.cert_pem.contains("BEGIN CERTIFICATE"));
+        assert_eq!(cert_summary(&b1.cert_pem).unwrap().cn, "cli.myhost");
+        let b2 = issue_cli_client_cert(dir.path(), "myhost").unwrap();
+        assert_eq!(b1.cert_pem, b2.cert_pem, "second call must reuse on-disk");
+    }
+
+    #[test]
+    fn issue_cli_client_cert_errors_without_ca() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(issue_cli_client_cert(dir.path(), "h").is_err());
+    }
+
+    #[test]
+    fn load_cli_client_returns_none_until_issued() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_cli_client(dir.path()).is_none());
+        init(dir.path()).unwrap();
+        issue_cli_client_cert(dir.path(), "h").unwrap();
+        assert!(load_cli_client(dir.path()).is_some());
+    }
+
+    #[test]
+    fn pinned_bootstrap_verifier_accepts_matching_fp_and_rejects_other() {
+        use rustls::client::danger::ServerCertVerifier;
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = tempfile::tempdir().unwrap();
+        let (cert_pem, _) = load_or_init_bootstrap_cert(dir.path()).unwrap();
+        let (chain, _) = parse_cert_and_key(
+            &cert_pem,
+            &std::fs::read_to_string(bootstrap_key_path(dir.path())).unwrap(),
+        )
+        .unwrap();
+        let actual_fp = spki_fingerprint_der(chain[0].as_ref()).unwrap();
+
+        let v = pinned_bootstrap_verifier(actual_fp.clone());
+        let sn = rustls::pki_types::ServerName::try_from("pod-bootstrap.orca.local").unwrap();
+        let now = rustls::pki_types::UnixTime::now();
+        assert!(v.verify_server_cert(&chain[0], &[], &sn, &[], now).is_ok());
+
+        let v2 = pinned_bootstrap_verifier("0".repeat(32));
+        assert!(
+            v2.verify_server_cert(&chain[0], &[], &sn, &[], now)
+                .is_err()
+        );
+
+        assert!(
+            v.supported_verify_schemes()
+                .contains(&rustls::SignatureScheme::ED25519)
+        );
+    }
+
+    #[test]
+    fn capturing_bootstrap_verifier_stores_fp() {
+        use rustls::client::danger::ServerCertVerifier;
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = tempfile::tempdir().unwrap();
+        let (cert_pem, _) = load_or_init_bootstrap_cert(dir.path()).unwrap();
+        let (chain, _) = parse_cert_and_key(
+            &cert_pem,
+            &std::fs::read_to_string(bootstrap_key_path(dir.path())).unwrap(),
+        )
+        .unwrap();
+        let expected = spki_fingerprint_der(chain[0].as_ref()).unwrap();
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let v = capturing_bootstrap_verifier(slot.clone());
+        let sn = rustls::pki_types::ServerName::try_from("pod-bootstrap.orca.local").unwrap();
+        let now = rustls::pki_types::UnixTime::now();
+        v.verify_server_cert(&chain[0], &[], &sn, &[], now).unwrap();
+        assert_eq!(slot.lock().unwrap().as_deref(), Some(expected.as_str()));
+        assert!(
+            v.supported_verify_schemes()
+                .contains(&rustls::SignatureScheme::ED25519)
+        );
+    }
+
+    #[test]
+    fn ca_paths_and_plugin_paths_are_under_pki_dir() {
+        let p = std::path::Path::new("/tmp/pkitest");
+        assert!(ca_cert_path(p).ends_with("ca.cert.pem"));
+        assert!(ca_key_path(p).ends_with("ca.key.pem"));
+        assert!(server_cert_path(p).ends_with("server/node.cert.pem"));
+        assert!(server_key_path(p).ends_with("server/node.key.pem"));
+        assert!(plugin_cert_path(p, "x").ends_with("plugins/x/node.cert.pem"));
+        assert!(plugin_key_path(p, "x").ends_with("plugins/x/node.key.pem"));
+        assert!(cli_client_cert_path(p).ends_with("client.cert.pem"));
+        assert!(cli_client_key_path(p).ends_with("client.key.pem"));
+        assert!(bootstrap_pub_path(p).ends_with("bootstrap.pub.pem"));
+        assert!(bootstrap_cert_path(p).ends_with("bootstrap.cert.pem"));
+    }
+
+    #[test]
     fn rest_server_cert_uses_ecdsa_p256() {
         // The REST server cert (browser-facing) must be ECDSA P-256 —
         // browsers (Firefox/Chrome) reject Ed25519 leaf certs in TLS
