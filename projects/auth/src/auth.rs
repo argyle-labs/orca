@@ -370,7 +370,7 @@ async fn auth_login(args: LoginArgs, _ctx: &contract::ToolCtx) -> anyhow::Result
         let prev = prev.trim();
         if !prev.is_empty() {
             let now = chrono::Utc::now().to_rfc3339();
-            let _ = db::sessions::revoke(&conn, prev, &now);
+            db::sessions::revoke(&conn, prev, &now).ok();
         }
     }
 
@@ -383,7 +383,7 @@ async fn auth_login(args: LoginArgs, _ctx: &contract::ToolCtx) -> anyhow::Result
 
     if let Some(parent) = session_path.parent() {
         std::fs::create_dir_all(parent)?;
-        let _ = utils::fs::chmod_dir_owner_only(parent);
+        utils::fs::chmod_dir_owner_only(parent).ok();
     }
     std::fs::write(&session_path, &sid)?;
     #[cfg(unix)]

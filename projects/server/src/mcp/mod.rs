@@ -58,7 +58,7 @@ fn resolve_host_operator() -> Option<contract::CallerIdentity> {
         return None;
     }
     let new_exp = now + chrono::Duration::seconds(::auth::auth::CLI_SESSION_TTL_SECS);
-    let _ = db::sessions::touch(&conn, sid, &now.to_rfc3339(), &new_exp.to_rfc3339());
+    db::sessions::touch(&conn, sid, &now.to_rfc3339(), &new_exp.to_rfc3339()).ok();
     Some(contract::CallerIdentity {
         user_id: row.user_id,
         username: row.username,
