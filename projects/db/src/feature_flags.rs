@@ -5,10 +5,9 @@
 //! column. New flags should land here, not in `settings`.
 
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 pub fn get(conn: &Connection, name: &str) -> Result<Option<bool>> {
-    use rusqlite::OptionalExtension;
     conn.query_row(
         "SELECT enabled FROM feature_flags WHERE name = ?1",
         rusqlite::params![name],

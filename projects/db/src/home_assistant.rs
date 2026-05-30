@@ -4,7 +4,7 @@
 //! access token used as a Bearer credential by `orca-homeassistant`.
 
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 #[derive(Debug, Clone)]
 pub struct EndpointRow {
@@ -32,7 +32,6 @@ pub fn list(conn: &Connection) -> Result<Vec<EndpointRow>> {
 }
 
 pub fn get(conn: &Connection, name: &str) -> Result<Option<EndpointRow>> {
-    use rusqlite::OptionalExtension;
     conn.query_row(
         "SELECT name, base_url, token, enabled
          FROM homeassistant_endpoints WHERE name = ?1",

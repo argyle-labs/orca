@@ -1,7 +1,7 @@
 //! Profile credentials — encrypted KV store scoped to a profile.
 
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 pub fn set(conn: &Connection, profile_id: &str, key: &str, value: &str) -> Result<()> {
     conn.execute(
@@ -15,7 +15,6 @@ pub fn set(conn: &Connection, profile_id: &str, key: &str, value: &str) -> Resul
 }
 
 pub fn get(conn: &Connection, profile_id: &str, key: &str) -> Result<Option<String>> {
-    use rusqlite::OptionalExtension;
     conn.query_row(
         "SELECT value FROM profile_credentials WHERE profile_id = ?1 AND key = ?2",
         rusqlite::params![profile_id, key],
