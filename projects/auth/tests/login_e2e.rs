@@ -74,7 +74,7 @@ async fn login_then_logout_roundtrips() {
     assert_eq!(out.username, "alice");
     assert_eq!(out.role, "admin");
 
-    let path = utils::fs::orca_home().unwrap().join("session");
+    let path = files::ops::orca_home().unwrap().join("session");
     assert!(path.exists(), "session file should exist");
     #[cfg(unix)]
     {
@@ -110,7 +110,7 @@ async fn wrong_password_rejected() {
         err.to_string().contains("invalid credentials"),
         "got: {err}"
     );
-    let path = utils::fs::orca_home().unwrap().join("session");
+    let path = files::ops::orca_home().unwrap().join("session");
     assert!(!path.exists(), "no session file on failed login");
 }
 
@@ -130,7 +130,7 @@ async fn second_login_revokes_prior_session() {
     seed_admin("carol", "pw1");
     let first = login("carol", "pw1").await.unwrap();
     assert_eq!(first.username, "carol");
-    let path = utils::fs::orca_home().unwrap().join("session");
+    let path = files::ops::orca_home().unwrap().join("session");
     let sid1 = std::fs::read_to_string(&path).unwrap().trim().to_string();
 
     let _ = login("carol", "pw1").await.unwrap();

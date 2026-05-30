@@ -148,7 +148,26 @@ async fn engine_update(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::empty_ctx;
+    use contract::ToolCtx;
+    use contract::config::{Config, Model};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn empty_ctx() -> ToolCtx {
+        ToolCtx::new(Arc::new(Config {
+            anthropic_api_key: None,
+            lmstudio_url: String::new(),
+            ollama_url: String::new(),
+            default_model: Model::LMStudio {
+                id: String::new(),
+                url: String::new(),
+            },
+            app_dir: PathBuf::from("/tmp"),
+            memory_root: PathBuf::from("/tmp"),
+            db_path: PathBuf::from("/tmp/orca-system-engine-test.db"),
+            ports: Default::default(),
+        }))
+    }
 
     #[test]
     fn infer_kind_uses_supplied_value() {

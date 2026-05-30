@@ -10,6 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 contract = { path = "../../contract" }
 utils    = { path = "../../utils" }
+files    = { path = "../../files" }
 db            = { package = "db", path = "../../db" }
 
 anyhow       = { workspace = true }

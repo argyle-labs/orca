@@ -3,10 +3,10 @@
 #![allow(clippy::disallowed_types)]
 use anyhow::{Context, Result};
 use db::{self as db, plugins::PluginRow};
+use files::ops::expand_tilde;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
-use utils::fs::expand_tilde;
 
 // ── Manifest parsing ──────────────────────────────────────────────────────────
 

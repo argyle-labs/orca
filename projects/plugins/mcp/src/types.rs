@@ -134,7 +134,7 @@ pub struct ListToolMappingsOutput {
 
 mod mcp_fed {
     use super::*;
-    use ::platform::json_schema::JsonSchemaNode;
+    use ::utils::json_schema::JsonSchemaNode;
     use serde_json::Value;
 
     #[derive(Serialize, Deserialize, JsonSchema)]

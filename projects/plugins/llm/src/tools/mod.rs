@@ -6,8 +6,8 @@ use crate::backend::{OutputSink, stdout_sink};
 use anyhow::Result;
 use bash::BashPermissions;
 use contract::{ToolDef, ToolResult};
+use files::ops;
 use serde_json::{Value, json};
-use utils::fs::ops;
 use utils::search;
 
 pub struct ToolRegistry {

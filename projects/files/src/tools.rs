@@ -132,9 +132,6 @@ pub struct FsSearchArgs {
     /// Limit to one root (e.g. "rebuy"|"orca"|"docs"). Default: search every registered root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
-    /// `"llm"` strips decorative markdown from matched lines.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -142,8 +139,6 @@ pub struct FsSearchArgs {
 pub struct FsSearchOutput {
     pub query: String,
     pub hits: Vec<FsSearchHit>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub enhanced_summary: Option<String>,
 }
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -173,36 +168,34 @@ pub struct FsRootsListOutput {
     pub roots: Vec<FsRootEntry>,
 }
 
-mod native;
-
 // ═══════════════════════════════════════════════════════════════════════════
-// Tools — call free fns in `native` directly. No service trait.
+// Tools — call free fns in the crate root directly. No service trait.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// List the registered filesystem roots — named path aliases consumed by every other `fs.*` tool.
-#[orca_tool(domain = "fs.roots", verb = "list", role = "read")]
+/// List the registered filesystem roots — named path aliases consumed by every other `files.*` tool.
+#[orca_tool(domain = "files.roots", verb = "list", role = "read")]
 async fn fs_roots_list(
     _args: FsRootsListArgs,
     ctx: &contract::ToolCtx,
 ) -> anyhow::Result<FsRootsListOutput> {
     Ok(FsRootsListOutput {
-        roots: native::roots_list(&ctx.config).await?,
+        roots: crate::roots_list(&ctx.config).await?,
     })
 }
 
 /// One-level directory listing. Provide `root` for a named alias or omit it for an absolute / `~/`-prefixed path.
-#[orca_tool(domain = "fs", verb = "list", role = "read")]
+#[orca_tool(domain = "files", verb = "list", role = "read")]
 async fn fs_list(args: FsListArgs, ctx: &contract::ToolCtx) -> anyhow::Result<FsListOutput> {
     Ok(FsListOutput {
-        entries: native::list(&ctx.config, args.root.as_deref(), &args.path).await?,
+        entries: crate::list(&ctx.config, args.root.as_deref(), &args.path).await?,
     })
 }
 
 /// Recursive directory tree. Compacted by default; pass `raw=true` for the unmodified filesystem layout.
-#[orca_tool(domain = "fs", verb = "tree", role = "read")]
+#[orca_tool(domain = "files", verb = "tree", role = "read")]
 async fn fs_tree(args: FsTreeArgs, ctx: &contract::ToolCtx) -> anyhow::Result<FsTreeOutput> {
     Ok(FsTreeOutput {
-        nodes: native::tree(
+        nodes: crate::tree(
             &ctx.config,
             args.root.as_deref(),
             &args.path,
@@ -213,10 +206,10 @@ async fn fs_tree(args: FsTreeArgs, ctx: &contract::ToolCtx) -> anyhow::Result<Fs
 }
 
 /// Read a text file. `format="llm"` strips decorative markdown; binary/multi-format reads are deferred to v2.
-#[orca_tool(domain = "fs", verb = "read", role = "read")]
+#[orca_tool(domain = "files", verb = "read", role = "read")]
 async fn fs_read(args: FsReadArgs, ctx: &contract::ToolCtx) -> anyhow::Result<FsReadOutput> {
     let llm = args.format.as_deref() == Some("llm");
-    let content = native::read(&ctx.config, args.root.as_deref(), &args.path, llm).await?;
+    let content = crate::read(&ctx.config, args.root.as_deref(), &args.path, llm).await?;
     Ok(FsReadOutput {
         root: args.root,
         path: args.path,
@@ -224,21 +217,20 @@ async fn fs_read(args: FsReadArgs, ctx: &contract::ToolCtx) -> anyhow::Result<Fs
     })
 }
 
-/// Case-insensitive line search across one or all registered roots. Optionally summarised by a local LLM.
-#[orca_tool(domain = "fs", verb = "search", role = "read")]
+/// Case-insensitive line search across one or all registered roots. Returns hits only —
+/// LLM summarisation surface dropped 2026-05-29; callers can format hits themselves.
+#[orca_tool(domain = "files", verb = "search", role = "read")]
 async fn fs_search(args: FsSearchArgs, ctx: &contract::ToolCtx) -> anyhow::Result<FsSearchOutput> {
-    let llm = args.format.as_deref() == Some("llm");
     let filter = args.root.as_deref().unwrap_or("all");
-    let (hits, summary) = native::search(&ctx.config, &args.query, filter, llm).await?;
+    let hits = crate::search(&ctx.config, &args.query, filter).await?;
     Ok(FsSearchOutput {
         query: args.query,
         hits,
-        enhanced_summary: summary,
     })
 }
 
 /// Metadata for a single path — kind (file/dir), byte size, existence flag.
-#[orca_tool(domain = "fs", verb = "stat", role = "read")]
+#[orca_tool(domain = "files", verb = "stat", role = "read")]
 async fn fs_stat(args: FsStatArgs, ctx: &contract::ToolCtx) -> anyhow::Result<FsStatOutput> {
-    native::stat(&ctx.config, args.root.as_deref(), &args.path).await
+    crate::stat(&ctx.config, args.root.as_deref(), &args.path).await
 }

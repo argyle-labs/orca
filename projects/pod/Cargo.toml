@@ -30,7 +30,6 @@ inventory       = { workspace = true }
 
 utils = { path = "../utils" }
 db = { package = "db", path = "../db" }
-replicate = { package = "replicate", path = "../replicate" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }

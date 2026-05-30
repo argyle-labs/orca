@@ -1,20 +1,29 @@
-//! Native fs implementation — text/markdown only in v1. Reuses the existing
-//! doc roots registry + embedded vault that live in the `docs` crate.
+//! `files` — unified filesystem primitives + `files.*` `#[orca_tool]` surface.
+//!
+//! Consolidated from `utils::{fs,embedded,tree,fs_native,fs_tools}` and
+//! `namespace::file_roots` (slice: fs consolidation, 2026-05-29). Renamed
+//! from `fs` to `files` to free up `std::fs` collision and reflect the
+//! domain (typed file/root operations) rather than a primitive.
 
-#![allow(clippy::disallowed_types)] // tree helpers in `docs` still pass Value blobs through; v1 mirrors their shape
+pub mod atomic;
+pub mod embedded;
+pub mod markdown;
+pub mod ops;
+pub mod roots;
+pub mod tools;
+pub mod tree;
+pub mod watch;
 
-use crate::{
+use crate::embedded::file_count as embedded_file_count;
+use crate::markdown::to_llm_text;
+use crate::ops::expand_tilde;
+use crate::tools::{
     FsEntry, FsNodeKind, FsRootEntry, FsSearchHit, FsSearchMatch, FsStatOutput, FsTreeNode,
 };
+use crate::tree::{NodeType, TreeNode};
 use anyhow::{Result, anyhow};
 use contract::config::Config;
-use llm::local as local_llm;
-use namespace::file_roots as roots_helper;
 use std::path::{Path, PathBuf};
-use utils::embedded;
-use utils::fs::expand_tilde;
-use utils::markdown::to_llm_text;
-use utils::tree::{NodeType, TreeNode};
 
 const EMBEDDED_ROOT: &str = "docs";
 
@@ -38,10 +47,6 @@ fn tree_node_to_fs(n: &TreeNode) -> FsTreeNode {
     }
 }
 
-fn value_to_tree_node(v: &serde_json::Value) -> Option<TreeNode> {
-    serde_json::from_value(v.clone()).ok()
-}
-
 fn resolve_absolute(path: &str) -> Result<PathBuf> {
     let expanded = expand_tilde(path);
     let pb = PathBuf::from(expanded);
@@ -53,31 +58,29 @@ fn resolve_absolute(path: &str) -> Result<PathBuf> {
     Ok(pb)
 }
 
-/// Resolve `(root, path)` to a filesystem location. Returns `None` for the
-/// embedded vault; caller dispatches separately.
 fn resolve(
     config: &Config,
     root: Option<&str>,
     path: &str,
-) -> Result<Option<(PathBuf, roots_helper::FileRoot)>> {
+) -> Result<Option<(PathBuf, roots::FileRoot)>> {
     match root {
         Some(EMBEDDED_ROOT) => Ok(None),
         Some(name) => {
-            let roots = roots_helper::doc_roots(config);
-            let r = roots
+            let rs = roots::file_roots(config);
+            let r = rs
                 .into_iter()
                 .find(|r| r.name == name)
                 .ok_or_else(|| anyhow!("unknown root: {name}"))?;
             let dir = if path.is_empty() {
                 r.path.clone()
             } else {
-                roots_helper::resolve_within_root(&r.path, path)?
+                roots::resolve_within_root(&r.path, path)?
             };
             Ok(Some((dir, r)))
         }
         None => {
             let dir = resolve_absolute(path)?;
-            let r = roots_helper::FileRoot {
+            let r = roots::FileRoot {
                 name: String::new(),
                 path: dir.clone(),
                 ignored: Default::default(),
@@ -88,15 +91,13 @@ fn resolve(
 }
 
 pub async fn roots_list(config: &Config) -> Result<Vec<FsRootEntry>> {
-    let roots = roots_helper::doc_roots(config);
-    let mut out: Vec<FsRootEntry> = roots
+    let rs = roots::file_roots(config);
+    let mut out: Vec<FsRootEntry> = rs
         .iter()
         .map(|r| {
             let exists = r.path.exists();
             let count = if exists {
-                roots_helper::count_doc_files(&roots_helper::build_doc_tree(
-                    &r.path, &r.path, &r.ignored,
-                ))
+                roots::count_doc_files(&roots::build_doc_tree(&r.path, &r.path, &r.ignored))
             } else {
                 0
             };
@@ -112,16 +113,14 @@ pub async fn roots_list(config: &Config) -> Result<Vec<FsRootEntry>> {
         name: EMBEDDED_ROOT.to_string(),
         path: "(embedded in binary)".to_string(),
         exists: true,
-        file_count: embedded::file_count() as u32,
+        file_count: embedded_file_count() as u32,
     });
     Ok(out)
 }
 
 pub async fn list(config: &Config, root: Option<&str>, path: &str) -> Result<Vec<FsEntry>> {
     if matches!(root, Some(EMBEDDED_ROOT)) {
-        let tree_value = embedded::tree();
-        let arr = tree_value.as_array().cloned().unwrap_or_default();
-        let nodes: Vec<TreeNode> = arr.iter().filter_map(value_to_tree_node).collect();
+        let nodes = embedded::tree_typed();
         return Ok(nodes
             .into_iter()
             .map(|n| FsEntry {
@@ -165,27 +164,18 @@ pub async fn tree(
     raw: bool,
 ) -> Result<Vec<FsTreeNode>> {
     if matches!(root, Some(EMBEDDED_ROOT)) {
-        let tree_value = embedded::tree();
-        let arr = tree_value.as_array().cloned().unwrap_or_default();
-        return Ok(arr
-            .iter()
-            .filter_map(value_to_tree_node)
-            .map(|n| tree_node_to_fs(&n))
-            .collect());
+        let nodes = embedded::tree_typed();
+        return Ok(nodes.iter().map(tree_node_to_fs).collect());
     }
 
     let (dir, r) = resolve(config, root, path)?.expect("non-embedded path returned");
-    let raw_nodes = roots_helper::build_doc_tree(&dir, &r.path, &r.ignored);
+    let raw_nodes = roots::build_doc_tree(&dir, &r.path, &r.ignored);
     let nodes = if raw {
         raw_nodes
     } else {
-        roots_helper::compact_doc_tree(raw_nodes)
+        roots::compact_doc_tree(raw_nodes)
     };
-    Ok(nodes
-        .iter()
-        .filter_map(value_to_tree_node)
-        .map(|n| tree_node_to_fs(&n))
-        .collect())
+    Ok(nodes.iter().map(tree_node_to_fs).collect())
 }
 
 pub async fn read(
@@ -204,13 +194,13 @@ pub async fn read(
 
     match root {
         Some(name) => {
-            let roots = roots_helper::doc_roots(config);
-            let r = roots
+            let rs = roots::file_roots(config);
+            let r = rs
                 .iter()
                 .find(|r| r.name == name)
                 .ok_or_else(|| anyhow!("unknown root: {name}"))?;
-            let full = roots_helper::resolve_doc_file(&r.path, path)
-                .or_else(|| roots_helper::resolve_within_root(&r.path, path).ok())
+            let full = roots::resolve_doc_file(&r.path, path)
+                .or_else(|| roots::resolve_within_root(&r.path, path).ok())
                 .filter(|p: &PathBuf| p.is_file())
                 .ok_or_else(|| anyhow!("not found: {name}/{path}"))?;
             Ok(apply(std::fs::read_to_string(full)?))
@@ -222,29 +212,25 @@ pub async fn read(
     }
 }
 
-pub async fn search(
-    config: &Config,
-    query: &str,
-    filter: &str,
-    llm_format: bool,
-) -> Result<(Vec<FsSearchHit>, Option<String>)> {
-    let all_roots = roots_helper::doc_roots(config);
-    let roots: Vec<&roots_helper::FileRoot> = all_roots
+/// Case-insensitive line search across one or all registered roots. Hits-only —
+/// LLM summary surface dropped 2026-05-29 (callers can format hits themselves).
+pub async fn search(config: &Config, query: &str, filter: &str) -> Result<Vec<FsSearchHit>> {
+    let all_roots = roots::file_roots(config);
+    let rs: Vec<&roots::FileRoot> = all_roots
         .iter()
         .filter(|r| filter == "all" || r.name == filter)
         .collect();
     let query_lower = query.to_lowercase();
     let mut hits: Vec<FsSearchHit> = Vec::new();
 
-    for r in roots {
+    for r in rs {
         if !r.path.exists() {
             continue;
         }
-        let files = roots_helper::collect_all_doc_files(&roots_helper::build_doc_tree(
-            &r.path, &r.path, &r.ignored,
-        ));
+        let files =
+            roots::collect_all_doc_files(&roots::build_doc_tree(&r.path, &r.path, &r.ignored));
         for file in files {
-            let rel = file["path"].as_str().unwrap_or("").to_string();
+            let rel = file.path.clone();
             let full = r.path.join(&rel);
             let Ok(content) = std::fs::read_to_string(&full) else {
                 continue;
@@ -256,11 +242,7 @@ pub async fn search(
                 .take(5)
                 .map(|(i, l)| FsSearchMatch {
                     line: (i + 1) as u32,
-                    text: if llm_format {
-                        to_llm_text(l.trim()).trim_end_matches('\n').to_string()
-                    } else {
-                        l.trim().to_string()
-                    },
+                    text: l.trim().to_string(),
                 })
                 .collect();
             if !matches.is_empty() {
@@ -280,11 +262,7 @@ pub async fn search(
                 .enumerate()
                 .map(|(i, l)| FsSearchMatch {
                     line: (i + 1) as u32,
-                    text: if llm_format {
-                        to_llm_text(l.trim()).trim_end_matches('\n').to_string()
-                    } else {
-                        l
-                    },
+                    text: l,
                 })
                 .collect();
             hits.push(FsSearchHit {
@@ -295,27 +273,7 @@ pub async fn search(
         }
     }
 
-    let summary = if !hits.is_empty()
-        && let Some(llm) = local_llm::discover_local_llm().await
-    {
-        let raw = hits
-            .iter()
-            .map(|h| {
-                let lines: Vec<String> = h
-                    .matches
-                    .iter()
-                    .map(|m| format!("L{}: {}", m.line, m.text))
-                    .collect();
-                format!("{}/{}\n{}", h.root, h.path, lines.join("\n"))
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        local_llm::present_text_results(&llm, query, &raw, 8000).await
-    } else {
-        None
-    };
-
-    Ok((hits, summary))
+    Ok(hits)
 }
 
 pub async fn stat(config: &Config, root: Option<&str>, path: &str) -> Result<FsStatOutput> {

@@ -188,14 +188,14 @@ mod tests {
             "2026-01-01T00:00:00Z",
         )
         .unwrap();
-        let bundle = replicate::export_all(&src).unwrap();
+        let bundle = crate::replicate::export_all(&src).unwrap();
         assert!(
             bundle.contains_key("users"),
             "users entity must be registered"
         );
 
         let dst = test_conn();
-        let merged = replicate::merge_bundle(&dst, bundle).unwrap();
+        let merged = crate::replicate::merge_bundle(&dst, bundle).unwrap();
         assert_eq!(merged, 1);
         let got = find_auth_by_username(&dst, "scott").unwrap().unwrap();
         assert_eq!(got.id, "u1");
@@ -204,7 +204,8 @@ mod tests {
 
         // A newer write (bumped updated_at via password change) propagates.
         set_password_hash(&src, "u1", "hash-v2", "2026-02-01T00:00:00Z").unwrap();
-        let n = replicate::merge_bundle(&dst, replicate::export_all(&src).unwrap()).unwrap();
+        let n = crate::replicate::merge_bundle(&dst, crate::replicate::export_all(&src).unwrap())
+            .unwrap();
         assert_eq!(n, 1);
         assert_eq!(
             find_auth_by_username(&dst, "scott")
@@ -215,7 +216,8 @@ mod tests {
         );
 
         // Re-merging the same (now stale) bundle is a no-op — LWW guards it.
-        let n2 = replicate::merge_bundle(&dst, replicate::export_all(&src).unwrap()).unwrap();
+        let n2 = crate::replicate::merge_bundle(&dst, crate::replicate::export_all(&src).unwrap())
+            .unwrap();
         assert_eq!(n2, 0);
     }
 

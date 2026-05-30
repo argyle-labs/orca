@@ -25,6 +25,6 @@ async fn list_commands(
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ListCommandsOutput> {
     Ok(ListCommandsOutput {
-        commands: agents::commands::list_embedded_commands(),
+        commands: crate::commands::list_embedded_commands(),
     })
 }

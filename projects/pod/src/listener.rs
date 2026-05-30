@@ -501,7 +501,7 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<PodExecResult> {
 /// fp before merging.
 fn handle_replicate_export() -> Result<pki::SignedEnvelope> {
     let conn = db::open_default()?;
-    let entities = replicate::export_all(&conn)?;
+    let entities = db::replicate::export_all(&conn)?;
     let body = ReplicateBundle {
         peer_id: format!("peer.{}", system::host_identity::machine_id_short()),
         issued_at: chrono::Utc::now().timestamp(),

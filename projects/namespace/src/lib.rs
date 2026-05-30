@@ -17,9 +17,7 @@ use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-pub mod doc_commands;
 pub mod doc_registry;
-pub mod file_roots;
 mod manager;
 mod native;
 

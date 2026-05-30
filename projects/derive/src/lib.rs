@@ -1,3 +1,9 @@
+//! `derive` — proc-macro crate. Paired with the `dispatch` runtime crate
+//! (macro+runtime split forced by Rust's proc-macro crate restrictions, like
+//! `serde-derive`+`serde`). Emits inventory entries at compile time that
+//! `dispatch` walks at startup. Hosts `#[orca_tool]` and `#[derive(Replicated)]`.
+//! NOT mesh-dispatch — peer calls live in `pod`.
+//!
 //! `#[orca_tool]` proc-macro — proof-of-shape entry point.
 //!
 //! Annotate an async function with the standard tool signature and the macro
@@ -227,7 +233,7 @@ fn expand_to_tokens(attr: ToolAttr, item: ItemFn) -> TokenStream2 {
 ///
 /// Generates `export`/`merge` fns over the named struct fields (each field maps
 /// 1:1 to a column of `table`, in declaration order) and submits a
-/// `::replicate::ReplicatedRegistration` into the inventory slice the pod mesh
+/// `::db::replicate::ReplicatedRegistration` into the inventory slice the pod mesh
 /// engine walks. Merge is last-write-wins on the `lww` column, keyed by `pk`.
 #[cfg(not(test))]
 #[proc_macro_derive(Replicated, attributes(replicate))]
@@ -427,7 +433,7 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
             }
 
             ::inventory::submit! {
-                ::replicate::ReplicatedRegistration {
+                ::db::replicate::ReplicatedRegistration {
                     name: #table,
                     export: #ty::__replicate_export,
                     merge: #ty::__replicate_merge,

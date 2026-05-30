@@ -57,3 +57,7 @@ pub mod update_cmd;
 // liveness probe (system.health). Absorbed from the dissolved `fleet` crate.
 pub mod infra;
 pub mod meta;
+
+// Moved 2026-05-29 from dissolved `platform` crate.
+pub mod engine;
+pub mod sweep;

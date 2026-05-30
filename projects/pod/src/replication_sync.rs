@@ -106,7 +106,7 @@ fn merge_bundle(env: &pki::SignedEnvelope, pinned_fp: &str) -> Result<usize> {
     );
 
     let conn = db::open_default()?;
-    replicate::merge_bundle(&conn, bundle.entities)
+    db::replicate::merge_bundle(&conn, bundle.entities)
 }
 
 #[cfg(test)]

@@ -364,7 +364,7 @@ pub fn require_sha256_nonempty(sha256: &str) -> Result<()> {
 const CHECK_CACHE_TTL_SECS: u64 = 14 * 24 * 3600;
 
 fn check_cache_dir() -> Option<PathBuf> {
-    Some(utils::fs::orca_home()?.join("cache").join("sha256"))
+    Some(files::ops::orca_home()?.join("cache").join("sha256"))
 }
 
 /// Drop any cached sha256 files older than `CHECK_CACHE_TTL_SECS`. Best-effort

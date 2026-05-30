@@ -12,10 +12,10 @@
 //! permissions, not network namespace.
 
 use anyhow::{Context, Result};
+use files::ops::chmod_dir_owner_only;
 use rand::Rng;
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use utils::fs::chmod_dir_owner_only;
 
 #[cfg(unix)]
 use std::io::Write;

@@ -3,7 +3,7 @@ use tempfile::tempdir;
 
 use ::llm::tools::bash::BashPermissions;
 use agents::embedded::{list_embedded_agents, load_agent_prompt};
-use utils::fs::ops;
+use files::ops;
 use utils::search;
 
 // These tests verify the tool implementations work correctly.

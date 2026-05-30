@@ -5,6 +5,7 @@
 pub mod agent_backend;
 pub mod agents;
 pub mod commands;
+pub mod commands_tool;
 pub mod embedded;
 
 pub mod resolve;

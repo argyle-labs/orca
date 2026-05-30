@@ -23,6 +23,7 @@ serde_json  = { workspace = true }
 inventory   = { workspace = true }
 
 utils  = { path = "../../utils" }
+files    = { path = "../../files" }
 db     = { path = "../../db" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }

@@ -1,30 +1,51 @@
 [package]
-name = "fs"
+name = "files"
 version.workspace = true
 edition.workspace = true
 
 [lib]
-name = "fs"
+name = "files"
 path = "src/lib.rs"
 
 [features]
 cli = ["dep:clap"]
+
 [dependencies]
 dispatch = { path = "../dispatch" }
 contract = { path = "../contract", default-features = false }
 derive    = { path = "../derive" }
+db        = { path = "../db" }
+utils     = { path = "../utils" }
+
 schemars      = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
 inventory     = { workspace = true }
 
-utils = { path = "../utils" }
-llm = { path = "../plugins/llm" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+thiserror   = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 clap        = { workspace = true,  optional = true }
+
+# Embedded docs
+rust-embed  = { workspace = true }
+
+# Tree schemas
+utoipa      = { workspace = true }
+
+# Markdown stripping
+regex       = { workspace = true }
+
+# Atomic writes
+tempfile    = { workspace = true }
+
+# Filesystem watch
+notify      = "8"
+
+# Glob ignore patterns
+glob        = { workspace = true }
 
 [lints]
 workspace = true

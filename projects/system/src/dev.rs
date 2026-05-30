@@ -5,10 +5,10 @@
 //! `server/src/commands/update.rs`; everything dev-runtime-related lives here.
 
 use anyhow::{Context, Result};
+use files::ops::chmod_dir_owner_only;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Command;
-use utils::fs::chmod_dir_owner_only;
 
 use crate::update::{
     current_binary_path, require_sha256_nonempty, resolve_github_token, verify_sha256,
@@ -17,7 +17,7 @@ use crate::update::{
 // ── Dev source (local serve) ──────────────────────────────────────────────────
 
 fn dev_source_path() -> Option<PathBuf> {
-    Some(utils::fs::orca_home()?.join("dev-source"))
+    Some(files::ops::orca_home()?.join("dev-source"))
 }
 
 pub fn read_dev_source() -> Option<String> {
@@ -142,11 +142,11 @@ pub async fn apply_update_dev(source_url: &str) -> Result<()> {
 const DEV_REPO_SUBDIR: &str = "dev/orca";
 
 fn dev_repo_path() -> Option<PathBuf> {
-    Some(utils::fs::orca_home()?.join(DEV_REPO_SUBDIR))
+    Some(files::ops::orca_home()?.join(DEV_REPO_SUBDIR))
 }
 
 fn dev_pid_path() -> Option<PathBuf> {
-    Some(utils::fs::orca_home()?.join("dev.pid"))
+    Some(files::ops::orca_home()?.join("dev.pid"))
 }
 
 /// Find `cargo` for `dev_enable` — daemon-inherited PATH typically lacks

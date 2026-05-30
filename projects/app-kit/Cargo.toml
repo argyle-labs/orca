@@ -52,7 +52,6 @@ path = "bin/uniffi-bindgen.rs"
 # direct UniFFI call (see project_mobile_as_standalone_orca.md).
 auth     = { path = "../auth" }
 system   = { path = "../system" }
-platform = { path = "../platform" }
 agents   = { path = "../plugins/agents" }
 plugins  = { path = "../plugins/runtime" }
 mcp      = { path = "../plugins/mcp" }

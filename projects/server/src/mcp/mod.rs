@@ -44,7 +44,7 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
 /// refuse with the recipient's normal zero-trust handling. No `first_admin`
 /// fallback: local DB access does not imply admin.
 fn resolve_host_operator() -> Option<contract::CallerIdentity> {
-    let path = utils::fs::orca_home()?.join("session");
+    let path = files::ops::orca_home()?.join("session");
     let sid = std::fs::read_to_string(&path).ok()?;
     let sid = sid.trim();
     if sid.is_empty() {

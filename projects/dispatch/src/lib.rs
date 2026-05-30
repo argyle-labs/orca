@@ -1,8 +1,15 @@
-//! `orca-dispatch` — runtime for OrcaTool.
+//! `dispatch` — runtime for OrcaTool. Paired with the `derive` proc-macro
+//! crate (which emits inventory entries at compile time) — they form the
+//! macro+runtime split (like `serde-derive`+`serde`) forced by Rust's
+//! proc-macro crate restrictions.
+//!
+//! **NOT mesh-dispatch.** Sending a command to another peer over the pod mesh
+//! lives in `pod` (caller_token, remote_exec, `RemoteExec` trait). This crate
+//! only routes tool calls within a single process.
 //!
 //! The contract (metadata traits, error, JsonAny, protocol types,
-//! ToolCtx/OrcaTool/RemoteExec trait anchors) lives in `orca-contract`. The
-//! proc-macro that emits per-tool scaffolding is `orca-macro`. This crate
+//! ToolCtx/OrcaTool/RemoteExec trait anchors) lives in `contract`. The
+//! proc-macro that emits per-tool scaffolding is `derive`. This crate
 //! provides:
 //!
 //! - The `ErasedTool` object-safe wrapper (`erased`)

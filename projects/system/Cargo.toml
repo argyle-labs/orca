@@ -26,6 +26,7 @@ serde_json     = { workspace = true }
 inventory      = { workspace = true }
 
 utils = { path = "../utils" }
+files = { path = "../files" }
 orca-sdk = { path = "../sdk/rust" }
 agents = { path = "../plugins/agents", default-features = false }
 db = { package = "db", path = "../db" }

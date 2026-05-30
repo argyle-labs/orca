@@ -114,6 +114,51 @@ pub fn file_count() -> usize {
     list().len()
 }
 
+/// Typed mirror of [`tree`] returning `crate::tree::TreeNode` directly.
+pub fn tree_typed() -> Vec<crate::tree::TreeNode> {
+    use crate::tree::{NodeType, TreeNode};
+    use std::collections::BTreeMap;
+
+    let mut top_files: Vec<TreeNode> = Vec::new();
+    let mut dirs: BTreeMap<String, Vec<TreeNode>> = BTreeMap::new();
+
+    for path in list() {
+        match path.splitn(2, '/').collect::<Vec<_>>().as_slice() {
+            [dir, _] if path.contains('/') => {
+                let dir = dir.to_string();
+                dirs.entry(dir).or_default().push(TreeNode {
+                    name: doc_title(&path),
+                    path: path.clone(),
+                    node_type: NodeType::File,
+                    order: None,
+                    children: None,
+                });
+            }
+            _ => {
+                top_files.push(TreeNode {
+                    name: doc_title(&path),
+                    path: path.clone(),
+                    node_type: NodeType::File,
+                    order: None,
+                    children: None,
+                });
+            }
+        }
+    }
+
+    let mut nodes = top_files;
+    for (dir_name, children) in dirs {
+        nodes.push(TreeNode {
+            name: dir_name.clone(),
+            path: dir_name,
+            node_type: NodeType::Dir,
+            order: None,
+            children: Some(children),
+        });
+    }
+    nodes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

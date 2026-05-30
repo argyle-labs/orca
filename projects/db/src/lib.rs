@@ -8,8 +8,10 @@
 //! the bottom of this file, and a migration entry in `MIGRATIONS` if the table was added
 //! to an already-deployed database.
 
+pub mod admin;
 pub mod api_tokens;
 pub mod config_store;
+pub mod config_tools;
 pub mod docker_runtimes;
 pub mod docs;
 pub mod feature_flags;
@@ -27,6 +29,11 @@ pub mod plugin_tools;
 pub mod plugin_types;
 pub mod plugins;
 pub mod pod;
+pub mod replicate;
+
+// Self-alias so proc-macro emissions of `::db::replicate::ReplicatedRegistration`
+// also resolve when the derive is used *inside* this crate (e.g. `users.rs`).
+extern crate self as db;
 pub mod ports;
 pub mod profile_creds;
 pub mod profiles;

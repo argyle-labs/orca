@@ -361,7 +361,7 @@ async fn auth_login(args: LoginArgs, _ctx: &contract::ToolCtx) -> anyhow::Result
     }
     crate::throttle::record_success(ip, &args.username);
 
-    let session_path = utils::fs::orca_home()
+    let session_path = files::ops::orca_home()
         .map(|d| d.join("session"))
         .ok_or_else(|| anyhow::anyhow!("no ORCA_HOME/HOME — cannot persist session"))?;
 
@@ -383,7 +383,7 @@ async fn auth_login(args: LoginArgs, _ctx: &contract::ToolCtx) -> anyhow::Result
 
     if let Some(parent) = session_path.parent() {
         std::fs::create_dir_all(parent)?;
-        utils::fs::chmod_dir_owner_only(parent).ok();
+        files::ops::chmod_dir_owner_only(parent).ok();
     }
     std::fs::write(&session_path, &sid)?;
     #[cfg(unix)]
@@ -415,7 +415,7 @@ pub struct LogoutOutput {
 /// active session to clear.
 #[orca_tool(domain = "auth", verb = "logout")]
 async fn auth_logout(_args: LogoutArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<LogoutOutput> {
-    let session_path = utils::fs::orca_home().map(|d| d.join("session"));
+    let session_path = files::ops::orca_home().map(|d| d.join("session"));
     let mut revoked = false;
     if let Some(ref path) = session_path
         && let Ok(sid) = std::fs::read_to_string(path)

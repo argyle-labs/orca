@@ -15,7 +15,6 @@ cli = [
 dispatch    = { path = "../../dispatch" }
 contract   = { path = "../../contract", default-features = false }
 derive      = { path = "../../derive" }
-platform        = { path = "../../platform", default-features = false }
 schemars        = { workspace = true }
 serde           = { workspace = true }
 serde_json      = { workspace = true }

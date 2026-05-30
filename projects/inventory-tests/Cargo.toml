@@ -22,11 +22,11 @@ inventory     = { workspace = true }
 agents        = { path = "../plugins/agents" }
 auth          = { path = "../auth" }
 mcp           = { path = "../plugins/mcp" }
-platform      = { path = "../platform" }
 plugins       = { path = "../plugins/runtime" }
 pod           = { path = "../pod" }
 system        = { path = "../system" }
 docker        = { path = "../plugins/docker" }
+files         = { path = "../files" }
 homeassistant = { path = "../plugins/homeassistant" }
 proxmox       = { path = "../plugins/proxmox" }
 

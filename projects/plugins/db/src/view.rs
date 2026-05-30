@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use utils::fs::expand_tilde;
+use files::ops::expand_tilde;
 
 use mysql_async::Pool;
 use mysql_async::prelude::Queryable;
