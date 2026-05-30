@@ -2,7 +2,8 @@
 //! real `sessions` row insert, real session file on disk. Pins the contract
 //! [[project-orca-login-local-auth]] depends on.
 
-use auth::auth::{LoginArgs, LogoutArgs, auth_login, auth_logout};
+use auth::auth::{AuthLogin, AuthLogout, LoginArgs, LogoutArgs};
+use contract::OrcaTool;
 use contract::ToolCtx;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -27,12 +28,15 @@ fn make_ctx() -> ToolCtx {
 
 fn fixture_home() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    // SAFETY: tests run sequentially via #[serial] equivalent — they each
-    // create their own tempdir and re-set ORCA_HOME; cargo test serializes
-    // these by virtue of being in one binary, single-threaded for this file.
+    let db_path = dir.path().join("orca.db");
+    // SAFETY: env mutation in tests is single-threaded by default in this
+    // integration binary (`flavor = "current_thread"` + cargo's
+    // per-binary test scheduling), and each test re-pins these to its own
+    // fresh tempdir before doing any work.
     unsafe {
         std::env::set_var("ORCA_HOME", dir.path());
         std::env::set_var("HOME", dir.path());
+        std::env::set_var("ORCA_DB_PATH", &db_path);
     }
     dir
 }
@@ -52,13 +56,13 @@ async fn invoke_login(username: &str, password: &str) -> anyhow::Result<Value> {
         password: password.into(),
     };
     let ctx = make_ctx();
-    let out = auth_login(args, &ctx).await?;
+    let out = AuthLogin::run(args, &ctx).await?;
     Ok(serde_json::to_value(&out)?)
 }
 
 async fn invoke_logout() -> anyhow::Result<Value> {
     let ctx = make_ctx();
-    let out = auth_logout(LogoutArgs {}, &ctx).await?;
+    let out = AuthLogout::run(LogoutArgs {}, &ctx).await?;
     Ok(serde_json::to_value(&out)?)
 }
 
