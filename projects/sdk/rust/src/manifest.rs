@@ -85,6 +85,20 @@ pub struct PluginSection {
     /// Minimum orca core version this plugin requires. Sent in `orca/hello`
     /// as `core_min_required`.
     pub min_orca_version: String,
+    /// Namespace this plugin owns. Tool names, db rows, specs, and config all
+    /// scope under it. Defaults to `id` when omitted. Same constraints as `id`
+    /// (non-empty, no whitespace, no path separators). Plugins targeting an
+    /// existing namespace (e.g. multiple HomeAssistant instances under `home`)
+    /// declare it explicitly.
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+impl PluginSection {
+    /// Effective namespace — explicit `namespace` field, falling back to `id`.
+    pub fn effective_namespace(&self) -> &str {
+        self.namespace.as_deref().unwrap_or(&self.id)
+    }
 }
 
 /// `[runtime]` — how the host spawns and supervises the plugin process.
@@ -199,6 +213,21 @@ impl Manifest {
         }
         check_semver(&self.plugin.version, "plugin.version")?;
         check_semver(&self.plugin.min_orca_version, "plugin.min_orca_version")?;
+
+        if let Some(ns) = &self.plugin.namespace {
+            if ns.trim().is_empty() {
+                bail!("plugin.namespace must not be empty when set");
+            }
+            if ns
+                .chars()
+                .any(|c| c.is_whitespace() || c == '/' || c == '\\')
+            {
+                bail!(
+                    "plugin.namespace '{}' contains invalid characters (whitespace or path separators)",
+                    ns
+                );
+            }
+        }
 
         match (&self.runtime.binary, &self.runtime.image) {
             (Some(_), Some(_)) => bail!("runtime.binary and runtime.image are mutually exclusive"),
@@ -420,6 +449,52 @@ binary = "./b"
         let m = parse_str(s).unwrap();
         assert!(!m.surfaces.mcp);
         assert!(!m.surfaces.federation);
+    }
+
+    #[test]
+    fn effective_namespace_defaults_to_id() {
+        let m = parse_str(CANONICAL).unwrap();
+        assert_eq!(m.plugin.effective_namespace(), "alpha");
+        assert!(m.plugin.namespace.is_none());
+    }
+
+    #[test]
+    fn explicit_namespace_overrides_id() {
+        let s = r#"
+[plugin]
+id = "sonarr-instance-a"
+version = "0.1.0"
+min_orca_version = "0.1.0"
+namespace = "arr"
+
+[runtime]
+binary = "./b"
+"#;
+        let m = parse_str(s).unwrap();
+        assert_eq!(m.plugin.effective_namespace(), "arr");
+    }
+
+    #[test]
+    fn rejects_bad_namespace() {
+        for bad in &["''", "'has space'", "'has/slash'", "'has\\back'"] {
+            let s = format!(
+                r#"
+[plugin]
+id = "x"
+version = "0.1.0"
+min_orca_version = "0.1.0"
+namespace = {bad}
+
+[runtime]
+binary = "./b"
+"#
+            );
+            let err = parse_str(&s).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("plugin.namespace"),
+                "expected plugin.namespace error for {bad}"
+            );
+        }
     }
 
     #[test]
