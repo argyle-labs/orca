@@ -33,7 +33,7 @@ pub fn list(conn: &Connection) -> Result<Vec<SchemaDbRow>> {
             database: row.get(5)?,
             container: row.get(6)?,
             domains_file: row.get(7)?,
-            enabled: row.get::<_, i32>(8)? != 0,
+            enabled: row.get(8)?,
             driver: row.get(9)?,
         })
     })?;
@@ -64,7 +64,7 @@ pub fn upsert(conn: &Connection, db: &SchemaDbRow) -> Result<()> {
             db.database,
             db.container,
             db.domains_file,
-            db.enabled as i32,
+            db.enabled,
             db.driver,
         ],
     )?;

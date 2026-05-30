@@ -10,7 +10,7 @@ pub struct PluginRow {
     pub id: String,
     pub manifest_path: String,
     pub tier: String,
-    /// UI mode this plugin belongs to: "orca" (default) or any custom mode string (e.g. "rebuy").
+    /// UI mode this plugin belongs to: "orca" (default) or any custom mode string.
     /// Plugins with the same mode group together in the sidebar.
     pub mode: String,
     pub mcp_command: Option<String>,

@@ -47,8 +47,8 @@ pub fn get(conn: &Connection, name: &str) -> Result<Option<EndpointRow>> {
                 base_url: row.get(1)?,
                 token_id: row.get(2)?,
                 token_secret: row.get(3)?,
-                insecure: row.get::<_, i32>(4)? != 0,
-                enabled: row.get::<_, i32>(5)? != 0,
+                insecure: row.get(4)?,
+                enabled: row.get(5)?,
             })
         },
     );
@@ -74,8 +74,8 @@ pub fn upsert(conn: &Connection, ep: &EndpointRow) -> Result<()> {
             ep.base_url,
             ep.token_id,
             ep.token_secret,
-            ep.insecure as i32,
-            ep.enabled as i32,
+            ep.insecure,
+            ep.enabled,
         ],
     )?;
     Ok(())

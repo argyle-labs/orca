@@ -24,7 +24,7 @@ pub fn list(conn: &Connection) -> Result<Vec<EndpointRow>> {
             name: row.get(0)?,
             base_url: row.get(1)?,
             token: row.get(2)?,
-            enabled: row.get::<_, i32>(3)? != 0,
+            enabled: row.get(3)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -32,7 +32,8 @@ pub fn list(conn: &Connection) -> Result<Vec<EndpointRow>> {
 }
 
 pub fn get(conn: &Connection, name: &str) -> Result<Option<EndpointRow>> {
-    let result = conn.query_row(
+    use rusqlite::OptionalExtension;
+    conn.query_row(
         "SELECT name, base_url, token, enabled
          FROM homeassistant_endpoints WHERE name = ?1",
         rusqlite::params![name],
@@ -41,15 +42,12 @@ pub fn get(conn: &Connection, name: &str) -> Result<Option<EndpointRow>> {
                 name: row.get(0)?,
                 base_url: row.get(1)?,
                 token: row.get(2)?,
-                enabled: row.get::<_, i32>(3)? != 0,
+                enabled: row.get(3)?,
             })
         },
-    );
-    match result {
-        Ok(row) => Ok(Some(row)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.into()),
-    }
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 pub fn upsert(conn: &Connection, ep: &EndpointRow) -> Result<()> {
@@ -60,7 +58,7 @@ pub fn upsert(conn: &Connection, ep: &EndpointRow) -> Result<()> {
              base_url = excluded.base_url,
              token    = excluded.token,
              enabled  = excluded.enabled",
-        rusqlite::params![ep.name, ep.base_url, ep.token, ep.enabled as i32],
+        rusqlite::params![ep.name, ep.base_url, ep.token, ep.enabled],
     )?;
     Ok(())
 }

@@ -43,7 +43,7 @@ pub fn list(conn: &Connection) -> Result<Vec<RuntimeRow>> {
             socket_path: row.get(1)?,
             host: row.get(2)?,
             url: row.get(3)?,
-            enabled: row.get::<_, i32>(4)? != 0,
+            enabled: row.get(4)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -84,7 +84,7 @@ pub fn upsert(conn: &Connection, rt: &RuntimeRow) -> Result<()> {
              host        = excluded.host,
              url         = excluded.url,
              enabled     = excluded.enabled",
-        rusqlite::params![rt.name, rt.socket_path, rt.host, rt.url, rt.enabled as i32],
+        rusqlite::params![rt.name, rt.socket_path, rt.host, rt.url, rt.enabled],
     )?;
     Ok(())
 }

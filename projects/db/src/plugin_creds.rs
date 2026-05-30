@@ -150,10 +150,10 @@ mod tests {
     #[test]
     fn set_list_delete() {
         let conn = test_conn();
-        set(&conn, "rebuy", "API_KEY", "secret-val").unwrap();
-        set(&conn, "rebuy", "OTHER", "other-val").unwrap();
+        set(&conn, "acme", "API_KEY", "secret-val").unwrap();
+        set(&conn, "acme", "OTHER", "other-val").unwrap();
 
-        let creds = list(&conn, "rebuy").unwrap();
+        let creds = list(&conn, "acme").unwrap();
         assert_eq!(creds.len(), 2);
         assert!(
             creds
@@ -162,8 +162,8 @@ mod tests {
         );
 
         // Upsert resets synced_at
-        set(&conn, "rebuy", "API_KEY", "new-val").unwrap();
-        let creds2 = list(&conn, "rebuy").unwrap();
+        set(&conn, "acme", "API_KEY", "new-val").unwrap();
+        let creds2 = list(&conn, "acme").unwrap();
         let api = creds2.iter().find(|c| c.key == "API_KEY").unwrap();
         assert_eq!(api.value, "new-val");
         assert!(
@@ -171,9 +171,9 @@ mod tests {
             "synced_at should be reset on update"
         );
 
-        assert!(delete(&conn, "rebuy", "API_KEY").unwrap());
-        assert!(!delete(&conn, "rebuy", "API_KEY").unwrap());
-        assert_eq!(list(&conn, "rebuy").unwrap().len(), 1);
+        assert!(delete(&conn, "acme", "API_KEY").unwrap());
+        assert!(!delete(&conn, "acme", "API_KEY").unwrap());
+        assert_eq!(list(&conn, "acme").unwrap().len(), 1);
     }
 
     #[test]

@@ -25,7 +25,7 @@ pub fn list(conn: &Connection, mcp_name: &str) -> Result<Vec<MappingRow>> {
             external_tool: row.get(2)?,
             match_type: row.get(3)?,
             confidence: row.get(4)?,
-            enabled: row.get::<_, i32>(5)? != 0,
+            enabled: row.get(5)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -44,7 +44,7 @@ pub fn all(conn: &Connection) -> Result<Vec<MappingRow>> {
             external_tool: row.get(2)?,
             match_type: row.get(3)?,
             confidence: row.get(4)?,
-            enabled: row.get::<_, i32>(5)? != 0,
+            enabled: row.get(5)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -52,7 +52,8 @@ pub fn all(conn: &Connection) -> Result<Vec<MappingRow>> {
 }
 
 pub fn lookup(conn: &Connection, orca_tool: &str) -> Result<Option<MappingRow>> {
-    let result = conn.query_row(
+    use rusqlite::OptionalExtension;
+    conn.query_row(
         "SELECT orca_tool, mcp_name, external_tool, match_type, confidence, enabled
          FROM mcp_tool_mappings WHERE orca_tool = ?1 AND enabled = 1",
         rusqlite::params![orca_tool],
@@ -63,15 +64,12 @@ pub fn lookup(conn: &Connection, orca_tool: &str) -> Result<Option<MappingRow>> 
                 external_tool: row.get(2)?,
                 match_type: row.get(3)?,
                 confidence: row.get(4)?,
-                enabled: row.get::<_, i32>(5)? != 0,
+                enabled: row.get(5)?,
             })
         },
-    );
-    match result {
-        Ok(row) => Ok(Some(row)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.into()),
-    }
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 pub fn upsert(conn: &Connection, row: &MappingRow) -> Result<()> {
@@ -86,7 +84,7 @@ pub fn upsert(conn: &Connection, row: &MappingRow) -> Result<()> {
              enabled       = excluded.enabled",
         rusqlite::params![
             row.orca_tool, row.mcp_name, row.external_tool,
-            row.match_type, row.confidence, row.enabled as i32
+            row.match_type, row.confidence, row.enabled
         ],
     )?;
     Ok(())
@@ -103,7 +101,7 @@ pub fn remove(conn: &Connection, orca_tool: &str) -> Result<bool> {
 pub fn set_enabled(conn: &Connection, orca_tool: &str, enabled: bool) -> Result<bool> {
     let n = conn.execute(
         "UPDATE mcp_tool_mappings SET enabled = ?1 WHERE orca_tool = ?2",
-        rusqlite::params![enabled as i32, orca_tool],
+        rusqlite::params![enabled, orca_tool],
     )?;
     Ok(n > 0)
 }
