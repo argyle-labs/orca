@@ -22,6 +22,7 @@
 //! deliberately exposes only the typed flavor clients and keeps the
 //! transport primitives internal.
 
+#[allow(dead_code)] // consumed by future `arr.*` orca tools; see module docs
 pub(crate) mod auth;
 
 macro_rules! flavor {
