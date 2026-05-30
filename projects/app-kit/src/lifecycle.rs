@@ -152,15 +152,52 @@ impl OrcaAppKit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn cfg() -> AppKitConfig {
+        AppKitConfig {
+            app_dir: std::path::PathBuf::from("/tmp/orca-appkit-test"),
+        }
+    }
 
     #[test]
-    fn version_returns_crate_version() {
-        // Don't call init() — it touches the real config. Just exercise the
-        // pure method.
-        let v = env!("CARGO_PKG_VERSION");
-        assert!(!v.is_empty());
-        // Smoke-test the struct shape compiles + the Arc fields are wired.
-        _ = std::mem::size_of::<OrcaAppKit>();
-        _ = std::mem::size_of::<AppKitConfig>();
+    fn init_constructs_handle_and_runs_install_services_closure() {
+        let called = AtomicBool::new(false);
+        let kit = OrcaAppKit::init(cfg(), |_ctx| {
+            called.store(true, Ordering::SeqCst);
+        })
+        .expect("init succeeds in a normal test env");
+        assert!(called.load(Ordering::SeqCst));
+        // Arc fields are populated.
+        assert!(Arc::strong_count(&kit.config) >= 1);
+        assert!(Arc::strong_count(&kit.ctx) >= 1);
+        assert!(Arc::strong_count(&kit.runtime) >= 1);
+    }
+
+    #[test]
+    fn version_matches_crate_pkg_version() {
+        let kit = OrcaAppKit::init(cfg(), |_| {}).unwrap();
+        assert_eq!(kit.version(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn shutdown_is_idempotent_no_op() {
+        let kit = OrcaAppKit::init(cfg(), |_| {}).unwrap();
+        kit.shutdown();
+        kit.shutdown();
+    }
+
+    #[test]
+    fn runtime_executes_async_work() {
+        let kit = OrcaAppKit::init(cfg(), |_| {}).unwrap();
+        let n: u32 = kit.runtime.block_on(async { 1 + 2 });
+        assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn app_kit_config_is_clone() {
+        let c = cfg();
+        let d = c.clone();
+        assert_eq!(c.app_dir, d.app_dir);
     }
 }

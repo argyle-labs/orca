@@ -34,6 +34,7 @@ regress     = "0.10"
 [dev-dependencies]
 tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
+rustls   = { workspace = true }
 
 [build-dependencies]
 openapi = { path = "../openapi" }

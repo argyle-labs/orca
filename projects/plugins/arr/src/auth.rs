@@ -177,6 +177,12 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    fn install_crypto() {
+        // reqwest is built against rustls-no-provider; tests must install one
+        // before constructing any client. Idempotent across tests.
+        _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     #[test]
     fn zeroize_string_wipes_bytes_and_clears_len() {
         let mut s = String::from("secret");
@@ -216,6 +222,7 @@ mod tests {
 
     #[test]
     fn reqwest_client_with_api_key_builds_for_ascii_key() {
+        install_crypto();
         let k = ApiKey::new("abc-123".into());
         assert!(reqwest_client_with_api_key(&k).is_ok());
     }
@@ -230,13 +237,18 @@ mod tests {
 
     #[tokio::test]
     async fn login_with_password_invalid_base_url_errors() {
+        install_crypto();
         let creds = Credentials::new("u".into(), "p".into());
-        let err = login_with_password("not a url", &creds).await.unwrap_err();
+        let err = login_with_password("not a url", &creds)
+            .await
+            .err()
+            .unwrap();
         assert!(err.to_string().contains("invalid base_url"));
     }
 
     #[tokio::test]
     async fn login_with_password_succeeds_on_2xx() {
+        install_crypto();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/login"))
@@ -252,6 +264,7 @@ mod tests {
 
     #[tokio::test]
     async fn login_with_password_succeeds_on_redirect() {
+        install_crypto();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/login"))
@@ -265,6 +278,7 @@ mod tests {
 
     #[tokio::test]
     async fn login_with_password_bails_on_4xx() {
+        install_crypto();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/login"))
@@ -273,7 +287,7 @@ mod tests {
             .await;
         let creds = Credentials::new("scott".into(), "wrong".into());
         let base = format!("{}/", server.uri());
-        let err = login_with_password(&base, &creds).await.unwrap_err();
+        let err = login_with_password(&base, &creds).await.err().unwrap();
         let msg = err.to_string();
         assert!(msg.contains("login failed"));
         assert!(msg.contains("401"));
