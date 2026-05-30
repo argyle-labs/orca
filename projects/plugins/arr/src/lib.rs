@@ -9,8 +9,20 @@
 //! Generated `Client` types are intentionally per-module (`arr::sonarr::Client`,
 //! `arr::radarr::Client`, …) — the *arr forks diverge enough that a unified
 //! trait would lie about which endpoints exist on which server.
+//!
+//! ## NOT a user-facing auth surface
+//!
+//! `auth` is `pub(crate)` on purpose: per
+//! `feedback-canonical-model-is-load-bearing`, every credential-touching
+//! affordance must route through an `#[orca_tool]` that resolves
+//! coordinates via the capability transport chain, pulls/persists
+//! creds through the `secrets` table with `self_secure`-gated
+//! replication, and runs under the authenticated caller identity. None
+//! of those prereqs exist yet — until they land, the *arr crate
+//! deliberately exposes only the typed flavor clients and keeps the
+//! transport primitives internal.
 
-pub mod auth;
+pub(crate) mod auth;
 
 macro_rules! flavor {
     ($name:ident) => {

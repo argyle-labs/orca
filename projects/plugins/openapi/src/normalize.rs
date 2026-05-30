@@ -422,10 +422,7 @@ fn json_schema(resp: &openapiv3::Response) -> Option<ReferenceOr<Schema>> {
 
 fn set_json_schema(resp: &mut openapiv3::Response, schema: ReferenceOr<Schema>) {
     // Ensure exactly one `application/json` entry, pointing at the union.
-    let mt = resp
-        .content
-        .entry("application/json".into())
-        .or_insert_with(MediaType::default);
+    let mt = resp.content.entry("application/json".into()).or_default();
     mt.schema = Some(schema);
 }
 
