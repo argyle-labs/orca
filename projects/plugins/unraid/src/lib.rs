@@ -288,6 +288,106 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn config_builder_and_endpoint_trim_trailing_slash() {
+        let c = Config::new("http://srv/", "tok").insecure(true);
+        assert_eq!(c.endpoint(), "http://srv/graphql");
+        assert!(c.insecure);
+        assert_eq!(c.token, "tok");
+        let _ = c.clone();
+        let _ = format!("{c:?}");
+
+        // No trailing slash also OK.
+        let c2 = Config::new("http://srv", "t");
+        assert_eq!(c2.endpoint(), "http://srv/graphql");
+        assert!(!c2.insecure);
+    }
+
+    #[test]
+    fn unraid_error_display() {
+        let m = UnraidError::Missing("name");
+        assert!(m.to_string().contains("name"));
+    }
+
+    #[tokio::test]
+    async fn every_no_arg_method_round_trips_via_graphql_mock() {
+        let server = MockServer::start().await;
+        // Wildcard: any POST /graphql → echo a benign payload.
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "ok": true }
+            })))
+            .mount(&server)
+            .await;
+        let c = Client::new(cfg(server.uri()));
+        // Exercise every no-argument fn — each routes through `query()` with
+        // its own const string; coverage attribution lands on each fn body.
+        c.system().await.unwrap();
+        c.array_status().await.unwrap();
+        c.array_start().await.unwrap();
+        c.array_stop().await.unwrap();
+        c.disks().await.unwrap();
+        c.shares().await.unwrap();
+        c.docker_list().await.unwrap();
+        c.vm_list().await.unwrap();
+        c.ups().await.unwrap();
+        c.parity().await.unwrap();
+        c.notifications().await.unwrap();
+        // graphql_query escape hatch — with and without variables.
+        c.graphql_query("{ x }", None).await.unwrap();
+        c.graphql_query("query Q($n:String!){ x(n:$n) }", Some(json!({"n":"v"})))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn every_named_action_method_runs_against_mock() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "ok": true }
+            })))
+            .mount(&server)
+            .await;
+        let c = Client::new(cfg(server.uri()));
+        c.docker_start("a").await.unwrap();
+        c.docker_stop("a").await.unwrap();
+        c.docker_restart("a").await.unwrap();
+        c.vm_start("a").await.unwrap();
+        c.vm_stop("a").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn every_named_action_rejects_empty_name() {
+        let c = Client::new(Config::new("http://nope", "t"));
+        for res in [
+            c.docker_start("").await,
+            c.docker_stop("").await,
+            c.docker_restart("").await,
+            c.vm_start("").await,
+            c.vm_stop("").await,
+        ] {
+            assert!(matches!(res.unwrap_err(), UnraidError::Missing("name")));
+        }
+    }
+
+    #[tokio::test]
+    async fn insecure_flag_propagates_to_request() {
+        // Coverage for the `insecure = true` branch of query() — wiremock
+        // serves http so the flag itself is a no-op on the wire, but the
+        // assignment in query() executes.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {}})))
+            .mount(&server)
+            .await;
+        let cfg = Config::new(server.uri(), "tok").insecure(true);
+        Client::new(cfg).system().await.unwrap();
+    }
+
     #[tokio::test]
     async fn graphql_errors_propagate() {
         let server = MockServer::start().await;

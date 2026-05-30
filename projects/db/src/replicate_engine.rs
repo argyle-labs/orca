@@ -417,19 +417,39 @@ mod tests {
     #[async_trait]
     impl ReplicationTransport for Shim {
         async fn list_peers(&self) -> Result<Vec<TransportPeer>> {
-            let f = current_slot().lock().unwrap().as_ref().unwrap().clone();
+            let f = current_slot()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+                .expect("engine test ran without with_engine slot installed")
+                .clone();
             f.list_peers().await
         }
         async fn push(&self, p: &TransportPeer, b: &BTreeMap<String, Value>) -> Result<usize> {
-            let f = current_slot().lock().unwrap().as_ref().unwrap().clone();
+            let f = current_slot()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+                .expect("engine test ran without with_engine slot installed")
+                .clone();
             f.push(p, b).await
         }
         async fn fetch(&self, p: &TransportPeer) -> Result<BTreeMap<String, Value>> {
-            let f = current_slot().lock().unwrap().as_ref().unwrap().clone();
+            let f = current_slot()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+                .expect("engine test ran without with_engine slot installed")
+                .clone();
             f.fetch(p).await
         }
         async fn fetch_roots(&self, p: &TransportPeer) -> Result<BTreeMap<String, String>> {
-            let f = current_slot().lock().unwrap().as_ref().unwrap().clone();
+            let f = current_slot()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+                .expect("engine test ran without with_engine slot installed")
+                .clone();
             f.fetch_roots(p).await
         }
     }
@@ -438,17 +458,36 @@ mod tests {
         let _ = register(Arc::new(Shim));
     }
 
+    /// Process-wide serializer for engine tests. The `Shim` reads transport
+    /// state through a single global slot, so two tests running in parallel
+    /// would trample each other (one sets `Some(fake_a)` mid-await while the
+    /// other expects `Some(fake_b)`). Each engine test acquires this for the
+    /// duration of its body. `tokio::sync::Mutex` lets us hold it across
+    /// `.await` points; poison recovery isn't needed since panics simply
+    /// drop the guard.
+    fn engine_test_lock() -> &'static tokio::sync::Mutex<()> {
+        static L: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        L.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
     async fn with_engine<F, Fut>(fake: Arc<FakeTransport>, body: F)
     where
         F: FnOnce(Arc<FakeTransport>) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
+        let _guard = engine_test_lock().lock().await;
         install_shim_once();
-        *current_slot().lock().unwrap() = Some(Arc::clone(&fake));
+        // Recover from any prior-test panic that left the slot Mutex poisoned.
+        let slot = current_slot();
+        {
+            let mut g = slot.lock().unwrap_or_else(|p| p.into_inner());
+            *g = Some(Arc::clone(&fake));
+        }
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("orca.db");
         crate::with_db_path(db_path, body(fake)).await;
-        *current_slot().lock().unwrap() = None;
+        let mut g = slot.lock().unwrap_or_else(|p| p.into_inner());
+        *g = None;
     }
 
     #[tokio::test(flavor = "current_thread")]

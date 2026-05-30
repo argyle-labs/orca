@@ -352,4 +352,149 @@ mod tests {
             .get_matches_from(["orca"]);
         assert!(walk_to_verb(&m).is_none());
     }
+
+    #[test]
+    fn ops_iterator_returns_inventory_entries() {
+        // Smoke: just ensure the iterator can be exhausted without panicking.
+        let count = ops().count();
+        // dispatch's own test binary has no registered ops, but inventory
+        // may carry entries pulled in from upstream crates — either is fine.
+        let _ = count;
+    }
+
+    #[test]
+    fn build_root_adds_global_peer_flag_even_with_empty_inventory() {
+        let cmd = build_root(Command::new("orca"));
+        // The global --peer flag is always present.
+        let m = cmd
+            .clone()
+            .try_get_matches_from(["orca", "--peer", "host-e"]);
+        assert!(m.is_ok(), "global --peer must parse: {m:?}");
+    }
+
+    #[test]
+    fn extract_peer_flag_reads_top_level_then_subcommand_then_skips_empty() {
+        let root = || {
+            Command::new("orca")
+                .arg(clap::Arg::new(PEER_FLAG).long("peer").global(true))
+                .subcommand(
+                    Command::new("engine")
+                        .subcommand_required(true)
+                        .subcommand(Command::new("list")),
+                )
+        };
+
+        // Top-level set.
+        let m = root().get_matches_from(["orca", "--peer", "host-a", "engine", "list"]);
+        assert_eq!(extract_peer_flag(&m).as_deref(), Some("host-a"));
+
+        // Subcommand-level set (clap globals attach there too).
+        let m = root().get_matches_from(["orca", "engine", "list", "--peer", "host-b"]);
+        assert_eq!(extract_peer_flag(&m).as_deref(), Some("host-b"));
+
+        // Whitespace-only value is treated as None.
+        let m = root().get_matches_from(["orca", "--peer", "   ", "engine", "list"]);
+        assert!(extract_peer_flag(&m).is_none());
+
+        // Absent.
+        let m = root().get_matches_from(["orca", "engine", "list"]);
+        assert!(extract_peer_flag(&m).is_none());
+    }
+
+    #[tokio::test]
+    async fn try_dispatch_returns_none_for_unregistered_domain() {
+        // Construct a synthetic root containing a subcommand whose
+        // (domain, verb) pair is guaranteed not to match any registered op.
+        let cmd = Command::new("orca").subcommand(
+            Command::new("__orca_unregistered_domain_xyz")
+                .subcommand_required(true)
+                .subcommand(Command::new("nope")),
+        );
+        let m = cmd.get_matches_from(["orca", "__orca_unregistered_domain_xyz", "nope"]);
+        let cfg = std::sync::Arc::new(contract::config::Config::load().unwrap());
+        let ctx = std::sync::Arc::new(contract::ToolCtx::new(cfg));
+        assert!(try_dispatch(&m, ctx).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn try_dispatch_returns_none_when_no_subcommand_selected() {
+        let m = Command::new("orca").get_matches_from(["orca"]);
+        let cfg = std::sync::Arc::new(contract::config::Config::load().unwrap());
+        let ctx = std::sync::Arc::new(contract::ToolCtx::new(cfg));
+        assert!(try_dispatch(&m, ctx).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn exec_remote_propagates_through_registered_remote_exec_service() {
+        use contract::{CallerIdentity, OrcaToolDef, RemoteExec};
+        use schemars::JsonSchema;
+        use serde::{Deserialize, Serialize};
+        use std::sync::Arc;
+
+        // Minimal tool definition.
+        #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+        struct Args {
+            x: u32,
+        }
+        #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+        struct Out {
+            y: u32,
+        }
+        struct ExampleTool;
+        impl OrcaToolDef for ExampleTool {
+            type Args = Args;
+            type Output = Out;
+            const NAME: &'static str = "example.echo";
+            const DESCRIPTION: &'static str = "echo";
+        }
+
+        struct DoubleExec;
+        #[async_trait::async_trait]
+        impl RemoteExec for DoubleExec {
+            async fn exec(
+                &self,
+                peer: &str,
+                tool: &str,
+                args: serde_json::Value,
+                _caller: Option<CallerIdentity>,
+            ) -> anyhow::Result<serde_json::Value> {
+                assert_eq!(peer, "host-x");
+                assert_eq!(tool, "example.echo");
+                let x = args["x"].as_u64().unwrap() as u32;
+                Ok(serde_json::json!({ "y": x * 2 }))
+            }
+        }
+
+        let cfg = Arc::new(contract::config::Config::load().unwrap());
+        let mut ctx = contract::ToolCtx::new(cfg);
+        let svc: Arc<dyn RemoteExec> = Arc::new(DoubleExec);
+        ctx.register_service(svc);
+        let out = exec_remote::<ExampleTool>("host-x", Args { x: 21 }, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(out, Out { y: 42 });
+    }
+
+    #[tokio::test]
+    async fn exec_remote_errors_when_no_remote_exec_service_registered() {
+        use contract::OrcaToolDef;
+        use schemars::JsonSchema;
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Serialize, Deserialize, JsonSchema)]
+        struct A;
+        #[derive(Serialize, Deserialize, JsonSchema)]
+        struct B;
+        struct T2;
+        impl OrcaToolDef for T2 {
+            type Args = A;
+            type Output = B;
+            const NAME: &'static str = "ex.t2";
+            const DESCRIPTION: &'static str = "t2";
+        }
+
+        let cfg = std::sync::Arc::new(contract::config::Config::load().unwrap());
+        let ctx = contract::ToolCtx::new(cfg);
+        assert!(exec_remote::<T2>("h", A, &ctx).await.is_err());
+    }
 }

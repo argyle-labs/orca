@@ -229,6 +229,114 @@ mod tests {
     }
 
     #[test]
+    fn every_kind_round_trips_through_serde_and_lookup_tables() {
+        for k in [
+            ErrorKind::NotFound,
+            ErrorKind::Invalid,
+            ErrorKind::Unauthorized,
+            ErrorKind::Forbidden,
+            ErrorKind::Conflict,
+            ErrorKind::Timeout,
+            ErrorKind::Unavailable,
+            ErrorKind::Internal,
+        ] {
+            // serde round-trip uses the snake_case representation.
+            let s = serde_json::to_string(&k).unwrap();
+            let back: ErrorKind = serde_json::from_str(&s).unwrap();
+            assert_eq!(k, back);
+            // as_str matches the serde tag (with quotes stripped).
+            assert_eq!(format!("\"{}\"", k.as_str()), s);
+            // http_status + cli_exit_code never panic and stay in plausible
+            // ranges.
+            assert!((400..=599).contains(&k.http_status()));
+            assert!((64..=78).contains(&k.cli_exit_code()));
+        }
+    }
+
+    #[test]
+    fn every_constructor_sets_matching_kind() {
+        assert_eq!(OrcaError::not_found("x").kind, ErrorKind::NotFound);
+        assert_eq!(OrcaError::invalid("x").kind, ErrorKind::Invalid);
+        assert_eq!(OrcaError::unauthorized("x").kind, ErrorKind::Unauthorized);
+        assert_eq!(OrcaError::forbidden("x").kind, ErrorKind::Forbidden);
+        assert_eq!(OrcaError::conflict("x").kind, ErrorKind::Conflict);
+        assert_eq!(OrcaError::timeout("x").kind, ErrorKind::Timeout);
+        assert_eq!(OrcaError::unavailable("x").kind, ErrorKind::Unavailable);
+        assert_eq!(OrcaError::internal("x").kind, ErrorKind::Internal);
+    }
+
+    #[test]
+    fn io_error_kind_mapping_covers_each_branch() {
+        let cases: &[(std::io::ErrorKind, ErrorKind)] = &[
+            (std::io::ErrorKind::NotFound, ErrorKind::NotFound),
+            (std::io::ErrorKind::PermissionDenied, ErrorKind::Forbidden),
+            (std::io::ErrorKind::TimedOut, ErrorKind::Timeout),
+            (
+                std::io::ErrorKind::ConnectionRefused,
+                ErrorKind::Unavailable,
+            ),
+            (std::io::ErrorKind::ConnectionReset, ErrorKind::Unavailable),
+            (
+                std::io::ErrorKind::ConnectionAborted,
+                ErrorKind::Unavailable,
+            ),
+            (std::io::ErrorKind::HostUnreachable, ErrorKind::Unavailable),
+            (
+                std::io::ErrorKind::NetworkUnreachable,
+                ErrorKind::Unavailable,
+            ),
+            (std::io::ErrorKind::InvalidInput, ErrorKind::Invalid),
+            (std::io::ErrorKind::InvalidData, ErrorKind::Invalid),
+            (std::io::ErrorKind::AlreadyExists, ErrorKind::Conflict),
+            (std::io::ErrorKind::WriteZero, ErrorKind::Internal),
+        ];
+        for (io_kind, expected) in cases {
+            let io = std::io::Error::new(*io_kind, "x");
+            let e: OrcaError = io.into();
+            assert_eq!(e.kind, *expected, "{io_kind:?}");
+        }
+    }
+
+    #[test]
+    fn serde_json_error_maps_to_invalid_with_prefixed_message() {
+        let json_err = serde_json::from_str::<u32>("not a number").unwrap_err();
+        let e: OrcaError = json_err.into();
+        assert_eq!(e.kind, ErrorKind::Invalid);
+        assert!(e.message.starts_with("json:"));
+    }
+
+    #[test]
+    fn str_and_string_conversions_default_to_internal() {
+        let from_str: OrcaError = "oops".into();
+        assert_eq!(from_str.kind, ErrorKind::Internal);
+        assert_eq!(from_str.message, "oops");
+
+        let from_string: OrcaError = String::from("bang").into();
+        assert_eq!(from_string.kind, ErrorKind::Internal);
+        assert_eq!(from_string.message, "bang");
+    }
+
+    #[test]
+    fn error_trait_is_implemented_for_dyn_error_use() {
+        let e = OrcaError::invalid("x");
+        let dyn_err: &(dyn std::error::Error) = &e;
+        assert_eq!(dyn_err.to_string(), "invalid: x");
+    }
+
+    #[test]
+    fn json_serialization_omits_none_fields_and_includes_set_fields() {
+        let plain = OrcaError::not_found("x");
+        let s = serde_json::to_string(&plain).unwrap();
+        assert!(!s.contains("code"));
+        assert!(!s.contains("context"));
+
+        let full = OrcaError::not_found("x").with_code("c").with_context("ctx");
+        let s = serde_json::to_string(&full).unwrap();
+        assert!(s.contains("\"code\":\"c\""));
+        assert!(s.contains("\"context\":\"ctx\""));
+    }
+
+    #[test]
     fn with_code_and_context_attach() {
         let e = OrcaError::not_found("missing")
             .with_code("secrets.not_found")
