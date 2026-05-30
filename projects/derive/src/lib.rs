@@ -69,6 +69,13 @@ struct ToolAttr {
     /// instead of running locally. Requires the Args type to derive `Clone`
     /// and `Serialize` and to declare `peer_id: Option<String>`.
     peer_dispatch: bool,
+    /// Opt-in: `#[orca_tool(..., refresh_runtime = true)]` schedules a
+    /// best-effort `RemoteExec::refresh_peer_runtime(peer)` after a successful
+    /// peer dispatch. Use for tools whose success mutates the peer's reported
+    /// runtime snapshot (version, channel, mode) — `system.update` is the
+    /// canonical case. Default off so secret/config writes don't pay for it.
+    /// Requires `peer_dispatch = true`.
+    refresh_runtime: bool,
     /// Minimum role required to invoke this tool via authenticated surfaces.
     /// `"any"` (default) means any authenticated identity passes; `"admin"`
     /// requires `AuthIdentity::role == "admin"`. Set via
@@ -84,6 +91,7 @@ impl Parse for ToolAttr {
         let mut cli_mode = None;
         let mut remote_ok = true;
         let mut peer_dispatch = false;
+        let mut refresh_runtime = false;
         let mut role: Option<LitStr> = None;
         for nv in items {
             let key = nv
@@ -139,6 +147,19 @@ impl Parse for ToolAttr {
                         }
                     };
                 }
+                "refresh_runtime" => {
+                    refresh_runtime = match &nv.value {
+                        Expr::Lit(ExprLit {
+                            lit: Lit::Bool(b), ..
+                        }) => b.value,
+                        _ => {
+                            return Err(syn::Error::new_spanned(
+                                &nv.value,
+                                "refresh_runtime expects a bool literal",
+                            ));
+                        }
+                    };
+                }
                 "role" => {
                     let s = lit_str(&nv.value)?;
                     match s.value().as_str() {
@@ -184,6 +205,7 @@ impl Parse for ToolAttr {
             cli_mode,
             remote_ok,
             peer_dispatch,
+            refresh_runtime,
             role,
         })
     }
@@ -538,6 +560,40 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
              so the macro can read `args.peer_id`",
         ));
     }
+    if attr.refresh_runtime && !attr.peer_dispatch {
+        return Err(syn::Error::new_spanned(
+            &item.sig.inputs,
+            "refresh_runtime=true requires peer_dispatch=true",
+        ));
+    }
+    let refresh_runtime_stanza = if attr.refresh_runtime {
+        quote! {
+            // Best-effort: force-refresh the peer's runtime snapshot so the
+            // UI reflects state mutated by this tool immediately instead of
+            // waiting for the next mesh poll. Default trait impl is a no-op;
+            // pod's PodRemoteExec fetches `system.detail` and updates its
+            // in-memory runtime cache. The backoff loop covers the
+            // daemon-restart gap for tools that swap the peer's binary.
+            let __svc_refresh = ::std::sync::Arc::clone(&__svc);
+            let __peer_refresh = __peer_id.clone();
+            ::tokio::spawn(async move {
+                for __delay_ms in [500u64, 2000, 5000, 10_000, 20_000] {
+                    ::tokio::time::sleep(
+                        ::std::time::Duration::from_millis(__delay_ms)
+                    ).await;
+                    if __svc_refresh
+                        .refresh_peer_runtime(&__peer_refresh)
+                        .await
+                        .is_ok()
+                    {
+                        return;
+                    }
+                }
+            });
+        }
+    } else {
+        quote! {}
+    };
     let peer_dispatch_stanza = if attr.peer_dispatch {
         quote! {
             if let ::core::option::Option::Some(__peer_id) = #args_forward.peer_id.clone() {
@@ -563,6 +619,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
                         "peer_dispatch: decode {} output from peer {}: {}",
                         #tool_name, __peer_id, e,
                     ))?;
+                #refresh_runtime_stanza
                 return ::core::result::Result::Ok(__out);
             }
         }
