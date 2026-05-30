@@ -463,6 +463,81 @@ mod tests {
     }
 
     #[test]
+    fn status_reports_staged_after_index_add() {
+        let dir = tempdir().unwrap();
+        let repo = init_repo(dir.path());
+        make_commit(dir.path(), "a.txt", "v1", "first");
+        // New file staged but not committed.
+        std::fs::write(dir.path().join("b.txt"), "v1").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("b.txt")).unwrap();
+        index.write().unwrap();
+        let s = status(dir.path()).unwrap();
+        let staged = s.iter().find(|e| e.path == "b.txt").unwrap();
+        assert_eq!(staged.kind, StatusKind::Staged);
+    }
+
+    #[test]
+    fn pull_not_fast_forward_when_histories_diverge() {
+        let origin_dir = tempdir().unwrap();
+        init_repo(origin_dir.path());
+        make_commit(origin_dir.path(), "a.txt", "v1", "first");
+        let origin = Repository::open(origin_dir.path()).unwrap();
+        let head_commit = origin.head().unwrap().peel_to_commit().unwrap();
+        origin.branch("main", &head_commit, true).unwrap();
+        origin.set_head("refs/heads/main").unwrap();
+
+        let work = tempdir().unwrap();
+        let work_path = work.path().join("clone");
+        let url = format!("file://{}", origin_dir.path().display());
+        clone(&url, &work_path, Some("main")).unwrap();
+
+        // Advance both sides independently so origin/main is not an ancestor.
+        make_commit(&work_path, "local.txt", "l", "local commit");
+        make_commit(origin_dir.path(), "remote.txt", "r", "remote commit");
+
+        let err = pull(&work_path).unwrap_err();
+        assert!(matches!(err, GitError::NotFastForward));
+    }
+
+    #[test]
+    fn push_to_local_bare_repo_succeeds() {
+        let bare_dir = tempdir().unwrap();
+        Repository::init_bare(bare_dir.path()).unwrap();
+
+        let work = tempdir().unwrap();
+        let repo = init_repo(work.path());
+        make_commit(work.path(), "a.txt", "v1", "first");
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("main", &head_commit, true).unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        repo.remote("origin", &format!("file://{}", bare_dir.path().display()))
+            .unwrap();
+
+        let r = push(work.path(), Some("main"), None).unwrap();
+        assert_eq!(r.branch, "main");
+        assert_eq!(r.remote, "origin");
+    }
+
+    #[test]
+    fn push_uses_head_branch_when_unspecified() {
+        let bare_dir = tempdir().unwrap();
+        Repository::init_bare(bare_dir.path()).unwrap();
+
+        let work = tempdir().unwrap();
+        let repo = init_repo(work.path());
+        make_commit(work.path(), "a.txt", "v1", "first");
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("trunk", &head_commit, true).unwrap();
+        repo.set_head("refs/heads/trunk").unwrap();
+        repo.remote("origin", &format!("file://{}", bare_dir.path().display()))
+            .unwrap();
+
+        let r = push(work.path(), None, None).unwrap();
+        assert_eq!(r.branch, "trunk");
+    }
+
+    #[test]
     fn hex_status_kind_round_trips_serde() {
         // Lock the wire shape — these names ship in REST/MCP responses.
         for (k, expected) in [
