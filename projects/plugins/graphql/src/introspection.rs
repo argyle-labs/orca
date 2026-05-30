@@ -254,3 +254,151 @@ pub fn parse_graphql_sdl(repo: &str, sdl: &str) -> Result<GraphQlInfo> {
         enums,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SDL: &str = r#"
+        "A user account."
+        type User {
+            id: ID!
+            name: String
+            tags: [String!]
+        }
+
+        "Input for creating a user."
+        input NewUser {
+            name: String!
+            age: Int
+        }
+
+        "Auth role."
+        enum Role { ADMIN GUEST }
+
+        type Query {
+            "Look up a user by id."
+            user(id: ID!): User
+            users: [User!]!
+        }
+
+        type Mutation {
+            createUser(input: NewUser!): User @deprecated(reason: "use createAccount")
+        }
+
+        type Subscription {
+            userCreated: User
+        }
+    "#;
+
+    #[test]
+    fn parse_graphql_sdl_extracts_every_definition_kind() {
+        let info = parse_graphql_sdl("repo", SDL).unwrap();
+        assert_eq!(info.repo, "repo");
+        assert_eq!(info.queries.len(), 2);
+        assert_eq!(info.mutations.len(), 1);
+        assert_eq!(info.subscriptions.len(), 1);
+        assert_eq!(info.types.len(), 1);
+        assert_eq!(info.inputs.len(), 1);
+        assert_eq!(info.enums.len(), 1);
+
+        let user_q = info.queries.iter().find(|o| o.name == "user").unwrap();
+        assert_eq!(user_q.description.as_deref(), Some("Look up a user by id."));
+        assert_eq!(user_q.returns, "User");
+        assert_eq!(user_q.args.len(), 1);
+        assert_eq!(user_q.args[0].name, "id");
+        assert_eq!(user_q.args[0].type_name, "ID");
+        assert!(user_q.args[0].required);
+
+        let users_q = info.queries.iter().find(|o| o.name == "users").unwrap();
+        // NonNull list of NonNull strings: outer type renders as "[User]" (NonNull peels into list).
+        assert_eq!(users_q.returns, "[User]");
+
+        let mutation = &info.mutations[0];
+        assert!(mutation.deprecated);
+
+        let user_type = &info.types[0];
+        assert_eq!(user_type.name, "User");
+        assert_eq!(user_type.description.as_deref(), Some("A user account."));
+        let id_field = user_type.fields.iter().find(|f| f.name == "id").unwrap();
+        assert_eq!(id_field.type_name, "ID");
+        assert!(id_field.required);
+        let name_field = user_type.fields.iter().find(|f| f.name == "name").unwrap();
+        assert!(!name_field.required);
+        let tags_field = user_type.fields.iter().find(|f| f.name == "tags").unwrap();
+        assert_eq!(tags_field.type_name, "[String]");
+
+        let input = &info.inputs[0];
+        assert_eq!(input.name, "NewUser");
+        assert_eq!(input.fields.len(), 2);
+        let name_in = input.fields.iter().find(|f| f.name == "name").unwrap();
+        assert!(name_in.required);
+
+        let role = &info.enums[0];
+        assert_eq!(role.name, "Role");
+        assert_eq!(role.values, vec!["ADMIN", "GUEST"]);
+    }
+
+    #[test]
+    fn parse_graphql_operations_buckets_query_mutation_subscription_and_anonymous() {
+        let src = r#"
+            query GetUser($id: ID!) { user(id: $id) { name } }
+            mutation Create($name: String!) { createUser(name: $name) { id } }
+            subscription Live { userCreated { id } }
+            query { anonymousField }
+            { bareSelectionSet }
+        "#;
+        let info = parse_graphql_operations("r", src).unwrap();
+        assert_eq!(
+            info.queries
+                .iter()
+                .map(|q| q.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["GetUser", "anonymous"]
+        );
+        assert_eq!(info.mutations[0].name, "Create");
+        assert_eq!(info.subscriptions[0].name, "Live");
+
+        let q = &info.queries[0];
+        assert_eq!(q.args.len(), 1);
+        assert_eq!(q.args[0].name, "id");
+        assert_eq!(q.args[0].type_name, "ID");
+        assert!(q.args[0].required);
+        assert!(q.args[0].description.is_none());
+        assert_eq!(q.returns, "");
+        assert!(!q.deprecated);
+    }
+
+    #[test]
+    fn parse_graphql_operations_handles_list_var_type() {
+        let src = "query Q($ids: [ID!]) { x }";
+        let info = parse_graphql_operations("r", src).unwrap();
+        assert_eq!(info.queries[0].args[0].type_name, "[ID]");
+        assert!(!info.queries[0].args[0].required);
+    }
+
+    #[test]
+    fn parse_graphql_operations_propagates_parse_errors() {
+        let err = parse_graphql_operations("r", "this is not graphql {").unwrap_err();
+        assert!(err.to_string().contains("GraphQL parse error"));
+    }
+
+    #[test]
+    fn parse_graphql_sdl_falls_back_to_operations_when_schema_parse_fails() {
+        // Operations-only document — schema parser typically rejects this.
+        let src = "query Foo { x }";
+        let info = parse_graphql_sdl("r", src).unwrap();
+        assert_eq!(info.queries.len(), 1);
+        assert_eq!(info.queries[0].name, "Foo");
+    }
+
+    #[test]
+    fn parse_graphql_sdl_falls_back_when_no_type_defs_present() {
+        // Valid schema doc but with zero type/schema definitions (just a
+        // directive declaration) → has_type_defs == false → operations path.
+        let src = "directive @foo on FIELD\nquery Q { x }";
+        let info = parse_graphql_sdl("r", src).unwrap();
+        // operations path is taken; query Q discovered.
+        assert_eq!(info.queries[0].name, "Q");
+    }
+}
