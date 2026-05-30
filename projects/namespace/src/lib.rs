@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 pub mod doc_registry;
 mod manager;
 mod native;
+mod spec;
 
 pub use manager::{Access, Namespace, NamespaceManager, Role};
 

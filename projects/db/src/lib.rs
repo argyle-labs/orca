@@ -22,6 +22,7 @@ pub mod llm;
 pub mod mcp_servers;
 pub mod oauth;
 pub mod openapi_specs;
+pub mod openapi_specs_registry;
 pub mod plugin_creds;
 pub mod plugin_data;
 pub mod plugin_installs;

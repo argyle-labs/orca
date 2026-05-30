@@ -1,13 +1,17 @@
 //! GraphQL SDL + operations document scanner. Parses `.graphql` files into
-//! a structured `GraphQlInfo` (the scanner-facing shape; the wire-facing
-//! mirror lives in `spec::mod` and is mapped over in `spec::graphql`).
+//! a structured [`GraphQlInfo`].
+//!
+//! These types describe the parsed schema shape and are not persisted —
+//! they're returned directly to namespace.spec.graphql.detail callers.
 
 use anyhow::Result;
 use graphql_parser::query::Type as GqlType;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct GraphQlField {
     pub name: String,
     #[serde(rename = "typeName")]
@@ -17,7 +21,7 @@ pub struct GraphQlField {
     pub required: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct GraphQlOperation {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -27,7 +31,7 @@ pub struct GraphQlOperation {
     pub deprecated: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct GraphQlType {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -35,7 +39,7 @@ pub struct GraphQlType {
     pub fields: Vec<GraphQlField>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct GraphQlEnum {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -43,7 +47,7 @@ pub struct GraphQlEnum {
     pub values: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct GraphQlInfo {
     pub repo: String,
     pub queries: Vec<GraphQlOperation>,
@@ -182,8 +186,8 @@ pub fn parse_graphql_operations(repo: &str, src: &str) -> Result<GraphQlInfo> {
 }
 
 /// Parse a GraphQL SDL string into a structured `GraphQlInfo`.
-/// Auto-detects format: schema SDL (`type Query { ... }`) vs operation document
-/// (`mutation Foo(...) { ... }`). Falls back to operation parsing if SDL parse fails.
+/// Auto-detects format: schema SDL vs operation document. Falls back to
+/// operation parsing if SDL parse fails or has no type defs.
 pub fn parse_graphql_sdl(repo: &str, sdl: &str) -> Result<GraphQlInfo> {
     use graphql_parser::schema::{Definition, TypeDefinition, parse_schema};
 

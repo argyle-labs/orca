@@ -132,7 +132,6 @@ members = [
     "projects/plugins/mcp",
     "projects/namespace",
     "projects/pod",
-    "projects/specs",
     "projects/system",
     "projects/utils",
     # Per-backend integration crates — every backend builds + caches
@@ -167,7 +166,6 @@ default-members = [
     "projects/plugins/mcp",
     "projects/namespace",
     "projects/pod",
-    "projects/specs",
     "projects/system",
     "projects/utils",
     "projects/plugins/docker",

@@ -32,6 +32,7 @@ schemars    = { workspace = true }
 async-trait = { workspace = true }
 cron        = { workspace = true }
 inventory   = { workspace = true }
+reqwest     = { workspace = true }
 
 clap        = { workspace = true, optional = true }
 # Used only for `task_local!` — the right primitive for scoping a DB path

@@ -9,6 +9,9 @@
 //! `path`, `locations` all have shapes that vary per-server and per-query.
 #![allow(clippy::disallowed_types)]
 
+pub mod introspection;
+pub mod shopify_proxy;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;

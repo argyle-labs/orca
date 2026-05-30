@@ -41,7 +41,6 @@ namespace = { path = "../namespace", features = ["cli"] }
 agents   = { path = "../plugins/agents",   features = ["cli"] }
 plugins  = { path = "../plugins/runtime",  features = ["cli"] }
 files    = { path = "../files",    features = ["cli"] }
-specs    = { path = "../specs",    features = ["cli"] }
 mcp      = { path = "../plugins/mcp",      features = ["cli"] }
 llm      = { path = "../plugins/llm" }
 conversation = { path = "../conversation" }
