@@ -159,6 +159,17 @@ func (m *Manifest) validate() error {
 		return err
 	}
 
+	if m.Plugin.Namespace != "" {
+		if strings.TrimSpace(m.Plugin.Namespace) == "" {
+			return errors.New("plugin.namespace must not be empty when set")
+		}
+		for _, r := range m.Plugin.Namespace {
+			if r == ' ' || r == '\t' || r == '\n' || r == '/' || r == '\\' {
+				return fmt.Errorf("plugin.namespace %q contains invalid characters (whitespace or path separators)", m.Plugin.Namespace)
+			}
+		}
+	}
+
 	switch {
 	case m.Runtime.Binary != nil && m.Runtime.Image != nil:
 		return errors.New("runtime.binary and runtime.image are mutually exclusive")
