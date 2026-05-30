@@ -235,7 +235,7 @@ pub async fn signup(Json(req): Json<SignupRequest>) -> Response {
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("hash: {e}")),
     };
     let user_id = new_id();
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = utils::time::now_rfc3339();
     let role = if first_user { "admin" } else { "member" };
     if let Err(e) = db::users::insert(&conn, &user_id, username, &hash, role, &now) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("insert: {e}"));
@@ -346,7 +346,7 @@ pub async fn signout(req: Request) -> Response {
         && let AuthKind::Session { session_id, .. } = &ident.kind
         && let Ok(conn) = db::open_default()
     {
-        _ = db::sessions::revoke(&conn, session_id, &chrono::Utc::now().to_rfc3339());
+        _ = db::sessions::revoke(&conn, session_id, &utils::time::now_rfc3339());
     }
     let mut resp = (
         StatusCode::OK,
@@ -413,7 +413,7 @@ pub async fn change_password(
         Ok(h) => h,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("hash: {e}")),
     };
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = utils::time::now_rfc3339();
     if let Err(e) = db::users::set_password_hash(&conn, &user_id, &hash, &now) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("update: {e}"));
     }

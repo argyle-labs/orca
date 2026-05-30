@@ -708,7 +708,7 @@ fn cmd_admin_reset_password(username: &str, revoke_sessions: bool) -> Result<()>
     }
 
     let hash = auth::password::hash_password(&new_pw).context("hash password")?;
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = utils::time::now_rfc3339();
     let updated =
         db::users::set_password_hash(&conn, &row.id, &hash, &now).context("write new hash")?;
     anyhow::ensure!(updated, "user row vanished mid-operation");

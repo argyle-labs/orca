@@ -186,8 +186,8 @@ fn install_manifest(
         instance_id.clone()
     };
     println!(
-        "registered plugin {} v{} ({}) [mode: {}] from {}",
-        display_id, m.plugin.version, m.plugin.tier, mode, abs_path
+        "registered plugin {} v{} ({}) from {}",
+        display_id, m.plugin.version, m.plugin.tier, abs_path
     );
 
     // Recursively install uses, resolving paths relative to this manifest's directory.
@@ -204,7 +204,7 @@ fn install_manifest(
             .id
             .clone()
             .unwrap_or_else(|| format!("{dep_base_id}@{instance_id}"));
-        let dep_id = install_manifest(conn, &dep_path, Some(&dep_instance_id), Some(&mode))?;
+        let dep_id = install_manifest(conn, &dep_path, Some(&dep_instance_id))?;
         db::plugins::add_dep(conn, &instance_id, &dep_id)?;
     }
 
@@ -239,7 +239,6 @@ tier = "personal"
 id = "my-plugin"
 version = "2.3.1"
 tier = "team"
-mode = "rebuy"
 context_injection = "full"
 
 [plugin.mcp]
@@ -264,7 +263,6 @@ label = "Dashboard"
         assert_eq!(m.plugin.id, "test-plugin");
         assert_eq!(m.plugin.version, "1.0.0");
         assert_eq!(m.plugin.tier, "personal");
-        assert_eq!(m.plugin.mode, "orca", "default mode should be orca");
         assert!(abs.contains("orca-plugin.toml"));
     }
 
@@ -274,7 +272,6 @@ label = "Dashboard"
         let path = write_manifest(dir.path(), FULL_MANIFEST);
         let (m, _) = parse_manifest(&path).unwrap();
         assert_eq!(m.plugin.id, "my-plugin");
-        assert_eq!(m.plugin.mode, "rebuy");
         assert_eq!(m.plugin.context_injection, Some("full".into()));
         let mcp = m.plugin.mcp.unwrap();
         assert_eq!(mcp.command, "node");
@@ -373,14 +370,6 @@ urls = ["http://lan.local", "http://tailscale.local"]
         assert_eq!(mcp.urls, vec!["http://lan.local", "http://tailscale.local"]);
     }
 
-    #[test]
-    fn manifest_default_mode_is_orca() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_manifest(dir.path(), MINIMAL_MANIFEST);
-        let (m, _) = parse_manifest(&path).unwrap();
-        assert_eq!(m.plugin.mode, "orca");
-    }
-
     fn open_test_db(dir: &std::path::Path) -> rusqlite::Connection {
         db::open_unencrypted(&dir.join("test.db")).unwrap()
     }
@@ -390,11 +379,10 @@ urls = ["http://lan.local", "http://tailscale.local"]
         let dir = tempfile::tempdir().unwrap();
         let conn = open_test_db(dir.path());
         let path = write_manifest(dir.path(), MINIMAL_MANIFEST);
-        let id = install_manifest(&conn, &path, None, None).unwrap();
+        let id = install_manifest(&conn, &path).unwrap();
         assert_eq!(id, "test-plugin");
         let row = db::plugins::get(&conn, "test-plugin").unwrap().unwrap();
         assert_eq!(row.tier, "personal");
-        assert_eq!(row.mode, "orca");
         assert_eq!(row.context_injection, "minimal");
         assert!(row.mcp_command.is_none());
         assert!(row.mcp_urls.is_empty());
@@ -402,15 +390,16 @@ urls = ["http://lan.local", "http://tailscale.local"]
     }
 
     #[test]
-    fn install_manifest_persists_full_mcp_and_overrides() {
+    fn install_manifest_persists_full_mcp_and_id_override() {
         let dir = tempfile::tempdir().unwrap();
         let conn = open_test_db(dir.path());
         let path = write_manifest(dir.path(), FULL_MANIFEST);
-        let id = install_manifest(&conn, &path, Some("my-plugin@rebuy"), Some("custom")).unwrap();
-        assert_eq!(id, "my-plugin@rebuy");
-        let row = db::plugins::get(&conn, "my-plugin@rebuy").unwrap().unwrap();
+        let id = install_manifest(&conn, &path, Some("my-plugin@workspace-a")).unwrap();
+        assert_eq!(id, "my-plugin@workspace-a");
+        let row = db::plugins::get(&conn, "my-plugin@workspace-a")
+            .unwrap()
+            .unwrap();
         assert_eq!(row.tier, "team");
-        assert_eq!(row.mode, "custom");
         assert_eq!(row.context_injection, "full");
         assert_eq!(row.mcp_command.as_deref(), Some("node"));
         assert_eq!(row.mcp_args, vec!["server.js", "--port", "3000"]);
@@ -436,7 +425,7 @@ url = "http://localhost:8080"
         let dir = tempfile::tempdir().unwrap();
         let conn = open_test_db(dir.path());
         let path = write_manifest(dir.path(), content);
-        install_manifest(&conn, &path, None, None).unwrap();
+        install_manifest(&conn, &path).unwrap();
         let row = db::plugins::get(&conn, "urlp").unwrap().unwrap();
         assert_eq!(row.mcp_urls, vec!["http://localhost:8080".to_string()]);
         assert!(
@@ -462,7 +451,7 @@ token_env = "TOK"
         let dir = tempfile::tempdir().unwrap();
         let conn = open_test_db(dir.path());
         let path = write_manifest(dir.path(), content);
-        install_manifest(&conn, &path, None, None).unwrap();
+        install_manifest(&conn, &path).unwrap();
         let row = db::plugins::get(&conn, "multi").unwrap().unwrap();
         assert_eq!(
             row.mcp_urls,
@@ -493,18 +482,15 @@ tier = "personal"
 id = "parent"
 version = "1.0.0"
 tier = "personal"
-mode = "rebuy"
 
 [[plugin.uses]]
 path = "dep/orca-plugin.toml"
 "#;
         let parent_path = write_manifest(dir.path(), parent_content);
-        install_manifest(&conn, &parent_path, None, None).unwrap();
+        install_manifest(&conn, &parent_path, None).unwrap();
 
-        let parent_row = db::plugins::get(&conn, "parent").unwrap().unwrap();
-        assert_eq!(parent_row.mode, "rebuy");
-        let dep_row = db::plugins::get(&conn, "child@parent").unwrap().unwrap();
-        assert_eq!(dep_row.mode, "rebuy", "dep should inherit parent's mode");
+        assert!(db::plugins::get(&conn, "parent").unwrap().is_some());
+        assert!(db::plugins::get(&conn, "child@parent").unwrap().is_some());
         let deps = db::plugins::list_deps(&conn, "parent").unwrap();
         assert!(deps.contains(&"child@parent".to_string()));
     }
@@ -537,7 +523,7 @@ path = "dep2/orca-plugin.toml"
 id = "explicit-id"
 "#;
         let parent_path = write_manifest(dir.path(), parent_content);
-        install_manifest(&conn, &parent_path, None, None).unwrap();
+        install_manifest(&conn, &parent_path, None).unwrap();
         assert!(db::plugins::get(&conn, "explicit-id").unwrap().is_some());
     }
 
@@ -555,7 +541,7 @@ tier = "personal"
 dir = "/tmp/orca-test-specs"
 "#;
         let path = write_manifest(dir.path(), content);
-        install_manifest(&conn, &path, None, None).unwrap();
+        install_manifest(&conn, &path).unwrap();
         let row = db::plugins::get(&conn, "withspecs").unwrap().unwrap();
         assert_eq!(row.specs_dir.as_deref(), Some("/tmp/orca-test-specs"));
     }

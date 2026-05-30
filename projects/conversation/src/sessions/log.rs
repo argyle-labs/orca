@@ -1,7 +1,6 @@
 // Conversation log entries; HashMap/Value appear in log payloads as protocol-level passthrough.
 #![allow(clippy::disallowed_types)]
 use anyhow::Result;
-use chrono::Utc;
 use serde_json::json;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -19,7 +18,7 @@ impl SessionLog {
         std::fs::create_dir_all(logs_dir)?;
 
         let project = project.unwrap_or("general").to_string();
-        let now = Utc::now().format("%Y-%m-%d_%H%M%S");
+        let now = chrono::Utc::now().format("%Y-%m-%d_%H%M%S");
         let session_id = format!("{now}_{project}");
         let path = logs_dir.join(format!("{session_id}.jsonl"));
 
@@ -33,7 +32,7 @@ impl SessionLog {
         log.write_record(json!({
             "type": "session_start",
             "session": session_id,
-            "timestamp": Utc::now().to_rfc3339(),
+            "timestamp": utils::time::now_rfc3339(),
         }))?;
 
         Ok(log)
@@ -46,7 +45,7 @@ impl SessionLog {
         self.write_record(json!({
             "id": id,
             "session": self.session_id,
-            "timestamp": Utc::now().to_rfc3339(),
+            "timestamp": utils::time::now_rfc3339(),
             "project": self.project,
             "role": role,
             "agent": agent,
@@ -66,7 +65,7 @@ impl SessionLog {
             "ref": id,
             "note": note,
             "important": true,
-            "timestamp": Utc::now().to_rfc3339(),
+            "timestamp": utils::time::now_rfc3339(),
         }))
     }
 

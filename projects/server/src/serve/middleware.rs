@@ -795,21 +795,21 @@ mod tests {
     }
 
     fn insert_user(conn: &db::Conn, role: &str) -> String {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = utils::time::now_rfc3339();
         let id = uuid::Uuid::now_v7().to_string();
         db::users::insert(conn, &id, "tester", "fake_hash", role, &now).unwrap();
         id
     }
 
     fn insert_session(conn: &db::Conn, user_id: &str, expires_at: &str) -> String {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = utils::time::now_rfc3339();
         let sid = uuid::Uuid::now_v7().to_string();
         db::sessions::insert(conn, &sid, user_id, &now, expires_at).unwrap();
         sid
     }
 
     fn insert_token(conn: &db::Conn, role: &str, hash: &str, expires_at: Option<&str>) -> String {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = utils::time::now_rfc3339();
         let id = uuid::Uuid::now_v7().to_string();
         db::api_tokens::insert(conn, &id, "test-token", hash, role, &now, expires_at, None)
             .unwrap();

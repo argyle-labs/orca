@@ -240,7 +240,7 @@ async fn plugin_cred_sync(
     args: SyncPluginCredsArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SyncPluginCredsOutput> {
-    crate::creds::sync_plugin_creds(&args.plugin)?;
+    db::plugin_creds::sync(&args.plugin)?;
     Ok(SyncPluginCredsOutput {
         plugin: args.plugin,
     })

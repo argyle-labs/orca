@@ -223,7 +223,7 @@ mod mcp_sync {
                         url: None,
                         source_mcp: Some(prefix.clone()),
                         spec_json: Some(spec_text),
-                        cached_at: Some(chrono::Utc::now().to_rfc3339()),
+                        cached_at: Some(utils::time::now_rfc3339()),
                         enabled: true,
                     };
                     match db::openapi_specs::upsert(&conn, &row) {

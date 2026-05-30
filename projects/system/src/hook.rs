@@ -1,7 +1,6 @@
 // CLI command that passes through spec/config blobs; HashMap/Value are protocol-level passthrough.
 #![allow(clippy::disallowed_types)]
 use anyhow::Result;
-use chrono::Utc;
 use clap::Subcommand;
 use serde_json::{Value, json};
 use std::io::Read;
@@ -64,7 +63,7 @@ fn log_dir() -> PathBuf {
 }
 
 fn session_file(session_short: &str, project: &str) -> PathBuf {
-    let date = Utc::now().format("%Y-%m-%d").to_string();
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
     log_dir().join(format!("{date}_{session_short}_{project}.jsonl"))
 }
 
@@ -175,7 +174,7 @@ fn session_start() -> Result<()> {
     let record = json!({
         "id": new_uuid(),
         "session": session_short,
-        "timestamp": Utc::now().to_rfc3339(),
+        "timestamp": utils::time::now_rfc3339(),
         "project": project,
         "role": "user",
         "agent": null,
@@ -213,7 +212,7 @@ fn session_stop() -> Result<()> {
     let record = json!({
         "id": new_uuid(),
         "session": session_short,
-        "timestamp": Utc::now().to_rfc3339(),
+        "timestamp": utils::time::now_rfc3339(),
         "project": project,
         "role": "assistant",
         "agent": "orca",

@@ -167,7 +167,7 @@ pub mod scaffold {
     use serde_json::{Value, json};
 
     fn base_spec_info(entry: &SpecEntry, title_suffix: &str) -> Value {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = utils::time::now_rfc3339();
         let captured = entry.captured_at.as_deref().unwrap_or(&now);
         let servers = entry
             .base_url
@@ -516,7 +516,7 @@ mod ops {
         let spec_json: Value = resp.json().await.context("invalid JSON from spec URL")?;
         let spec_text = serde_json::to_string(&spec_json)?;
         let path_count = spec_json["paths"].as_object().map(|p| p.len() as u32);
-        let cached_at = chrono::Utc::now().to_rfc3339();
+        let cached_at = utils::time::now_rfc3339();
         let conn = crate::open_default()?;
         let row = openapi_specs::OpenApiSpecRow {
             name: name.to_string(),
@@ -557,7 +557,7 @@ mod ops {
         let spec_json: Value = resp.json().await.context("invalid JSON from spec URL")?;
         let spec_text = serde_json::to_string(&spec_json)?;
         let path_count = spec_json["paths"].as_object().map(|p| p.len() as u32);
-        let cached_at = chrono::Utc::now().to_rfc3339();
+        let cached_at = utils::time::now_rfc3339();
         let updated = openapi_specs::OpenApiSpecRow {
             name: row.name.clone(),
             url: row.url.clone(),

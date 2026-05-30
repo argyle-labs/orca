@@ -237,7 +237,7 @@ async fn auth_token_create(
     let token_hash = hash::sha256_hex(plaintext.as_bytes());
 
     let id = uuid::Uuid::now_v7().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = utils::time::now_rfc3339();
     let expires_at = args
         .expires_in_days
         .map(|d| (chrono::Utc::now() + chrono::Duration::days(d as i64)).to_rfc3339());
@@ -369,7 +369,7 @@ async fn auth_login(args: LoginArgs, _ctx: &contract::ToolCtx) -> anyhow::Result
     if let Ok(prev) = std::fs::read_to_string(&session_path) {
         let prev = prev.trim();
         if !prev.is_empty() {
-            let now = chrono::Utc::now().to_rfc3339();
+            let now = utils::time::now_rfc3339();
             db::sessions::revoke(&conn, prev, &now).ok();
         }
     }
@@ -423,7 +423,7 @@ async fn auth_logout(_args: LogoutArgs, _ctx: &contract::ToolCtx) -> anyhow::Res
         let sid = sid.trim();
         if !sid.is_empty() {
             let conn = db::open_default()?;
-            let now = chrono::Utc::now().to_rfc3339();
+            let now = utils::time::now_rfc3339();
             revoked = db::sessions::revoke(&conn, sid, &now)?;
         }
     }

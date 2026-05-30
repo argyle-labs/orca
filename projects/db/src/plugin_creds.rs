@@ -4,7 +4,7 @@
 //! Values are stored encrypted at rest by SQLCipher.
 //! Synced to each plugin's local encrypted store via the HTTP /creds API.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::Connection;
 
 #[derive(Debug, Clone)]
