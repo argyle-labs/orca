@@ -2,10 +2,9 @@
 //! real `sessions` row insert, real session file on disk. Pins the contract
 //! [[project-orca-login-local-auth]] depends on.
 
-use auth::auth::{AuthLogin, AuthLogout, LoginArgs, LogoutArgs};
+use auth::auth::{AuthLogin, AuthLogout, LoginArgs, LoginOutput, LogoutArgs, LogoutOutput};
 use contract::OrcaTool;
 use contract::ToolCtx;
-use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 use utils::config::{Config, Model};
@@ -50,20 +49,19 @@ fn seed_admin(username: &str, password: &str) -> String {
     id
 }
 
-async fn invoke_login(username: &str, password: &str) -> anyhow::Result<Value> {
-    let args = LoginArgs {
-        username: username.into(),
-        password: password.into(),
-    };
-    let ctx = make_ctx();
-    let out = AuthLogin::run(args, &ctx).await?;
-    Ok(serde_json::to_value(&out)?)
+async fn login(username: &str, password: &str) -> anyhow::Result<LoginOutput> {
+    AuthLogin::run(
+        LoginArgs {
+            username: username.into(),
+            password: password.into(),
+        },
+        &make_ctx(),
+    )
+    .await
 }
 
-async fn invoke_logout() -> anyhow::Result<Value> {
-    let ctx = make_ctx();
-    let out = AuthLogout::run(LogoutArgs {}, &ctx).await?;
-    Ok(serde_json::to_value(&out)?)
+async fn logout() -> anyhow::Result<LogoutOutput> {
+    AuthLogout::run(LogoutArgs {}, &make_ctx()).await
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -71,13 +69,11 @@ async fn login_then_logout_roundtrips() {
     let _h = fixture_home();
     let uid = seed_admin("alice", "hunter2");
 
-    // login
-    let v = invoke_login("alice", "hunter2").await.unwrap();
-    assert_eq!(v["user_id"].as_str(), Some(uid.as_str()));
-    assert_eq!(v["username"].as_str(), Some("alice"));
-    assert_eq!(v["role"].as_str(), Some("admin"));
+    let out = login("alice", "hunter2").await.unwrap();
+    assert_eq!(out.user_id, uid);
+    assert_eq!(out.username, "alice");
+    assert_eq!(out.role, "admin");
 
-    // session file exists, mode 0600 (unix)
     let path = utils::fs::orca_home().unwrap().join("session");
     assert!(path.exists(), "session file should exist");
     #[cfg(unix)]
@@ -87,7 +83,6 @@ async fn login_then_logout_roundtrips() {
         assert_eq!(mode, 0o600, "session file must be 0600");
     }
 
-    // session row is active in DB
     let sid = std::fs::read_to_string(&path).unwrap();
     let conn = db::open_default().unwrap();
     let row = db::sessions::find_active(&conn, sid.trim())
@@ -95,9 +90,8 @@ async fn login_then_logout_roundtrips() {
         .expect("session row");
     assert_eq!(row.user_id, uid);
 
-    // logout revokes + clears file
-    let v = invoke_logout().await.unwrap();
-    assert_eq!(v["revoked"].as_bool(), Some(true));
+    let out = logout().await.unwrap();
+    assert!(out.revoked, "logout should revoke the active session");
     assert!(!path.exists(), "session file should be removed");
     assert!(
         db::sessions::find_active(&conn, sid.trim())
@@ -111,7 +105,7 @@ async fn login_then_logout_roundtrips() {
 async fn wrong_password_rejected() {
     let _h = fixture_home();
     seed_admin("bob", "correct-horse");
-    let err = invoke_login("bob", "wrong").await.unwrap_err();
+    let err = login("bob", "wrong").await.unwrap_err();
     assert!(
         err.to_string().contains("invalid credentials"),
         "got: {err}"
@@ -123,7 +117,7 @@ async fn wrong_password_rejected() {
 #[tokio::test(flavor = "current_thread")]
 async fn unknown_user_rejected() {
     let _h = fixture_home();
-    let err = invoke_login("ghost", "anything").await.unwrap_err();
+    let err = login("ghost", "anything").await.unwrap_err();
     assert!(
         err.to_string().contains("invalid credentials"),
         "got: {err}"
@@ -134,12 +128,12 @@ async fn unknown_user_rejected() {
 async fn second_login_revokes_prior_session() {
     let _h = fixture_home();
     seed_admin("carol", "pw1");
-    let v1 = invoke_login("carol", "pw1").await.unwrap();
+    let first = login("carol", "pw1").await.unwrap();
+    assert_eq!(first.username, "carol");
     let path = utils::fs::orca_home().unwrap().join("session");
     let sid1 = std::fs::read_to_string(&path).unwrap().trim().to_string();
-    assert_eq!(v1["username"].as_str(), Some("carol"));
 
-    let _ = invoke_login("carol", "pw1").await.unwrap();
+    let _ = login("carol", "pw1").await.unwrap();
     let sid2 = std::fs::read_to_string(&path).unwrap().trim().to_string();
     assert_ne!(sid1, sid2, "second login mints a fresh sid");
 
@@ -157,6 +151,6 @@ async fn second_login_revokes_prior_session() {
 #[tokio::test(flavor = "current_thread")]
 async fn logout_with_no_session_is_noop() {
     let _h = fixture_home();
-    let v = invoke_logout().await.unwrap();
-    assert_eq!(v["revoked"].as_bool(), Some(false));
+    let out = logout().await.unwrap();
+    assert!(!out.revoked);
 }
