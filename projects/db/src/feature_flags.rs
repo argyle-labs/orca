@@ -8,16 +8,14 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 pub fn get(conn: &Connection, name: &str) -> Result<Option<bool>> {
-    let result = conn.query_row(
+    use rusqlite::OptionalExtension;
+    conn.query_row(
         "SELECT enabled FROM feature_flags WHERE name = ?1",
         rusqlite::params![name],
-        |row| row.get::<_, i64>(0),
-    );
-    match result {
-        Ok(v) => Ok(Some(v != 0)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.into()),
-    }
+        |row| row.get::<_, bool>(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 pub fn set(conn: &Connection, name: &str, enabled: bool) -> Result<()> {
@@ -27,7 +25,7 @@ pub fn set(conn: &Connection, name: &str, enabled: bool) -> Result<()> {
          ON CONFLICT(name) DO UPDATE SET
              enabled    = excluded.enabled,
              updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
-        rusqlite::params![name, enabled as i64],
+        rusqlite::params![name, enabled],
     )?;
     Ok(())
 }

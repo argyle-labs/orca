@@ -21,7 +21,7 @@ pub fn list(conn: &Connection) -> Result<Vec<Provider>> {
             name: row.get(0)?,
             url: row.get(1)?,
             kind: row.get(2)?,
-            enabled: row.get::<_, i64>(3)? != 0,
+            enabled: row.get(3)?,
             created_at: row.get(4)?,
         })
     })?;
@@ -41,7 +41,7 @@ pub fn upsert(conn: &Connection, name: &str, url: &str, kind: &str) -> Result<()
 pub fn set_enabled(conn: &Connection, name: &str, enabled: bool) -> Result<bool> {
     let n = conn.execute(
         "UPDATE llm_providers SET enabled = ?2 WHERE name = ?1",
-        rusqlite::params![name, enabled as i64],
+        rusqlite::params![name, enabled],
     )?;
     Ok(n > 0)
 }

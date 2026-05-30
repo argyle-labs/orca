@@ -187,4 +187,292 @@ mod tests {
         let after = list(&conn, "p").unwrap();
         assert!(after[0].synced_at.is_some());
     }
+
+    // ── sync() — credential push primitive ────────────────────────────────────
+
+    fn install_http_plugin(conn: &Connection, id: &str, base_url: &str) {
+        use crate::plugins::PluginRow;
+        use std::collections::HashMap;
+        let row = PluginRow {
+            id: id.into(),
+            manifest_path: "/tmp/manifest.toml".into(),
+            tier: "personal".into(),
+            mode: "orca".into(),
+            mcp_command: Some(base_url.into()),
+            mcp_args: vec![],
+            mcp_env: HashMap::new(),
+            mcp_token_env: None,
+            mcp_urls: vec![],
+            context_injection: "minimal".into(),
+            enabled: true,
+            command_map: HashMap::new(),
+            nav_links: vec![],
+            search_tools: vec![],
+            specs_dir: None,
+        };
+        crate::plugins::upsert(conn, &row).unwrap();
+    }
+
+    fn open_test_path(dir: &std::path::Path) -> (std::path::PathBuf, Connection) {
+        let path = dir.join("test.db");
+        let conn = crate::open_unencrypted(&path).unwrap();
+        (path, conn)
+    }
+
+    #[test]
+    fn sync_no_creds_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, conn) = open_test_path(dir.path());
+        install_http_plugin(&conn, "p-nocreds", "http://127.0.0.1:1");
+        drop(conn);
+        crate::with_thread_db_path(&path, || sync("p-nocreds").unwrap());
+    }
+
+    #[test]
+    fn sync_errors_when_plugin_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, conn) = open_test_path(dir.path());
+        set(&conn, "ghost", "API_KEY", "v").unwrap();
+        drop(conn);
+        let err = crate::with_thread_db_path(&path, || sync("ghost").err().unwrap());
+        assert!(
+            format!("{err:#}").contains("not registered"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn sync_errors_without_resolvable_url() {
+        use crate::plugins::PluginRow;
+        use std::collections::HashMap;
+        let dir = tempfile::tempdir().unwrap();
+        let (path, conn) = open_test_path(dir.path());
+        let row = PluginRow {
+            id: "stdio-plugin".into(),
+            manifest_path: "/tmp/m.toml".into(),
+            tier: "personal".into(),
+            mode: "orca".into(),
+            mcp_command: Some("node".into()),
+            mcp_args: vec!["server.js".into()],
+            mcp_env: HashMap::new(),
+            mcp_token_env: None,
+            mcp_urls: vec![],
+            context_injection: "minimal".into(),
+            enabled: true,
+            command_map: HashMap::new(),
+            nav_links: vec![],
+            search_tools: vec![],
+            specs_dir: None,
+        };
+        crate::plugins::upsert(&conn, &row).unwrap();
+        set(&conn, "stdio-plugin", "PLUGIN_TOKEN", "tok").unwrap();
+        set(&conn, "stdio-plugin", "API_KEY", "v").unwrap();
+        drop(conn);
+        let err = crate::with_thread_db_path(&path, || sync("stdio-plugin").err().unwrap());
+        assert!(format!("{err:#}").contains("HTTP URL"), "got: {err:#}");
+    }
+
+    #[test]
+    fn sync_errors_without_plugin_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, conn) = open_test_path(dir.path());
+        install_http_plugin(&conn, "p-notok", "http://127.0.0.1:1");
+        set(&conn, "p-notok", "API_KEY", "v").unwrap();
+        drop(conn);
+        let err = crate::with_thread_db_path(&path, || sync("p-notok").err().unwrap());
+        assert!(format!("{err:#}").contains("PLUGIN_TOKEN"), "got: {err:#}");
+    }
+
+    #[test]
+    fn sync_pushes_each_and_marks_synced() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (base_url, _server) = rt.block_on(async {
+            let server = wiremock::MockServer::start().await;
+            wiremock::Mock::given(wiremock::matchers::method("PUT"))
+                .and(wiremock::matchers::path("/creds"))
+                .respond_with(wiremock::ResponseTemplate::new(204))
+                .mount(&server)
+                .await;
+            (server.uri(), server)
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let (path, conn) = open_test_path(dir.path());
+        install_http_plugin(&conn, "p-sync", &base_url);
+        set(&conn, "p-sync", "PLUGIN_TOKEN", "secret").unwrap();
+        set(&conn, "p-sync", "API_KEY", "v1").unwrap();
+        set(&conn, "p-sync", "OTHER", "v2").unwrap();
+        drop(conn);
+
+        crate::with_thread_db_path(&path, || sync("p-sync").unwrap());
+
+        let conn = crate::open_unencrypted(&path).unwrap();
+        let creds = list(&conn, "p-sync").unwrap();
+        let api = creds.iter().find(|c| c.key == "API_KEY").unwrap();
+        assert!(api.synced_at.is_some(), "expected synced_at to be set");
+    }
+
+    #[test]
+    fn sync_token_from_mcp_env_when_not_stored() {
+        use crate::plugins::PluginRow;
+        use std::collections::HashMap;
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (base_url, _server) = rt.block_on(async {
+            let server = wiremock::MockServer::start().await;
+            wiremock::Mock::given(wiremock::matchers::method("PUT"))
+                .respond_with(wiremock::ResponseTemplate::new(200))
+                .mount(&server)
+                .await;
+            (server.uri(), server)
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let (path, conn) = open_test_path(dir.path());
+        let mut env = HashMap::new();
+        env.insert("PLUGIN_TOKEN".into(), "env-secret".into());
+        let row = PluginRow {
+            id: "p-envtok".into(),
+            manifest_path: "/tmp/m.toml".into(),
+            tier: "personal".into(),
+            mode: "orca".into(),
+            mcp_command: Some(base_url),
+            mcp_args: vec![],
+            mcp_env: env,
+            mcp_token_env: None,
+            mcp_urls: vec![],
+            context_injection: "minimal".into(),
+            enabled: true,
+            command_map: HashMap::new(),
+            nav_links: vec![],
+            search_tools: vec![],
+            specs_dir: None,
+        };
+        crate::plugins::upsert(&conn, &row).unwrap();
+        set(&conn, "p-envtok", "API_KEY", "v").unwrap();
+        drop(conn);
+
+        crate::with_thread_db_path(&path, || sync("p-envtok").unwrap());
+    }
+
+    #[test]
+    fn sync_reports_failure_without_mark() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (base_url, _server) = rt.block_on(async {
+            let server = wiremock::MockServer::start().await;
+            wiremock::Mock::given(wiremock::matchers::method("PUT"))
+                .respond_with(wiremock::ResponseTemplate::new(500))
+                .mount(&server)
+                .await;
+            (server.uri(), server)
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let (path, conn) = open_test_path(dir.path());
+        install_http_plugin(&conn, "p-fail", &base_url);
+        set(&conn, "p-fail", "PLUGIN_TOKEN", "tok").unwrap();
+        set(&conn, "p-fail", "API_KEY", "v").unwrap();
+        drop(conn);
+
+        crate::with_thread_db_path(&path, || sync("p-fail").unwrap());
+
+        let conn = crate::open_unencrypted(&path).unwrap();
+        let creds = list(&conn, "p-fail").unwrap();
+        let api = creds.iter().find(|c| c.key == "API_KEY").unwrap();
+        assert!(
+            api.synced_at.is_none(),
+            "500 response must leave synced_at as None"
+        );
+    }
+
+    // ── PluginRow::resolve_url ────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_url_from_http_command() {
+        use crate::plugins::PluginRow;
+        use std::collections::HashMap;
+        let row = PluginRow {
+            id: "p".into(),
+            manifest_path: "/tmp/m.toml".into(),
+            tier: "personal".into(),
+            mode: "orca".into(),
+            mcp_command: Some("http://localhost:8080".into()),
+            mcp_args: vec![],
+            mcp_env: HashMap::new(),
+            mcp_token_env: None,
+            mcp_urls: vec![],
+            context_injection: "minimal".into(),
+            enabled: true,
+            command_map: HashMap::new(),
+            nav_links: vec![],
+            search_tools: vec![],
+            specs_dir: None,
+        };
+        assert_eq!(row.resolve_url().as_deref(), Some("http://localhost:8080"));
+    }
+
+    #[test]
+    fn resolve_url_strips_trailing_slash_and_falls_back_to_args() {
+        use crate::plugins::PluginRow;
+        use std::collections::HashMap;
+        let base = PluginRow {
+            id: "p".into(),
+            manifest_path: "/tmp/m.toml".into(),
+            tier: "personal".into(),
+            mode: "orca".into(),
+            mcp_command: Some("https://plugin.example.com/".into()),
+            mcp_args: vec![],
+            mcp_env: HashMap::new(),
+            mcp_token_env: None,
+            mcp_urls: vec![],
+            context_injection: "minimal".into(),
+            enabled: true,
+            command_map: HashMap::new(),
+            nav_links: vec![],
+            search_tools: vec![],
+            specs_dir: None,
+        };
+        assert_eq!(
+            base.resolve_url().as_deref(),
+            Some("https://plugin.example.com")
+        );
+
+        // command is a binary; URL hides in mcp_args
+        let arg_row = PluginRow {
+            mcp_command: Some("node".into()),
+            mcp_args: vec!["server.js".into(), "http://localhost:9000".into()],
+            ..base.clone()
+        };
+        assert_eq!(
+            arg_row.resolve_url().as_deref(),
+            Some("http://localhost:9000")
+        );
+
+        // stdio: no URL anywhere
+        let stdio = PluginRow {
+            mcp_command: Some("node".into()),
+            mcp_args: vec!["server.js".into(), "--port".into(), "3000".into()],
+            ..base.clone()
+        };
+        assert!(stdio.resolve_url().is_none());
+
+        // empty: None
+        let empty = PluginRow {
+            mcp_command: None,
+            mcp_args: vec![],
+            ..base
+        };
+        assert!(empty.resolve_url().is_none());
+    }
 }

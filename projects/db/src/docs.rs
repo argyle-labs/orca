@@ -22,7 +22,7 @@ pub fn list_roots(conn: &Connection) -> Result<Vec<RootRow>> {
             name: row.get(0)?,
             path: row.get(1)?,
             description: row.get(2)?,
-            enabled: row.get::<_, i32>(3)? != 0,
+            enabled: row.get(3)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -37,7 +37,7 @@ pub fn upsert_root(conn: &Connection, root: &RootRow) -> Result<()> {
              path        = excluded.path,
              description = excluded.description,
              enabled     = excluded.enabled",
-        rusqlite::params![root.name, root.path, root.description, root.enabled as i32],
+        rusqlite::params![root.name, root.path, root.description, root.enabled],
     )?;
     Ok(())
 }

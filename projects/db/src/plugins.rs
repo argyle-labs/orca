@@ -73,7 +73,7 @@ fn parse_plugin_row(
     args_json: String,
     env_json: String,
     context_injection: String,
-    enabled: i32,
+    enabled: bool,
     map_json: String,
     mcp_token_env: Option<String>,
     nav_links_json: String,
@@ -97,7 +97,7 @@ fn parse_plugin_row(
         mcp_token_env,
         mcp_urls,
         context_injection,
-        enabled: enabled != 0,
+        enabled,
         command_map: serde_json::from_str(&map_json).unwrap_or_default(),
         nav_links: serde_json::from_str(&nav_links_json).unwrap_or_default(),
         search_tools: serde_json::from_str(&search_tools_json).unwrap_or_default(),
@@ -117,7 +117,7 @@ pub fn list(conn: &Connection) -> Result<Vec<PluginRow>> {
             row.get::<_, String>(5)?,
             row.get::<_, String>(6)?,
             row.get::<_, String>(7)?,
-            row.get::<_, i32>(8)?,
+            row.get::<_, bool>(8)?,
             row.get::<_, String>(9)?,
             row.get::<_, Option<String>>(10)?,
             row.get::<_, String>(11)?,
@@ -180,7 +180,7 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<PluginRow>> {
                 row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
                 row.get::<_, String>(7)?,
-                row.get::<_, i32>(8)?,
+                row.get::<_, bool>(8)?,
                 row.get::<_, String>(9)?,
                 row.get::<_, Option<String>>(10)?,
                 row.get::<_, String>(11)?,
@@ -261,7 +261,7 @@ pub fn upsert(conn: &Connection, plugin: &PluginRow) -> Result<()> {
         rusqlite::params![
             plugin.id, plugin.manifest_path, plugin.tier, plugin.mode,
             plugin.mcp_command, args_json, env_json, plugin.context_injection,
-            plugin.enabled as i32, map_json, plugin.mcp_token_env, nav_json, search_tools_json,
+            plugin.enabled, map_json, plugin.mcp_token_env, nav_json, search_tools_json,
             plugin.specs_dir, mcp_url_json,
         ],
     )?;
@@ -311,7 +311,7 @@ pub fn has_parent(conn: &Connection, dep_id: &str) -> Result<bool> {
 pub fn set_enabled(conn: &Connection, id: &str, enabled: bool) -> Result<bool> {
     let n = conn.execute(
         "UPDATE plugins SET enabled = ?1 WHERE id = ?2",
-        rusqlite::params![enabled as i32, id],
+        rusqlite::params![enabled, id],
     )?;
     Ok(n > 0)
 }

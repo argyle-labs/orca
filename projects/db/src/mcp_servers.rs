@@ -25,7 +25,7 @@ pub fn list(conn: &Connection) -> Result<Vec<ServerRow>> {
             row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
             row.get::<_, String>(3)?,
-            row.get::<_, i32>(4)?,
+            row.get::<_, bool>(4)?,
         ))
     })?;
     let mut result = Vec::new();
@@ -38,7 +38,7 @@ pub fn list(conn: &Connection) -> Result<Vec<ServerRow>> {
             command,
             args,
             env,
-            enabled: enabled != 0,
+            enabled,
         });
     }
     Ok(result)
@@ -60,7 +60,7 @@ pub fn upsert(conn: &Connection, server: &ServerRow) -> Result<()> {
             server.command,
             args_json,
             env_json,
-            server.enabled as i32
+            server.enabled
         ],
     )?;
     Ok(())

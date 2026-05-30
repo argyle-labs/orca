@@ -25,7 +25,7 @@ pub fn list(conn: &Connection) -> Result<Vec<OpenApiSpecRow>> {
             source_mcp: row.get(2)?,
             spec_json: row.get(3)?,
             cached_at: row.get(4)?,
-            enabled: row.get::<_, i32>(5)? != 0,
+            enabled: row.get(5)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -44,7 +44,7 @@ pub fn get(conn: &Connection, name: &str) -> Result<Option<OpenApiSpecRow>> {
             source_mcp: row.get(2)?,
             spec_json: row.get(3)?,
             cached_at: row.get(4)?,
-            enabled: row.get::<_, i32>(5)? != 0,
+            enabled: row.get(5)?,
         })
     })?;
     Ok(rows.next().transpose()?)
@@ -66,7 +66,7 @@ pub fn upsert(conn: &Connection, spec: &OpenApiSpecRow) -> Result<()> {
             spec.source_mcp,
             spec.spec_json,
             spec.cached_at,
-            spec.enabled as i32,
+            spec.enabled,
         ],
     )?;
     Ok(())

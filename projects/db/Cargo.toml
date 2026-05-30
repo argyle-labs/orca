@@ -33,7 +33,7 @@ sha2        = { workspace = true }
 async-trait = { workspace = true }
 cron        = { workspace = true }
 inventory   = { workspace = true }
-reqwest     = { workspace = true }
+reqwest     = { workspace = true, features = ["blocking"] }
 
 clap        = { workspace = true, optional = true }
 # Used only for `task_local!` — the right primitive for scoping a DB path
@@ -43,6 +43,9 @@ tokio      = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+wiremock = "0.6"
+tokio    = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+rustls   = { workspace = true }
 
 # `cargo run --release --example db_bench` to run the perf microbench. See
 # the file header for baseline-vs-current measurement methodology.
