@@ -146,7 +146,7 @@ members = [
     "projects/plugins/openapi",
     "projects/plugins/proxmox",
     "projects/plugins/smb",
-    "projects/plugins/sonarr",
+    "projects/plugins/arr",
     "projects/plugins/unraid",
 ]
 default-members = [
@@ -177,7 +177,7 @@ default-members = [
     "projects/plugins/openapi",
     "projects/plugins/proxmox",
     "projects/plugins/smb",
-    "projects/plugins/sonarr",
+    "projects/plugins/arr",
     "projects/plugins/unraid",
 ]
 resolver = "2"
