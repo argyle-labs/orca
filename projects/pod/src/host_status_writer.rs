@@ -21,10 +21,12 @@ use system::system_info_types::SystemInfoReport;
 
 use crate::runtime_cache;
 
-/// How often the sync puller asks each peer for new status rows. Matches
-/// the persist cadence — pulling more often than peers write just burns
-/// the network.
-const SYNC_INTERVAL: Duration = Duration::from_secs(60);
+/// How often the sync puller asks each peer for new status rows.
+/// Tightened from 60s → 20s to narrow the post-update staleness window
+/// for the runtime cache (version / channel / mode) that drives the
+/// systems-list UI. Per-tool refresh hooks (e.g. system.update) still
+/// force-refresh immediately on success; this is the fleetwide fallback.
+const SYNC_INTERVAL: Duration = Duration::from_secs(20);
 
 /// Max rows requested per peer per sync tick. Bounds catch-up work after a
 /// peer reconnects from a long outage; still well under
@@ -263,6 +265,53 @@ async fn pull_one_peer_inner(peer_id: &str, addr: &str) -> Result<()> {
     })
     .await??;
     Ok(())
+}
+
+/// Best-effort: fetch `system.detail` from a peer at `addr` and stash the
+/// runtime fields (version / target / frontend / mode / channel / pinned_to)
+/// into the in-memory `runtime_cache`. Returns `Err` if the call fails so
+/// callers can retry; the puller path ignores the result because its next
+/// tick will try again anyway.
+pub async fn refresh_runtime_from_addr(peer_id: &str, addr: &str) -> Result<()> {
+    let detail_res = tokio::time::timeout(
+        Duration::from_secs(5),
+        crate::exec(addr, "system.detail", serde_json::json!({})),
+    )
+    .await
+    .context("system.detail timeout")??;
+    let detail: SystemStatusReport =
+        serde_json::from_value(detail_res.result).context("decode system.detail response")?;
+    runtime_cache::put(
+        peer_id,
+        runtime_cache::RuntimeFields {
+            version: Some(detail.version),
+            target: Some(detail.target),
+            frontend: Some(detail.frontend),
+            mode: detail.mode,
+            channel: detail.channel,
+            pinned_to: detail.pinned_to,
+        },
+    );
+    Ok(())
+}
+
+/// Resolve a peer_id to its dial addr via the local pod_peers row, then
+/// refresh its runtime snapshot. Used after `system.update --peer <h>`
+/// completes so the UI reflects the new version immediately rather than
+/// waiting up to one sync tick.
+pub async fn refresh_runtime_for_peer(peer_id: &str) -> Result<()> {
+    let pid = peer_id.to_string();
+    let addr = tokio::task::spawn_blocking(move || -> Result<String> {
+        let conn = db::open_default()?;
+        let peers = db::pod::list_peers(&conn)?;
+        peers
+            .into_iter()
+            .find(|p| p.peer_id == pid)
+            .map(|p| p.addr)
+            .ok_or_else(|| anyhow::anyhow!("peer {pid} not in pod_peers"))
+    })
+    .await??;
+    refresh_runtime_from_addr(peer_id, &addr).await
 }
 
 // Silence the unused-import warning when the file is touched in isolation.
