@@ -181,9 +181,7 @@ mod tests {
         let (path, conn) = open_test_db(dir.path());
         install_http_plugin(&conn, "p-nocreds", "http://127.0.0.1:1");
         drop(conn);
-        db::set_thread_db_path(Some(path.to_str().unwrap()));
-        sync_plugin_creds("p-nocreds").unwrap();
-        db::set_thread_db_path(None);
+        db::with_thread_db_path(&path, || sync_plugin_creds("p-nocreds").unwrap());
     }
 
     #[test]
@@ -193,9 +191,7 @@ mod tests {
         // Plugin doesn't exist; add a stray credential so we get past empty-check.
         db::plugin_creds::set(&conn, "ghost", "API_KEY", "v").unwrap();
         drop(conn);
-        db::set_thread_db_path(Some(path.to_str().unwrap()));
-        let err = sync_plugin_creds("ghost").err().unwrap();
-        db::set_thread_db_path(None);
+        let err = db::with_thread_db_path(&path, || sync_plugin_creds("ghost").err().unwrap());
         assert!(
             format!("{err:#}").contains("not registered"),
             "got: {err:#}"
@@ -213,9 +209,8 @@ mod tests {
         db::plugin_creds::set(&conn, "stdio-plugin", "MEERKAT_TOKEN", "tok").unwrap();
         db::plugin_creds::set(&conn, "stdio-plugin", "API_KEY", "v").unwrap();
         drop(conn);
-        db::set_thread_db_path(Some(path.to_str().unwrap()));
-        let err = sync_plugin_creds("stdio-plugin").err().unwrap();
-        db::set_thread_db_path(None);
+        let err =
+            db::with_thread_db_path(&path, || sync_plugin_creds("stdio-plugin").err().unwrap());
         assert!(format!("{err:#}").contains("HTTP URL"), "got: {err:#}");
     }
 
@@ -226,9 +221,7 @@ mod tests {
         install_http_plugin(&conn, "p-notok", "http://127.0.0.1:1");
         db::plugin_creds::set(&conn, "p-notok", "API_KEY", "v").unwrap();
         drop(conn);
-        db::set_thread_db_path(Some(path.to_str().unwrap()));
-        let err = sync_plugin_creds("p-notok").err().unwrap();
-        db::set_thread_db_path(None);
+        let err = db::with_thread_db_path(&path, || sync_plugin_creds("p-notok").err().unwrap());
         assert!(format!("{err:#}").contains("MEERKAT_TOKEN"), "got: {err:#}");
     }
 
@@ -257,9 +250,7 @@ mod tests {
         db::plugin_creds::set(&conn, "p-sync", "OTHER", "v2").unwrap();
         drop(conn);
 
-        db::set_thread_db_path(Some(path.to_str().unwrap()));
-        sync_plugin_creds("p-sync").unwrap();
-        db::set_thread_db_path(None);
+        db::with_thread_db_path(&path, || sync_plugin_creds("p-sync").unwrap());
 
         // mark_synced flipped synced_at on all stored rows.
         let conn = db::open_unencrypted(&path).unwrap();
@@ -294,9 +285,7 @@ mod tests {
         db::plugin_creds::set(&conn, "p-envtok", "API_KEY", "v").unwrap();
         drop(conn);
 
-        db::set_thread_db_path(Some(path.to_str().unwrap()));
-        sync_plugin_creds("p-envtok").unwrap();
-        db::set_thread_db_path(None);
+        db::with_thread_db_path(&path, || sync_plugin_creds("p-envtok").unwrap());
     }
 
     #[test]
@@ -322,9 +311,7 @@ mod tests {
         db::plugin_creds::set(&conn, "p-fail", "API_KEY", "v").unwrap();
         drop(conn);
 
-        db::set_thread_db_path(Some(path.to_str().unwrap()));
-        sync_plugin_creds("p-fail").unwrap();
-        db::set_thread_db_path(None);
+        db::with_thread_db_path(&path, || sync_plugin_creds("p-fail").unwrap());
 
         // 500 → not marked synced.
         let conn = db::open_unencrypted(&path).unwrap();

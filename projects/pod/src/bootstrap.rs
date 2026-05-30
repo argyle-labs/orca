@@ -474,12 +474,7 @@ fn value_response<T: Serialize>(id: Value, v: &T) -> Response {
     }
 }
 
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use utils::time::now_secs_since_epoch as now_secs;
 
 /// Pick the human-readable label to store in `pod_peers.peer_hostname` (or
 /// `pending_offers.peer_hostname`) for a peer that's announcing itself.

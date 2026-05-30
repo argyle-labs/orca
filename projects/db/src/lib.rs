@@ -252,6 +252,31 @@ pub fn set_thread_db_path(path: Option<&str>) {
     THREAD_DB_PATH.with(|p| *p.borrow_mut() = path.map(|s| s.to_string()));
 }
 
+/// Run `f` with the thread-local DB-path override pinned to `path`, restoring
+/// the previous value on return (or unwind). Use this from synchronous tests
+/// of tool bodies that call `open_default()` — it removes the
+/// `set_thread_db_path(Some)…set_thread_db_path(None)` book-keeping and is
+/// panic-safe, so a failing assertion never leaks the override into the next
+/// test on the same thread.
+///
+/// For `async fn` tests, keep using `with_db_path`, which uses a task-local
+/// that survives executor thread hops.
+pub fn with_thread_db_path<F, R>(path: &std::path::Path, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    struct Guard(Option<String>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            THREAD_DB_PATH.with(|p| *p.borrow_mut() = self.0.take());
+        }
+    }
+    let prev = THREAD_DB_PATH.with(|p| p.borrow().clone());
+    THREAD_DB_PATH.with(|p| *p.borrow_mut() = Some(path.to_string_lossy().into_owned()));
+    let _guard = Guard(prev);
+    f()
+}
+
 /// Open orca database using the default path (`~/.orca/orca.db`).
 ///
 /// Resolution order:
@@ -1268,6 +1293,38 @@ pub(crate) mod testing {
 mod registry_tests {
     use super::*;
     use crate::testing::test_conn;
+
+    #[test]
+    fn with_thread_db_path_pins_and_restores_on_return() {
+        set_thread_db_path(Some("/orig/path.db"));
+        let observed = with_thread_db_path(std::path::Path::new("/scoped/path.db"), || {
+            THREAD_DB_PATH.with(|p| p.borrow().clone())
+        });
+        assert_eq!(observed.as_deref(), Some("/scoped/path.db"));
+        assert_eq!(
+            THREAD_DB_PATH.with(|p| p.borrow().clone()).as_deref(),
+            Some("/orig/path.db"),
+            "previous override must be restored after the scope ends"
+        );
+        set_thread_db_path(None);
+    }
+
+    #[test]
+    fn with_thread_db_path_restores_on_panic() {
+        // Guarantees a panicking test body doesn't leak its override into
+        // the next test scheduled on this thread.
+        set_thread_db_path(None);
+        let result = std::panic::catch_unwind(|| {
+            with_thread_db_path(std::path::Path::new("/leak/path.db"), || {
+                panic!("boom");
+            })
+        });
+        assert!(result.is_err());
+        assert!(
+            THREAD_DB_PATH.with(|p| p.borrow().is_none()),
+            "override must be cleared after panic unwind"
+        );
+    }
 
     // ── Migrations ────────────────────────────────────────────────────────────
 

@@ -15,19 +15,13 @@ pub fn set(conn: &Connection, profile_id: &str, key: &str, value: &str) -> Resul
 }
 
 pub fn get(conn: &Connection, profile_id: &str, key: &str) -> Result<Option<String>> {
+    use rusqlite::OptionalExtension;
     conn.query_row(
         "SELECT value FROM profile_credentials WHERE profile_id = ?1 AND key = ?2",
         rusqlite::params![profile_id, key],
         |r| r.get::<_, String>(0),
     )
-    .map(Some)
-    .or_else(|e| {
-        if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-            Ok(None)
-        } else {
-            Err(e)
-        }
-    })
+    .optional()
     .map_err(Into::into)
 }
 

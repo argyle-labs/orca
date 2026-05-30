@@ -1,7 +1,7 @@
 //! Profiles + profile shares + active-profile pointer.
 
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 #[derive(Debug, Clone)]
 pub struct ProfileRow {
@@ -52,14 +52,7 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<ProfileRow>> {
                 updated_at: r.get(5)?,
             })
         })
-        .map(Some)
-        .or_else(|e| {
-            if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-                Ok(None)
-            } else {
-                Err(e)
-            }
-        })?;
+        .optional()?;
     Ok(row)
 }
 
@@ -84,14 +77,7 @@ pub fn get_by_owner_and_name(
                 updated_at: r.get(5)?,
             })
         })
-        .map(Some)
-        .or_else(|e| {
-            if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-                Ok(None)
-            } else {
-                Err(e)
-            }
-        })?;
+        .optional()?;
     Ok(row)
 }
 
@@ -189,14 +175,7 @@ pub fn role_for_user(conn: &Connection, profile_id: &str, user_id: &str) -> Resu
             [profile_id],
             |r| r.get(0),
         )
-        .map(Some)
-        .or_else(|e| {
-            if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-                Ok(None)
-            } else {
-                Err(e)
-            }
-        })?;
+        .optional()?;
     if owner.as_deref() == Some(user_id) {
         return Ok(Some("owner".to_string()));
     }
@@ -206,14 +185,7 @@ pub fn role_for_user(conn: &Connection, profile_id: &str, user_id: &str) -> Resu
             rusqlite::params![profile_id, user_id],
             |r| r.get(0),
         )
-        .map(Some)
-        .or_else(|e| {
-            if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-                Ok(None)
-            } else {
-                Err(e)
-            }
-        })?;
+        .optional()?;
     Ok(role)
 }
 
@@ -234,13 +206,6 @@ pub fn get_active(conn: &Connection, user_id: &str) -> Result<Option<String>> {
         [user_id],
         |r| r.get::<_, String>(0),
     )
-    .map(Some)
-    .or_else(|e| {
-        if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-            Ok(None)
-        } else {
-            Err(e)
-        }
-    })
+    .optional()
     .map_err(Into::into)
 }

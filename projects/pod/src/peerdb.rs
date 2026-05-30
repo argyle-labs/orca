@@ -13,12 +13,7 @@ pub fn hash_code(raw: &str) -> String {
     utils::hash::sha256_hex(raw.as_bytes())
 }
 
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use utils::time::now_secs_since_epoch as now_secs;
 
 // ── pod_discovery ────────────────────────────────────────────────────────────
 

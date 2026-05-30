@@ -865,12 +865,7 @@ pub async fn cmd_pod_leave(wipe_secrets: bool, wipe_all: bool) -> Result<()> {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use utils::time::now_secs_since_epoch as now_secs;
 
 /// Dial a paired peer with our mesh client cert. Used by post-join methods
 /// (notify-trust, has-ca-key, push-ca-key, peer-leaving).

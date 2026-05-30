@@ -38,6 +38,26 @@ pub struct PluginRow {
     pub specs_dir: Option<String>,
 }
 
+impl PluginRow {
+    /// Canonical "where does this plugin live" resolver — checks `mcp_command`
+    /// first, then `mcp_args`, for an `http(s)://` URL. Trailing slashes are
+    /// stripped so callers can append paths cleanly. Returns `None` for stdio
+    /// plugins (no HTTP transport).
+    pub fn resolve_url(&self) -> Option<String> {
+        if let Some(cmd) = &self.mcp_command
+            && (cmd.starts_with("http://") || cmd.starts_with("https://"))
+        {
+            return Some(cmd.trim_end_matches('/').to_string());
+        }
+        for arg in &self.mcp_args {
+            if arg.starts_with("http://") || arg.starts_with("https://") {
+                return Some(arg.trim_end_matches('/').to_string());
+            }
+        }
+        None
+    }
+}
+
 const PLUGIN_COLS: &str =
     "id, manifest_path, tier, COALESCE(mode,'orca'), mcp_command, mcp_args, mcp_env,
      context_injection, enabled, command_map, mcp_token_env, COALESCE(nav_links,'[]'),

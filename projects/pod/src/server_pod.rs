@@ -259,10 +259,7 @@ pub fn discover() -> Result<Vec<PodDiscoveryRowDto>> {
 pub fn pending() -> Result<Vec<PodPendingOfferDto>> {
     let conn = db::open_default()?;
     let rows = pdb::list_pending_offers(&conn, "in")?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now = utils::time::now_secs_since_epoch();
     Ok(rows
         .into_iter()
         .map(|r| PodPendingOfferDto {
@@ -304,10 +301,7 @@ pub async fn offer(addr: &str, port: Option<u16>) -> Result<PodOfferOutput> {
     let code = mint_pairing_code();
     let code_hash = pdb::hash_code(&code);
     let offer_id = uuid::Uuid::now_v7().to_string();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now = utils::time::now_secs_since_epoch();
     pdb::insert_pending_offer(
         &conn,
         &offer_id,

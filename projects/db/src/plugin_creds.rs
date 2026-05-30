@@ -69,6 +69,79 @@ pub fn mark_synced(conn: &Connection, plugin_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Push every stored credential for `plugin_id` to its running HTTP instance,
+/// then mark them synced. The plugin URL and bearer token are pulled from the
+/// `plugins` table (URL via [`crate::plugins::PluginRow::resolve_url`], token
+/// from `PLUGIN_TOKEN` in either stored credentials or the plugin's
+/// `mcp_env`). On any push failure, `synced_at` is left untouched so the next
+/// sync re-attempts the unsynced rows.
+///
+/// This is the canonical credential-sync primitive — per
+/// `project_db_sync_primitive`, sync belongs in db, not in per-domain modules.
+pub fn sync(plugin_id: &str) -> Result<()> {
+    use anyhow::Context;
+
+    let conn = crate::open_default()?;
+
+    let creds = list(&conn, plugin_id)?;
+    if creds.is_empty() {
+        println!("no credentials to sync for plugin '{plugin_id}'");
+        return Ok(());
+    }
+
+    let plugin = crate::plugins::get(&conn, plugin_id)?
+        .with_context(|| format!("plugin '{plugin_id}' not registered — run `orca plugin add`"))?;
+
+    let base_url = plugin.resolve_url().with_context(|| {
+        format!(
+            "could not determine HTTP URL for plugin '{plugin_id}'\nSet url in [plugin.mcp] of the plugin manifest."
+        )
+    })?;
+
+    let bearer = creds
+        .iter()
+        .find(|r| r.key == "PLUGIN_TOKEN")
+        .map(|r| r.value.clone())
+        .or_else(|| plugin.mcp_env.get("PLUGIN_TOKEN").cloned())
+        .with_context(|| format!("no PLUGIN_TOKEN found for plugin '{plugin_id}'"))?;
+
+    let client = reqwest::blocking::Client::new();
+    let mut synced = 0usize;
+    let mut failed = 0usize;
+
+    for cred in &creds {
+        if cred.key == "PLUGIN_TOKEN" {
+            // Don't push the auth token to itself — it's already on the host.
+            continue;
+        }
+        let url = format!("{base_url}/creds");
+        #[allow(clippy::disallowed_types)]
+        let body = serde_json::json!({"key": cred.key, "value": cred.value});
+        match client.put(&url).bearer_auth(&bearer).json(&body).send() {
+            Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 204 => {
+                synced += 1;
+            }
+            Ok(resp) => {
+                eprintln!("  failed {}: HTTP {}", cred.key, resp.status());
+                failed += 1;
+            }
+            Err(e) => {
+                eprintln!("  failed {}: {}", cred.key, e);
+                failed += 1;
+            }
+        }
+    }
+
+    if failed == 0 {
+        mark_synced(&conn, plugin_id)?;
+        println!("synced {synced} credential(s) to plugin '{plugin_id}'");
+    } else {
+        println!("synced {synced}, failed {failed} — credentials NOT marked as synced");
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
