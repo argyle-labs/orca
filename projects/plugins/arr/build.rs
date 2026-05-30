@@ -46,7 +46,6 @@ fn main() {
         let content = prettyplease::unparse(&ast);
 
         let out = out_dir.join(format!("{flavor}_codegen.rs"));
-        fs::write(&out, content)
-            .unwrap_or_else(|e| panic!("write {}: {e}", out.display()));
+        fs::write(&out, content).unwrap_or_else(|e| panic!("write {}: {e}", out.display()));
     }
 }
