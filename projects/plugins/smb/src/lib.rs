@@ -425,4 +425,214 @@ something invalid
         let h = health(dir.path(), Duration::from_secs(1)).await;
         assert_eq!(h, Health::Ok);
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_macos_mounts_picks_smbfs_lines() {
+        let raw = "\
+//user@srv/public on /Volumes/public (smbfs, nodev, nosuid, mounted by user)
+/dev/disk1s1 on / (apfs, local, journaled)
+//user@srv/cifs on /Volumes/cifs (cifs)
+malformed line with no parens
+";
+        let mounts = parse_macos_mounts(raw);
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[0].fs_type, "smbfs");
+        assert_eq!(mounts[0].source, "//user@srv/public");
+        assert_eq!(mounts[0].mountpoint, PathBuf::from("/Volumes/public"));
+        assert!(mounts[0].options.contains(&"nodev".to_string()));
+        assert_eq!(mounts[1].fs_type, "cifs");
+        // Malformed lines (no " on " / no parens) are skipped.
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn urlencode_passes_safe_chars_and_escapes_others() {
+        assert_eq!(urlencode("abcXYZ012-_.~"), "abcXYZ012-_.~");
+        assert_eq!(urlencode("a b"), "a%20b");
+        assert_eq!(urlencode("p@ss/word"), "p%40ss%2Fword");
+    }
+
+    #[test]
+    fn parse_smbclient_shares_skips_unknown_kinds_and_short_lines() {
+        let raw = "Disk|x|c\nUnknown|y|c\nDisk\n";
+        let shares = parse_smbclient_shares(raw);
+        // Only the well-formed Disk line maps; "Unknown" kind dropped;
+        // "Disk" alone (no name field) dropped.
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].name, "x");
+    }
+
+    #[tokio::test]
+    async fn health_timeout_when_probe_runs_longer_than_budget() {
+        // A nanosecond budget against any spawn_blocking on a real file will
+        // race and either return Ok or Timeout; assert it's one of those —
+        // the goal is to exercise the timeout branch in coverage.
+        let dir = tempfile::tempdir().unwrap();
+        let h = health(dir.path(), Duration::from_nanos(1)).await;
+        assert!(matches!(h, Health::Ok | Health::Timeout));
+    }
+
+    #[tokio::test]
+    async fn unmount_invalid_path_returns_tool_failed() {
+        // umount(1) is universally present on macOS/Linux; the failure path
+        // surfaces ToolFailed. We don't assert exit code (varies by impl).
+        let res = unmount(Path::new("/nonexistent_orca_smb_unmount_test")).await;
+        match res {
+            Err(SmbError::ToolFailed { tool, .. }) => assert_eq!(tool, "umount"),
+            Err(SmbError::MissingTool(_)) => {} // also acceptable on minimal images
+            other => panic!("expected ToolFailed or MissingTool, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_shares_propagates_smbclient_failure_or_missing() {
+        // smbclient is usually absent on macOS CI images and the function
+        // surfaces MissingTool. If the test host happens to have smbclient,
+        // pointing it at a black-hole server will surface ToolFailed.
+        let res = list_shares("127.0.0.1:1", &Credentials::Guest).await;
+        assert!(matches!(
+            res,
+            Err(SmbError::MissingTool(_)) | Err(SmbError::ToolFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn mount_share_health_round_trip_through_serde() {
+        let m = Mount {
+            source: "//srv/x".into(),
+            mountpoint: PathBuf::from("/mnt/x"),
+            fs_type: "cifs".into(),
+            options: vec!["ro".into()],
+        };
+        let s = serde_json::to_string(&m).unwrap();
+        let back: Mount = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, m);
+
+        for k in [
+            ShareKind::Disk,
+            ShareKind::Ipc,
+            ShareKind::Printer,
+            ShareKind::Other,
+        ] {
+            let j = serde_json::to_string(&k).unwrap();
+            let back: ShareKind = serde_json::from_str(&j).unwrap();
+            assert_eq!(back, k);
+        }
+
+        for h in [
+            Health::Ok,
+            Health::Stale,
+            Health::Missing,
+            Health::Timeout,
+            Health::Error,
+        ] {
+            let j = serde_json::to_string(&h).unwrap();
+            let back: Health = serde_json::from_str(&j).unwrap();
+            assert_eq!(back, h);
+        }
+    }
+
+    #[test]
+    fn smb_error_display_covers_each_variant() {
+        let e = SmbError::MissingTool("mount.cifs");
+        assert!(e.to_string().contains("mount.cifs"));
+        let e = SmbError::ToolFailed {
+            tool: "x",
+            code: Some(2),
+            stderr: "boom".into(),
+        };
+        assert!(e.to_string().contains("boom"));
+        let e = SmbError::Timeout(Duration::from_secs(3));
+        assert!(e.to_string().contains("timed out"));
+        let e = SmbError::Unsupported;
+        assert!(e.to_string().contains("unsupported"));
+        let io: SmbError = std::io::Error::other("x").into();
+        assert!(io.to_string().starts_with("io:"));
+    }
+
+    #[test]
+    fn credentials_debug_works_for_each_variant() {
+        for c in [
+            Credentials::File(PathBuf::from("/x")),
+            Credentials::Inline {
+                username: "u".into(),
+                password: "p".into(),
+            },
+            Credentials::Guest,
+        ] {
+            let _ = format!("{c:?}");
+            let _ = c.clone();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn mount_macos_with_inline_creds_runs_through_to_tool() {
+        // mount_smbfs exists on macOS; pointing at a black-hole server
+        // forces it to exit non-zero so we exercise the
+        // run_tool/ToolFailed branch. If the binary somehow isn't on PATH,
+        // MissingTool is also acceptable.
+        let dir = tempfile::tempdir().unwrap();
+        let spec = MountSpec {
+            server: "127.0.0.1:1",
+            share: "nope",
+            mountpoint: dir.path(),
+            credentials: Credentials::Inline {
+                username: "u".into(),
+                password: "p".into(),
+            },
+            extra_opts: vec![],
+        };
+        let res = mount(spec).await;
+        assert!(matches!(
+            res,
+            Err(SmbError::ToolFailed { .. }) | Err(SmbError::MissingTool(_))
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn mount_macos_with_guest_credentials_runs_through_to_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = MountSpec {
+            server: "127.0.0.1:1",
+            share: "nope",
+            mountpoint: dir.path(),
+            credentials: Credentials::Guest,
+            extra_opts: vec![],
+        };
+        let res = mount(spec).await;
+        assert!(matches!(
+            res,
+            Err(SmbError::ToolFailed { .. }) | Err(SmbError::MissingTool(_))
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn mount_macos_with_creds_file_runs_through_to_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = MountSpec {
+            server: "127.0.0.1:1",
+            share: "nope",
+            mountpoint: dir.path(),
+            credentials: Credentials::File(PathBuf::from("/dev/null")),
+            extra_opts: vec![],
+        };
+        let res = mount(spec).await;
+        assert!(matches!(
+            res,
+            Err(SmbError::ToolFailed { .. }) | Err(SmbError::MissingTool(_))
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn list_mounts_macos_returns_a_vec() {
+        // /sbin/mount is always present on macOS; assert the call returns Ok.
+        let mounts = list_mounts().await.expect("/sbin/mount runs");
+        // Don't assert content — depends on host. Just exercise the path.
+        let _ = mounts.len();
+    }
 }

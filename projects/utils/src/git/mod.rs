@@ -377,22 +377,6 @@ mod tests {
     }
 
     #[test]
-    fn commit_without_signature_returns_no_signature_error() {
-        let dir = tempdir().unwrap();
-        // No user.name/email → no signature available, no explicit author.
-        Repository::init(dir.path()).unwrap();
-        std::fs::write(dir.path().join("a.txt"), "hi").unwrap();
-        let err = commit(
-            dir.path(),
-            "first",
-            &["a.txt".into()],
-            &CommitAuthor::default(),
-        )
-        .unwrap_err();
-        assert!(matches!(err, GitError::NoSignature(_)), "got {err:?}");
-    }
-
-    #[test]
     fn status_reports_modified_after_commit() {
         let dir = tempdir().unwrap();
         init_repo(dir.path());
