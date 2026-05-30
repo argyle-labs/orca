@@ -84,8 +84,7 @@ mod tests {
     fn sign_then_verify_envelope_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
         let signing = pki::load_or_init_bootstrap_key(tmp.path()).unwrap();
-        let verifying = pki::bootstrap_verifying_key(&signing);
-        let fp = pki::bootstrap_pubkey_fingerprint(&verifying);
+        let fp = pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
 
         // sign_bundle uses pki_dir(); for the roundtrip we directly drive
         // pki::sign_envelope so the test stays hermetic.

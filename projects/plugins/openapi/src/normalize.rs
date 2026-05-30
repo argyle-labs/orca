@@ -465,3 +465,642 @@ fn synth_id(method: &str, path: &str) -> String {
     }
     s.trim_end_matches('_').to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openapiv3::{OpenAPI, ReferenceOr, StatusCode};
+
+    fn spec(json: serde_json::Value) -> OpenAPI {
+        serde_json::from_value(json).expect("valid openapi fixture")
+    }
+
+    fn base(paths: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "t", "version": "0" },
+            "paths": paths,
+        })
+    }
+
+    #[test]
+    fn synth_id_slugifies_and_collapses_underscores() {
+        assert_eq!(synth_id("get", "/api/v3/movie/{id}"), "get_api_v3_movie_id");
+        assert_eq!(synth_id("post", "/"), "post");
+        assert_eq!(synth_id("get", "/a//b"), "get_a_b");
+    }
+
+    #[test]
+    fn synthesize_assigns_ids_and_skips_existing() {
+        let mut s = spec(base(serde_json::json!({
+            "/a": { "get": { "responses": { "200": { "description": "ok" } } } },
+            "/b": {
+                "post": {
+                    "operationId": "keepMe",
+                    "responses": { "200": { "description": "ok" } }
+                }
+            }
+        })));
+        let mut r = NormalizeReport::default();
+        synthesize_operation_ids(&mut s, &mut r);
+        assert_eq!(r.synthesized_ids.len(), 1);
+        assert_eq!(r.synthesized_ids[0].2, "get_a");
+        // Keep existing.
+        let op_b = s.paths.paths.get("/b").unwrap();
+        if let ReferenceOr::Item(item) = op_b {
+            assert_eq!(
+                item.post.as_ref().unwrap().operation_id.as_deref(),
+                Some("keepMe")
+            );
+        } else {
+            panic!("expected item");
+        }
+    }
+
+    #[test]
+    fn for_each_op_mut_iterates_all_methods() {
+        let mut s = spec(base(serde_json::json!({
+            "/p": {
+                "get":     { "responses": { "200": { "description": "ok" } } },
+                "put":     { "responses": { "200": { "description": "ok" } } },
+                "post":    { "responses": { "200": { "description": "ok" } } },
+                "delete":  { "responses": { "200": { "description": "ok" } } },
+                "options": { "responses": { "200": { "description": "ok" } } },
+                "head":    { "responses": { "200": { "description": "ok" } } },
+                "patch":   { "responses": { "200": { "description": "ok" } } },
+                "trace":   { "responses": { "200": { "description": "ok" } } }
+            }
+        })));
+        let mut r = NormalizeReport::default();
+        synthesize_operation_ids(&mut s, &mut r);
+        assert_eq!(r.synthesized_ids.len(), 8);
+        let mut methods: Vec<&str> = r
+            .synthesized_ids
+            .iter()
+            .map(|(m, _, _)| m.as_str())
+            .collect();
+        methods.sort();
+        assert_eq!(
+            methods,
+            vec![
+                "delete", "get", "head", "options", "patch", "post", "put", "trace"
+            ]
+        );
+    }
+
+    #[test]
+    fn rewrite_multipart_collapses_to_octet_stream() {
+        let mut s = spec(base(serde_json::json!({
+            "/login": {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "multipart/form-data": { "schema": { "type": "object" } }
+                        }
+                    },
+                    "responses": { "200": { "description": "ok" } }
+                }
+            },
+            // No body — function must early-return.
+            "/ping": { "get": { "responses": { "200": { "description": "ok" } } } },
+            // Non-multipart body — untouched.
+            "/json": {
+                "post": {
+                    "requestBody": {
+                        "content": { "application/json": { "schema": { "type": "object" } } }
+                    },
+                    "responses": { "200": { "description": "ok" } }
+                }
+            }
+        })));
+        let mut r = NormalizeReport::default();
+        rewrite_multipart_to_octet_stream(&mut s, &mut r);
+        assert_eq!(r.rewrote_multipart, vec!["POST /login".to_string()]);
+
+        let login = s.paths.paths.get("/login").unwrap();
+        let ReferenceOr::Item(item) = login else {
+            panic!()
+        };
+        let body = item.post.as_ref().unwrap().request_body.as_ref().unwrap();
+        let ReferenceOr::Item(body) = body else {
+            panic!()
+        };
+        assert_eq!(
+            body.content.keys().collect::<Vec<_>>(),
+            vec!["application/octet-stream"]
+        );
+    }
+
+    #[test]
+    fn collapse_response_keeps_application_json_silently_when_others_are_equivalent() {
+        let mut s = spec(base(serde_json::json!({
+            "/a": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": { "schema": { "type": "object" } },
+                                "text/json":        { "schema": { "type": "object" } },
+                                "text/plain":       { "schema": { "type": "string" } }
+                            }
+                        }
+                    }
+                }
+            }
+        })));
+        let mut r = NormalizeReport::default();
+        collapse_response_media_types(&mut s, &mut r);
+        // All dropped types are json-equivalent → no entry surfaced.
+        assert!(r.collapsed_responses.is_empty());
+
+        let a = s.paths.paths.get("/a").unwrap();
+        let ReferenceOr::Item(item) = a else { panic!() };
+        let resp = item
+            .get
+            .as_ref()
+            .unwrap()
+            .responses
+            .responses
+            .get(&StatusCode::Code(200))
+            .unwrap();
+        let ReferenceOr::Item(resp) = resp else {
+            panic!()
+        };
+        assert_eq!(
+            resp.content.keys().collect::<Vec<_>>(),
+            vec!["application/json"]
+        );
+    }
+
+    #[test]
+    fn collapse_response_surfaces_non_json_drops_and_handles_default() {
+        let mut s = spec(base(serde_json::json!({
+            "/a": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": { "schema": { "type": "object" } },
+                                "application/xml":  { "schema": { "type": "object" } }
+                            }
+                        },
+                        "default": {
+                            "description": "err",
+                            "content": {
+                                "application/json": { "schema": { "type": "object" } },
+                                "application/octet-stream": { "schema": { "type": "string" } }
+                            }
+                        }
+                    }
+                }
+            }
+        })));
+        let mut r = NormalizeReport::default();
+        collapse_response_media_types(&mut s, &mut r);
+        assert_eq!(r.collapsed_responses.len(), 2);
+        let labels: Vec<&str> = r
+            .collapsed_responses
+            .iter()
+            .map(|(l, _, _)| l.as_str())
+            .collect();
+        assert!(labels.iter().any(|l| l.contains("200")));
+        assert!(labels.iter().any(|l| l.contains("default")));
+    }
+
+    #[test]
+    fn collapse_response_when_no_application_json_falls_back_to_any_json_key() {
+        let mut s = spec(base(serde_json::json!({
+            "/a": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/vnd.api+json": { "schema": { "type": "object" } },
+                                "application/xml":          { "schema": { "type": "object" } }
+                            }
+                        }
+                    }
+                }
+            }
+        })));
+        let mut r = NormalizeReport::default();
+        collapse_response_media_types(&mut s, &mut r);
+        let a = s.paths.paths.get("/a").unwrap();
+        let ReferenceOr::Item(item) = a else { panic!() };
+        let resp = item
+            .get
+            .as_ref()
+            .unwrap()
+            .responses
+            .responses
+            .get(&StatusCode::Code(200))
+            .unwrap();
+        let ReferenceOr::Item(resp) = resp else {
+            panic!()
+        };
+        assert_eq!(
+            resp.content.keys().collect::<Vec<_>>(),
+            vec!["application/vnd.api+json"]
+        );
+    }
+
+    #[test]
+    fn collapse_response_with_no_json_at_all_is_noop() {
+        let mut s = spec(base(serde_json::json!({
+            "/a": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/xml":          { "schema": { "type": "object" } },
+                                "application/octet-stream": { "schema": { "type": "string" } }
+                            }
+                        }
+                    }
+                }
+            }
+        })));
+        let mut r = NormalizeReport::default();
+        collapse_response_media_types(&mut s, &mut r);
+        assert!(r.collapsed_responses.is_empty());
+        let a = s.paths.paths.get("/a").unwrap();
+        let ReferenceOr::Item(item) = a else { panic!() };
+        let resp = item
+            .get
+            .as_ref()
+            .unwrap()
+            .responses
+            .responses
+            .get(&StatusCode::Code(200))
+            .unwrap();
+        let ReferenceOr::Item(resp) = resp else {
+            panic!()
+        };
+        // Both kept — no JSON key to anchor on.
+        assert_eq!(resp.content.len(), 2);
+    }
+
+    #[test]
+    fn collapse_request_media_types_drops_xml_keeps_json() {
+        let mut s = spec(base(serde_json::json!({
+            "/a": {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": { "schema": { "type": "object" } },
+                            "application/xml":  { "schema": { "type": "object" } }
+                        }
+                    },
+                    "responses": { "200": { "description": "ok" } }
+                }
+            }
+        })));
+        let mut r = NormalizeReport::default();
+        collapse_request_media_types(&mut s, &mut r);
+        assert_eq!(r.collapsed_requests.len(), 1);
+        let a = s.paths.paths.get("/a").unwrap();
+        let ReferenceOr::Item(item) = a else { panic!() };
+        let body = item.post.as_ref().unwrap().request_body.as_ref().unwrap();
+        let ReferenceOr::Item(body) = body else {
+            panic!()
+        };
+        assert_eq!(
+            body.content.keys().collect::<Vec<_>>(),
+            vec!["application/json"]
+        );
+    }
+
+    #[test]
+    fn merge_success_unifies_divergent_2xx_into_oneof() {
+        let mut s = spec(base(serde_json::json!({
+            "/a": {
+                "post": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": { "schema": { "type": "object", "properties": { "id": { "type": "integer" } } } }
+                            }
+                        },
+                        "201": {
+                            "description": "created",
+                            "content": {
+                                "application/json": { "schema": { "type": "string" } }
+                            }
+                        }
+                    }
+                }
+            }
+        })));
+        let mut r = NormalizeReport::default();
+        merge_success_response_schemas(&mut s, &mut r);
+        assert_eq!(r.merged_success_responses.len(), 1);
+        let (_, statuses, variants) = &r.merged_success_responses[0];
+        assert_eq!(*variants, 2);
+        let mut s_sorted = statuses.clone();
+        s_sorted.sort();
+        assert_eq!(s_sorted, vec!["200", "201"]);
+
+        // Both responses now point at the same oneOf schema.
+        let a = s.paths.paths.get("/a").unwrap();
+        let ReferenceOr::Item(item) = a else { panic!() };
+        let responses = &item.post.as_ref().unwrap().responses;
+        for code in [200, 201] {
+            let resp = responses.responses.get(&StatusCode::Code(code)).unwrap();
+            let ReferenceOr::Item(resp) = resp else {
+                panic!()
+            };
+            let mt = resp.content.get("application/json").unwrap();
+            let ReferenceOr::Item(sch) = mt.schema.as_ref().unwrap() else {
+                panic!()
+            };
+            assert!(matches!(sch.schema_kind, SchemaKind::OneOf { .. }));
+        }
+    }
+
+    #[test]
+    fn merge_success_adds_null_variant_for_empty_body() {
+        let mut s = spec(base(serde_json::json!({
+            "/a": {
+                "post": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": { "schema": { "type": "object" } }
+                            }
+                        },
+                        "204": { "description": "no content" }
+                    }
+                }
+            }
+        })));
+        let mut r = NormalizeReport::default();
+        merge_success_response_schemas(&mut s, &mut r);
+        assert_eq!(r.merged_success_responses.len(), 1);
+        assert_eq!(r.merged_success_responses[0].2, 2);
+    }
+
+    #[test]
+    fn merge_success_uses_default_response_as_part_of_bucket() {
+        let mut s = spec(base(serde_json::json!({
+            "/a": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": { "schema": { "type": "object" } }
+                            }
+                        },
+                        "default": {
+                            "description": "fallback",
+                            "content": {
+                                "application/json": { "schema": { "type": "string" } }
+                            }
+                        }
+                    }
+                }
+            }
+        })));
+        let mut r = NormalizeReport::default();
+        // success bucket includes `default` per get_success_response logic
+        merge_success_response_schemas(&mut s, &mut r);
+        let (_, statuses, _) = &r.merged_success_responses[0];
+        assert!(statuses.iter().any(|s| s == "default"));
+    }
+
+    #[test]
+    fn merge_success_single_status_is_noop() {
+        let mut s = spec(base(serde_json::json!({
+            "/a": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": { "application/json": { "schema": { "type": "object" } } }
+                        }
+                    }
+                }
+            }
+        })));
+        let mut r = NormalizeReport::default();
+        merge_success_response_schemas(&mut s, &mut r);
+        assert!(r.merged_success_responses.is_empty());
+    }
+
+    #[test]
+    fn merge_success_identical_schemas_emits_no_oneof() {
+        let mut s = spec(base(serde_json::json!({
+            "/a": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": { "application/json": { "schema": { "type": "object" } } }
+                        },
+                        "201": {
+                            "description": "ok",
+                            "content": { "application/json": { "schema": { "type": "object" } } }
+                        }
+                    }
+                }
+            }
+        })));
+        let mut r = NormalizeReport::default();
+        merge_success_response_schemas(&mut s, &mut r);
+        // Only one distinct shape across both statuses → no union needed.
+        assert!(r.merged_success_responses.is_empty());
+    }
+
+    #[test]
+    fn merge_error_unifies_4xx_5xx() {
+        let mut s = spec(base(serde_json::json!({
+            "/a": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": { "application/json": { "schema": { "type": "object" } } }
+                        },
+                        "404": {
+                            "description": "missing",
+                            "content": { "application/json": { "schema": { "type": "object" } } }
+                        },
+                        "500": { "description": "boom" }
+                    }
+                }
+            }
+        })));
+        let mut r = NormalizeReport::default();
+        merge_error_response_schemas(&mut s, &mut r);
+        assert_eq!(r.merged_error_responses.len(), 1);
+        let (_, statuses, variants) = &r.merged_error_responses[0];
+        assert_eq!(*variants, 2);
+        let mut sorted = statuses.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec!["404", "500"]);
+    }
+
+    #[test]
+    fn is_progenitor_success_and_error_classifiers() {
+        assert!(is_progenitor_success(&StatusCode::Code(101)));
+        assert!(is_progenitor_success(&StatusCode::Code(200)));
+        assert!(is_progenitor_success(&StatusCode::Code(299)));
+        assert!(!is_progenitor_success(&StatusCode::Code(404)));
+        assert!(is_progenitor_success(&StatusCode::Range(2)));
+        assert!(!is_progenitor_success(&StatusCode::Range(4)));
+
+        assert!(is_progenitor_error(&StatusCode::Code(404)));
+        assert!(is_progenitor_error(&StatusCode::Code(500)));
+        assert!(!is_progenitor_error(&StatusCode::Code(200)));
+        assert!(is_progenitor_error(&StatusCode::Range(4)));
+        assert!(is_progenitor_error(&StatusCode::Range(5)));
+        assert!(!is_progenitor_error(&StatusCode::Range(2)));
+    }
+
+    #[test]
+    fn status_label_formats_codes_and_ranges() {
+        assert_eq!(status_label(&StatusCode::Code(200)), "200");
+        assert_eq!(status_label(&StatusCode::Range(4)), "4XX");
+        assert_eq!(SuccessKey::Default.label(), "default");
+        assert_eq!(SuccessKey::Status(StatusCode::Code(201)).label(), "201");
+        // Debug derive exercised.
+        let _ = format!("{:?}", SuccessKey::Default);
+    }
+
+    #[test]
+    fn is_json_equivalent_recognizes_common_variants() {
+        assert!(is_json_equivalent("application/json"));
+        assert!(is_json_equivalent("text/json"));
+        assert!(is_json_equivalent("application/vnd.api+json"));
+        assert!(is_json_equivalent("application/json; charset=utf-8"));
+        assert!(is_json_equivalent("text/plain"));
+        assert!(!is_json_equivalent("application/xml"));
+        assert!(!is_json_equivalent("application/octet-stream"));
+    }
+
+    #[test]
+    fn for_progenitor_runs_every_pass_and_is_idempotent() {
+        let mut s = spec(base(serde_json::json!({
+            "/login": {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "multipart/form-data": { "schema": { "type": "object" } }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": { "schema": { "type": "object" } },
+                                "application/xml":  { "schema": { "type": "object" } }
+                            }
+                        },
+                        "404": { "description": "missing" },
+                        "500": {
+                            "description": "boom",
+                            "content": { "application/json": { "schema": { "type": "string" } } }
+                        }
+                    }
+                }
+            }
+        })));
+        let r1 = for_progenitor(&mut s);
+        assert!(!r1.synthesized_ids.is_empty());
+        assert!(!r1.rewrote_multipart.is_empty());
+        assert!(!r1.collapsed_responses.is_empty());
+        assert!(!r1.merged_error_responses.is_empty());
+
+        let r2 = for_progenitor(&mut s);
+        // Idempotent: a second pass finds nothing else to do.
+        assert!(r2.synthesized_ids.is_empty());
+        assert!(r2.rewrote_multipart.is_empty());
+        assert!(r2.collapsed_responses.is_empty());
+        assert!(r2.collapsed_requests.is_empty());
+        assert!(r2.merged_success_responses.is_empty());
+        assert!(r2.merged_error_responses.is_empty());
+    }
+
+    #[test]
+    fn emit_cargo_warnings_prints_all_buckets() {
+        // Just exercise the println path — assert it doesn't panic and
+        // covers every loop body.
+        let r = NormalizeReport {
+            synthesized_ids: vec![("get".into(), "/a".into(), "get_a".into())],
+            rewrote_multipart: vec!["POST /login".into()],
+            collapsed_requests: vec![(
+                "POST /a".into(),
+                "application/json".into(),
+                vec!["application/xml".into()],
+            )],
+            collapsed_responses: vec![(
+                "GET /a -> 200".into(),
+                "application/json".into(),
+                vec!["application/xml".into()],
+            )],
+            merged_success_responses: vec![("POST /a".into(), vec!["200".into(), "201".into()], 2)],
+            merged_error_responses: vec![("GET /a".into(), vec!["404".into(), "500".into()], 2)],
+        };
+        r.emit_cargo_warnings("test-crate");
+        // Debug + Default + Clone derives.
+        let _ = format!("{r:?}");
+        let _ = r.clone();
+        let _ = NormalizeReport::default();
+    }
+
+    #[test]
+    fn paths_with_reference_or_ref_are_skipped() {
+        // path item is a `$ref` rather than an inline PathItem — iterator
+        // hits the `continue` branch.
+        let s_json = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "t", "version": "0" },
+            "paths": {
+                "/a": { "$ref": "#/components/pathItems/foo" }
+            }
+        });
+        let mut s: OpenAPI = serde_json::from_value(s_json).unwrap();
+        let mut r = NormalizeReport::default();
+        synthesize_operation_ids(&mut s, &mut r);
+        assert!(r.synthesized_ids.is_empty());
+    }
+
+    #[test]
+    fn response_reference_is_treated_as_no_schema() {
+        // ReferenceOr::Reference in the success bucket → get_success_response
+        // returns None, which contributes nothing to the variants list.
+        let s_json = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "t", "version": "0" },
+            "components": {
+                "responses": {
+                    "Shared": { "description": "shared" }
+                }
+            },
+            "paths": {
+                "/a": {
+                    "get": {
+                        "responses": {
+                            "200": { "$ref": "#/components/responses/Shared" },
+                            "201": {
+                                "description": "ok",
+                                "content": { "application/json": { "schema": { "type": "object" } } }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let mut s: OpenAPI = serde_json::from_value(s_json).unwrap();
+        let mut r = NormalizeReport::default();
+        merge_success_response_schemas(&mut s, &mut r);
+        // Only one inline shape — no union emitted.
+        assert!(r.merged_success_responses.is_empty());
+    }
+}
