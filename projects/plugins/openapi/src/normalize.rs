@@ -38,13 +38,14 @@ pub struct NormalizeReport {
     /// Responses whose alternate media types were collapsed away.
     /// `(op_label + status, kept, dropped)`.
     pub collapsed_responses: Vec<(String, String, Vec<String>)>,
-    /// Operations whose extra success-range (2xx) responses had their
-    /// schemas unified to match the canonical 2xx (typically `200`),
-    /// because progenitor can only emit one success type per op. All status
-    /// codes remain reachable from the generated client — only the typed
-    /// schema variation across them is flattened.
-    /// `(op_label, canonical_status, unified_statuses)`.
-    pub unified_success_statuses: Vec<(String, String, Vec<String>)>,
+    /// Operations whose multiple 2xx responses had their schemas merged
+    /// into a synthetic `oneOf` covering every distinct response shape, so
+    /// progenitor emits a single sum-type return for all success statuses.
+    /// All status codes stay routable; every response shape stays
+    /// callable as a variant of the generated enum. Empty-body 2xx
+    /// responses contribute a `null`-typed variant.
+    /// `(op_label, statuses, variant_count)`.
+    pub merged_success_responses: Vec<(String, Vec<String>, usize)>,
 }
 
 impl NormalizeReport {
@@ -66,9 +67,9 @@ impl NormalizeReport {
                 "cargo:warning={crate_name}: collapsed response {op} kept={kept} dropped={dropped:?}"
             );
         }
-        for (op, canonical, unified) in &self.unified_success_statuses {
+        for (op, statuses, variants) in &self.merged_success_responses {
             println!(
-                "cargo:warning={crate_name}: unified success-status schemas {op} canonical={canonical} unified={unified:?}"
+                "cargo:warning={crate_name}: merged success responses {op} statuses={statuses:?} into oneOf with {variants} variant(s)"
             );
         }
     }

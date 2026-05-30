@@ -21,12 +21,12 @@ use system::system_info_types::SystemInfoReport;
 
 use crate::runtime_cache;
 
-/// How often the sync puller asks each peer for new status rows.
-/// Tightened from 60s → 20s to narrow the post-update staleness window
-/// for the runtime cache (version / channel / mode) that drives the
-/// systems-list UI. Per-tool refresh hooks (e.g. system.update) still
-/// force-refresh immediately on success; this is the fleetwide fallback.
-const SYNC_INTERVAL: Duration = Duration::from_secs(20);
+// Cadence is adaptive — see `subscribe_demand::choose_cadence`. When any UI
+// session is actively subscribed the puller runs at FAST_CADENCE (~2s) so
+// version / mode / channel changes surface promptly; with nobody watching it
+// drops to SLOW_CADENCE (~30s). Per-tool refresh hooks (e.g. system.update)
+// still force-refresh immediately on success — this is the fleetwide
+// fallback.
 
 /// Max rows requested per peer per sync tick. Bounds catch-up work after a
 /// peer reconnects from a long outage; still well under
@@ -71,7 +71,12 @@ pub fn spawn_sync_puller() {
             if let Err(e) = pull_peer_status_once().await {
                 tracing::warn!("host_status sync puller: {e:#}");
             }
-            tokio::time::sleep(SYNC_INTERVAL).await;
+            let next = crate::subscribe_demand::choose_cadence(
+                crate::subscribe_demand::is_live(),
+                crate::subscribe_demand::FAST_CADENCE,
+                crate::subscribe_demand::SLOW_CADENCE,
+            );
+            tokio::time::sleep(next).await;
         }
     });
 }
