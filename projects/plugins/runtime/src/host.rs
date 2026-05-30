@@ -988,6 +988,7 @@ fn handle_types_declare(
             .expect("Response serializes");
         }
     };
+    let plugin_ns = state.plugin_namespace.as_deref().unwrap_or(plugin_id);
 
     let params: TypesDeclareParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
         Some(p) => p,
@@ -1050,11 +1051,11 @@ fn handle_types_declare(
             ))
             .expect("Response serializes");
         }
-        accepted.push(format!("{plugin_id}.{}", decl.type_name));
+        accepted.push(format!("{plugin_ns}.{}", decl.type_name));
     }
 
     info!(
-        "[plugin-host] types.declare from '{plugin_id}' accepted {} type(s)",
+        "[plugin-host] types.declare from '{plugin_id}' (ns '{plugin_ns}') accepted {} type(s)",
         accepted.len()
     );
 
@@ -1082,6 +1083,7 @@ fn handle_tools_declare(
             .expect("Response serializes");
         }
     };
+    let plugin_ns = state.plugin_namespace.as_deref().unwrap_or(plugin_id);
 
     let params: ToolsDeclareParams = match params.and_then(|p| serde_json::from_value(p).ok()) {
         Some(p) => p,
@@ -1127,7 +1129,7 @@ fn handle_tools_declare(
             schema_str,
             decl.sensitivity.as_str().to_string(),
         ));
-        accepted.push(format!("{plugin_id}.{}", decl.name));
+        accepted.push(format!("{plugin_ns}.{}", decl.name));
     }
 
     let mut conn = match db::open_default() {

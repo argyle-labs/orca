@@ -421,6 +421,7 @@ async fn handle_observation_conn(
                             methods_optional: vec![],
                             plugins_required: vec![],
                             plugins_optional: vec![],
+                            plugin_namespace: String::new(),
                         });
                         event_tx.send(Event::Hello(params.clone())).ok();
                         hello_seen = true;
