@@ -8,7 +8,7 @@
 
 use crate::host_addressing::{self, PodPeerAddress};
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PeerSummary {
@@ -33,13 +33,12 @@ pub struct PeerSummary {
 /// surface the value in a snapshot. The mutating side (`set_self_secure`)
 /// stays in `server::pod::db` next to the Tier-2 state machine.
 pub fn get_self_secure(conn: &Connection) -> Result<bool> {
-    use rusqlite::OptionalExtension;
     let row = conn
         .query_row("SELECT self_secure FROM pod_self WHERE id = 1", [], |r| {
-            r.get::<_, i64>(0)
+            r.get::<_, bool>(0)
         })
         .optional()?;
-    Ok(row.unwrap_or(0) != 0)
+    Ok(row.unwrap_or(false))
 }
 
 pub fn list_peers(conn: &Connection) -> Result<Vec<PeerSummary>> {
@@ -66,8 +65,8 @@ pub fn list_peers(conn: &Connection) -> Result<Vec<PeerSummary>> {
                 addr: r.get::<_, String>(2)?,
                 port: r.get::<_, i64>(3)? as u16,
                 last_seen_at: r.get::<_, i64>(4)?,
-                local_secure: r.get::<_, i64>(6)? != 0,
-                peer_secure: r.get::<_, i64>(7)? != 0,
+                local_secure: r.get(6)?,
+                peer_secure: r.get(7)?,
                 status,
                 addresses: Vec::new(),
             })

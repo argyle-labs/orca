@@ -35,14 +35,7 @@ pub fn record(
     conn.execute(
         "INSERT INTO scheduler_runs (job_name, started_at, finished_at, ok, error, duration_ms)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            job_name,
-            started_at,
-            finished_at,
-            ok as i64,
-            error,
-            duration_ms
-        ],
+        params![job_name, started_at, finished_at, ok, error, duration_ms],
     )?;
     // Trim — keep the newest RETAIN_PER_JOB rows per job.
     conn.execute(
@@ -104,7 +97,7 @@ fn row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<SchedulerRun> {
         job_name: r.get(1)?,
         started_at: r.get(2)?,
         finished_at: r.get(3)?,
-        ok: r.get::<_, i64>(4)? != 0,
+        ok: r.get(4)?,
         error: r.get(5)?,
         duration_ms: r.get(6)?,
     })

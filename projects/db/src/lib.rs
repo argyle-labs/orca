@@ -696,7 +696,6 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             mcp_token_env     TEXT,
             context_injection TEXT NOT NULL DEFAULT 'minimal',
             command_map       TEXT NOT NULL DEFAULT '{}',
-            mode              TEXT NOT NULL DEFAULT 'orca',
             nav_links         TEXT NOT NULL DEFAULT '[]',
             search_tools      TEXT NOT NULL DEFAULT '[]',
             specs_dir         TEXT,
@@ -1180,15 +1179,7 @@ pub fn insert_event(
             (id, session, project, timestamp, role, agent, content, important, tags)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         rusqlite::params![
-            id,
-            session,
-            project,
-            timestamp,
-            role,
-            agent,
-            content,
-            important as i32,
-            tags,
+            id, session, project, timestamp, role, agent, content, important, tags,
         ],
     )?;
     Ok(())
@@ -1228,7 +1219,7 @@ pub fn search_events(conn: &Connection, query: &str, limit: usize) -> Result<Vec
             role: row.get(4)?,
             agent: row.get(5)?,
             content: row.get(6)?,
-            important: row.get::<_, i32>(7)? != 0,
+            important: row.get(7)?,
             tags: row.get(8)?,
         })
     })?;
@@ -1256,7 +1247,7 @@ pub fn important_events(conn: &Connection, project: &str, limit: usize) -> Resul
             role: row.get(4)?,
             agent: row.get(5)?,
             content: row.get(6)?,
-            important: row.get::<_, i32>(7)? != 0,
+            important: row.get(7)?,
             tags: row.get(8)?,
         })
     })?;

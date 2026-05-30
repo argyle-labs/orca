@@ -294,7 +294,7 @@ fn row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<ConfigRow> {
         noun: r.get(2)?,
         name: r.get(3)?,
         json: r.get(4)?,
-        is_replica: r.get::<_, i64>(5)? != 0,
+        is_replica: r.get(5)?,
         updated_at: r.get(6)?,
         updated_by: r.get(7)?,
     })

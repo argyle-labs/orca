@@ -1,7 +1,7 @@
 //! MCP tool mapping registry — bridges orca tool names to external MCP server tools.
 
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 #[derive(Debug, Clone)]
 pub struct MappingRow {
@@ -52,7 +52,6 @@ pub fn all(conn: &Connection) -> Result<Vec<MappingRow>> {
 }
 
 pub fn lookup(conn: &Connection, orca_tool: &str) -> Result<Option<MappingRow>> {
-    use rusqlite::OptionalExtension;
     conn.query_row(
         "SELECT orca_tool, mcp_name, external_tool, match_type, confidence, enabled
          FROM mcp_tool_mappings WHERE orca_tool = ?1 AND enabled = 1",

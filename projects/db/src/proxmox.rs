@@ -5,7 +5,7 @@
 //! homelab clusters.
 
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 #[derive(Debug, Clone)]
 pub struct EndpointRow {
@@ -37,7 +37,7 @@ pub fn list(conn: &Connection) -> Result<Vec<EndpointRow>> {
 }
 
 pub fn get(conn: &Connection, name: &str) -> Result<Option<EndpointRow>> {
-    let result = conn.query_row(
+    conn.query_row(
         "SELECT name, base_url, token_id, token_secret, insecure, enabled
          FROM proxmox_endpoints WHERE name = ?1",
         rusqlite::params![name],
@@ -51,12 +51,9 @@ pub fn get(conn: &Connection, name: &str) -> Result<Option<EndpointRow>> {
                 enabled: row.get(5)?,
             })
         },
-    );
-    match result {
-        Ok(row) => Ok(Some(row)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.into()),
-    }
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 pub fn upsert(conn: &Connection, ep: &EndpointRow) -> Result<()> {

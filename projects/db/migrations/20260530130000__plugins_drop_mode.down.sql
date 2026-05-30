@@ -1,0 +1,1 @@
+ALTER TABLE plugins ADD COLUMN mode TEXT NOT NULL DEFAULT 'orca';
