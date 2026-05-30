@@ -7,7 +7,22 @@ use contract::OrcaTool;
 use contract::ToolCtx;
 use contract::config::{Config, Model};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+
+/// Global serialization for tests that mutate process-wide env vars
+/// (ORCA_HOME, HOME, ORCA_DB_PATH). Without this, parallel tests race
+/// and stomp each other's tempdirs → "database is locked" / "disk I/O error".
+fn env_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+pub struct Fixture {
+    _guard: MutexGuard<'static, ()>,
+    pub dir: tempfile::TempDir,
+}
 
 fn make_ctx() -> ToolCtx {
     ToolCtx::new(Arc::new(Config {
@@ -25,19 +40,20 @@ fn make_ctx() -> ToolCtx {
     }))
 }
 
-fn fixture_home() -> tempfile::TempDir {
+fn fixture_home() -> Fixture {
+    // Hold the env lock for the entire test so parallel tests don't stomp
+    // ORCA_HOME / HOME / ORCA_DB_PATH on each other (each pins them to its
+    // own tempdir; without serialization sqlite races on the same file).
+    let guard = env_lock();
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("orca.db");
-    // SAFETY: env mutation in tests is single-threaded by default in this
-    // integration binary (`flavor = "current_thread"` + cargo's
-    // per-binary test scheduling), and each test re-pins these to its own
-    // fresh tempdir before doing any work.
+    // SAFETY: env mutation is serialized by `env_lock()` above.
     unsafe {
         std::env::set_var("ORCA_HOME", dir.path());
         std::env::set_var("HOME", dir.path());
         std::env::set_var("ORCA_DB_PATH", &db_path);
     }
-    dir
+    Fixture { _guard: guard, dir }
 }
 
 fn seed_admin(username: &str, password: &str) -> String {

@@ -56,6 +56,12 @@ export interface HelloParams {
   plugins_required?: string[];
   /** Optional peer plugins. Same format. */
   plugins_optional?: string[];
+  /**
+   * Namespace this plugin owns (from manifest.plugin.namespace, falling back
+   * to plugin_id). All tool/type ids are stamped with this prefix instead of
+   * plugin_id. Omit = host uses plugin_id.
+   */
+  plugin_namespace?: string;
 }
 
 /**

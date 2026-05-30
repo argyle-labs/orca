@@ -14,6 +14,18 @@ export interface PluginSection {
   id: string;
   version: string;
   min_orca_version: string;
+  /**
+   * Namespace this plugin owns. Tool names, db rows, specs, and config all
+   * scope under it. Omit = falls back to `id` (see `effectiveNamespace`).
+   * Plugins targeting an existing namespace (e.g. multiple HomeAssistant
+   * instances under "home") declare it explicitly.
+   */
+  namespace?: string;
+}
+
+/** Effective namespace — explicit `namespace`, falling back to `id`. */
+export function effectiveNamespace(p: PluginSection): string {
+  return p.namespace && p.namespace.length > 0 ? p.namespace : p.id;
 }
 
 export interface RuntimeSection {
@@ -59,7 +71,7 @@ export interface Manifest {
 }
 
 const ALLOWED_TOP = new Set(['plugin', 'runtime', 'surfaces', 'capabilities', 'depends_on']);
-const ALLOWED_PLUGIN = new Set(['id', 'version', 'min_orca_version']);
+const ALLOWED_PLUGIN = new Set(['id', 'version', 'min_orca_version', 'namespace']);
 const ALLOWED_RUNTIME = new Set(['binary', 'image', 'mode', 'eager']);
 const ALLOWED_SURFACES = new Set([
   'mcp',
@@ -121,6 +133,21 @@ export function parseString(s: string): Manifest {
   checkSemver(version, 'plugin.version');
   checkSemver(minOrca, 'plugin.min_orca_version');
 
+  const namespace =
+    plugin['namespace'] === undefined ? undefined : String(plugin['namespace']);
+  if (namespace !== undefined) {
+    if (namespace.trim().length === 0) {
+      throw new Error('plugin.namespace must not be empty when set');
+    }
+    for (const ch of namespace) {
+      if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '/' || ch === '\\') {
+        throw new Error(
+          `plugin.namespace "${namespace}" contains invalid characters (whitespace or path separators)`,
+        );
+      }
+    }
+  }
+
   const binary = runtime['binary'] === undefined ? undefined : String(runtime['binary']);
   const image = runtime['image'] === undefined ? undefined : String(runtime['image']);
   if (binary !== undefined && image !== undefined) {
@@ -177,7 +204,12 @@ export function parseString(s: string): Manifest {
   }
 
   const result: Manifest = {
-    plugin: { id, version, min_orca_version: minOrca },
+    plugin: {
+      id,
+      version,
+      min_orca_version: minOrca,
+      ...(namespace !== undefined ? { namespace } : {}),
+    },
     runtime: { mode: 'process', eager, ...(binary !== undefined ? { binary } : {}), ...(image !== undefined ? { image } : {}) },
     surfaces,
     capabilities,
