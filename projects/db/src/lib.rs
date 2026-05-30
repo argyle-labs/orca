@@ -711,7 +711,8 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         );
 
         CREATE TABLE IF NOT EXISTS plugin_types (
-            plugin_id      TEXT NOT NULL,
+            plugin_id        TEXT NOT NULL,
+            plugin_namespace TEXT NOT NULL DEFAULT '',
             type_name      TEXT NOT NULL,
             fq_type_id     TEXT NOT NULL UNIQUE,
             schema_version TEXT NOT NULL,
@@ -725,6 +726,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
 
         CREATE TABLE IF NOT EXISTS plugin_tools (
             plugin_id        TEXT NOT NULL,
+            plugin_namespace TEXT NOT NULL DEFAULT '',
             name             TEXT NOT NULL,
             fq_name          TEXT NOT NULL UNIQUE,
             description      TEXT NOT NULL,

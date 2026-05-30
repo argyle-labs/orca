@@ -1037,19 +1037,23 @@ fn handle_types_declare(
         if let Err(e) = db::plugin_types::upsert(
             &conn,
             plugin_id,
+            plugin_ns,
             &decl.type_name,
             &decl.schema_version,
             &schema_str,
             decl.sensitivity.as_str(),
         ) {
-            return serde_json::to_value(Response::err(
-                id,
+            let err = if let Some((fq, owner)) = db::plugin_types::is_namespace_collision(&e) {
+                ErrorObject::invalid_params(&format!(
+                    "types.declare rejected: '{fq}' already declared by plugin '{owner}'"
+                ))
+            } else {
                 ErrorObject::internal(&format!(
                     "upsert plugin_type {plugin_id}.{}: {e}",
                     decl.type_name
-                )),
-            ))
-            .expect("Response serializes");
+                ))
+            };
+            return serde_json::to_value(Response::err(id, err)).expect("Response serializes");
         }
         accepted.push(format!("{plugin_ns}.{}", decl.type_name));
     }
@@ -1142,12 +1146,15 @@ fn handle_tools_declare(
             .expect("Response serializes");
         }
     };
-    if let Err(e) = db::plugin_tools::replace(&mut conn, plugin_id, &rows) {
-        return serde_json::to_value(Response::err(
-            id,
-            ErrorObject::internal(&format!("replace_plugin_tools {plugin_id}: {e}")),
-        ))
-        .expect("Response serializes");
+    if let Err(e) = db::plugin_tools::replace(&mut conn, plugin_id, plugin_ns, &rows) {
+        let err = if let Some((fq, owner)) = db::plugin_tools::is_namespace_collision(&e) {
+            ErrorObject::invalid_params(&format!(
+                "tools.declare rejected: '{fq}' already declared by plugin '{owner}'"
+            ))
+        } else {
+            ErrorObject::internal(&format!("replace_plugin_tools {plugin_id}: {e}"))
+        };
+        return serde_json::to_value(Response::err(id, err)).expect("Response serializes");
     }
 
     info!(

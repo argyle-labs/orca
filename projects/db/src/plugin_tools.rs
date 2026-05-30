@@ -1,11 +1,12 @@
 //! Plugin-declared tool registry — what the MCP layer surfaces to LLMs as plugin-owned tools.
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use rusqlite::Connection;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PluginToolRow {
     pub plugin_id: String,
+    pub plugin_namespace: String,
     pub name: String,
     pub fq_name: String,
     pub description: String,
@@ -16,12 +17,40 @@ pub struct PluginToolRow {
     pub declared_at: String,
 }
 
-/// Upsert a plugin-declared tool. Fully-qualified name is `<plugin_id>.<name>`
+/// Returned by `replace` when a tool's fq_name (`<namespace>.<name>`) is
+/// already declared by a *different* `plugin_id`. The reject-on-collision
+/// policy means two plugins sharing a namespace cannot declare the same
+/// tool — ops must rename or pick distinct namespaces.
+pub fn is_namespace_collision(err: &anyhow::Error) -> Option<(String, String)> {
+    err.downcast_ref::<NamespaceCollision>()
+        .map(|c| (c.fq_name.clone(), c.owner_plugin_id.clone()))
+}
+
+#[derive(Debug)]
+struct NamespaceCollision {
+    fq_name: String,
+    owner_plugin_id: String,
+}
+
+impl std::fmt::Display for NamespaceCollision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "tool '{}' already declared by plugin '{}'",
+            self.fq_name, self.owner_plugin_id
+        )
+    }
+}
+
+impl std::error::Error for NamespaceCollision {}
+
+/// Upsert a plugin-declared tool. Fully-qualified name is `<plugin_namespace>.<name>`
 /// and is unique across all plugins. Re-declaring the same `(plugin_id, name)`
 /// updates the description / schema / sensitivity in place.
 pub fn upsert(
     conn: &Connection,
     plugin_id: &str,
+    plugin_namespace: &str,
     name: &str,
     description: &str,
     input_schema: &str,
@@ -30,17 +59,33 @@ pub fn upsert(
     if !matches!(sensitivity, "general" | "sensitive") {
         anyhow::bail!("sensitivity must be 'general' or 'sensitive', got '{sensitivity}'");
     }
-    let fq = format!("{plugin_id}.{name}");
+    let fq = format!("{plugin_namespace}.{name}");
+    if let Some(owner) = collision_owner(conn, &fq, plugin_id)? {
+        return Err(anyhow!(NamespaceCollision {
+            fq_name: fq,
+            owner_plugin_id: owner,
+        }));
+    }
     conn.execute(
         "INSERT INTO plugin_tools
-            (plugin_id, name, fq_name, description, input_schema, sensitivity)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            (plugin_id, plugin_namespace, name, fq_name, description, input_schema, sensitivity)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(plugin_id, name) DO UPDATE SET
-            description    = excluded.description,
-            input_schema   = excluded.input_schema,
-            sensitivity    = excluded.sensitivity,
-            declared_at    = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
-        rusqlite::params![plugin_id, name, fq, description, input_schema, sensitivity],
+            plugin_namespace = excluded.plugin_namespace,
+            fq_name          = excluded.fq_name,
+            description      = excluded.description,
+            input_schema     = excluded.input_schema,
+            sensitivity      = excluded.sensitivity,
+            declared_at      = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+        rusqlite::params![
+            plugin_id,
+            plugin_namespace,
+            name,
+            fq,
+            description,
+            input_schema,
+            sensitivity
+        ],
     )?;
     Ok(())
 }
@@ -49,9 +94,16 @@ pub fn upsert(
 /// `orca/tools.declare` arrives — declarations are idempotent and replace
 /// the previously-known set, so any tool the plugin no longer declares is
 /// removed from the registry.
+///
+/// If any incoming tool's fq_name (`<namespace>.<name>`) is already owned by
+/// a *different* plugin_id, the whole batch is rejected with a
+/// `NamespaceCollision` error (see [`is_namespace_collision`]). The reject
+/// happens inside the transaction so the plugin's existing rows are
+/// preserved on failure.
 pub fn replace(
     conn: &mut Connection,
     plugin_id: &str,
+    plugin_namespace: &str,
     tools: &[(String, String, String, String)],
 ) -> Result<()> {
     let tx = conn.transaction()?;
@@ -60,76 +112,46 @@ pub fn replace(
         if !matches!(sensitivity.as_str(), "general" | "sensitive") {
             anyhow::bail!("sensitivity must be 'general' or 'sensitive', got '{sensitivity}'");
         }
-        let fq = format!("{plugin_id}.{name}");
+        let fq = format!("{plugin_namespace}.{name}");
+        if let Some(owner) = collision_owner(&tx, &fq, plugin_id)? {
+            return Err(anyhow!(NamespaceCollision {
+                fq_name: fq,
+                owner_plugin_id: owner,
+            }));
+        }
         tx.execute(
             "INSERT INTO plugin_tools
-                (plugin_id, name, fq_name, description, input_schema, sensitivity)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![plugin_id, name, fq, description, schema, sensitivity],
+                (plugin_id, plugin_namespace, name, fq_name, description, input_schema, sensitivity)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                plugin_id,
+                plugin_namespace,
+                name,
+                fq,
+                description,
+                schema,
+                sensitivity
+            ],
         )?;
     }
     tx.commit()?;
     Ok(())
 }
 
-/// List all tools declared by a single plugin.
-pub fn list(conn: &Connection, plugin_id: &str) -> Result<Vec<PluginToolRow>> {
+/// Returns the `plugin_id` that currently owns `fq_name` if it's owned by
+/// someone other than `self_plugin_id`. We just deleted self's rows in
+/// `replace`, so any survivor is by definition a different plugin.
+fn collision_owner(
+    conn: &Connection,
+    fq_name: &str,
+    self_plugin_id: &str,
+) -> Result<Option<String>> {
     let mut stmt = conn.prepare(
-        "SELECT plugin_id, name, fq_name, description, input_schema, sensitivity, declared_at
-         FROM plugin_tools WHERE plugin_id = ?1 ORDER BY name",
+        "SELECT plugin_id FROM plugin_tools WHERE fq_name = ?1 AND plugin_id != ?2 LIMIT 1",
     )?;
-    let rows = stmt.query_map([plugin_id], |r| {
-        Ok(PluginToolRow {
-            plugin_id: r.get(0)?,
-            name: r.get(1)?,
-            fq_name: r.get(2)?,
-            description: r.get(3)?,
-            input_schema: r.get(4)?,
-            sensitivity: r.get(5)?,
-            declared_at: r.get(6)?,
-        })
-    })?;
-    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-}
-
-/// List every tool across every plugin — what the MCP registry needs to
-/// surface plugin tools to LLMs.
-pub fn list_all(conn: &Connection) -> Result<Vec<PluginToolRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT plugin_id, name, fq_name, description, input_schema, sensitivity, declared_at
-         FROM plugin_tools ORDER BY fq_name",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok(PluginToolRow {
-            plugin_id: r.get(0)?,
-            name: r.get(1)?,
-            fq_name: r.get(2)?,
-            description: r.get(3)?,
-            input_schema: r.get(4)?,
-            sensitivity: r.get(5)?,
-            declared_at: r.get(6)?,
-        })
-    })?;
-    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-}
-
-/// Look up a single tool by its fully-qualified name (`<plugin_id>.<name>`).
-pub fn get(conn: &Connection, fq_name: &str) -> Result<Option<PluginToolRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT plugin_id, name, fq_name, description, input_schema, sensitivity, declared_at
-         FROM plugin_tools WHERE fq_name = ?1",
-    )?;
-    let row = stmt
-        .query_row([fq_name], |r| {
-            Ok(PluginToolRow {
-                plugin_id: r.get(0)?,
-                name: r.get(1)?,
-                fq_name: r.get(2)?,
-                description: r.get(3)?,
-                input_schema: r.get(4)?,
-                sensitivity: r.get(5)?,
-                declared_at: r.get(6)?,
-            })
+    let owner = stmt
+        .query_row(rusqlite::params![fq_name, self_plugin_id], |r| {
+            r.get::<_, String>(0)
         })
         .map(Some)
         .or_else(|e| {
@@ -139,5 +161,55 @@ pub fn get(conn: &Connection, fq_name: &str) -> Result<Option<PluginToolRow>> {
                 Err(e)
             }
         })?;
+    Ok(owner)
+}
+
+/// List all tools declared by a single plugin.
+pub fn list(conn: &Connection, plugin_id: &str) -> Result<Vec<PluginToolRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT plugin_id, plugin_namespace, name, fq_name, description, input_schema, sensitivity, declared_at
+         FROM plugin_tools WHERE plugin_id = ?1 ORDER BY name",
+    )?;
+    let rows = stmt.query_map([plugin_id], row_from)?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// List every tool across every plugin — what the MCP registry needs to
+/// surface plugin tools to LLMs.
+pub fn list_all(conn: &Connection) -> Result<Vec<PluginToolRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT plugin_id, plugin_namespace, name, fq_name, description, input_schema, sensitivity, declared_at
+         FROM plugin_tools ORDER BY fq_name",
+    )?;
+    let rows = stmt.query_map([], row_from)?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Look up a single tool by its fully-qualified name (`<plugin_namespace>.<name>`).
+pub fn get(conn: &Connection, fq_name: &str) -> Result<Option<PluginToolRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT plugin_id, plugin_namespace, name, fq_name, description, input_schema, sensitivity, declared_at
+         FROM plugin_tools WHERE fq_name = ?1",
+    )?;
+    let row = stmt.query_row([fq_name], row_from).map(Some).or_else(|e| {
+        if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
+            Ok(None)
+        } else {
+            Err(e)
+        }
+    })?;
     Ok(row)
+}
+
+fn row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<PluginToolRow> {
+    Ok(PluginToolRow {
+        plugin_id: r.get(0)?,
+        plugin_namespace: r.get(1)?,
+        name: r.get(2)?,
+        fq_name: r.get(3)?,
+        description: r.get(4)?,
+        input_schema: r.get(5)?,
+        sensitivity: r.get(6)?,
+        declared_at: r.get(7)?,
+    })
 }
