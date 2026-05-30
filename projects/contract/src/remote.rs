@@ -35,4 +35,13 @@ pub trait RemoteExec: Send + Sync {
         args: serde_json::Value,
         caller: Option<CallerIdentity>,
     ) -> Result<serde_json::Value>;
+
+    /// Best-effort: force-refresh the runtime snapshot (version / channel /
+    /// mode / target) the controller caches for `peer`. Called by tools whose
+    /// success mutates the peer's reported runtime — notably `system.update` —
+    /// so the UI reflects the new state without waiting for the next sync
+    /// tick. Default no-op for transports that don't maintain a runtime cache.
+    async fn refresh_peer_runtime(&self, _peer: &str) -> Result<()> {
+        Ok(())
+    }
 }
