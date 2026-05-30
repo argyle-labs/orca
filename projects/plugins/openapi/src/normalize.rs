@@ -15,8 +15,8 @@
 //! never patch them in a single integration's build.rs.
 
 use openapiv3::{
-    MediaType, OpenAPI, Operation, ReferenceOr, Schema, SchemaData, SchemaKind, StringFormat,
-    StringType, Type, VariantOrUnknownOrEmpty,
+    MediaType, OpenAPI, Operation, ReferenceOr, Schema, SchemaData, SchemaKind, StatusCode,
+    StringFormat, StringType, Type, VariantOrUnknownOrEmpty,
 };
 
 /// What `for_progenitor` had to change. Surfaced so consumer build scripts
@@ -38,6 +38,10 @@ pub struct NormalizeReport {
     /// Responses whose alternate media types were collapsed away.
     /// `(op_label + status, kept, dropped)`.
     pub collapsed_responses: Vec<(String, String, Vec<String>)>,
+    /// Operations whose extra success-range (2xx) responses were dropped
+    /// because progenitor can only emit one success type per op.
+    /// `(op_label, kept_status, dropped_statuses)`.
+    pub collapsed_success_statuses: Vec<(String, String, Vec<String>)>,
 }
 
 impl NormalizeReport {
