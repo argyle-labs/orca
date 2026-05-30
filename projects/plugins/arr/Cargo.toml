@@ -31,6 +31,10 @@ futures-core = "0.3"
 bytes       = "1"
 regress     = "0.10"
 
+[dev-dependencies]
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
+
 [build-dependencies]
 openapi = { path = "../openapi" }
 progenitor  = "0.14"

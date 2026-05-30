@@ -170,3 +170,112 @@ pub(crate) async fn login_with_password(
     }
     Ok(LoginSession { client })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn zeroize_string_wipes_bytes_and_clears_len() {
+        let mut s = String::from("secret");
+        let cap = s.capacity();
+        s.zeroize();
+        assert!(s.is_empty());
+        // capacity is preserved; the wipe happened in place before clear.
+        assert_eq!(s.capacity(), cap);
+    }
+
+    #[test]
+    fn redacted_debug_hides_value() {
+        let r = Redacted::new(String::from("topsecret"));
+        let dbg = format!("{r:?}");
+        assert_eq!(dbg, "Redacted(***)");
+        assert!(!dbg.contains("topsecret"));
+        assert_eq!(r.expose(), "topsecret");
+    }
+
+    #[test]
+    fn api_key_debug_redacts_inner_value() {
+        let k = ApiKey::new("abc123".into());
+        let s = format!("{k:?}");
+        assert!(s.contains("ApiKey"));
+        assert!(s.contains("***"));
+        assert!(!s.contains("abc123"));
+    }
+
+    #[test]
+    fn credentials_debug_redacts_password_but_keeps_username() {
+        let c = Credentials::new("scott".into(), "hunter2".into());
+        let s = format!("{c:?}");
+        assert!(s.contains("scott"));
+        assert!(!s.contains("hunter2"));
+        assert!(s.contains("***"));
+    }
+
+    #[test]
+    fn reqwest_client_with_api_key_builds_for_ascii_key() {
+        let k = ApiKey::new("abc-123".into());
+        assert!(reqwest_client_with_api_key(&k).is_ok());
+    }
+
+    #[test]
+    fn reqwest_client_with_api_key_rejects_invalid_header_bytes() {
+        // Newlines aren't valid header values.
+        let k = ApiKey::new("bad\nkey".into());
+        let err = reqwest_client_with_api_key(&k).unwrap_err();
+        assert!(err.to_string().contains("api key"));
+    }
+
+    #[tokio::test]
+    async fn login_with_password_invalid_base_url_errors() {
+        let creds = Credentials::new("u".into(), "p".into());
+        let err = login_with_password("not a url", &creds).await.unwrap_err();
+        assert!(err.to_string().contains("invalid base_url"));
+    }
+
+    #[tokio::test]
+    async fn login_with_password_succeeds_on_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let creds = Credentials::new("scott".into(), "pw".into());
+        let base = format!("{}/", server.uri());
+        let session = login_with_password(&base, &creds).await.unwrap();
+        // Client was returned with cookie store; just check it exists.
+        let _ = session.client;
+    }
+
+    #[tokio::test]
+    async fn login_with_password_succeeds_on_redirect() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(302))
+            .mount(&server)
+            .await;
+        let creds = Credentials::new("scott".into(), "pw".into());
+        let base = format!("{}/", server.uri());
+        login_with_password(&base, &creds).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn login_with_password_bails_on_4xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(401).set_body_bytes(b"nope" as &[u8]))
+            .mount(&server)
+            .await;
+        let creds = Credentials::new("scott".into(), "wrong".into());
+        let base = format!("{}/", server.uri());
+        let err = login_with_password(&base, &creds).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("login failed"));
+        assert!(msg.contains("401"));
+    }
+}

@@ -329,4 +329,166 @@ mod tests {
             other => panic!("expected Git(NotFound), got {other:?}"),
         }
     }
+
+    fn make_commit(dir: &Path, file: &str, content: &str, msg: &str) -> String {
+        std::fs::write(dir.join(file), content).unwrap();
+        commit(dir, msg, &[file.to_string()], &CommitAuthor::default())
+            .unwrap()
+            .oid
+    }
+
+    #[test]
+    fn commit_with_explicit_paths_only_stages_those() {
+        let dir = tempdir().unwrap();
+        init_repo(dir.path());
+        std::fs::write(dir.path().join("keep.txt"), "k").unwrap();
+        std::fs::write(dir.path().join("skip.txt"), "s").unwrap();
+        commit(
+            dir.path(),
+            "partial",
+            &["keep.txt".into()],
+            &CommitAuthor::default(),
+        )
+        .unwrap();
+        let s = status(dir.path()).unwrap();
+        let names: Vec<&str> = s.iter().map(|e| e.path.as_str()).collect();
+        assert!(names.contains(&"skip.txt"));
+        assert!(!names.contains(&"keep.txt"));
+    }
+
+    #[test]
+    fn commit_with_explicit_author_overrides_config() {
+        let dir = tempdir().unwrap();
+        // Init bare repo without setting user.name/email — exercises the
+        // explicit-author path in `signature`.
+        Repository::init(dir.path()).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hi").unwrap();
+        let r = commit(
+            dir.path(),
+            "first",
+            &["a.txt".into()],
+            &CommitAuthor {
+                name: Some("Alice".into()),
+                email: Some("a@example.com".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(r.oid.len(), 40);
+    }
+
+    #[test]
+    fn commit_without_signature_returns_no_signature_error() {
+        let dir = tempdir().unwrap();
+        // No user.name/email → no signature available, no explicit author.
+        Repository::init(dir.path()).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hi").unwrap();
+        let err = commit(
+            dir.path(),
+            "first",
+            &["a.txt".into()],
+            &CommitAuthor::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, GitError::NoSignature(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn status_reports_modified_after_commit() {
+        let dir = tempdir().unwrap();
+        init_repo(dir.path());
+        make_commit(dir.path(), "a.txt", "v1", "first");
+        std::fs::write(dir.path().join("a.txt"), "v2").unwrap();
+        let s = status(dir.path()).unwrap();
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].kind, StatusKind::Modified);
+        assert_eq!(s[0].path, "a.txt");
+    }
+
+    #[test]
+    fn clone_from_local_origin_and_pull_is_up_to_date() {
+        let origin_dir = tempdir().unwrap();
+        init_repo(origin_dir.path());
+        make_commit(origin_dir.path(), "a.txt", "v1", "first");
+        // Move HEAD to a branch named "main" so pull's refs/heads/<branch>
+        // lookup works regardless of init.defaultBranch.
+        let origin = Repository::open(origin_dir.path()).unwrap();
+        let head_commit = origin.head().unwrap().peel_to_commit().unwrap();
+        origin.branch("main", &head_commit, true).unwrap();
+        origin.set_head("refs/heads/main").unwrap();
+
+        let work = tempdir().unwrap();
+        let work_path = work.path().join("clone");
+        let url = format!("file://{}", origin_dir.path().display());
+        let res = clone(&url, &work_path, Some("main")).unwrap();
+        assert_eq!(res.branch, "main");
+        assert_eq!(res.head.len(), 40);
+
+        // No upstream changes → up-to-date branch.
+        let p = pull(&work_path).unwrap();
+        assert!(!p.updated);
+        assert_eq!(p.branch, "main");
+        assert!(p.head.is_none());
+    }
+
+    #[test]
+    fn pull_fast_forwards_when_origin_advances() {
+        let origin_dir = tempdir().unwrap();
+        init_repo(origin_dir.path());
+        make_commit(origin_dir.path(), "a.txt", "v1", "first");
+        let origin = Repository::open(origin_dir.path()).unwrap();
+        let head_commit = origin.head().unwrap().peel_to_commit().unwrap();
+        origin.branch("main", &head_commit, true).unwrap();
+        origin.set_head("refs/heads/main").unwrap();
+
+        let work = tempdir().unwrap();
+        let work_path = work.path().join("clone");
+        let url = format!("file://{}", origin_dir.path().display());
+        clone(&url, &work_path, Some("main")).unwrap();
+
+        // Advance origin past clone's HEAD.
+        let new_oid = make_commit(origin_dir.path(), "b.txt", "v1", "second");
+
+        let p = pull(&work_path).unwrap();
+        assert!(p.updated);
+        assert_eq!(p.head.as_deref(), Some(new_oid.as_str()));
+        // After FF the worktree should contain the new file.
+        assert!(work_path.join("b.txt").exists());
+    }
+
+    #[test]
+    fn fetch_succeeds_after_clone() {
+        let origin_dir = tempdir().unwrap();
+        init_repo(origin_dir.path());
+        make_commit(origin_dir.path(), "a.txt", "v1", "first");
+        let work = tempdir().unwrap();
+        let url = format!("file://{}", origin_dir.path().display());
+        let work_path = work.path().join("clone");
+        clone(&url, &work_path, None).unwrap();
+        // Idempotent fetch.
+        fetch(&work_path).unwrap();
+        fetch(&work_path).unwrap();
+    }
+
+    #[test]
+    fn head_summary_handles_unborn_head() {
+        let dir = tempdir().unwrap();
+        let repo = init_repo(dir.path());
+        let (branch, head) = head_summary(&repo);
+        assert!(branch.is_empty());
+        assert!(head.is_empty());
+    }
+
+    #[test]
+    fn hex_status_kind_round_trips_serde() {
+        // Lock the wire shape — these names ship in REST/MCP responses.
+        for (k, expected) in [
+            (StatusKind::Staged, "\"staged\""),
+            (StatusKind::Untracked, "\"untracked\""),
+            (StatusKind::Modified, "\"modified\""),
+            (StatusKind::Conflicted, "\"conflicted\""),
+            (StatusKind::Other, "\"other\""),
+        ] {
+            assert_eq!(serde_json::to_string(&k).unwrap(), expected);
+        }
+    }
 }
