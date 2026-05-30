@@ -9,6 +9,12 @@ import type {
   AuthChangePasswordData,
   AuthChangePasswordErrors,
   AuthChangePasswordResponses,
+  AuthLoginData,
+  AuthLoginErrors,
+  AuthLoginResponses,
+  AuthLogoutData,
+  AuthLogoutErrors,
+  AuthLogoutResponses,
   AuthMeData,
   AuthMeErrors,
   AuthMeResponses,
@@ -22,24 +28,54 @@ import type {
   AuthSignupResponses,
   AuthSignupStatusData,
   AuthSignupStatusResponses,
-  FsListData,
-  FsListErrors,
-  FsListResponses,
-  FsReadData,
-  FsReadErrors,
-  FsReadResponses,
-  FsRootsListData,
-  FsRootsListErrors,
-  FsRootsListResponses,
-  FsSearchData,
-  FsSearchErrors,
-  FsSearchResponses,
-  FsStatData,
-  FsStatErrors,
-  FsStatResponses,
-  FsTreeData,
-  FsTreeErrors,
-  FsTreeResponses,
+  DockerEngineDetailData,
+  DockerEngineDetailErrors,
+  DockerEngineDetailResponses,
+  DockerEngineUpdateData,
+  DockerEngineUpdateErrors,
+  DockerEngineUpdateResponses,
+  DockerRuntimeCreateData,
+  DockerRuntimeCreateErrors,
+  DockerRuntimeCreateResponses,
+  DockerRuntimeDeleteData,
+  DockerRuntimeDeleteErrors,
+  DockerRuntimeDeleteResponses,
+  DockerRuntimeListData,
+  DockerRuntimeListErrors,
+  DockerRuntimeListResponses,
+  DockerServiceDetailData,
+  DockerServiceDetailErrors,
+  DockerServiceDetailResponses,
+  DockerServiceListData,
+  DockerServiceListErrors,
+  DockerServiceListLogsData,
+  DockerServiceListLogsErrors,
+  DockerServiceListLogsResponses,
+  DockerServiceListResponses,
+  DockerServiceListStatsData,
+  DockerServiceListStatsErrors,
+  DockerServiceListStatsResponses,
+  DockerServiceUpdateData,
+  DockerServiceUpdateErrors,
+  DockerServiceUpdateResponses,
+  FilesListData,
+  FilesListErrors,
+  FilesListResponses,
+  FilesReadData,
+  FilesReadErrors,
+  FilesReadResponses,
+  FilesRootsListData,
+  FilesRootsListErrors,
+  FilesRootsListResponses,
+  FilesSearchData,
+  FilesSearchErrors,
+  FilesSearchResponses,
+  FilesStatData,
+  FilesStatErrors,
+  FilesStatResponses,
+  FilesTreeData,
+  FilesTreeErrors,
+  FilesTreeResponses,
   NamespaceCreateData,
   NamespaceCreateErrors,
   NamespaceCreateResponses,
@@ -76,21 +112,6 @@ import type {
   NamespaceProjectListData,
   NamespaceProjectListErrors,
   NamespaceProjectListResponses,
-  NamespaceSchemaCreateData,
-  NamespaceSchemaCreateErrors,
-  NamespaceSchemaCreateResponses,
-  NamespaceSchemaDeleteData,
-  NamespaceSchemaDeleteErrors,
-  NamespaceSchemaDeleteResponses,
-  NamespaceSchemaListData,
-  NamespaceSchemaListErrors,
-  NamespaceSchemaListResponses,
-  NamespaceSchemaViewDetailData,
-  NamespaceSchemaViewDetailErrors,
-  NamespaceSchemaViewDetailResponses,
-  NamespaceSchemaViewListData,
-  NamespaceSchemaViewListErrors,
-  NamespaceSchemaViewListResponses,
   NamespaceShareCreateData,
   NamespaceShareCreateErrors,
   NamespaceShareCreateResponses,
@@ -103,9 +124,33 @@ import type {
   NamespaceShowData,
   NamespaceShowErrors,
   NamespaceShowResponses,
+  NamespaceSpecCreateData,
+  NamespaceSpecCreateErrors,
+  NamespaceSpecCreateResponses,
+  NamespaceSpecDeleteData,
+  NamespaceSpecDeleteErrors,
+  NamespaceSpecDeleteResponses,
   NamespaceSpecDetailData,
   NamespaceSpecDetailErrors,
   NamespaceSpecDetailResponses,
+  NamespaceSpecGraphqlDetailData,
+  NamespaceSpecGraphqlDetailErrors,
+  NamespaceSpecGraphqlDetailResponses,
+  NamespaceSpecGraphqlUpdateData,
+  NamespaceSpecGraphqlUpdateErrors,
+  NamespaceSpecGraphqlUpdateResponses,
+  NamespaceSpecListData,
+  NamespaceSpecListDbData,
+  NamespaceSpecListDbErrors,
+  NamespaceSpecListDbResponses,
+  NamespaceSpecListErrors,
+  NamespaceSpecListResponses,
+  NamespaceSpecRefreshData,
+  NamespaceSpecRefreshErrors,
+  NamespaceSpecRefreshResponses,
+  NamespaceSpecSyncMcpData,
+  NamespaceSpecSyncMcpErrors,
+  NamespaceSpecSyncMcpResponses,
   NamespaceUseData,
   NamespaceUseErrors,
   NamespaceUseResponses,
@@ -250,6 +295,9 @@ import type {
   SystemEngineUpdateData,
   SystemEngineUpdateErrors,
   SystemEngineUpdateResponses,
+  SystemHealthData,
+  SystemHealthErrors,
+  SystemHealthResponses,
   SystemHostDetailData,
   SystemHostDetailErrors,
   SystemHostDetailResponses,
@@ -259,6 +307,15 @@ import type {
   SystemHostSetData,
   SystemHostSetErrors,
   SystemHostSetResponses,
+  SystemInfraServiceDetailData,
+  SystemInfraServiceDetailErrors,
+  SystemInfraServiceDetailResponses,
+  SystemInfraServiceListData,
+  SystemInfraServiceListErrors,
+  SystemInfraServiceListResponses,
+  SystemInfraTestCreateData,
+  SystemInfraTestCreateErrors,
+  SystemInfraTestCreateResponses,
   SystemKillStaleData,
   SystemKillStaleErrors,
   SystemKillStaleResponses,
@@ -364,27 +421,27 @@ import type {
   SystemSweepOrganizationData,
   SystemSweepOrganizationErrors,
   SystemSweepOrganizationResponses,
-  SystemUpdateApplyData,
-  SystemUpdateApplyErrors,
-  SystemUpdateApplyResponses,
-  SystemUpdateCheckData,
-  SystemUpdateCheckErrors,
-  SystemUpdateCheckResponses,
-  SystemUpdateClearSourceData,
-  SystemUpdateClearSourceErrors,
-  SystemUpdateClearSourceResponses,
   SystemUpdateData,
   SystemUpdateErrors,
-  SystemUpdatePinData,
-  SystemUpdatePinErrors,
-  SystemUpdatePinResponses,
   SystemUpdateResponses,
-  SystemUpdateSetSourceData,
-  SystemUpdateSetSourceErrors,
-  SystemUpdateSetSourceResponses,
-  SystemUpdateUnpinData,
-  SystemUpdateUnpinErrors,
-  SystemUpdateUnpinResponses,
+  SystemUpdateStateApplyData,
+  SystemUpdateStateApplyErrors,
+  SystemUpdateStateApplyResponses,
+  SystemUpdateStateCheckData,
+  SystemUpdateStateCheckErrors,
+  SystemUpdateStateCheckResponses,
+  SystemUpdateStateClearSourceData,
+  SystemUpdateStateClearSourceErrors,
+  SystemUpdateStateClearSourceResponses,
+  SystemUpdateStatePinData,
+  SystemUpdateStatePinErrors,
+  SystemUpdateStatePinResponses,
+  SystemUpdateStateSetSourceData,
+  SystemUpdateStateSetSourceErrors,
+  SystemUpdateStateSetSourceResponses,
+  SystemUpdateStateUnpinData,
+  SystemUpdateStateUnpinErrors,
+  SystemUpdateStateUnpinResponses,
 } from './types.gen';
 
 export type Options<
@@ -478,7 +535,251 @@ export const agentRun = <ThrowOnError extends boolean = false>(
   options: Options<AgentRunData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<AgentRunResponses, AgentRunErrors, ThrowOnError>({
-    url: '/api/tools/agent.run',
+    url: '/api/v1/agent.run',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Authenticate the operator on THIS host and persist a CLI session at `$ORCA_HOME/session` (mode 0600). Replaces the legacy `first_admin` ambient-identity fallback on CLI + MCP-stdio.
+ *
+ * [MUTATES STATE] Authenticate the operator on THIS host and persist a CLI session at `$ORCA_HOME/session` (mode 0600). Replaces the legacy `first_admin` ambient-identity fallback on CLI + MCP-stdio.
+ */
+export const authLogin = <ThrowOnError extends boolean = false>(
+  options: Options<AuthLoginData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<AuthLoginResponses, AuthLoginErrors, ThrowOnError>({
+    url: '/api/v1/auth.login',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Revoke the on-disk CLI session and remove `$ORCA_HOME/session`. Idempotent — `revoked=false` means there was no active session to clear.
+ *
+ * [MUTATES STATE] Revoke the on-disk CLI session and remove `$ORCA_HOME/session`. Idempotent — `revoked=false` means there was no active session to clear.
+ */
+export const authLogout = <ThrowOnError extends boolean = false>(
+  options: Options<AuthLogoutData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<AuthLogoutResponses, AuthLogoutErrors, ThrowOnError>({
+    url: '/api/v1/auth.logout',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Probe the local docker engine (colima | desktop | none) and whether it is running.
+ *
+ * Probe the local docker engine (colima | desktop | none) and whether it is running.
+ */
+export const dockerEngineDetail = <ThrowOnError extends boolean = false>(
+  options: Options<DockerEngineDetailData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    DockerEngineDetailResponses,
+    DockerEngineDetailErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/docker.engine.detail',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Start the local docker engine. Returns the start-command output.
+ *
+ * [MUTATES STATE] Start the local docker engine. Returns the start-command output.
+ */
+export const dockerEngineUpdate = <ThrowOnError extends boolean = false>(
+  options: Options<DockerEngineUpdateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    DockerEngineUpdateResponses,
+    DockerEngineUpdateErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/docker.engine.update',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Register a Docker runtime in orca.db. Provide socketPath, host, or url.
+ *
+ * [MUTATES STATE] Register a Docker runtime in orca.db. Provide socketPath, host, or url.
+ */
+export const dockerRuntimeCreate = <ThrowOnError extends boolean = false>(
+  options: Options<DockerRuntimeCreateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    DockerRuntimeCreateResponses,
+    DockerRuntimeCreateErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/docker.runtime.create',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove a Docker runtime from orca.db by name.
+ *
+ * [MUTATES STATE] Remove a Docker runtime from orca.db by name.
+ */
+export const dockerRuntimeDelete = <ThrowOnError extends boolean = false>(
+  options: Options<DockerRuntimeDeleteData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    DockerRuntimeDeleteResponses,
+    DockerRuntimeDeleteErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/docker.runtime.delete',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List all Docker runtimes registered in orca.db.
+ *
+ * List all Docker runtimes registered in orca.db.
+ */
+export const dockerRuntimeList = <ThrowOnError extends boolean = false>(
+  options: Options<DockerRuntimeListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    DockerRuntimeListResponses,
+    DockerRuntimeListErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/docker.runtime.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Read docker-compose logs from the project at `project` (optionally scoped to a service).
+ *
+ * Read docker-compose logs from the project at `project` (optionally scoped to a service).
+ */
+export const dockerServiceDetail = <ThrowOnError extends boolean = false>(
+  options: Options<DockerServiceDetailData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    DockerServiceDetailResponses,
+    DockerServiceDetailErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/docker.service.detail',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List the compose services under `path` with state/health/ports plus the resolved compose-file path.
+ *
+ * List the compose services under `path` with state/health/ports plus the resolved compose-file path.
+ */
+export const dockerServiceList = <ThrowOnError extends boolean = false>(
+  options: Options<DockerServiceListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    DockerServiceListResponses,
+    DockerServiceListErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/docker.service.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List every docker-compose project under the rebuy root with its service states. Powers the cross-project logs panel.
+ *
+ * List every docker-compose project under the rebuy root with its service states. Powers the cross-project logs panel.
+ */
+export const dockerServiceListLogs = <ThrowOnError extends boolean = false>(
+  options: Options<DockerServiceListLogsData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    DockerServiceListLogsResponses,
+    DockerServiceListLogsErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/docker.service.list-logs',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Live CPU + memory stats for all running containers (`docker stats --no-stream`). Returns an empty list when docker is not running or no containers are up.
+ *
+ * Live CPU + memory stats for all running containers (`docker stats --no-stream`). Returns an empty list when docker is not running or no containers are up.
+ */
+export const dockerServiceListStats = <ThrowOnError extends boolean = false>(
+  options: Options<DockerServiceListStatsData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    DockerServiceListStatsResponses,
+    DockerServiceListStatsErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/docker.service.list-stats',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Run a docker-compose lifecycle action against the compose project at `project_path`.
+ *
+ * [MUTATES STATE] Run a docker-compose lifecycle action against the compose project at `project_path`.
+ */
+export const dockerServiceUpdate = <ThrowOnError extends boolean = false>(
+  options: Options<DockerServiceUpdateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    DockerServiceUpdateResponses,
+    DockerServiceUpdateErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/docker.service.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -491,11 +792,11 @@ export const agentRun = <ThrowOnError extends boolean = false>(
  *
  * One-level directory listing. Provide `root` for a named alias or omit it for an absolute / `~/`-prefixed path.
  */
-export const fsList = <ThrowOnError extends boolean = false>(
-  options: Options<FsListData, ThrowOnError>,
+export const filesList = <ThrowOnError extends boolean = false>(
+  options: Options<FilesListData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<FsListResponses, FsListErrors, ThrowOnError>({
-    url: '/api/tools/fs.list',
+  (options.client ?? client).post<FilesListResponses, FilesListErrors, ThrowOnError>({
+    url: '/api/v1/files.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -508,11 +809,11 @@ export const fsList = <ThrowOnError extends boolean = false>(
  *
  * Read a text file. `format="llm"` strips decorative markdown; binary/multi-format reads are deferred to v2.
  */
-export const fsRead = <ThrowOnError extends boolean = false>(
-  options: Options<FsReadData, ThrowOnError>,
+export const filesRead = <ThrowOnError extends boolean = false>(
+  options: Options<FilesReadData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<FsReadResponses, FsReadErrors, ThrowOnError>({
-    url: '/api/tools/fs.read',
+  (options.client ?? client).post<FilesReadResponses, FilesReadErrors, ThrowOnError>({
+    url: '/api/v1/files.read',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -521,15 +822,15 @@ export const fsRead = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * List the registered filesystem roots — named path aliases consumed by every other `fs.*` tool.
+ * List the registered filesystem roots — named path aliases consumed by every other `files.*` tool.
  *
- * List the registered filesystem roots — named path aliases consumed by every other `fs.*` tool.
+ * List the registered filesystem roots — named path aliases consumed by every other `files.*` tool.
  */
-export const fsRootsList = <ThrowOnError extends boolean = false>(
-  options: Options<FsRootsListData, ThrowOnError>,
+export const filesRootsList = <ThrowOnError extends boolean = false>(
+  options: Options<FilesRootsListData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<FsRootsListResponses, FsRootsListErrors, ThrowOnError>({
-    url: '/api/tools/fs.roots.list',
+  (options.client ?? client).post<FilesRootsListResponses, FilesRootsListErrors, ThrowOnError>({
+    url: '/api/v1/files.roots.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -538,15 +839,15 @@ export const fsRootsList = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * Case-insensitive line search across one or all registered roots. Optionally summarised by a local LLM.
+ * Case-insensitive line search across one or all registered roots. Returns hits only — LLM summarisation surface dropped 2026-05-29; callers can format hits themselves.
  *
- * Case-insensitive line search across one or all registered roots. Optionally summarised by a local LLM.
+ * Case-insensitive line search across one or all registered roots. Returns hits only — LLM summarisation surface dropped 2026-05-29; callers can format hits themselves.
  */
-export const fsSearch = <ThrowOnError extends boolean = false>(
-  options: Options<FsSearchData, ThrowOnError>,
+export const filesSearch = <ThrowOnError extends boolean = false>(
+  options: Options<FilesSearchData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<FsSearchResponses, FsSearchErrors, ThrowOnError>({
-    url: '/api/tools/fs.search',
+  (options.client ?? client).post<FilesSearchResponses, FilesSearchErrors, ThrowOnError>({
+    url: '/api/v1/files.search',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -559,11 +860,11 @@ export const fsSearch = <ThrowOnError extends boolean = false>(
  *
  * Metadata for a single path — kind (file/dir), byte size, existence flag.
  */
-export const fsStat = <ThrowOnError extends boolean = false>(
-  options: Options<FsStatData, ThrowOnError>,
+export const filesStat = <ThrowOnError extends boolean = false>(
+  options: Options<FilesStatData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<FsStatResponses, FsStatErrors, ThrowOnError>({
-    url: '/api/tools/fs.stat',
+  (options.client ?? client).post<FilesStatResponses, FilesStatErrors, ThrowOnError>({
+    url: '/api/v1/files.stat',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -576,11 +877,11 @@ export const fsStat = <ThrowOnError extends boolean = false>(
  *
  * Recursive directory tree. Compacted by default; pass `raw=true` for the unmodified filesystem layout.
  */
-export const fsTree = <ThrowOnError extends boolean = false>(
-  options: Options<FsTreeData, ThrowOnError>,
+export const filesTree = <ThrowOnError extends boolean = false>(
+  options: Options<FilesTreeData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<FsTreeResponses, FsTreeErrors, ThrowOnError>({
-    url: '/api/tools/fs.tree',
+  (options.client ?? client).post<FilesTreeResponses, FilesTreeErrors, ThrowOnError>({
+    url: '/api/v1/files.tree',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -597,7 +898,7 @@ export const namespaceCreate = <ThrowOnError extends boolean = false>(
   options: Options<NamespaceCreateData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<NamespaceCreateResponses, NamespaceCreateErrors, ThrowOnError>({
-    url: '/api/tools/namespace.create',
+    url: '/api/v1/namespace.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -614,7 +915,7 @@ export const namespaceCurrent = <ThrowOnError extends boolean = false>(
   options: Options<NamespaceCurrentData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<NamespaceCurrentResponses, NamespaceCurrentErrors, ThrowOnError>({
-    url: '/api/tools/namespace.current',
+    url: '/api/v1/namespace.current',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -631,7 +932,7 @@ export const namespaceDelete = <ThrowOnError extends boolean = false>(
   options: Options<NamespaceDeleteData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<NamespaceDeleteResponses, NamespaceDeleteErrors, ThrowOnError>({
-    url: '/api/tools/namespace.delete',
+    url: '/api/v1/namespace.delete',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -652,7 +953,7 @@ export const namespaceDocListCommands = <ThrowOnError extends boolean = false>(
     NamespaceDocListCommandsErrors,
     ThrowOnError
   >({
-    url: '/api/tools/namespace.doc.list-commands',
+    url: '/api/v1/namespace.doc.list-commands',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -673,7 +974,7 @@ export const namespaceDocPatternCreate = <ThrowOnError extends boolean = false>(
     NamespaceDocPatternCreateErrors,
     ThrowOnError
   >({
-    url: '/api/tools/namespace.doc.pattern.create',
+    url: '/api/v1/namespace.doc.pattern.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -694,7 +995,7 @@ export const namespaceDocPatternDelete = <ThrowOnError extends boolean = false>(
     NamespaceDocPatternDeleteErrors,
     ThrowOnError
   >({
-    url: '/api/tools/namespace.doc.pattern.delete',
+    url: '/api/v1/namespace.doc.pattern.delete',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -715,7 +1016,7 @@ export const namespaceDocPatternList = <ThrowOnError extends boolean = false>(
     NamespaceDocPatternListErrors,
     ThrowOnError
   >({
-    url: '/api/tools/namespace.doc.pattern.list',
+    url: '/api/v1/namespace.doc.pattern.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -736,7 +1037,7 @@ export const namespaceDocRootCreate = <ThrowOnError extends boolean = false>(
     NamespaceDocRootCreateErrors,
     ThrowOnError
   >({
-    url: '/api/tools/namespace.doc.root.create',
+    url: '/api/v1/namespace.doc.root.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -757,7 +1058,7 @@ export const namespaceDocRootDelete = <ThrowOnError extends boolean = false>(
     NamespaceDocRootDeleteErrors,
     ThrowOnError
   >({
-    url: '/api/tools/namespace.doc.root.delete',
+    url: '/api/v1/namespace.doc.root.delete',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -778,7 +1079,7 @@ export const namespaceDocRootList = <ThrowOnError extends boolean = false>(
     NamespaceDocRootListErrors,
     ThrowOnError
   >({
-    url: '/api/tools/namespace.doc.root.list',
+    url: '/api/v1/namespace.doc.root.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -795,7 +1096,7 @@ export const namespaceList = <ThrowOnError extends boolean = false>(
   options: Options<NamespaceListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<NamespaceListResponses, NamespaceListErrors, ThrowOnError>({
-    url: '/api/tools/namespace.list',
+    url: '/api/v1/namespace.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -816,112 +1117,7 @@ export const namespaceProjectList = <ThrowOnError extends boolean = false>(
     NamespaceProjectListErrors,
     ThrowOnError
   >({
-    url: '/api/tools/namespace.project.list',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Add or update a schema database in orca.db. Use container OR host/port, not both.
- *
- * [MUTATES STATE] Add or update a schema database in orca.db. Use container OR host/port, not both.
- */
-export const namespaceSchemaCreate = <ThrowOnError extends boolean = false>(
-  options: Options<NamespaceSchemaCreateData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    NamespaceSchemaCreateResponses,
-    NamespaceSchemaCreateErrors,
-    ThrowOnError
-  >({
-    url: '/api/tools/namespace.schema.create',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Remove a schema database from orca.db by name.
- *
- * [MUTATES STATE] Remove a schema database from orca.db by name.
- */
-export const namespaceSchemaDelete = <ThrowOnError extends boolean = false>(
-  options: Options<NamespaceSchemaDeleteData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    NamespaceSchemaDeleteResponses,
-    NamespaceSchemaDeleteErrors,
-    ThrowOnError
-  >({
-    url: '/api/tools/namespace.schema.delete',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * List all MySQL/MariaDB/Postgres/SQLite schema databases registered in orca.db.
- *
- * List all MySQL/MariaDB/Postgres/SQLite schema databases registered in orca.db.
- */
-export const namespaceSchemaList = <ThrowOnError extends boolean = false>(
-  options: Options<NamespaceSchemaListData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    NamespaceSchemaListResponses,
-    NamespaceSchemaListErrors,
-    ThrowOnError
-  >({
-    url: '/api/tools/namespace.schema.list',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Return the multi-tab schema view across every configured database. Result is `{ tabs, showTabs, errors? }`.
- *
- * Return the multi-tab schema view across every configured database. Result is `{ tabs, showTabs, errors? }`.
- */
-export const namespaceSchemaViewDetail = <ThrowOnError extends boolean = false>(
-  options: Options<NamespaceSchemaViewDetailData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    NamespaceSchemaViewDetailResponses,
-    NamespaceSchemaViewDetailErrors,
-    ThrowOnError
-  >({
-    url: '/api/tools/namespace.schema.view.detail',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Return the flattened list of domain definitions across every configured database.
- *
- * Return the flattened list of domain definitions across every configured database.
- */
-export const namespaceSchemaViewList = <ThrowOnError extends boolean = false>(
-  options: Options<NamespaceSchemaViewListData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    NamespaceSchemaViewListResponses,
-    NamespaceSchemaViewListErrors,
-    ThrowOnError
-  >({
-    url: '/api/tools/namespace.schema.view.list',
+    url: '/api/v1/namespace.project.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -942,7 +1138,7 @@ export const namespaceShareCreate = <ThrowOnError extends boolean = false>(
     NamespaceShareCreateErrors,
     ThrowOnError
   >({
-    url: '/api/tools/namespace.share.create',
+    url: '/api/v1/namespace.share.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -963,7 +1159,7 @@ export const namespaceShareDelete = <ThrowOnError extends boolean = false>(
     NamespaceShareDeleteErrors,
     ThrowOnError
   >({
-    url: '/api/tools/namespace.share.delete',
+    url: '/api/v1/namespace.share.delete',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -984,7 +1180,7 @@ export const namespaceShareList = <ThrowOnError extends boolean = false>(
     NamespaceShareListErrors,
     ThrowOnError
   >({
-    url: '/api/tools/namespace.share.list',
+    url: '/api/v1/namespace.share.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1001,7 +1197,49 @@ export const namespaceShow = <ThrowOnError extends boolean = false>(
   options: Options<NamespaceShowData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<NamespaceShowResponses, NamespaceShowErrors, ThrowOnError>({
-    url: '/api/tools/namespace.show',
+    url: '/api/v1/namespace.show',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Fetch a JSON OpenAPI spec from `url` and persist it under `name` in orca.db.
+ *
+ * [MUTATES STATE] Fetch a JSON OpenAPI spec from `url` and persist it under `name` in orca.db.
+ */
+export const namespaceSpecCreate = <ThrowOnError extends boolean = false>(
+  options: Options<NamespaceSpecCreateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    NamespaceSpecCreateResponses,
+    NamespaceSpecCreateErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/namespace.spec.create',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove a spec from orca.db. Returns `removed: true` when a row was deleted.
+ *
+ * [MUTATES STATE] Remove a spec from orca.db. Returns `removed: true` when a row was deleted.
+ */
+export const namespaceSpecDelete = <ThrowOnError extends boolean = false>(
+  options: Options<NamespaceSpecDeleteData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    NamespaceSpecDeleteResponses,
+    NamespaceSpecDeleteErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/namespace.spec.delete',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1022,7 +1260,133 @@ export const namespaceSpecDetail = <ThrowOnError extends boolean = false>(
     NamespaceSpecDetailErrors,
     ThrowOnError
   >({
-    url: '/api/tools/namespace.spec.detail',
+    url: '/api/v1/namespace.spec.detail',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Parse the local `<repo>.graphql` SDL into a structured types/queries/mutations view.
+ *
+ * Parse the local `<repo>.graphql` SDL into a structured types/queries/mutations view.
+ */
+export const namespaceSpecGraphqlDetail = <ThrowOnError extends boolean = false>(
+  options: Options<NamespaceSpecGraphqlDetailData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    NamespaceSpecGraphqlDetailResponses,
+    NamespaceSpecGraphqlDetailErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/namespace.spec.graphql.detail',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Proxy a GraphQL request to a Shopify shop using the configured shop+token. Returns the raw upstream JSON body.
+ *
+ * Proxy a GraphQL request to a Shopify shop using the configured shop+token. Returns the raw upstream JSON body.
+ */
+export const namespaceSpecGraphqlUpdate = <ThrowOnError extends boolean = false>(
+  options: Options<NamespaceSpecGraphqlUpdateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    NamespaceSpecGraphqlUpdateResponses,
+    NamespaceSpecGraphqlUpdateErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/namespace.spec.graphql.update',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List every registered OpenAPI / GraphQL spec — filesystem-resident, DB-backed, and plugin-declared — with per-source metadata.
+ *
+ * List every registered OpenAPI / GraphQL spec — filesystem-resident, DB-backed, and plugin-declared — with per-source metadata.
+ */
+export const namespaceSpecList = <ThrowOnError extends boolean = false>(
+  options: Options<NamespaceSpecListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    NamespaceSpecListResponses,
+    NamespaceSpecListErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/namespace.spec.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List URL-registered + MCP-synced specs from orca.db (the DB-backed slice only).
+ *
+ * List URL-registered + MCP-synced specs from orca.db (the DB-backed slice only).
+ */
+export const namespaceSpecListDb = <ThrowOnError extends boolean = false>(
+  options: Options<NamespaceSpecListDbData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    NamespaceSpecListDbResponses,
+    NamespaceSpecListDbErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/namespace.spec.list-db',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Re-fetch a previously-registered spec from its stored URL and update orca.db.
+ *
+ * [MUTATES STATE] Re-fetch a previously-registered spec from its stored URL and update orca.db.
+ */
+export const namespaceSpecRefresh = <ThrowOnError extends boolean = false>(
+  options: Options<NamespaceSpecRefreshData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    NamespaceSpecRefreshResponses,
+    NamespaceSpecRefreshErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/namespace.spec.refresh',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Connect to `server` (an MCP server), call its `{prefix}_spec_list` and `{prefix}_spec_schema` tools, and upsert every advertised repo into orca.db.
+ *
+ * [MUTATES STATE] Connect to `server` (an MCP server), call its `{prefix}_spec_list` and `{prefix}_spec_schema` tools, and upsert every advertised repo into orca.db.
+ */
+export const namespaceSpecSyncMcp = <ThrowOnError extends boolean = false>(
+  options: Options<NamespaceSpecSyncMcpData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    NamespaceSpecSyncMcpResponses,
+    NamespaceSpecSyncMcpErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/namespace.spec.sync-mcp',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1039,7 +1403,7 @@ export const namespaceUse = <ThrowOnError extends boolean = false>(
   options: Options<NamespaceUseData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<NamespaceUseResponses, NamespaceUseErrors, ThrowOnError>({
-    url: '/api/tools/namespace.use',
+    url: '/api/v1/namespace.use',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1056,7 +1420,7 @@ export const podForget = <ThrowOnError extends boolean = false>(
   options: Options<PodForgetData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodForgetResponses, PodForgetErrors, ThrowOnError>({
-    url: '/api/tools/pod.forget',
+    url: '/api/v1/pod.forget',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1073,7 +1437,7 @@ export const podJoin = <ThrowOnError extends boolean = false>(
   options: Options<PodJoinData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodJoinResponses, PodJoinErrors, ThrowOnError>({
-    url: '/api/tools/pod.join',
+    url: '/api/v1/pod.join',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1090,7 +1454,7 @@ export const podKick = <ThrowOnError extends boolean = false>(
   options: Options<PodKickData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodKickResponses, PodKickErrors, ThrowOnError>({
-    url: '/api/tools/pod.kick',
+    url: '/api/v1/pod.kick',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1107,7 +1471,7 @@ export const podLeave = <ThrowOnError extends boolean = false>(
   options: Options<PodLeaveData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodLeaveResponses, PodLeaveErrors, ThrowOnError>({
-    url: '/api/tools/pod.leave',
+    url: '/api/v1/pod.leave',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1124,7 +1488,7 @@ export const podList = <ThrowOnError extends boolean = false>(
   options: Options<PodListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodListResponses, PodListErrors, ThrowOnError>({
-    url: '/api/tools/pod.list',
+    url: '/api/v1/pod.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1141,7 +1505,7 @@ export const podPing = <ThrowOnError extends boolean = false>(
   options: Options<PodPingData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodPingResponses, PodPingErrors, ThrowOnError>({
-    url: '/api/tools/pod.ping',
+    url: '/api/v1/pod.ping',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1158,7 +1522,7 @@ export const podRecover = <ThrowOnError extends boolean = false>(
   options: Options<PodRecoverData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodRecoverResponses, PodRecoverErrors, ThrowOnError>({
-    url: '/api/tools/pod.recover',
+    url: '/api/v1/pod.recover',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1175,7 +1539,7 @@ export const podStatusDetail = <ThrowOnError extends boolean = false>(
   options: Options<PodStatusDetailData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodStatusDetailResponses, PodStatusDetailErrors, ThrowOnError>({
-    url: '/api/tools/pod.status.detail',
+    url: '/api/v1/pod.status.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1192,7 +1556,7 @@ export const podStatusList = <ThrowOnError extends boolean = false>(
   options: Options<PodStatusListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodStatusListResponses, PodStatusListErrors, ThrowOnError>({
-    url: '/api/tools/pod.status.list',
+    url: '/api/v1/pod.status.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1209,7 +1573,7 @@ export const podTrust = <ThrowOnError extends boolean = false>(
   options: Options<PodTrustData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodTrustResponses, PodTrustErrors, ThrowOnError>({
-    url: '/api/tools/pod.trust',
+    url: '/api/v1/pod.trust',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1230,7 +1594,7 @@ export const systemAgentBackendClearKey = <ThrowOnError extends boolean = false>
     SystemAgentBackendClearKeyErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.agent.backend.clear-key',
+    url: '/api/v1/system.agent.backend.clear-key',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1251,7 +1615,7 @@ export const systemAgentBackendDetail = <ThrowOnError extends boolean = false>(
     SystemAgentBackendDetailErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.agent.backend.detail',
+    url: '/api/v1/system.agent.backend.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1272,7 +1636,7 @@ export const systemAgentBackendOverride = <ThrowOnError extends boolean = false>
     SystemAgentBackendOverrideErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.agent.backend.override',
+    url: '/api/v1/system.agent.backend.override',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1293,7 +1657,7 @@ export const systemAgentBackendSetKey = <ThrowOnError extends boolean = false>(
     SystemAgentBackendSetKeyErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.agent.backend.set-key',
+    url: '/api/v1/system.agent.backend.set-key',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1314,7 +1678,7 @@ export const systemAgentBackendSetMode = <ThrowOnError extends boolean = false>(
     SystemAgentBackendSetModeErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.agent.backend.set-mode',
+    url: '/api/v1/system.agent.backend.set-mode',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1335,7 +1699,7 @@ export const systemAgentBackendUseServerAnthropic = <ThrowOnError extends boolea
     SystemAgentBackendUseServerAnthropicErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.agent.backend.use-server-anthropic',
+    url: '/api/v1/system.agent.backend.use-server-anthropic',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1352,7 +1716,7 @@ export const systemAgentGet = <ThrowOnError extends boolean = false>(
   options: Options<SystemAgentGetData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemAgentGetResponses, SystemAgentGetErrors, ThrowOnError>({
-    url: '/api/tools/system.agent.get',
+    url: '/api/v1/system.agent.get',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1373,7 +1737,7 @@ export const systemAgentGetConfig = <ThrowOnError extends boolean = false>(
     SystemAgentGetConfigErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.agent.get-config',
+    url: '/api/v1/system.agent.get-config',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1394,7 +1758,7 @@ export const systemAgentGetContext = <ThrowOnError extends boolean = false>(
     SystemAgentGetContextErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.agent.get-context',
+    url: '/api/v1/system.agent.get-context',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1411,7 +1775,7 @@ export const systemAgentList = <ThrowOnError extends boolean = false>(
   options: Options<SystemAgentListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemAgentListResponses, SystemAgentListErrors, ThrowOnError>({
-    url: '/api/tools/system.agent.list',
+    url: '/api/v1/system.agent.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1432,7 +1796,7 @@ export const systemAuthSessionCreate = <ThrowOnError extends boolean = false>(
     SystemAuthSessionCreateErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.auth.session.create',
+    url: '/api/v1/system.auth.session.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1453,7 +1817,7 @@ export const systemAuthSessionDelete = <ThrowOnError extends boolean = false>(
     SystemAuthSessionDeleteErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.auth.session.delete',
+    url: '/api/v1/system.auth.session.delete',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1474,7 +1838,7 @@ export const systemAuthSessionDetail = <ThrowOnError extends boolean = false>(
     SystemAuthSessionDetailErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.auth.session.detail',
+    url: '/api/v1/system.auth.session.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1495,7 +1859,7 @@ export const systemAuthTokenCreate = <ThrowOnError extends boolean = false>(
     SystemAuthTokenCreateErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.auth.token.create',
+    url: '/api/v1/system.auth.token.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1516,7 +1880,7 @@ export const systemAuthTokenDelete = <ThrowOnError extends boolean = false>(
     SystemAuthTokenDeleteErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.auth.token.delete',
+    url: '/api/v1/system.auth.token.delete',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1537,7 +1901,7 @@ export const systemAuthTokenList = <ThrowOnError extends boolean = false>(
     SystemAuthTokenListErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.auth.token.list',
+    url: '/api/v1/system.auth.token.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1554,7 +1918,7 @@ export const systemBootstrap = <ThrowOnError extends boolean = false>(
   options: Options<SystemBootstrapData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemBootstrapResponses, SystemBootstrapErrors, ThrowOnError>({
-    url: '/api/tools/system.bootstrap',
+    url: '/api/v1/system.bootstrap',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1575,7 +1939,7 @@ export const systemConfigDelete = <ThrowOnError extends boolean = false>(
     SystemConfigDeleteErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.config.delete',
+    url: '/api/v1/system.config.delete',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1592,7 +1956,7 @@ export const systemConfigGet = <ThrowOnError extends boolean = false>(
   options: Options<SystemConfigGetData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemConfigGetResponses, SystemConfigGetErrors, ThrowOnError>({
-    url: '/api/tools/system.config.get',
+    url: '/api/v1/system.config.get',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1609,7 +1973,7 @@ export const systemConfigList = <ThrowOnError extends boolean = false>(
   options: Options<SystemConfigListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemConfigListResponses, SystemConfigListErrors, ThrowOnError>({
-    url: '/api/tools/system.config.list',
+    url: '/api/v1/system.config.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1626,7 +1990,7 @@ export const systemConfigSet = <ThrowOnError extends boolean = false>(
   options: Options<SystemConfigSetData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemConfigSetResponses, SystemConfigSetErrors, ThrowOnError>({
-    url: '/api/tools/system.config.set',
+    url: '/api/v1/system.config.set',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1643,7 +2007,7 @@ export const systemCreate = <ThrowOnError extends boolean = false>(
   options: Options<SystemCreateData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemCreateResponses, SystemCreateErrors, ThrowOnError>({
-    url: '/api/tools/system.create',
+    url: '/api/v1/system.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1664,7 +2028,7 @@ export const systemDaemonInstall = <ThrowOnError extends boolean = false>(
     SystemDaemonInstallErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.daemon.install',
+    url: '/api/v1/system.daemon.install',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1681,7 +2045,7 @@ export const systemDaemonPark = <ThrowOnError extends boolean = false>(
   options: Options<SystemDaemonParkData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemDaemonParkResponses, SystemDaemonParkErrors, ThrowOnError>({
-    url: '/api/tools/system.daemon.park',
+    url: '/api/v1/system.daemon.park',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1702,7 +2066,7 @@ export const systemDaemonReclaim = <ThrowOnError extends boolean = false>(
     SystemDaemonReclaimErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.daemon.reclaim',
+    url: '/api/v1/system.daemon.reclaim',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1723,7 +2087,7 @@ export const systemDaemonStatus = <ThrowOnError extends boolean = false>(
     SystemDaemonStatusErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.daemon.status',
+    url: '/api/v1/system.daemon.status',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1740,7 +2104,7 @@ export const systemDaemonStop = <ThrowOnError extends boolean = false>(
   options: Options<SystemDaemonStopData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemDaemonStopResponses, SystemDaemonStopErrors, ThrowOnError>({
-    url: '/api/tools/system.daemon.stop',
+    url: '/api/v1/system.daemon.stop',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1761,7 +2125,7 @@ export const systemDaemonUninstall = <ThrowOnError extends boolean = false>(
     SystemDaemonUninstallErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.daemon.uninstall',
+    url: '/api/v1/system.daemon.uninstall',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1778,7 +2142,7 @@ export const systemDbDetail = <ThrowOnError extends boolean = false>(
   options: Options<SystemDbDetailData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemDbDetailResponses, SystemDbDetailErrors, ThrowOnError>({
-    url: '/api/tools/system.db.detail',
+    url: '/api/v1/system.db.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1799,7 +2163,7 @@ export const systemDbLifecycleUpdate = <ThrowOnError extends boolean = false>(
     SystemDbLifecycleUpdateErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.db.lifecycle.update',
+    url: '/api/v1/system.db.lifecycle.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1816,7 +2180,7 @@ export const systemDelete = <ThrowOnError extends boolean = false>(
   options: Options<SystemDeleteData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemDeleteResponses, SystemDeleteErrors, ThrowOnError>({
-    url: '/api/tools/system.delete',
+    url: '/api/v1/system.delete',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1833,7 +2197,7 @@ export const systemDetail = <ThrowOnError extends boolean = false>(
   options: Options<SystemDetailData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemDetailResponses, SystemDetailErrors, ThrowOnError>({
-    url: '/api/tools/system.detail',
+    url: '/api/v1/system.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1854,7 +2218,7 @@ export const systemDiagnosticList = <ThrowOnError extends boolean = false>(
     SystemDiagnosticListErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.diagnostic.list',
+    url: '/api/v1/system.diagnostic.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1875,7 +2239,7 @@ export const systemEngineCreate = <ThrowOnError extends boolean = false>(
     SystemEngineCreateErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.engine.create',
+    url: '/api/v1/system.engine.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1896,7 +2260,7 @@ export const systemEngineDelete = <ThrowOnError extends boolean = false>(
     SystemEngineDeleteErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.engine.delete',
+    url: '/api/v1/system.engine.delete',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1913,7 +2277,7 @@ export const systemEngineList = <ThrowOnError extends boolean = false>(
   options: Options<SystemEngineListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemEngineListResponses, SystemEngineListErrors, ThrowOnError>({
-    url: '/api/tools/system.engine.list',
+    url: '/api/v1/system.engine.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1934,7 +2298,24 @@ export const systemEngineUpdate = <ThrowOnError extends boolean = false>(
     SystemEngineUpdateErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.engine.update',
+    url: '/api/v1/system.engine.update',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Liveness probe — returns {ok: true} when the server is alive.
+ *
+ * Liveness probe — returns {ok: true} when the server is alive.
+ */
+export const systemHealth = <ThrowOnError extends boolean = false>(
+  options: Options<SystemHealthData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SystemHealthResponses, SystemHealthErrors, ThrowOnError>({
+    url: '/api/v1/system.health',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1951,7 +2332,7 @@ export const systemHostDetail = <ThrowOnError extends boolean = false>(
   options: Options<SystemHostDetailData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemHostDetailResponses, SystemHostDetailErrors, ThrowOnError>({
-    url: '/api/tools/system.host.detail',
+    url: '/api/v1/system.host.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1972,7 +2353,7 @@ export const systemHostRefresh = <ThrowOnError extends boolean = false>(
     SystemHostRefreshErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.host.refresh',
+    url: '/api/v1/system.host.refresh',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1989,7 +2370,70 @@ export const systemHostSet = <ThrowOnError extends boolean = false>(
   options: Options<SystemHostSetData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemHostSetResponses, SystemHostSetErrors, ThrowOnError>({
-    url: '/api/tools/system.host.set',
+    url: '/api/v1/system.host.set',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Fetch docker compose logs for a running rebuy service. Specify the project path and service name.
+ *
+ * Fetch docker compose logs for a running rebuy service. Specify the project path and service name.
+ */
+export const systemInfraServiceDetail = <ThrowOnError extends boolean = false>(
+  options: Options<SystemInfraServiceDetailData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    SystemInfraServiceDetailResponses,
+    SystemInfraServiceDetailErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/system.infra.service.detail',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List all running docker compose services across all rebuy projects. Returns project name, path, and per-service state/health/ports.
+ *
+ * List all running docker compose services across all rebuy projects. Returns project name, path, and per-service state/health/ports.
+ */
+export const systemInfraServiceList = <ThrowOnError extends boolean = false>(
+  options: Options<SystemInfraServiceListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    SystemInfraServiceListResponses,
+    SystemInfraServiceListErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/system.infra.service.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Run the orca project test suite. Returns test output with pass/fail counts. Suites: rust (cargo test), frontend (vitest), e2e (playwright), all.
+ *
+ * Run the orca project test suite. Returns test output with pass/fail counts. Suites: rust (cargo test), frontend (vitest), e2e (playwright), all.
+ */
+export const systemInfraTestCreate = <ThrowOnError extends boolean = false>(
+  options: Options<SystemInfraTestCreateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    SystemInfraTestCreateResponses,
+    SystemInfraTestCreateErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/system.infra.test.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2006,7 +2450,7 @@ export const systemKillStale = <ThrowOnError extends boolean = false>(
   options: Options<SystemKillStaleData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemKillStaleResponses, SystemKillStaleErrors, ThrowOnError>({
-    url: '/api/tools/system.kill-stale',
+    url: '/api/v1/system.kill-stale',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2023,7 +2467,7 @@ export const systemMcpCreate = <ThrowOnError extends boolean = false>(
   options: Options<SystemMcpCreateData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemMcpCreateResponses, SystemMcpCreateErrors, ThrowOnError>({
-    url: '/api/tools/system.mcp.create',
+    url: '/api/v1/system.mcp.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2040,7 +2484,7 @@ export const systemMcpDelete = <ThrowOnError extends boolean = false>(
   options: Options<SystemMcpDeleteData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemMcpDeleteResponses, SystemMcpDeleteErrors, ThrowOnError>({
-    url: '/api/tools/system.mcp.delete',
+    url: '/api/v1/system.mcp.delete',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2061,7 +2505,7 @@ export const systemMcpFederationListTools = <ThrowOnError extends boolean = fals
     SystemMcpFederationListToolsErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.mcp.federation.list-tools',
+    url: '/api/v1/system.mcp.federation.list-tools',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2082,7 +2526,7 @@ export const systemMcpFederationRun = <ThrowOnError extends boolean = false>(
     SystemMcpFederationRunErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.mcp.federation.run',
+    url: '/api/v1/system.mcp.federation.run',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2099,7 +2543,7 @@ export const systemMcpList = <ThrowOnError extends boolean = false>(
   options: Options<SystemMcpListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemMcpListResponses, SystemMcpListErrors, ThrowOnError>({
-    url: '/api/tools/system.mcp.list',
+    url: '/api/v1/system.mcp.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2120,7 +2564,7 @@ export const systemMcpMappingCreate = <ThrowOnError extends boolean = false>(
     SystemMcpMappingCreateErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.mcp.mapping.create',
+    url: '/api/v1/system.mcp.mapping.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2141,7 +2585,7 @@ export const systemMcpMappingDelete = <ThrowOnError extends boolean = false>(
     SystemMcpMappingDeleteErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.mcp.mapping.delete',
+    url: '/api/v1/system.mcp.mapping.delete',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2162,7 +2606,7 @@ export const systemMcpMappingList = <ThrowOnError extends boolean = false>(
     SystemMcpMappingListErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.mcp.mapping.list',
+    url: '/api/v1/system.mcp.mapping.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2179,7 +2623,7 @@ export const systemMcpSync = <ThrowOnError extends boolean = false>(
   options: Options<SystemMcpSyncData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemMcpSyncResponses, SystemMcpSyncErrors, ThrowOnError>({
-    url: '/api/tools/system.mcp.sync',
+    url: '/api/v1/system.mcp.sync',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2200,7 +2644,7 @@ export const systemPackageBuild = <ThrowOnError extends boolean = false>(
     SystemPackageBuildErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.package.build',
+    url: '/api/v1/system.package.build',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2221,7 +2665,7 @@ export const systemPkiCaCreate = <ThrowOnError extends boolean = false>(
     SystemPkiCaCreateErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.pki.ca.create',
+    url: '/api/v1/system.pki.ca.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2242,7 +2686,7 @@ export const systemPkiCertCreate = <ThrowOnError extends boolean = false>(
     SystemPkiCertCreateErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.pki.cert.create',
+    url: '/api/v1/system.pki.cert.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2259,7 +2703,7 @@ export const systemPkiList = <ThrowOnError extends boolean = false>(
   options: Options<SystemPkiListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemPkiListResponses, SystemPkiListErrors, ThrowOnError>({
-    url: '/api/tools/system.pki.list',
+    url: '/api/v1/system.pki.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2280,7 +2724,7 @@ export const systemPluginCreate = <ThrowOnError extends boolean = false>(
     SystemPluginCreateErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.plugin.create',
+    url: '/api/v1/system.plugin.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2301,7 +2745,7 @@ export const systemPluginCredCreate = <ThrowOnError extends boolean = false>(
     SystemPluginCredCreateErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.plugin.cred.create',
+    url: '/api/v1/system.plugin.cred.create',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2322,7 +2766,7 @@ export const systemPluginCredDelete = <ThrowOnError extends boolean = false>(
     SystemPluginCredDeleteErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.plugin.cred.delete',
+    url: '/api/v1/system.plugin.cred.delete',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2343,7 +2787,7 @@ export const systemPluginCredList = <ThrowOnError extends boolean = false>(
     SystemPluginCredListErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.plugin.cred.list',
+    url: '/api/v1/system.plugin.cred.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2364,7 +2808,7 @@ export const systemPluginCredSync = <ThrowOnError extends boolean = false>(
     SystemPluginCredSyncErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.plugin.cred.sync',
+    url: '/api/v1/system.plugin.cred.sync',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2385,7 +2829,7 @@ export const systemPluginDataGet = <ThrowOnError extends boolean = false>(
     SystemPluginDataGetErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.plugin.data.get',
+    url: '/api/v1/system.plugin.data.get',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2406,7 +2850,7 @@ export const systemPluginDataSet = <ThrowOnError extends boolean = false>(
     SystemPluginDataSetErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.plugin.data.set',
+    url: '/api/v1/system.plugin.data.set',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2427,7 +2871,7 @@ export const systemPluginDelete = <ThrowOnError extends boolean = false>(
     SystemPluginDeleteErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.plugin.delete',
+    url: '/api/v1/system.plugin.delete',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2444,7 +2888,7 @@ export const systemPluginList = <ThrowOnError extends boolean = false>(
   options: Options<SystemPluginListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemPluginListResponses, SystemPluginListErrors, ThrowOnError>({
-    url: '/api/tools/system.plugin.list',
+    url: '/api/v1/system.plugin.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2465,7 +2909,7 @@ export const systemPluginUpdate = <ThrowOnError extends boolean = false>(
     SystemPluginUpdateErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.plugin.update',
+    url: '/api/v1/system.plugin.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2482,7 +2926,7 @@ export const systemPodDetail = <ThrowOnError extends boolean = false>(
   options: Options<SystemPodDetailData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemPodDetailResponses, SystemPodDetailErrors, ThrowOnError>({
-    url: '/api/tools/system.pod.detail',
+    url: '/api/v1/system.pod.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2499,7 +2943,7 @@ export const systemPodUpdate = <ThrowOnError extends boolean = false>(
   options: Options<SystemPodUpdateData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemPodUpdateResponses, SystemPodUpdateErrors, ThrowOnError>({
-    url: '/api/tools/system.pod.update',
+    url: '/api/v1/system.pod.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2520,7 +2964,7 @@ export const systemScheduleList = <ThrowOnError extends boolean = false>(
     SystemScheduleListErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.schedule.list',
+    url: '/api/v1/system.schedule.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2541,7 +2985,7 @@ export const systemScheduleRun = <ThrowOnError extends boolean = false>(
     SystemScheduleRunErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.schedule.run',
+    url: '/api/v1/system.schedule.run',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2562,7 +3006,7 @@ export const systemScheduleStatus = <ThrowOnError extends boolean = false>(
     SystemScheduleStatusErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.schedule.status',
+    url: '/api/v1/system.schedule.status',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2583,7 +3027,7 @@ export const systemSecretBackends = <ThrowOnError extends boolean = false>(
     SystemSecretBackendsErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.secret.backends',
+    url: '/api/v1/system.secret.backends',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2604,7 +3048,7 @@ export const systemSecretDelete = <ThrowOnError extends boolean = false>(
     SystemSecretDeleteErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.secret.delete',
+    url: '/api/v1/system.secret.delete',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2625,7 +3069,7 @@ export const systemSecretDetail = <ThrowOnError extends boolean = false>(
     SystemSecretDetailErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.secret.detail',
+    url: '/api/v1/system.secret.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2642,7 +3086,7 @@ export const systemSecretList = <ThrowOnError extends boolean = false>(
   options: Options<SystemSecretListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemSecretListResponses, SystemSecretListErrors, ThrowOnError>({
-    url: '/api/tools/system.secret.list',
+    url: '/api/v1/system.secret.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2651,15 +3095,15 @@ export const systemSecretList = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * [MUTATES STATE] Create or update a secret. For 'inline' backend, `value` is required; for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field'). When `peer_id` is set the secret is written on the named peer instead of locally — same admin trust surface as `system.update`.
+ * [MUTATES STATE] Create or update a secret. For 'inline' backend, `value` is required; for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field'). Write the secret on a remote system with the top-level `--peer <h>` flag.
  *
- * [MUTATES STATE] Create or update a secret. For 'inline' backend, `value` is required; for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field'). When `peer_id` is set the secret is written on the named peer instead of locally — same admin trust surface as `system.update`.
+ * [MUTATES STATE] Create or update a secret. For 'inline' backend, `value` is required; for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field'). Write the secret on a remote system with the top-level `--peer <h>` flag.
  */
 export const systemSecretSet = <ThrowOnError extends boolean = false>(
   options: Options<SystemSecretSetData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemSecretSetResponses, SystemSecretSetErrors, ThrowOnError>({
-    url: '/api/tools/system.secret.set',
+    url: '/api/v1/system.secret.set',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2680,7 +3124,7 @@ export const systemSweepOrganization = <ThrowOnError extends boolean = false>(
     SystemSweepOrganizationErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.sweep.organization',
+    url: '/api/v1/system.sweep.organization',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2689,15 +3133,15 @@ export const systemSweepOrganization = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * [MUTATES STATE] Update orca on this host. Optionally pass `version` to switch channel or pin before applying: "stable" | "rc" | "dev" | "<semver>". "dev" tracks GitHub HEAD via cargo-watch. Omit to apply the latest on the current channel. When `peer_id` is set the update runs on the named peer instead of locally.
+ * [MUTATES STATE] Update orca on this host. Optionally pass `version` to switch channel or pin before applying: "stable" | "rc" | "dev" | "<semver>". "dev" tracks GitHub HEAD via cargo-watch. Omit to apply the latest on the current channel. Run on a remote system with the top-level `--peer <h>` flag.
  *
- * [MUTATES STATE] Update orca on this host. Optionally pass `version` to switch channel or pin before applying: "stable" | "rc" | "dev" | "<semver>". "dev" tracks GitHub HEAD via cargo-watch. Omit to apply the latest on the current channel. When `peer_id` is set the update runs on the named peer instead of locally.
+ * [MUTATES STATE] Update orca on this host. Optionally pass `version` to switch channel or pin before applying: "stable" | "rc" | "dev" | "<semver>". "dev" tracks GitHub HEAD via cargo-watch. Omit to apply the latest on the current channel. Run on a remote system with the top-level `--peer <h>` flag.
  */
 export const systemUpdate = <ThrowOnError extends boolean = false>(
   options: Options<SystemUpdateData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemUpdateResponses, SystemUpdateErrors, ThrowOnError>({
-    url: '/api/tools/system.update',
+    url: '/api/v1/system.update',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2710,15 +3154,15 @@ export const systemUpdate = <ThrowOnError extends boolean = false>(
  *
  * Apply the latest update on the configured channel. Reads `~/.orca/channel` when no channel given; rewrites it on success. Uses dev-source when set.
  */
-export const systemUpdateApply = <ThrowOnError extends boolean = false>(
-  options: Options<SystemUpdateApplyData, ThrowOnError>,
+export const systemUpdateStateApply = <ThrowOnError extends boolean = false>(
+  options: Options<SystemUpdateStateApplyData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<
-    SystemUpdateApplyResponses,
-    SystemUpdateApplyErrors,
+    SystemUpdateStateApplyResponses,
+    SystemUpdateStateApplyErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.update.apply',
+    url: '/api/v1/system.update-state.apply',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2731,15 +3175,15 @@ export const systemUpdateApply = <ThrowOnError extends boolean = false>(
  *
  * Preview only — resolve the target version on the channel and cache its sha256. Does NOT replace the running binary.
  */
-export const systemUpdateCheck = <ThrowOnError extends boolean = false>(
-  options: Options<SystemUpdateCheckData, ThrowOnError>,
+export const systemUpdateStateCheck = <ThrowOnError extends boolean = false>(
+  options: Options<SystemUpdateStateCheckData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<
-    SystemUpdateCheckResponses,
-    SystemUpdateCheckErrors,
+    SystemUpdateStateCheckResponses,
+    SystemUpdateStateCheckErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.update.check',
+    url: '/api/v1/system.update-state.check',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2752,15 +3196,15 @@ export const systemUpdateCheck = <ThrowOnError extends boolean = false>(
  *
  * Clear the dev-source URL, reverting to GitHub-based updates.
  */
-export const systemUpdateClearSource = <ThrowOnError extends boolean = false>(
-  options: Options<SystemUpdateClearSourceData, ThrowOnError>,
+export const systemUpdateStateClearSource = <ThrowOnError extends boolean = false>(
+  options: Options<SystemUpdateStateClearSourceData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<
-    SystemUpdateClearSourceResponses,
-    SystemUpdateClearSourceErrors,
+    SystemUpdateStateClearSourceResponses,
+    SystemUpdateStateClearSourceErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.update.clear-source',
+    url: '/api/v1/system.update-state.clear-source',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2773,11 +3217,15 @@ export const systemUpdateClearSource = <ThrowOnError extends boolean = false>(
  *
  * Pin to a version. Future `system.update.apply` runs will not upgrade past this.
  */
-export const systemUpdatePin = <ThrowOnError extends boolean = false>(
-  options: Options<SystemUpdatePinData, ThrowOnError>,
+export const systemUpdateStatePin = <ThrowOnError extends boolean = false>(
+  options: Options<SystemUpdateStatePinData, ThrowOnError>,
 ) =>
-  (options.client ?? client).post<SystemUpdatePinResponses, SystemUpdatePinErrors, ThrowOnError>({
-    url: '/api/tools/system.update.pin',
+  (options.client ?? client).post<
+    SystemUpdateStatePinResponses,
+    SystemUpdateStatePinErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/system.update-state.pin',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2790,15 +3238,15 @@ export const systemUpdatePin = <ThrowOnError extends boolean = false>(
  *
  * Set a dev-source URL. Future `system.update.apply` runs pull from there instead of GitHub.
  */
-export const systemUpdateSetSource = <ThrowOnError extends boolean = false>(
-  options: Options<SystemUpdateSetSourceData, ThrowOnError>,
+export const systemUpdateStateSetSource = <ThrowOnError extends boolean = false>(
+  options: Options<SystemUpdateStateSetSourceData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<
-    SystemUpdateSetSourceResponses,
-    SystemUpdateSetSourceErrors,
+    SystemUpdateStateSetSourceResponses,
+    SystemUpdateStateSetSourceErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.update.set-source',
+    url: '/api/v1/system.update-state.set-source',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -2811,15 +3259,15 @@ export const systemUpdateSetSource = <ThrowOnError extends boolean = false>(
  *
  * Clear the version pin. `system.update.apply` resumes following the channel.
  */
-export const systemUpdateUnpin = <ThrowOnError extends boolean = false>(
-  options: Options<SystemUpdateUnpinData, ThrowOnError>,
+export const systemUpdateStateUnpin = <ThrowOnError extends boolean = false>(
+  options: Options<SystemUpdateStateUnpinData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<
-    SystemUpdateUnpinResponses,
-    SystemUpdateUnpinErrors,
+    SystemUpdateStateUnpinResponses,
+    SystemUpdateStateUnpinErrors,
     ThrowOnError
   >({
-    url: '/api/tools/system.update.unpin',
+    url: '/api/v1/system.update-state.unpin',
     ...options,
     headers: {
       'Content-Type': 'application/json',

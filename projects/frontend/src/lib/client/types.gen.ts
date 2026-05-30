@@ -85,6 +85,15 @@ export type ConfigRowOut = {
   updated_by: string;
 };
 
+export type DbSpecRow = {
+  cachedAt?: string | null;
+  enabled: boolean;
+  name: string;
+  pathCount?: number | null;
+  sourceMcp?: string | null;
+  url?: string | null;
+};
+
 export type DenyAdvisory = {
   id: string;
   package: string;
@@ -107,11 +116,64 @@ export type Dependency = Array<string> | JsonSchemaNode;
 
 export type DependencyKind = 'normal' | 'dev' | 'build';
 
-export type DocRootRegEntry = {
-  description?: string | null;
-  enabled: boolean;
+/**
+ * Live CPU/memory stats for one running container.
+ */
+export type DockerContainerStats = {
+  /**
+   * Block I/O read bytes since container start.
+   */
+  block_read_bytes: number;
+  /**
+   * Block I/O write bytes since container start.
+   */
+  block_write_bytes: number;
+  /**
+   * CPU usage as a percentage of total host capacity (all cores).
+   */
+  cpu_percent: number;
+  id: string;
+  /**
+   * Container memory limit in MB (`0` = unlimited / host RAM).
+   */
+  mem_limit_mb: number;
+  /**
+   * RSS-equivalent working set in MB.
+   */
+  mem_usage_mb: number;
   name: string;
+  /**
+   * Net rx bytes.
+   */
+  net_rx_bytes: number;
+  /**
+   * Net tx bytes.
+   */
+  net_tx_bytes: number;
+};
+
+export type DockerEngineKind = 'colima' | 'desktop' | 'none';
+
+export type DockerLogProject = {
   path: string;
+  project: string;
+  services: Array<DockerServiceRow>;
+};
+
+export type DockerRuntimeEntry = {
+  enabled: boolean;
+  host?: string | null;
+  name: string;
+  socketPath?: string | null;
+  url?: string | null;
+};
+
+export type DockerServiceRow = {
+  health: string;
+  name: string;
+  ports: Array<string>;
+  running: boolean;
+  state: string;
 };
 
 export type DoctorEntry = {
@@ -124,6 +186,13 @@ export type DoctorEntry = {
  * `exclusiveMinimum`/`exclusiveMaximum`: numeric in draft-06+, boolean in draft-4.
  */
 export type ExclusiveLimit = number | boolean;
+
+export type FileRootRegEntry = {
+  description?: string | null;
+  enabled: boolean;
+  name: string;
+  path: string;
+};
 
 export type FsEntry = {
   name: string;
@@ -194,6 +263,33 @@ export type GpuInfo = {
   vendor: string;
   vram_total_mb?: number | null;
   vram_used_mb?: number | null;
+};
+
+export type GraphQlEnum = {
+  description?: string | null;
+  name: string;
+  values: Array<string>;
+};
+
+export type GraphQlField = {
+  description?: string | null;
+  name: string;
+  required: boolean;
+  typeName: string;
+};
+
+export type GraphQlOperation = {
+  args: Array<GraphQlField>;
+  deprecated: boolean;
+  description?: string | null;
+  name: string;
+  returns: string;
+};
+
+export type GraphQlType = {
+  description?: string | null;
+  fields: Array<GraphQlField>;
+  name: string;
 };
 
 export type HostChannel = {
@@ -537,6 +633,12 @@ export type PodPendingOfferDto = {
   ttl_secs: number;
 };
 
+export type ProjectServices = {
+  path: string;
+  project: string;
+  services: Array<ServiceState>;
+};
+
 export type ProviderDto = {
   created_at: string;
   enabled: boolean;
@@ -570,51 +672,6 @@ export type ScheduleEntry = {
    * Next firing time (RFC3339, UTC) if the cron parses, else null.
    */
   next_run?: string | null;
-};
-
-/**
- * One column entry within `tabs[*].columns[tableName]`. Field names match
- * the HTTP `/api/schema` payload — the frontend reads `fk_target`
- * snake_case directly.
- */
-export type SchemaColumn = {
-  extra: string;
-  fk_target?: string | null;
-  key: string;
-  name: string;
-  nullable: boolean;
-  type: string;
-};
-
-export type SchemaDbEntry = {
-  container?: string | null;
-  database: string;
-  domainsFile?: string | null;
-  driver: string;
-  enabled: boolean;
-  host?: string | null;
-  name: string;
-  port?: number | null;
-  user: string;
-};
-
-/**
- * Domain grouping (loaded from each schema DB's `domainsFile` JSON).
- */
-export type SchemaDomain = {
-  color: string;
-  group?: string | null;
-  key: string;
-  label: string;
-  subgroup?: string | null;
-  tables: Array<string>;
-};
-
-export type SchemaForeignKey = {
-  column: string;
-  refColumn: string;
-  refTable: string;
-  table: string;
 };
 
 /**
@@ -702,24 +759,6 @@ export type SchemaObject = {
   write_only?: boolean | null;
 };
 
-export type SchemaTab = {
-  columns: {
-    [key: string]: Array<SchemaColumn>;
-  };
-  domains: Array<SchemaDomain>;
-  foreignKeys: Array<SchemaForeignKey>;
-  tables: Array<SchemaTableInfo>;
-  title: string;
-};
-
-/**
- * One row in `tabs[*].tables`.
- */
-export type SchemaTableInfo = {
-  comment: string;
-  name: string;
-};
-
 /**
  * `type` may be a single instance type or an array of them.
  */
@@ -737,6 +776,13 @@ export type SecretEntry = {
    */
   ref_path: string;
   updated_at: string;
+};
+
+export type ServiceState = {
+  health?: string | null;
+  name: string;
+  ports: Array<string>;
+  state: string;
 };
 
 export type SessionOk = {
@@ -758,6 +804,27 @@ export type SignupRequest = {
 export type SignupStatus = {
   allowed: boolean;
   reason: string;
+};
+
+export type SpecFilesPresence = {
+  full: boolean;
+  public: boolean;
+};
+
+export type SpecMetaRow = {
+  baseUrl?: string | null;
+  capturedAt?: string | null;
+  files: SpecFilesPresence;
+  hasGraphql: boolean;
+  namespace: string;
+  pathCount?: number | null;
+  project: string;
+  repo: string;
+  /**
+   * "manual" | "url" | "mcp" | "plugin"
+   */
+  source: string;
+  sourceMcp?: string | null;
 };
 
 export type SyncToolsServerEntry = {
@@ -1062,7 +1129,7 @@ export type AgentRunData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/agent.run';
+  url: '/api/v1/agent.run';
 };
 
 export type AgentRunErrors = {
@@ -1104,7 +1171,570 @@ export type AgentRunResponses = {
 
 export type AgentRunResponse = AgentRunResponses[keyof AgentRunResponses];
 
-export type FsListData = {
+export type AuthLoginData = {
+  /**
+   * LoginArgs
+   */
+  body: {
+    /**
+     * Password. Required. CLI users should prefer a stdin-piped form
+     * (`printf '%s' "$PASS" | orca auth login --username scott --password -`)
+     * once interactive prompting lands — until then, pass it verbatim and
+     * be aware it lands in shell history.
+     */
+    password: string;
+    /**
+     * Operator username (matches the web `users` table).
+     */
+    username: string;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/auth.login';
+};
+
+export type AuthLoginErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type AuthLoginError = AuthLoginErrors[keyof AuthLoginErrors];
+
+export type AuthLoginResponses = {
+  /**
+   * LoginOutput
+   *
+   * Tool result
+   */
+  200: {
+    /**
+     * RFC3339 expiry of the on-disk session.
+     */
+    expires_at: string;
+    /**
+     * "admin" | "read" — whatever role the user holds in `users`.
+     */
+    role: string;
+    user_id: string;
+    username: string;
+  };
+};
+
+export type AuthLoginResponse = AuthLoginResponses[keyof AuthLoginResponses];
+
+export type AuthLogoutData = {
+  /**
+   * LogoutArgs
+   */
+  body: {
+    [key: string]: unknown;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/auth.logout';
+};
+
+export type AuthLogoutErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type AuthLogoutError = AuthLogoutErrors[keyof AuthLogoutErrors];
+
+export type AuthLogoutResponses = {
+  /**
+   * LogoutOutput
+   *
+   * Tool result
+   */
+  200: {
+    revoked: boolean;
+  };
+};
+
+export type AuthLogoutResponse = AuthLogoutResponses[keyof AuthLogoutResponses];
+
+export type DockerEngineDetailData = {
+  /**
+   * GetDockerEngineArgs
+   */
+  body: {
+    [key: string]: unknown;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/docker.engine.detail';
+};
+
+export type DockerEngineDetailErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type DockerEngineDetailError = DockerEngineDetailErrors[keyof DockerEngineDetailErrors];
+
+export type DockerEngineDetailResponses = {
+  /**
+   * DockerEngineStatus
+   *
+   * Tool result
+   */
+  200: {
+    engine: DockerEngineKind;
+    running: boolean;
+  };
+};
+
+export type DockerEngineDetailResponse =
+  DockerEngineDetailResponses[keyof DockerEngineDetailResponses];
+
+export type DockerEngineUpdateData = {
+  /**
+   * StartDockerEngineArgs
+   */
+  body: {
+    [key: string]: unknown;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/docker.engine.update';
+};
+
+export type DockerEngineUpdateErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type DockerEngineUpdateError = DockerEngineUpdateErrors[keyof DockerEngineUpdateErrors];
+
+export type DockerEngineUpdateResponses = {
+  /**
+   * StartDockerEngineOutput
+   *
+   * Tool result
+   */
+  200: {
+    output: string;
+  };
+};
+
+export type DockerEngineUpdateResponse =
+  DockerEngineUpdateResponses[keyof DockerEngineUpdateResponses];
+
+export type DockerRuntimeCreateData = {
+  /**
+   * AddDockerRuntimeArgs
+   */
+  body: {
+    host?: string | null;
+    name: string;
+    socketPath?: string | null;
+    url?: string | null;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/docker.runtime.create';
+};
+
+export type DockerRuntimeCreateErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type DockerRuntimeCreateError = DockerRuntimeCreateErrors[keyof DockerRuntimeCreateErrors];
+
+export type DockerRuntimeCreateResponses = {
+  /**
+   * DockerRuntimeMutationResult
+   *
+   * Tool result
+   */
+  200: {
+    changed: boolean;
+    name: string;
+  };
+};
+
+export type DockerRuntimeCreateResponse =
+  DockerRuntimeCreateResponses[keyof DockerRuntimeCreateResponses];
+
+export type DockerRuntimeDeleteData = {
+  /**
+   * RemoveDockerRuntimeArgs
+   */
+  body: {
+    name: string;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/docker.runtime.delete';
+};
+
+export type DockerRuntimeDeleteErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type DockerRuntimeDeleteError = DockerRuntimeDeleteErrors[keyof DockerRuntimeDeleteErrors];
+
+export type DockerRuntimeDeleteResponses = {
+  /**
+   * DockerRuntimeMutationResult
+   *
+   * Tool result
+   */
+  200: {
+    changed: boolean;
+    name: string;
+  };
+};
+
+export type DockerRuntimeDeleteResponse =
+  DockerRuntimeDeleteResponses[keyof DockerRuntimeDeleteResponses];
+
+export type DockerRuntimeListData = {
+  /**
+   * ListDockerRuntimesArgs
+   */
+  body: {
+    [key: string]: unknown;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/docker.runtime.list';
+};
+
+export type DockerRuntimeListErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type DockerRuntimeListError = DockerRuntimeListErrors[keyof DockerRuntimeListErrors];
+
+export type DockerRuntimeListResponses = {
+  /**
+   * ListDockerRuntimesOutput
+   *
+   * Tool result
+   */
+  200: {
+    runtimes: Array<DockerRuntimeEntry>;
+  };
+};
+
+export type DockerRuntimeListResponse =
+  DockerRuntimeListResponses[keyof DockerRuntimeListResponses];
+
+export type DockerServiceDetailData = {
+  /**
+   * GetLogsArgs
+   */
+  body: {
+    /**
+     * Absolute path to the compose project.
+     */
+    project: string;
+    /**
+     * Specific service name; omit to read across all services.
+     */
+    service?: string | null;
+    /**
+     * Number of log lines to return (default 200).
+     */
+    tail?: number | null;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/docker.service.detail';
+};
+
+export type DockerServiceDetailErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type DockerServiceDetailError = DockerServiceDetailErrors[keyof DockerServiceDetailErrors];
+
+export type DockerServiceDetailResponses = {
+  /**
+   * GetLogsOutput
+   *
+   * Tool result
+   */
+  200: {
+    output: string;
+  };
+};
+
+export type DockerServiceDetailResponse =
+  DockerServiceDetailResponses[keyof DockerServiceDetailResponses];
+
+export type DockerServiceListData = {
+  /**
+   * GetDockerServicesArgs
+   */
+  body: {
+    /**
+     * Absolute path to the docker-compose project directory.
+     */
+    path: string;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/docker.service.list';
+};
+
+export type DockerServiceListErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type DockerServiceListError = DockerServiceListErrors[keyof DockerServiceListErrors];
+
+export type DockerServiceListResponses = {
+  /**
+   * DockerServicesView
+   *
+   * Tool result
+   */
+  200: {
+    composeFile?: string | null;
+    services: Array<DockerServiceRow>;
+  };
+};
+
+export type DockerServiceListResponse =
+  DockerServiceListResponses[keyof DockerServiceListResponses];
+
+export type DockerServiceListLogsData = {
+  /**
+   * GetLogServicesArgs
+   */
+  body: {
+    [key: string]: unknown;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/docker.service.list-logs';
+};
+
+export type DockerServiceListLogsErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type DockerServiceListLogsError =
+  DockerServiceListLogsErrors[keyof DockerServiceListLogsErrors];
+
+export type DockerServiceListLogsResponses = {
+  /**
+   * GetLogServicesOutput
+   *
+   * Tool result
+   */
+  200: {
+    projects: Array<DockerLogProject>;
+  };
+};
+
+export type DockerServiceListLogsResponse =
+  DockerServiceListLogsResponses[keyof DockerServiceListLogsResponses];
+
+export type DockerServiceListStatsData = {
+  /**
+   * DockerStatsArgs
+   */
+  body: {
+    [key: string]: unknown;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/docker.service.list-stats';
+};
+
+export type DockerServiceListStatsErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type DockerServiceListStatsError =
+  DockerServiceListStatsErrors[keyof DockerServiceListStatsErrors];
+
+export type DockerServiceListStatsResponses = {
+  /**
+   * DockerStatsOutput
+   *
+   * Tool result
+   */
+  200: {
+    containers: Array<DockerContainerStats>;
+  };
+};
+
+export type DockerServiceListStatsResponse =
+  DockerServiceListStatsResponses[keyof DockerServiceListStatsResponses];
+
+export type DockerServiceUpdateData = {
+  /**
+   * RunDockerActionArgs
+   */
+  body: {
+    /**
+     * `up`, `down`, `restart`, `start`, `stop`, `build`, `pull`, `logs`.
+     */
+    action: string;
+    projectPath: string;
+    service?: string | null;
+    tail?: number | null;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/docker.service.update';
+};
+
+export type DockerServiceUpdateErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type DockerServiceUpdateError = DockerServiceUpdateErrors[keyof DockerServiceUpdateErrors];
+
+export type DockerServiceUpdateResponses = {
+  /**
+   * DockerActionResult
+   *
+   * Tool result
+   */
+  200: {
+    composeFile?: string | null;
+    output: string;
+  };
+};
+
+export type DockerServiceUpdateResponse =
+  DockerServiceUpdateResponses[keyof DockerServiceUpdateResponses];
+
+export type FilesListData = {
   /**
    * FsListArgs
    */
@@ -1120,10 +1750,10 @@ export type FsListData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/fs.list';
+  url: '/api/v1/files.list';
 };
 
-export type FsListErrors = {
+export type FilesListErrors = {
   /**
    * Unknown tool
    */
@@ -1138,9 +1768,9 @@ export type FsListErrors = {
   };
 };
 
-export type FsListError = FsListErrors[keyof FsListErrors];
+export type FilesListError = FilesListErrors[keyof FilesListErrors];
 
-export type FsListResponses = {
+export type FilesListResponses = {
   /**
    * FsListOutput
    *
@@ -1151,9 +1781,9 @@ export type FsListResponses = {
   };
 };
 
-export type FsListResponse = FsListResponses[keyof FsListResponses];
+export type FilesListResponse = FilesListResponses[keyof FilesListResponses];
 
-export type FsReadData = {
+export type FilesReadData = {
   /**
    * FsReadArgs
    */
@@ -1174,10 +1804,10 @@ export type FsReadData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/fs.read';
+  url: '/api/v1/files.read';
 };
 
-export type FsReadErrors = {
+export type FilesReadErrors = {
   /**
    * Unknown tool
    */
@@ -1192,9 +1822,9 @@ export type FsReadErrors = {
   };
 };
 
-export type FsReadError = FsReadErrors[keyof FsReadErrors];
+export type FilesReadError = FilesReadErrors[keyof FilesReadErrors];
 
-export type FsReadResponses = {
+export type FilesReadResponses = {
   /**
    * FsReadOutput
    *
@@ -1207,9 +1837,9 @@ export type FsReadResponses = {
   };
 };
 
-export type FsReadResponse = FsReadResponses[keyof FsReadResponses];
+export type FilesReadResponse = FilesReadResponses[keyof FilesReadResponses];
 
-export type FsRootsListData = {
+export type FilesRootsListData = {
   /**
    * FsRootsListArgs
    */
@@ -1218,10 +1848,10 @@ export type FsRootsListData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/fs.roots.list';
+  url: '/api/v1/files.roots.list';
 };
 
-export type FsRootsListErrors = {
+export type FilesRootsListErrors = {
   /**
    * Unknown tool
    */
@@ -1236,9 +1866,9 @@ export type FsRootsListErrors = {
   };
 };
 
-export type FsRootsListError = FsRootsListErrors[keyof FsRootsListErrors];
+export type FilesRootsListError = FilesRootsListErrors[keyof FilesRootsListErrors];
 
-export type FsRootsListResponses = {
+export type FilesRootsListResponses = {
   /**
    * FsRootsListOutput
    *
@@ -1249,17 +1879,13 @@ export type FsRootsListResponses = {
   };
 };
 
-export type FsRootsListResponse = FsRootsListResponses[keyof FsRootsListResponses];
+export type FilesRootsListResponse = FilesRootsListResponses[keyof FilesRootsListResponses];
 
-export type FsSearchData = {
+export type FilesSearchData = {
   /**
    * FsSearchArgs
    */
   body: {
-    /**
-     * `"llm"` strips decorative markdown from matched lines.
-     */
-    format?: string | null;
     /**
      * Case-insensitive search term.
      */
@@ -1271,10 +1897,10 @@ export type FsSearchData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/fs.search';
+  url: '/api/v1/files.search';
 };
 
-export type FsSearchErrors = {
+export type FilesSearchErrors = {
   /**
    * Unknown tool
    */
@@ -1289,24 +1915,23 @@ export type FsSearchErrors = {
   };
 };
 
-export type FsSearchError = FsSearchErrors[keyof FsSearchErrors];
+export type FilesSearchError = FilesSearchErrors[keyof FilesSearchErrors];
 
-export type FsSearchResponses = {
+export type FilesSearchResponses = {
   /**
    * FsSearchOutput
    *
    * Tool result
    */
   200: {
-    enhancedSummary?: string | null;
     hits: Array<FsSearchHit>;
     query: string;
   };
 };
 
-export type FsSearchResponse = FsSearchResponses[keyof FsSearchResponses];
+export type FilesSearchResponse = FilesSearchResponses[keyof FilesSearchResponses];
 
-export type FsStatData = {
+export type FilesStatData = {
   /**
    * FsStatArgs
    */
@@ -1316,10 +1941,10 @@ export type FsStatData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/fs.stat';
+  url: '/api/v1/files.stat';
 };
 
-export type FsStatErrors = {
+export type FilesStatErrors = {
   /**
    * Unknown tool
    */
@@ -1334,9 +1959,9 @@ export type FsStatErrors = {
   };
 };
 
-export type FsStatError = FsStatErrors[keyof FsStatErrors];
+export type FilesStatError = FilesStatErrors[keyof FilesStatErrors];
 
-export type FsStatResponses = {
+export type FilesStatResponses = {
   /**
    * FsStatOutput
    *
@@ -1351,9 +1976,9 @@ export type FsStatResponses = {
   };
 };
 
-export type FsStatResponse = FsStatResponses[keyof FsStatResponses];
+export type FilesStatResponse = FilesStatResponses[keyof FilesStatResponses];
 
-export type FsTreeData = {
+export type FilesTreeData = {
   /**
    * FsTreeArgs
    */
@@ -1373,10 +1998,10 @@ export type FsTreeData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/fs.tree';
+  url: '/api/v1/files.tree';
 };
 
-export type FsTreeErrors = {
+export type FilesTreeErrors = {
   /**
    * Unknown tool
    */
@@ -1391,9 +2016,9 @@ export type FsTreeErrors = {
   };
 };
 
-export type FsTreeError = FsTreeErrors[keyof FsTreeErrors];
+export type FilesTreeError = FilesTreeErrors[keyof FilesTreeErrors];
 
-export type FsTreeResponses = {
+export type FilesTreeResponses = {
   /**
    * FsTreeOutput
    *
@@ -1404,7 +2029,7 @@ export type FsTreeResponses = {
   };
 };
 
-export type FsTreeResponse = FsTreeResponses[keyof FsTreeResponses];
+export type FilesTreeResponse = FilesTreeResponses[keyof FilesTreeResponses];
 
 export type NamespaceCreateData = {
   /**
@@ -1416,7 +2041,7 @@ export type NamespaceCreateData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/namespace.create';
+  url: '/api/v1/namespace.create';
 };
 
 export type NamespaceCreateErrors = {
@@ -1466,7 +2091,7 @@ export type NamespaceCurrentData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/namespace.current';
+  url: '/api/v1/namespace.current';
 };
 
 export type NamespaceCurrentErrors = {
@@ -1511,7 +2136,7 @@ export type NamespaceDeleteData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/namespace.delete';
+  url: '/api/v1/namespace.delete';
 };
 
 export type NamespaceDeleteErrors = {
@@ -1555,7 +2180,7 @@ export type NamespaceDocListCommandsData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/namespace.doc.list-commands';
+  url: '/api/v1/namespace.doc.list-commands';
 };
 
 export type NamespaceDocListCommandsErrors = {
@@ -1599,7 +2224,7 @@ export type NamespaceDocPatternCreateData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/namespace.doc.pattern.create';
+  url: '/api/v1/namespace.doc.pattern.create';
 };
 
 export type NamespaceDocPatternCreateErrors = {
@@ -1644,7 +2269,7 @@ export type NamespaceDocPatternDeleteData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/namespace.doc.pattern.delete';
+  url: '/api/v1/namespace.doc.pattern.delete';
 };
 
 export type NamespaceDocPatternDeleteErrors = {
@@ -1689,7 +2314,7 @@ export type NamespaceDocPatternListData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/namespace.doc.pattern.list';
+  url: '/api/v1/namespace.doc.pattern.list';
 };
 
 export type NamespaceDocPatternListErrors = {
@@ -1726,7 +2351,7 @@ export type NamespaceDocPatternListResponse =
 
 export type NamespaceDocRootCreateData = {
   /**
-   * AddDocRootArgs
+   * AddFileRootArgs
    */
   body: {
     description?: string | null;
@@ -1735,7 +2360,7 @@ export type NamespaceDocRootCreateData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/namespace.doc.root.create';
+  url: '/api/v1/namespace.doc.root.create';
 };
 
 export type NamespaceDocRootCreateErrors = {
@@ -1758,7 +2383,7 @@ export type NamespaceDocRootCreateError =
 
 export type NamespaceDocRootCreateResponses = {
   /**
-   * DocRootMutationResult
+   * FileRootMutationResult
    *
    * Tool result
    */
@@ -1773,14 +2398,14 @@ export type NamespaceDocRootCreateResponse =
 
 export type NamespaceDocRootDeleteData = {
   /**
-   * RemoveDocRootArgs
+   * RemoveFileRootArgs
    */
   body: {
     name: string;
   };
   path?: never;
   query?: never;
-  url: '/api/tools/namespace.doc.root.delete';
+  url: '/api/v1/namespace.doc.root.delete';
 };
 
 export type NamespaceDocRootDeleteErrors = {
@@ -1803,7 +2428,7 @@ export type NamespaceDocRootDeleteError =
 
 export type NamespaceDocRootDeleteResponses = {
   /**
-   * DocRootMutationResult
+   * FileRootMutationResult
    *
    * Tool result
    */
@@ -1818,14 +2443,14 @@ export type NamespaceDocRootDeleteResponse =
 
 export type NamespaceDocRootListData = {
   /**
-   * ListDocRootsArgs
+   * ListFileRootsArgs
    */
   body: {
     [key: string]: unknown;
   };
   path?: never;
   query?: never;
-  url: '/api/tools/namespace.doc.root.list';
+  url: '/api/v1/namespace.doc.root.list';
 };
 
 export type NamespaceDocRootListErrors = {
@@ -1848,12 +2473,12 @@ export type NamespaceDocRootListError =
 
 export type NamespaceDocRootListResponses = {
   /**
-   * ListDocRootsOutput
+   * ListFileRootsOutput
    *
    * Tool result
    */
   200: {
-    roots: Array<DocRootRegEntry>;
+    roots: Array<FileRootRegEntry>;
   };
 };
 
@@ -1869,7 +2494,7 @@ export type NamespaceListData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/namespace.list';
+  url: '/api/v1/namespace.list';
 };
 
 export type NamespaceListErrors = {
@@ -1911,7 +2536,7 @@ export type NamespaceProjectListData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/namespace.project.list';
+  url: '/api/v1/namespace.project.list';
 };
 
 export type NamespaceProjectListErrors = {
@@ -1946,236 +2571,6 @@ export type NamespaceProjectListResponses = {
 export type NamespaceProjectListResponse =
   NamespaceProjectListResponses[keyof NamespaceProjectListResponses];
 
-export type NamespaceSchemaCreateData = {
-  /**
-   * AddSchemaArgs
-   */
-  body: {
-    container?: string | null;
-    database: string;
-    domainsFile?: string | null;
-    host?: string | null;
-    name: string;
-    password: string;
-    port?: number | null;
-    user: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/namespace.schema.create';
-};
-
-export type NamespaceSchemaCreateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceSchemaCreateError =
-  NamespaceSchemaCreateErrors[keyof NamespaceSchemaCreateErrors];
-
-export type NamespaceSchemaCreateResponses = {
-  /**
-   * SchemaMutationResult
-   *
-   * Tool result
-   */
-  200: {
-    changed: boolean;
-    name: string;
-  };
-};
-
-export type NamespaceSchemaCreateResponse =
-  NamespaceSchemaCreateResponses[keyof NamespaceSchemaCreateResponses];
-
-export type NamespaceSchemaDeleteData = {
-  /**
-   * RemoveSchemaArgs
-   */
-  body: {
-    name: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/namespace.schema.delete';
-};
-
-export type NamespaceSchemaDeleteErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceSchemaDeleteError =
-  NamespaceSchemaDeleteErrors[keyof NamespaceSchemaDeleteErrors];
-
-export type NamespaceSchemaDeleteResponses = {
-  /**
-   * SchemaMutationResult
-   *
-   * Tool result
-   */
-  200: {
-    changed: boolean;
-    name: string;
-  };
-};
-
-export type NamespaceSchemaDeleteResponse =
-  NamespaceSchemaDeleteResponses[keyof NamespaceSchemaDeleteResponses];
-
-export type NamespaceSchemaListData = {
-  /**
-   * ListSchemasArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/namespace.schema.list';
-};
-
-export type NamespaceSchemaListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceSchemaListError = NamespaceSchemaListErrors[keyof NamespaceSchemaListErrors];
-
-export type NamespaceSchemaListResponses = {
-  /**
-   * ListSchemasOutput
-   *
-   * Tool result
-   */
-  200: {
-    schemas: Array<SchemaDbEntry>;
-  };
-};
-
-export type NamespaceSchemaListResponse =
-  NamespaceSchemaListResponses[keyof NamespaceSchemaListResponses];
-
-export type NamespaceSchemaViewDetailData = {
-  /**
-   * GetSchemaArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/namespace.schema.view.detail';
-};
-
-export type NamespaceSchemaViewDetailErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceSchemaViewDetailError =
-  NamespaceSchemaViewDetailErrors[keyof NamespaceSchemaViewDetailErrors];
-
-export type NamespaceSchemaViewDetailResponses = {
-  /**
-   * GetSchemaOutput
-   *
-   * Tool result
-   */
-  200: {
-    errors?: Array<string> | null;
-    showTabs: boolean;
-    tabs: Array<SchemaTab>;
-  };
-};
-
-export type NamespaceSchemaViewDetailResponse =
-  NamespaceSchemaViewDetailResponses[keyof NamespaceSchemaViewDetailResponses];
-
-export type NamespaceSchemaViewListData = {
-  /**
-   * GetSchemaDomainsArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/tools/namespace.schema.view.list';
-};
-
-export type NamespaceSchemaViewListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceSchemaViewListError =
-  NamespaceSchemaViewListErrors[keyof NamespaceSchemaViewListErrors];
-
-export type NamespaceSchemaViewListResponses = {
-  /**
-   * GetSchemaDomainsOutput
-   *
-   * Tool result
-   */
-  200: {
-    domains: Array<SchemaDomain>;
-  };
-};
-
-export type NamespaceSchemaViewListResponse =
-  NamespaceSchemaViewListResponses[keyof NamespaceSchemaViewListResponses];
-
 export type NamespaceShareCreateData = {
   /**
    * NamespaceShareArgs
@@ -2190,7 +2585,7 @@ export type NamespaceShareCreateData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/namespace.share.create';
+  url: '/api/v1/namespace.share.create';
 };
 
 export type NamespaceShareCreateErrors = {
@@ -2237,7 +2632,7 @@ export type NamespaceShareDeleteData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/namespace.share.delete';
+  url: '/api/v1/namespace.share.delete';
 };
 
 export type NamespaceShareDeleteErrors = {
@@ -2286,7 +2681,7 @@ export type NamespaceShareListData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/namespace.share.list';
+  url: '/api/v1/namespace.share.list';
 };
 
 export type NamespaceShareListErrors = {
@@ -2333,7 +2728,7 @@ export type NamespaceShowData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/namespace.show';
+  url: '/api/v1/namespace.show';
 };
 
 export type NamespaceShowErrors = {
@@ -2374,6 +2769,98 @@ export type NamespaceShowResponses = {
 
 export type NamespaceShowResponse = NamespaceShowResponses[keyof NamespaceShowResponses];
 
+export type NamespaceSpecCreateData = {
+  /**
+   * RegisterSpecArgs
+   */
+  body: {
+    name: string;
+    url: string;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/namespace.spec.create';
+};
+
+export type NamespaceSpecCreateErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type NamespaceSpecCreateError = NamespaceSpecCreateErrors[keyof NamespaceSpecCreateErrors];
+
+export type NamespaceSpecCreateResponses = {
+  /**
+   * RegisterSpecResult
+   *
+   * Tool result
+   */
+  200: {
+    cachedAt?: string | null;
+    enabled: boolean;
+    name: string;
+    pathCount?: number | null;
+    sourceMcp?: string | null;
+    url?: string | null;
+  };
+};
+
+export type NamespaceSpecCreateResponse =
+  NamespaceSpecCreateResponses[keyof NamespaceSpecCreateResponses];
+
+export type NamespaceSpecDeleteData = {
+  /**
+   * UnregisterSpecArgs
+   */
+  body: {
+    name: string;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/namespace.spec.delete';
+};
+
+export type NamespaceSpecDeleteErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type NamespaceSpecDeleteError = NamespaceSpecDeleteErrors[keyof NamespaceSpecDeleteErrors];
+
+export type NamespaceSpecDeleteResponses = {
+  /**
+   * UnregisterSpecOutput
+   *
+   * Tool result
+   */
+  200: {
+    removed: boolean;
+  };
+};
+
+export type NamespaceSpecDeleteResponse =
+  NamespaceSpecDeleteResponses[keyof NamespaceSpecDeleteResponses];
+
 export type NamespaceSpecDetailData = {
   /**
    * SpecDetailArgs
@@ -2383,7 +2870,7 @@ export type NamespaceSpecDetailData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/namespace.spec.detail';
+  url: '/api/v1/namespace.spec.detail';
 };
 
 export type NamespaceSpecDetailErrors = {
@@ -2420,6 +2907,285 @@ export type NamespaceSpecDetailResponses = {
 export type NamespaceSpecDetailResponse =
   NamespaceSpecDetailResponses[keyof NamespaceSpecDetailResponses];
 
+export type NamespaceSpecGraphqlDetailData = {
+  /**
+   * GetSpecGraphqlInfoArgs
+   */
+  body: {
+    repo: string;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/namespace.spec.graphql.detail';
+};
+
+export type NamespaceSpecGraphqlDetailErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type NamespaceSpecGraphqlDetailError =
+  NamespaceSpecGraphqlDetailErrors[keyof NamespaceSpecGraphqlDetailErrors];
+
+export type NamespaceSpecGraphqlDetailResponses = {
+  /**
+   * GraphQlInfoData
+   *
+   * Tool result
+   */
+  200: {
+    enums: Array<GraphQlEnum>;
+    inputs: Array<GraphQlType>;
+    mutations: Array<GraphQlOperation>;
+    queries: Array<GraphQlOperation>;
+    repo: string;
+    subscriptions: Array<GraphQlOperation>;
+    types: Array<GraphQlType>;
+  };
+};
+
+export type NamespaceSpecGraphqlDetailResponse =
+  NamespaceSpecGraphqlDetailResponses[keyof NamespaceSpecGraphqlDetailResponses];
+
+export type NamespaceSpecGraphqlUpdateData = {
+  /**
+   * ProxyGraphqlArgs
+   */
+  body: {
+    operation_name?: string | null;
+    query: string;
+    repo: string;
+    shop: string;
+    token: string;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/namespace.spec.graphql.update';
+};
+
+export type NamespaceSpecGraphqlUpdateErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type NamespaceSpecGraphqlUpdateError =
+  NamespaceSpecGraphqlUpdateErrors[keyof NamespaceSpecGraphqlUpdateErrors];
+
+export type NamespaceSpecGraphqlUpdateResponses = {
+  /**
+   * GraphqlProxyResult
+   *
+   * `body` is opaque — GraphQL response shapes vary per query and are not owned by orca.
+   */
+  200: {
+    status: number;
+  };
+};
+
+export type NamespaceSpecGraphqlUpdateResponse =
+  NamespaceSpecGraphqlUpdateResponses[keyof NamespaceSpecGraphqlUpdateResponses];
+
+export type NamespaceSpecListData = {
+  /**
+   * ListSpecsArgs
+   */
+  body: {
+    [key: string]: unknown;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/namespace.spec.list';
+};
+
+export type NamespaceSpecListErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type NamespaceSpecListError = NamespaceSpecListErrors[keyof NamespaceSpecListErrors];
+
+export type NamespaceSpecListResponses = {
+  /**
+   * ListSpecsOutput
+   *
+   * Tool result
+   */
+  200: {
+    specs: Array<SpecMetaRow>;
+  };
+};
+
+export type NamespaceSpecListResponse =
+  NamespaceSpecListResponses[keyof NamespaceSpecListResponses];
+
+export type NamespaceSpecListDbData = {
+  /**
+   * ListDbSpecsArgs
+   */
+  body: {
+    [key: string]: unknown;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/namespace.spec.list-db';
+};
+
+export type NamespaceSpecListDbErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type NamespaceSpecListDbError = NamespaceSpecListDbErrors[keyof NamespaceSpecListDbErrors];
+
+export type NamespaceSpecListDbResponses = {
+  /**
+   * ListDbSpecsOutput
+   *
+   * Tool result
+   */
+  200: {
+    specs: Array<DbSpecRow>;
+  };
+};
+
+export type NamespaceSpecListDbResponse =
+  NamespaceSpecListDbResponses[keyof NamespaceSpecListDbResponses];
+
+export type NamespaceSpecRefreshData = {
+  /**
+   * RefreshSpecArgs
+   */
+  body: {
+    name: string;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/namespace.spec.refresh';
+};
+
+export type NamespaceSpecRefreshErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type NamespaceSpecRefreshError =
+  NamespaceSpecRefreshErrors[keyof NamespaceSpecRefreshErrors];
+
+export type NamespaceSpecRefreshResponses = {
+  /**
+   * RegisterSpecResult
+   *
+   * Tool result
+   */
+  200: {
+    cachedAt?: string | null;
+    enabled: boolean;
+    name: string;
+    pathCount?: number | null;
+    sourceMcp?: string | null;
+    url?: string | null;
+  };
+};
+
+export type NamespaceSpecRefreshResponse =
+  NamespaceSpecRefreshResponses[keyof NamespaceSpecRefreshResponses];
+
+export type NamespaceSpecSyncMcpData = {
+  /**
+   * SyncMcpSpecsArgs
+   */
+  body: {
+    server: string;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/namespace.spec.sync-mcp';
+};
+
+export type NamespaceSpecSyncMcpErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type NamespaceSpecSyncMcpError =
+  NamespaceSpecSyncMcpErrors[keyof NamespaceSpecSyncMcpErrors];
+
+export type NamespaceSpecSyncMcpResponses = {
+  /**
+   * SyncMcpSpecsResult
+   *
+   * Tool result
+   */
+  200: {
+    errors: Array<string>;
+    server: string;
+    synced: number;
+  };
+};
+
+export type NamespaceSpecSyncMcpResponse =
+  NamespaceSpecSyncMcpResponses[keyof NamespaceSpecSyncMcpResponses];
+
 export type NamespaceUseData = {
   /**
    * NamespaceSpecArgs
@@ -2432,7 +3198,7 @@ export type NamespaceUseData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/namespace.use';
+  url: '/api/v1/namespace.use';
 };
 
 export type NamespaceUseErrors = {
@@ -2480,7 +3246,7 @@ export type PodForgetData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/pod.forget';
+  url: '/api/v1/pod.forget';
 };
 
 export type PodForgetErrors = {
@@ -2545,7 +3311,7 @@ export type PodJoinData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/pod.join';
+  url: '/api/v1/pod.join';
 };
 
 export type PodJoinErrors = {
@@ -2616,7 +3382,7 @@ export type PodKickData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/pod.kick';
+  url: '/api/v1/pod.kick';
 };
 
 export type PodKickErrors = {
@@ -2660,7 +3426,7 @@ export type PodLeaveData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/pod.leave';
+  url: '/api/v1/pod.leave';
 };
 
 export type PodLeaveErrors = {
@@ -2706,7 +3472,7 @@ export type PodListData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/pod.list';
+  url: '/api/v1/pod.list';
 };
 
 export type PodListErrors = {
@@ -2752,7 +3518,7 @@ export type PodPingData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/pod.ping';
+  url: '/api/v1/pod.ping';
 };
 
 export type PodPingErrors = {
@@ -2802,7 +3568,7 @@ export type PodRecoverData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/pod.recover';
+  url: '/api/v1/pod.recover';
 };
 
 export type PodRecoverErrors = {
@@ -2862,7 +3628,7 @@ export type PodStatusDetailData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/pod.status.detail';
+  url: '/api/v1/pod.status.detail';
 };
 
 export type PodStatusDetailErrors = {
@@ -2902,7 +3668,7 @@ export type PodStatusListData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/pod.status.list';
+  url: '/api/v1/pod.status.list';
 };
 
 export type PodStatusListErrors = {
@@ -2949,7 +3715,7 @@ export type PodTrustData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/pod.trust';
+  url: '/api/v1/pod.trust';
 };
 
 export type PodTrustErrors = {
@@ -2999,7 +3765,7 @@ export type SystemAgentBackendClearKeyData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.agent.backend.clear-key';
+  url: '/api/v1/system.agent.backend.clear-key';
 };
 
 export type SystemAgentBackendClearKeyErrors = {
@@ -3045,7 +3811,7 @@ export type SystemAgentBackendDetailData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.agent.backend.detail';
+  url: '/api/v1/system.agent.backend.detail';
 };
 
 export type SystemAgentBackendDetailErrors = {
@@ -3097,7 +3863,7 @@ export type SystemAgentBackendOverrideData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.agent.backend.override';
+  url: '/api/v1/system.agent.backend.override';
 };
 
 export type SystemAgentBackendOverrideErrors = {
@@ -3143,7 +3909,7 @@ export type SystemAgentBackendSetKeyData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.agent.backend.set-key';
+  url: '/api/v1/system.agent.backend.set-key';
 };
 
 export type SystemAgentBackendSetKeyErrors = {
@@ -3192,7 +3958,7 @@ export type SystemAgentBackendSetModeData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.agent.backend.set-mode';
+  url: '/api/v1/system.agent.backend.set-mode';
 };
 
 export type SystemAgentBackendSetModeErrors = {
@@ -3236,7 +4002,7 @@ export type SystemAgentBackendUseServerAnthropicData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.agent.backend.use-server-anthropic';
+  url: '/api/v1/system.agent.backend.use-server-anthropic';
 };
 
 export type SystemAgentBackendUseServerAnthropicErrors = {
@@ -3280,7 +4046,7 @@ export type SystemAgentGetData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.agent.get';
+  url: '/api/v1/system.agent.get';
 };
 
 export type SystemAgentGetErrors = {
@@ -3323,7 +4089,7 @@ export type SystemAgentGetConfigData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.agent.get-config';
+  url: '/api/v1/system.agent.get-config';
 };
 
 export type SystemAgentGetConfigErrors = {
@@ -3369,7 +4135,7 @@ export type SystemAgentGetContextData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.agent.get-context';
+  url: '/api/v1/system.agent.get-context';
 };
 
 export type SystemAgentGetContextErrors = {
@@ -3416,7 +4182,7 @@ export type SystemAgentListData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.agent.list';
+  url: '/api/v1/system.agent.list';
 };
 
 export type SystemAgentListErrors = {
@@ -3465,7 +4231,7 @@ export type SystemAuthSessionCreateData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.auth.session.create';
+  url: '/api/v1/system.auth.session.create';
 };
 
 export type SystemAuthSessionCreateErrors = {
@@ -3514,7 +4280,7 @@ export type SystemAuthSessionDeleteData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.auth.session.delete';
+  url: '/api/v1/system.auth.session.delete';
 };
 
 export type SystemAuthSessionDeleteErrors = {
@@ -3559,7 +4325,7 @@ export type SystemAuthSessionDetailData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.auth.session.detail';
+  url: '/api/v1/system.auth.session.detail';
 };
 
 export type SystemAuthSessionDetailErrors = {
@@ -3614,7 +4380,7 @@ export type SystemAuthTokenCreateData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.auth.token.create';
+  url: '/api/v1/system.auth.token.create';
 };
 
 export type SystemAuthTokenCreateErrors = {
@@ -3664,7 +4430,7 @@ export type SystemAuthTokenDeleteData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.auth.token.delete';
+  url: '/api/v1/system.auth.token.delete';
 };
 
 export type SystemAuthTokenDeleteErrors = {
@@ -3708,7 +4474,7 @@ export type SystemAuthTokenListData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.auth.token.list';
+  url: '/api/v1/system.auth.token.list';
 };
 
 export type SystemAuthTokenListErrors = {
@@ -3762,7 +4528,7 @@ export type SystemBootstrapData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.bootstrap';
+  url: '/api/v1/system.bootstrap';
 };
 
 export type SystemBootstrapErrors = {
@@ -3810,7 +4576,7 @@ export type SystemConfigDeleteData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.config.delete';
+  url: '/api/v1/system.config.delete';
 };
 
 export type SystemConfigDeleteErrors = {
@@ -3860,7 +4626,7 @@ export type SystemConfigGetData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.config.get';
+  url: '/api/v1/system.config.get';
 };
 
 export type SystemConfigGetErrors = {
@@ -3909,7 +4675,7 @@ export type SystemConfigListData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.config.list';
+  url: '/api/v1/system.config.list';
 };
 
 export type SystemConfigListErrors = {
@@ -3961,7 +4727,7 @@ export type SystemConfigSetData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.config.set';
+  url: '/api/v1/system.config.set';
 };
 
 export type SystemConfigSetErrors = {
@@ -4004,7 +4770,7 @@ export type SystemCreateData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.create';
+  url: '/api/v1/system.create';
 };
 
 export type SystemCreateErrors = {
@@ -4055,7 +4821,7 @@ export type SystemDaemonInstallData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.daemon.install';
+  url: '/api/v1/system.daemon.install';
 };
 
 export type SystemDaemonInstallErrors = {
@@ -4099,7 +4865,7 @@ export type SystemDaemonParkData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.daemon.park';
+  url: '/api/v1/system.daemon.park';
 };
 
 export type SystemDaemonParkErrors = {
@@ -4141,7 +4907,7 @@ export type SystemDaemonReclaimData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.daemon.reclaim';
+  url: '/api/v1/system.daemon.reclaim';
 };
 
 export type SystemDaemonReclaimErrors = {
@@ -4184,7 +4950,7 @@ export type SystemDaemonStatusData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.daemon.status';
+  url: '/api/v1/system.daemon.status';
 };
 
 export type SystemDaemonStatusErrors = {
@@ -4233,7 +4999,7 @@ export type SystemDaemonStopData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.daemon.stop';
+  url: '/api/v1/system.daemon.stop';
 };
 
 export type SystemDaemonStopErrors = {
@@ -4275,7 +5041,7 @@ export type SystemDaemonUninstallData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.daemon.uninstall';
+  url: '/api/v1/system.daemon.uninstall';
 };
 
 export type SystemDaemonUninstallErrors = {
@@ -4319,7 +5085,7 @@ export type SystemDbDetailData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.db.detail';
+  url: '/api/v1/system.db.detail';
 };
 
 export type SystemDbDetailErrors = {
@@ -4376,7 +5142,7 @@ export type SystemDbLifecycleUpdateData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.db.lifecycle.update';
+  url: '/api/v1/system.db.lifecycle.update';
 };
 
 export type SystemDbLifecycleUpdateErrors = {
@@ -4426,7 +5192,7 @@ export type SystemDeleteData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.delete';
+  url: '/api/v1/system.delete';
 };
 
 export type SystemDeleteErrors = {
@@ -4470,7 +5236,7 @@ export type SystemDetailData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.detail';
+  url: '/api/v1/system.detail';
 };
 
 export type SystemDetailErrors = {
@@ -4548,7 +5314,7 @@ export type SystemDiagnosticListData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.diagnostic.list';
+  url: '/api/v1/system.diagnostic.list';
 };
 
 export type SystemDiagnosticListErrors = {
@@ -4603,7 +5369,7 @@ export type SystemEngineCreateData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.engine.create';
+  url: '/api/v1/system.engine.create';
 };
 
 export type SystemEngineCreateErrors = {
@@ -4652,7 +5418,7 @@ export type SystemEngineDeleteData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.engine.delete';
+  url: '/api/v1/system.engine.delete';
 };
 
 export type SystemEngineDeleteErrors = {
@@ -4698,7 +5464,7 @@ export type SystemEngineListData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.engine.list';
+  url: '/api/v1/system.engine.list';
 };
 
 export type SystemEngineListErrors = {
@@ -4746,7 +5512,7 @@ export type SystemEngineUpdateData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.engine.update';
+  url: '/api/v1/system.engine.update';
 };
 
 export type SystemEngineUpdateErrors = {
@@ -4783,6 +5549,48 @@ export type SystemEngineUpdateResponses = {
 export type SystemEngineUpdateResponse =
   SystemEngineUpdateResponses[keyof SystemEngineUpdateResponses];
 
+export type SystemHealthData = {
+  /**
+   * HealthArgs
+   */
+  body: {
+    [key: string]: unknown;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/system.health';
+};
+
+export type SystemHealthErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type SystemHealthError = SystemHealthErrors[keyof SystemHealthErrors];
+
+export type SystemHealthResponses = {
+  /**
+   * HealthOutput
+   *
+   * Tool result
+   */
+  200: {
+    ok: boolean;
+  };
+};
+
+export type SystemHealthResponse = SystemHealthResponses[keyof SystemHealthResponses];
+
 export type SystemHostDetailData = {
   /**
    * EmptyArgs
@@ -4792,7 +5600,7 @@ export type SystemHostDetailData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.host.detail';
+  url: '/api/v1/system.host.detail';
 };
 
 export type SystemHostDetailErrors = {
@@ -4836,7 +5644,7 @@ export type SystemHostRefreshData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.host.refresh';
+  url: '/api/v1/system.host.refresh';
 };
 
 export type SystemHostRefreshErrors = {
@@ -4883,7 +5691,7 @@ export type SystemHostSetData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.host.set';
+  url: '/api/v1/system.host.set';
 };
 
 export type SystemHostSetErrors = {
@@ -4917,6 +5725,159 @@ export type SystemHostSetResponses = {
 
 export type SystemHostSetResponse = SystemHostSetResponses[keyof SystemHostSetResponses];
 
+export type SystemInfraServiceDetailData = {
+  /**
+   * GetServiceLogsArgs
+   */
+  body: {
+    /**
+     * Absolute path to the project directory.
+     */
+    project: string;
+    /**
+     * Service name as defined in docker-compose.
+     */
+    service: string;
+    /**
+     * Number of log lines to return (default: 200).
+     */
+    tail?: number | null;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/system.infra.service.detail';
+};
+
+export type SystemInfraServiceDetailErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type SystemInfraServiceDetailError =
+  SystemInfraServiceDetailErrors[keyof SystemInfraServiceDetailErrors];
+
+export type SystemInfraServiceDetailResponses = {
+  /**
+   * GetServiceLogsOutput
+   *
+   * Tool result
+   */
+  200: {
+    output: string;
+    project: string;
+    service: string;
+  };
+};
+
+export type SystemInfraServiceDetailResponse =
+  SystemInfraServiceDetailResponses[keyof SystemInfraServiceDetailResponses];
+
+export type SystemInfraServiceListData = {
+  /**
+   * ListServicesArgs
+   */
+  body: {
+    [key: string]: unknown;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/system.infra.service.list';
+};
+
+export type SystemInfraServiceListErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type SystemInfraServiceListError =
+  SystemInfraServiceListErrors[keyof SystemInfraServiceListErrors];
+
+export type SystemInfraServiceListResponses = {
+  /**
+   * ListServicesOutput
+   *
+   * Tool result
+   */
+  200: {
+    projects: Array<ProjectServices>;
+  };
+};
+
+export type SystemInfraServiceListResponse =
+  SystemInfraServiceListResponses[keyof SystemInfraServiceListResponses];
+
+export type SystemInfraTestCreateData = {
+  /**
+   * RunTestsArgs
+   */
+  body: {
+    /**
+     * Which suite to run: rust | frontend | e2e | all (default: rust).
+     */
+    suite?: string | null;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/system.infra.test.create';
+};
+
+export type SystemInfraTestCreateErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type SystemInfraTestCreateError =
+  SystemInfraTestCreateErrors[keyof SystemInfraTestCreateErrors];
+
+export type SystemInfraTestCreateResponses = {
+  /**
+   * RunTestsOutput
+   *
+   * Tool result
+   */
+  200: {
+    duration_ms: number;
+    exit_code: number;
+    failed: number;
+    output: string;
+    passed: number;
+    suite: string;
+  };
+};
+
+export type SystemInfraTestCreateResponse =
+  SystemInfraTestCreateResponses[keyof SystemInfraTestCreateResponses];
+
 export type SystemKillStaleData = {
   /**
    * KillStaleArgs
@@ -4926,7 +5887,7 @@ export type SystemKillStaleData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.kill-stale';
+  url: '/api/v1/system.kill-stale';
 };
 
 export type SystemKillStaleErrors = {
@@ -4973,7 +5934,7 @@ export type SystemMcpCreateData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.mcp.create';
+  url: '/api/v1/system.mcp.create';
 };
 
 export type SystemMcpCreateErrors = {
@@ -5016,7 +5977,7 @@ export type SystemMcpDeleteData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.mcp.delete';
+  url: '/api/v1/system.mcp.delete';
 };
 
 export type SystemMcpDeleteErrors = {
@@ -5059,7 +6020,7 @@ export type SystemMcpFederationListToolsData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.mcp.federation.list-tools';
+  url: '/api/v1/system.mcp.federation.list-tools';
 };
 
 export type SystemMcpFederationListToolsErrors = {
@@ -5107,7 +6068,7 @@ export type SystemMcpFederationRunData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.mcp.federation.run';
+  url: '/api/v1/system.mcp.federation.run';
 };
 
 export type SystemMcpFederationRunErrors = {
@@ -5152,7 +6113,7 @@ export type SystemMcpListData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.mcp.list';
+  url: '/api/v1/system.mcp.list';
 };
 
 export type SystemMcpListErrors = {
@@ -5196,7 +6157,7 @@ export type SystemMcpMappingCreateData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.mcp.mapping.create';
+  url: '/api/v1/system.mcp.mapping.create';
 };
 
 export type SystemMcpMappingCreateErrors = {
@@ -5242,7 +6203,7 @@ export type SystemMcpMappingDeleteData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.mcp.mapping.delete';
+  url: '/api/v1/system.mcp.mapping.delete';
 };
 
 export type SystemMcpMappingDeleteErrors = {
@@ -5290,7 +6251,7 @@ export type SystemMcpMappingListData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.mcp.mapping.list';
+  url: '/api/v1/system.mcp.mapping.list';
 };
 
 export type SystemMcpMappingListErrors = {
@@ -5336,7 +6297,7 @@ export type SystemMcpSyncData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.mcp.sync';
+  url: '/api/v1/system.mcp.sync';
 };
 
 export type SystemMcpSyncErrors = {
@@ -5405,7 +6366,7 @@ export type SystemPackageBuildData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.package.build';
+  url: '/api/v1/system.package.build';
 };
 
 export type SystemPackageBuildErrors = {
@@ -5451,7 +6412,7 @@ export type SystemPkiCaCreateData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.pki.ca.create';
+  url: '/api/v1/system.pki.ca.create';
 };
 
 export type SystemPkiCaCreateErrors = {
@@ -5500,7 +6461,7 @@ export type SystemPkiCertCreateData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.pki.cert.create';
+  url: '/api/v1/system.pki.cert.create';
 };
 
 export type SystemPkiCertCreateErrors = {
@@ -5546,7 +6507,7 @@ export type SystemPkiListData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.pki.list';
+  url: '/api/v1/system.pki.list';
 };
 
 export type SystemPkiListErrors = {
@@ -5595,7 +6556,7 @@ export type SystemPluginCreateData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.plugin.create';
+  url: '/api/v1/system.plugin.create';
 };
 
 export type SystemPluginCreateErrors = {
@@ -5640,7 +6601,7 @@ export type SystemPluginCredCreateData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.plugin.cred.create';
+  url: '/api/v1/system.plugin.cred.create';
 };
 
 export type SystemPluginCredCreateErrors = {
@@ -5687,7 +6648,7 @@ export type SystemPluginCredDeleteData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.plugin.cred.delete';
+  url: '/api/v1/system.plugin.cred.delete';
 };
 
 export type SystemPluginCredDeleteErrors = {
@@ -5733,7 +6694,7 @@ export type SystemPluginCredListData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.plugin.cred.list';
+  url: '/api/v1/system.plugin.cred.list';
 };
 
 export type SystemPluginCredListErrors = {
@@ -5778,7 +6739,7 @@ export type SystemPluginCredSyncData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.plugin.cred.sync';
+  url: '/api/v1/system.plugin.cred.sync';
 };
 
 export type SystemPluginCredSyncErrors = {
@@ -5823,7 +6784,7 @@ export type SystemPluginDataGetData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.plugin.data.get';
+  url: '/api/v1/system.plugin.data.get';
 };
 
 export type SystemPluginDataGetErrors = {
@@ -5875,7 +6836,7 @@ export type SystemPluginDataSetData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.plugin.data.set';
+  url: '/api/v1/system.plugin.data.set';
 };
 
 export type SystemPluginDataSetErrors = {
@@ -5918,7 +6879,7 @@ export type SystemPluginDeleteData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.plugin.delete';
+  url: '/api/v1/system.plugin.delete';
 };
 
 export type SystemPluginDeleteErrors = {
@@ -5968,7 +6929,7 @@ export type SystemPluginListData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.plugin.list';
+  url: '/api/v1/system.plugin.list';
 };
 
 export type SystemPluginListErrors = {
@@ -6014,7 +6975,7 @@ export type SystemPluginUpdateData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.plugin.update';
+  url: '/api/v1/system.plugin.update';
 };
 
 export type SystemPluginUpdateErrors = {
@@ -6061,7 +7022,7 @@ export type SystemPodDetailData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.pod.detail';
+  url: '/api/v1/system.pod.detail';
 };
 
 export type SystemPodDetailErrors = {
@@ -6126,7 +7087,7 @@ export type SystemPodUpdateData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.pod.update';
+  url: '/api/v1/system.pod.update';
 };
 
 export type SystemPodUpdateErrors = {
@@ -6171,7 +7132,7 @@ export type SystemScheduleListData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.schedule.list';
+  url: '/api/v1/system.schedule.list';
 };
 
 export type SystemScheduleListErrors = {
@@ -6218,7 +7179,7 @@ export type SystemScheduleRunData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.schedule.run';
+  url: '/api/v1/system.schedule.run';
 };
 
 export type SystemScheduleRunErrors = {
@@ -6267,7 +7228,7 @@ export type SystemScheduleStatusData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.schedule.status';
+  url: '/api/v1/system.schedule.status';
 };
 
 export type SystemScheduleStatusErrors = {
@@ -6311,7 +7272,7 @@ export type SystemSecretBackendsData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.secret.backends';
+  url: '/api/v1/system.secret.backends';
 };
 
 export type SystemSecretBackendsErrors = {
@@ -6355,7 +7316,7 @@ export type SystemSecretDeleteData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.secret.delete';
+  url: '/api/v1/system.secret.delete';
 };
 
 export type SystemSecretDeleteErrors = {
@@ -6399,7 +7360,7 @@ export type SystemSecretDetailData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.secret.detail';
+  url: '/api/v1/system.secret.detail';
 };
 
 export type SystemSecretDetailErrors = {
@@ -6444,7 +7405,7 @@ export type SystemSecretListData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.secret.list';
+  url: '/api/v1/system.secret.list';
 };
 
 export type SystemSecretListErrors = {
@@ -6489,11 +7450,6 @@ export type SystemSecretSetData = {
     description?: string | null;
     name: string;
     /**
-     * When set, proxy the call to the named remote peer via the pod mesh
-     * instead of writing the secret locally.
-     */
-    peer_id?: string | null;
-    /**
      * Required for external backends (e.g. `op://Personal/orca-gh/token`). Ignored for inline.
      */
     ref_path?: string | null;
@@ -6504,7 +7460,7 @@ export type SystemSecretSetData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.secret.set';
+  url: '/api/v1/system.secret.set';
 };
 
 export type SystemSecretSetErrors = {
@@ -6551,7 +7507,7 @@ export type SystemSweepOrganizationData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.sweep.organization';
+  url: '/api/v1/system.sweep.organization';
 };
 
 export type SystemSweepOrganizationErrors = {
@@ -6596,11 +7552,6 @@ export type SystemUpdateData = {
    */
   body: {
     /**
-     * When set, proxy the call to the named remote peer via the pod mesh
-     * instead of running on the local host.
-     */
-    peer_id?: string | null;
-    /**
      * Version or channel to switch to, then apply.
      * Channels: "stable" | "rc" | "dev".
      * Pinned version: "0.0.4-rc.11" (leading "v" optional).
@@ -6611,7 +7562,7 @@ export type SystemUpdateData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.update';
+  url: '/api/v1/system.update';
 };
 
 export type SystemUpdateErrors = {
@@ -6646,7 +7597,7 @@ export type SystemUpdateResponses = {
 
 export type SystemUpdateResponse = SystemUpdateResponses[keyof SystemUpdateResponses];
 
-export type SystemUpdateApplyData = {
+export type SystemUpdateStateApplyData = {
   /**
    * UpdateApplyArgs
    */
@@ -6658,10 +7609,10 @@ export type SystemUpdateApplyData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.update.apply';
+  url: '/api/v1/system.update-state.apply';
 };
 
-export type SystemUpdateApplyErrors = {
+export type SystemUpdateStateApplyErrors = {
   /**
    * Unknown tool
    */
@@ -6676,9 +7627,10 @@ export type SystemUpdateApplyErrors = {
   };
 };
 
-export type SystemUpdateApplyError = SystemUpdateApplyErrors[keyof SystemUpdateApplyErrors];
+export type SystemUpdateStateApplyError =
+  SystemUpdateStateApplyErrors[keyof SystemUpdateStateApplyErrors];
 
-export type SystemUpdateApplyResponses = {
+export type SystemUpdateStateApplyResponses = {
   /**
    * UpdateApplyOutput
    *
@@ -6692,10 +7644,10 @@ export type SystemUpdateApplyResponses = {
   };
 };
 
-export type SystemUpdateApplyResponse =
-  SystemUpdateApplyResponses[keyof SystemUpdateApplyResponses];
+export type SystemUpdateStateApplyResponse =
+  SystemUpdateStateApplyResponses[keyof SystemUpdateStateApplyResponses];
 
-export type SystemUpdateCheckData = {
+export type SystemUpdateStateCheckData = {
   /**
    * UpdateCheckArgs
    */
@@ -6704,10 +7656,10 @@ export type SystemUpdateCheckData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.update.check';
+  url: '/api/v1/system.update-state.check';
 };
 
-export type SystemUpdateCheckErrors = {
+export type SystemUpdateStateCheckErrors = {
   /**
    * Unknown tool
    */
@@ -6722,9 +7674,10 @@ export type SystemUpdateCheckErrors = {
   };
 };
 
-export type SystemUpdateCheckError = SystemUpdateCheckErrors[keyof SystemUpdateCheckErrors];
+export type SystemUpdateStateCheckError =
+  SystemUpdateStateCheckErrors[keyof SystemUpdateStateCheckErrors];
 
-export type SystemUpdateCheckResponses = {
+export type SystemUpdateStateCheckResponses = {
   /**
    * UpdateCheckOutput
    *
@@ -6738,10 +7691,10 @@ export type SystemUpdateCheckResponses = {
   };
 };
 
-export type SystemUpdateCheckResponse =
-  SystemUpdateCheckResponses[keyof SystemUpdateCheckResponses];
+export type SystemUpdateStateCheckResponse =
+  SystemUpdateStateCheckResponses[keyof SystemUpdateStateCheckResponses];
 
-export type SystemUpdateClearSourceData = {
+export type SystemUpdateStateClearSourceData = {
   /**
    * UpdateClearSourceArgs
    */
@@ -6750,10 +7703,10 @@ export type SystemUpdateClearSourceData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.update.clear-source';
+  url: '/api/v1/system.update-state.clear-source';
 };
 
-export type SystemUpdateClearSourceErrors = {
+export type SystemUpdateStateClearSourceErrors = {
   /**
    * Unknown tool
    */
@@ -6768,10 +7721,10 @@ export type SystemUpdateClearSourceErrors = {
   };
 };
 
-export type SystemUpdateClearSourceError =
-  SystemUpdateClearSourceErrors[keyof SystemUpdateClearSourceErrors];
+export type SystemUpdateStateClearSourceError =
+  SystemUpdateStateClearSourceErrors[keyof SystemUpdateStateClearSourceErrors];
 
-export type SystemUpdateClearSourceResponses = {
+export type SystemUpdateStateClearSourceResponses = {
   /**
    * UpdateClearSourceOutput
    *
@@ -6782,10 +7735,10 @@ export type SystemUpdateClearSourceResponses = {
   };
 };
 
-export type SystemUpdateClearSourceResponse =
-  SystemUpdateClearSourceResponses[keyof SystemUpdateClearSourceResponses];
+export type SystemUpdateStateClearSourceResponse =
+  SystemUpdateStateClearSourceResponses[keyof SystemUpdateStateClearSourceResponses];
 
-export type SystemUpdatePinData = {
+export type SystemUpdateStatePinData = {
   /**
    * UpdatePinArgs
    */
@@ -6797,10 +7750,10 @@ export type SystemUpdatePinData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.update.pin';
+  url: '/api/v1/system.update-state.pin';
 };
 
-export type SystemUpdatePinErrors = {
+export type SystemUpdateStatePinErrors = {
   /**
    * Unknown tool
    */
@@ -6815,9 +7768,10 @@ export type SystemUpdatePinErrors = {
   };
 };
 
-export type SystemUpdatePinError = SystemUpdatePinErrors[keyof SystemUpdatePinErrors];
+export type SystemUpdateStatePinError =
+  SystemUpdateStatePinErrors[keyof SystemUpdateStatePinErrors];
 
-export type SystemUpdatePinResponses = {
+export type SystemUpdateStatePinResponses = {
   /**
    * UpdatePinOutput
    *
@@ -6828,9 +7782,10 @@ export type SystemUpdatePinResponses = {
   };
 };
 
-export type SystemUpdatePinResponse = SystemUpdatePinResponses[keyof SystemUpdatePinResponses];
+export type SystemUpdateStatePinResponse =
+  SystemUpdateStatePinResponses[keyof SystemUpdateStatePinResponses];
 
-export type SystemUpdateSetSourceData = {
+export type SystemUpdateStateSetSourceData = {
   /**
    * UpdateSetSourceArgs
    */
@@ -6842,10 +7797,10 @@ export type SystemUpdateSetSourceData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.update.set-source';
+  url: '/api/v1/system.update-state.set-source';
 };
 
-export type SystemUpdateSetSourceErrors = {
+export type SystemUpdateStateSetSourceErrors = {
   /**
    * Unknown tool
    */
@@ -6860,10 +7815,10 @@ export type SystemUpdateSetSourceErrors = {
   };
 };
 
-export type SystemUpdateSetSourceError =
-  SystemUpdateSetSourceErrors[keyof SystemUpdateSetSourceErrors];
+export type SystemUpdateStateSetSourceError =
+  SystemUpdateStateSetSourceErrors[keyof SystemUpdateStateSetSourceErrors];
 
-export type SystemUpdateSetSourceResponses = {
+export type SystemUpdateStateSetSourceResponses = {
   /**
    * UpdateSetSourceOutput
    *
@@ -6874,10 +7829,10 @@ export type SystemUpdateSetSourceResponses = {
   };
 };
 
-export type SystemUpdateSetSourceResponse =
-  SystemUpdateSetSourceResponses[keyof SystemUpdateSetSourceResponses];
+export type SystemUpdateStateSetSourceResponse =
+  SystemUpdateStateSetSourceResponses[keyof SystemUpdateStateSetSourceResponses];
 
-export type SystemUpdateUnpinData = {
+export type SystemUpdateStateUnpinData = {
   /**
    * UpdateUnpinArgs
    */
@@ -6886,10 +7841,10 @@ export type SystemUpdateUnpinData = {
   };
   path?: never;
   query?: never;
-  url: '/api/tools/system.update.unpin';
+  url: '/api/v1/system.update-state.unpin';
 };
 
-export type SystemUpdateUnpinErrors = {
+export type SystemUpdateStateUnpinErrors = {
   /**
    * Unknown tool
    */
@@ -6904,9 +7859,10 @@ export type SystemUpdateUnpinErrors = {
   };
 };
 
-export type SystemUpdateUnpinError = SystemUpdateUnpinErrors[keyof SystemUpdateUnpinErrors];
+export type SystemUpdateStateUnpinError =
+  SystemUpdateStateUnpinErrors[keyof SystemUpdateStateUnpinErrors];
 
-export type SystemUpdateUnpinResponses = {
+export type SystemUpdateStateUnpinResponses = {
   /**
    * UpdateUnpinOutput
    *
@@ -6917,5 +7873,5 @@ export type SystemUpdateUnpinResponses = {
   };
 };
 
-export type SystemUpdateUnpinResponse =
-  SystemUpdateUnpinResponses[keyof SystemUpdateUnpinResponses];
+export type SystemUpdateStateUnpinResponse =
+  SystemUpdateStateUnpinResponses[keyof SystemUpdateStateUnpinResponses];
