@@ -322,7 +322,7 @@ pub struct LoginArgs {
     pub password: String,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct LoginOutput {
     pub user_id: String,
     pub username: String,
@@ -405,7 +405,7 @@ async fn auth_login(args: LoginArgs, _ctx: &contract::ToolCtx) -> anyhow::Result
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct LogoutArgs {}
 
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct LogoutOutput {
     pub revoked: bool,
 }
