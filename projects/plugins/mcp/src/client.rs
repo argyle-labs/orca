@@ -14,7 +14,7 @@ fn active_docker_host() -> Option<String> {
 /// first (works in interactive shells), then probe well-known install locations.
 /// Build a PATH that includes all well-known tool install directories so that
 /// processes spawned by orca (MCP servers and their children) can find CLIs
-/// like `node`, `rebuy`, `npx`, etc. even in minimal daemon environments.
+/// like `node`, `npx`, etc. even in minimal daemon environments.
 fn augmented_path() -> String {
     let current = std::env::var("PATH").unwrap_or_default();
     let home = std::env::var("HOME").unwrap_or_default();
@@ -123,7 +123,7 @@ enum Transport {
     /// HTTP/SSE transport (MCP over Server-Sent Events).
     /// Each request opens a fresh /sse connection, gets a session endpoint, POSTs
     /// the JSON-RPC message, then reads the response from that same SSE stream.
-    /// This is stateless per-request and matches meerkat's /sse + /message model.
+    /// This is stateless per-request and matches the MCP /sse + /message model.
     Sse {
         base_url: String,
         http: reqwest::Client,

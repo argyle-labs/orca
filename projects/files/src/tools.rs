@@ -71,7 +71,7 @@ pub struct FsRootEntry {
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct FsListArgs {
-    /// Named root alias (e.g. "rebuy", "orca", "docs"). Omit to address path absolutely.
+    /// Named root alias (e.g. "orca", "docs"). Omit to address path absolutely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
     /// Path within root, or absolute / `~/`-prefixed when no root.
@@ -129,7 +129,7 @@ pub struct FsReadOutput {
 pub struct FsSearchArgs {
     /// Case-insensitive search term.
     pub query: String,
-    /// Limit to one root (e.g. "rebuy"|"orca"|"docs"). Default: search every registered root.
+    /// Limit to one root (e.g. "orca"|"docs"). Default: search every registered root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
 }

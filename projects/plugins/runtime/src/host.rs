@@ -1350,8 +1350,8 @@ fn handle_context_publish(
     // Schema gate: if this type_id has been declared via orca/types.declare,
     // the published payload must conform to the registered JSON Schema.
     // Undeclared type_ids are allowed through — declaration is currently
-    // opt-in. Once meerkat plugins land, strict-mode (declared-or-reject)
-    // can be turned on.
+    // opt-in. Once enough plugins declare schemas, strict-mode
+    // (declared-or-reject) can be turned on.
     if let Err(reject) = validate_against_declared_schema(&id, &params.value) {
         return reject;
     }

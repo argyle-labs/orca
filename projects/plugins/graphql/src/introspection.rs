@@ -106,7 +106,7 @@ fn map_operation(f: &graphql_parser::schema::Field<String>) -> GraphQlOperation 
 }
 
 /// Parse a GraphQL **operations document** (named queries/mutations/subscriptions with selection
-/// sets) into `GraphQlInfo`. Used for client operation files like `rebuy-shopify-client.graphql`.
+/// sets) into `GraphQlInfo`. Used for client operation files like `acme-shopify-client.graphql`.
 pub fn parse_graphql_operations(repo: &str, src: &str) -> Result<GraphQlInfo> {
     use graphql_parser::query::{Definition, OperationDefinition, parse_query};
 
