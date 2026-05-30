@@ -63,6 +63,11 @@ impl NormalizeReport {
                 "cargo:warning={crate_name}: collapsed response {op} kept={kept} dropped={dropped:?}"
             );
         }
+        for (op, kept, dropped) in &self.collapsed_success_statuses {
+            println!(
+                "cargo:warning={crate_name}: collapsed success statuses {op} kept={kept} dropped={dropped:?}"
+            );
+        }
     }
 }
 
@@ -75,6 +80,7 @@ pub fn for_progenitor(spec: &mut OpenAPI) -> NormalizeReport {
     rewrite_multipart_to_octet_stream(spec, &mut r);
     collapse_response_media_types(spec, &mut r);
     collapse_request_media_types(spec, &mut r);
+    collapse_success_response_statuses(spec, &mut r);
     r
 }
 
