@@ -136,7 +136,7 @@ fn create_service_user(user: &str, home_dir: &str) -> Result<()> {
         "/bin/sh"
     };
 
-    let ok = if tool_present("useradd") {
+    let ok = if utils::path::which("useradd").is_some() {
         Command::new("useradd")
             .args([
                 "--system",
@@ -149,7 +149,7 @@ fn create_service_user(user: &str, home_dir: &str) -> Result<()> {
             ])
             .status()?
             .success()
-    } else if tool_present("adduser") {
+    } else if utils::path::which("adduser").is_some() {
         Command::new("adduser")
             .args(["-S", "-D", "-h", home_dir, "-s", shell, user])
             .status()?
@@ -180,13 +180,13 @@ fn add_to_groups(user: &str) {
             continue;
         }
 
-        let ok = if tool_present("usermod") {
+        let ok = if utils::path::which("usermod").is_some() {
             Command::new("usermod")
                 .args(["-aG", grp, user])
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false)
-        } else if tool_present("addgroup") {
+        } else if utils::path::which("addgroup").is_some() {
             Command::new("addgroup")
                 .args([user, grp])
                 .status()
@@ -252,15 +252,6 @@ fn is_root() -> bool {
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
-        .unwrap_or(false)
-}
-
-#[cfg(target_os = "linux")]
-fn tool_present(name: &str) -> bool {
-    Command::new("which")
-        .arg(name)
-        .output()
-        .map(|o| o.status.success())
         .unwrap_or(false)
 }
 

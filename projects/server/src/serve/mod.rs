@@ -675,13 +675,8 @@ fn pid_alive(pid: u32) -> bool {
 /// resolved path). After a redeploy, the symlink is updated to the new binary;
 /// the canonical path from current_exe() points to the old binary on disk.
 fn resolve_daemon_binary() -> String {
-    if let Ok(out) = std::process::Command::new("which").arg("orca").output()
-        && out.status.success()
-    {
-        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !path.is_empty() {
-            return path;
-        }
+    if let Some(path) = utils::path::which("orca") {
+        return path;
     }
     std::env::current_exe()
         .unwrap_or_default()

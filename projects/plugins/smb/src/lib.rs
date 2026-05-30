@@ -220,7 +220,7 @@ pub async fn health(mountpoint: &Path, probe_timeout: Duration) -> Health {
 pub async fn mount(spec: MountSpec<'_>) -> Result<(), SmbError> {
     #[cfg(target_os = "linux")]
     {
-        which_or_err("mount.cifs").await?;
+        utils::path::which("mount.cifs").ok_or(SmbError::MissingTool("mount.cifs"))?;
         let mut opts: Vec<String> = Vec::new();
         match &spec.credentials {
             Credentials::File(p) => opts.push(format!("credentials={}", p.display())),
@@ -245,7 +245,7 @@ pub async fn mount(spec: MountSpec<'_>) -> Result<(), SmbError> {
     }
     #[cfg(target_os = "macos")]
     {
-        which_or_err("mount_smbfs").await?;
+        utils::path::which("mount_smbfs").ok_or(SmbError::MissingTool("mount_smbfs"))?;
         let auth_part = match &spec.credentials {
             Credentials::Inline { username, password } => {
                 format!("{}:{}@", urlencode(username), urlencode(password))
@@ -269,13 +269,13 @@ pub async fn mount(spec: MountSpec<'_>) -> Result<(), SmbError> {
 
 /// Unmount a previously-mounted share.
 pub async fn unmount(mountpoint: &Path) -> Result<(), SmbError> {
-    which_or_err("umount").await?;
+    utils::path::which("umount").ok_or(SmbError::MissingTool("umount"))?;
     run_tool("umount", &[mountpoint.to_str().unwrap_or("")]).await
 }
 
 /// List shares advertised by `server` via `smbclient -L //server`.
 pub async fn list_shares(server: &str, credentials: &Credentials) -> Result<Vec<Share>, SmbError> {
-    which_or_err("smbclient").await?;
+    utils::path::which("smbclient").ok_or(SmbError::MissingTool("smbclient"))?;
     let mut args: Vec<String> = vec![format!("-L"), format!("//{server}"), "-g".into()];
     match credentials {
         Credentials::Guest => args.push("-N".into()),
@@ -325,15 +325,6 @@ pub(crate) fn parse_smbclient_shares(raw: &str) -> Vec<Share> {
             })
         })
         .collect()
-}
-
-async fn which_or_err(tool: &'static str) -> Result<(), SmbError> {
-    let res = Command::new("which").arg(tool).output().await?;
-    if res.status.success() {
-        Ok(())
-    } else {
-        Err(SmbError::MissingTool(tool))
-    }
 }
 
 async fn run_tool(tool: &'static str, args: &[&str]) -> Result<(), SmbError> {

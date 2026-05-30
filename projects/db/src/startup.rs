@@ -6,7 +6,7 @@
 
 use contract::config::Config;
 
-use crate::open;
+use crate::{open, to_json_arr, to_json_obj};
 
 /// Run all one-time startup tasks: TOML migrations and Colima auto-registration.
 pub fn init(config: &Config) {
@@ -60,8 +60,8 @@ fn migrate_toml_servers_to_db(toml_path: &std::path::Path, db_path: &std::path::
 
     let Ok(conn) = open(db_path) else { return };
     for s in &parsed.mcp.servers {
-        let args_json = serde_json::to_string(&s.args).unwrap_or_else(|_| "[]".into());
-        let env_json = serde_json::to_string(&s.env).unwrap_or_else(|_| "{}".into());
+        let args_json = to_json_arr(&s.args);
+        let env_json = to_json_obj(&s.env);
         conn.execute(
             "INSERT OR IGNORE INTO mcp_servers (name, command, args, env, enabled)
              VALUES (?1, ?2, ?3, ?4, 1)",

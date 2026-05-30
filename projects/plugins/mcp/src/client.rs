@@ -54,13 +54,10 @@ fn resolve_command(command: &str) -> String {
         return command.to_string();
     }
     // which works when PATH is rich (interactive shell, dev mode)
-    if let Ok(out) = std::process::Command::new("which").arg(command).output()
-        && out.status.success()
+    if let Some(resolved) = utils::path::which(command)
+        && std::path::Path::new(&resolved).exists()
     {
-        let resolved = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !resolved.is_empty() && std::path::Path::new(&resolved).exists() {
-            return resolved;
-        }
+        return resolved;
     }
     // Probe known install paths — covers launchd/systemd daemon environments
     let mut candidates: Vec<String> = vec![

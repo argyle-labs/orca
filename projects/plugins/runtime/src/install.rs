@@ -379,7 +379,7 @@ urls = ["http://lan.local", "http://tailscale.local"]
         let dir = tempfile::tempdir().unwrap();
         let conn = open_test_db(dir.path());
         let path = write_manifest(dir.path(), MINIMAL_MANIFEST);
-        let id = install_manifest(&conn, &path).unwrap();
+        let id = install_manifest(&conn, &path, None).unwrap();
         assert_eq!(id, "test-plugin");
         let row = db::plugins::get(&conn, "test-plugin").unwrap().unwrap();
         assert_eq!(row.tier, "personal");
@@ -425,7 +425,7 @@ url = "http://localhost:8080"
         let dir = tempfile::tempdir().unwrap();
         let conn = open_test_db(dir.path());
         let path = write_manifest(dir.path(), content);
-        install_manifest(&conn, &path).unwrap();
+        install_manifest(&conn, &path, None).unwrap();
         let row = db::plugins::get(&conn, "urlp").unwrap().unwrap();
         assert_eq!(row.mcp_urls, vec!["http://localhost:8080".to_string()]);
         assert!(
@@ -451,7 +451,7 @@ token_env = "TOK"
         let dir = tempfile::tempdir().unwrap();
         let conn = open_test_db(dir.path());
         let path = write_manifest(dir.path(), content);
-        install_manifest(&conn, &path).unwrap();
+        install_manifest(&conn, &path, None).unwrap();
         let row = db::plugins::get(&conn, "multi").unwrap().unwrap();
         assert_eq!(
             row.mcp_urls,
@@ -541,7 +541,7 @@ tier = "personal"
 dir = "/tmp/orca-test-specs"
 "#;
         let path = write_manifest(dir.path(), content);
-        install_manifest(&conn, &path).unwrap();
+        install_manifest(&conn, &path, None).unwrap();
         let row = db::plugins::get(&conn, "withspecs").unwrap().unwrap();
         assert_eq!(row.specs_dir.as_deref(), Some("/tmp/orca-test-specs"));
     }

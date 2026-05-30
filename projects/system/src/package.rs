@@ -129,13 +129,13 @@ fn detect_format() -> Result<PackageFormat> {
     #[cfg(target_os = "linux")]
     {
         // Prefer tool presence over OS hints — more reliable on minimal images.
-        if tool_available("dpkg") {
+        if utils::path::which("dpkg").is_some() {
             return Ok(PackageFormat::Deb);
         }
-        if tool_available("rpm") {
+        if utils::path::which("rpm").is_some() {
             return Ok(PackageFormat::Rpm);
         }
-        if tool_available("apk") {
+        if utils::path::which("apk").is_some() {
             return Ok(PackageFormat::Apk);
         }
         let os = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
@@ -201,7 +201,7 @@ fn build_deb(
     let pkg_name = format!("orca_{version}_{deb_arch}.deb");
     let out = out_dir.join(&pkg_name);
 
-    if tool_available("dpkg-deb") {
+    if utils::path::which("dpkg-deb").is_some() {
         let ok = Command::new("dpkg-deb")
             .args(["--build", "--root-owner-group"])
             .arg(&staging)
@@ -286,7 +286,7 @@ fn build_rpm(
         ),
     )?;
 
-    if tool_available("rpmbuild") {
+    if utils::path::which("rpmbuild").is_some() {
         let topdir = staging.display().to_string();
         let ok = Command::new("rpmbuild")
             .args([
@@ -364,7 +364,7 @@ fn build_apk(binary: &Path, version: &str, arch: &str, out_dir: &Path) -> Result
     std::fs::copy(binary, staging.join("orca"))?;
     set_mode_755(&staging.join("orca"))?;
 
-    if tool_available("abuild") {
+    if utils::path::which("abuild").is_some() {
         let ok = Command::new("abuild")
             .arg("-r")
             .current_dir(&staging)
@@ -495,7 +495,7 @@ fi
     let final_pkg = out_dir.join(format!("orca_{version}_{arch}.pkg"));
     const IDENTIFIER: &str = "com.orca.daemon";
 
-    if !tool_available("pkgbuild") {
+    if !utils::path::which("pkgbuild").is_some() {
         let keep = out_dir.join("orca-pkg-staging");
         if keep.exists() {
             std::fs::remove_dir_all(&keep)?;
@@ -532,7 +532,7 @@ fi
 
     // productsign if installer identity provided.
     if let Some(identity) = pkg_sign_identity {
-        if tool_available("productsign") {
+        if utils::path::which("productsign").is_some() {
             let ok = Command::new("productsign")
                 .args(["--sign", identity])
                 .arg(&unsigned_pkg)
@@ -638,14 +638,6 @@ end
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-fn tool_available(name: &str) -> bool {
-    Command::new("which")
-        .arg(name)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
 
 fn write_script(path: &Path, content: &str) -> Result<()> {
     std::fs::write(path, content)?;

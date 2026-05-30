@@ -696,6 +696,10 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             mcp_token_env     TEXT,
             context_injection TEXT NOT NULL DEFAULT 'minimal',
             command_map       TEXT NOT NULL DEFAULT '{}',
+            -- `mode` is dropped by migration 20260530130000__plugins_drop_mode.
+            -- Kept in CREATE TABLE so fresh + migrated dbs converge on the same
+            -- final schema after migrations run.
+            mode              TEXT NOT NULL DEFAULT 'orca',
             nav_links         TEXT NOT NULL DEFAULT '[]',
             search_tools      TEXT NOT NULL DEFAULT '[]',
             specs_dir         TEXT,

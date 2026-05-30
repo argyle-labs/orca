@@ -11,6 +11,7 @@ path = "src/lib.rs"
 serde       = { workspace = true }
 thiserror   = { workspace = true }
 tokio       = { workspace = true }
+utils       = { path = "../../utils" }
 
 [dev-dependencies]
 tempfile   = { workspace = true }

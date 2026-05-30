@@ -143,7 +143,9 @@ pub fn sync(plugin_id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::PluginRow;
     use crate::testing::test_conn;
+    use std::collections::HashMap;
 
     #[test]
     fn set_list_delete() {
@@ -189,8 +191,6 @@ mod tests {
     // ── sync() — credential push primitive ────────────────────────────────────
 
     fn install_http_plugin(conn: &Connection, id: &str, base_url: &str) {
-        use crate::plugins::PluginRow;
-        use std::collections::HashMap;
         let row = PluginRow {
             id: id.into(),
             manifest_path: "/tmp/manifest.toml".into(),
@@ -240,8 +240,6 @@ mod tests {
 
     #[test]
     fn sync_errors_without_resolvable_url() {
-        use crate::plugins::PluginRow;
-        use std::collections::HashMap;
         let dir = tempfile::tempdir().unwrap();
         let (path, conn) = open_test_path(dir.path());
         let row = PluginRow {
@@ -314,8 +312,6 @@ mod tests {
 
     #[test]
     fn sync_token_from_mcp_env_when_not_stored() {
-        use crate::plugins::PluginRow;
-        use std::collections::HashMap;
         let _ = rustls::crypto::ring::default_provider().install_default();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -395,8 +391,6 @@ mod tests {
 
     #[test]
     fn resolve_url_from_http_command() {
-        use crate::plugins::PluginRow;
-        use std::collections::HashMap;
         let row = PluginRow {
             id: "p".into(),
             manifest_path: "/tmp/m.toml".into(),
@@ -418,8 +412,6 @@ mod tests {
 
     #[test]
     fn resolve_url_strips_trailing_slash_and_falls_back_to_args() {
-        use crate::plugins::PluginRow;
-        use std::collections::HashMap;
         let base = PluginRow {
             id: "p".into(),
             manifest_path: "/tmp/m.toml".into(),

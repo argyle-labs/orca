@@ -313,7 +313,6 @@ mod tests {
             id: id.into(),
             manifest_path: format!("/plugins/{id}/manifest.toml"),
             tier: "personal".into(),
-            mode: "orca".into(),
             mcp_command: Some("node".into()),
             mcp_args: vec!["server.js".into()],
             mcp_env: Default::default(),

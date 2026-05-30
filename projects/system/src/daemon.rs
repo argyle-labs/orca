@@ -371,12 +371,8 @@ fn resolve_binary() -> Result<String> {
     {
         return Ok(s.binary);
     }
-    let out = Command::new("which").arg(APP_NAME).output()?;
-    if out.status.success() {
-        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !path.is_empty() {
-            return Ok(path);
-        }
+    if let Some(path) = utils::path::which(APP_NAME) {
+        return Ok(path);
     }
     let home = std::env::var("HOME").unwrap_or_default();
     Ok(format!("{home}/.local/bin/{APP_NAME}"))
