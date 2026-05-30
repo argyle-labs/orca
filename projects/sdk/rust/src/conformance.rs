@@ -691,6 +691,7 @@ mod tests {
                 methods_optional: vec![],
                 plugins_required: vec![],
                 plugins_optional: vec![],
+                plugin_namespace: String::new(),
             }),
             types_declared: vec![TypeDeclaration {
                 type_name: SCENARIO.type_name.into(),
