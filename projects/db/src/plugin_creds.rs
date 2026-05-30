@@ -79,8 +79,6 @@ pub fn mark_synced(conn: &Connection, plugin_id: &str) -> Result<()> {
 /// This is the canonical credential-sync primitive — per
 /// `project_db_sync_primitive`, sync belongs in db, not in per-domain modules.
 pub fn sync(plugin_id: &str) -> Result<()> {
-    use anyhow::Context;
-
     let conn = crate::open_default()?;
 
     let creds = list(&conn, plugin_id)?;
