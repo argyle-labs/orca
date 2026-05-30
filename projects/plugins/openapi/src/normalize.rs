@@ -14,7 +14,10 @@
 //! Add new preprocessors here as we discover more upstream-spec edge cases;
 //! never patch them in a single integration's build.rs.
 
-use openapiv3::{OpenAPI, Operation, ReferenceOr};
+use openapiv3::{
+    MediaType, OpenAPI, Operation, ReferenceOr, Schema, SchemaData, SchemaKind, StringFormat,
+    StringType, Type, VariantOrUnknownOrEmpty,
+};
 
 /// What `for_progenitor` had to change. Surfaced so consumer build scripts
 /// can `cargo:warning=` each entry — that way a new upstream spec version
@@ -24,8 +27,11 @@ use openapiv3::{OpenAPI, Operation, ReferenceOr};
 pub struct NormalizeReport {
     /// Synthesized operationIds: `(method, path, generated_id)`.
     pub synthesized_ids: Vec<(String, String, String)>,
-    /// Operations dropped because they used a multipart request body.
-    pub dropped_multipart: Vec<String>,
+    /// Operations whose multipart request body was rewritten to
+    /// `application/octet-stream` (raw bytes) so progenitor can codegen them.
+    /// Callers must assemble the multipart body themselves (e.g. via
+    /// `reqwest::multipart::Form` → bytes) before invoking the generated fn.
+    pub rewrote_multipart: Vec<String>,
     /// Request bodies whose alternate media types were collapsed away.
     /// `(op_label, kept, dropped)`.
     pub collapsed_requests: Vec<(String, String, Vec<String>)>,
@@ -38,8 +44,10 @@ impl NormalizeReport {
     /// Emit `cargo:warning=` lines so each item appears in the build log.
     /// Intended for use from a consumer's build.rs.
     pub fn emit_cargo_warnings(&self, crate_name: &str) {
-        for op in &self.dropped_multipart {
-            println!("cargo:warning={crate_name}: dropped multipart op {op}");
+        for op in &self.rewrote_multipart {
+            println!(
+                "cargo:warning={crate_name}: rewrote multipart op {op} -> application/octet-stream (caller assembles body)"
+            );
         }
         for (op, kept, dropped) in &self.collapsed_requests {
             println!(
@@ -60,7 +68,7 @@ impl NormalizeReport {
 pub fn for_progenitor(spec: &mut OpenAPI) -> NormalizeReport {
     let mut r = NormalizeReport::default();
     synthesize_operation_ids(spec, &mut r);
-    strip_multipart_operations(spec, &mut r);
+    rewrite_multipart_to_octet_stream(spec, &mut r);
     collapse_response_media_types(spec, &mut r);
     collapse_request_media_types(spec, &mut r);
     r
@@ -104,21 +112,42 @@ pub fn synthesize_operation_ids(spec: &mut OpenAPI, report: &mut NormalizeReport
     });
 }
 
-/// Drop any operation that uses a `multipart/*` request body. Progenitor
-/// doesn't support multipart codegen; callers that need file-upload
-/// endpoints (e.g. Sonarr's manual-import) fall back to raw reqwest.
-pub fn strip_multipart_operations(spec: &mut OpenAPI, report: &mut NormalizeReport) {
+/// Rewrite any `multipart/*` request body to a single
+/// `application/octet-stream` entry with `format: binary`. Progenitor can't
+/// codegen multipart, but it *can* codegen an op that takes raw bytes —
+/// callers (e.g. Sonarr `POST /login`) build the multipart body themselves
+/// via `reqwest::multipart::Form`, serialize to bytes, and pass through. The
+/// operation stays reachable from the generated client, which is the whole
+/// point: dropping `/login` would block login automation.
+pub fn rewrite_multipart_to_octet_stream(spec: &mut OpenAPI, report: &mut NormalizeReport) {
     for_each_op_mut(spec, |method, path, op| {
-        if let Some(o) = op.as_ref()
-            && let Some(ReferenceOr::Item(body)) = &o.request_body
-            && body.content.keys().any(|k| k.starts_with("multipart/"))
-        {
-            report
-                .dropped_multipart
-                .push(format!("{} {}", method.to_uppercase(), path));
-            *op = None;
+        let Some(o) = op.as_mut() else { return };
+        let Some(ReferenceOr::Item(body)) = o.request_body.as_mut() else {
+            return;
+        };
+        if !body.content.keys().any(|k| k.starts_with("multipart/")) {
+            return;
         }
+        body.content.clear();
+        body.content
+            .insert("application/octet-stream".into(), octet_stream_media_type());
+        report
+            .rewrote_multipart
+            .push(format!("{} {}", method.to_uppercase(), path));
     });
+}
+
+fn octet_stream_media_type() -> MediaType {
+    MediaType {
+        schema: Some(ReferenceOr::Item(Schema {
+            schema_data: SchemaData::default(),
+            schema_kind: SchemaKind::Type(Type::String(StringType {
+                format: VariantOrUnknownOrEmpty::Item(StringFormat::Binary),
+                ..Default::default()
+            })),
+        })),
+        ..Default::default()
+    }
 }
 
 /// Progenitor errors with "more media types than expected" when a response
@@ -161,7 +190,13 @@ pub fn collapse_request_media_types(spec: &mut OpenAPI, report: &mut NormalizeRe
     report.collapsed_requests.extend(hits);
 }
 
-/// Returns `Some((kept, dropped))` if anything was removed.
+/// Returns `Some((kept, dropped))` only when a genuinely different media
+/// type was dropped (e.g. `application/xml`, `application/octet-stream`).
+/// The *arr stack and most .NET-based APIs advertise the same JSON payload
+/// under several labels (`application/json`, `text/json`,
+/// `application/*+json`, `text/plain`); collapsing those is a no-op on the
+/// wire, so we do it silently to keep build output readable. Anything we
+/// can't recognize as a JSON-equivalent label gets surfaced.
 fn keep_one_json_media_type(
     content: &mut indexmap::IndexMap<String, openapiv3::MediaType>,
 ) -> Option<(String, Vec<String>)> {
@@ -175,7 +210,16 @@ fn keep_one_json_media_type(
         .cloned()
         .collect();
     content.retain(|k, _| *k == json_key);
-    Some((json_key, dropped))
+    let surfaced: Vec<String> = dropped
+        .into_iter()
+        .filter(|k| !is_json_equivalent(k))
+        .collect();
+    (!surfaced.is_empty()).then_some((json_key, surfaced))
+}
+
+fn is_json_equivalent(media_type: &str) -> bool {
+    let m = media_type.split(';').next().unwrap_or(media_type).trim();
+    m.contains("json") || m == "text/plain"
 }
 
 fn synth_id(method: &str, path: &str) -> String {

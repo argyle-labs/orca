@@ -1,0 +1,43 @@
+[package]
+name = "arr"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+[lib]
+name = "arr"
+path = "src/lib.rs"
+
+# Typed clients for the *arr stack (sonarr/radarr/prowlarr/lidarr/readarr).
+# All five share a forked C# codebase, so their OpenAPI specs are
+# structurally near-identical and codegen the same way. Each spec lives in
+# `specs/<flavor>.openapi.json`; `build.rs` runs progenitor on every file
+# present and emits a sibling module (`arr::sonarr`, `arr::radarr`, …). Drop
+# in a new spec file to enable a new flavor — no code change required.
+#
+# Update a spec by overwriting its file, e.g.:
+#   curl http://sonarr.local/api/v3/openapi.json -o specs/sonarr.openapi.json
+
+[dependencies]
+anyhow      = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+reqwest     = { workspace = true }
+chrono      = { workspace = true }
+uuid        = { workspace = true }
+# progenitor's generated client uses these at runtime
+progenitor-client = "0.14"
+futures-core = "0.3"
+bytes       = "1"
+regress     = "0.10"
+
+[build-dependencies]
+openapi = { path = "../openapi" }
+progenitor  = "0.14"
+openapiv3   = "2"
+serde_json  = { workspace = true }
+prettyplease = "0.2"
+syn         = { version = "2", features = ["full"] }
+
+[lints]
+workspace = true
