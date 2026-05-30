@@ -16,6 +16,7 @@ use crate::system_info_types::SystemInfoReport;
 use crate::install_status::install_status_report;
 use crate::system_info::current_or_collect;
 use crate::update_state::{read_channel_marker, read_version_pin};
+use contract::config::{APP_LOGS_SUBDIR, APP_STATE_DIR};
 use derive::orca_tool;
 
 // ── Shared shapes ───────────────────────────────────────────────────────────
@@ -47,6 +48,23 @@ pub struct PathInitialized {
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct McpRegistration {
     pub registered: bool,
+}
+
+/// Storage footprint snapshot — surfaces orca.db and log-dir sizes so
+/// operators can spot bloat. Per project_db_size_and_retention: orca.db
+/// stays small, logs go to files with size+retention.
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+pub struct StorageReport {
+    /// Size of `orca.db` (including SQLite WAL/SHM if alongside) in bytes.
+    pub db_size_bytes: u64,
+    pub db_path: String,
+    /// Recursive size of `{home}/.orca/logs/` in bytes.
+    pub logs_dir_bytes: u64,
+    pub logs_dir_path: String,
+    /// UNIX epoch seconds of the last retention sweep. `None` until the
+    /// sweep job lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_retention_sweep_at: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
@@ -81,6 +99,8 @@ pub struct SystemStatusReport {
     /// when the collector failed to initialise on this host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<SystemInfoReport>,
+    /// orca.db + logs dir footprint. Used by UI host drawer + alerts.
+    pub storage: StorageReport,
 }
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -91,9 +111,10 @@ pub struct SystemStatusArgs {}
 #[orca_tool(domain = "system", verb = "detail")]
 async fn system_detail(
     _args: SystemStatusArgs,
-    _ctx: &contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SystemStatusReport> {
     let report = install_status_report()?;
+    let storage = collect_storage(&ctx.config.db_path);
 
     let frontend = if cfg!(feature = "ui") {
         "embedded"
@@ -161,7 +182,65 @@ async fn system_detail(
         channel,
         pinned_to,
         system,
+        storage,
     })
+}
+
+fn collect_storage(db_path: &std::path::Path) -> StorageReport {
+    let db_size_bytes = file_size_with_sidecars(db_path);
+    let logs_dir_path = std::env::var("HOME")
+        .map(|h| format!("{h}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}"))
+        .unwrap_or_default();
+    let logs_dir_bytes = if logs_dir_path.is_empty() {
+        0
+    } else {
+        dir_size_recursive(std::path::Path::new(&logs_dir_path))
+    };
+    StorageReport {
+        db_size_bytes,
+        db_path: db_path.to_string_lossy().into_owned(),
+        logs_dir_bytes,
+        logs_dir_path,
+        last_retention_sweep_at: None,
+    }
+}
+
+fn file_size_with_sidecars(path: &std::path::Path) -> u64 {
+    let main = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let wal = path
+        .to_str()
+        .and_then(|s| std::fs::metadata(format!("{s}-wal")).ok())
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let shm = path
+        .to_str()
+        .and_then(|s| std::fs::metadata(format!("{s}-shm")).ok())
+        .map(|m| m.len())
+        .unwrap_or(0);
+    main + wal + shm
+}
+
+fn dir_size_recursive(root: &std::path::Path) -> u64 {
+    let mut total: u64 = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_dir() {
+                stack.push(entry.path());
+            } else if ft.is_file()
+                && let Ok(md) = entry.metadata()
+            {
+                total += md.len();
+            }
+        }
+    }
+    total
 }
 
 #[cfg(test)]

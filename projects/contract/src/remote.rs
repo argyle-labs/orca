@@ -45,3 +45,71 @@ pub trait RemoteExec: Send + Sync {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    struct EchoExec;
+
+    #[async_trait::async_trait]
+    impl RemoteExec for EchoExec {
+        async fn exec(
+            &self,
+            peer: &str,
+            tool: &str,
+            args: serde_json::Value,
+            caller: Option<CallerIdentity>,
+        ) -> Result<serde_json::Value> {
+            Ok(json!({
+                "peer": peer,
+                "tool": tool,
+                "args": args,
+                "caller_user": caller.map(|c| c.user_id),
+            }))
+        }
+    }
+
+    #[test]
+    fn caller_identity_is_clone_and_debug() {
+        let c = CallerIdentity {
+            user_id: "u1".into(),
+            username: "scott".into(),
+            role: "admin".into(),
+        };
+        let d = c.clone();
+        assert_eq!(d.user_id, "u1");
+        assert_eq!(d.username, "scott");
+        assert_eq!(d.role, "admin");
+        assert!(format!("{c:?}").contains("scott"));
+    }
+
+    #[tokio::test]
+    async fn exec_round_trips_caller_and_args() {
+        let t = EchoExec;
+        let out = t
+            .exec(
+                "peerA",
+                "system.detail",
+                json!({"x": 1}),
+                Some(CallerIdentity {
+                    user_id: "u1".into(),
+                    username: "scott".into(),
+                    role: "admin".into(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["peer"], "peerA");
+        assert_eq!(out["tool"], "system.detail");
+        assert_eq!(out["args"], json!({"x": 1}));
+        assert_eq!(out["caller_user"], "u1");
+    }
+
+    #[tokio::test]
+    async fn refresh_peer_runtime_default_is_noop_ok() {
+        let t = EchoExec;
+        t.refresh_peer_runtime("peerA").await.unwrap();
+    }
+}

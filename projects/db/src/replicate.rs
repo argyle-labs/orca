@@ -29,10 +29,12 @@
 #![allow(clippy::disallowed_types)]
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 use anyhow::Result;
 use rusqlite::Connection;
 use serde_json::Value;
+use tokio::sync::broadcast;
 
 /// One entry per `#[derive(Replicated)]` type. `export`/`merge` are generated
 /// to operate on the type's backing table; the engine never needs to know the
@@ -68,6 +70,9 @@ pub fn export_all(conn: &Connection) -> Result<BTreeMap<String, Value>> {
 /// Merge an incoming bundle, dispatching each entity to its registered `merge`.
 /// Unknown entity names are skipped (forward-compat with peers that replicate
 /// entities this host doesn't know). Returns total rows created/updated.
+///
+/// Merges do NOT emit [`notify_write`] — only origin writes do. Otherwise
+/// every push from peer A→B would cascade back as B→A,C,D,…
 pub fn merge_bundle(conn: &Connection, bundle: BTreeMap<String, Value>) -> Result<usize> {
     let mut total = 0;
     for reg in registrations() {
@@ -79,4 +84,147 @@ pub fn merge_bundle(conn: &Connection, bundle: BTreeMap<String, Value>) -> Resul
         }
     }
     Ok(total)
+}
+
+// ── Write-notify channel — feeds push-on-write fanout in the pod crate ──
+//
+// Every origin write (insert/update/delete) on a `#[derive(Replicated)]`
+// entity calls [`notify_write`]. The pod crate subscribes via [`subscribe`]
+// and pushes a freshly-built bundle to all paired peers immediately. The
+// 60s pull tick is the backstop, not the primary path.
+//
+// Replicated merges do NOT notify (see [`merge_bundle`]) — otherwise pushes
+// would echo back and amplify.
+
+const WRITE_NOTIFY_CAPACITY: usize = 256;
+
+fn write_notify_sender() -> &'static broadcast::Sender<&'static str> {
+    static SENDER: OnceLock<broadcast::Sender<&'static str>> = OnceLock::new();
+    SENDER.get_or_init(|| {
+        let (tx, _rx) = broadcast::channel(WRITE_NOTIFY_CAPACITY);
+        tx
+    })
+}
+
+/// Signal that a row was written/updated/deleted on the named replicated
+/// entity (e.g. `"users"`). Called by origin write helpers only — never
+/// from merge paths. Cheap no-op when no one's subscribed.
+pub fn notify_write(entity: &'static str) {
+    drop(write_notify_sender().send(entity));
+}
+
+/// Subscribe to origin write notifications. Returns a broadcast receiver
+/// that yields the entity name of each origin write. Used by pod's
+/// push-on-write task.
+pub fn subscribe() -> broadcast::Receiver<&'static str> {
+    write_notify_sender().subscribe()
+}
+
+// ── Merkle-style content roots — cheap divergence check before fetching bundles ──
+//
+// Each tick, peers exchange these per-entity roots; matching roots → skip the
+// full bundle fetch. Hash inputs are canonical (rows from `export` are JSON
+// arrays already sorted by pk in the derive's `SELECT … ORDER BY`), so two
+// peers with identical row sets always produce the same root.
+
+use sha2::{Digest, Sha256};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::test_conn;
+    use crate::users;
+
+    #[test]
+    fn roots_are_deterministic_for_identical_state() {
+        let a = test_conn();
+        let b = test_conn();
+        users::insert(&a, "u1", "scott", "h", "admin", "2026-01-01T00:00:00Z").unwrap();
+        users::insert(&b, "u1", "scott", "h", "admin", "2026-01-01T00:00:00Z").unwrap();
+        assert_eq!(roots(&a).unwrap(), roots(&b).unwrap());
+    }
+
+    #[test]
+    fn roots_change_when_rows_differ() {
+        let a = test_conn();
+        let b = test_conn();
+        users::insert(&a, "u1", "scott", "h", "admin", "2026-01-01T00:00:00Z").unwrap();
+        // b is empty -> different root
+        assert_ne!(
+            roots(&a).unwrap().get("users"),
+            roots(&b).unwrap().get("users")
+        );
+    }
+
+    #[test]
+    fn roots_cover_every_registered_entity() {
+        let conn = test_conn();
+        let r = roots(&conn).unwrap();
+        for reg in registrations() {
+            assert!(
+                r.contains_key(reg.name),
+                "roots missing registered entity '{}'",
+                reg.name
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn notify_write_delivers_to_subscriber() {
+        let mut rx = subscribe();
+        notify_write("users");
+        let got = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .expect("recv timeout")
+            .expect("recv error");
+        assert_eq!(got, "users");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn user_insert_fires_notification() {
+        let mut rx = subscribe();
+        let conn = test_conn();
+        users::insert(&conn, "u1", "alice", "h", "member", "t0").unwrap();
+        let got = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .expect("origin write must notify");
+        assert_eq!(got.unwrap(), "users");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn merge_does_not_fire_notification() {
+        // Origin writes notify; replicated merges must not (otherwise pushes
+        // would echo and amplify across the mesh).
+        let src = test_conn();
+        users::insert(&src, "u1", "alice", "h", "member", "t0").unwrap();
+        let bundle = export_all(&src).unwrap();
+
+        // Subscribe AFTER the source-side write so the merge below is the
+        // only candidate event in the channel.
+        let mut rx = subscribe();
+        let dst = test_conn();
+        merge_bundle(&dst, bundle).unwrap();
+
+        let result = tokio::time::timeout(std::time::Duration::from_millis(150), rx.recv()).await;
+        assert!(
+            result.is_err(),
+            "merge_bundle must not emit notify_write, got {:?}",
+            result
+        );
+    }
+}
+
+/// Per-entity content hash of this host's view. Keyed by entity name.
+pub fn roots(conn: &Connection) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for reg in registrations() {
+        let rows = (reg.export)(conn)?;
+        let canonical = serde_json::to_vec(&rows)?;
+        let mut hasher = Sha256::new();
+        hasher.update(&canonical);
+        let digest = hasher.finalize();
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        out.insert(reg.name.to_string(), hex);
+    }
+    Ok(out)
 }

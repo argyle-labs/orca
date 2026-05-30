@@ -24,5 +24,8 @@ async-trait = { workspace = true }
 dirs = { workspace = true }
 rust-embed = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
 [lints]
 workspace = true

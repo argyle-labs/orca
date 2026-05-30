@@ -8,7 +8,7 @@ use contract::ToolCtx;
 #[cfg(target_os = "linux")]
 use contract::config::APP_SYSTEMD_SERVICE;
 #[cfg(target_os = "macos")]
-use contract::config::{APP_DAEMON_LOG, APP_PLIST_LABEL};
+use contract::config::{APP_DAEMON_LOG_FILE, APP_LOGS_SUBDIR, APP_PLIST_LABEL};
 use contract::config::{APP_NAME, APP_STATE_DIR};
 use derive::orca_tool;
 use schemars::JsonSchema;
@@ -390,6 +390,9 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     let agents_dir = format!("{home}/Library/LaunchAgents");
     std::fs::create_dir_all(&agents_dir)?;
     let plist_path = format!("{agents_dir}/{APP_PLIST_LABEL}.plist");
+    let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
+    std::fs::create_dir_all(&logs_dir)?;
+    let daemon_log = format!("{logs_dir}/{APP_DAEMON_LOG_FILE}");
 
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -417,9 +420,9 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     <key>ThrottleInterval</key>
     <integer>30</integer>
     <key>StandardOutPath</key>
-    <string>{APP_DAEMON_LOG}</string>
+    <string>{daemon_log}</string>
     <key>StandardErrorPath</key>
-    <string>{APP_DAEMON_LOG}</string>
+    <string>{daemon_log}</string>
 </dict>
 </plist>
 "#
@@ -445,7 +448,7 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
         "{} {APP_NAME} daemon installed — starts now and on login",
         "✓".green()
     );
-    println!("  logs: tail -f {APP_DAEMON_LOG}");
+    println!("  logs: tail -f {daemon_log}");
     Ok(())
 }
 
@@ -484,11 +487,15 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     let service_dir = format!("{home}/.config/systemd/user");
     std::fs::create_dir_all(&service_dir)?;
     let service_path = format!("{service_dir}/{APP_SYSTEMD_SERVICE}.service");
+    let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
+    std::fs::create_dir_all(&logs_dir)?;
+    let daemon_log = format!("{logs_dir}/{APP_DAEMON_LOG_FILE}");
 
     let service = format!(
         "[Unit]\nDescription=Orca AI daemon\nAfter=network.target\n\n\
          [Service]\nExecStart={binary} daemon --port {port}\n\
-         Environment=HOME={home}\nRestart=on-failure\nRestartSec=5\n\n\
+         Environment=HOME={home}\nRestart=on-failure\nRestartSec=5\n\
+         StandardOutput=append:{daemon_log}\nStandardError=append:{daemon_log}\n\n\
          [Install]\nWantedBy=default.target\n"
     );
 
@@ -552,11 +559,18 @@ fn install_system_service(binary: &str, port: u16, user: &str, home: &str) -> Re
 #[cfg(target_os = "linux")]
 fn install_systemd_system(binary: &str, port: u16, user: &str, home: &str) -> Result<()> {
     let path = format!("/etc/systemd/system/{APP_SYSTEMD_SERVICE}.service");
+    let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
+    std::fs::create_dir_all(&logs_dir)?;
+    let _ = Command::new("chown")
+        .args(["-R", &format!("{user}:{user}"), &logs_dir])
+        .status();
+    let daemon_log = format!("{logs_dir}/{APP_DAEMON_LOG_FILE}");
     let unit = format!(
         "[Unit]\nDescription=Orca AI daemon\nAfter=network.target\n\n\
          [Service]\nType=simple\nUser={user}\n\
          Environment=HOME={home}\nExecStart={binary} daemon --port {port}\n\
-         Restart=on-failure\nRestartSec=5\n\n\
+         Restart=on-failure\nRestartSec=5\n\
+         StandardOutput=append:{daemon_log}\nStandardError=append:{daemon_log}\n\n\
          [Install]\nWantedBy=multi-user.target\n"
     );
     std::fs::write(&path, &unit)?;
@@ -579,10 +593,16 @@ fn install_systemd_system(binary: &str, port: u16, user: &str, home: &str) -> Re
 #[cfg(target_os = "linux")]
 fn install_openrc(binary: &str, port: u16, user: &str, home: &str) -> Result<()> {
     let path = format!("/etc/init.d/{APP_SYSTEMD_SERVICE}");
+    let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
+    std::fs::create_dir_all(&logs_dir)?;
+    let _ = Command::new("chown")
+        .args(["-R", &format!("{user}:{user}"), &logs_dir])
+        .status();
+    let daemon_log = format!("{logs_dir}/{APP_DAEMON_LOG_FILE}");
     // OpenRC init script. supervise-daemon handles restart-on-crash without
     // requiring start-stop-daemon/pidfile bookkeeping. `command_user` drops
-    // privs to the orca user; `command_background=true` would conflict with
-    // supervise-daemon, so we omit it.
+    // privs to the orca user. output_log/error_log keep daemon stdout+stderr
+    // off /dev/null — without these supervise-daemon discards everything.
     let script = format!(
         "#!/sbin/openrc-run\n\
          name=\"{APP_NAME}\"\n\
@@ -592,6 +612,8 @@ fn install_openrc(binary: &str, port: u16, user: &str, home: &str) -> Result<()>
          command_user=\"{user}\"\n\
          supervisor=supervise-daemon\n\
          pidfile=\"/run/{APP_NAME}.pid\"\n\
+         output_log=\"{daemon_log}\"\n\
+         error_log=\"{daemon_log}\"\n\
          export HOME=\"{home}\"\n\
          depend() {{\n    need net\n}}\n"
     );
@@ -637,6 +659,8 @@ fn install_unraid(binary: &str, port: u16, user: &str, home: &str) -> Result<()>
     println!("{} wrote {}", "✓".green(), persist_bin);
 
     let rc_path = format!("/etc/rc.d/rc.{APP_NAME}");
+    let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
+    let daemon_log = format!("{logs_dir}/{APP_DAEMON_LOG_FILE}");
     let rc_script = format!(
         "#!/bin/sh\n\
          # Orca daemon (Unraid). Generated by `orca daemon install`.\n\
@@ -644,6 +668,8 @@ fn install_unraid(binary: &str, port: u16, user: &str, home: &str) -> Result<()>
          PERSIST_BIN={persist_bin}\n\
          USER={user}\n\
          HOME={home}\n\
+         LOG_DIR={logs_dir}\n\
+         LOG_FILE={daemon_log}\n\
          export HOME\n\
          # Re-stage the binary from USB if missing or out of date. The go hook\n\
          # does this on boot, but a manual `restart` after `orca update` also\n\
@@ -656,8 +682,12 @@ fn install_unraid(binary: &str, port: u16, user: &str, home: &str) -> Result<()>
              chown \"$USER:$USER\" \"$BIN\" 2>/dev/null || true\n\
            fi\n\
          }}\n\
+         ensure_logs() {{\n\
+           mkdir -p \"$LOG_DIR\"\n\
+           chown -R \"$USER:$USER\" \"$LOG_DIR\" 2>/dev/null || true\n\
+         }}\n\
          case \"$1\" in\n\
-           start) stage_bin; runuser -u $USER -- $BIN daemon --port {port} >>/var/log/orca.log 2>&1 &\n\
+           start) stage_bin; ensure_logs; runuser -u $USER -- $BIN daemon --port {port} >>\"$LOG_FILE\" 2>&1 &\n\
                   echo $! > /var/run/orca.pid ;;\n\
            stop)  [ -f /var/run/orca.pid ] && kill $(cat /var/run/orca.pid) ; rm -f /var/run/orca.pid ;;\n\
            restart) $0 stop; sleep 1; $0 start ;;\n\

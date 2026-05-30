@@ -63,6 +63,7 @@ pub fn insert(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6)",
         params![id, username, username_lower, password_hash, role, now],
     )?;
+    crate::replicate::notify_write("users");
     Ok(User {
         id: id.to_string(),
         username: username.to_string(),
@@ -111,6 +112,9 @@ pub fn set_password_hash(conn: &Connection, id: &str, new_hash: &str, now: &str)
         "UPDATE users SET password_hash = ?2, password_updated_at = ?3, updated_at = ?3 WHERE id = ?1",
         params![id, new_hash, now],
     )?;
+    if n > 0 {
+        crate::replicate::notify_write("users");
+    }
     Ok(n > 0)
 }
 

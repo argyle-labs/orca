@@ -15,6 +15,8 @@ pub mod cli;
 pub mod host_status_writer;
 pub mod server_pod;
 
+pub use db::replicate_engine::PeerSyncReport;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -229,6 +231,21 @@ pub struct PodPingArgs {
     /// Paired peer ID (`peer.<machine_id_short>`) — looked up in `pod_peers`
     /// for the dial target.
     pub peer_id: String,
+}
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Default, Serialize, Deserialize, JsonSchema)]
+pub struct PodSyncArgs {
+    /// Optional source-peer filter (hostname / peer_id / addr). Omit to pull
+    /// from every paired peer.
+    #[cfg_attr(feature = "cli", arg(long))]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub peer: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodSyncOutput {
+    pub peers: Vec<PeerSyncReport>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -722,6 +739,18 @@ async fn pod_forget(
     server_pod::forget(&args.peer_id).await
 }
 
+/// Force a one-shot replication tick on this host (or — with `peer_id` set —
+/// on the named remote peer via the universal peer-dispatch path) and return
+/// a per-source-peer report. Replaces "wait 60s for the background tick to
+/// fire and hope it worked." `peer` arg optionally filters which source peer
+/// we pull from (hostname / peer_id / addr) — omit to pull from every paired
+/// peer. Admin: this is operator-facing and can surface mesh errors.
+#[orca_tool(domain = "pod", verb = "sync", role = "admin")]
+async fn pod_sync(args: PodSyncArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<PodSyncOutput> {
+    let reports = db::replicate_engine::sync_now(args.peer.as_deref()).await?;
+    Ok(PodSyncOutput { peers: reports })
+}
+
 /// Days-remaining + rotation state for every mesh cert on this host, plus
 /// the current `self_secure` (Tier-2 secrets-storage) setting.
 #[orca_tool(domain = "system.pod", verb = "detail")]
@@ -810,7 +839,6 @@ pub mod host_status_replica;
 mod listener;
 pub mod mdns;
 pub mod peerdb;
-pub mod replication_sync;
 pub mod roster_sync;
 pub mod runtime_cache;
 pub mod scheduler;
@@ -818,6 +846,7 @@ pub mod subscribe;
 pub mod subscribe_client;
 pub mod subscribe_demand;
 pub mod subscribe_wire;
+pub mod transport;
 
 pub use bootstrap::handle_pod_bootstrap_connection;
 pub use listener::handle_pod_connection;
@@ -842,6 +871,8 @@ pub const POD_DEV_ENABLE_METHOD: &str = "pod/dev-enable";
 pub const POD_DEV_DISABLE_METHOD: &str = "pod/dev-disable";
 pub const POD_EXEC_METHOD: &str = "pod/exec";
 pub const POD_REPLICATE_EXPORT_METHOD: &str = "pod/replicate-export";
+pub const POD_REPLICATE_PUSH_METHOD: &str = "pod/replicate-push";
+pub const POD_REPLICATE_ROOTS_METHOD: &str = "pod/replicate-roots";
 
 /// Body of `pod/replicate-export`: this host's full view of every shared-state
 /// entity registered via `#[derive(Replicated)]` — `{ entity_name -> rows }`.
@@ -1169,6 +1200,42 @@ pub async fn fetch_replicate_bundle(host: &str) -> Result<pki::SignedEnvelope> {
         POD_REPLICATE_EXPORT_METHOD,
         None::<()>,
         Duration::from_secs(30),
+    )
+    .await
+}
+
+/// Push our signed bundle to `host`. Recipient verifies sig + pinned bootstrap
+/// fp before merging. Returns the count of rows merged on the recipient.
+pub async fn push_replicate_bundle(host: &str, envelope: &pki::SignedEnvelope) -> Result<usize> {
+    let result: ReplicatePushResult = call_typed(
+        host,
+        POD_REPLICATE_PUSH_METHOD,
+        Some(envelope),
+        Duration::from_secs(30),
+    )
+    .await?;
+    Ok(result.merged)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplicatePushResult {
+    pub merged: usize,
+}
+
+/// Cheap divergence-check response: per-entity content roots from the peer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplicateRootsResult {
+    pub roots: std::collections::BTreeMap<String, String>,
+}
+
+/// Fetch a peer's per-entity content roots. Cheap (32 bytes/entity); the
+/// engine uses this to skip the full bundle fetch when nothing diverged.
+pub async fn fetch_replicate_roots(host: &str) -> Result<ReplicateRootsResult> {
+    call_typed(
+        host,
+        POD_REPLICATE_ROOTS_METHOD,
+        None::<()>,
+        Duration::from_secs(15),
     )
     .await
 }

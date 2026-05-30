@@ -39,3 +39,48 @@ impl std::str::FromStr for JsonAny {
         Ok(Self(serde_json::from_str(s)?))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::str::FromStr;
+
+    #[test]
+    fn default_is_null() {
+        let v: JsonAny = Default::default();
+        assert_eq!(v.0, Value::Null);
+    }
+
+    #[test]
+    fn from_value_wraps_inner() {
+        let v: JsonAny = json!({"name": "foo"}).into();
+        assert_eq!(v.0, json!({"name": "foo"}));
+    }
+
+    #[test]
+    fn from_str_parses_json_literal() {
+        let v = JsonAny::from_str(r#"{"k":1}"#).unwrap();
+        assert_eq!(v.0, json!({"k": 1}));
+    }
+
+    #[test]
+    fn from_str_rejects_invalid_json() {
+        assert!(JsonAny::from_str("not json").is_err());
+    }
+
+    #[test]
+    fn serializes_transparently_as_inner() {
+        let v: JsonAny = json!([1, 2, 3]).into();
+        let s = serde_json::to_string(&v).unwrap();
+        assert_eq!(s, "[1,2,3]");
+        let round: JsonAny = serde_json::from_str(&s).unwrap();
+        assert_eq!(round.0, json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn clone_preserves_inner() {
+        let v: JsonAny = json!("hello").into();
+        assert_eq!(v.clone().0, v.0);
+    }
+}

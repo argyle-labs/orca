@@ -592,8 +592,10 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
     std::mem::drop(pod::roster_sync::spawn());
     info!("[pod] roster-sync armed (60s) — auto-fills pod_peers from any paired peer");
 
-    std::mem::drop(pod::replication_sync::spawn());
-    info!("[pod] replication-sync armed (60s) — merges shared users/configs from paired peers");
+    if let Err(e) = db::replicate_engine::register(pod::transport::PodMeshTransport::new()) {
+        tracing::warn!("[replicate] transport register failed: {e:#}");
+    }
+    let _ = db::replicate_engine::spawn();
 
     std::mem::drop(system::host_identity::spawn_refresh_task());
     info!("[host-addressing] refresh task armed (5m)");

@@ -31,6 +31,7 @@ pub mod plugin_types;
 pub mod plugins;
 pub mod pod;
 pub mod replicate;
+pub mod replicate_engine;
 
 // Self-alias so proc-macro emissions of `::db::replicate::ReplicatedRegistration`
 // also resolve when the derive is used *inside* this crate (e.g. `users.rs`).

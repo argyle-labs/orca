@@ -23,8 +23,9 @@ use utils::state::DaemonMode;
 use super::{
     AddressChannel, HostAddressingSnapshot, POD_DEV_DISABLE_METHOD, POD_DEV_ENABLE_METHOD,
     POD_DEV_SYNC_METHOD, POD_EXEC_METHOD, POD_PING_METHOD, POD_REPLICATE_EXPORT_METHOD,
-    PodDevDisableResult, PodDevEnableResult, PodDevSyncResult, PodExecParams, PodExecResult,
-    PodPingResult, ReplicateBundle, peerdb as pdb, pki_dir,
+    POD_REPLICATE_PUSH_METHOD, POD_REPLICATE_ROOTS_METHOD, PodDevDisableResult, PodDevEnableResult,
+    PodDevSyncResult, PodExecParams, PodExecResult, PodPingResult, ReplicatePushResult,
+    ReplicateRootsResult, peerdb as pdb, pki_dir,
 };
 
 const POD_NOTIFY_TRUST_METHOD: &str = "pod/notify-trust";
@@ -161,6 +162,14 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
         },
         POD_REPLICATE_EXPORT_METHOD => match handle_replicate_export() {
             Ok(env) => value_response(id, &env),
+            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+        },
+        POD_REPLICATE_PUSH_METHOD => match handle_replicate_push(peer_cn, request) {
+            Ok(r) => value_response(id, &r),
+            Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
+        },
+        POD_REPLICATE_ROOTS_METHOD => match handle_replicate_roots() {
+            Ok(r) => value_response(id, &r),
             Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
         },
         POD_NOTIFY_TRUST_METHOD => match handle_notify_trust(peer_cn, peer_addr, request) {
@@ -499,16 +508,42 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<PodExecResult> {
 /// bootstrap key. The mTLS chain already authenticated the requesting peer; the
 /// signature lets the puller bind the payload to this host's pinned bootstrap
 /// fp before merging.
+/// Handle `pod/replicate-roots`: return this host's per-entity content roots.
+/// No signature needed — roots are opaque hashes; the engine only uses them
+/// to short-circuit identical-state bundle fetches. mTLS already authenticated
+/// the caller as a paired peer.
+fn handle_replicate_roots() -> Result<ReplicateRootsResult> {
+    let conn = db::open_default()?;
+    let roots = db::replicate::roots(&conn)?;
+    Ok(ReplicateRootsResult { roots })
+}
+
 fn handle_replicate_export() -> Result<pki::SignedEnvelope> {
     let conn = db::open_default()?;
     let entities = db::replicate::export_all(&conn)?;
-    let body = ReplicateBundle {
-        peer_id: format!("peer.{}", system::host_identity::machine_id_short()),
-        issued_at: chrono::Utc::now().timestamp(),
-        entities,
+    crate::transport::sign_bundle(entities)
+}
+
+/// Handle `pod/replicate-push`: caller (the writer) sent us a signed bundle.
+/// Verify against the caller's pinned bootstrap fp, then hand off to the db
+/// engine to merge. Trust model mirrors `pod/replicate-export` (mTLS proves
+/// transport, signature proves bundle origin).
+fn handle_replicate_push(peer_cn: &str, request: Request) -> Result<ReplicatePushResult> {
+    let envelope: pki::SignedEnvelope = match request.params {
+        Some(v) => serde_json::from_value(v).context("parse pod/replicate-push params")?,
+        None => anyhow::bail!("pod/replicate-push requires params"),
     };
-    let signing = pki::load_or_init_bootstrap_key(&pki_dir())?;
-    pki::sign_envelope(&signing, &body).context("sign replicate bundle")
+    let conn = db::open_default()?;
+    let pinned_fp = pdb::pinned_pubkey_fp(&conn, peer_cn)?.ok_or_else(|| {
+        anyhow::anyhow!("pod/replicate-push refused: peer {peer_cn} has no pinned bootstrap fp")
+    })?;
+    drop(conn);
+    let entities = crate::transport::verify_envelope(&envelope, &pinned_fp)?;
+    let merged = db::replicate_engine::merge_into_local(entities)?;
+    if merged > 0 {
+        tracing::info!("[replicate.push.recv] merged {merged} row(s) from {peer_cn}");
+    }
+    Ok(ReplicatePushResult { merged })
 }
 
 fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {

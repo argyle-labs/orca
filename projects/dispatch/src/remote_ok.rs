@@ -28,3 +28,29 @@ pub fn snapshot() -> Vec<&'static str> {
         .map(|s| s.iter().copied().collect())
         .unwrap_or_default()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The allowlist is a process-wide OnceLock — all behavior lives in one
+    // test so the uninstalled-state and first-call-wins assertions are
+    // observable regardless of test-runner process model.
+    #[test]
+    fn install_lookup_snapshot_and_idempotency() {
+        assert!(!is_allowed("system.detail"));
+        assert!(snapshot().is_empty());
+
+        install(["system.detail", "pod.list"]);
+        assert!(is_allowed("system.detail"));
+        assert!(is_allowed("pod.list"));
+        assert!(!is_allowed("system.update"));
+        let mut snap = snapshot();
+        snap.sort();
+        assert_eq!(snap, vec!["pod.list", "system.detail"]);
+
+        // Subsequent install calls are no-ops — first call wins.
+        install(["never_added"]);
+        assert!(!is_allowed("never_added"));
+    }
+}
