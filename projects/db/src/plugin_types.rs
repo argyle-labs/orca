@@ -1,7 +1,7 @@
 //! Plugin-declared TypedValue type registry.
 
 use anyhow::{Result, anyhow};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PluginTypeRow {
@@ -65,14 +65,7 @@ pub fn upsert(
     )?;
     let owner = owner_stmt
         .query_row(rusqlite::params![fq, plugin_id], |r| r.get::<_, String>(0))
-        .map(Some)
-        .or_else(|e| {
-            if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-                Ok(None)
-            } else {
-                Err(e)
-            }
-        })?;
+        .optional()?;
     if let Some(owner_id) = owner {
         return Err(anyhow!(NamespaceCollision {
             fq_type_id: fq,
@@ -120,16 +113,7 @@ pub fn get(conn: &Connection, fq_type_id: &str) -> Result<Option<PluginTypeRow>>
         "SELECT plugin_id, plugin_namespace, type_name, fq_type_id, schema_version, schema_json, sensitivity, declared_at
          FROM plugin_types WHERE fq_type_id = ?1",
     )?;
-    let row = stmt
-        .query_row([fq_type_id], row_from)
-        .map(Some)
-        .or_else(|e| {
-            if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-                Ok(None)
-            } else {
-                Err(e)
-            }
-        })?;
+    let row = stmt.query_row([fq_type_id], row_from).optional()?;
     Ok(row)
 }
 

@@ -1,7 +1,7 @@
 //! Plugin-declared tool registry — what the MCP layer surfaces to LLMs as plugin-owned tools.
 
 use anyhow::{Result, anyhow};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PluginToolRow {
@@ -153,14 +153,7 @@ fn collision_owner(
         .query_row(rusqlite::params![fq_name, self_plugin_id], |r| {
             r.get::<_, String>(0)
         })
-        .map(Some)
-        .or_else(|e| {
-            if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-                Ok(None)
-            } else {
-                Err(e)
-            }
-        })?;
+        .optional()?;
     Ok(owner)
 }
 
@@ -191,13 +184,7 @@ pub fn get(conn: &Connection, fq_name: &str) -> Result<Option<PluginToolRow>> {
         "SELECT plugin_id, plugin_namespace, name, fq_name, description, input_schema, sensitivity, declared_at
          FROM plugin_tools WHERE fq_name = ?1",
     )?;
-    let row = stmt.query_row([fq_name], row_from).map(Some).or_else(|e| {
-        if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-            Ok(None)
-        } else {
-            Err(e)
-        }
-    })?;
+    let row = stmt.query_row([fq_name], row_from).optional()?;
     Ok(row)
 }
 
