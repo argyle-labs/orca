@@ -90,6 +90,10 @@ type HelloParams struct {
 	// Optional peer plugins. Missing optional deps shift the hello status
 	// to "degraded" but don't reject.
 	PluginsOptional []string `json:"plugins_optional,omitempty"`
+	// Namespace this plugin owns (from manifest.plugin.namespace, falling
+	// back to plugin_id). All tool/type ids are stamped with this prefix
+	// instead of plugin_id. Empty = host uses plugin_id (back-compat).
+	PluginNamespace string `json:"plugin_namespace,omitempty"`
 }
 
 // HelloOptions is the builder for Hello so adding manifest hints later is
