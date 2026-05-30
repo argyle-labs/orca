@@ -1,3 +1,7 @@
+// Consumed by the future `arr.*` orca tool surface (not yet built —
+// see module docs). Acknowledged dead-code until that lands.
+#![allow(dead_code)]
+
 //! Crate-internal transport primitives for *arr authentication.
 //!
 //! **Do not call from outside this crate.** Per
