@@ -32,7 +32,7 @@ macro_rules! flavor {
 }
 
 flavor!(sonarr);
-// flavor!(radarr);    // drop specs/radarr.openapi.json + uncomment
-// flavor!(prowlarr);  // drop specs/prowlarr.openapi.json + uncomment
-// flavor!(lidarr);    // drop specs/lidarr.openapi.json + uncomment
-// flavor!(readarr);   // drop specs/readarr.openapi.json + uncomment
+flavor!(radarr);
+flavor!(prowlarr);
+flavor!(lidarr);
+flavor!(readarr);
