@@ -38,7 +38,7 @@ struct ManifestUses {
     /// Path to the dependency's orca-plugin.toml (relative to this manifest or absolute/~/…).
     path: String,
     /// Override the instance id for this dependency. Allows the same plugin template
-    /// to be used multiple times with different credentials (e.g. atlassian@rebuy vs atlassian@infra).
+    /// to be used multiple times with different credentials (e.g. atlassian@infra-a vs atlassian@infra-b).
     /// Defaults to "{dep_plugin_id}@{parent_id}" when not specified.
     id: Option<String>,
 }
