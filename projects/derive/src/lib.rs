@@ -690,6 +690,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
                 #args_param,
                 #ctx_param,
             ) -> ::anyhow::Result<#output_ty> {
+                #local_only_reject_stanza
                 #peer_dispatch_stanza
                 #fn_ident(#args_forward, #ctx_param_name).await
             }

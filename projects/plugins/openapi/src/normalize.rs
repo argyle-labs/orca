@@ -46,6 +46,10 @@ pub struct NormalizeReport {
     /// responses contribute a `null`-typed variant.
     /// `(op_label, statuses, variant_count)`.
     pub merged_success_responses: Vec<(String, Vec<String>, usize)>,
+    /// Same as `merged_success_responses` but for the error bucket
+    /// (4xx/5xx + `default`). Progenitor's assertion fires there too when
+    /// schemas diverge across error statuses.
+    pub merged_error_responses: Vec<(String, Vec<String>, usize)>,
 }
 
 impl NormalizeReport {
@@ -72,6 +76,11 @@ impl NormalizeReport {
                 "cargo:warning={crate_name}: merged success responses {op} statuses={statuses:?} into oneOf with {variants} variant(s)"
             );
         }
+        for (op, statuses, variants) in &self.merged_error_responses {
+            println!(
+                "cargo:warning={crate_name}: merged error responses {op} statuses={statuses:?} into oneOf with {variants} variant(s)"
+            );
+        }
     }
 }
 
@@ -85,6 +94,7 @@ pub fn for_progenitor(spec: &mut OpenAPI) -> NormalizeReport {
     collapse_response_media_types(spec, &mut r);
     collapse_request_media_types(spec, &mut r);
     merge_success_response_schemas(spec, &mut r);
+    merge_error_response_schemas(spec, &mut r);
     r
 }
 
