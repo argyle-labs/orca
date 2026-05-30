@@ -66,6 +66,14 @@ pub struct HelloParams {
     /// `full` if all are satisfied; missing optional deps shift to `degraded`.
     #[serde(default)]
     pub plugins_optional: Vec<String>,
+    /// Namespace this plugin owns (from `manifest.plugin.namespace`, falling
+    /// back to `plugin_id`). All tool names, type ids, and db rows the plugin
+    /// produces are stamped with this prefix instead of `plugin_id`. Lets
+    /// multiple plugin instances share a namespace (e.g. multiple Sonarr
+    /// instances all under `arr`). Empty string = use `plugin_id` (back-compat
+    /// for older SDK clients).
+    #[serde(default)]
+    pub plugin_namespace: String,
 }
 
 /// Result returned by the server for `orca/hello`.
@@ -615,6 +623,7 @@ impl TcpTransport {
             methods_optional: opts.methods_optional.clone(),
             plugins_required: opts.plugins_required.clone(),
             plugins_optional: opts.plugins_optional.clone(),
+            plugin_namespace: opts.plugin_namespace.clone(),
         };
 
         let resp = self
@@ -717,6 +726,7 @@ pub struct HelloOptions {
     methods_optional: Vec<String>,
     plugins_required: Vec<String>,
     plugins_optional: Vec<String>,
+    plugin_namespace: String,
 }
 
 impl HelloOptions {
@@ -730,7 +740,14 @@ impl HelloOptions {
             methods_optional: Vec::new(),
             plugins_required: Vec::new(),
             plugins_optional: Vec::new(),
+            plugin_namespace: String::new(),
         }
+    }
+    /// Explicit namespace from `manifest.plugin.namespace`. Empty = host
+    /// defaults to `plugin_id`.
+    pub fn with_namespace(mut self, ns: impl Into<String>) -> Self {
+        self.plugin_namespace = ns.into();
+        self
     }
     pub fn with_plugin_version(mut self, v: impl Into<String>) -> Self {
         self.plugin_version = v.into();

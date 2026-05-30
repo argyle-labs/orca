@@ -630,6 +630,12 @@ struct ConnState {
     /// claim in `orca/hello` must match this exactly.
     peer_cn: String,
     plugin_id: Option<String>,
+    /// Namespace the plugin declared in `orca/hello.plugin_namespace`. Tool
+    /// names, type ids, and per-plugin db rows are stamped with this prefix.
+    /// Defaults to `plugin_id` when the plugin sent an empty namespace
+    /// (back-compat). Set in `handle_hello`, read by `types.declare` and
+    /// `tools.declare`.
+    plugin_namespace: Option<String>,
     registry: ContextRegistry,
     /// Process-wide registry the connection registers itself with on hello
     /// and unregisters from on drop, so external code can dispatch
@@ -671,6 +677,7 @@ async fn handle_connection(
     let mut state = ConnState {
         peer_cn,
         plugin_id: None,
+        plugin_namespace: None,
         registry,
         plugins,
         notify_tx,
@@ -827,6 +834,11 @@ fn handle_hello(
         return serde_json::to_value(Response::ok(id, value)).expect("Response serializes");
     }
     state.plugin_id = Some(params.plugin_id.clone());
+    state.plugin_namespace = Some(if params.plugin_namespace.is_empty() {
+        params.plugin_id.clone()
+    } else {
+        params.plugin_namespace.clone()
+    });
 
     // Make this connection reachable to external code (MCP bridge, etc.)
     // by registering a handle the registry hands out by plugin_id.
