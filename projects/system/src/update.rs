@@ -167,6 +167,77 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
     }))
 }
 
+/// Single entry in the version-picker list. Tag is the GitHub release tag
+/// (with or without `v` prefix as returned by GitHub); `is_current` is true
+/// when the tag matches the running binary's `CURRENT_VERSION`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct VersionEntry {
+    pub tag: String,
+    pub prerelease: bool,
+    pub published_at: Option<String>,
+    pub is_current: bool,
+}
+
+#[derive(Deserialize)]
+struct ReleaseMeta {
+    tag_name: String,
+    #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
+    published_at: Option<String>,
+}
+
+/// Return all releases visible on `channel`, newest first. Empty for
+/// [`Channel::Dev`] (dev tracks local git HEAD, not GitHub releases).
+pub async fn list_versions(channel: &Channel, token: &str) -> Result<Vec<VersionEntry>> {
+    if matches!(channel, Channel::Dev) {
+        return Ok(Vec::new());
+    }
+    if token.is_empty() {
+        bail!("no github token available — set secret 'github_token' or export GITHUB_TOKEN");
+    }
+
+    let client = utils::http::Client::new();
+    let user_agent = format!("{APP_NAME}/{CURRENT_VERSION}");
+    let url = format!("{APP_REPO_API_URL}/releases?per_page=100");
+    let releases: Vec<ReleaseMeta> = client
+        .get(url)
+        .bearer(token)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
+        .header("User-Agent", &user_agent)
+        .send()
+        .await
+        .context("GitHub API request failed")?
+        .json()
+        .context("failed to parse releases JSON")?;
+
+    let mut entries: Vec<VersionEntry> = releases
+        .into_iter()
+        .filter(|r| channel.accepts(&r.tag_name))
+        .map(|r| {
+            let stripped = r.tag_name.trim_start_matches('v');
+            VersionEntry {
+                is_current: stripped == CURRENT_VERSION,
+                tag: r.tag_name,
+                prerelease: r.prerelease,
+                published_at: r.published_at,
+            }
+        })
+        .collect();
+
+    entries.sort_by(|a, b| {
+        if is_newer_full(&a.tag, &b.tag) {
+            std::cmp::Ordering::Less // newer first
+        } else if is_newer_full(&b.tag, &a.tag) {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    });
+    Ok(entries)
+}
+
 /// Download the new binary, verify its checksum, and atomically replace the
 /// current binary. Token must be the same one used for `check_for_update`.
 pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {

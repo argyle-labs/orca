@@ -1,8 +1,8 @@
 //! Orca SDK — headless plugin and federation client library.
 //!
-//! This crate is the dependency surface for plugins, Meerkat, workers, and
-//! native app shells. It must never depend on orca-server or anything that
-//! requires the `ui` feature.
+//! This crate is the dependency surface for plugins, downstream consumers,
+//! workers, and native app shells. It must never depend on orca-server or
+//! anything that requires the `ui` feature.
 //!
 //! ## Surface
 //!
