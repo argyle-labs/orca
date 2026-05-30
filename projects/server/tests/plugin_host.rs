@@ -1331,6 +1331,7 @@ async fn hello_rejects_when_required_plugin_dep_missing() {
                     methods_optional: vec![],
                     plugins_required: vec!["nonexistent>=0.1.0".into()],
                     plugins_optional: vec![],
+                    plugin_namespace: String::new(),
                 })
                 .unwrap(),
             ),
