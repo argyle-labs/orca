@@ -185,7 +185,7 @@ mod tests {
     }
 
     fn ctx() -> ToolCtx {
-        use utils::config::{Config, Model};
+        use contract::config::{Config, Model};
         ToolCtx::new(Arc::new(Config {
             anthropic_api_key: None,
             lmstudio_url: "http://localhost:1234".into(),

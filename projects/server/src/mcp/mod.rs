@@ -11,11 +11,11 @@ use ::mcp::context7;
 
 use anyhow::Result;
 use contract::ToolCtx;
+use contract::config::Config;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use utils::config::Config;
 
 pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     let mut ctx = ToolCtx::new(config);

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use utils::config::APP_NAME;
+use contract::config::APP_NAME;
 // rand 0.10: fill_bytes is on the `Rng` trait (was on `RngCore`).
 use rand::Rng;
 use serde::Deserialize;

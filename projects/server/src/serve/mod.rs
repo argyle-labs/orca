@@ -44,7 +44,7 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
     let pki_dir = db_path
         .parent()
         .unwrap_or(std::path::Path::new("."))
-        .join(utils::config::APP_PKI_DIR);
+        .join(contract::config::APP_PKI_DIR);
     let app = build_router(dev, db_path);
 
     let addr: SocketAddr = if dev {
@@ -117,7 +117,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     let pki_dir = db_path
         .parent()
         .unwrap_or(std::path::Path::new("."))
-        .join(utils::config::APP_PKI_DIR);
+        .join(contract::config::APP_PKI_DIR);
     // `port` is the HTTP bind (CLI `--port`, default APP_REST_HTTP_PORT).
     // HTTPS uses the Config-resolved https port (env-overridable). Both
     // listen concurrently — homelab clients without an internal CA reach
@@ -605,7 +605,7 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
 /// directly. Best-effort: a config-load failure disables the scheduler but
 /// does not abort the daemon.
 fn spawn_scheduler_runtime() {
-    match utils::config::Config::load() {
+    match contract::config::Config::load() {
         Ok(cfg) => {
             let cfg = Arc::new(cfg);
             let ctx = Arc::new(crate::mcp::build_tool_ctx(cfg));
@@ -976,7 +976,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
 
     // Mount the OrcaTool registry under /api/tools. Same registry as MCP stdio
     // and CLI — one trait impl, three live surfaces (REST + MCP + CLI).
-    let api = match utils::config::Config::load() {
+    let api = match contract::config::Config::load() {
         Ok(cfg) => {
             // Reuse the same registry + service-trait setup that the CLI and
             // MCP-stdio surfaces use, otherwise tools that look up services on

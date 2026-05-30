@@ -7,6 +7,8 @@
 //!
 //! No inventory, no axum, no tokio — those live in `orca-dispatch`.
 
+pub mod config;
+
 mod def;
 pub use def::{OrcaOp, OrcaToolDef};
 

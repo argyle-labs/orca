@@ -42,8 +42,8 @@ pub mod tools;
 pub mod users;
 
 use anyhow::{Context, Result};
+use contract::config::{APP_DB_FILE, APP_STATE_DIR};
 use rusqlite::Connection;
-use utils::config::{APP_DB_FILE, APP_STATE_DIR};
 
 // Re-export so downstream native crates can name `db::Connection` without
 // taking a direct rusqlite dep.

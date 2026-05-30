@@ -820,6 +820,7 @@ pub use listener::handle_pod_connection;
 
 use ::db::ports::mesh_port;
 use anyhow::{Context, Result};
+use contract::config::{APP_PKI_DIR, APP_STATE_DIR};
 use orca_sdk::framing::{read_frame, write_frame};
 use orca_sdk::jsonrpc::{Message, Request, Response};
 use orca_sdk::pki;
@@ -830,7 +831,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
-use utils::config::{APP_PKI_DIR, APP_STATE_DIR};
 
 pub const POD_PING_METHOD: &str = "pod/ping";
 pub const POD_DEV_SYNC_METHOD: &str = "pod/dev-sync";

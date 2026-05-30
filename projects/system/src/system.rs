@@ -168,9 +168,9 @@ async fn system_detail(
 mod tests {
     use super::*;
     use contract::ToolCtx;
+    use contract::config::{Config, Model};
     use std::path::PathBuf;
     use std::sync::Arc;
-    use utils::config::{Config, Model};
 
     fn empty_ctx() -> ToolCtx {
         ToolCtx::new(Arc::new(Config {

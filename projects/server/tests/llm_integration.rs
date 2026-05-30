@@ -16,13 +16,13 @@ use ::llm::{
     buffer_sink, classify_model, discover_all, estimate_context_window, resolve_model,
     select_for_task, stdout_sink,
 };
+use contract::config::{Config, Model};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::sync::{Mutex, MutexGuard};
 use tokio_util::sync::CancellationToken;
-use utils::config::{Config, Model};
 
 /// Generous per-chat timeout so a misbehaving local model can't hang the
 /// suite forever. Long enough that healthy slow models still complete.

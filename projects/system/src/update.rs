@@ -13,9 +13,9 @@
 //! orca.db; falls back to `$GITHUB_TOKEN` for bootstrap / CI.
 
 use anyhow::{Context, Result, bail};
+use contract::config::{APP_NAME, APP_REPO_API_URL};
 use serde::Deserialize;
 use std::path::PathBuf;
-use utils::config::{APP_NAME, APP_REPO_API_URL};
 
 use crate::update_state::{Channel, is_newer_full};
 

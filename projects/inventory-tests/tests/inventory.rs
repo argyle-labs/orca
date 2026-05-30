@@ -8,13 +8,13 @@ use dispatch::ToolRegistration;
 use agents as _;
 use auth as _;
 use docker as _;
-use docs as _;
 use homeassistant as _;
 use mcp as _;
 use platform as _;
 use plugins as _;
 use proxmox as _;
 use system as _;
+use utils as _;
 
 #[test]
 fn host_tools_present_in_inventory_slice() {

@@ -2,7 +2,7 @@ use crate::sessions::log;
 use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;
-use utils::config::Config;
+use contract::config::Config;
 
 #[derive(Subcommand)]
 pub enum LogAction {

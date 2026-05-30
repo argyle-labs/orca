@@ -19,8 +19,7 @@ serde_json    = { workspace = true }
 inventory     = { workspace = true }
 
 utils = { path = "../utils" }
-docs = { path = "../docs" }
-llm = { path = "../llm" }
+llm = { path = "../plugins/llm" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }

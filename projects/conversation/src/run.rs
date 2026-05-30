@@ -96,8 +96,8 @@ async fn agent_run(args: AgentRunArgs, ctx: &ToolCtx) -> Result<AgentRunOutput> 
 
 async fn run_session(
     full_prompt: &str,
-    config: &utils::config::Config,
-    forced_model: Option<utils::config::Model>,
+    config: &contract::config::Config,
+    forced_model: Option<contract::config::Model>,
 ) -> Result<String> {
     let (sink, buf) = buffer_sink();
     let pctx = ProjectContext::default();
@@ -108,7 +108,11 @@ async fn run_session(
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn delegate_envelope(agent: &str, prompt: &str, config: &utils::config::Config) -> Result<String> {
+fn delegate_envelope(
+    agent: &str,
+    prompt: &str,
+    config: &contract::config::Config,
+) -> Result<String> {
     let agent_prompt = agents::resolve::load_agent_prompt(agent, config)
         .ok_or_else(|| anyhow::anyhow!("agent not found: {agent}"))?;
     let envelope = json!({

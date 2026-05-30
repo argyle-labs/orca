@@ -3,10 +3,10 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use contract::config::{APP_PKI_DIR, APP_STATE_DIR};
 use derive::orca_tool;
 use orca_sdk::pki::{self as sdk_pki, Capability};
 use std::path::PathBuf;
-use utils::config::{APP_PKI_DIR, APP_STATE_DIR};
 
 fn pki_dir() -> PathBuf {
     dirs::home_dir()

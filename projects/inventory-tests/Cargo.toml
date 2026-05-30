@@ -19,17 +19,16 @@ dispatch = { path = "../dispatch" }
 inventory     = { workspace = true }
 
 # Link every bucket so its inventory::submit! statics are pulled in.
-agents        = { path = "../agents" }
+agents        = { path = "../plugins/agents" }
 auth          = { path = "../auth" }
-docs          = { path = "../docs" }
-mcp           = { path = "../mcp" }
+mcp           = { path = "../plugins/mcp" }
 platform      = { path = "../platform" }
-plugins       = { path = "../plugins" }
+plugins       = { path = "../plugins/runtime" }
 pod           = { path = "../pod" }
 system        = { path = "../system" }
-docker        = { path = "../integrations/docker" }
-homeassistant = { path = "../integrations/homeassistant" }
-proxmox       = { path = "../integrations/proxmox" }
+docker        = { path = "../plugins/docker" }
+homeassistant = { path = "../plugins/homeassistant" }
+proxmox       = { path = "../plugins/proxmox" }
 
 [lints]
 workspace = true

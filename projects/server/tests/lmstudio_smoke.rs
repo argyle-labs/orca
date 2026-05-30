@@ -663,11 +663,11 @@ async fn lmstudio_mcp_run_agent_offload() {
     // Build a Config that points at LM Studio and has no Anthropic key — ensures
     // build_backend can only produce an LMStudioBackend.
     let home = std::env::var("HOME").expect("HOME not set");
-    let config = utils::config::Config {
+    let config = contract::config::Config {
         anthropic_api_key: None,
         lmstudio_url: LMS_URL.to_string(),
         ollama_url: String::new(),
-        default_model: utils::config::Model::LMStudio {
+        default_model: contract::config::Model::LMStudio {
             id: FAST_MODEL.to_string(),
             url: String::new(),
         },

@@ -22,9 +22,9 @@
 //! out of SQLite for the common case.
 
 use anyhow::{Context, Result};
+use contract::config::Ports;
 use rusqlite::Connection;
 use std::sync::OnceLock;
-use utils::config::Ports;
 
 const PORTS_NOUN: &str = "ports";
 const PORTS_NAME: &str = "rest";
@@ -156,7 +156,7 @@ pub fn mesh_port() -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use utils::config::{APP_PLUGIN_PORT, APP_REST_HTTP_PORT, APP_REST_HTTPS_PORT};
+    use contract::config::{APP_PLUGIN_PORT, APP_REST_HTTP_PORT, APP_REST_HTTPS_PORT};
 
     fn open_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();

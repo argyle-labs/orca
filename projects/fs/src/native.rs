@@ -7,14 +7,14 @@ use crate::{
     FsEntry, FsNodeKind, FsRootEntry, FsSearchHit, FsSearchMatch, FsStatOutput, FsTreeNode,
 };
 use anyhow::{Result, anyhow};
-use docs::embedded;
-use docs::mcp_helpers as roots_helper;
-use docs::tree::{NodeType, TreeNode};
+use contract::config::Config;
 use llm::local as local_llm;
+use namespace::file_roots as roots_helper;
 use std::path::{Path, PathBuf};
-use utils::config::Config;
+use utils::embedded;
 use utils::fs::expand_tilde;
 use utils::markdown::to_llm_text;
+use utils::tree::{NodeType, TreeNode};
 
 const EMBEDDED_ROOT: &str = "docs";
 
@@ -59,7 +59,7 @@ fn resolve(
     config: &Config,
     root: Option<&str>,
     path: &str,
-) -> Result<Option<(PathBuf, roots_helper::DocRoot)>> {
+) -> Result<Option<(PathBuf, roots_helper::FileRoot)>> {
     match root {
         Some(EMBEDDED_ROOT) => Ok(None),
         Some(name) => {
@@ -77,7 +77,7 @@ fn resolve(
         }
         None => {
             let dir = resolve_absolute(path)?;
-            let r = roots_helper::DocRoot {
+            let r = roots_helper::FileRoot {
                 name: String::new(),
                 path: dir.clone(),
                 ignored: Default::default(),
@@ -229,7 +229,7 @@ pub async fn search(
     llm_format: bool,
 ) -> Result<(Vec<FsSearchHit>, Option<String>)> {
     let all_roots = roots_helper::doc_roots(config);
-    let roots: Vec<&roots_helper::DocRoot> = all_roots
+    let roots: Vec<&roots_helper::FileRoot> = all_roots
         .iter()
         .filter(|r| filter == "all" || r.name == filter)
         .collect();

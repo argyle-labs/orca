@@ -16,11 +16,11 @@ use ::llm::{
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
+use contract::config::{Config, Model};
 use crossterm::event::{Event, EventStream};
 use futures_util::StreamExt;
 use rustyline::DefaultEditor;
 use tokio::sync::mpsc;
-use utils::config::{Config, Model};
 
 pub struct Session {
     pub(super) config: Config,

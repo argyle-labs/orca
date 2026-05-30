@@ -9,7 +9,7 @@ use crate::{
     NamespaceShareEntry, NamespaceSharesReport, NamespaceSummary,
 };
 use anyhow::{Context, Result, anyhow};
-use utils::config::{Config, LOCAL_USER};
+use contract::config::{Config, LOCAL_USER};
 
 fn user_id() -> String {
     LOCAL_USER.to_string()

@@ -140,7 +140,7 @@ impl NamespaceManager {
         Self { namespaces_root }
     }
 
-    pub fn from_config(cfg: &utils::config::Config) -> Self {
+    pub fn from_config(cfg: &contract::config::Config) -> Self {
         Self::new(cfg.profiles_dir())
     }
 

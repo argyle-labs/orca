@@ -161,9 +161,9 @@ async fn projects_list(
 mod tests {
     use super::*;
     use contract::ToolCtx;
+    use contract::config::{Config, Model};
     use std::path::PathBuf;
     use std::sync::Arc;
-    use utils::config::{Config, Model};
 
     fn ctx_with_memory(root: PathBuf) -> ToolCtx {
         ToolCtx::new(Arc::new(Config {

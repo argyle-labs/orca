@@ -27,7 +27,7 @@ inventory      = { workspace = true }
 
 utils = { path = "../utils" }
 orca-sdk = { path = "../sdk/rust" }
-agents = { path = "../agents", default-features = false }
+agents = { path = "../plugins/agents", default-features = false }
 db = { package = "db", path = "../db" }
 rusqlite = { workspace = true }
 uuid = { workspace = true }
@@ -45,7 +45,7 @@ cron         = { workspace = true }
 colored      = { workspace = true }
 axum         = { workspace = true, optional = true }
 regex        = { workspace = true, optional = true }
-docker = { path = "../integrations/docker", default-features = false }
+docker = { path = "../plugins/docker", default-features = false }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -69,8 +69,8 @@ mod tests {
     }
 
     fn make_ctx() -> Arc<ToolCtx> {
+        use contract::config::{Config, Model};
         use std::path::PathBuf;
-        use utils::config::{Config, Model};
         let cfg = Arc::new(Config {
             anthropic_api_key: None,
             lmstudio_url: "http://localhost:1234".into(),

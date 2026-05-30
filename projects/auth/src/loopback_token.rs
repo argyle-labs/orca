@@ -29,7 +29,9 @@ const TOKEN_FILENAME: &str = "loopback.token";
 
 fn secrets_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("no home dir")?;
-    Ok(home.join(utils::config::APP_STATE_DIR).join(SECRETS_SUBDIR))
+    Ok(home
+        .join(contract::config::APP_STATE_DIR)
+        .join(SECRETS_SUBDIR))
 }
 
 fn token_path() -> Result<PathBuf> {

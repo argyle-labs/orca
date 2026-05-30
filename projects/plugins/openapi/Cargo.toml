@@ -1,0 +1,30 @@
+[package]
+name = "openapi"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "openapi"
+path = "src/lib.rs"
+
+# Runtime OpenAPI parser. Consumers that want a typed client add
+# `progenitor` to their own [build-dependencies] and call generate_from_spec
+# below from their build.rs — progenitor itself isn't re-exported because
+# it must run in the consumer's build script.
+
+[dependencies]
+anyhow      = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+serde_yaml  = { workspace = true }
+reqwest     = { workspace = true, features = ["blocking"] }
+oas3        = "0.22"
+# `openapiv3` is the type system used by progenitor — included so the
+# `normalize` module can preprocess specs before codegen. Pulling it into
+# this crate keeps every "patch the upstream spec so progenitor accepts it"
+# fix in ONE place instead of duplicated across each integration build.rs.
+openapiv3   = "2"
+indexmap    = "2"
+
+[lints]
+workspace = true

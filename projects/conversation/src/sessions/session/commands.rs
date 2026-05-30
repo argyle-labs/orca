@@ -5,8 +5,8 @@ use ::llm::{
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
+use contract::config::Model;
 use tokio_util::sync::CancellationToken;
-use utils::config::Model;
 
 impl Session {
     pub(super) async fn handle_command(&mut self, input: &str) -> Result<()> {

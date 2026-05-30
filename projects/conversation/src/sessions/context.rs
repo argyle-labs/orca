@@ -1,5 +1,5 @@
 use anyhow::Result;
-use utils::config::Config;
+use contract::config::Config;
 
 /// Resolved project context: system prompt + memory content.
 #[derive(Debug, Default)]
@@ -100,8 +100,8 @@ fn local_model_prompt() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use contract::config::Model;
     use std::path::PathBuf;
-    use utils::config::Model;
 
     fn test_config(memory_root: PathBuf) -> Config {
         Config {

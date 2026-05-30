@@ -19,7 +19,7 @@ serde         = { workspace = true }
 inventory     = { workspace = true }
 tracing       = { workspace = true }
 utils    = { path = "../utils" }
-llm           = { path = "../llm" }
+llm           = { path = "../plugins/llm" }
 
 anyhow        = { workspace = true }
 async-trait   = { workspace = true }
@@ -36,7 +36,7 @@ tokio-util    = { workspace = true }
 unicode-width = "0.2"
 uuid          = { workspace = true }
 dirs          = { workspace = true }
-agents        = { path = "../agents" }
+agents        = { path = "../plugins/agents" }
 db            = { package = "db", path = "../db" }
 platform      = { path = "../platform" }
 

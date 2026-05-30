@@ -5,15 +5,15 @@
 use anyhow::Result;
 use colored::Colorize;
 use contract::ToolCtx;
+#[cfg(target_os = "linux")]
+use contract::config::APP_SYSTEMD_SERVICE;
+#[cfg(target_os = "macos")]
+use contract::config::{APP_DAEMON_LOG, APP_PLIST_LABEL};
+use contract::config::{APP_NAME, APP_STATE_DIR};
 use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::process::Command;
-#[cfg(target_os = "linux")]
-use utils::config::APP_SYSTEMD_SERVICE;
-#[cfg(target_os = "macos")]
-use utils::config::{APP_DAEMON_LOG, APP_PLIST_LABEL};
-use utils::config::{APP_NAME, APP_STATE_DIR};
 use utils::state::DaemonMode;
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -102,7 +102,7 @@ async fn daemon_reclaim_tool(
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DaemonInstallArgs {
     /// HTTP port to bind.
-    #[cfg_attr(feature = "cli", arg(short, long, default_value_t = utils::config::APP_REST_HTTP_PORT))]
+    #[cfg_attr(feature = "cli", arg(short, long, default_value_t = contract::config::APP_REST_HTTP_PORT))]
     #[serde(default = "default_http_port")]
     pub port: u16,
     /// Install as a SYSTEM service running as this user (requires root).
@@ -111,7 +111,7 @@ pub struct DaemonInstallArgs {
 }
 
 fn default_http_port() -> u16 {
-    utils::config::APP_REST_HTTP_PORT
+    contract::config::APP_REST_HTTP_PORT
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
@@ -302,7 +302,7 @@ fn install(port: u16, service_user: Option<String>) -> Result<()> {
             // chown the PKI tree to the service user so the daemon can read it.
             let pki_dir = std::path::PathBuf::from(&home)
                 .join(APP_STATE_DIR)
-                .join(utils::config::APP_PKI_DIR);
+                .join(contract::config::APP_PKI_DIR);
             chown_recursive(&pki_dir, &user)?;
             install_system_service(&binary, port, &user, &home)
         }
@@ -312,7 +312,7 @@ fn install(port: u16, service_user: Option<String>) -> Result<()> {
 fn ensure_pki_for_home(home: &str) -> Result<()> {
     let pki_dir = std::path::PathBuf::from(home)
         .join(APP_STATE_DIR)
-        .join(utils::config::APP_PKI_DIR);
+        .join(contract::config::APP_PKI_DIR);
     orca_sdk::pki::init(&pki_dir)?;
     Ok(())
 }

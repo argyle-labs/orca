@@ -46,7 +46,7 @@ pub struct UpdateApplyOutput {
 
 /// Apply the latest update on the configured channel. Reads `~/.orca/channel`
 /// when no channel given; rewrites it on success. Uses dev-source when set.
-#[orca_tool(domain = "system.update", verb = "apply")]
+#[orca_tool(domain = "system.update-state", verb = "apply")]
 async fn update_apply(args: UpdateApplyArgs, _ctx: &ToolCtx) -> Result<UpdateApplyOutput> {
     let channel_arg = args.channel.trim();
     if channel_arg.is_empty()
@@ -134,7 +134,7 @@ pub struct UpdateCheckOutput {
 
 /// Preview only — resolve the target version on the channel and cache its sha256.
 /// Does NOT replace the running binary.
-#[orca_tool(domain = "system.update", verb = "check")]
+#[orca_tool(domain = "system.update-state", verb = "check")]
 async fn update_check(args: UpdateCheckArgs, _ctx: &ToolCtx) -> Result<UpdateCheckOutput> {
     prune_check_cache();
     let channel = resolve_channel(args.channel.trim());
@@ -188,7 +188,7 @@ pub struct UpdatePinOutput {
 }
 
 /// Pin to a version. Future `system.update.apply` runs will not upgrade past this.
-#[orca_tool(domain = "system.update", verb = "pin")]
+#[orca_tool(domain = "system.update-state", verb = "pin")]
 async fn update_pin(args: UpdatePinArgs, _ctx: &ToolCtx) -> Result<UpdatePinOutput> {
     let version = args.version.trim();
     if version.is_empty() {
@@ -216,7 +216,7 @@ pub struct UpdateUnpinOutput {
 }
 
 /// Clear the version pin. `system.update.apply` resumes following the channel.
-#[orca_tool(domain = "system.update", verb = "unpin")]
+#[orca_tool(domain = "system.update-state", verb = "unpin")]
 async fn update_unpin(_args: UpdateUnpinArgs, _ctx: &ToolCtx) -> Result<UpdateUnpinOutput> {
     clear_version_pin()?;
     println!("[orca] pin cleared");
@@ -238,7 +238,7 @@ pub struct UpdateSetSourceOutput {
 }
 
 /// Set a dev-source URL. Future `system.update.apply` runs pull from there instead of GitHub.
-#[orca_tool(domain = "system.update", verb = "set-source")]
+#[orca_tool(domain = "system.update-state", verb = "set-source")]
 async fn update_set_source(
     args: UpdateSetSourceArgs,
     _ctx: &ToolCtx,
@@ -264,7 +264,7 @@ pub struct UpdateClearSourceOutput {
 }
 
 /// Clear the dev-source URL, reverting to GitHub-based updates.
-#[orca_tool(domain = "system.update", verb = "clear-source")]
+#[orca_tool(domain = "system.update-state", verb = "clear-source")]
 async fn update_clear_source(
     _args: UpdateClearSourceArgs,
     _ctx: &ToolCtx,
@@ -309,10 +309,10 @@ pub async fn startup_update_check() {
 mod tests {
     use super::*;
     use crate::update_state::read_version_pin;
+    use contract::config::{Config, Model};
     use serial_test::serial;
     use std::path::PathBuf;
     use std::sync::Arc;
-    use utils::config::{Config, Model};
 
     fn isolated_orca_home(scenario: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");

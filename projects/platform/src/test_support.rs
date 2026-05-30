@@ -2,9 +2,9 @@
 //! `native`+`test` only.
 
 use contract::ToolCtx;
+use contract::config::{Config, Model};
 use std::path::PathBuf;
 use std::sync::Arc;
-use utils::config::{Config, Model};
 
 pub fn empty_ctx() -> ToolCtx {
     ToolCtx::new(Arc::new(Config {

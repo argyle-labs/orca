@@ -39,24 +39,23 @@ pod      = { path = "../pod",      features = ["cli"] }
 system   = { path = "../system",   features = ["cli"] }
 platform = { path = "../platform", features = ["cli"] }
 namespace = { path = "../namespace", features = ["cli"] }
-agents   = { path = "../agents",   features = ["cli"] }
-plugins  = { path = "../plugins",  features = ["cli"] }
-docs     = { path = "../docs",     features = ["cli"] }
+agents   = { path = "../plugins/agents",   features = ["cli"] }
+plugins  = { path = "../plugins/runtime",  features = ["cli"] }
 fs       = { path = "../fs",       features = ["cli"] }
 specs    = { path = "../specs",    features = ["cli"] }
-mcp      = { path = "../mcp",      features = ["cli"] }
-llm      = { path = "../llm" }
+mcp      = { path = "../plugins/mcp",      features = ["cli"] }
+llm      = { path = "../plugins/llm" }
 conversation = { path = "../conversation" }
 # Integration crates (flat names, no facade)
-integrations-db = { path = "../integrations/db",          features = ["cli"] }
-docker        = { path = "../integrations/docker",        features = ["cli"] }
-dockge        = { path = "../integrations/dockge" }
-homeassistant = { path = "../integrations/homeassistant", features = ["cli"] }
-nfs           = { path = "../integrations/nfs" }
-ntfy          = { path = "../integrations/ntfy" }
-proxmox       = { path = "../integrations/proxmox",       features = ["cli"] }
-smb           = { path = "../integrations/smb" }
-unraid        = { path = "../integrations/unraid" }
+database = { path = "../plugins/db",          features = ["cli"] }
+docker        = { path = "../plugins/docker",        features = ["cli"] }
+dockge        = { path = "../plugins/dockge" }
+homeassistant = { path = "../plugins/homeassistant", features = ["cli"] }
+nfs           = { path = "../plugins/nfs" }
+ntfy          = { path = "../plugins/ntfy" }
+proxmox       = { path = "../plugins/proxmox",       features = ["cli"] }
+smb           = { path = "../plugins/smb" }
+unraid        = { path = "../plugins/unraid" }
 
 # CLI
 clap = { workspace = true }

@@ -126,7 +126,7 @@ async fn host_detail(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Resu
         .find(|c| c.key == "display_name")
         .map(|c| c.value.clone())
         .unwrap_or_else(native_support::os_hostname);
-    let machine_id = utils::config::Config::load()
+    let machine_id = contract::config::Config::load()
         .ok()
         .and_then(|c| std::fs::read_to_string(c.app_dir.join("machine_id")).ok())
         .map(|s| s.trim().to_string())

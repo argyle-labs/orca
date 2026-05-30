@@ -44,8 +44,8 @@
 //! is the explicit design-pass deliverable for #4.
 
 use contract::ToolCtx;
+use contract::config::Config;
 use std::sync::Arc;
-use utils::config::Config;
 
 /// Configuration passed from the native UI at construction time.
 ///

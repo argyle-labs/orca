@@ -28,7 +28,7 @@ clap       = { workspace = true,         optional = true }
 graphql-parser = "0.4"
 regex = { workspace = true }
 utoipa = { workspace = true }
-mcp = { path = "../mcp" }
+mcp = { path = "../plugins/mcp" }
 reqwest = { workspace = true }
 dirs = { workspace = true }
 toml = { workspace = true }

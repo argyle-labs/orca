@@ -5,9 +5,9 @@
 use auth::auth::{AuthLogin, AuthLogout, LoginArgs, LoginOutput, LogoutArgs, LogoutOutput};
 use contract::OrcaTool;
 use contract::ToolCtx;
+use contract::config::{Config, Model};
 use std::path::PathBuf;
 use std::sync::Arc;
-use utils::config::{Config, Model};
 
 fn make_ctx() -> ToolCtx {
     ToolCtx::new(Arc::new(Config {

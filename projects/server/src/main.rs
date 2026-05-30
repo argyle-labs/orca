@@ -1,6 +1,7 @@
 use ::llm::{ClaudeBackend, Message, ModelBackend, stdout_sink};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use contract::config::Config;
 use conversation::log_cmd::{LogAction, cmd_log};
 use conversation::sessions::context::ProjectContext;
 use conversation::sessions::session::Session;
@@ -9,7 +10,6 @@ use orca::serve;
 use orca::serve::openapi::orca_spec_json;
 use system::dev_serve as dev_serve_cmd;
 use system::hook::{self as hook_cmd, HookAction};
-use utils::config::Config;
 
 #[derive(Parser)]
 #[command(name = "orca", about = "Context-first AI agent orchestrator", version)]
@@ -65,14 +65,14 @@ enum Command {
         dev: bool,
         /// HTTP port to bind. Defaults to `APP_REST_HTTP_PORT` (12000);
         /// override with `--port`, `ORCA_HTTP_PORT=<n>`, or orca.toml.
-        #[arg(short, long, default_value_t = utils::config::APP_REST_HTTP_PORT)]
+        #[arg(short, long, default_value_t = contract::config::APP_REST_HTTP_PORT)]
         port: u16,
     },
 
     /// Run as daemon with cooperative port handoff (SIGUSR1 park / SIGUSR2 reclaim).
     /// `system.daemon.{status,stop,park,reclaim,install,uninstall}` are tools.
     Daemon {
-        #[arg(short, long, default_value_t = utils::config::APP_REST_HTTP_PORT)]
+        #[arg(short, long, default_value_t = contract::config::APP_REST_HTTP_PORT)]
         port: u16,
     },
 
@@ -80,7 +80,7 @@ enum Command {
     /// Parks the stable daemon, runs dev mode, reclaims on exit.
     Dev {
         /// HTTP port to bind. Defaults to `APP_REST_HTTP_PORT` (12000).
-        #[arg(short, long, default_value_t = utils::config::APP_REST_HTTP_PORT)]
+        #[arg(short, long, default_value_t = contract::config::APP_REST_HTTP_PORT)]
         port: u16,
     },
 
@@ -460,7 +460,7 @@ async fn main() -> Result<()> {
 fn bootstrap_default_profile(config: &Config) -> Result<()> {
     let conn = db::open(&config.db_path)?;
     let mgr = namespace::NamespaceManager::from_config(config);
-    let p = mgr.ensure_default_for(&conn, utils::config::LOCAL_USER)?;
+    let p = mgr.ensure_default_for(&conn, contract::config::LOCAL_USER)?;
     tracing::trace!(profile_id = %p.id, "active profile resolved");
     Ok(())
 }

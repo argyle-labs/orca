@@ -223,7 +223,7 @@ pub struct DevEnableResult {
 }
 
 pub fn cmd_dev_enable() -> Result<DevEnableResult> {
-    use utils::config::APP_REPO_URL;
+    use contract::config::APP_REPO_URL;
 
     let repo = dev_repo_path().context("no ORCA_HOME or HOME")?;
 
