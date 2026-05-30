@@ -48,9 +48,6 @@ struct ManifestPlugin {
     id: String,
     version: String,
     tier: String,
-    /// UI mode this plugin belongs to: "orca" (default) or a custom mode string (e.g. "rebuy").
-    #[serde(default = "default_mode")]
-    mode: String,
     #[serde(default)]
     context_injection: Option<String>,
     #[serde(default)]
@@ -67,15 +64,9 @@ struct ManifestPlugin {
     /// Optional directory containing spec files served with this plugin's namespace.
     #[serde(default)]
     specs: Option<ManifestSpecs>,
-    /// Other plugins this plugin extends. Dependencies are installed automatically
-    /// and inherit this plugin's mode so their nav links and MCPs appear in the
-    /// same workspace.
+    /// Other plugins this plugin extends. Dependencies are installed automatically.
     #[serde(default, rename = "uses")]
     uses: Vec<ManifestUses>,
-}
-
-fn default_mode() -> String {
-    "orca".to_string()
 }
 
 #[derive(Deserialize)]
@@ -102,7 +93,7 @@ fn parse_manifest(path: &str) -> Result<(Manifest, String)> {
 /// `instance_id` overrides the plugin's own id (for multi-instance scenarios).
 pub fn install_plugin(manifest_path: &str, instance_id: Option<&str>) -> Result<String> {
     let conn = db::open_default()?;
-    install_manifest(&conn, manifest_path, instance_id, None)
+    install_manifest(&conn, manifest_path, instance_id)
 }
 
 /// Public entry point: remove a plugin and cascade-remove exclusive deps.
@@ -121,20 +112,17 @@ pub fn remove_plugin(id: &str) -> Result<bool> {
 /// Install a single plugin manifest into the DB.
 ///
 /// - `instance_id_override`: use this id instead of the one declared in the toml.
-///   Enables multiple instances of the same plugin template (e.g. `atlassian@rebuy`
-///   and `atlassian@infra`) each with their own credentials and MCP connection.
-/// - `mode_override`: force this mode (parent passes its own mode to deps).
+///   Enables multiple instances of the same plugin template (e.g. `atlassian@infra-a`
+///   and `atlassian@infra-b`) each with their own credentials and MCP connection.
 ///
 /// Returns the instance id that was registered.
 fn install_manifest(
     conn: &rusqlite::Connection,
     manifest_path: &str,
     instance_id_override: Option<&str>,
-    mode_override: Option<&str>,
 ) -> Result<String> {
     let (m, abs_path) = parse_manifest(manifest_path)?;
     let instance_id = instance_id_override.unwrap_or(&m.plugin.id).to_string();
-    let mode = mode_override.unwrap_or(&m.plugin.mode).to_string();
     let specs_dir = m
         .plugin
         .specs
@@ -186,7 +174,6 @@ fn install_manifest(
             .unwrap_or_else(|| "minimal".into()),
         enabled: true,
         command_map: m.plugin.commands.clone(),
-        mode: mode.clone(),
         nav_links: m.plugin.nav_links.clone(),
         search_tools: m.plugin.search_tools,
         specs_dir,

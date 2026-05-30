@@ -229,12 +229,11 @@ pub fn upsert(conn: &Connection, plugin: &PluginRow) -> Result<()> {
         Some(to_json_arr(&plugin.mcp_urls))
     };
     conn.execute(
-        "INSERT INTO plugins (id, manifest_path, tier, mode, mcp_command, mcp_args, mcp_env, context_injection, enabled, command_map, mcp_token_env, nav_links, search_tools, specs_dir, mcp_url)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+        "INSERT INTO plugins (id, manifest_path, tier, mcp_command, mcp_args, mcp_env, context_injection, enabled, command_map, mcp_token_env, nav_links, search_tools, specs_dir, mcp_url)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(id) DO UPDATE SET
              manifest_path     = excluded.manifest_path,
              tier              = excluded.tier,
-             mode              = excluded.mode,
              mcp_command       = excluded.mcp_command,
              mcp_args          = excluded.mcp_args,
              mcp_env           = excluded.mcp_env,
@@ -247,7 +246,7 @@ pub fn upsert(conn: &Connection, plugin: &PluginRow) -> Result<()> {
              specs_dir         = excluded.specs_dir,
              mcp_url           = excluded.mcp_url",
         rusqlite::params![
-            plugin.id, plugin.manifest_path, plugin.tier, plugin.mode,
+            plugin.id, plugin.manifest_path, plugin.tier,
             plugin.mcp_command, args_json, env_json, plugin.context_injection,
             plugin.enabled, map_json, plugin.mcp_token_env, nav_json, search_tools_json,
             plugin.specs_dir, mcp_url_json,

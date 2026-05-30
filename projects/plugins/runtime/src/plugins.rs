@@ -12,7 +12,6 @@ use derive::orca_tool;
 pub struct PluginEntry {
     pub id: String,
     pub tier: String,
-    pub mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_command: Option<String>,
     pub enabled: bool,
@@ -139,7 +138,6 @@ async fn list_plugins(
         .map(|p| PluginEntry {
             id: p.id,
             tier: p.tier,
-            mode: p.mode,
             mcp_command: p.mcp_command,
             enabled: p.enabled,
         })
