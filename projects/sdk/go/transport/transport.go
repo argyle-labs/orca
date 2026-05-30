@@ -107,6 +107,7 @@ type HelloOptions struct {
 	MethodsOptional []string
 	PluginsRequired []string
 	PluginsOptional []string
+	PluginNamespace string
 }
 
 // NewHelloOptions returns sensible defaults: core_min_required=0.1.0.
@@ -489,6 +490,7 @@ func (t *Transport) HelloFull(ctx context.Context, opts HelloOptions) (*HelloRes
 		MethodsOptional: opts.MethodsOptional,
 		PluginsRequired: opts.PluginsRequired,
 		PluginsOptional: opts.PluginsOptional,
+		PluginNamespace: opts.PluginNamespace,
 	}
 	resp, err := t.Call(ctx, "orca/hello", params)
 	if err != nil {
