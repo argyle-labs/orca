@@ -60,7 +60,7 @@ pub struct SecretGetReport {
 // ── secret.set ──────────────────────────────────────────────────────────────
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SecretSetArgs {
     pub name: String,
     /// Backend kind. Defaults to "inline".
@@ -78,11 +78,6 @@ pub struct SecretSetArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "cli", arg(long))]
     pub description: Option<String>,
-    /// When set, proxy the call to the named remote peer via the pod mesh
-    /// instead of writing the secret locally.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long, hide = true))]
-    pub peer_id: Option<String>,
 }
 
 fn default_inline() -> String {
@@ -181,9 +176,8 @@ async fn secret_detail(
 
 /// [MUTATES STATE] Create or update a secret. For 'inline' backend, `value` is required;
 /// for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field').
-/// When `peer_id` is set the secret is written on the named peer instead of locally
-/// — same admin trust surface as `system.update`.
-#[orca_tool(domain = "system.secret", verb = "set", peer_dispatch = true)]
+/// Write the secret on a remote system with the top-level `--peer <h>` flag.
+#[orca_tool(domain = "system.secret", verb = "set")]
 async fn secret_set(
     args: SecretSetArgs,
     _ctx: &contract::ToolCtx,

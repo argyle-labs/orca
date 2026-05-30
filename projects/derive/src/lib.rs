@@ -63,18 +63,12 @@ struct ToolAttr {
     /// install/uninstall, package build. The dispatcher additionally requires
     /// admin auth on every remote invocation regardless of this flag.
     remote_ok: bool,
-    /// Opt-in: `#[orca_tool(..., peer_dispatch = true)]` auto-emits a proxy
-    /// stanza inside `OrcaTool::run` that inspects `args.peer_id` and, when
-    /// `Some`, dispatches to that peer via `contract::RemoteExec`
-    /// instead of running locally. Requires the Args type to derive `Clone`
-    /// and `Serialize` and to declare `peer_id: Option<String>`.
-    peer_dispatch: bool,
     /// Opt-in: `#[orca_tool(..., refresh_runtime = true)]` schedules a
     /// best-effort `RemoteExec::refresh_peer_runtime(peer)` after a successful
     /// peer dispatch. Use for tools whose success mutates the peer's reported
     /// runtime snapshot (version, channel, mode) — `system.update` is the
     /// canonical case. Default off so secret/config writes don't pay for it.
-    /// Requires `peer_dispatch = true`.
+    /// Meaningless on `local_only` tools (compile-time rejected).
     refresh_runtime: bool,
     /// Minimum role required to invoke this tool via authenticated surfaces.
     /// `"any"` (default) means any authenticated identity passes; `"admin"`
@@ -90,7 +84,6 @@ impl Parse for ToolAttr {
         let mut verb = None;
         let mut cli_mode = None;
         let mut remote_ok = true;
-        let mut peer_dispatch = false;
         let mut refresh_runtime = false;
         let mut role: Option<LitStr> = None;
         for nv in items {
@@ -133,19 +126,6 @@ impl Parse for ToolAttr {
                     if v {
                         remote_ok = false;
                     }
-                }
-                "peer_dispatch" => {
-                    peer_dispatch = match &nv.value {
-                        Expr::Lit(ExprLit {
-                            lit: Lit::Bool(b), ..
-                        }) => b.value,
-                        _ => {
-                            return Err(syn::Error::new_spanned(
-                                &nv.value,
-                                "peer_dispatch expects a bool literal",
-                            ));
-                        }
-                    };
                 }
                 "refresh_runtime" => {
                     refresh_runtime = match &nv.value {
@@ -204,7 +184,6 @@ impl Parse for ToolAttr {
                 .ok_or_else(|| syn::Error::new(Span::call_site(), "missing `verb = \"…\"`"))?,
             cli_mode,
             remote_ok,
-            peer_dispatch,
             refresh_runtime,
             role,
         })
@@ -553,17 +532,16 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     let ctx_param_name = Ident::new("ctx", Span::call_site());
     let ctx_param = quote! { #ctx_param_name: &::contract::ToolCtx };
 
-    if attr.peer_dispatch && !needs_args_binding {
+    // Peer dispatch is universal: every tool with `remote_ok = true` (i.e.
+    // not `local_only`) gets the proxy stanza. The trigger lives on
+    // `ToolCtx::peer()` — populated by the CLI `--peer <h>` flag, REST
+    // `X-Orca-Peer` header, or MCP envelope — so individual Args structs no
+    // longer carry a `peer_id` field. `local_only = true` opts out.
+    let emit_peer_dispatch = attr.remote_ok;
+    if attr.refresh_runtime && !emit_peer_dispatch {
         return Err(syn::Error::new_spanned(
             &item.sig.inputs,
-            "peer_dispatch=true requires a named (non-underscored) args parameter \
-             so the macro can read `args.peer_id`",
-        ));
-    }
-    if attr.refresh_runtime && !attr.peer_dispatch {
-        return Err(syn::Error::new_spanned(
-            &item.sig.inputs,
-            "refresh_runtime=true requires peer_dispatch=true",
+            "refresh_runtime=true is meaningless on a local_only tool",
         ));
     }
     let refresh_runtime_stanza = if attr.refresh_runtime {
@@ -594,14 +572,14 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     } else {
         quote! {}
     };
-    let peer_dispatch_stanza = if attr.peer_dispatch {
+    let peer_dispatch_stanza = if emit_peer_dispatch {
         quote! {
-            if let ::core::option::Option::Some(__peer_id) = #args_forward.peer_id.clone() {
-                let mut __a = ::core::clone::Clone::clone(&#args_forward);
-                __a.peer_id = ::core::option::Option::None;
+            if let ::core::option::Option::Some(__peer_id) =
+                #ctx_param_name.peer().map(::std::string::ToString::to_string)
+            {
                 let __svc = #ctx_param_name
                     .service::<::std::sync::Arc<dyn ::contract::RemoteExec>>()?;
-                let __args_value = ::serde_json::to_value(&__a)
+                let __args_value = ::serde_json::to_value(&#args_forward)
                     .map_err(|e| ::anyhow::anyhow!("peer_dispatch: serialize args: {e}"))?;
                 // Forward the ctx's ambient operator identity; the transport
                 // mints a signed caller token from it (project-remote-exec-full-fix

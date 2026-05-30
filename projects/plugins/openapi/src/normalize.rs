@@ -84,7 +84,7 @@ pub fn for_progenitor(spec: &mut OpenAPI) -> NormalizeReport {
     rewrite_multipart_to_octet_stream(spec, &mut r);
     collapse_response_media_types(spec, &mut r);
     collapse_request_media_types(spec, &mut r);
-    collapse_success_response_statuses(spec, &mut r);
+    merge_success_response_schemas(spec, &mut r);
     r
 }
 
@@ -234,39 +234,69 @@ fn keep_one_json_media_type(
 /// Progenitor panics (`response_types.len() <= 1`) when an operation lists
 /// more than one success-range (2xx) response, because it can only emit a
 /// single success type per generated fn. Real specs (e.g. Prowlarr) declare
-/// both `200` and `201` for some create endpoints. Keep the lowest-numbered
-/// 2xx response (most clients treat that as canonical) and drop the rest.
-/// `2XX`-range responses are kept only if no specific 2xx code is present.
-pub fn collapse_success_response_statuses(spec: &mut OpenAPI, report: &mut NormalizeReport) {
-    let mut hits: Vec<(String, String, Vec<String>)> = Vec::new();
+/// both `200` and `201` for some create endpoints with different schemas.
+///
+/// We preserve every status code AND every response shape by replacing each
+/// 2xx response's JSON schema with a synthetic `oneOf` union of all the
+/// distinct shapes (including a `null` variant if any 2xx is empty-bodied).
+/// Progenitor sees one unified success type across statuses → emits an
+/// enum where each upstream response shape becomes a callable variant.
+pub fn merge_success_response_schemas(spec: &mut OpenAPI, report: &mut NormalizeReport) {
+    let mut hits: Vec<(String, Vec<String>, usize)> = Vec::new();
     for_each_op_mut(spec, |method, path, op| {
         let Some(op) = op else { return };
-        let success_keys: Vec<StatusCode> = op
+        let success_statuses: Vec<StatusCode> = op
             .responses
             .responses
             .keys()
             .filter(|s| is_success_status(s))
             .cloned()
             .collect();
-        if success_keys.len() <= 1 {
+        if success_statuses.len() <= 1 {
             return;
         }
-        let keep = pick_canonical_success(&success_keys).clone();
-        let dropped: Vec<String> = success_keys
-            .iter()
-            .filter(|s| **s != keep)
-            .map(status_label)
-            .collect();
-        op.responses
-            .responses
-            .retain(|s, _| !is_success_status(s) || *s == keep);
+
+        // Collect distinct response shapes by serde-value identity. A
+        // missing JSON content entry contributes a synthetic `null`
+        // variant so empty-body 2xx responses still round-trip.
+        let mut variants: Vec<ReferenceOr<Schema>> = Vec::new();
+        let mut had_empty = false;
+        for s in &success_statuses {
+            let Some(ReferenceOr::Item(resp)) = op.responses.responses.get(s) else {
+                continue;
+            };
+            match json_schema(resp) {
+                Some(schema) => push_distinct(&mut variants, schema),
+                None => had_empty = true,
+            }
+        }
+        if had_empty {
+            push_distinct(&mut variants, ReferenceOr::Item(null_schema()));
+        }
+        if variants.len() <= 1 {
+            return;
+        }
+
+        let union = ReferenceOr::Item(Schema {
+            schema_data: SchemaData::default(),
+            schema_kind: SchemaKind::OneOf {
+                one_of: variants.clone(),
+            },
+        });
+        for s in &success_statuses {
+            let Some(ReferenceOr::Item(resp)) = op.responses.responses.get_mut(s) else {
+                continue;
+            };
+            set_json_schema(resp, union.clone());
+        }
+
         hits.push((
             format!("{} {}", method.to_uppercase(), path),
-            status_label(&keep),
-            dropped,
+            success_statuses.iter().map(status_label).collect(),
+            variants.len(),
         ));
     });
-    report.collapsed_success_statuses.extend(hits);
+    report.merged_success_responses.extend(hits);
 }
 
 fn is_success_status(s: &StatusCode) -> bool {
@@ -277,21 +307,47 @@ fn is_success_status(s: &StatusCode) -> bool {
     }
 }
 
-fn pick_canonical_success(keys: &[StatusCode]) -> &StatusCode {
-    keys.iter()
-        .filter(|s| matches!(s, StatusCode::Code(_)))
-        .min_by_key(|s| match s {
-            StatusCode::Code(c) => *c,
-            _ => u16::MAX,
-        })
-        .or_else(|| keys.first())
-        .expect("caller guarantees non-empty")
-}
-
 fn status_label(s: &StatusCode) -> String {
     match s {
         StatusCode::Code(c) => c.to_string(),
         StatusCode::Range(r) => format!("{r}XX"),
+    }
+}
+
+fn json_schema(resp: &openapiv3::Response) -> Option<ReferenceOr<Schema>> {
+    resp.content
+        .iter()
+        .find(|(k, _)| k.contains("json"))
+        .and_then(|(_, mt)| mt.schema.clone())
+}
+
+fn set_json_schema(resp: &mut openapiv3::Response, schema: ReferenceOr<Schema>) {
+    // Ensure exactly one `application/json` entry, pointing at the union.
+    let mt = resp
+        .content
+        .entry("application/json".into())
+        .or_insert_with(MediaType::default);
+    mt.schema = Some(schema);
+}
+
+fn push_distinct(out: &mut Vec<ReferenceOr<Schema>>, candidate: ReferenceOr<Schema>) {
+    let cv = serde_json::to_value(&candidate).ok();
+    if out
+        .iter()
+        .any(|existing| serde_json::to_value(existing).ok() == cv)
+    {
+        return;
+    }
+    out.push(candidate);
+}
+
+fn null_schema() -> Schema {
+    Schema {
+        schema_data: SchemaData {
+            nullable: true,
+            ..Default::default()
+        },
+        schema_kind: SchemaKind::Type(Type::String(StringType::default())),
     }
 }
 

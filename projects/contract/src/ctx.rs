@@ -19,6 +19,13 @@ pub struct ToolCtx {
     /// Used to mint the signed caller token when a tool dispatches to a remote
     /// peer. `None` on unauthenticated/bootstrap paths.
     auth: Option<crate::CallerIdentity>,
+    /// Target peer for this invocation. When `Some(peer)` and the tool is not
+    /// `local_only`, the dispatcher (macro-emitted stanza) proxies the call
+    /// via `RemoteExec` instead of running locally. Populated from the
+    /// `--peer <h>` CLI flag, the `X-Orca-Peer` REST header, or an MCP
+    /// envelope field. `None` runs locally. Peer routing is opt-out: tools
+    /// marked `local_only = true` reject a peer target with a clear error.
+    peer_target: Option<String>,
     services: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
 }
 
@@ -27,6 +34,7 @@ impl ToolCtx {
         Self {
             config,
             auth: None,
+            peer_target: None,
             services: HashMap::new(),
         }
     }
@@ -49,6 +57,25 @@ impl ToolCtx {
     /// The ambient operator identity, if one was set.
     pub fn caller(&self) -> Option<crate::CallerIdentity> {
         self.auth.clone()
+    }
+
+    /// Set the target peer in-place. Called by the CLI dispatcher when
+    /// `--peer <h>` is present (and by REST/MCP middleware on equivalent
+    /// per-request inputs) before the tool's `OrcaTool::run` fires.
+    pub fn set_peer(&mut self, peer: Option<String>) {
+        self.peer_target = peer.filter(|s| !s.trim().is_empty());
+    }
+
+    /// Builder-style peer setter, mirroring `with_auth`. Useful when
+    /// constructing a one-off ctx in tests or scripted call sites.
+    pub fn with_peer(mut self, peer: impl Into<String>) -> Self {
+        self.set_peer(Some(peer.into()));
+        self
+    }
+
+    /// The target peer for this invocation, if one was set.
+    pub fn peer(&self) -> Option<&str> {
+        self.peer_target.as_deref()
     }
 
     /// Insert a service handle. `T` is typically `Arc<dyn FooService>` —

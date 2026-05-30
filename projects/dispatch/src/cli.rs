@@ -18,6 +18,12 @@ use clap::{ArgMatches, Command};
 
 use contract::ToolCtx;
 
+/// Top-level `--peer <hostname>` flag exposed on every CLI invocation. When
+/// present, the dispatcher populates `ToolCtx::peer_target` before invoking
+/// the matched tool. Tools marked `local_only` will reject the peer routing
+/// and surface a clear error.
+const PEER_FLAG: &str = "__orca_peer";
+
 /// Erased CLI dispatch closure: parses matches into the op's Args struct,
 /// invokes `OrcaTool::run`, formats Output to stdout.
 pub type CliRunFn =
@@ -87,7 +93,35 @@ pub fn build_root(mut root: Command) -> Command {
     for (name, node) in tree.children {
         root = root.subcommand(materialize(name, node));
     }
-    root
+    root.arg(
+        clap::Arg::new(PEER_FLAG)
+            .long("peer")
+            .value_name("HOSTNAME")
+            .global(true)
+            .help(
+                "Run this command on a remote peer over the pod mesh. Any tool \
+                 that isn't marked local-only can be peer-dispatched; the peer \
+                 enforces the same role checks as a local call.",
+            ),
+    )
+}
+
+/// Pull `--peer` out of the matched args (top-level or any subcommand level,
+/// since it's a clap global). `None` means run locally.
+fn extract_peer_flag(matches: &ArgMatches) -> Option<String> {
+    let mut cur = matches;
+    loop {
+        if let Some(v) = cur.get_one::<String>(PEER_FLAG) {
+            let t = v.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+        match cur.subcommand() {
+            Some((_, sub)) => cur = sub,
+            None => return None,
+        }
+    }
 }
 
 use contract::RemoteExec;

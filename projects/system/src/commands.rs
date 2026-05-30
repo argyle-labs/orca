@@ -25,7 +25,7 @@ use derive::orca_tool;
 pub struct EmptyArgs {}
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SystemUpdateArgs {
     /// Version or channel to switch to, then apply.
     /// Channels: "stable" | "rc" | "dev".
@@ -35,11 +35,6 @@ pub struct SystemUpdateArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "cli", arg(long))]
     pub version: Option<String>,
-    /// When set, proxy the call to the named remote peer via the pod mesh
-    /// instead of running on the local host.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long, hide = true))]
-    pub peer_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -73,13 +68,8 @@ async fn system_delete(
 /// Optionally pass `version` to switch channel or pin before applying:
 /// "stable" | "rc" | "dev" | "<semver>". "dev" tracks GitHub HEAD via
 /// cargo-watch. Omit to apply the latest on the current channel.
-/// When `peer_id` is set the update runs on the named peer instead of locally.
-#[orca_tool(
-    domain = "system",
-    verb = "update",
-    peer_dispatch = true,
-    refresh_runtime = true
-)]
+/// Run on a remote system with the top-level `--peer <h>` flag.
+#[orca_tool(domain = "system", verb = "update", refresh_runtime = true)]
 async fn system_update(
     args: SystemUpdateArgs,
     _ctx: &contract::ToolCtx,
