@@ -74,11 +74,40 @@ async fn system_delete(
 /// "stable" | "rc" | "dev" | "<semver>". "dev" tracks GitHub HEAD via
 /// cargo-watch. Omit to apply the latest on the current channel.
 /// When `peer_id` is set the update runs on the named peer instead of locally.
-#[orca_tool(domain = "system", verb = "update", peer_dispatch = true)]
+#[orca_tool(domain = "system", verb = "update")]
 async fn system_update(
     args: SystemUpdateArgs,
-    _ctx: &contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> anyhow::Result<InstallReport> {
+    // Hand-rolled peer dispatch (instead of the macro's `peer_dispatch=true`)
+    // so we can force-refresh the runtime cache after a successful update.
+    // The peer just swapped its binary; without this hook the systems-list UI
+    // shows the old version until the next sync tick (~20s). The retry loop
+    // covers the daemon-restart gap. Keep this exception local — every other
+    // tool should keep using `peer_dispatch=true`.
+    if let Some(peer) = args.peer_id.clone() {
+        let mut forwarded = args.clone();
+        forwarded.peer_id = None;
+        let svc = ctx.service::<std::sync::Arc<dyn contract::RemoteExec>>()?;
+        let args_value = serde_json::to_value(&forwarded)
+            .map_err(|e| anyhow::anyhow!("serialize system.update args: {e}"))?;
+        let out_value = svc
+            .exec(&peer, "system.update", args_value, ctx.caller())
+            .await?;
+        let report: InstallReport = serde_json::from_value(out_value)
+            .map_err(|e| anyhow::anyhow!("decode system.update output from peer {peer}: {e}"))?;
+        let svc_clone = std::sync::Arc::clone(&svc);
+        let peer_clone = peer.clone();
+        tokio::spawn(async move {
+            for delay_ms in [500u64, 2000, 5000, 10_000, 20_000] {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                if svc_clone.refresh_peer_runtime(&peer_clone).await.is_ok() {
+                    return;
+                }
+            }
+        });
+        return Ok(report);
+    }
     if let Some(ref v) = args.version {
         match v.as_str() {
             "dev" => {
@@ -119,7 +148,7 @@ async fn system_update(
     match check_for_update(&ch, &token).await? {
         None => report
             .skipped
-            .push(format!("already up to date on '{resolved}'")),
+            .push(format!("no updates available on '{resolved}'")),
         Some(info) => {
             if let Some(pin) = resolve_pin_veto(&info.version) {
                 report.skipped.push(format!(

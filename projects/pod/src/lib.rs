@@ -552,6 +552,10 @@ impl contract::RemoteExec for PodRemoteExec {
     ) -> anyhow::Result<serde_json::Value> {
         Ok(server_pod::exec(peer, tool, args, caller).await?.result)
     }
+
+    async fn refresh_peer_runtime(&self, peer: &str) -> anyhow::Result<()> {
+        crate::host_status_writer::refresh_runtime_for_peer(peer).await
+    }
 }
 
 // ── Tools ───────────────────────────────────────────────────────────────────

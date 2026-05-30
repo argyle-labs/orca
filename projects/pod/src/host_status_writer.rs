@@ -63,9 +63,10 @@ pub fn spawn_sync_puller() {
         return;
     }
     tokio::spawn(async move {
-        // Let the daemon finish bringing pod/listener up before we start
-        // dialing peers.
-        tokio::time::sleep(Duration::from_secs(15)).await;
+        // Brief stagger so the listener has bound its sockets, then prime
+        // immediately — the first tick is what surfaces peer versions to a
+        // freshly-booted UI, so don't make users wait a full interval.
+        tokio::time::sleep(Duration::from_secs(2)).await;
         loop {
             if let Err(e) = pull_peer_status_once().await {
                 tracing::warn!("host_status sync puller: {e:#}");
