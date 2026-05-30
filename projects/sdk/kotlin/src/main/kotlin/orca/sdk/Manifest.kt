@@ -14,7 +14,17 @@ data class PluginSection(
     val id: String,
     val version: String,
     val minOrcaVersion: String,
-)
+    /**
+     * Namespace this plugin owns. Tool names, db rows, specs, and config all
+     * scope under it. Null = falls back to `id` (see `effectiveNamespace`).
+     * Plugins targeting an existing namespace (e.g. multiple HomeAssistant
+     * instances under "home") declare it explicitly.
+     */
+    val namespace: String? = null,
+) {
+    /** Effective namespace — explicit `namespace`, falling back to `id`. */
+    fun effectiveNamespace(): String = namespace?.takeIf { it.isNotEmpty() } ?: id
+}
 
 data class RuntimeSection(
     val binary: String?,
@@ -64,7 +74,7 @@ data class Manifest(
 }
 
 private val ALLOWED_TOP = setOf("plugin", "runtime", "surfaces", "capabilities", "depends_on")
-private val ALLOWED_PLUGIN = setOf("id", "version", "min_orca_version")
+private val ALLOWED_PLUGIN = setOf("id", "version", "min_orca_version", "namespace")
 private val ALLOWED_RUNTIME = setOf("binary", "image", "mode", "eager")
 private val ALLOWED_SURFACES = setOf("mcp", "cli", "ui", "docs", "jobs", "storage", "federation")
 private val ALLOWED_CAPABILITY = setOf("name", "sensitivity")

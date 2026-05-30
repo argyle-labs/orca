@@ -78,6 +78,8 @@ export interface HelloOptions {
   methodsOptional?: string[];
   pluginsRequired?: string[];
   pluginsOptional?: string[];
+  /** Maps to wire `plugin_namespace`. */
+  pluginNamespace?: string;
 }
 
 export interface HelloResult {
@@ -385,6 +387,7 @@ export class Transport {
     if (opts.methodsOptional !== undefined) params.methods_optional = opts.methodsOptional;
     if (opts.pluginsRequired !== undefined) params.plugins_required = opts.pluginsRequired;
     if (opts.pluginsOptional !== undefined) params.plugins_optional = opts.pluginsOptional;
+    if (opts.pluginNamespace !== undefined) params.plugin_namespace = opts.pluginNamespace;
     const resp = await this.call('orca/hello', params);
     if (resp.error) throw new Error(`orca/hello rejected: ${resp.error.message}`);
     const result = resp.result as HelloResult;
