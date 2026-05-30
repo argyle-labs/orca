@@ -1,4 +1,8 @@
-//! Plugin registry — installed plugins, their MCP transport config, UI hooks, and dep graph.
+//! Plugin registry — installed plugins, UI hooks, and dep graph.
+//!
+//! Transport (command/args/env/urls/token_env) is plugin-authored and lives in
+//! the manifest at `manifest_path`. Use [`crate::plugin_manifest::parse_path`]
+//! at dial time to resolve it — those facts are not cached here.
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -10,15 +14,6 @@ pub struct PluginRow {
     pub id: String,
     pub manifest_path: String,
     pub tier: String,
-    pub mcp_command: Option<String>,
-    pub mcp_args: Vec<String>,
-    pub mcp_env: std::collections::HashMap<String, String>,
-    /// Env var name whose value is the Bearer token for HTTP/SSE transport.
-    pub mcp_token_env: Option<String>,
-    /// HTTP/SSE endpoints for this plugin's MCP server, tried in priority order.
-    /// Allows fallback across public domain → LAN → tailscale addresses.
-    /// When non-empty, used instead of spawning a stdio subprocess (deploy mode).
-    pub mcp_urls: Vec<String>,
     pub context_injection: String,
     pub enabled: bool,
     /// Maps universal command name → plugin's internal MCP tool name.
@@ -35,61 +30,24 @@ pub struct PluginRow {
     pub specs_dir: Option<String>,
 }
 
-impl PluginRow {
-    /// Canonical "where does this plugin live" resolver — checks `mcp_command`
-    /// first, then `mcp_args`, for an `http(s)://` URL. Trailing slashes are
-    /// stripped so callers can append paths cleanly. Returns `None` for stdio
-    /// plugins (no HTTP transport).
-    pub fn resolve_url(&self) -> Option<String> {
-        if let Some(cmd) = &self.mcp_command
-            && (cmd.starts_with("http://") || cmd.starts_with("https://"))
-        {
-            return Some(cmd.trim_end_matches('/').to_string());
-        }
-        for arg in &self.mcp_args {
-            if arg.starts_with("http://") || arg.starts_with("https://") {
-                return Some(arg.trim_end_matches('/').to_string());
-            }
-        }
-        None
-    }
-}
+const PLUGIN_COLS: &str = "id, manifest_path, tier, context_injection, enabled, command_map,
+     COALESCE(nav_links,'[]'), COALESCE(search_tools,'[]'), specs_dir";
 
-const PLUGIN_COLS: &str = "id, manifest_path, tier, mcp_command, mcp_args, mcp_env,
-     context_injection, enabled, command_map, mcp_token_env, COALESCE(nav_links,'[]'),
-     COALESCE(search_tools,'[]'), specs_dir, mcp_url";
-
-#[allow(clippy::too_many_arguments)]
 fn parse_plugin_row(
     id: String,
     manifest_path: String,
     tier: String,
-    mcp_command: Option<String>,
-    args_json: String,
-    env_json: String,
     context_injection: String,
     enabled: bool,
     map_json: String,
-    mcp_token_env: Option<String>,
     nav_links_json: String,
     search_tools_json: String,
     specs_dir: Option<String>,
-    mcp_url_raw: Option<String>,
 ) -> PluginRow {
-    // mcp_url column stores either a JSON array ["url1","url2"] or a plain URL string.
-    let mcp_urls = match mcp_url_raw.as_deref() {
-        None | Some("") => vec![],
-        Some(s) => serde_json::from_str::<Vec<String>>(s).unwrap_or_else(|_| vec![s.to_string()]),
-    };
     PluginRow {
         id,
         manifest_path,
         tier,
-        mcp_command,
-        mcp_args: serde_json::from_str(&args_json).unwrap_or_default(),
-        mcp_env: serde_json::from_str(&env_json).unwrap_or_default(),
-        mcp_token_env,
-        mcp_urls,
         context_injection,
         enabled,
         command_map: serde_json::from_str(&map_json).unwrap_or_default(),
@@ -106,17 +64,12 @@ pub fn list(conn: &Connection) -> Result<Vec<PluginRow>> {
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, String>(4)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, bool>(4)?,
             row.get::<_, String>(5)?,
             row.get::<_, String>(6)?,
-            row.get::<_, bool>(7)?,
-            row.get::<_, String>(8)?,
-            row.get::<_, Option<String>>(9)?,
-            row.get::<_, String>(10)?,
-            row.get::<_, String>(11)?,
-            row.get::<_, Option<String>>(12)?,
-            row.get::<_, Option<String>>(13)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, Option<String>>(8)?,
         ))
     })?;
     let mut result = Vec::new();
@@ -125,33 +78,23 @@ pub fn list(conn: &Connection) -> Result<Vec<PluginRow>> {
             id,
             manifest_path,
             tier,
-            mcp_command,
-            args_json,
-            env_json,
             context_injection,
             enabled,
             map_json,
-            mcp_token_env,
             nav_links_json,
             search_tools_json,
             specs_dir,
-            mcp_url,
         ) = r?;
         result.push(parse_plugin_row(
             id,
             manifest_path,
             tier,
-            mcp_command,
-            args_json,
-            env_json,
             context_injection,
             enabled,
             map_json,
-            mcp_token_env,
             nav_links_json,
             search_tools_json,
             specs_dir,
-            mcp_url,
         ));
     }
     Ok(result)
@@ -166,17 +109,12 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<PluginRow>> {
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, String>(4)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, bool>(4)?,
                 row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
-                row.get::<_, bool>(7)?,
-                row.get::<_, String>(8)?,
-                row.get::<_, Option<String>>(9)?,
-                row.get::<_, String>(10)?,
-                row.get::<_, String>(11)?,
-                row.get::<_, Option<String>>(12)?,
-                row.get::<_, Option<String>>(13)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, Option<String>>(8)?,
             ))
         },
     );
@@ -185,32 +123,22 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<PluginRow>> {
             id,
             manifest_path,
             tier,
-            mcp_command,
-            args_json,
-            env_json,
             context_injection,
             enabled,
             map_json,
-            mcp_token_env,
             nav_links_json,
             search_tools_json,
             specs_dir,
-            mcp_url,
         )) => Ok(Some(parse_plugin_row(
             id,
             manifest_path,
             tier,
-            mcp_command,
-            args_json,
-            env_json,
             context_injection,
             enabled,
             map_json,
-            mcp_token_env,
             nav_links_json,
             search_tools_json,
             specs_dir,
-            mcp_url,
         ))),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
@@ -218,38 +146,24 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<PluginRow>> {
 }
 
 pub fn upsert(conn: &Connection, plugin: &PluginRow) -> Result<()> {
-    let args_json = to_json_arr(&plugin.mcp_args);
-    let env_json = to_json_obj(&plugin.mcp_env);
     let map_json = to_json_obj(&plugin.command_map);
     let nav_json = to_json_arr(&plugin.nav_links);
     let search_tools_json = to_json_arr(&plugin.search_tools);
-    let mcp_url_json: Option<String> = if plugin.mcp_urls.is_empty() {
-        None
-    } else {
-        Some(to_json_arr(&plugin.mcp_urls))
-    };
     conn.execute(
-        "INSERT INTO plugins (id, manifest_path, tier, mcp_command, mcp_args, mcp_env, context_injection, enabled, command_map, mcp_token_env, nav_links, search_tools, specs_dir, mcp_url)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        "INSERT INTO plugins (id, manifest_path, tier, context_injection, enabled, command_map, nav_links, search_tools, specs_dir)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(id) DO UPDATE SET
              manifest_path     = excluded.manifest_path,
              tier              = excluded.tier,
-             mcp_command       = excluded.mcp_command,
-             mcp_args          = excluded.mcp_args,
-             mcp_env           = excluded.mcp_env,
              context_injection = excluded.context_injection,
              enabled           = excluded.enabled,
              command_map       = excluded.command_map,
-             mcp_token_env     = excluded.mcp_token_env,
              nav_links         = excluded.nav_links,
              search_tools      = excluded.search_tools,
-             specs_dir         = excluded.specs_dir,
-             mcp_url           = excluded.mcp_url",
+             specs_dir         = excluded.specs_dir",
         rusqlite::params![
-            plugin.id, plugin.manifest_path, plugin.tier,
-            plugin.mcp_command, args_json, env_json, plugin.context_injection,
-            plugin.enabled, map_json, plugin.mcp_token_env, nav_json, search_tools_json,
-            plugin.specs_dir, mcp_url_json,
+            plugin.id, plugin.manifest_path, plugin.tier, plugin.context_injection,
+            plugin.enabled, map_json, nav_json, search_tools_json, plugin.specs_dir,
         ],
     )?;
     Ok(())
@@ -313,11 +227,6 @@ mod tests {
             id: id.into(),
             manifest_path: format!("/plugins/{id}/manifest.toml"),
             tier: "personal".into(),
-            mcp_command: Some("node".into()),
-            mcp_args: vec!["server.js".into()],
-            mcp_env: Default::default(),
-            mcp_token_env: None,
-            mcp_urls: vec![],
             context_injection: "minimal".into(),
             enabled: true,
             command_map: Default::default(),
@@ -332,19 +241,19 @@ mod tests {
         let conn = test_conn();
         assert!(list(&conn).unwrap().is_empty());
 
-        upsert(&conn, &make_plugin("rebuy")).unwrap();
+        upsert(&conn, &make_plugin("acme")).unwrap();
 
         let rows = list(&conn).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].id, "rebuy");
+        assert_eq!(rows[0].id, "acme");
         assert_eq!(rows[0].tier, "personal");
 
-        let found = get(&conn, "rebuy").unwrap().unwrap();
-        assert_eq!(found.mcp_args, vec!["server.js"]);
+        let found = get(&conn, "acme").unwrap().unwrap();
+        assert_eq!(found.manifest_path, "/plugins/acme/manifest.toml");
 
-        assert!(remove(&conn, "rebuy").unwrap());
+        assert!(remove(&conn, "acme").unwrap());
         assert!(list(&conn).unwrap().is_empty());
-        assert!(!remove(&conn, "rebuy").unwrap());
+        assert!(!remove(&conn, "acme").unwrap());
     }
 
     #[test]
