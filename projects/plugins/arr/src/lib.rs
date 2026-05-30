@@ -32,8 +32,7 @@ macro_rules! flavor {
 }
 
 flavor!(sonarr);
-// bisecting: re-enable one at a time
-// flavor!(radarr);
-// flavor!(prowlarr);
-// flavor!(lidarr);
-// flavor!(readarr);
+flavor!(radarr);
+flavor!(prowlarr);
+flavor!(lidarr);
+flavor!(readarr);

@@ -38,10 +38,13 @@ pub struct NormalizeReport {
     /// Responses whose alternate media types were collapsed away.
     /// `(op_label + status, kept, dropped)`.
     pub collapsed_responses: Vec<(String, String, Vec<String>)>,
-    /// Operations whose extra success-range (2xx) responses were dropped
-    /// because progenitor can only emit one success type per op.
-    /// `(op_label, kept_status, dropped_statuses)`.
-    pub collapsed_success_statuses: Vec<(String, String, Vec<String>)>,
+    /// Operations whose extra success-range (2xx) responses had their
+    /// schemas unified to match the canonical 2xx (typically `200`),
+    /// because progenitor can only emit one success type per op. All status
+    /// codes remain reachable from the generated client — only the typed
+    /// schema variation across them is flattened.
+    /// `(op_label, canonical_status, unified_statuses)`.
+    pub unified_success_statuses: Vec<(String, String, Vec<String>)>,
 }
 
 impl NormalizeReport {
@@ -63,9 +66,9 @@ impl NormalizeReport {
                 "cargo:warning={crate_name}: collapsed response {op} kept={kept} dropped={dropped:?}"
             );
         }
-        for (op, kept, dropped) in &self.collapsed_success_statuses {
+        for (op, canonical, unified) in &self.unified_success_statuses {
             println!(
-                "cargo:warning={crate_name}: collapsed success statuses {op} kept={kept} dropped={dropped:?}"
+                "cargo:warning={crate_name}: unified success-status schemas {op} canonical={canonical} unified={unified:?}"
             );
         }
     }
@@ -225,6 +228,70 @@ fn keep_one_json_media_type(
         .filter(|k| !is_json_equivalent(k))
         .collect();
     (!surfaced.is_empty()).then_some((json_key, surfaced))
+}
+
+/// Progenitor panics (`response_types.len() <= 1`) when an operation lists
+/// more than one success-range (2xx) response, because it can only emit a
+/// single success type per generated fn. Real specs (e.g. Prowlarr) declare
+/// both `200` and `201` for some create endpoints. Keep the lowest-numbered
+/// 2xx response (most clients treat that as canonical) and drop the rest.
+/// `2XX`-range responses are kept only if no specific 2xx code is present.
+pub fn collapse_success_response_statuses(spec: &mut OpenAPI, report: &mut NormalizeReport) {
+    let mut hits: Vec<(String, String, Vec<String>)> = Vec::new();
+    for_each_op_mut(spec, |method, path, op| {
+        let Some(op) = op else { return };
+        let success_keys: Vec<StatusCode> = op
+            .responses
+            .responses
+            .keys()
+            .filter(|s| is_success_status(s))
+            .cloned()
+            .collect();
+        if success_keys.len() <= 1 {
+            return;
+        }
+        let keep = pick_canonical_success(&success_keys).clone();
+        let dropped: Vec<String> = success_keys
+            .iter()
+            .filter(|s| **s != keep)
+            .map(status_label)
+            .collect();
+        op.responses
+            .responses
+            .retain(|s, _| !is_success_status(s) || *s == keep);
+        hits.push((
+            format!("{} {}", method.to_uppercase(), path),
+            status_label(&keep),
+            dropped,
+        ));
+    });
+    report.collapsed_success_statuses.extend(hits);
+}
+
+fn is_success_status(s: &StatusCode) -> bool {
+    match s {
+        StatusCode::Code(c) => (200..300).contains(c),
+        StatusCode::Range(2) => true,
+        StatusCode::Range(_) => false,
+    }
+}
+
+fn pick_canonical_success(keys: &[StatusCode]) -> &StatusCode {
+    keys.iter()
+        .filter(|s| matches!(s, StatusCode::Code(_)))
+        .min_by_key(|s| match s {
+            StatusCode::Code(c) => *c,
+            _ => u16::MAX,
+        })
+        .or_else(|| keys.first())
+        .expect("caller guarantees non-empty")
+}
+
+fn status_label(s: &StatusCode) -> String {
+    match s {
+        StatusCode::Code(c) => c.to_string(),
+        StatusCode::Range(r) => format!("{r}XX"),
+    }
 }
 
 fn is_json_equivalent(media_type: &str) -> bool {
