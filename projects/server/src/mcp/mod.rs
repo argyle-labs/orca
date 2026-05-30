@@ -37,18 +37,32 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
 }
 
 /// Resolve the host's ambient operator identity for minting signed caller
-/// tokens on the CLI/daemon remote-dispatch path. Uses the earliest-created
-/// admin web user; that user is replicated to every peer, so the recipient can
-/// look it up. Returns `None` when the host has no admin user yet (fresh /
-/// headless host) — remote dispatch then sends no token and falls back to the
-/// recipient's trusted-peer handling.
+/// tokens on the CLI/MCP remote-dispatch path. Reads the on-disk session
+/// written by `orca auth login` (see [[project-orca-login-local-auth]]),
+/// validates it against `sessions`, and slides expiry by the CLI TTL.
+/// Returns `None` when there is no active session — remote admin tools then
+/// refuse with the recipient's normal zero-trust handling. No `first_admin`
+/// fallback: local DB access does not imply admin.
 fn resolve_host_operator() -> Option<contract::CallerIdentity> {
+    let path = utils::fs::orca_home()?.join("session");
+    let sid = std::fs::read_to_string(&path).ok()?;
+    let sid = sid.trim();
+    if sid.is_empty() {
+        return None;
+    }
     let conn = db::open_default().ok()?;
-    let admin = db::users::first_admin(&conn).ok().flatten()?;
+    let row = db::sessions::find_active(&conn, sid).ok().flatten()?;
+    let now = chrono::Utc::now();
+    let exp_parsed = chrono::DateTime::parse_from_rfc3339(&row.expires_at).ok()?;
+    if exp_parsed <= now {
+        return None;
+    }
+    let new_exp = now + chrono::Duration::seconds(::auth::auth::CLI_SESSION_TTL_SECS);
+    let _ = db::sessions::touch(&conn, sid, &now.to_rfc3339(), &new_exp.to_rfc3339());
     Some(contract::CallerIdentity {
-        user_id: admin.id,
-        username: admin.username,
-        role: admin.role,
+        user_id: row.user_id,
+        username: row.username,
+        role: row.role,
     })
 }
 

@@ -299,3 +299,138 @@ async fn auth_token_delete(
 }
 
 // Hex / sha helpers used to live here; replaced by utils::hash::*.
+
+// ── Operator login (CLI / MCP-stdio) ────────────────────────────────────────
+//
+// Replaces the implicit `first_admin` ambient-identity fallback on the CLI
+// and MCP-stdio surfaces (see [[project-orca-login-local-auth]]). The
+// session id is held in `$ORCA_HOME/session` (mode 0600) and the row of
+// record lives in the existing `sessions` table so revoke / password-reset
+// flows work uniformly. 24h sliding expiry — see `resolve_host_operator` in
+// `server/src/mcp/mod.rs`, which slides on each authenticated call.
+pub const CLI_SESSION_TTL_SECS: i64 = 24 * 60 * 60;
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct LoginArgs {
+    /// Operator username (matches the web `users` table).
+    pub username: String,
+    /// Password. Required. CLI users should prefer a stdin-piped form
+    /// (`printf '%s' "$PASS" | orca auth login --username scott --password -`)
+    /// once interactive prompting lands — until then, pass it verbatim and
+    /// be aware it lands in shell history.
+    pub password: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct LoginOutput {
+    pub user_id: String,
+    pub username: String,
+    /// "admin" | "read" — whatever role the user holds in `users`.
+    pub role: String,
+    /// RFC3339 expiry of the on-disk session.
+    pub expires_at: String,
+}
+
+/// [MUTATES STATE] Authenticate the operator on THIS host and persist a CLI
+/// session at `$ORCA_HOME/session` (mode 0600). Replaces the legacy
+/// `first_admin` ambient-identity fallback on CLI + MCP-stdio.
+#[orca_tool(domain = "auth", verb = "login")]
+async fn auth_login(args: LoginArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<LoginOutput> {
+    // Throttle on the CLI path too: same IP-bucket as REST signin keeps brute
+    // force from sneaking in via a local invocation loop.
+    let ip = "127.0.0.1";
+    if let crate::throttle::CheckOutcome::Throttled { retry_after_secs } =
+        crate::throttle::check(ip, &args.username)
+    {
+        bail!("signin throttled — retry in {retry_after_secs}s");
+    }
+
+    let conn = db::open_default()?;
+    let row = match db::users::find_auth_by_username(&conn, &args.username)? {
+        Some(r) => r,
+        None => {
+            crate::throttle::record_failure(ip, &args.username);
+            bail!("invalid credentials");
+        }
+    };
+    let ok = crate::password::verify_password(&args.password, &row.password_hash).unwrap_or(false);
+    if !ok {
+        crate::throttle::record_failure(ip, &args.username);
+        bail!("invalid credentials");
+    }
+    crate::throttle::record_success(ip, &args.username);
+
+    let session_path = utils::fs::orca_home()
+        .map(|d| d.join("session"))
+        .ok_or_else(|| anyhow::anyhow!("no ORCA_HOME/HOME — cannot persist session"))?;
+
+    // Single-session model: revoke any previous CLI session for this host.
+    if let Ok(prev) = std::fs::read_to_string(&session_path) {
+        let prev = prev.trim();
+        if !prev.is_empty() {
+            let now = chrono::Utc::now().to_rfc3339();
+            let _ = db::sessions::revoke(&conn, prev, &now);
+        }
+    }
+
+    let mut sid_bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut sid_bytes);
+    let sid = hash::hex_encode(&sid_bytes);
+    let now = chrono::Utc::now();
+    let exp = now + chrono::Duration::seconds(CLI_SESSION_TTL_SECS);
+    db::sessions::insert(&conn, &sid, &row.id, &now.to_rfc3339(), &exp.to_rfc3339())?;
+
+    if let Some(parent) = session_path.parent() {
+        std::fs::create_dir_all(parent)?;
+        let _ = utils::fs::chmod_dir_owner_only(parent);
+    }
+    std::fs::write(&session_path, &sid)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&session_path)?.permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&session_path, perms)?;
+    }
+    Ok(LoginOutput {
+        user_id: row.id,
+        username: row.username,
+        role: row.role,
+        expires_at: exp.to_rfc3339(),
+    })
+}
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct LogoutArgs {}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct LogoutOutput {
+    pub revoked: bool,
+}
+
+/// [MUTATES STATE] Revoke the on-disk CLI session and remove
+/// `$ORCA_HOME/session`. Idempotent — `revoked=false` means there was no
+/// active session to clear.
+#[orca_tool(domain = "auth", verb = "logout")]
+async fn auth_logout(_args: LogoutArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<LogoutOutput> {
+    let session_path = utils::fs::orca_home().map(|d| d.join("session"));
+    let mut revoked = false;
+    if let Some(ref path) = session_path
+        && let Ok(sid) = std::fs::read_to_string(path)
+    {
+        let sid = sid.trim();
+        if !sid.is_empty() {
+            let conn = db::open_default()?;
+            let now = chrono::Utc::now().to_rfc3339();
+            revoked = db::sessions::revoke(&conn, sid, &now)?;
+        }
+    }
+    if let Some(path) = session_path
+        && path.exists()
+    {
+        std::fs::remove_file(path)?;
+    }
+    Ok(LogoutOutput { revoked })
+}
