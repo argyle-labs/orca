@@ -1,7 +1,7 @@
 //! Plugin install registry — channel/lock policy and reconciliation state per (system, plugin).
 
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 /// Identity placeholder for the local orca node before pod-mesh node identity
 /// lands. Mirrors `contract::config::LOCAL_USER` — once each node has a real id, this
@@ -120,14 +120,7 @@ pub fn get(
                 updated_at: r.get(7)?,
             })
         })
-        .map(Some)
-        .or_else(|e| {
-            if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-                Ok(None)
-            } else {
-                Err(e)
-            }
-        })?;
+        .optional()?;
     Ok(row)
 }
 
