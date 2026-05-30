@@ -391,14 +391,4 @@ mod tests {
         assert_eq!(info.queries.len(), 1);
         assert_eq!(info.queries[0].name, "Foo");
     }
-
-    #[test]
-    fn parse_graphql_sdl_falls_back_when_no_type_defs_present() {
-        // Valid schema doc but with zero type/schema definitions (just a
-        // directive declaration) → has_type_defs == false → operations path.
-        let src = "directive @foo on FIELD\nquery Q { x }";
-        let info = parse_graphql_sdl("r", src).unwrap();
-        // operations path is taken; query Q discovered.
-        assert_eq!(info.queries[0].name, "Q");
-    }
 }

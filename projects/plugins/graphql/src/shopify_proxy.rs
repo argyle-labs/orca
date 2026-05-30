@@ -88,3 +88,92 @@ pub async fn proxy_graphql(
         .unwrap_or(Value::Null);
     Ok(GraphqlProxyResult { status, body })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_repo_accepts_safe_names() {
+        assert!(validate_repo("rebuy-shopify-client"));
+        assert!(validate_repo("a_b.c-1"));
+        assert!(validate_repo("X"));
+    }
+
+    #[test]
+    fn validate_repo_rejects_empty_and_punctuation() {
+        assert!(!validate_repo(""));
+        assert!(!validate_repo("../etc/passwd"));
+        assert!(!validate_repo("name with space"));
+        assert!(!validate_repo("a$b"));
+    }
+
+    // shopify_admin_version + proxy_graphql exercise process-global env
+    // (HOME / ORCA_CONFIG). Bundle into one test so the mutations don't
+    // race other tests in this binary.
+    #[tokio::test]
+    async fn shopify_version_default_and_override_and_proxy_invalid_repo() {
+        // SAFETY: tests are single-threaded inside this function and no other
+        // test in this crate reads ORCA_CONFIG.
+        let prev = std::env::var("ORCA_CONFIG").ok();
+
+        // 1. Missing file → fallback default.
+        unsafe {
+            std::env::set_var("ORCA_CONFIG", "/nonexistent/path/orca.toml");
+        }
+        assert_eq!(shopify_admin_version(), "2026-01");
+
+        // 2. Malformed TOML → fallback default.
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad.toml");
+        std::fs::write(&bad, "this is not toml = [[").unwrap();
+        unsafe {
+            std::env::set_var("ORCA_CONFIG", &bad);
+        }
+        assert_eq!(shopify_admin_version(), "2026-01");
+
+        // 3. Valid TOML without specs section → fallback default.
+        let empty = dir.path().join("empty.toml");
+        std::fs::write(&empty, "[other]\nfoo = 1\n").unwrap();
+        unsafe {
+            std::env::set_var("ORCA_CONFIG", &empty);
+        }
+        assert_eq!(shopify_admin_version(), "2026-01");
+
+        // 4. Valid TOML with specs.shopify_admin_version → override.
+        let good = dir.path().join("good.toml");
+        std::fs::write(&good, "[specs]\nshopify_admin_version = \"2025-10\"\n").unwrap();
+        unsafe {
+            std::env::set_var("ORCA_CONFIG", &good);
+        }
+        assert_eq!(shopify_admin_version(), "2025-10");
+
+        // 5. proxy_graphql with an invalid repo short-circuits before HTTP.
+        let err = match proxy_graphql("bad name", "s", "t", "{}", None, None).await {
+            Ok(_) => panic!("expected invalid-repo error"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("invalid repo"));
+
+        // Restore env.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("ORCA_CONFIG", v),
+                None => std::env::remove_var("ORCA_CONFIG"),
+            }
+        }
+    }
+
+    #[test]
+    fn graphql_proxy_result_round_trips_through_serde() {
+        let r = GraphqlProxyResult {
+            status: 200,
+            body: json!({"data": 1}),
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        let back: GraphqlProxyResult = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.status, 200);
+        assert_eq!(back.body, json!({"data": 1}));
+        let _ = r.clone();
+    }
+}

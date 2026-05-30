@@ -278,4 +278,70 @@ mod tests {
         assert!(!r.version.is_empty());
         assert!(!r.target.is_empty());
     }
+
+    #[test]
+    fn file_size_missing_returns_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("does-not-exist.db");
+        assert_eq!(file_size_with_sidecars(&p), 0);
+    }
+
+    #[test]
+    fn file_size_sums_main_wal_shm() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("orca.db");
+        std::fs::write(&p, vec![0u8; 100]).unwrap();
+        std::fs::write(tmp.path().join("orca.db-wal"), vec![0u8; 30]).unwrap();
+        std::fs::write(tmp.path().join("orca.db-shm"), vec![0u8; 7]).unwrap();
+        assert_eq!(file_size_with_sidecars(&p), 137);
+    }
+
+    #[test]
+    fn file_size_main_only_when_no_sidecars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("orca.db");
+        std::fs::write(&p, vec![0u8; 42]).unwrap();
+        assert_eq!(file_size_with_sidecars(&p), 42);
+    }
+
+    #[test]
+    fn dir_size_zero_for_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(dir_size_recursive(&tmp.path().join("nope")), 0);
+    }
+
+    #[test]
+    fn dir_size_zero_for_empty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(dir_size_recursive(tmp.path()), 0);
+    }
+
+    #[test]
+    fn dir_size_recurses_subdirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.log"), vec![0u8; 10]).unwrap();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("b.log"), vec![0u8; 25]).unwrap();
+        let deep = sub.join("deep");
+        std::fs::create_dir(&deep).unwrap();
+        std::fs::write(deep.join("c.log"), vec![0u8; 5]).unwrap();
+        assert_eq!(dir_size_recursive(tmp.path()), 40);
+    }
+
+    #[test]
+    fn collect_storage_populates_paths_and_sizes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("orca.db");
+        std::fs::write(&db, vec![0u8; 64]).unwrap();
+        let report = collect_storage(&db);
+        assert_eq!(report.db_size_bytes, 64);
+        assert_eq!(report.db_path, db.to_string_lossy());
+        assert!(report.last_retention_sweep_at.is_none());
+        // logs_dir_path is derived from $HOME; in CI/dev it is set, so the
+        // path is non-empty. We don't assert on size (host-dependent).
+        if std::env::var("HOME").is_ok() {
+            assert!(report.logs_dir_path.ends_with("/logs"));
+        }
+    }
 }
