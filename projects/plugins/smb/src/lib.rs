@@ -552,8 +552,7 @@ malformed line with no parens
             },
             Credentials::Guest,
         ] {
-            let _ = format!("{c:?}");
-            let _ = c.clone();
+            let _ = c;
         }
     }
 

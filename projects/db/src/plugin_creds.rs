@@ -312,7 +312,9 @@ args = ["server.js"]
 
     #[test]
     fn sync_pushes_each_and_marks_synced() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -345,7 +347,9 @@ args = ["server.js"]
 
     #[test]
     fn sync_token_from_mcp_env_when_not_stored() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -398,7 +402,9 @@ PLUGIN_TOKEN = "env-secret"
 
     #[test]
     fn sync_reports_failure_without_mark() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()

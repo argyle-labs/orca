@@ -455,7 +455,7 @@ mod tests {
     }
 
     fn install_shim_once() {
-        let _ = register(Arc::new(Shim));
+        register(Arc::new(Shim)).ok();
     }
 
     /// Process-wide serializer for engine tests. The `Shim` reads transport
