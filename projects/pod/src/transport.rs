@@ -144,32 +144,3 @@ mod tests {
         );
     }
 }
-
-/// Sign the given entities bundle with this host's bootstrap key. Shared by
-/// push (transport) + receiver-side `pod/replicate-export` handler.
-pub fn sign_bundle(entities: BTreeMap<String, Value>) -> Result<pki::SignedEnvelope> {
-    let body = ReplicateBundle {
-        peer_id: format!("peer.{}", system::host_identity::machine_id_short()),
-        issued_at: chrono::Utc::now().timestamp(),
-        entities,
-    };
-    let signing = pki::load_or_init_bootstrap_key(&pki_dir())?;
-    pki::sign_envelope(&signing, &body).context("sign replicate bundle")
-}
-
-/// Verify a signed envelope against the expected pinned bootstrap fp; return
-/// the verified entities map. Used by transport.fetch + receiver-side
-/// `pod/replicate-push` handler.
-pub fn verify_envelope(
-    envelope: &pki::SignedEnvelope,
-    pinned_fp: &str,
-) -> Result<BTreeMap<String, Value>> {
-    let (bundle, verifying) =
-        pki::verify_envelope::<ReplicateBundle>(envelope).context("verify bundle envelope")?;
-    let signer_fp = pki::bootstrap_pubkey_fingerprint(&verifying);
-    anyhow::ensure!(
-        signer_fp == pinned_fp,
-        "replicate bundle signer fp {signer_fp} does not match pinned peer fp {pinned_fp}"
-    );
-    Ok(bundle.entities)
-}
