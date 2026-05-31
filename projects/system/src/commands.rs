@@ -4,6 +4,7 @@
 //! calls `crate::install::*`, `crate::update::*`, `crate::update_state::*`,
 //! and `crate::dev::*` directly. No service indirection.
 
+use anyhow::Context;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -82,7 +83,7 @@ async fn system_update(
             "stable" | "rc" => {
                 let ch = resolve_channel(v);
                 write_channel_marker(&ch)?;
-                _ = clear_version_pin();
+                clear_version_pin().context("clear version pin after channel switch")?;
             }
             other => {
                 let trimmed = other.trim();

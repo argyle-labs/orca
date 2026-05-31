@@ -189,16 +189,13 @@ pub fn is_newer_full(a: &str, b: &str) -> bool {
         return ac > bc;
     }
 
+    // Only two pre-release kinds exist in this project: stable (empty suffix)
+    // and rc. No alpha/beta — anything unrecognized is treated as older than
+    // rc so it can never out-rank a real release.
     let pre_kind = |s: &str| -> u64 {
         if s.is_empty() {
-            4
-        }
-        // stable > rc > beta > alpha
-        else if s.starts_with("rc") {
-            3
-        } else if s.starts_with("beta") {
             2
-        } else if s.starts_with("alpha") {
+        } else if s.starts_with("rc") {
             1
         } else {
             0
@@ -259,21 +256,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn channel_dropped_beta_alpha_now_default_to_stable() {
-        // Old markers should never crash — silently downgrade to Stable.
-        assert_eq!(Channel::parse("beta"), Channel::Stable);
-        assert_eq!(Channel::parse("alpha"), Channel::Stable);
-    }
-
     // ── Channel::accepts ──────────────────────────────────────────────────────
 
     #[test]
     fn stable_accepts_only_clean_tags() {
         assert!(Channel::Stable.accepts("v1.0.0"));
         assert!(!Channel::Stable.accepts("v1.0.0-rc.1"));
-        assert!(!Channel::Stable.accepts("v1.0.0-beta.1"));
-        assert!(!Channel::Stable.accepts("v1.0.0-alpha.1"));
     }
 
     #[test]
@@ -281,8 +269,6 @@ mod tests {
         assert!(Channel::Rc.accepts("v1.0.0"));
         assert!(Channel::Rc.accepts("v1.0.0-rc.1"));
         assert!(Channel::Rc.accepts("v1.0.0-rc.99"));
-        assert!(!Channel::Rc.accepts("v1.0.0-beta.1"));
-        assert!(!Channel::Rc.accepts("v1.0.0-alpha.1"));
     }
 
     #[test]
@@ -388,12 +374,6 @@ mod tests {
         assert!(is_newer_full("0.0.4-rc.3", "0.0.4-rc.1"));
         assert!(is_newer_full("0.0.4-rc.2", "0.0.4-rc.1"));
         assert!(!is_newer_full("0.0.4-rc.1", "0.0.4-rc.1"));
-    }
-
-    #[test]
-    fn is_newer_full_rc_beats_beta() {
-        assert!(is_newer_full("0.0.4-rc.1", "0.0.4-beta.9"));
-        assert!(!is_newer_full("0.0.4-beta.9", "0.0.4-rc.1"));
     }
 
     #[test]
