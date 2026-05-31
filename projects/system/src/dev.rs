@@ -120,7 +120,7 @@ pub async fn apply_update_dev(source_url: &str) -> Result<()> {
     if crate::update::is_unraid() {
         let persist_bin = std::path::Path::new("/boot/config/plugins/orca/bin/orca");
         if let Some(parent) = persist_bin.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent).ok();
         }
         if let Err(e) = std::fs::copy(&current, persist_bin) {
             tracing::warn!(
@@ -129,7 +129,7 @@ pub async fn apply_update_dev(source_url: &str) -> Result<()> {
             );
         } else {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(persist_bin, std::fs::Permissions::from_mode(0o755));
+            std::fs::set_permissions(persist_bin, std::fs::Permissions::from_mode(0o755)).ok();
         }
     }
 

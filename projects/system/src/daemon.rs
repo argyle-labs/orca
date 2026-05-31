@@ -5,11 +5,11 @@
 use anyhow::Result;
 use colored::Colorize;
 use contract::ToolCtx;
+#[cfg(target_os = "macos")]
+use contract::config::APP_PLIST_LABEL;
 #[cfg(target_os = "linux")]
 use contract::config::APP_SYSTEMD_SERVICE;
-#[cfg(target_os = "macos")]
-use contract::config::{APP_DAEMON_LOG_FILE, APP_LOGS_SUBDIR, APP_PLIST_LABEL};
-use contract::config::{APP_NAME, APP_STATE_DIR};
+use contract::config::{APP_DAEMON_LOG_FILE, APP_LOGS_SUBDIR, APP_NAME, APP_STATE_DIR};
 use derive::orca_tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -498,9 +498,10 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     std::fs::write(&service_path, &service)?;
     println!("{} wrote {}", "✓".green(), service_path);
 
-    let _ = Command::new("systemctl")
+    Command::new("systemctl")
         .args(["--user", "daemon-reload"])
-        .status();
+        .status()
+        .ok();
 
     let status = Command::new("systemctl")
         .args(["--user", "enable", "--now", APP_SYSTEMD_SERVICE])
@@ -557,9 +558,10 @@ fn install_systemd_system(binary: &str, port: u16, user: &str, home: &str) -> Re
     let path = format!("/etc/systemd/system/{APP_SYSTEMD_SERVICE}.service");
     let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
     std::fs::create_dir_all(&logs_dir)?;
-    let _ = Command::new("chown")
+    Command::new("chown")
         .args(["-R", &format!("{user}:{user}"), &logs_dir])
-        .status();
+        .status()
+        .ok();
     let daemon_log = format!("{logs_dir}/{APP_DAEMON_LOG_FILE}");
     let unit = format!(
         "[Unit]\nDescription=Orca AI daemon\nAfter=network.target\n\n\
@@ -572,7 +574,7 @@ fn install_systemd_system(binary: &str, port: u16, user: &str, home: &str) -> Re
     std::fs::write(&path, &unit)?;
     println!("{} wrote {}", "✓".green(), path);
 
-    let _ = Command::new("systemctl").arg("daemon-reload").status();
+    Command::new("systemctl").arg("daemon-reload").status().ok();
     let status = Command::new("systemctl")
         .args(["enable", "--now", APP_SYSTEMD_SERVICE])
         .status()?;
@@ -591,9 +593,10 @@ fn install_openrc(binary: &str, port: u16, user: &str, home: &str) -> Result<()>
     let path = format!("/etc/init.d/{APP_SYSTEMD_SERVICE}");
     let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
     std::fs::create_dir_all(&logs_dir)?;
-    let _ = Command::new("chown")
+    Command::new("chown")
         .args(["-R", &format!("{user}:{user}"), &logs_dir])
-        .status();
+        .status()
+        .ok();
     let daemon_log = format!("{logs_dir}/{APP_DAEMON_LOG_FILE}");
     // OpenRC init script. supervise-daemon handles restart-on-crash without
     // requiring start-stop-daemon/pidfile bookkeeping. `command_user` drops
@@ -761,9 +764,10 @@ fn install_system_service(_binary: &str, _port: u16, _user: &str, _home: &str) -
 
 #[cfg(target_os = "linux")]
 fn uninstall_service() -> Result<()> {
-    let _ = Command::new("systemctl")
+    Command::new("systemctl")
         .args(["--user", "disable", "--now", APP_SYSTEMD_SERVICE])
-        .status();
+        .status()
+        .ok();
 
     let home = std::env::var("HOME")?;
     let service_path = format!("{home}/.config/systemd/user/{APP_SYSTEMD_SERVICE}.service");
@@ -772,9 +776,10 @@ fn uninstall_service() -> Result<()> {
         println!("{} removed {}", "✓".green(), service_path);
     }
 
-    let _ = Command::new("systemctl")
+    Command::new("systemctl")
         .args(["--user", "daemon-reload"])
-        .status();
+        .status()
+        .ok();
     println!("{} {APP_NAME} daemon uninstalled", "✓".green());
     Ok(())
 }

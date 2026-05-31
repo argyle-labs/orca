@@ -235,10 +235,11 @@ fn install_ssh_key(user: &str, home_dir: &str, pubkey: &str) -> Result<()> {
 
     #[cfg(target_os = "linux")]
     if !user.is_empty() && is_root() {
-        let _ = Command::new("chown")
+        Command::new("chown")
             .args(["-R", user])
             .arg(&ssh_dir)
-            .status();
+            .status()
+            .ok();
     }
 
     println!("{} installed SSH key for '{user}'", "✓".green());

@@ -297,13 +297,12 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
     if is_unraid() {
         let persist_bin = std::path::Path::new("/boot/config/plugins/orca/bin/orca");
         if let Some(parent) = persist_bin.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent).ok();
         }
         match std::fs::copy(&current, persist_bin) {
             Ok(_) => {
                 use std::os::unix::fs::PermissionsExt;
-                let _ =
-                    std::fs::set_permissions(persist_bin, std::fs::Permissions::from_mode(0o755));
+                std::fs::set_permissions(persist_bin, std::fs::Permissions::from_mode(0o755)).ok();
                 println!("[orca] mirrored to {} (unraid USB)", persist_bin.display());
             }
             Err(e) => {
