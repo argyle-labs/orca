@@ -140,7 +140,7 @@ async fn namespace_list(
 }
 
 /// Show details of a namespace (defaults to the active one).
-#[orca_tool(domain = "namespace", verb = "show")]
+#[orca_tool(domain = "namespace", verb = "detail")]
 async fn namespace_show(
     args: NamespaceShowArgs,
     ctx: &contract::ToolCtx,

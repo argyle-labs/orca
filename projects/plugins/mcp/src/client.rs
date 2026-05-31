@@ -178,7 +178,7 @@ impl McpClient {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
 
-        // Augment PATH so MCP server subprocesses can find tools (node, rebuy CLI, etc.)
+        // Augment PATH so MCP server subprocesses can find tools (node, npx, etc.)
         // that live in nvm/volta/fnm/homebrew paths stripped by launchd/systemd daemons.
         cmd.env("PATH", augmented_path());
 
@@ -424,7 +424,7 @@ impl McpClient {
             }
             Transport::Sse { base_url, http } => {
                 // Notifications via SSE: open a session, POST the notification.
-                // Meerkat will ignore notifications that aren't JSON-RPC requests
+                // The peer will ignore notifications that aren't JSON-RPC requests
                 // (no `id` field means no response expected). Fire and forget.
                 if let Ok(sse_resp) = http
                     .get(format!("{base_url}/sse"))

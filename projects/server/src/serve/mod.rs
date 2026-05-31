@@ -948,7 +948,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
     let (api, spec) = openapi::openapi_router().split_for_parts();
     // Stash the assembled spec so the spec-serving handlers can read it.
     openapi::install_spec(spec);
-    // Write orca's own spec to disk so it lives alongside rebuy's scanner-generated specs.
+    // Write orca's own spec to disk so it lives alongside scanner-generated specs.
     write_orca_spec_to_disk();
 
     let api = api
@@ -1011,7 +1011,7 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
 }
 
 /// Write orca's generated OpenAPI spec to ~/.orca/specs/orca.json so it
-/// lives alongside rebuy's scanner-generated specs and can be compared to them.
+/// lives alongside scanner-generated specs and can be compared to them.
 fn write_orca_spec_to_disk() {
     let dir = db::openapi_specs_registry::specs_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {

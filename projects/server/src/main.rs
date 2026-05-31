@@ -14,7 +14,7 @@ use system::hook::{self as hook_cmd, HookAction};
 #[derive(Parser)]
 #[command(name = "orca", about = "Context-first AI agent orchestrator", version)]
 struct Cli {
-    /// Project context to load (e.g. "meerkat"). Omit for general session.
+    /// Project context to load. Omit for general session.
     #[arg(value_name = "PROJECT")]
     project: Option<String>,
 

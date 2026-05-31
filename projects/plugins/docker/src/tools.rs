@@ -120,7 +120,12 @@ pub struct GetLogsOutput {
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct GetLogServicesArgs {}
+pub struct GetLogServicesArgs {
+    /// Directory to scan for compose projects. Defaults to `$HOME/code`.
+    #[cfg_attr(feature = "cli", arg(long))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetLogServicesOutput {

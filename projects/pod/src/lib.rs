@@ -753,7 +753,7 @@ async fn pod_sync(args: PodSyncArgs, _ctx: &contract::ToolCtx) -> anyhow::Result
 
 /// Days-remaining + rotation state for every mesh cert on this host, plus
 /// the current `self_secure` (Tier-2 secrets-storage) setting.
-#[orca_tool(domain = "system.pod", verb = "detail")]
+#[orca_tool(domain = "pod", verb = "detail")]
 async fn pod_detail(
     _args: EmptyArgs,
     _ctx: &contract::ToolCtx,
@@ -765,7 +765,7 @@ async fn pod_detail(
 /// on the named remote peer over the pod mesh. Currently exposes
 /// `self_secure` (Tier-2 secrets-storage permission). Admin-only because
 /// flipping it can authorize secrets replication into this host.
-#[orca_tool(domain = "system.pod", verb = "update", role = "admin")]
+#[orca_tool(domain = "pod", verb = "update", role = "admin")]
 async fn pod_update(
     args: PodUpdateArgs,
     ctx: &contract::ToolCtx,

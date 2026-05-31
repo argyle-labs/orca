@@ -46,7 +46,7 @@ struct DiscoveredProject {
 /// Always includes a `global` entry for `$HOME` itself. Then walks
 /// `$HOME/code/` and any subdir of `$HOME/code/<x>/` that looks like a
 /// git repo (has `.git/`). Two-level depth is enough for the common
-/// monorepo-of-repos layout (e.g. `~/code/rebuy/<repo>`) without
+/// monorepo-of-repos layout (e.g. `~/code/<org>/<repo>`) without
 /// recursing into `node_modules` style trees.
 fn discover_projects(home: &Path) -> Vec<DiscoveredProject> {
     let mut out = vec![DiscoveredProject {

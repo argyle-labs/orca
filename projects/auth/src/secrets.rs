@@ -1,9 +1,9 @@
-//! Secrets domain — host-level named secrets with pluggable backends.
+//! Secrets domain — named secrets with pluggable backends.
 //!
-//! v1 surface: `secret.list`, `secret.get`, `secret.set`, `secret.delete`,
-//! `secret.backends`. The only backend in v1 is `inline` (value stored in the
-//! SQLCipher-encrypted orca.db). v2 plan adds 1Password / Bitwarden / OS
-//! keychain backends as separate integration crates.
+//! v1 surface: `secrets.list`, `secrets.detail`, `secrets.set`, `secrets.delete`.
+//! The only backend in v1 is `inline` (value stored in the SQLCipher-encrypted
+//! orca.db). v2 plan adds 1Password / Bitwarden / OS keychain backends as
+//! separate integration crates.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -23,12 +23,6 @@ pub struct SecretEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub updated_at: String,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct BackendInfo {
-    pub kind: String,
-    pub supports_store: bool,
 }
 
 // ── secret.list ─────────────────────────────────────────────────────────────
@@ -105,17 +99,6 @@ pub struct SecretDeleteReport {
     pub removed: bool,
 }
 
-// ── secret.backends ─────────────────────────────────────────────────────────
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct SecretBackendsArgs {}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct SecretBackendsReport {
-    pub backends: Vec<BackendInfo>,
-}
-
 // ── Inline backend (v1 — value lives in encrypted DB) ───────────────────────
 
 /// Available backend kinds on this host. v1 only knows `inline`.
@@ -140,7 +123,7 @@ pub async fn get_secret(name: &str) -> anyhow::Result<(String, String)> {
 // ── Native dispatch ─────────────────────────────────────────────────────────
 
 /// List configured secrets (names + backends + metadata). Never returns values.
-#[orca_tool(domain = "system.secret", verb = "list")]
+#[orca_tool(domain = "secrets", verb = "list")]
 async fn secret_list(
     _args: SecretListArgs,
     _ctx: &contract::ToolCtx,
@@ -161,7 +144,7 @@ async fn secret_list(
 }
 
 /// [SENSITIVE] Fetch a secret value by name. Resolves via the configured backend.
-#[orca_tool(domain = "system.secret", verb = "detail")]
+#[orca_tool(domain = "secrets", verb = "detail")]
 async fn secret_detail(
     args: SecretGetArgs,
     _ctx: &contract::ToolCtx,
@@ -177,7 +160,7 @@ async fn secret_detail(
 /// [MUTATES STATE] Create or update a secret. For 'inline' backend, `value` is required;
 /// for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field').
 /// Write the secret on a remote system with the top-level `--peer <h>` flag.
-#[orca_tool(domain = "system.secret", verb = "set")]
+#[orca_tool(domain = "secrets", verb = "set")]
 async fn secret_set(
     args: SecretSetArgs,
     _ctx: &contract::ToolCtx,
@@ -228,7 +211,7 @@ async fn secret_set(
 
 /// [MUTATES STATE] Remove a secret. The inline value is zeroed; for external backends
 /// only the orca registration is removed (the upstream vault is untouched).
-#[orca_tool(domain = "system.secret", verb = "delete")]
+#[orca_tool(domain = "secrets", verb = "delete")]
 async fn secret_delete(
     args: SecretDeleteArgs,
     _ctx: &contract::ToolCtx,
@@ -239,18 +222,4 @@ async fn secret_delete(
         name: args.name,
         removed,
     })
-}
-
-/// List backend kinds available on this host (lets the UI render a backend picker).
-#[orca_tool(domain = "system.secret", verb = "backends")]
-async fn secret_backends(
-    _args: SecretBackendsArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<SecretBackendsReport> {
-    // v1: inline only, supports store.
-    let backends = vec![BackendInfo {
-        kind: "inline".into(),
-        supports_store: true,
-    }];
-    Ok(SecretBackendsReport { backends })
 }

@@ -25,7 +25,12 @@ pub struct ProjectServices {
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct ListServicesArgs {}
+pub struct ListServicesArgs {
+    /// Directory to scan for compose projects. Defaults to `$HOME/code`.
+    #[cfg_attr(feature = "cli", arg(long))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListServicesOutput {
@@ -69,19 +74,19 @@ pub struct RunTestsOutput {
     pub duration_ms: u64,
 }
 
-/// List all running docker compose services across all rebuy projects. Returns
+/// List all running docker compose services under a projects root. Returns
 /// project name, path, and per-service state/health/ports.
 #[orca_tool(domain = "system.infra.service", verb = "list")]
 async fn infra_service_list(
-    _args: ListServicesArgs,
+    args: ListServicesArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ListServicesOutput> {
     use std::path::PathBuf;
 
     let home = std::env::var("HOME").unwrap_or_default();
-    let rebuy_root = std::env::var("REBUY_ROOT").unwrap_or_else(|_| format!("{home}/code/rebuy"));
+    let root = args.root.unwrap_or_else(|| format!("{home}/code"));
 
-    let entries = match std::fs::read_dir(&rebuy_root) {
+    let entries = match std::fs::read_dir(&root) {
         Ok(e) => e,
         Err(_) => {
             return Ok(ListServicesOutput {
@@ -140,7 +145,7 @@ async fn infra_service_list(
     Ok(ListServicesOutput { projects: out })
 }
 
-/// Fetch docker compose logs for a running rebuy service. Specify the project
+/// Fetch docker compose logs for a running service. Specify the project
 /// path and service name.
 #[orca_tool(domain = "system.infra.service", verb = "detail")]
 async fn infra_service_detail(
