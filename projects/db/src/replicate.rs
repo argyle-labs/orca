@@ -129,6 +129,21 @@ pub fn subscribe() -> broadcast::Receiver<&'static str> {
 
 use sha2::{Digest, Sha256};
 
+/// Per-entity content hash of this host's view. Keyed by entity name.
+pub fn roots(conn: &Connection) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for reg in registrations() {
+        let rows = (reg.export)(conn)?;
+        let canonical = serde_json::to_vec(&rows)?;
+        let mut hasher = Sha256::new();
+        hasher.update(&canonical);
+        let digest = hasher.finalize();
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        out.insert(reg.name.to_string(), hex);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,19 +228,4 @@ mod tests {
     // (`notify_write_delivers_to_subscriber`, `user_insert_fires_notification`)
     // cover the positive path; for the negative path we rely on the body
     // of `merge_bundle` being trivially small and reviewable.
-}
-
-/// Per-entity content hash of this host's view. Keyed by entity name.
-pub fn roots(conn: &Connection) -> Result<BTreeMap<String, String>> {
-    let mut out = BTreeMap::new();
-    for reg in registrations() {
-        let rows = (reg.export)(conn)?;
-        let canonical = serde_json::to_vec(&rows)?;
-        let mut hasher = Sha256::new();
-        hasher.update(&canonical);
-        let digest = hasher.finalize();
-        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-        out.insert(reg.name.to_string(), hex);
-    }
-    Ok(out)
 }
