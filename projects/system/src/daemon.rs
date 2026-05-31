@@ -2,7 +2,9 @@
 //! Start is intentionally NOT a tool here: it IS the daemon's main loop, wired
 //! at the binary entry point in `orca`'s main.rs (depends on `serve::run_daemon`).
 
-use anyhow::{Context, Result};
+#[cfg(target_os = "linux")]
+use anyhow::Context;
+use anyhow::Result;
 use colored::Colorize;
 use contract::ToolCtx;
 #[cfg(target_os = "macos")]

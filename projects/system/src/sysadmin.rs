@@ -4,7 +4,9 @@
 //! lockstep. Internals (user creation, group management, linger, SSH key
 //! install) are module-private helpers — there is no service trait.
 
-use anyhow::{Context, Result};
+#[cfg(target_os = "linux")]
+use anyhow::Context;
+use anyhow::Result;
 use colored::Colorize;
 use contract::ToolCtx;
 use derive::orca_tool;
