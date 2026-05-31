@@ -226,6 +226,33 @@ impl Client {
         self.get("/api2/json/cluster/backup").await
     }
 
+    /// `GET /api2/json/cluster/resources?type=vm` — every VM + LXC in the
+    /// cluster with vmid/node/type/name.
+    pub async fn cluster_vm_resources(&self) -> Result<Value, ProxmoxError> {
+        self.get("/api2/json/cluster/resources?type=vm").await
+    }
+
+    /// `GET /api2/json/nodes/{node}/{kind}/{vmid}/config` — full guest
+    /// config (memory, cpus, `netN`, ...). The topology collector parses
+    /// `netN` for tap MACs.
+    pub async fn guest_config(
+        &self,
+        node: &str,
+        vmid: u64,
+        kind: GuestKind,
+    ) -> Result<Value, ProxmoxError> {
+        if node.is_empty() {
+            return Err(ProxmoxError::Missing("node"));
+        }
+        self.get(&format!(
+            "/api2/json/nodes/{}/{}/{}/config",
+            urlencoding::encode(node),
+            kind.as_str(),
+            vmid
+        ))
+        .await
+    }
+
     /// `GET /api2/json/nodes/{node}/{kind}/{vmid}/snapshot` — list snapshots.
     pub async fn snapshot_list(
         &self,
