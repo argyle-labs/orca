@@ -1127,25 +1127,33 @@
         <div class="update-setting-row">
           <span class="update-setting-label">Version</span>
           <div class="version-pick">
-            <input
-              type="text"
+            <select
               class="version-input"
-              placeholder="e.g. 0.0.5-rc.1"
-              bind:value={drawerVersionInput}
-              disabled={updatePending}
-            />
+              bind:value={drawerVersionSelect}
+              disabled={updatePending || drawerVersions.length === 0}
+            >
+              {#each drawerVersions as v}
+                <option value={v.tag}>{v.tag}{v.is_current ? ' (current)' : ''}{v.prerelease ? ' — rc' : ''}</option>
+              {/each}
+            </select>
             <button
               class="ctrl-btn"
-              onclick={applyVersion}
-              disabled={updatePending || !drawerVersionInput.trim()}
+              onclick={applySelectedVersion}
+              disabled={updatePending || !drawerVersionSelect}
+              title="Apply this specific version"
+            >Apply</button>
+            <button
+              class="ctrl-btn"
+              onclick={pinSelectedVersion}
+              disabled={updatePending || !drawerVersionSelect}
               title="Pin and apply this specific version"
             >Pin</button>
           </div>
         </div>
 
         {#if updateResult}
-          {#if updateResult.done.length > 0}
-            <p class="update-status ok">{updateResult.done.join(' · ')}</p>
+          {#if updateResult.notes.length > 0}
+            <p class="update-status ok">{updateResult.notes.join(' · ')}</p>
           {/if}
           {#if updateResult.errors.length > 0}
             <p class="err">{updateResult.errors.join(' · ')}</p>
