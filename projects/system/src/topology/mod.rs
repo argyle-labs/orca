@@ -8,7 +8,7 @@
 //!
 //! Slice A: docker + proxmox. Unraid lands next.
 
-use crate::system_info_types::TopologyClaim;
+use contract::TopologyClaim;
 use serde_json::Value;
 
 mod proxmox;
