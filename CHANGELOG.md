@@ -1,3 +1,24 @@
+## [v0.0.5] — 2026-05-31
+
+> Promoted from RC.
+
+## What's Changed
+
+
+## Installation
+
+One-liner (auto-detects OS/arch, verifies sha256):
+
+```sh
+curl -fsSL https://github.com/scottdkey/orca/releases/download/v0.0.5/install.sh | sh -s -- --version v0.0.5
+```
+
+Supported targets: aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-gnu aarch64-unknown-linux-musl
+
+**Full diff:** [v0.0.4 → v0.0.5](https://github.com/scottdkey/orca/compare/v0.0.4...v0.0.5)
+
+---
+
 ## [v0.0.4] — 2026-05-24
 
 > Promoted from RC.
