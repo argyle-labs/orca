@@ -294,54 +294,27 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
         }
     }
 
-    // Unraid: also mirror the new binary to /boot (USB), otherwise the update
-    // is wiped on next reboot when the RAM rootfs resets. See
-    // `install_unraid()` in commands/daemon.rs for the persistence contract.
-    //
-    // /boot is vfat owned root:root with dmask=0077 — the orca service user
-    // can't write directly. Stage the binary in /tmp/orca-mirror-* (matching
-    // the sudoers fragment dropped by `system.bootstrap` on unraid) and run
-    // `sudo -n install -m 0755 -o root -g root <tmp> /boot/.../orca`.
-    //
-    // A failed mirror here means the rc.orca init will re-stage the OLD
-    // binary on next restart, silently reverting the update — so we hard-fail.
+    // Unraid: mirror the new binary to appdata so it survives the RAM-rootfs
+    // wipe on reboot. /mnt/user/appdata/orca/bin/ is a real ext4/xfs path owned
+    // by the orca user — no sudo, no staging, no vfat permission dance.
+    // `rc.orca` restores from this path on boot. See
+    // [[project-unraid-persistence-via-appdata]] for the contract.
     #[cfg(target_os = "linux")]
     if is_unraid() {
-        let persist_bin = std::path::Path::new("/boot/config/plugins/orca/bin/orca");
-        let stage = std::path::PathBuf::from(format!(
-            "/tmp/orca-mirror-{}",
-            info.version.replace(['/', ' '], "_")
-        ));
-        std::fs::copy(&current, &stage).with_context(|| {
+        let persist_dir = std::path::Path::new("/mnt/user/appdata/orca/bin");
+        let persist_bin = persist_dir.join("orca");
+        std::fs::create_dir_all(persist_dir)
+            .with_context(|| format!("create unraid appdata dir {}", persist_dir.display()))?;
+        std::fs::copy(&current, &persist_bin).with_context(|| {
             format!(
-                "stage new binary at {} before sudo install",
-                stage.display()
+                "mirror new binary to {} (unraid appdata persistence)",
+                persist_bin.display()
             )
         })?;
-        let status = std::process::Command::new("sudo")
-            .args(["-n", "install", "-m", "0755", "-o", "root", "-g", "root"])
-            .arg(&stage)
-            .arg(persist_bin)
-            .status()
-            .with_context(|| {
-                format!(
-                    "invoke sudo install to mirror binary to {} (unraid USB) — \
-                     ensure /etc/sudoers.d/orca-unraid-mirror grants orca NOPASSWD \
-                     for `install ... /tmp/orca-mirror-* {}`",
-                    persist_bin.display(),
-                    persist_bin.display()
-                )
-            })?;
-        if !status.success() {
-            anyhow::bail!(
-                "sudo install of mirror binary {} exited {status} — \
-                 without this the update is reverted on next reboot",
-                persist_bin.display()
-            );
-        }
-        std::fs::remove_file(&stage)
-            .with_context(|| format!("clean up staged binary {}", stage.display()))?;
-        println!("[orca] mirrored to {} (unraid USB)", persist_bin.display());
+        println!(
+            "[orca] mirrored to {} (unraid appdata)",
+            persist_bin.display()
+        );
     }
 
     println!("[orca] updated to v{} — scheduling restart", info.version);
