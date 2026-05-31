@@ -5,7 +5,26 @@
 //! Consumed by `system::topology` and surfaced on `SystemInfoReport.claims`.
 
 use contract::TopologyClaim;
-use serde_json::Value;
+use serde::Deserialize;
+use std::collections::BTreeMap;
+
+#[derive(Debug, Deserialize)]
+struct InspectEntry {
+    #[serde(rename = "NetworkSettings", default)]
+    network_settings: NetworkSettings,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct NetworkSettings {
+    #[serde(rename = "Networks", default)]
+    networks: BTreeMap<String, NetworkEntry>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct NetworkEntry {
+    #[serde(rename = "MacAddress", default)]
+    mac_address: String,
+}
 
 /// Enumerate local containers via the `docker` CLI and build claims.
 pub async fn collect_claims() -> anyhow::Result<Vec<TopologyClaim>> {
@@ -13,7 +32,8 @@ pub async fn collect_claims() -> anyhow::Result<Vec<TopologyClaim>> {
     let mut claims = Vec::with_capacity(summaries.len());
     for s in summaries {
         let inspected = crate::containers::inspect(&s.id).await?;
-        let macs = extract_macs_from_inspect(&inspected);
+        let entries: Vec<InspectEntry> = serde_json::from_value(inspected).unwrap_or_default();
+        let macs = extract_macs(&entries);
         let id_short = s.id.chars().take(12).collect::<String>();
         let name = first_name(&s.names);
         claims.push(TopologyClaim {
@@ -28,29 +48,17 @@ pub async fn collect_claims() -> anyhow::Result<Vec<TopologyClaim>> {
     Ok(claims)
 }
 
-/// `docker inspect` returns `[ {...} ]`. Walk
-/// `[0].NetworkSettings.Networks.<name>.MacAddress` and collect non-empty
-/// MACs (lowercased).
-fn extract_macs_from_inspect(v: &Value) -> Vec<String> {
-    let Some(obj) = v.as_array().and_then(|a| a.first()) else {
+fn extract_macs(entries: &[InspectEntry]) -> Vec<String> {
+    let Some(first) = entries.first() else {
         return Vec::new();
     };
-    let Some(networks) = obj
-        .get("NetworkSettings")
-        .and_then(|n| n.get("Networks"))
-        .and_then(|n| n.as_object())
-    else {
-        return Vec::new();
-    };
-    let mut macs = Vec::new();
-    for (_name, net) in networks {
-        if let Some(mac) = net.get("MacAddress").and_then(|m| m.as_str())
-            && !mac.is_empty()
-        {
-            macs.push(mac.to_lowercase());
-        }
-    }
-    macs
+    first
+        .network_settings
+        .networks
+        .values()
+        .filter(|n| !n.mac_address.is_empty())
+        .map(|n| n.mac_address.to_lowercase())
+        .collect()
 }
 
 fn first_name(names: &str) -> String {
@@ -66,41 +74,39 @@ fn first_name(names: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+
+    fn parse(s: &str) -> Vec<InspectEntry> {
+        serde_json::from_str(s).unwrap()
+    }
 
     #[test]
     fn extract_macs_pulls_per_network_mac() {
-        let v = json!([{
-            "NetworkSettings": {
-                "Networks": {
-                    "bridge": {"MacAddress": "02:42:AC:11:00:02"},
-                    "frontend": {"MacAddress": "02:42:AC:12:00:03"},
-                }
-            }
-        }]);
-        let mut macs = extract_macs_from_inspect(&v);
+        let entries = parse(
+            r#"[{"NetworkSettings":{"Networks":{
+                "bridge":{"MacAddress":"02:42:AC:11:00:02"},
+                "frontend":{"MacAddress":"02:42:AC:12:00:03"}
+            }}}]"#,
+        );
+        let mut macs = extract_macs(&entries);
         macs.sort();
         assert_eq!(macs, vec!["02:42:ac:11:00:02", "02:42:ac:12:00:03"]);
     }
 
     #[test]
     fn extract_macs_skips_empty_and_missing() {
-        let v = json!([{
-            "NetworkSettings": {
-                "Networks": {
-                    "bridge": {"MacAddress": ""},
-                    "none": {},
-                }
-            }
-        }]);
-        assert!(extract_macs_from_inspect(&v).is_empty());
+        let entries = parse(
+            r#"[{"NetworkSettings":{"Networks":{
+                "bridge":{"MacAddress":""},
+                "none":{}
+            }}}]"#,
+        );
+        assert!(extract_macs(&entries).is_empty());
     }
 
     #[test]
     fn extract_macs_handles_missing_networksettings() {
-        assert!(extract_macs_from_inspect(&json!([{}])).is_empty());
-        assert!(extract_macs_from_inspect(&json!([])).is_empty());
-        assert!(extract_macs_from_inspect(&json!({})).is_empty());
+        assert!(extract_macs(&parse("[{}]")).is_empty());
+        assert!(extract_macs(&parse("[]")).is_empty());
     }
 
     #[test]
