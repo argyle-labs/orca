@@ -548,7 +548,7 @@ mod tests {
     #[test]
     fn skip_body_matches_prefix() {
         assert!(skip_body("/api/openapi/spec.json"));
-        assert!(skip_body("/api/specs/rebuy"));
+        assert!(skip_body("/api/specs/acme"));
         assert!(!skip_body("/api/health"));
         assert!(!skip_body("/api/agents"));
     }
