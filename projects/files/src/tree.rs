@@ -77,7 +77,7 @@ fn parse_numeric_prefix(name: &str) -> (Option<u32>, String) {
 }
 
 fn strip_app_prefix(title: &str) -> String {
-    // Strip "AppName — " prefix from titles like "rebuy-cli-mcp-server — Patterns"
+    // Strip "AppName — " prefix from titles like "my-cli — Patterns"
     if let Some((_, rest)) = title.split_once(" \u{2014} ") {
         rest.trim().to_string()
     } else {
