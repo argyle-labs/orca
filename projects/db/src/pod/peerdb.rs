@@ -481,6 +481,21 @@ pub fn pinned_pubkey_fp(conn: &Connection, peer_id: &str) -> Result<Option<Strin
     Ok(fp)
 }
 
+/// True if a `pod_peers` row with this `peer_id` exists. Used by the
+/// roster-sync loop to avoid double-counting newly-learned peers when an
+/// upsert would otherwise be a silent no-op vs an actual insert.
+pub fn peer_exists(conn: &Connection, peer_id: &str) -> Result<bool> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM pod_peers WHERE peer_id = ?",
+            params![peer_id],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    Ok(exists)
+}
+
 pub fn list_peers(conn: &Connection) -> Result<Vec<PeerRow>> {
     let mut stmt = conn.prepare(
         "SELECT p.peer_id,

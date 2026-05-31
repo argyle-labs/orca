@@ -23,7 +23,6 @@
 use crate::{PodListOutput, PodMember, PodPeerDto};
 use anyhow::Result;
 use orca_sdk::pki;
-use rusqlite::OptionalExtension;
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -156,15 +155,7 @@ async fn ingest_roster(
         if !is_ingestable(&entry, own_peer_id) {
             continue;
         }
-        let exists: bool = conn
-            .query_row(
-                "SELECT 1 FROM pod_peers WHERE peer_id = ?",
-                rusqlite::params![&entry.peer_id],
-                |_| Ok(true),
-            )
-            .optional()?
-            .unwrap_or(false);
-        if exists {
+        if pdb::peer_exists(&conn, &entry.peer_id)? {
             continue;
         }
         pdb::upsert_peer(

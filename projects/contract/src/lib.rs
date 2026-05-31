@@ -31,3 +31,6 @@ mod tool;
 pub use ctx::ToolCtx;
 pub use remote::{CallerIdentity, RemoteExec};
 pub use tool::OrcaTool;
+
+pub mod topology;
+pub use topology::TopologyClaim;

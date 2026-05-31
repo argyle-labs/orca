@@ -11,6 +11,7 @@ pub mod compose;
 pub mod containers;
 pub mod engine;
 pub mod tools;
+pub mod topology;
 
 pub use compose::{Compose, ComposeError, ServiceStatus, ServiceSummary};
 pub use containers::ContainerSummary;

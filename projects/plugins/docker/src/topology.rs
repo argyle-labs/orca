@@ -1,36 +1,18 @@
-//! Topology claim collectors.
+//! Docker → TopologyClaim collector.
 //!
-//! A "claim" is "this host runs that child" — emitted by the colocated peer
-//! (the one with the API/creds) and consumed by the inference task to derive
-//! `parent_peer_id` edges via MAC matching. Per
-//! [[project-colocated-api-collectors]], collectors run *only* on the peer
-//! adjacent to the API endpoint; credentials never cross hosts.
-//!
-//! Slice A: docker only. Proxmox + Unraid land next.
+//! Runs on the local host (the docker socket is the API endpoint). Emits
+//! one claim per container with MACs from `NetworkSettings.Networks[*]`.
+//! Consumed by `system::topology` and surfaced on `SystemInfoReport.claims`.
 
-use crate::system_info_types::TopologyClaim;
+use contract::TopologyClaim;
 use serde_json::Value;
 
-/// Collect topology claims from every provider this host can reach locally.
-/// Each collector failure is logged and skipped — one broken provider must
-/// not blank out the whole snapshot.
-pub async fn collect_claims() -> Vec<TopologyClaim> {
-    let mut out = Vec::new();
-    match collect_docker_claims().await {
-        Ok(mut v) => out.append(&mut v),
-        Err(e) => tracing::warn!(error = %e, "topology: docker collector failed"),
-    }
-    out
-}
-
-/// Enumerate local docker containers via the `docker` CLI (already a
-/// dependency of the docker plugin). Extracts MAC from
-/// `NetworkSettings.Networks[*].MacAddress`.
-async fn collect_docker_claims() -> anyhow::Result<Vec<TopologyClaim>> {
-    let summaries = docker::containers::list(false).await?;
+/// Enumerate local containers via the `docker` CLI and build claims.
+pub async fn collect_claims() -> anyhow::Result<Vec<TopologyClaim>> {
+    let summaries = crate::containers::list(false).await?;
     let mut claims = Vec::with_capacity(summaries.len());
     for s in summaries {
-        let inspected = docker::containers::inspect(&s.id).await?;
+        let inspected = crate::containers::inspect(&s.id).await?;
         let macs = extract_macs_from_inspect(&inspected);
         let id_short = s.id.chars().take(12).collect::<String>();
         let name = first_name(&s.names);
@@ -46,9 +28,9 @@ async fn collect_docker_claims() -> anyhow::Result<Vec<TopologyClaim>> {
     Ok(claims)
 }
 
-/// `docker inspect` returns an array of one object. Walk
+/// `docker inspect` returns `[ {...} ]`. Walk
 /// `[0].NetworkSettings.Networks.<name>.MacAddress` and collect non-empty
-/// MACs.
+/// MACs (lowercased).
 fn extract_macs_from_inspect(v: &Value) -> Vec<String> {
     let Some(obj) = v.as_array().and_then(|a| a.first()) else {
         return Vec::new();
@@ -71,7 +53,6 @@ fn extract_macs_from_inspect(v: &Value) -> Vec<String> {
     macs
 }
 
-/// `docker ps` returns names as a comma-joined string. Use the first.
 fn first_name(names: &str) -> String {
     names
         .split(',')

@@ -173,32 +173,13 @@ pub struct SystemInfoReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_kind: Option<String>,
     /// Things this host claims to host (VMs it runs, containers under its
-    /// docker socket, LXCs, etc.). Populated by colocated API collectors
-    /// (Proxmox, Unraid, Docker, ...). Each entry's `macs` is the join key
+    /// docker socket, LXCs, etc.). Populated by colocated provider plugins
+    /// (proxmox, unraid, docker, ...). Each entry's `macs` is the join key
     /// the inference layer matches against other peers' `interfaces[].mac`.
+    /// `TopologyClaim` lives in `contract` so plugins can emit it without
+    /// depending on `system`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub claims: Vec<TopologyClaim>,
-}
-
-/// One child entity this host claims to run. Emitted by API collectors
-/// and consumed by the inference task to derive `parent_peer_id` edges.
-#[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct TopologyClaim {
-    /// `"vm"`, `"container"`, `"lxc"`.
-    pub kind: String,
-    /// Provider-native id (proxmox vmid, docker container id short, ...).
-    pub id: String,
-    pub name: String,
-    /// MAC addresses associated with this child. Inference matches these
-    /// against `interfaces[].mac` on other peers' snapshots.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub macs: Vec<String>,
-    /// Provider that emitted this claim (`"proxmox"`, `"docker"`,
-    /// `"unraid"`, ...). Lets the UI badge the edge.
-    pub provider: String,
-    /// Provider instance id (from `<provider>.<instance>.<field>` secret
-    /// key). `"local"` for the local docker socket.
-    pub provider_instance: String,
+    pub claims: Vec<contract::TopologyClaim>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
