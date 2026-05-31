@@ -197,6 +197,14 @@ write_cargo_version() {
   log "workspace version → $new ($(grep '^version' "$workspace_toml" | head -1))"
   # Regenerate Cargo.lock from the updated Cargo.toml.
   ( cd "$REPO_ROOT" && cargo update -p orca 2>/dev/null || true )
+  # Bake the release version verbatim into the binary. build.rs reads this
+  # env var first; without it, build.rs falls back to `<cargo>-dev+g<sha>.dirty`
+  # because the working tree is dirty (Cargo.toml just changed) and the tag
+  # doesn't exist yet (created after the build). All subsequent cargo
+  # invocations in this shell — local `make release rc` AND the CI composite
+  # action that `source`s this lib — inherit it.
+  export ORCA_RELEASE_VERSION="$new"
+  log "exported ORCA_RELEASE_VERSION=$new for build.rs"
 }
 
 # Compute next RC version from latest stable tag.
