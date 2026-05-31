@@ -120,17 +120,18 @@ pub async fn apply_update_dev(source_url: &str) -> Result<()> {
     if crate::update::is_unraid() {
         let persist_bin = std::path::Path::new("/boot/config/plugins/orca/bin/orca");
         if let Some(parent) = persist_bin.parent() {
-            std::fs::create_dir_all(parent).ok();
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create unraid USB dir {}", parent.display()))?;
         }
-        if let Err(e) = std::fs::copy(&current, persist_bin) {
-            tracing::warn!(
-                "unraid USB mirror to {} failed: {e:#} — update will not survive reboot",
+        std::fs::copy(&current, persist_bin).with_context(|| {
+            format!(
+                "mirror dev binary to {} (unraid USB) — without this the dev build is reverted on next reboot",
                 persist_bin.display()
-            );
-        } else {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(persist_bin, std::fs::Permissions::from_mode(0o755)).ok();
-        }
+            )
+        })?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(persist_bin, std::fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("chmod 0755 {}", persist_bin.display()))?;
     }
 
     println!("[orca] dev build applied — restarting...");

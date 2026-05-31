@@ -498,10 +498,13 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     std::fs::write(&service_path, &service)?;
     println!("{} wrote {}", "✓".green(), service_path);
 
-    Command::new("systemctl")
+    let reload = Command::new("systemctl")
         .args(["--user", "daemon-reload"])
         .status()
-        .ok();
+        .context("invoking systemctl --user daemon-reload")?;
+    if !reload.success() {
+        anyhow::bail!("systemctl --user daemon-reload failed with status {reload}");
+    }
 
     let status = Command::new("systemctl")
         .args(["--user", "enable", "--now", APP_SYSTEMD_SERVICE])
@@ -558,10 +561,13 @@ fn install_systemd_system(binary: &str, port: u16, user: &str, home: &str) -> Re
     let path = format!("/etc/systemd/system/{APP_SYSTEMD_SERVICE}.service");
     let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
     std::fs::create_dir_all(&logs_dir)?;
-    Command::new("chown")
+    let chown = Command::new("chown")
         .args(["-R", &format!("{user}:{user}"), &logs_dir])
         .status()
-        .ok();
+        .with_context(|| format!("invoking chown on {logs_dir}"))?;
+    if !chown.success() {
+        anyhow::bail!("chown {user}:{user} {logs_dir} failed with status {chown}");
+    }
     let daemon_log = format!("{logs_dir}/{APP_DAEMON_LOG_FILE}");
     let unit = format!(
         "[Unit]\nDescription=Orca AI daemon\nAfter=network.target\n\n\
@@ -574,7 +580,13 @@ fn install_systemd_system(binary: &str, port: u16, user: &str, home: &str) -> Re
     std::fs::write(&path, &unit)?;
     println!("{} wrote {}", "✓".green(), path);
 
-    Command::new("systemctl").arg("daemon-reload").status().ok();
+    let reload = Command::new("systemctl")
+        .arg("daemon-reload")
+        .status()
+        .context("invoking systemctl daemon-reload")?;
+    if !reload.success() {
+        anyhow::bail!("systemctl daemon-reload failed with status {reload}");
+    }
     let status = Command::new("systemctl")
         .args(["enable", "--now", APP_SYSTEMD_SERVICE])
         .status()?;
@@ -593,10 +605,13 @@ fn install_openrc(binary: &str, port: u16, user: &str, home: &str) -> Result<()>
     let path = format!("/etc/init.d/{APP_SYSTEMD_SERVICE}");
     let logs_dir = format!("{home}/{APP_STATE_DIR}/{APP_LOGS_SUBDIR}");
     std::fs::create_dir_all(&logs_dir)?;
-    Command::new("chown")
+    let chown = Command::new("chown")
         .args(["-R", &format!("{user}:{user}"), &logs_dir])
         .status()
-        .ok();
+        .with_context(|| format!("invoking chown on {logs_dir}"))?;
+    if !chown.success() {
+        anyhow::bail!("chown {user}:{user} {logs_dir} failed with status {chown}");
+    }
     let daemon_log = format!("{logs_dir}/{APP_DAEMON_LOG_FILE}");
     // OpenRC init script. supervise-daemon handles restart-on-crash without
     // requiring start-stop-daemon/pidfile bookkeeping. `command_user` drops

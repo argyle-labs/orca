@@ -284,34 +284,38 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
     // Without this the launchd daemon gets SIGKILLed on respawn (exit -9).
     #[cfg(target_os = "macos")]
     {
-        _ = std::process::Command::new("codesign")
+        let codesign_status = std::process::Command::new("codesign")
             .args(["--force", "--sign", "-"])
             .arg(&current)
-            .status();
+            .status()
+            .context("invoking codesign")?;
+        if !codesign_status.success() {
+            anyhow::bail!("codesign failed with status {codesign_status}");
+        }
     }
 
     // Unraid: also mirror the new binary to /boot (USB), otherwise the update
     // is wiped on next reboot when the RAM rootfs resets. See
     // `install_unraid()` in commands/daemon.rs for the persistence contract.
+    // A failed mirror here means the rc.orca init will re-stage the OLD
+    // binary on next restart, silently reverting the update — so we hard-fail.
     #[cfg(target_os = "linux")]
     if is_unraid() {
         let persist_bin = std::path::Path::new("/boot/config/plugins/orca/bin/orca");
         if let Some(parent) = persist_bin.parent() {
-            std::fs::create_dir_all(parent).ok();
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create unraid USB dir {}", parent.display()))?;
         }
-        match std::fs::copy(&current, persist_bin) {
-            Ok(_) => {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(persist_bin, std::fs::Permissions::from_mode(0o755)).ok();
-                println!("[orca] mirrored to {} (unraid USB)", persist_bin.display());
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "unraid USB mirror to {} failed: {e:#} — update will not survive reboot",
-                    persist_bin.display()
-                );
-            }
-        }
+        std::fs::copy(&current, persist_bin).with_context(|| {
+            format!(
+                "mirror new binary to {} (unraid USB) — without this the update is reverted on next reboot",
+                persist_bin.display()
+            )
+        })?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(persist_bin, std::fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("chmod 0755 {}", persist_bin.display()))?;
+        println!("[orca] mirrored to {} (unraid USB)", persist_bin.display());
     }
 
     println!("[orca] updated to v{} — scheduling restart", info.version);
