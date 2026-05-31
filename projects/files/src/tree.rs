@@ -407,7 +407,7 @@ mod tests {
         let f = tmp.path().join("doc.md");
         fs::write(
             &f,
-            "# rebuy-cli-mcp-server \u{2014} Patterns: Idioms and Conventions\nContent.",
+            "# my-cli \u{2014} Patterns: Idioms and Conventions\nContent.",
         )
         .unwrap();
         assert_eq!(
