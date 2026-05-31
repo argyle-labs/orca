@@ -10,7 +10,7 @@ pub struct ProjectContext {
 
 impl ProjectContext {
     /// Try to resolve a project name to its memory dir.
-    /// Matches: "meerkat" → ~/.orca/memory/meerkat/MEMORY.md
+    /// Matches: `<name>` → `~/.orca/memory/<name>/MEMORY.md`
     pub fn resolve(name: &str, config: &Config) -> Result<Self> {
         let memory_root = &config.memory_root;
 
@@ -29,7 +29,7 @@ impl ProjectContext {
             for entry in entries.flatten() {
                 let dir_name = entry.file_name();
                 let dir_name = dir_name.to_string_lossy();
-                if dir_name.contains(name) && !dir_name.starts_with("rebuy") {
+                if dir_name.contains(name) {
                     let memory_file = entry.path().join("MEMORY.md");
                     if memory_file.exists() {
                         let content = std::fs::read_to_string(&memory_file)?;

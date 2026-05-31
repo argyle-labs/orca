@@ -345,11 +345,7 @@ fn step_claude_md(home: &Path, report: &mut InstallReport) {
 /// To register a new external source, add the path here. Future: read this
 /// list from `orca.db` so plugins can self-register without recompiling
 /// orca.
-const EXTERNAL_AGENT_SOURCES: &[&str] = &[
-    "meerkat/agents",
-    "rebuy/rebuy-orca-plugin/agents",
-    "leetcode/agents",
-];
+const EXTERNAL_AGENT_SOURCES: &[&str] = &[];
 
 /// One agent prompt resolved at install time: either embedded in the orca
 /// binary or read from an external source repo. `body` is the full file
