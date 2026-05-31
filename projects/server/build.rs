@@ -26,6 +26,7 @@ fn main() {
     println!("cargo:rustc-env=ORCA_BUILD_TARGET={target}");
 
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=ORCA_RELEASE_VERSION");
 
     // Only ensure frontend/dist exists when the `ui` feature is on — that's
     // the only build configuration where RustEmbed reads from it. Headless
@@ -37,6 +38,11 @@ fn main() {
 }
 
 fn resolve_version() -> String {
+    if let Ok(v) = env::var("ORCA_RELEASE_VERSION")
+        && !v.trim().is_empty()
+    {
+        return v.trim().trim_start_matches('v').to_string();
+    }
     let cargo_version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
 
     let exact_tag = Command::new("git")

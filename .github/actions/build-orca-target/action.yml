@@ -62,6 +62,9 @@ runs:
         # rustc network-stable target dir under the workspace root so the
         # Swatinem cache picks up everything in one shot.
         CARGO_NET_RETRY: '5'
+        # Bake the release version verbatim into the binary so build.rs
+        # doesn't need a tag (build runs before publish-rc tags the repo).
+        ORCA_RELEASE_VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
         source scripts/release-lib.sh
