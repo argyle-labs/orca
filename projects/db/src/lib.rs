@@ -800,12 +800,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             enabled     INTEGER NOT NULL DEFAULT 1,
             created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         );
-        INSERT OR IGNORE INTO doc_roots (name, path, description) VALUES
-            ('rebuy',    '~/code/rebuy',    'Rebuy monorepo'),
-            ('orca',     '~/code/orca',     'Orca codebase'),
-            ('bardbase', '~/code/bardbase', 'Bardbase'),
-            ('homepage', '~/code/homepage', 'Homepage'),
-            ('meerkat',  '~/code/meerkat',  'Meerkat');
+        -- doc_roots ships empty. Users register their own via `fs.roots.create`.
 
         CREATE TABLE IF NOT EXISTS doc_ignore_patterns (
             pattern    TEXT PRIMARY KEY,

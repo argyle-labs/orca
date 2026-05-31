@@ -560,6 +560,7 @@ impl McpPool {
                     if !p.enabled {
                         continue;
                     }
+
                     // Transport lives in the manifest, not the row — re-parse on demand.
                     let Ok((manifest, _)) = db::plugin_manifest::parse_path(&p.manifest_path)
                     else {

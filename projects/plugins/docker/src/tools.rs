@@ -257,17 +257,17 @@ async fn docker_service_detail(
     Ok(GetLogsOutput { output })
 }
 
-/// List every docker-compose project under the rebuy root with its service
+/// List every docker-compose project under a projects root with its service
 /// states. Powers the cross-project logs panel.
 #[orca_tool(domain = "docker.service", verb = "list-logs")]
 async fn docker_service_list_logs(
-    _args: GetLogServicesArgs,
+    args: GetLogServicesArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<GetLogServicesOutput> {
     let home = std::env::var("HOME").unwrap_or_default();
-    let rebuy_root = std::env::var("REBUY_ROOT").unwrap_or_else(|_| format!("{home}/code/rebuy"));
+    let root = args.root.unwrap_or_else(|| format!("{home}/code"));
 
-    let entries = match std::fs::read_dir(&rebuy_root) {
+    let entries = match std::fs::read_dir(&root) {
         Ok(e) => e,
         Err(_) => {
             return Ok(GetLogServicesOutput {

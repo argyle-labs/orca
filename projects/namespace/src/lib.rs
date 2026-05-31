@@ -52,12 +52,6 @@ pub struct NamespaceListReport {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct NamespaceCurrentReport {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active: Option<NamespaceSummary>,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct NamespaceMutationResult {
     pub id: String,
     pub name: String,
@@ -90,10 +84,6 @@ pub struct NamespaceShowArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec: Option<String>,
 }
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct NamespaceCurrentArgs {}
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -146,15 +136,6 @@ async fn namespace_show(
     ctx: &contract::ToolCtx,
 ) -> anyhow::Result<NamespaceDetail> {
     native::show(&ctx.config, args.spec.as_deref()).await
-}
-
-/// Show the currently active namespace (or None).
-#[orca_tool(domain = "namespace", verb = "current")]
-async fn namespace_current(
-    _args: NamespaceCurrentArgs,
-    ctx: &contract::ToolCtx,
-) -> anyhow::Result<NamespaceCurrentReport> {
-    native::current(&ctx.config).await
 }
 
 /// [MUTATES STATE] Create a new namespace owned by the current user.

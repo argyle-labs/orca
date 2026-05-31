@@ -5,8 +5,8 @@
 
 use crate::manager::{NamespaceManager, Role};
 use crate::{
-    NamespaceCurrentReport, NamespaceDetail, NamespaceListReport, NamespaceMutationResult,
-    NamespaceShareEntry, NamespaceSharesReport, NamespaceSummary,
+    NamespaceDetail, NamespaceListReport, NamespaceMutationResult, NamespaceShareEntry,
+    NamespaceSharesReport, NamespaceSummary,
 };
 use anyhow::{Context, Result, anyhow};
 use contract::config::{Config, LOCAL_USER};
@@ -63,16 +63,6 @@ pub async fn show(cfg: &Config, spec: Option<&str>) -> Result<NamespaceDetail> {
         description: p.description,
         root: p.root.display().to_string(),
         access: format!("{access:?}").to_lowercase(),
-    })
-}
-
-pub async fn current(cfg: &Config) -> Result<NamespaceCurrentReport> {
-    let (conn, mgr) = open(cfg)?;
-    let me = user_id();
-    let active = mgr.resolve_active(&conn, &me)?;
-    let active_id = active.as_ref().map(|p| p.id.clone());
-    Ok(NamespaceCurrentReport {
-        active: active.map(|p| summary(&p, active_id.as_deref())),
     })
 }
 

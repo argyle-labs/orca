@@ -81,16 +81,10 @@ mod tests {
     use crate::testing::test_conn;
 
     #[test]
-    fn roots_seeded_by_migration() {
+    fn fresh_db_has_no_seeded_roots() {
         let conn = test_conn();
         let roots = list_roots(&conn).unwrap();
-        // Migration 15 seeds rebuy, orca, bardbase, homepage, meerkat
-        assert!(
-            roots.len() >= 5,
-            "expected seeded doc roots, got {}",
-            roots.len()
-        );
-        assert!(roots.iter().any(|r| r.name == "orca"));
+        assert!(roots.is_empty(), "doc_roots ships empty, got {roots:?}");
     }
 
     #[test]
