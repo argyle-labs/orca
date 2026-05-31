@@ -33,113 +33,36 @@ pub struct PluginRow {
 const PLUGIN_COLS: &str = "id, manifest_path, tier, context_injection, enabled, command_map,
      COALESCE(nav_links,'[]'), COALESCE(search_tools,'[]'), specs_dir";
 
-fn parse_plugin_row(
-    id: String,
-    manifest_path: String,
-    tier: String,
-    context_injection: String,
-    enabled: bool,
-    map_json: String,
-    nav_links_json: String,
-    search_tools_json: String,
-    specs_dir: Option<String>,
-) -> PluginRow {
-    PluginRow {
-        id,
-        manifest_path,
-        tier,
-        context_injection,
-        enabled,
-        command_map: serde_json::from_str(&map_json).unwrap_or_default(),
+fn row_to_plugin(row: &rusqlite::Row<'_>) -> rusqlite::Result<PluginRow> {
+    let command_map_json: String = row.get(5)?;
+    let nav_links_json: String = row.get(6)?;
+    let search_tools_json: String = row.get(7)?;
+    Ok(PluginRow {
+        id: row.get(0)?,
+        manifest_path: row.get(1)?,
+        tier: row.get(2)?,
+        context_injection: row.get(3)?,
+        enabled: row.get(4)?,
+        command_map: serde_json::from_str(&command_map_json).unwrap_or_default(),
         nav_links: serde_json::from_str(&nav_links_json).unwrap_or_default(),
         search_tools: serde_json::from_str(&search_tools_json).unwrap_or_default(),
-        specs_dir,
-    }
+        specs_dir: row.get(8)?,
+    })
 }
 
 pub fn list(conn: &Connection) -> Result<Vec<PluginRow>> {
     let mut stmt = conn.prepare(&format!("SELECT {PLUGIN_COLS} FROM plugins ORDER BY id"))?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, bool>(4)?,
-            row.get::<_, String>(5)?,
-            row.get::<_, String>(6)?,
-            row.get::<_, String>(7)?,
-            row.get::<_, Option<String>>(8)?,
-        ))
-    })?;
-    let mut result = Vec::new();
-    for r in rows {
-        let (
-            id,
-            manifest_path,
-            tier,
-            context_injection,
-            enabled,
-            map_json,
-            nav_links_json,
-            search_tools_json,
-            specs_dir,
-        ) = r?;
-        result.push(parse_plugin_row(
-            id,
-            manifest_path,
-            tier,
-            context_injection,
-            enabled,
-            map_json,
-            nav_links_json,
-            search_tools_json,
-            specs_dir,
-        ));
-    }
-    Ok(result)
+    let rows = stmt.query_map([], row_to_plugin)?;
+    rows.map(|r| r.map_err(Into::into)).collect()
 }
 
 pub fn get(conn: &Connection, id: &str) -> Result<Option<PluginRow>> {
-    let result = conn.query_row(
+    match conn.query_row(
         &format!("SELECT {PLUGIN_COLS} FROM plugins WHERE id = ?1"),
         rusqlite::params![id],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, bool>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-                row.get::<_, Option<String>>(8)?,
-            ))
-        },
-    );
-    match result {
-        Ok((
-            id,
-            manifest_path,
-            tier,
-            context_injection,
-            enabled,
-            map_json,
-            nav_links_json,
-            search_tools_json,
-            specs_dir,
-        )) => Ok(Some(parse_plugin_row(
-            id,
-            manifest_path,
-            tier,
-            context_injection,
-            enabled,
-            map_json,
-            nav_links_json,
-            search_tools_json,
-            specs_dir,
-        ))),
+        row_to_plugin,
+    ) {
+        Ok(p) => Ok(Some(p)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
     }

@@ -8,6 +8,7 @@
 //! parser without crossing crate-graph constraints. The SDK ships its own
 //! strict v0 [`sdk::manifest::Manifest`]; reconciling the two is the next wave
 //! after this column-removal pass.
+#![allow(clippy::disallowed_types)] // nav_links is plugin-defined free-form JSON
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -32,7 +33,6 @@ pub struct PluginSection {
     #[serde(default)]
     pub commands: HashMap<String, String>,
     #[serde(default)]
-    #[allow(clippy::disallowed_types)]
     pub nav_links: Vec<serde_json::Value>,
     #[serde(default)]
     pub search_tools: Vec<PluginSearchTool>,
