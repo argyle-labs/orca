@@ -838,7 +838,6 @@ pub mod dispatcher;
 pub mod host_status_replica;
 mod listener;
 pub mod mdns;
-pub mod peerdb;
 pub mod roster_sync;
 pub mod runtime_cache;
 pub mod scheduler;
@@ -1018,7 +1017,7 @@ pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
         }
     }
     let conn = ::db::open_default()?;
-    crate::peerdb::wipe_pod_membership(&conn)?;
+    db::pod::wipe_pod_membership(&conn)?;
     drop(conn);
 
     // If this host holds the mesh CA key (founder), self-issue fresh
@@ -1034,7 +1033,7 @@ pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
              pod-membership wiped — re-pair joiners as needed"
         );
         let conn = ::db::open_default()?;
-        crate::peerdb::set_self_secure(&conn, true)?;
+        db::pod::set_self_secure(&conn, true)?;
     } else {
         tracing::warn!(
             "[pod] mesh cert+pod-membership state wiped; daemon will come up unpaired — \

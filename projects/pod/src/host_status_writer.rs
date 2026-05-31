@@ -132,7 +132,7 @@ async fn persist_local_snapshot() -> Result<()> {
 async fn pull_peer_status_once() -> Result<()> {
     let peers = tokio::task::spawn_blocking(|| -> Result<Vec<(String, String)>> {
         let conn = db::open_default()?;
-        let rows = db::pod::list_peers(&conn)?;
+        let rows = db::pod::list_peer_summaries(&conn)?;
         // (peer_id, addr) — skip departed peers, skip our own row (no point
         // pulling ourselves; the local writer owns those).
         let own = own_peer_id();
@@ -309,7 +309,7 @@ pub async fn refresh_runtime_for_peer(peer_id: &str) -> Result<()> {
     let pid = peer_id.to_string();
     let addr = tokio::task::spawn_blocking(move || -> Result<String> {
         let conn = db::open_default()?;
-        let peers = db::pod::list_peers(&conn)?;
+        let peers = db::pod::list_peer_summaries(&conn)?;
         peers
             .into_iter()
             .find(|p| p.peer_id == pid)

@@ -10,6 +10,9 @@ use crate::host_addressing::{self, PodPeerAddress};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
+pub mod peerdb;
+pub use peerdb::*;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PeerSummary {
     pub peer_id: String,
@@ -41,7 +44,7 @@ pub fn get_self_secure(conn: &Connection) -> Result<bool> {
     Ok(row.unwrap_or(false))
 }
 
-pub fn list_peers(conn: &Connection) -> Result<Vec<PeerSummary>> {
+pub fn list_peer_summaries(conn: &Connection) -> Result<Vec<PeerSummary>> {
     let mut stmt = conn.prepare(
         "SELECT p.peer_id, p.peer_hostname, p.peer_addr, p.peer_port,
                 p.last_seen_at, p.departed_at,

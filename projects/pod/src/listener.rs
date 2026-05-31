@@ -25,8 +25,9 @@ use super::{
     POD_DEV_SYNC_METHOD, POD_EXEC_METHOD, POD_PING_METHOD, POD_REPLICATE_EXPORT_METHOD,
     POD_REPLICATE_PUSH_METHOD, POD_REPLICATE_ROOTS_METHOD, PodDevDisableResult, PodDevEnableResult,
     PodDevSyncResult, PodExecParams, PodExecResult, PodPingResult, ReplicatePushResult,
-    ReplicateRootsResult, peerdb as pdb, pki_dir,
+    ReplicateRootsResult, pki_dir,
 };
+use db::pod as pdb;
 
 const POD_NOTIFY_TRUST_METHOD: &str = "pod/notify-trust";
 const POD_HAS_CA_KEY_METHOD: &str = "pod/has-ca-key";
@@ -422,7 +423,7 @@ fn authorize_role_gated(
     let verified = crate::caller_token::verify(env, tool, args, now)
         .context("pod/exec refused: caller token verification failed")?;
 
-    let pinned = crate::peerdb::pinned_pubkey_fp(conn, peer_cn)?.ok_or_else(|| {
+    let pinned = db::pod::pinned_pubkey_fp(conn, peer_cn)?.ok_or_else(|| {
         anyhow::anyhow!(
             "pod/exec refused: peer {peer_cn} has no pinned bootstrap key to verify against"
         )

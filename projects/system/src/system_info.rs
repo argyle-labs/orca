@@ -76,9 +76,11 @@ pub fn spawn_refresher() {
             sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
             let gpus = collect_gpus().await;
-            let snap = Arc::new(snapshot_from_sys(&sys, gpus));
+            let claims = crate::topology::collect_claims().await;
+            let mut snap = snapshot_from_sys(&sys, gpus);
+            snap.claims = claims;
             if let Ok(mut g) = cache().lock() {
-                *g = Some(snap);
+                *g = Some(Arc::new(snap));
             }
         }
     });
@@ -246,7 +248,7 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
     // Pod / paired counts straight from the DB. Best-effort: a DB error
     // leaves the fields `None` rather than poisoning the whole snapshot.
     if let Ok(conn) = db::open_default()
-        && let Ok(peers) = db::pod::list_peers(&conn)
+        && let Ok(peers) = db::pod::list_peer_summaries(&conn)
     {
         report.pod_peer_count = Some(peers.len() as u32);
         report.pod_paired_count = Some(

@@ -160,6 +160,45 @@ pub struct SystemInfoReport {
     /// metric like load average.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_at_unix: Option<i64>,
+
+    // ── Topology ──
+    /// Inferred parent in the physical/virtual/container hierarchy.
+    /// Set by the inference task (mac-match on peers' `claims`), never by
+    /// user config. `None` until a claim matches one of this host's
+    /// interface MACs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_peer_id: Option<String>,
+    /// Kind of parent edge: `"hypervisor"` (VM under a host), `"host"`
+    /// (container under its docker host), or `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_kind: Option<String>,
+    /// Things this host claims to host (VMs it runs, containers under its
+    /// docker socket, LXCs, etc.). Populated by colocated API collectors
+    /// (Proxmox, Unraid, Docker, ...). Each entry's `macs` is the join key
+    /// the inference layer matches against other peers' `interfaces[].mac`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claims: Vec<TopologyClaim>,
+}
+
+/// One child entity this host claims to run. Emitted by API collectors
+/// and consumed by the inference task to derive `parent_peer_id` edges.
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+pub struct TopologyClaim {
+    /// `"vm"`, `"container"`, `"lxc"`.
+    pub kind: String,
+    /// Provider-native id (proxmox vmid, docker container id short, ...).
+    pub id: String,
+    pub name: String,
+    /// MAC addresses associated with this child. Inference matches these
+    /// against `interfaces[].mac` on other peers' snapshots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub macs: Vec<String>,
+    /// Provider that emitted this claim (`"proxmox"`, `"docker"`,
+    /// `"unraid"`, ...). Lets the UI badge the edge.
+    pub provider: String,
+    /// Provider instance id (from `<provider>.<instance>.<field>` secret
+    /// key). `"local"` for the local docker socket.
+    pub provider_instance: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]

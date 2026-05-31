@@ -126,7 +126,7 @@ async fn reconcile_once(registry: &Mutex<HashMap<String, JoinHandle<()>>>) -> Re
     let own = format!("peer.{}", system::host_identity::machine_id_short());
     let peers = tokio::task::spawn_blocking(move || -> Result<Vec<(String, String)>> {
         let conn = ::db::open_default()?;
-        let rows = ::db::pod::list_peers(&conn)?;
+        let rows = ::db::pod::list_peer_summaries(&conn)?;
         Ok(rows
             .into_iter()
             .filter(|p| p.status == "active" && p.peer_id != own)

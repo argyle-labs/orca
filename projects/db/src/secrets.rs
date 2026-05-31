@@ -148,6 +148,53 @@ pub fn write_inline_value(conn: &Connection, name: &str, value: &str) -> Result<
     settings::secret_set(conn, name, value)
 }
 
+/// Multi-instance secret convention. Keys follow `<provider>.<instance>.<field>`
+/// (e.g. `proxmox.frigg.api_url`, `proxmox.frigg.api_token`). Returns one
+/// entry per `instance_id` with all its `field -> value` pairs resolved
+/// (inline backend only — external backends are skipped with a warn).
+///
+/// Used by colocated API collectors (proxmox, unraid, plex, sonarr, ...) to
+/// enumerate every instance configured locally. N instances per provider —
+/// the helper assumes nothing about cardinality.
+pub fn list_provider_instances(
+    conn: &Connection,
+    provider: &str,
+) -> Result<Vec<(String, std::collections::BTreeMap<String, String>)>> {
+    use std::collections::BTreeMap;
+    let prefix = format!("{provider}.");
+    let mut stmt =
+        conn.prepare("SELECT name, backend FROM secrets WHERE name LIKE ?1 || '%' ORDER BY name")?;
+    let rows = stmt.query_map(rusqlite::params![&prefix], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    let mut out: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for row in rows {
+        let (name, backend) = row?;
+        let rest = match name.strip_prefix(&prefix) {
+            Some(r) => r,
+            None => continue,
+        };
+        let (instance, field) = match rest.split_once('.') {
+            Some((i, f)) if !i.is_empty() && !f.is_empty() => (i, f),
+            _ => continue,
+        };
+        if backend != "inline" {
+            tracing::warn!(
+                secret = %name, backend = %backend,
+                "list_provider_instances skipping non-inline backend"
+            );
+            continue;
+        }
+        let Some(value) = settings::secret_get(conn, &name)? else {
+            continue;
+        };
+        out.entry(instance.to_string())
+            .or_default()
+            .insert(field.to_string(), value);
+    }
+    Ok(out.into_iter().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +248,48 @@ mod tests {
         assert!(removed);
         assert!(get(&conn, "k").unwrap().is_none());
         assert!(read_inline_value(&conn, "k").unwrap().is_none());
+    }
+
+    #[test]
+    fn list_provider_instances_groups_by_instance() {
+        let conn = test_conn();
+        upsert(&conn, "proxmox.frigg.api_url", "inline", "", None).unwrap();
+        write_inline_value(&conn, "proxmox.frigg.api_url", "https://frigg:8006").unwrap();
+        upsert(&conn, "proxmox.frigg.api_token", "inline", "", None).unwrap();
+        write_inline_value(&conn, "proxmox.frigg.api_token", "tok-a").unwrap();
+        upsert(&conn, "proxmox.lab.api_url", "inline", "", None).unwrap();
+        write_inline_value(&conn, "proxmox.lab.api_url", "https://lab:8006").unwrap();
+        upsert(&conn, "unrelated", "inline", "", None).unwrap();
+        write_inline_value(&conn, "unrelated", "x").unwrap();
+
+        let instances = list_provider_instances(&conn, "proxmox").unwrap();
+        assert_eq!(instances.len(), 2);
+        let frigg = &instances.iter().find(|(i, _)| i == "frigg").unwrap().1;
+        assert_eq!(
+            frigg.get("api_url").map(String::as_str),
+            Some("https://frigg:8006")
+        );
+        assert_eq!(frigg.get("api_token").map(String::as_str), Some("tok-a"));
+        let lab = &instances.iter().find(|(i, _)| i == "lab").unwrap().1;
+        assert_eq!(
+            lab.get("api_url").map(String::as_str),
+            Some("https://lab:8006")
+        );
+        assert!(lab.get("api_token").is_none());
+    }
+
+    #[test]
+    fn list_provider_instances_skips_flat_legacy_keys() {
+        let conn = test_conn();
+        // `github_token` (no dots) must not be misread as a github instance.
+        upsert(&conn, "github_token", "inline", "", None).unwrap();
+        write_inline_value(&conn, "github_token", "tok").unwrap();
+        assert!(list_provider_instances(&conn, "github").unwrap().is_empty());
+        assert!(
+            list_provider_instances(&conn, "github_token")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

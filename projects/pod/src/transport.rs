@@ -18,9 +18,9 @@ use orca_sdk::pki;
 use serde_json::Value;
 
 use crate::{
-    ReplicateBundle, fetch_replicate_bundle, fetch_replicate_roots, peerdb as pdb, pki_dir,
-    push_replicate_bundle,
+    ReplicateBundle, fetch_replicate_bundle, fetch_replicate_roots, pki_dir, push_replicate_bundle,
 };
+use db::pod as pdb;
 
 pub struct PodMeshTransport;
 

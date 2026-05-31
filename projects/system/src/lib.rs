@@ -16,6 +16,7 @@ pub mod host;
 pub mod host_identity;
 pub mod host_status;
 pub mod system_info_types;
+pub mod topology;
 pub mod update_state;
 
 #[cfg(test)]

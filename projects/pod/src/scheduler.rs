@@ -28,7 +28,8 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tracing::{info, warn};
 
-use super::{peerdb as pdb, pki_dir};
+use super::pki_dir;
+use db::pod as pdb;
 use system::periodic;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(15);
