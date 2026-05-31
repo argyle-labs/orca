@@ -56,10 +56,13 @@ mod tests {
     async fn spec_detail_returns_valid_json_openapi_doc() {
         let ctx = empty_ctx();
         let out = spec_detail(SpecDetailArgs {}, &ctx).await.unwrap();
-        // Round-trip through serde_json — proves we emitted valid JSON.
-        let v: serde_json::Value = serde_json::from_str(&out.spec).unwrap();
-        // Sanity check: top-level OpenAPI shape includes `openapi` + `paths`.
-        assert!(v.get("openapi").is_some(), "missing openapi field");
-        assert!(v.get("paths").is_some(), "missing paths field");
+        #[derive(serde::Deserialize)]
+        struct Shape {
+            openapi: String,
+            paths: std::collections::BTreeMap<String, serde::de::IgnoredAny>,
+        }
+        let v: Shape = serde_json::from_str(&out.spec).unwrap();
+        assert!(!v.openapi.is_empty(), "missing openapi field");
+        assert!(!v.paths.is_empty(), "missing paths field");
     }
 }
