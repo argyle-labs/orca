@@ -454,8 +454,15 @@ mod tests {
         }
     }
 
+    /// Register the test Shim engine exactly once. `register` errors when an
+    /// engine is already installed; that's the expected path on the 2nd+
+    /// engine test in this module. Guarding with `Once` ensures the first
+    /// register panics on real failures and later calls are no-ops.
     fn install_shim_once() {
-        register(Arc::new(Shim)).ok();
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            register(Arc::new(Shim)).expect("register test shim engine");
+        });
     }
 
     /// Process-wide serializer for engine tests. The `Shim` reads transport

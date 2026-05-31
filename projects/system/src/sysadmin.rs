@@ -4,7 +4,7 @@
 //! lockstep. Internals (user creation, group management, linger, SSH key
 //! install) are module-private helpers — there is no service trait.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use colored::Colorize;
 use contract::ToolCtx;
 use derive::orca_tool;
@@ -235,11 +235,17 @@ fn install_ssh_key(user: &str, home_dir: &str, pubkey: &str) -> Result<()> {
 
     #[cfg(target_os = "linux")]
     if !user.is_empty() && is_root() {
-        Command::new("chown")
+        let chown = Command::new("chown")
             .args(["-R", user])
             .arg(&ssh_dir)
             .status()
-            .ok();
+            .with_context(|| format!("invoking chown -R {user} on {}", ssh_dir.display()))?;
+        if !chown.success() {
+            anyhow::bail!(
+                "chown -R {user} {} failed with status {chown} — SSH key would be unreadable to {user}",
+                ssh_dir.display()
+            );
+        }
     }
 
     println!("{} installed SSH key for '{user}'", "✓".green());
