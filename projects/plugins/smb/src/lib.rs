@@ -542,20 +542,6 @@ malformed line with no parens
         assert!(io.to_string().starts_with("io:"));
     }
 
-    #[test]
-    fn credentials_debug_works_for_each_variant() {
-        for c in [
-            Credentials::File(PathBuf::from("/x")),
-            Credentials::Inline {
-                username: "u".into(),
-                password: "p".into(),
-            },
-            Credentials::Guest,
-        ] {
-            let _ = c;
-        }
-    }
-
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn mount_macos_with_inline_creds_runs_through_to_tool() {
