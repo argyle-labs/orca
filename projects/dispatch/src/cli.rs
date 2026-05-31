@@ -451,6 +451,7 @@ mod tests {
         struct DoubleExec;
         #[async_trait::async_trait]
         impl RemoteExec for DoubleExec {
+            #[allow(clippy::disallowed_types)]
             async fn exec(
                 &self,
                 peer: &str,
