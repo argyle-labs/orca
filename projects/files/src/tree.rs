@@ -28,10 +28,6 @@ pub fn get_roots() -> HashMap<String, PathBuf> {
     let home = std::env::var("HOME").unwrap_or_default();
     let mut roots = HashMap::new();
     roots.insert(
-        "rebuy".to_string(),
-        PathBuf::from(std::env::var("REBUY_ROOT").unwrap_or_else(|_| format!("{home}/code/rebuy"))),
-    );
-    roots.insert(
         "orca".to_string(),
         PathBuf::from(
             std::env::var("ORCA_CODE_ROOT").unwrap_or_else(|_| format!("{home}/code/orca")),
@@ -48,18 +44,6 @@ pub fn get_roots() -> HashMap<String, PathBuf> {
 
 pub fn get_ignored(root_name: &str) -> HashSet<String> {
     match root_name {
-        "rebuy" => [
-            "node_modules",
-            ".git",
-            ".next",
-            "dist",
-            "build",
-            "vendor",
-            "www",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect(),
         "orca" => [".git", "target", "node_modules", "dist", "build", ".next"]
             .iter()
             .map(|s| s.to_string())
@@ -73,18 +57,6 @@ pub fn get_ignored(root_name: &str) -> HashSet<String> {
 // find relevant context across past decisions without exposing the raw tree.
 pub fn get_search_ignored(root_name: &str) -> HashSet<String> {
     match root_name {
-        "rebuy" => [
-            "node_modules",
-            ".git",
-            ".next",
-            "dist",
-            "build",
-            "vendor",
-            "www",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect(),
         "orca" => [".git", "logs", ".trash", "node_modules", "plugins"]
             .iter()
             .map(|s| s.to_string())
