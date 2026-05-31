@@ -116,38 +116,16 @@ pub async fn apply_update_dev(source_url: &str) -> Result<()> {
     }
     std::fs::rename(&tmp, &current).context("failed to replace binary")?;
 
-    // /boot is root-owned vfat — orca user can't write directly. Stage in
-    // /tmp/orca-mirror-* and use the sudoers-allowed `install` (see
-    // sudoers fragment dropped by system.bootstrap on unraid).
+    // Unraid persists binaries in appdata (orca-writeable). No sudo needed.
+    // See [[project-unraid-persistence-via-appdata]].
     #[cfg(target_os = "linux")]
     if crate::update::is_unraid() {
-        let persist_bin = std::path::Path::new("/boot/config/plugins/orca/bin/orca");
-        let stage = std::path::PathBuf::from("/tmp/orca-mirror-dev");
-        std::fs::copy(&current, &stage).with_context(|| {
-            format!(
-                "stage dev binary at {} before sudo install",
-                stage.display()
-            )
-        })?;
-        let status = std::process::Command::new("sudo")
-            .args(["-n", "install", "-m", "0755", "-o", "root", "-g", "root"])
-            .arg(&stage)
-            .arg(persist_bin)
-            .status()
-            .with_context(|| {
-                format!(
-                    "invoke sudo install to mirror dev binary to {} (unraid USB)",
-                    persist_bin.display()
-                )
-            })?;
-        if !status.success() {
-            anyhow::bail!(
-                "sudo install of dev mirror binary {} exited {status} — dev build will revert on next reboot",
-                persist_bin.display()
-            );
-        }
-        std::fs::remove_file(&stage)
-            .with_context(|| format!("clean up staged dev binary {}", stage.display()))?;
+        let persist_dir = std::path::Path::new("/mnt/user/appdata/orca/bin");
+        let persist_bin = persist_dir.join("orca");
+        std::fs::create_dir_all(persist_dir)
+            .with_context(|| format!("create unraid appdata dir {}", persist_dir.display()))?;
+        std::fs::copy(&current, &persist_bin)
+            .with_context(|| format!("mirror dev binary to {}", persist_bin.display()))?;
     }
 
     println!("[orca] dev build applied — restarting...");
