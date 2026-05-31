@@ -39,57 +39,36 @@ fn main() {
 fn resolve_version() -> String {
     let cargo_version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
 
-    // Try `git describe --tags --always --dirty` — gives us either an exact tag
-    // ("v0.0.3-rc.3"), an annotated past-tag string ("v0.0.3-rc.3-5-g66d2ea6"),
-    // or just a SHA if no tag is reachable.
-    let described = match Command::new("git")
-        .args(["describe", "--tags", "--always", "--dirty"])
-        .output()
-    {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
-        _ => return format!("{cargo_version}+unknown"),
-    };
-
-    // Strip the conventional leading 'v' from tags.
-    let described = described
-        .strip_prefix('v')
-        .unwrap_or(&described)
-        .to_string();
-
-    // Is HEAD exactly a tag? `git describe --tags --exact-match` succeeds iff yes.
     let exact_tag = Command::new("git")
         .args(["describe", "--tags", "--exact-match"])
         .output()
-        .map(|o| o.status.success())
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+
+    let dirty = Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .map(|o| !o.stdout.is_empty())
         .unwrap_or(false);
 
-    let dirty = described.ends_with("-dirty");
-
-    if exact_tag && !dirty {
-        // Clean release build sitting on the tag.
-        return described;
+    if let Some(tag) = exact_tag
+        && !dirty
+    {
+        return tag.strip_prefix('v').unwrap_or(&tag).to_string();
     }
 
-    // Past a tag (or no tag). Rewrite "<tag>-<N>-g<sha>[-dirty]" → "<tag>-dev+<N>.g<sha>[.dirty]"
-    // to make the "-dev" intent obvious. Falls back to "<sha>-dev" when there's no tag.
-    let stripped = described.trim_end_matches("-dirty");
-    let parts: Vec<&str> = stripped.rsplitn(3, '-').collect();
-    if parts.len() == 3 && parts[0].starts_with('g') {
-        // parts = [g<sha>, <N>, <tag>] (reversed)
-        let sha = parts[0];
-        let n = parts[1];
-        let tag = parts[2];
-        let mut s = format!("{tag}-dev+{n}.{sha}");
-        if dirty {
-            s.push_str(".dirty");
-        }
-        s
-    } else {
-        // No tag reachable — `git describe` returned a bare SHA (and maybe -dirty).
-        let mut s = format!("{cargo_version}-dev+g{stripped}");
-        if dirty {
-            s.push_str(".dirty");
-        }
-        s
+    let sha = Command::new("git")
+        .args(["rev-parse", "--short=7", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".into());
+
+    let mut s = format!("{cargo_version}-dev+g{sha}");
+    if dirty {
+        s.push_str(".dirty");
     }
+    s
 }
