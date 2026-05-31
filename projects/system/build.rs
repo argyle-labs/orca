@@ -25,47 +25,36 @@ fn main() {
 fn resolve_version() -> String {
     let cargo_version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
 
-    let described = match Command::new("git")
-        .args(["describe", "--tags", "--always", "--dirty"])
-        .output()
-    {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
-        _ => return format!("{cargo_version}+unknown"),
-    };
-
-    let described = described
-        .strip_prefix('v')
-        .unwrap_or(&described)
-        .to_string();
-
     let exact_tag = Command::new("git")
         .args(["describe", "--tags", "--exact-match"])
         .output()
-        .map(|o| o.status.success())
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+
+    let dirty = Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .map(|o| !o.stdout.is_empty())
         .unwrap_or(false);
 
-    let dirty = described.ends_with("-dirty");
-
-    if exact_tag && !dirty {
-        return described;
+    if let Some(tag) = exact_tag
+        && !dirty
+    {
+        return tag.strip_prefix('v').unwrap_or(&tag).to_string();
     }
 
-    let stripped = described.trim_end_matches("-dirty");
-    let parts: Vec<&str> = stripped.rsplitn(3, '-').collect();
-    if parts.len() == 3 && parts[0].starts_with('g') {
-        let sha = parts[0];
-        let n = parts[1];
-        let tag = parts[2];
-        let mut s = format!("{tag}-dev+{n}.{sha}");
-        if dirty {
-            s.push_str(".dirty");
-        }
-        s
-    } else {
-        let mut s = format!("{cargo_version}-dev+g{stripped}");
-        if dirty {
-            s.push_str(".dirty");
-        }
-        s
+    let sha = Command::new("git")
+        .args(["rev-parse", "--short=7", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".into());
+
+    let mut s = format!("{cargo_version}-dev+g{sha}");
+    if dirty {
+        s.push_str(".dirty");
     }
+    s
 }
