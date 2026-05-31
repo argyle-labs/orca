@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn validate_repo_accepts_safe_names() {
-        assert!(validate_repo("rebuy-shopify-client"));
+        assert!(validate_repo("acme-shopify-client"));
         assert!(validate_repo("a_b.c-1"));
         assert!(validate_repo("X"));
     }
