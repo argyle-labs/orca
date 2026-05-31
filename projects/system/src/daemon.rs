@@ -779,10 +779,21 @@ fn install_system_service(_binary: &str, _port: u16, _user: &str, _home: &str) -
 
 #[cfg(target_os = "linux")]
 fn uninstall_service() -> Result<()> {
-    Command::new("systemctl")
+    // disable --now: log failures and keep going so we still remove the unit
+    // file. A failed disable usually means the service is already stopped or
+    // never existed; not a reason to abort the uninstall.
+    match Command::new("systemctl")
         .args(["--user", "disable", "--now", APP_SYSTEMD_SERVICE])
         .status()
-        .ok();
+    {
+        Ok(s) if s.success() => {}
+        Ok(s) => tracing::warn!(
+            "systemctl --user disable --now {APP_SYSTEMD_SERVICE} exited {s} — continuing uninstall"
+        ),
+        Err(e) => tracing::warn!(
+            "invoking systemctl --user disable --now {APP_SYSTEMD_SERVICE}: {e:#} — continuing uninstall"
+        ),
+    }
 
     let home = std::env::var("HOME")?;
     let service_path = format!("{home}/.config/systemd/user/{APP_SYSTEMD_SERVICE}.service");
@@ -791,10 +802,13 @@ fn uninstall_service() -> Result<()> {
         println!("{} removed {}", "✓".green(), service_path);
     }
 
-    Command::new("systemctl")
+    let reload = Command::new("systemctl")
         .args(["--user", "daemon-reload"])
         .status()
-        .ok();
+        .context("invoking systemctl --user daemon-reload")?;
+    if !reload.success() {
+        anyhow::bail!("systemctl --user daemon-reload failed with status {reload}");
+    }
     println!("{} {APP_NAME} daemon uninstalled", "✓".green());
     Ok(())
 }
