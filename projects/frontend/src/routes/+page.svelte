@@ -130,14 +130,14 @@
 
   // Drawer update controls — reset only when the SELECTED INSTANCE changes,
   // not on every poll tick that updates instance data.
-  let drawerVersionInput = $state('');
+  type VersionEntry = { tag: string; prerelease: boolean; published_at: string | null; is_current: boolean };
+  let drawerVersionSelect = $state('');
+  let drawerVersions = $state<VersionEntry[]>([]);
+  let drawerVersionsLoading = $state(false);
   let drawerOpenedForId = $state<string | null>(null);
-  let updateResult = $state<{ done: string[]; errors: string[] } | null>(null);
+  let updateResult = $state<{ notes: string[]; errors: string[] } | null>(null);
   let updatePending = $state(false);
   let secureToggling = $state(false);
-  // One popover per channel button. Bound via `popoverOpen[ch]` in the loop;
-  // only one is open at a time (each opener closes the others first).
-  let popoverOpen = $state<Record<string, boolean>>({ stable: false, rc: false, dev: false });
 
   // 1-second live poll; DB writes happen every 10 s (host_status_writer)
   const POLL_MS = 1000;
@@ -447,58 +447,103 @@
     // clobber the user's channel selection on every tick.
     if (selectedInst && selectedInst.id !== drawerOpenedForId) {
       drawerOpenedForId = selectedInst.id;
-      drawerVersionInput = selectedInst.pinnedTo ?? '';
+      drawerVersionSelect = selectedInst.version ? `v${selectedInst.version}` : '';
+      drawerVersions = [];
       updateResult = null;
-      popoverOpen = { stable: false, rc: false, dev: false };
+      void probeUpdateState();
     }
   });
 
-  async function applyChannelUpdate(channel: string) {
+  type SystemUpdateResp = {
+    current_version: string;
+    channel: string;
+    pinned_to: string | null;
+    dev_source: string | null;
+    available_versions: VersionEntry[];
+    latest: string | null;
+    applied: string | null;
+    hostname: string | null;
+    fqdn: string | null;
+    addressing_set: string[];
+    os_package_result: string | null;
+    notes: string[];
+    errors: string[];
+  };
+
+  async function probeUpdateState() {
+    if (!selectedInst) return;
+    drawerVersionsLoading = true;
+    try {
+      const args: Record<string, unknown> = {};
+      if (selectedInst.role === 'system') args.peer_id = selectedInst.peerId;
+      const r = await callTool<SystemUpdateResp>('systemUpdate', args);
+      drawerVersions = r.available_versions ?? [];
+      if (selectedInst) {
+        selectedInst.channel = r.channel;
+        selectedInst.pinnedTo = r.pinned_to;
+        if (r.current_version) selectedInst.version = r.current_version;
+        if (r.latest) {
+          selectedInst.updateLatest = r.latest;
+          selectedInst.updateAvailable =
+            !!r.current_version && r.latest.replace(/^v/, '') !== r.current_version;
+        }
+        instances = [...instances];
+      }
+      if (!drawerVersionSelect && r.current_version) {
+        drawerVersionSelect = `v${r.current_version}`;
+      }
+    } catch (e) {
+      console.warn('update state probe failed:', e);
+    } finally {
+      drawerVersionsLoading = false;
+    }
+  }
+
+  async function runSystemUpdate(args: Record<string, unknown>) {
     if (!selectedInst) return;
     updatePending = true;
     updateResult = null;
-    popoverOpen = { stable: false, rc: false, dev: false };
     try {
-      const args: Record<string, unknown> = { version: channel };
       if (selectedInst.role === 'system') args.peer_id = selectedInst.peerId;
-      const r = await callTool<{ done: string[]; skipped: string[]; errors: string[] }>(
-        'systemUpdate',
-        args,
-      );
-      updateResult = { done: r.done, errors: r.errors };
-      // Optimistic: assume the requested channel applied; puller will reconcile.
-      if (selectedInst) selectedInst.channel = channel;
-      instances = [...instances];
+      const r = await callTool<SystemUpdateResp>('systemUpdate', args);
+      updateResult = { notes: r.notes ?? [], errors: r.errors ?? [] };
+      drawerVersions = r.available_versions ?? drawerVersions;
+      if (selectedInst) {
+        selectedInst.channel = r.channel;
+        selectedInst.pinnedTo = r.pinned_to;
+        if (r.current_version) selectedInst.version = r.current_version;
+        if (r.latest) {
+          selectedInst.updateLatest = r.latest;
+          selectedInst.updateAvailable =
+            !!r.current_version && r.latest.replace(/^v/, '') !== r.current_version;
+        }
+        instances = [...instances];
+      }
       void (selectedInst.role === 'local' ? refreshLocal(selectedInst) : refreshPodPeers());
     } catch (e) {
-      console.warn('update failed:', e);
-      updateResult = { done: [], errors: [e instanceof Error ? e.message : String(e)] };
+      console.warn('system update failed:', e);
+      updateResult = { notes: [], errors: [e instanceof Error ? e.message : String(e)] };
     } finally {
       updatePending = false;
     }
   }
 
-  async function applyVersion() {
-    if (!selectedInst) return;
-    const v = drawerVersionInput.trim();
-    if (!v) return;
-    updatePending = true;
-    updateResult = null;
-    try {
-      const args: Record<string, unknown> = { version: v };
-      if (selectedInst.role === 'system') args.peer_id = selectedInst.peerId;
-      const r = await callTool<{ done: string[]; skipped: string[]; errors: string[] }>(
-        'systemUpdate',
-        args,
-      );
-      updateResult = { done: r.done, errors: r.errors };
-      await (selectedInst.role === 'local' ? refreshLocal(selectedInst) : refreshPodPeers());
-    } catch (e) {
-      console.warn('version apply failed:', e);
-      updateResult = { done: [], errors: [e instanceof Error ? e.message : String(e)] };
-    } finally {
-      updatePending = false;
-    }
+  async function applyChannelUpdate(channel: string) {
+    await runSystemUpdate({ channel });
+  }
+
+  async function applySelectedVersion() {
+    if (!drawerVersionSelect) return;
+    await runSystemUpdate({ version: drawerVersionSelect });
+  }
+
+  async function pinSelectedVersion() {
+    if (!drawerVersionSelect) return;
+    await runSystemUpdate({ version: drawerVersionSelect, pin: true });
+  }
+
+  async function clearPin() {
+    await runSystemUpdate({ unpin: true });
   }
 
   async function toggleSecure(inst: Instance) {
