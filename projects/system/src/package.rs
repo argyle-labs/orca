@@ -495,7 +495,7 @@ fi
     let final_pkg = out_dir.join(format!("orca_{version}_{arch}.pkg"));
     const IDENTIFIER: &str = "com.orca.daemon";
 
-    if !utils::path::which("pkgbuild").is_some() {
+    if utils::path::which("pkgbuild").is_none() {
         let keep = out_dir.join("orca-pkg-staging");
         if keep.exists() {
             std::fs::remove_dir_all(&keep)?;
