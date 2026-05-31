@@ -490,7 +490,7 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     let daemon_log = format!("{logs_dir}/{APP_DAEMON_LOG_FILE}");
 
     let service = format!(
-        "[Unit]\nDescription=Orca AI daemon\nAfter=network.target\n\n\
+        "[Unit]\nDescription={APP_NAME} daemon\nAfter=network.target\n\n\
          [Service]\nExecStart={binary} daemon --port {port}\n\
          Environment=HOME={home}\nRestart=on-failure\nRestartSec=5\n\
          StandardOutput=append:{daemon_log}\nStandardError=append:{daemon_log}\n\n\
@@ -572,7 +572,7 @@ fn install_systemd_system(binary: &str, port: u16, user: &str, home: &str) -> Re
     }
     let daemon_log = format!("{logs_dir}/{APP_DAEMON_LOG_FILE}");
     let unit = format!(
-        "[Unit]\nDescription=Orca AI daemon\nAfter=network.target\n\n\
+        "[Unit]\nDescription={APP_NAME} daemon\nAfter=network.target\n\n\
          [Service]\nType=simple\nUser={user}\n\
          Environment=HOME={home}\nExecStart={binary} daemon --port {port}\n\
          Restart=on-failure\nRestartSec=5\n\
@@ -622,7 +622,7 @@ fn install_openrc(binary: &str, port: u16, user: &str, home: &str) -> Result<()>
     let script = format!(
         "#!/sbin/openrc-run\n\
          name=\"{APP_NAME}\"\n\
-         description=\"Orca AI daemon\"\n\
+         description=\"{APP_NAME} daemon\"\n\
          command=\"{binary}\"\n\
          command_args=\"daemon --port {port}\"\n\
          command_user=\"{user}\"\n\
