@@ -319,7 +319,7 @@ mod tests {
     #[test]
     fn error_trait_is_implemented_for_dyn_error_use() {
         let e = OrcaError::invalid("x");
-        let dyn_err: &(dyn std::error::Error) = &e;
+        let dyn_err: &dyn std::error::Error = &e;
         assert_eq!(dyn_err.to_string(), "invalid: x");
     }
 

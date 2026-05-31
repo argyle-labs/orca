@@ -2125,8 +2125,7 @@ mod tests {
 
     #[test]
     fn pinned_bootstrap_verifier_accepts_matching_fp_and_rejects_other() {
-        use rustls::client::danger::ServerCertVerifier;
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _p = rustls::crypto::ring::default_provider().install_default();
         let dir = tempfile::tempdir().unwrap();
         let (cert_pem, _) = load_or_init_bootstrap_cert(dir.path()).unwrap();
         let (chain, _) = parse_cert_and_key(
@@ -2155,8 +2154,7 @@ mod tests {
 
     #[test]
     fn capturing_bootstrap_verifier_stores_fp() {
-        use rustls::client::danger::ServerCertVerifier;
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _p = rustls::crypto::ring::default_provider().install_default();
         let dir = tempfile::tempdir().unwrap();
         let (cert_pem, _) = load_or_init_bootstrap_cert(dir.path()).unwrap();
         let (chain, _) = parse_cert_and_key(

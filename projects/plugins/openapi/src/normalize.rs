@@ -969,8 +969,6 @@ mod tests {
         assert_eq!(status_label(&StatusCode::Range(4)), "4XX");
         assert_eq!(SuccessKey::Default.label(), "default");
         assert_eq!(SuccessKey::Status(StatusCode::Code(201)).label(), "201");
-        // Debug derive exercised.
-        let _ = format!("{:?}", SuccessKey::Default);
     }
 
     #[test]
@@ -1048,10 +1046,6 @@ mod tests {
             merged_error_responses: vec![("GET /a".into(), vec!["404".into(), "500".into()], 2)],
         };
         r.emit_cargo_warnings("test-crate");
-        // Debug + Default + Clone derives.
-        let _ = format!("{r:?}");
-        let _ = r.clone();
-        let _ = NormalizeReport::default();
     }
 
     #[test]

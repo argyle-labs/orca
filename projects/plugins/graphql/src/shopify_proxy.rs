@@ -174,6 +174,5 @@ mod tests {
         let back: GraphqlProxyResult = serde_json::from_str(&s).unwrap();
         assert_eq!(back.status, 200);
         assert_eq!(back.body, json!({"data": 1}));
-        let _ = r.clone();
     }
 }

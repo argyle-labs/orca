@@ -294,8 +294,6 @@ mod tests {
         assert_eq!(c.endpoint(), "http://srv/graphql");
         assert!(c.insecure);
         assert_eq!(c.token, "tok");
-        let _ = c.clone();
-        let _ = format!("{c:?}");
 
         // No trailing slash also OK.
         let c2 = Config::new("http://srv", "t");

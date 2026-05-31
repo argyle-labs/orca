@@ -317,9 +317,6 @@ nasbox:/legacy /mnt/legacy smbfs ro 0 0
         assert_eq!(back.released, r.released);
         assert_eq!(back.skipped, r.skipped);
         assert_eq!(back.failed[0].mountpoint, "/c");
-        // exercise Clone+Debug derives
-        let _ = format!("{:?}", r.clone());
-        let _ = format!("{:?}", r.failed[0].clone());
     }
 
     #[tokio::test]
