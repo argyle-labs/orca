@@ -449,10 +449,7 @@ async fn find_release_by_tag(
     }
     let release: Release = resp.json().context("parse release json")?;
     let stripped = release.tag_name.trim_start_matches('v').to_string();
-    let build_target = match option_env!("ORCA_BUILD_TARGET") {
-        Some(v) => v,
-        None => "unknown-target",
-    };
+    let build_target = option_env!("ORCA_BUILD_TARGET").unwrap_or("unknown-target");
     let versioned = format!("{APP_NAME}-{stripped}-{build_target}");
     let legacy = format!("{APP_NAME}-{build_target}");
     let asset = release
