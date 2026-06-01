@@ -1,27 +1,24 @@
-//! Codebase sweep tools — orca dogfooding itself.
+//! Codebase sweep — orca dogfooding itself.
+//!
+//! Relocated 2026-06-01 from `system::sweep`. Tool shape deferred:
+//! [`run_organization`] is a plain async fn for now. When the dev crate
+//! grows an orca_tool surface it'll be a `dev.sweep` (or similar) entry.
 //!
 //! Per `project_orca_sweeps.md`. Order locked 2026-05-19:
-//!   1. `sweep.organization` (this file) — unused deps, advisories, licenses.
-//!   2. `sweep.code-standards` (TODO).
-//!   3. `sweep.security` (TODO).
-//!   4. `sweep.coverage` (TODO).
-//!
-//! Every Args/Output is fully typed per `feedback_no_any_no_offloads.md` —
-//! no `Value`/`any`/`unknown` escape hatches.
+//!   1. organization (this file) — unused deps, advisories, licenses.
+//!   2. code-standards (TODO).
+//!   3. security (TODO).
+//!   4. coverage (TODO).
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use derive::orca_tool;
-
 // ── Args ────────────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SweepOrganizationArgs {
     /// Cargo workspace root. Defaults to `cargo locate-project --workspace`.
-    #[cfg_attr(feature = "cli", clap(long))]
     pub workspace_root: Option<PathBuf>,
 }
 
@@ -110,10 +107,8 @@ pub struct DenyReport {
 /// cargo-udeps) and advisory check (cargo-deny). Each sub-tool reports
 /// independently; missing binaries surface as `not_installed` rather than
 /// erroring the whole sweep.
-#[orca_tool(domain = "system.sweep", verb = "organization")]
-async fn sweep_organization(
+pub async fn run_organization(
     args: SweepOrganizationArgs,
-    _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<SweepOrganizationOutput> {
     let start = std::time::Instant::now();
     let workspace_root = native::resolve_workspace_root(args.workspace_root.as_deref())?;

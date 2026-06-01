@@ -1,34 +1,22 @@
-//! `system.diagnostic.list` (formerly `LifecycleService::doctor`).
-//! Lives in the server crate because the report scans embedded agents,
-//! per-profile agent override dirs, and `Config`-derived paths.
+//! Host diagnostic entries, surfaced as the `diagnostic` field of
+//! `system.detail`. There is no standalone `system.diagnostic` orca_tool
+//! — diagnostics are a detail of the system, not a separate resource.
 
-use derive::orca_tool;
+use anyhow::Result;
+use contract::config::Config;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct DoctorEntry {
     pub category: String,
     pub status: String, // "ok" | "warn" | "error"
     pub message: String,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct DoctorReport {
-    pub entries: Vec<DoctorEntry>,
-}
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct DoctorArgs {}
-
-/// Validate agent files, symlinks, config, tool availability — returns ok/warn/error entries.
-#[orca_tool(domain = "system.diagnostic", verb = "list")]
-async fn system_diagnostic_list(
-    _args: DoctorArgs,
-    ctx: &contract::ToolCtx,
-) -> anyhow::Result<DoctorReport> {
-    let cfg = &ctx.config;
+/// Validate agent files, symlinks, config, tool availability. Returns the
+/// list of ok/warn/error entries that `system.detail` exposes.
+pub(crate) fn collect(cfg: &Config) -> Result<Vec<DoctorEntry>> {
     let mut entries: Vec<DoctorEntry> = Vec::new();
     let push = |entries: &mut Vec<DoctorEntry>, cat: &str, status: &str, msg: String| {
         entries.push(DoctorEntry {
@@ -140,5 +128,5 @@ async fn system_diagnostic_list(
         );
     }
 
-    Ok(DoctorReport { entries })
+    Ok(entries)
 }

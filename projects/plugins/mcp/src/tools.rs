@@ -32,7 +32,7 @@ fn make_mcp_pool() -> McpPool {
 // ── MCP registry CRUD ───────────────────────────────────────────────────────
 
 /// List all MCP servers registered in orca.db (orca's own managed registry). Does not include ~/.claude.json servers managed by Claude Code directly.
-#[orca_tool(domain = "system.mcp", verb = "list")]
+#[orca_tool(domain = "mcp", verb = "list")]
 async fn list_mcp_servers(
     _args: ListMcpServersArgs,
     _ctx: &contract::ToolCtx,
@@ -52,7 +52,7 @@ async fn list_mcp_servers(
 }
 
 /// [MUTATES STATE] Add or update an MCP server in orca.db. Use when registering a new MCP server for orca to federate.
-#[orca_tool(domain = "system.mcp", verb = "create")]
+#[orca_tool(domain = "mcp", verb = "create")]
 async fn add_mcp_server(
     args: AddMcpServerArgs,
     _ctx: &contract::ToolCtx,
@@ -73,7 +73,7 @@ async fn add_mcp_server(
 }
 
 /// [MUTATES STATE] Remove an MCP server from orca.db by name.
-#[orca_tool(domain = "system.mcp", verb = "delete")]
+#[orca_tool(domain = "mcp", verb = "delete")]
 async fn remove_mcp_server(
     args: RemoveMcpServerArgs,
     _ctx: &contract::ToolCtx,
@@ -87,7 +87,7 @@ async fn remove_mcp_server(
 }
 
 /// [MUTATES STATE] Map an orca tool name to a specific tool on a registered MCP server.
-#[orca_tool(domain = "system.mcp.mapping", verb = "create")]
+#[orca_tool(domain = "mcp.mapping", verb = "create")]
 async fn mcp_mapping_create(
     args: MapToolArgs,
     _ctx: &contract::ToolCtx,
@@ -117,7 +117,7 @@ async fn mcp_mapping_create(
 }
 
 /// [MUTATES STATE] Remove a tool mapping from orca.db.
-#[orca_tool(domain = "system.mcp.mapping", verb = "delete")]
+#[orca_tool(domain = "mcp.mapping", verb = "delete")]
 async fn mcp_mapping_delete(
     args: UnmapToolArgs,
     _ctx: &contract::ToolCtx,
@@ -131,7 +131,7 @@ async fn mcp_mapping_delete(
 }
 
 /// [MUTATES STATE] Auto-discover and map tools from registered MCP servers. Provide name or set all=true.
-#[orca_tool(domain = "system.mcp", verb = "sync")]
+#[orca_tool(domain = "mcp", verb = "sync")]
 async fn sync_tools(
     args: SyncToolsArgs,
     _ctx: &contract::ToolCtx,
@@ -176,7 +176,7 @@ async fn sync_tools(
 }
 
 /// List all tool mappings in orca.db, optionally filtered by server name.
-#[orca_tool(domain = "system.mcp.mapping", verb = "list")]
+#[orca_tool(domain = "mcp.mapping", verb = "list")]
 async fn mcp_mapping_list(
     args: ListToolMappingsArgs,
     _ctx: &contract::ToolCtx,
@@ -204,7 +204,7 @@ async fn mcp_mapping_list(
 // ── MCP federation passthrough ──────────────────────────────────────────────
 
 /// List every tool advertised by every registered MCP server (connects on demand).
-#[orca_tool(domain = "system.mcp.federation", verb = "list-tools")]
+#[orca_tool(domain = "mcp.federation", verb = "list-tools")]
 async fn list_mcp_tools(
     _args: ListMcpToolsArgs,
     _ctx: &contract::ToolCtx,
@@ -240,7 +240,7 @@ async fn list_mcp_tools(
 }
 
 /// [MUTATES STATE] Invoke a tool on a registered MCP server. Returns the typed `tools/call` envelope (`{ content, isError, structuredContent? }`).
-#[orca_tool(domain = "system.mcp.federation", verb = "run", cli = skip)]
+#[orca_tool(domain = "mcp.federation", verb = "run", cli = skip)]
 async fn run_mcp_tool(
     args: RunMcpToolArgs,
     _ctx: &contract::ToolCtx,

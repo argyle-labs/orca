@@ -17,7 +17,7 @@ pub struct SpecDetailReport {
 pub struct SpecDetailArgs {}
 
 /// Dump orca's own OpenAPI JSON document. Used by build pipelines that don't want to spin up the HTTP server.
-#[orca_tool(domain = "namespace.spec", verb = "detail")]
+#[orca_tool(domain = "spec", verb = "detail")]
 async fn spec_detail(
     _args: SpecDetailArgs,
     _ctx: &contract::ToolCtx,

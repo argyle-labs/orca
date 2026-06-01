@@ -1,5 +1,12 @@
 # Orca Plugin Authoring Guide
 
+> **Scope: Tier 2 (SDK) plugins only.** This guide covers third-party /
+> experimental plugins authored against the `orca-plugin.toml` SDK and
+> run as MCP-stdio (or mTLS) sidecars. Tier 1 core integrations live
+> in-process at `projects/plugins/<name>/` and are not authored this
+> way. See [`planned/plugin-architecture.md`](planned/plugin-architecture.md)
+> for the two-tier model and tier-selection criteria.
+
 Plugins extend Orca with new MCP tools, sidebar navigation, UI pages, agents, and persistent data. Each plugin is an independent process that speaks the MCP protocol over stdio or HTTP. Orca manages its lifecycle and wires it into the system.
 
 ---

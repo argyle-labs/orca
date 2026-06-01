@@ -131,7 +131,7 @@ mod native_support {
 // ── Tools ────────────────────────────────────────────────────────────────────
 
 /// List schedule rows with their next firing time.
-#[orca_tool(domain = "system.schedule", verb = "list")]
+#[orca_tool(domain = "schedule", verb = "list")]
 async fn schedule_list(
     args: ScheduleListArgs,
     _ctx: &contract::ToolCtx,
@@ -156,7 +156,7 @@ async fn schedule_list(
 }
 
 /// Show per-job last-run status from the scheduler_runs history.
-#[orca_tool(domain = "system.schedule", verb = "status")]
+#[orca_tool(domain = "schedule", verb = "status")]
 async fn schedule_status(
     args: ScheduleStatusArgs,
     _ctx: &contract::ToolCtx,
@@ -184,7 +184,7 @@ async fn schedule_status(
 
 /// Invoke a scheduled job immediately, out-of-band from the loop.
 /// Useful for testing schedule wiring without waiting for the next firing.
-#[orca_tool(domain = "system.schedule", verb = "run")]
+#[orca_tool(domain = "schedule", verb = "run")]
 async fn schedule_run(
     args: ScheduleRunArgs,
     ctx: &contract::ToolCtx,
@@ -225,8 +225,8 @@ mod tests {
     #[test]
     fn schedule_tools_register_from_db_crate() {
         let names = dispatch::names();
-        assert!(names.contains(&"system.schedule.list"), "got: {names:?}");
-        assert!(names.contains(&"system.schedule.status"), "got: {names:?}");
-        assert!(names.contains(&"system.schedule.run"), "got: {names:?}");
+        assert!(names.contains(&"schedule.list"), "got: {names:?}");
+        assert!(names.contains(&"schedule.status"), "got: {names:?}");
+        assert!(names.contains(&"schedule.run"), "got: {names:?}");
     }
 }

@@ -19,7 +19,7 @@ pub struct ListCommandsOutput {
 }
 
 /// List all Claude slash commands and skills embedded in the orca binary.
-#[orca_tool(domain = "namespace.doc", verb = "list-commands")]
+#[orca_tool(domain = "doc", verb = "list-commands")]
 async fn list_commands(
     _args: ListCommandsArgs,
     _ctx: &contract::ToolCtx,

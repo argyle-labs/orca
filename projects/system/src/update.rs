@@ -170,7 +170,8 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
 /// Single entry in the version-picker list. Tag is the GitHub release tag
 /// (with or without `v` prefix as returned by GitHub); `is_current` is true
 /// when the tag matches the running binary's `CURRENT_VERSION`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(default)]
 pub struct VersionEntry {
     pub tag: String,
     pub prerelease: bool,

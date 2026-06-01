@@ -14,6 +14,7 @@
 pub mod cli;
 pub mod host_status_writer;
 pub mod server_pod;
+pub mod status;
 
 pub use db::replicate_engine::PeerSyncReport;
 

@@ -82,10 +82,11 @@ pub struct PackageBuildOutput {
 }
 
 /// Build a distributable package (deb/rpm/apk/PKGBUILD/pkg/homebrew) from the current orca binary.
-/// Format auto-detected from host OS when not provided. Postinst scripts delegate to
-/// `system bootstrap` + `daemon install`.
-#[orca_tool(domain = "system.package", verb = "build", local_only = true)]
-async fn package_build(args: PackageBuildArgs, _ctx: &ToolCtx) -> Result<PackageBuildOutput> {
+/// Format auto-detected from host OS when not provided. Postinst scripts
+/// delegate to `system install --service-user orca` (which absorbed the old
+/// `system.bootstrap` + supervisor-install responsibilities).
+#[orca_tool(domain = "system", verb = "build", local_only = true)]
+async fn system_build(args: PackageBuildArgs, _ctx: &ToolCtx) -> Result<PackageBuildOutput> {
     let binary = args.binary.map(Ok).unwrap_or_else(std::env::current_exe)?;
     if !binary.exists() {
         anyhow::bail!("binary not found: {}", binary.display());

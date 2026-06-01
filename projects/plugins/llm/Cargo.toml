@@ -19,6 +19,7 @@ colored      = { workspace = true }
 futures-util = { workspace = true }
 reqwest      = { workspace = true }
 rustls       = { workspace = true }
+schemars     = { workspace = true }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
 tokio        = { workspace = true }

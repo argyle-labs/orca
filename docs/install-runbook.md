@@ -1,185 +1,218 @@
 # Orca Install Runbook
 
-How to bring a fresh host onto a published orca release. Two paths:
+The operator-facing how-to. For the scope of what install does and why,
+see [`planned/install-bootstrap.md`](planned/install-bootstrap.md); for
+discovery + enrollment, see
+[`planned/discovery-enrollment.md`](planned/discovery-enrollment.md).
 
-- **Pull (primary)** — host fetches its own binary from GitHub. One ssh.
-- **Push (fallback)** — controller ships bytes over ssh. Use when the host
-  has no `curl`/`wget` (`baldur`), no GitHub reach (`freyr` behind VPN), or
-  any other minimal-image case.
+Onboarding a host has three phases:
 
-Both paths use the same `scripts/install.sh` on the target and result in the
-same end state.
+```
+   1. install          2. discovery        3. enrollment
+   ──────────          ────────────        ─────────────
+   one command         automatic           operator pastes
+   on the new host     mDNS broadcast      one-time token
+                                           on a pod member
+```
+
+After phase 1 the host runs orca **locally** (the orca-native secret
+store is usable immediately). After phase 3 it's a full pod member.
 
 ---
 
-## The `orca` service user
+## Phase 1 — Install (one command, universal)
 
-Whenever install.sh runs as root, it creates a least-privileged `orca` user
-and installs for that user. Root never owns the binary.
-
-| | |
-|---|---|
-| Home | `/var/lib/orca` |
-| Shell | `/bin/bash` (needed for `systemctl --user`) |
-| Groups | `docker`, `systemd-journal` (best-effort — skipped if absent) |
-| Sudo | **never** |
-| Linger | enabled via `loginctl enable-linger` so user-systemd persists |
-| `authorized_keys` | populated **only** from `--admin-pubkey`. Root's keys are not copied. |
-
-If you need to grant orca additional capabilities later (host reboot, raw
-socket binding, etc.), do it explicitly via polkit rules or capabilities —
-not by adding it to `sudo`.
-
----
-
-## Getting your admin pubkey
-
-`--admin-pubkey` / `ORCA_ADMIN_PUBKEY` is the SSH public key that will be
-written to `/var/lib/orca/.ssh/authorized_keys` so the controller can `ssh
-orca@host` afterward. It is the **`.pub` file**, never the private key.
+Same verb on every platform; platform adapters fill in OS-specific bits
+internally.
 
 ```sh
-# Preferred: ed25519
-cat ~/.ssh/id_ed25519.pub
-
-# Older keys, in priority order:
-cat ~/.ssh/id_ecdsa.pub
-cat ~/.ssh/id_rsa.pub
+curl -fsSL https://install.orca.sh | sh
+# or, against a release tarball:
+sh scripts/install.sh --version vX.Y.Z
 ```
 
-No key yet? Generate one — orca will not use the private side:
+What install does:
+
+1. Detects platform (OS / libc / arch / init / pkg mgr).
+2. Verifies the binary signature.
+3. Creates the `orca` service user (`/var/lib/orca`, no sudo, linger on systemd).
+4. Installs binary + platform service unit (systemd / OpenRC / launchd / rc.d / procd / Unraid go-file).
+5. Installs **minimal daemon prerequisites**: NTP (chrony or systemd-timesyncd), firewall holes for `:12000` `:12443` `:12002`, base packages adapters need (`nfs-common`, `qemu-guest-agent`, etc).
+6. Generates the **host-identity-derived key** for the orca-native secret backend. Orca-native is usable locally immediately.
+7. Starts the daemon. **mDNS service advertising begins now** — no enrollment required to be discovered.
+8. **Prints a one-time enroll token** (default TTL **15 min**, single-use). Capture this; phase 3 needs it.
+
+The caller is **not** responsible for the OS layer post-install — install
+handles its own prerequisites. It just doesn't try to be a full
+host-baseline tool.
+
+### Re-installs are idempotent
+
+Re-running install on a host that already has orca skips every step
+whose state already matches. **It does not rotate the identity key or
+the enroll token** unless you pass `--rotate`.
+
+### Push-mode for hosts without curl / GitHub reach
 
 ```sh
-ssh-keygen -t ed25519 -C "orca-admin@$(hostname)"
-cat ~/.ssh/id_ed25519.pub
+scripts/deploy-host.sh root@baldur            # latest RC
+scripts/deploy-host.sh root@freyr --version vX.Y.Z
 ```
 
-Pass it via either form. **Both must be the literal one-line pubkey** —
-quoted on the command line, expanded by your local shell before the value
-travels to the host:
+Controller scp's the binary + install.sh into `/tmp/`, then runs
+`install.sh --from-file`. Target needs only `sh`, `mv`, `chmod`,
+`mkdir`, `sha256sum`/`shasum`.
+
+### Service user (admin pubkey)
+
+When install runs as root, it creates `orca` and writes the admin
+pubkey from `--admin-pubkey` / `ORCA_ADMIN_PUBKEY` to
+`/var/lib/orca/.ssh/authorized_keys`. Pass the **`.pub` file contents**,
+never the private key:
 
 ```sh
-# flag
-... install.sh --admin-pubkey "$(cat ~/.ssh/id_ed25519.pub)"
-
-# env
-ORCA_ADMIN_PUBKEY="$(cat ~/.ssh/id_ed25519.pub)" sh install.sh
-```
-
-Verify after install:
-
-```sh
-ssh "$HOST" 'sudo cat /var/lib/orca/.ssh/authorized_keys'
-ssh "orca@$HOST" 'whoami'   # → orca
-```
-
----
-
-## Path 1 — Pull install (one ssh)
-
-For hosts with `curl` or `wget` and GitHub reach.
-
-```sh
-GH_TOKEN=$(gh auth token)
-
-# Non-root user (their own install — no orca user created):
-ssh user@host "GITHUB_TOKEN=$GH_TOKEN sh -s -- --version v0.0.3-rc.12 --prerelease" \
-  < scripts/install.sh
-
-# Root (creates orca user, drops privs, bootstraps daemon):
 ssh root@host \
-  "GITHUB_TOKEN=$GH_TOKEN ORCA_ADMIN_PUBKEY=\"$(cat ~/.ssh/id_ed25519.pub)\" \
-   sh -s -- --version v0.0.3-rc.12 --prerelease" \
+  "ORCA_ADMIN_PUBKEY=\"$(cat ~/.ssh/id_ed25519.pub)\" \
+   sh -s -- --version vX.Y.Z" \
   < scripts/install.sh
 ```
 
-The root variant runs `orca daemon install` automatically at the end of the
-script, so a single ssh produces a fully running host.
-
-If the host has `wget` but no `curl`, install.sh auto-detects and uses wget.
-You don't pass anything.
-
----
-
-## Path 2 — Push install (controller ships bytes)
-
-Use when pull fails: no `curl`/`wget`, no GitHub reach, or air-gapped.
+Verify:
 
 ```sh
-scripts/deploy-host.sh root@baldur
-scripts/deploy-host.sh root@freyr
+ssh "orca@$HOST" 'whoami'
+ssh orca@$HOST '~/.local/bin/orca --version'
+ssh orca@$HOST '~/.local/bin/orca daemon status'
 ```
 
-`deploy-host.sh`:
+---
 
-1. Resolves the latest RC tag (`--version` overrides).
-2. Fetches the matching binary + sha256 via `gh release download` on the controller, cached under `$TMPDIR/orca-deploy-<version>/`.
-3. SSHes into the host, probes `uname -s -m` + libc, scp's binary + sha + install.sh into `/tmp/`.
-4. Runs `install.sh --from-file --admin-pubkey "$(reads ~/.ssh/id_*.pub)"`.
+## Phase 2 — Discovery (automatic)
 
-Target requirements: `sh`, `mv`, `chmod`, `mkdir`, `sha256sum`/`shasum`. **No
-curl, no wget, no outbound network.**
+From any existing pod member:
+
+```sh
+orca pod discover              # all candidates + members on the segment
+orca pod discover --unenrolled # just candidates waiting on enrollment
+orca pod discover --known      # candidates whose peer_id matches a prior roster entry
+```
+
+mDNS broadcasts start at install; the new host appears within seconds.
+No flag, no command on the new host required.
+
+If the new host won't appear: assumption is a trusted L2 segment. mDNS
+across VLANs requires an mDNS reflector (Avahi `enable-reflector=yes`
+on the gateway). On hostile networks, install with `--no-mdns` and
+enroll by direct IP.
 
 ---
 
-## Verify
+## Phase 3 — Enrollment (operator pastes the token)
 
 ```sh
-ssh orca@host '~/.local/bin/orca --version'
+orca pod add <new-host-name-or-ip> --token <oob-token>
+```
+
+What happens:
+
+1. Token validated (single-use, TTL-bound).
+2. mTLS cert exchange — new host gets a peer cert minted by the pod CA.
+3. Pod roster updated (CRDT replicates to all members).
+4. **Identity-key escrow** — the host's identity-derived key is split
+   k-of-n across enrolled peers for DR (per
+   [`planned/backup-restore.md`](planned/backup-restore.md) §4.4).
+   Install does **not** escrow; enrollment is the only place this
+   happens.
+5. Reconcilers in scope for this host begin operating.
+
+### If the token expired
+
+```sh
+# On the new host (run as the orca user):
+~/.local/bin/orca system pair-token show       # current valid token
+~/.local/bin/orca system pair-token rotate     # mint a fresh one
+```
+
+### Re-enrollment (host was wiped, machine-id preserved)
+
+```sh
+orca pod discover --known                       # sees the host as previously known
+orca pod rejoin <peer_id> --token <new-token>   # recovers escrowed identity key
+```
+
+If `/etc/machine-id` was rotated, the host enrolls clean; the old
+roster entry remains as an audit tombstone.
+
+---
+
+## Verify a fully onboarded host
+
+```sh
 ssh orca@host '~/.local/bin/orca daemon status'
-ssh orca@host 'journalctl --user -u orca -n 20 --no-pager'
+curl -sS http://host:12000/api/health        # {"ok":true}
+orca pod list                                 # new host is enrolled=true, healthy
 ```
 
-Reachability from the controller:
-
-```sh
-curl -sS http://host:12000/api/health   # → {"ok":true}
-```
-
-Expect `listening on 0.0.0.0:12002 (mTLS)` in the journal — that's the
-plugin-host. If it's missing or you see `server cert not found`, run
-`orca pki ca-init` then `systemctl --user restart orca` as the orca user.
+Expect `listening on 0.0.0.0:12002 (mTLS)` in the journal.
 
 ---
 
-## Upgrading a host
+## Upgrades
 
-Re-run the same path with a new `--version`. systemd picks up the new binary
-on restart:
+Re-run the same install path with a newer `--version`:
 
 ```sh
-# Pull, root host:
-ssh root@host "GITHUB_TOKEN=$GH_TOKEN ORCA_ADMIN_PUBKEY=\"$(cat ~/.ssh/id_ed25519.pub)\" \
-  sh -s -- --version v0.0.3-rc.13 --prerelease" < scripts/install.sh
+ssh root@host "ORCA_ADMIN_PUBKEY=\"$(cat ~/.ssh/id_ed25519.pub)\" \
+  sh -s -- --version vX.Y.Z" < scripts/install.sh
 ssh orca@host 'systemctl --user restart orca'
 
-# Push:
-scripts/deploy-host.sh root@host --version v0.0.3-rc.13
+# Or push-mode:
+scripts/deploy-host.sh root@host --version vX.Y.Z
 ssh orca@host 'systemctl --user restart orca'
 ```
 
-`daemon install` does not need to re-run unless the systemd unit shape
-changed.
+`daemon install` does not need to re-run unless the unit shape changed.
+Once `orca host update apply` lands (ROADMAP §1.2), this becomes a
+single verb.
 
 ---
 
 ## Channel pinning
 
-`install.sh` writes `~/.orca/channel` (or `/var/lib/orca/.orca/channel`) to
-either `stable` or `rc` based on the tag shape (`-rc.` → `rc`). Pass
-`--prerelease` to override.
+`install.sh` writes `~/.orca/channel` (or `/var/lib/orca/.orca/channel`)
+based on the tag shape (`-rc.` → `rc`). Pass `--prerelease` to override.
+
+---
+
+## Platform matrix
+
+| Platform | Path | Daemon | Notes |
+|---|---|---|---|
+| Debian / Ubuntu | pull or push | `systemctl --user` + linger | Reference / best-tested. |
+| Alpine | pull or push | OpenRC user-session or s6 | See [`host-setup/host-setup-alpine.md`](host-setup/host-setup-alpine.md). |
+| Fedora | pull or push | `systemctl --user` + linger | SELinux contexts on `/var/lib/orca` need labeling; see `host-setup-fedora.md`. |
+| Proxmox host | pull or push, root-flow | `systemctl --user` | Pairs with [`planned/lxc-vm-reconciler.md`](planned/lxc-vm-reconciler.md). |
+| LXC (unprivileged) | pull or push | user-systemd | UID 0 inside → 100000 on host. |
+| Unraid | push only | `/mnt/user/appdata/orca/bin/`, started from `go` | `/boot` path retired. |
+| macOS | manual (laptop) | launchd | Full-disk-access prompt on first run for some operations. |
 
 ---
 
 ## Known gotchas
 
-- **`GITHUB_TOKEN` required for pull mode.** Releases are private. Not
-  needed in push mode (controller has it via `gh`).
-- **`--admin-pubkey` required when first creating the orca user.** Without
-  it the controller would have no way to ssh back in as orca.
-- **`PATH` on non-login shells.** `~/.local/bin` and `/var/lib/orca/.local/bin`
-  are usually not on the SSH non-login PATH. Always invoke `~/.local/bin/orca`
-  by absolute path in scripts.
-- **First-boot plugin-host warning on rc.11 and earlier:** older
-  `daemon install` did not run `pki ca-init`. One-time fix: `orca pki ca-init
-  && systemctl --user restart orca` as the orca user. Fixed in tree for rc.13+.
+- **`GITHUB_TOKEN` required for pull mode** (releases are private).
+- **`--admin-pubkey` required when first creating the orca user** — without it the controller can't ssh back as orca.
+- **`PATH` on non-login shells** — always invoke `~/.local/bin/orca` by absolute path in scripts.
+- **Release artifact verification** — signing scheme (cosign vs minisign) is an open decision (ROADMAP "Open decisions" §1). Today install verifies sha256 only.
+- **First-boot plugin-host warning on rc.11 and earlier** — one-time fix: `orca pki ca-init && systemctl --user restart orca` as the orca user. Fixed in tree for rc.13+.
+
+---
+
+## See also
+
+- [`planned/install-bootstrap.md`](planned/install-bootstrap.md) — install scope.
+- [`planned/discovery-enrollment.md`](planned/discovery-enrollment.md) — phases 2 + 3 scope.
+- [`planned/host-lifecycle.md`](planned/host-lifecycle.md) — drivers, updates, reboots after enrollment.
+- [`planned/backup-restore.md`](planned/backup-restore.md) §4.4 — identity-key escrow.
+- [`ROADMAP.md`](ROADMAP.md) §1.3 — install + enrollment hardening exit criteria.
+- [`host-setup/`](host-setup/) — per-OS manual prereqs.

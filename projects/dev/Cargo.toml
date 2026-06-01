@@ -1,0 +1,27 @@
+[package]
+name = "dev"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "dev"
+path = "src/lib.rs"
+
+[dependencies]
+contract = { path = "../contract", default-features = false }
+files    = { path = "../files" }
+utils    = { path = "../utils" }
+
+anyhow     = { workspace = true }
+axum       = { workspace = true }
+schemars   = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+tokio      = { workspace = true }
+tracing    = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

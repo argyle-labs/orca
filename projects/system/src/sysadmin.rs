@@ -1,8 +1,10 @@
-//! Host-level lifecycle helpers: `system.kill-stale` and `system.bootstrap`.
+//! Host-level lifecycle helpers backing `system.kill` (this file) and the
+//! service-user bootstrap path used by `system.install` (in `commands.rs`).
 //!
-//! Each verb is a `#[orca_tool]` so the macro emits CLI/REST/MCP/WASM in
-//! lockstep. Internals (user creation, group management, linger, SSH key
-//! install) are module-private helpers — there is no service trait.
+//! Service-user creation / group management / linger / SSH key install are
+//! exposed as `pub(crate)` helpers so the install tool can drive them.
+//! There is no dedicated `system.bootstrap` orca_tool — install owns that
+//! responsibility now.
 
 #[cfg(target_os = "linux")]
 use anyhow::Context;
@@ -18,18 +20,18 @@ use std::process::Command;
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct KillStaleArgs {}
+pub struct SystemKillArgs {}
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
-pub struct KillStaleOutput {
+pub struct SystemKillOutput {
     pub killed_patterns: Vec<String>,
 }
 
 /// Kill stale orca runtime processes (mcp-serve, daemon start) so a binary
 /// swap is picked up by their clients on next call. Safe to run before any
 /// deploy; no-op when nothing matches.
-#[orca_tool(domain = "system", verb = "kill-stale")]
-async fn kill_stale(_args: KillStaleArgs, _ctx: &ToolCtx) -> Result<KillStaleOutput> {
+#[orca_tool(domain = "system", verb = "kill")]
+async fn system_kill(_args: SystemKillArgs, _ctx: &ToolCtx) -> Result<SystemKillOutput> {
     let mut killed = Vec::new();
     for pat in STALE_PATTERNS {
         let status = Command::new("pkill").arg("-f").arg(pat).status();
@@ -42,56 +44,24 @@ async fn kill_stale(_args: KillStaleArgs, _ctx: &ToolCtx) -> Result<KillStaleOut
             Err(e) => eprintln!("warn: pkill '{pat}' failed: {e}"),
         }
     }
-    Ok(KillStaleOutput {
+    Ok(SystemKillOutput {
         killed_patterns: killed,
-    })
-}
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct BootstrapArgs {
-    /// SSH pubkey to add to the service user's authorized_keys.
-    #[cfg_attr(feature = "cli", arg(long))]
-    pub admin_pubkey: Option<String>,
-    /// Service user name (default: orca).
-    #[cfg_attr(feature = "cli", arg(long, default_value = "orca"))]
-    #[serde(default = "default_service_user")]
-    pub service_user: String,
-    /// Home directory for the service user (default: /var/lib/orca).
-    #[cfg_attr(feature = "cli", arg(long, default_value = "/var/lib/orca"))]
-    #[serde(default = "default_home_dir")]
-    pub home_dir: String,
-}
-
-fn default_service_user() -> String {
-    "orca".to_string()
-}
-fn default_home_dir() -> String {
-    "/var/lib/orca".to_string()
-}
-
-#[derive(Serialize, Deserialize, JsonSchema, Debug)]
-pub struct BootstrapOutput {
-    pub user: String,
-    pub home_dir: String,
-}
-
-/// Create the orca service user and configure SSH access. Idempotent.
-/// Designed to run as root immediately after the binary is placed, before
-/// `daemon install --service-user orca`.
-#[orca_tool(domain = "system", verb = "bootstrap", local_only = true)]
-async fn bootstrap_tool(args: BootstrapArgs, _ctx: &ToolCtx) -> Result<BootstrapOutput> {
-    bootstrap(args.admin_pubkey, &args.service_user, &args.home_dir)?;
-    Ok(BootstrapOutput {
-        user: args.service_user,
-        home_dir: args.home_dir,
     })
 }
 
 const STALE_PATTERNS: &[&str] = &["orca mcp-serve", "orca daemon"];
 
+/// Default home directory when `system.install --service-user <u>` is
+/// called without an explicit `--home-dir`. The user name itself is
+/// already required at the call site, so no default constant is needed.
+pub(crate) const DEFAULT_SERVICE_HOME: &str = "/var/lib/orca";
+
+/// Create the orca service user and configure SSH access. Idempotent.
+/// Designed to run as root immediately after the binary is placed, before
+/// `daemon install --service-user orca`. Driven by `system.install` —
+/// there is no standalone `system.bootstrap` orca_tool.
 #[cfg(target_os = "linux")]
-fn bootstrap(admin_pubkey: Option<String>, user: &str, home_dir: &str) -> Result<()> {
+pub(crate) fn bootstrap(admin_pubkey: Option<String>, user: &str, home_dir: &str) -> Result<()> {
     validate_shell_safe("--service-user", user)?;
     validate_shell_safe("--home-dir", home_dir)?;
 
@@ -119,7 +89,7 @@ fn bootstrap(admin_pubkey: Option<String>, user: &str, home_dir: &str) -> Result
 }
 
 #[cfg(not(target_os = "linux"))]
-fn bootstrap(admin_pubkey: Option<String>, _user: &str, home_dir: &str) -> Result<()> {
+pub(crate) fn bootstrap(admin_pubkey: Option<String>, _user: &str, home_dir: &str) -> Result<()> {
     if let Some(pk) = admin_pubkey {
         install_ssh_key("", home_dir, &pk)?;
     }

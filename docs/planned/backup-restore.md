@@ -1,5 +1,11 @@
 # Backup + restore — unified story
 
+> **HARD RULE — user-triggered changes only.** Orca detects drift,
+> notifies, and waits. The user runs `orca apply <change-id>` (or
+> accepts a UI prompt). No reconciler ever auto-applies. Scheduled
+> backup *jobs* are user-declared schedules (still operator-defined);
+> *restores* are always explicit verbs. See ROADMAP §1.11.
+
 One backup story across two concerns that historically lived
 separately:
 
@@ -100,7 +106,8 @@ backup is not touched**.
 
 ### 2.1 Source kinds — native APIs first
 
-**Rule**: where a service exposes a native backup API, use it.
+**Hard rule** (see `feedback_native_backup_apis`): where a service
+exposes a native backup API, use it.
 Don't tar the docker volume. Native backups are app-consistent
 (the service flushes its own buffers, closes its own write
 transactions, knows which paths are throwaway caches), produce a
@@ -196,13 +203,41 @@ is worse than no backup at all; it gives false confidence.
 
 ## 3. Concern 1: managed-service backups (meerkat scripts → orca verbs)
 
-| Meerkat script | Replacement | Notes |
+The 9 backup-relevant scripts in meerkat (verified 2026-06-01):
+
+| Meerkat path | Replacement | Notes |
 |---|---|---|
-| `backup-configs.sh` | `[[job]] kind = "config_snapshot"` source + `kind = "git_commit"` target | Currently writes into `backups/configs/` and the repo. Keep the on-disk layout exactly; parity-check per [schema-evolution.md](schema-evolution.md). |
-| `restore-config.sh` | `orca backup restore --job <name> --from <snapshot>` | Same flag shape it had as a script. |
-| `pbs-backup-hook.sh` | `[[job]] target = "pbs"` with the pre/post hooks above | PBS integration grows hooks API surface. |
-| `pbs-mount-watchdog.sh` | Folds into the NFS health loop (see [orca-as-logic-layer.md](orca-as-logic-layer.md) §3.3) — not a backup job per se, but it gates whether backup jobs can run. |
-| Per-host `backup-appdata.sh` (baldur, freyr, willow, maple) | `[[job]] kind = "docker_volumes"` per host | The chown-fix wrappers (`appdata-backup-chown.sh`, `fix-backup-ownership.sh`) become `[job.source.permission_fix]` options. |
+| `scripts/backup-configs.sh` | `[[job]] kind = "config_snapshot"` source + `kind = "git_commit"` target | Currently writes into `backups/configs/` and the repo. Keep the on-disk layout exactly; parity-check per [schema-evolution.md](schema-evolution.md). |
+| `scripts/restore-config.sh` | `orca backup restore --job <name> --from <snapshot>` | Same flag shape it had as a script. |
+| `scripts/pbs-backup-hook.sh` | `[[job]] target = "pbs"` with pre/post hooks (§2) | **Needs `projects/plugins/pbs/`** — there is no PBS plugin in orca today. New plugin work. |
+| `scripts/pbs-mount-watchdog.sh` | Folds into the NFS client reconciler in [storage-shares.md](storage-shares.md) — not a backup job per se, but it gates whether backup jobs can run. |
+| `scripts/baldur/backup-appdata.sh` | `[[job]] kind = "docker_volumes"` on baldur | Native-API-first per [§2.1]; only the volumes that lack a native endpoint stay on docker-volume tar. |
+| `scripts/freyr/backup-appdata.sh` + the `scripts/freyr/{backup,restore,update,restart}` wrappers | `[[job]]` per service; the arr stack uses `arr_native` (§2.1) not volume tar | Wrappers retire when verbs cover the surface. |
+| `scripts/thor/backup-zigbee2mqtt.sh` | `[[job]] kind = "zigbee2mqtt_backup"` (native source — see §2.1 table) | |
+| `scripts/maple/appdata-backup-chown.sh` + `scripts/maple/fix-backup-ownership.sh` | `[job.source.permission_fix]` option (folds into `utils/fs/perms`) | |
+| `scripts/willow/appdata-backup-chown.sh` + `scripts/willow/fix-backup-ownership.sh` | Retire with willow (2026-06-01 cutover); for maple keep the same successor as above. |
+
+### 3.1 New work: `projects/plugins/pbs/`
+
+PBS integration is **not** shipped — `projects/plugins/` has docker,
+dockge, nfs, smb, ntfy, proxmox, unraid, homeassistant, arr, graphql,
+openapi, llm, agents, runtime, mcp, db, but no `pbs`. The PBS
+backup-hook flow above depends on it. New plugin work:
+
+- `pbs.datastore.list` / `pbs.datastore.detail`
+- `pbs.snapshot.list` / `pbs.snapshot.delete`
+- `pbs.sync_job.list` / `pbs.sync_job.run`
+- `pbs.hook.{pre,post}` (the hook surface this doc consumes)
+- `pbs.client.install` (host-side: install PBS client + key material)
+
+Lives under `projects/plugins/pbs/` alongside the other integrations.
+
+### 3.2 Namespace — `backup_job`
+
+The config-store noun for jobs in this doc is **`backup_job`**, not
+`job`. `projects/server/src/jobs/` is already taken by **agent
+execution** (chat+tool loop). Two unrelated concepts; pick distinct
+names. `[[backup_job]]` in TOML, `system.backup.job.*` in tool defs.
 
 Each retirement follows the [schema-evolution.md](schema-evolution.md)
 parity workflow. Default operational cycle for backups is **two
@@ -283,18 +318,25 @@ fails if you lose 1P access. A key escrowed only on a YubiKey fails
 if you lose the token. Default policy: at least two independent
 targets per key, where one of them is an offline fallback.
 
+> **Handle grammar.** All `op://` references in this section
+> follow [`secrets-identity.md`](secrets-identity.md) §2.1 — three
+> segments for 1Password (`vault/item/field`), no path-style
+> namespacing. Per-host orca keys live as item `orca-keys.<host>`
+> in the `Orca` vault; per-host backup keys as `backup-keys.<host>`;
+> escrow shares as `escrow.<scope>` with field-per-share.
+
 ### 4.6 Escrow operations
 
 ```sh
 # Manual export of a single key
-orca pki key export --key secrets-master --to op://Private/orca-keys/secrets-master
-orca pki key export --key pod-ca         --to op://Private/orca-keys/pod-ca
+orca pki key export --key secrets-master --to op://Orca/orca-keys.secrets-master/key
+orca pki key export --key pod-ca         --to op://Orca/orca-keys.pod-ca/key
 
-# Bulk export of all tracked keys
-orca pki key export --all --to op://Private/orca-keys
+# Bulk export of all tracked keys (writes one item per key in the Orca vault)
+orca pki key export --all --vault Orca
 
 # Import / restore from escrow
-orca pki key import --key secrets-master --from op://Private/orca-keys/secrets-master
+orca pki key import --key secrets-master --from op://Orca/orca-keys.secrets-master/key
 
 # Verify every tracked key has a current escrow entry
 orca pki key audit
@@ -306,11 +348,11 @@ window (default 30 days). Stale or missing escrows fail loudly:
 
 ```
 orca pki key audit
-  ✓ secrets-master    op://Private/orca-keys/secrets-master   (verified 3d ago)
-                      shamir://operators/3-of-5                (verified 14d ago)
-  ✗ pod-ca            op://Private/orca-keys/pod-ca            MISSING
-                      yubikey://serial-12345/piv-slot-9c       (verified 31d ago, STALE)
-  ✓ offsite/baldur    op://Private/orca-keys/offsite-baldur    (verified 1h ago)
+  ✓ secrets-master    op://Orca/orca-keys.secrets-master/key   (verified 3d ago)
+                      shamir://operators/3-of-5                 (verified 14d ago)
+  ✗ pod-ca            op://Orca/orca-keys.pod-ca/key            MISSING
+                      yubikey://serial-12345/piv-slot-9c        (verified 31d ago, STALE)
+  ✓ offsite-baldur    op://Orca/orca-keys.offsite-baldur/key    (verified 1h ago)
 exit 1: 1 key has no valid escrow, 1 key has stale escrow
 ```
 
@@ -342,20 +384,20 @@ the config DB, push only a specific store to a vault, etc.
 
 | Store | Default vault path | Notes |
 |---|---|---|
-| `config` | `op://Private/orca-keys/<host>/config.db.enc` | Encrypted blob. |
-| `secrets/store` | `op://Private/orca-keys/<host>/secrets.db.enc` | Encrypted blob (master key escrowed separately, §4.4). |
-| `secrets/items` | `op://Private/orca-keys/<host>/secrets/` | Per-secret items (see §4.9). |
-| `audit` | `op://Private/orca-keys/<host>/audit.db.enc` | 1-year retention floor. |
-| `pki/ca` | `op://Private/orca-keys/<host>/ca-key` | Founding peer only. |
-| `pki/revocation` | `op://Private/orca-keys/<host>/revocation.signed` | Replicated via mesh; vault copy is the fallback. |
+| `config` | `op://Orca/backup-keys.<host>/config_db_enc` | Encrypted blob. |
+| `secrets/store` | `op://Orca/backup-keys.<host>/secrets_db_enc` | Encrypted blob (master key escrowed separately, §4.4). |
+| `secrets/items` | `op://Orca/backup-keys.<host>/secrets_items` | Per-secret items (see §4.9). |
+| `audit` | `op://Orca/backup-keys.<host>/audit_db_enc` | 1-year retention floor. |
+| `pki/ca` | `op://Orca/orca-keys.<host>-ca/key` | Founding peer only. |
+| `pki/revocation` | `op://Orca/orca-keys.<host>-revocation/signed` | Replicated via mesh; vault copy is the fallback. |
 | `repos/<id>` | (not vault) | Materialized config repo — recoverable from git, not escrowed. |
 | `metrics`, `logs` | (not escrowed) | Time-series; expendable. |
 
 Verbs operate per-store:
 
 ```sh
-orca backup push  --store secrets/store --target op://Private/orca-keys
-orca backup pull  --store secrets/store --from   op://Private/orca-keys
+orca backup push  --store secrets/store --target op://Orca/backup-keys.<host>/secrets_db_enc
+orca backup pull  --store secrets/store --from   op://Orca/backup-keys.<host>/secrets_db_enc
 orca backup list  --store secrets/store
 orca backup verify --store secrets/store
 ```
@@ -380,8 +422,8 @@ A backup target is configured per host or per pod:
 # config/<host>/backup.toml
 [target.vault]
 kind        = "1password"
-vault       = "Private"
-item_prefix = "orca-keys/maple"
+vault       = "Orca"
+item        = "backup-keys.maple"      # 3-segment grammar: op://Orca/backup-keys.maple/<field>
 mode        = "automatic"        # automatic | manual | inventory-only
 on_change   = true               # push when source store changes (with debounce)
 schedule    = "0 */6 * * *"      # plus a periodic full push every 6h
@@ -402,20 +444,20 @@ into the local secrets store.
 
 ```sh
 # 1. Orca writes the inventory schema to the vault
-orca backup inventory export --host maple --to op://Private/orca-keys/maple
+orca backup inventory export --host maple --to op://Orca/secrets-inventory.maple
 
-# Created in 1Password:
-#   maple/secrets/GITHUB_TOKEN          (empty)
-#   maple/secrets/CF_API_TOKEN          (empty)
-#   maple/secrets/UNRAID_API_KEY        (empty)
-#   maple/secrets/PIA_USERNAME          (empty)
-#   maple/secrets/PIA_PASSWORD          (empty)
-#   maple/secrets/SMB_GUEST_PASSWORD    (empty)
+# Created in 1Password (item `secrets-inventory.maple`, one field per secret):
+#   field GITHUB_TOKEN          (empty)
+#   field CF_API_TOKEN          (empty)
+#   field UNRAID_API_KEY        (empty)
+#   field PIA_USERNAME          (empty)
+#   field PIA_PASSWORD          (empty)
+#   field SMB_GUEST_PASSWORD    (empty)
 
 # 2. Operator fills in values in 1Password by hand.
 
 # 3. Orca pulls populated values into the local secrets store
-orca backup inventory import --host maple --from op://Private/orca-keys/maple
+orca backup inventory import --host maple --from op://Orca/secrets-inventory.maple
 
 # Verifies each declared secret now has a value; reports gaps.
 orca backup inventory verify --host maple

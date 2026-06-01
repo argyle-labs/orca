@@ -386,6 +386,96 @@ when meerkat's MCP server retires.
 
 ---
 
+## 3.8 Retirement inventory — verified paths
+
+Every path here was verified to exist on 2026-06-01. Nothing
+retires without [feedback_parity_rule] four-check parity on every
+affected host (functional / side-effect / failure-mode / operational).
+Successor column points at the orca planned doc that absorbs the
+behavior; see that doc for the design.
+
+### `meerkat/scripts/` — top-level
+
+| Script | Successor |
+|---|---|
+| `scripts/autofs-switchback.sh` | one-shot — delete after final cutover; not migrated |
+| `scripts/backup-configs.sh` | `backup-restore.md` — `config_snapshot` source + `git_commit` target |
+| `scripts/fix-unbound-forwarding.py` | one-shot — keep as documented procedure unless recurring |
+| `scripts/fix-wireguard-config.py` | same — one-shot, document in meerkat |
+| `scripts/install-meerkat-sync.sh` | retired with `meerkat-sync.sh` |
+| `scripts/meerkat-agent.sh` | `host-lifecycle.md` + orca `system host` verbs; drops `/etc/sudoers.d/meerkat` |
+| `scripts/meerkat-sync.sh` | orca-v1-scope §3.2 git sync (scheduler-driven) |
+| `scripts/migrate.sh` | audit + delete (likely obsolete) |
+| `scripts/nfs-monitor.sh` (545 lines) | `storage-shares.md` §7 client reconciler + observability — already shipped in `projects/plugins/nfs`; parity check then retire |
+| `scripts/pbs-backup-hook.sh` | `backup-restore.md` — `pbs` target + pre/post hooks |
+| `scripts/pbs-mount-watchdog.sh` | `storage-shares.md` client-side stale-handle watchdog |
+| `scripts/restore-config.sh` | `backup-restore.md` — `orca backup restore` verb |
+| `scripts/setup-host.sh` (303 lines) | `install-bootstrap.md` + `orca-as-logic-layer.md` §3.6 reconcilers |
+| `scripts/sync-proxmox-configs.sh` | `lxc-vm-reconciler.md` §2.7 drift detection job |
+| `scripts/willow-nfs-release.sh` | retire with willow (2026-06-01); behavior folded into NFS plugin |
+
+### `meerkat/scripts/<host>/` — per-host
+
+| Path | Successor |
+|---|---|
+| `scripts/baldur/backup-appdata.sh` | `backup-restore.md` `docker_volumes` source |
+| `scripts/baldur/nfs-monitor.conf` | config data — moves to `config/baldur/nfs.toml` per §3.6 |
+| `scripts/freyr/{backup-appdata.sh,backup,restore,update,restart}` | `backup-restore.md` + orca `service` verbs |
+| `scripts/freyr/{crond.start,wait-nfs.start,freyr-mgmt.sh}` | orca scheduler + `storage-shares.md` mount-readiness gate |
+| `scripts/freyr/nfs-monitor.conf` | config data → `config/freyr/nfs.toml` |
+| `scripts/thor/backup-zigbee2mqtt.sh` | `backup-restore.md` — `zigbee2mqtt_backup` native-API source |
+| `scripts/thor/nfs-monitor.conf` | config data → `config/thor/nfs.toml` |
+| `scripts/maple/appdata-backup-chown.sh` + `fix-backup-ownership.sh` | `backup-restore.md` `[job.source.permission_fix]` option (folds into `utils/fs/perms`) |
+| `scripts/willow/appdata-backup-chown.sh` + `fix-backup-ownership.sh` | retire with willow (2026-06-01); same successor as maple for the maple-only variant |
+| `scripts/pbs/nfs-monitor.conf` | config data → `config/pbs/nfs.toml` |
+| `scripts/frigg/nfs-monitor.conf` | config data → `config/frigg/nfs.toml` |
+| `scripts/openwrt/*` | `orca-as-logic-layer.md` §3.6 openwrt reconciler |
+| `scripts/opnsense/*` | `orca-as-logic-layer.md` §3.6 opnsense reconciler |
+| `scripts/meerkat.d/*` (8 dispatcher files) | orca verbs (backup/restore/list/status/sync/update) |
+
+### `meerkat/plugins/` — all 10 dirs
+
+All duplicate orca built-ins under `projects/plugins/` and retire:
+
+| meerkat path | orca successor | Disposition |
+|---|---|---|
+| `plugins/docker` | `projects/plugins/docker` | Retire — duplicate |
+| `plugins/dockge` | `projects/plugins/dockge` | Retire — duplicate |
+| `plugins/git` | `projects/utils` git + reference plugin | Retire — duplicate |
+| `plugins/graphql` | (no orca built-in yet) | **Promote** to `projects/plugins/graphql` then retire |
+| `plugins/homeassistant` | `projects/plugins/homeassistant` | Retire — duplicate |
+| `plugins/nfs` | `projects/plugins/nfs` | Retire — duplicate |
+| `plugins/ntfy` | `projects/plugins/ntfy` | Retire — duplicate |
+| `plugins/proxmox` | `projects/plugins/proxmox` | Retire — duplicate |
+| `plugins/rest` | (no orca built-in yet) | **Promote** to `projects/plugins/rest` then retire |
+| `plugins/unraid` | `projects/plugins/unraid` | Retire — duplicate |
+
+### `meerkat/compose/` — 28 stacks
+
+These are config-as-code, not behavior; they **stay** in meerkat as
+declarative input to orca's reconcilers. They are not retirement
+targets here. Two exceptions called out elsewhere:
+
+- `compose/uptime-kuma` — retirement target under `observability.md`
+  alerting parity.
+- `compose/ntfy` — `projects/plugins/ntfy` is the successor on the
+  notification side; the compose stack stays as the *deployment* of
+  the ntfy server until the storage-mesh reconciler owns it.
+- `compose/caddy` vs `compose/traefik` vs the nginx-proxy-manager
+  LXC (CT 104) — see `caddy-plugin-scope.md`; pick one.
+
+### `meerkat/meerkat/` — Go binary
+
+Whole directory retires per §3.1 (table above). ~4600 LOC. Successor
+is the orca daemon (`projects/server` + `projects/system` +
+`projects/plugins/*`).
+
+Cross-link: [feedback_parity_rule] — nothing here is deleted in
+isolation. Each row in this inventory ships with the parity
+checklist in its deletion commit.
+
+---
+
 ## 4. Strategy
 
 ### 4.1 Two principles
@@ -587,5 +677,6 @@ P4. P5/P6 are cleanup.
   migration (Caddy route management).
 - [plugin-architecture.md](plugin-architecture.md) — the contract
   retained plugins must speak.
-- [connector-roadmap.md](connector-roadmap.md) — likely overlaps
-  §3.1 here; reconcile when this doc is approved.
+- `meerkat/docs/planned/connector-roadmap.md` — lives in the meerkat
+  repo (homelab-specific connector list); overlaps §3.1 here.
+  Reconcile from the meerkat side, not from orca.

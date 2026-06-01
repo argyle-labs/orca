@@ -9,6 +9,27 @@ Sizing: **S** ≤ 1 day · **M** 1–3 days · **L** 3–7 days · **XL** > 1 we
 
 ---
 
+## 0. Picking one reverse proxy
+
+The meerkat repo currently carries **three** overlapping HTTP-front
+surfaces:
+
+- `meerkat/compose/caddy/Caddyfile` — the Caddy stack this doc
+  scopes orca around.
+- `meerkat/compose/traefik/` — a Traefik stack (parallel route table).
+- `meerkat/proxmox/configs/lxcs/104-npmplus.conf` — nginx-proxy-manager
+  in CT 104 on its own PVE host.
+
+Three reverse proxies is two too many. **Caddy is the pick going
+forward** (this doc's design, automatic ACME, programmable config,
+the `:12002` mTLS upstream story already worked through). Traefik
+and nginx-proxy-manager retire under [schema-evolution.md](schema-evolution.md)
+parity once every route on either has a Caddy equivalent reconciled
+through orca. Until then they stay; nothing retires until parity is
+proven.
+
+---
+
 ## 1. Why
 
 - Today: single hand-written Caddyfile, one upstream per vhost, no

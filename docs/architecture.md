@@ -1,125 +1,140 @@
 # Architecture
 
-brain is a single Rust binary that serves four roles simultaneously:
+Orca is a single Rust binary that runs on every host in a pod and
+exposes one tool surface (CLI / REST / MCP / WASM client) via the
+`#[orca_tool]` macro. Every host runs the same daemon; lifecycle,
+storage, services, and observability are all orca verbs.
 
-1. **CLI** — interactive REPL for local AI sessions (`brain`, `brain <project>`)
-2. **TUI** — split-pane terminal UI via crossterm (default mode; `--classic` for readline)
-3. **Web server** — React site + REST API on `:12000` (`brain serve`)
-4. **MCP server** — JSON-RPC 2.0 over stdio for Claude Code integration (`brain mcp-serve`)
+For sequencing of what's shipped vs. next, see
+[`ROADMAP.md`](ROADMAP.md).
 
-## Why one binary
+## The four-surface model
 
-Deployment is `cp brain ~/.local/bin/brain`. No Docker, no node runtime at the install target, no separate web server process. The React site and all documentation are compiled into the binary at build time via `rust-embed`. See [single-binary.md](single-binary.md).
+A single `#[orca_tool]` declaration in a domain crate (e.g.
+`projects/system`, `projects/plugins/proxmox`) emits to all four
+surfaces automatically:
 
-## Crate map
+| Surface | Entry point |
+|---|---|
+| CLI | clap subcommand under `orca <noun> <verb>` |
+| REST | `/api/v1/<tool>` on `:12000` (HTTP) and `:12443` (HTTPS) |
+| MCP | JSON-RPC 2.0 over stdio for Claude Code / agentic clients |
+| WASM | Browser SDK consumed by the frontend |
 
-The repo is a Cargo workspace. Each crate has a single responsibility.
+No hand-written `#[utoipa::path]`; the macro is the sole emitter
+(`feedback_all_endpoints_in_openapi.md`). No transport-specific
+domain logic in `projects/server` — the server is thin
+(`feedback_server_is_thin.md`).
+
+## Workspace layout
 
 ```
 projects/
-  core/          brain-core    — ModelBackend trait, LM Studio + Claude backends, tool types
-  utils/         brain-utils   — Config, types, logging, ledger, auth, db (brain.db CRUD)
-  agents/        brain-agents  — embedded agent definitions (build-time fallback)
-  jobs/          brain-jobs    — background job queue
-  scanner/       brain-scanner — source file scanning for OpenAPI generation
-  commands/      brain-commands— CLI subcommand handlers (one module per command)
-  docs/          brain-docs    — embedded WHY documentation (this file)
-  server/        brain (binary)— CLI, session, web server, MCP server
-  frontend/      React site (compiled into server binary via rust-embed)
+  app-kit/         shared app-level utilities
+  auth/            secrets store, PKI (CA + peer cert mint/rotate)
+  contract/        stable contract types (cache-friendly leaf crate)
+  conversation/    agent conversation state
+  db/              SQLite layer: config_store, migrations, db sync primitive
+  derive/          #[orca_tool] proc-macro
+  dispatch/        runtime side of derive/dispatch pair
+  files/           generic fs primitives (list/read/search/tree/stat)
+  frontend/        SvelteKit web UI, embedded into binary at build
+  inventory-tests/ sibling crate to break test-only cycles
+  namespace/       tool-namespace scoping
+  plugins/         agents, arr, db, docker, dockge, graphql, homeassistant,
+                   llm, mcp, nfs, ntfy, openapi, proxmox, runtime, smb, unraid
+  pod/             mesh: mTLS, mDNS discovery, pairing, dispatch, cert rotation
+  sdk/             multi-language plugin SDK (rust/go/ts/kotlin)
+  server/          thin HTTP+MCP transport layer
+  system/          install/update/scheduler/daemon/host/topology — lifecycle core
+  utils/           shared helpers (config, logging, fs perms, git)
 ```
 
-### Key files in `projects/server/src/`
+System lifecycle lives in `projects/system/`. The major modules
+(`install.rs`, `update.rs`, `scheduler.rs`, `daemon.rs`, `host.rs`,
+`host_status.rs`, `system_info*`, `topology/`) are the surface the
+ROADMAP Phase 1 work extends.
 
-```
-main.rs               CLI entry (clap), Command enum dispatch, project auto-detection
-context.rs            Assembles system prompt from project memory + agent definition
-tui.rs                crossterm split-pane TUI, keybindings
+Plugins under `projects/plugins/` are sandboxed integrations
+(`project_plugins_as_sandboxed_integrations.md`). Each declares the
+namespace it owns; tools/specs/rows scope by namespace
+(`project_plugin_namespace_scoping.md`). First-party plugins are
+signed + default; anyone can author against the SDK
+(`project_integrations_to_plugins.md`).
 
-session/
-  mod.rs              Session struct (config, backend, messages, tools, ledger, log)
-  chat.rs             Chat loop — sends messages, handles tool calls, agentic rounds (max 30)
-  commands.rs         Slash commands (/model, /flag, /search, /escalate, /context, /tokens)
-  delegate.rs         delegate tool — sub-session for one-shot agent calls
-  util.rs             resolve_model() (LM Studio → Claude fallback), history, git check
+## Ports
 
-mcp/
-  mod.rs              JSON-RPC 2.0 dispatcher (stdin → stdout); tool federation routing
-  tools.rs            Tool definitions (JSON schemas for all brain-owned MCP tools)
-  handlers.rs         Tool implementations (agents, services, registry CRUD)
-  specs.rs            OpenAPI spec helpers — disk first, DB fallback
-  docs.rs             Doc tree helpers (runs without axum)
-  context7.rs         Context7 MCP proxy
+| Port | Bind | Purpose |
+|---|---|---|
+| 12000 | HTTP | REST + MCP-over-HTTP, browser UI |
+| 12443 | HTTPS | Same as 12000 with TLS |
+| 12002 | mTLS | Pod mesh (peer-to-peer dispatch + replication) |
 
-serve/
-  mod.rs              axum router; rust-embed serves site/dist in release
-  openapi.rs          utoipa spec assembly; static SPEC OnceLock
-  tree.rs             TreeNode type, vault tree builder (brain + rebuy + docs roots)
-  mcp_client.rs       Spawns MCP server subprocesses, pools them, injects DOCKER_HOST
-  api/                HTTP handlers — one file per domain, all utoipa-annotated
-    specs.rs          External API spec registry (list/get/register/refresh/unregister)
-    mcp.rs            MCP server proxy (tools list, tool run)
-    schema.rs         MySQL schema visualizer
-    schema_registry.rs  Schema DB CRUD (list/add/remove)
-    docker_registry.rs  Docker runtime CRUD (list/add/remove)
-    docker.rs         Docker Compose service management
-    docs.rs           Vault doc tree + search
-    logs.rs           Docker service log fetching
-    health.rs         Rebuy local service health checks
-    atlassian.rs      Jira + Confluence via Atlassian REST API
-    bitbucket.rs      Bitbucket repo and PR listing
-    system.rs         Brain install status + install/uninstall actions
-    tests_handler.rs  Test suite runner
-    ctx7.rs           Context7 documentation proxy
-    learning.rs       Learning progress tracking
-    download.rs       Spec download helpers
-    pdf.rs            PDF rendering
-```
+All three are per-host configurable via `~/.orca/orca.toml [ports]`
+or env (`ORCA_HTTP_PORT` / `ORCA_HTTPS_PORT` / `ORCA_MESH_PORT`).
+Always read via `http_port()` / `https_port()` / `mesh_port()`
+helpers — never the consts at runtime
+(`project_serve_scheme_http_https.md`).
 
-## Request flow (web)
+## Identity, trust, and pairing
 
-```
-browser → axum router → handler → filesystem / MCP client / docker CLI / brain.db
-                      ↓ (root="docs")
-                      rust-embed (compiled-in docs/)
-```
+Each host has a stable `peer_id` anchored to `/etc/machine-id` (or
+a fixed path on systems where `$HOME` churns —
+`project_peer_identity_churn.md`). Pairing = mutual mTLS trust;
+no asserted-role fallbacks. Self-secure = Tier-2 cred sync opt-in.
 
-## Request flow (MCP — brain's own tools)
+Cross-host dispatch is opt-out via `local_only` flag
+(`project_universal_peer_dispatch.md`). `--peer <name>` on CLI and
+`X-Orca-Peer` header on REST route the call through pod mesh.
 
-```
-Claude Code → stdin → mcp/mod.rs dispatcher → tool implementation
-                                             ↓ (brain_run)
-                                             session.rs → lmstudio / claude backend
-```
+Secrets never cross to non-secure hosts; sensitive operations
+delegate back to a holder via callback
+(`project_secret_delegation_not_distribution.md`).
 
-## Request flow (MCP — federated tools)
+## Config + state storage
 
-```
-Claude Code → stdin → mcp/mod.rs dispatcher
-                    ↓ (tool not in brain's own tools)
-                    tool_registry: HashMap<tool_name, server_name>
-                    ↓
-                    mcp_client.rs: McpPool::get_or_connect(server_name)
-                    ↓
-                    registered MCP server subprocess (from brain.db)
-```
+Two tiers (`project_storage_tiers.md`):
 
-## The three-surface pattern
+- `~/.orca/` — files (mesh-replicated where opt-in)
+- `~/.orca/orca.db` — encrypted SQLite, key at `~/.orca/.db_key`
 
-Every registry (MCP servers, schema DBs, Docker runtimes, OpenAPI specs) has four surfaces:
+`orca.toml` is build/runtime app config; `orca.db` is dynamic
+state (config rows, secrets, install state, scheduler runs).
+Database stays small — logs/metrics/history land on disk with
+retention, not as rows (`project_db_size_and_retention.md`).
 
-| Surface | Location |
-|---------|----------|
-| DB CRUD | `brain-utils/src/db.rs` — `list_*`, `upsert_*`, `remove_*` functions |
-| CLI | `brain-commands/src/*_cmd.rs` — clap subcommand enum + handler |
-| REST API | `projects/server/src/serve/api/*_registry.rs` — GET/POST/DELETE handlers |
-| MCP tools | `projects/server/src/mcp/tools.rs` + `handlers.rs` + `mod.rs` dispatch |
+## Where state lives
 
-All four surfaces must be kept in sync when adding a new registry feature.
+Canonical map. State of a given kind has exactly one owner.
 
-## Configuration
+| State | Lives in | Owner |
+|---|---|---|
+| Desired state | config repo `main` branch | operator |
+| Realized state | config repo `state/` branch | orca daemon |
+| Runtime state (peers, tasks, scheduler runs, lifecycle events) | SQLite DB on each peer (`~/.orca/orca.db`) | orca daemon |
+| Non-secret envs | DB (config store) | orca daemon |
+| Secrets | secret backend (orca-native / 1Password / bw / vaultwarden) | backend |
+| Mesh-replicated state (peer roster, trust info) | mesh CRDT | orca daemon (replicated) |
+| Escrow state (DR keys, founding-peer CA) | secret backend, k-of-n distributed | gated subset of peers |
 
-Runtime config splits across two locations:
-- `~/brain/config/brain.toml` — static settings (LLM endpoints, API keys). Not in this repo.
-- `~/.brain/brain.db` — dynamic registries (MCP servers, schema DBs, Docker runtimes, OpenAPI specs). Managed via CLI.
+Boundaries:
 
-The binary reads `brain.toml` at startup. `brain.db` is opened on demand via `brain_utils::db::open_default()`.
+- DB syncs to the config-repo `state/` branch on commit; reconciler
+  only **reads** from the `main` branch, **writes** only to the DB
+  and target hosts.
+- Secrets never sit in the config repo — only handles do. Resolved
+  values live in memory on a holder node at projection time and are
+  zeroed after the write.
+- The mesh CRDT is the only state replicated by gossip; everything
+  else is per-peer-local or backend-owned.
+- Escrow is the **only** state where a key is intentionally split
+  across peers without a single owner — k-of-n unlock by design.
+
+## See also
+
+- [`single-binary.md`](single-binary.md) — why one binary, build sequence
+- [`repo-structure.md`](repo-structure.md) — directory-level map
+- [`ROADMAP.md`](ROADMAP.md) "Cross-cutting standing rules" — dev + deploy + hard rules
+- [`install-runbook.md`](install-runbook.md) — fresh-host bootstrap
+- [`plugin-authoring.md`](plugin-authoring.md) — plugin contract
+- [`ROADMAP.md`](ROADMAP.md) — phasing

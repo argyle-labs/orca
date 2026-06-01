@@ -12,10 +12,10 @@
 //! Both tasks are idempotent: callers can fire `spawn_…` more than once and
 //! only the first invocation actually starts a task.
 
+use crate::status::HostStatusRows;
 use anyhow::{Context, Result};
 use std::sync::OnceLock;
 use std::time::Duration;
-use system::host_status::HostStatusRows;
 use system::system::SystemStatusReport;
 use system::system_info_types::SystemInfoReport;
 

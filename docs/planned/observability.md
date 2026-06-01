@@ -430,7 +430,7 @@ Time window selector global to the panel: `15m` `1h` `6h` `24h` `7d`.
 
 ---
 
-## 7. Alerting
+## 7. Alerting + retirement targets
 
 Out of scope for the first cut, but the shape is clear: orca's
 status surface already does discrete probes. Threshold alerts
@@ -438,10 +438,45 @@ status surface already does discrete probes. Threshold alerts
 and should reuse the same ntfy integration that orca already has
 in Prod.
 
-Existing Uptime Kuma stays until orca's alert surface reaches
-parity (per the schema-evolution rule in
-[schema-evolution.md](schema-evolution.md): no retirement until
-orca replaces the functionality).
+### 7.1 Named retirement targets (parity rule applies)
+
+Each of these stays in place until orca's observability surface
+proves parity per [schema-evolution.md](schema-evolution.md):
+
+| Target | Path | Successor surface |
+|---|---|---|
+| Uptime Kuma | `meerkat/compose/uptime-kuma/` | Threshold-alerts + status probes in this doc; ntfy integration already Prod |
+| ntfy server (deployment) | `meerkat/compose/ntfy/` | `projects/plugins/ntfy` is the *client*; the *server* stays as a compose stack until storage-mesh reconciler owns it |
+| Per-host NFS watchdog configs | `meerkat/scripts/{baldur,freyr,thor,pbs,frigg}/nfs-monitor.conf` | `projects/plugins/nfs` health probes + [storage-shares.md](storage-shares.md) client reconciler |
+
+The system tree + collector seed already exists in
+`projects/system/src/topology/` (`mod.rs`, `proxmox.rs`). Extend
+that, don't greenfield.
+
+### 7.2 Metrics storage — pick SQLite (embedded)
+
+**Decision: embedded SQLite**, not an external TSDB (Prometheus, VictoriaMetrics, InfluxDB).
+
+Reasoning:
+
+- Orca already ships SQLite for the config store, secrets store,
+  audit DB, sessions, scheduler-runs — adding a TSDB doubles the
+  daemon-side dependency surface for one more concern.
+- The "in-orca first, minimize external deps" rule in §1 of this
+  doc applies most strongly to the layer that has to be up before
+  you can debug anything *else*. A TSDB outage masks itself.
+- The retention math fits: 15s raw × 24h is ~5700 samples/series;
+  1m × 30d is ~43k; 1h × 1yr is ~8800. Even with 200 series per
+  host and 10 hosts the working set is well inside SQLite's
+  comfort zone with the materialized-rollup approach in §3.8.
+- External offload to Loki/Prometheus/OTLP stays available as a
+  **sink** (§4.6 for logs; same shape for metrics) for users who
+  have a fleet-wide observability stack. The in-orca store is
+  always the primary.
+
+Schema: `metrics.db` separate from `logs.db` and `audit.db`
+(different write patterns; see §4.2 logs rationale). Per-host;
+cross-host queries fan out over pod mesh.
 
 ---
 

@@ -1,5 +1,11 @@
 # Host lifecycle — drivers, updates, reboots, UPS
 
+> **HARD RULE — user-triggered changes only.** Orca detects drift,
+> notifies, and waits. The user runs `orca apply <change-id>` (or
+> accepts a UI prompt). No reconciler ever auto-applies. No
+> scheduled apt-upgrade, no auto-reboot, no auto-driver-rebuild.
+> See ROADMAP §1.11.
+
 Beyond install ([install-bootstrap.md](install-bootstrap.md)), orca
 owns the full life of a host: drivers, OS updates, reboots,
 shutdowns, and coordinated shutdown orchestration driven by UPS
@@ -80,7 +86,44 @@ driver is blocked until both can move together.
 
 ---
 
+## 1.5 Proxmox guest lifecycle — pointer
+
+LXC and VM lifecycle on Proxmox hosts is its own beast (config
+drift, bind sources, tmpfs scratch, restore-aware start). It is
+**not** covered here. See [lxc-vm-reconciler.md](lxc-vm-reconciler.md)
+for the full design — declarative `pct`/`qm` configs from the
+repo, diff-and-apply against `/etc/pve/{lxc,qemu-server}/*.conf`,
+bind-source + inner-service readiness gates, PBS-snapshot-aware
+restore wrapping.
+
+### Tmpfs scratch volumes (host-level)
+
+Today on frigg, `/var/lib/orca-transcode` is an 8G fstab-backed
+tmpfs shared by CT 113 (jellyfin) and CT 114 (njord) via per-CT
+`mp2` binds. **No per-CT quota** — either guest can fill it and
+starve the other.
+
+Orca should own:
+
+- The host-side `*.mount` systemd unit + size policy (replaces the
+  fstab line).
+- Per-consumer subdir bind, with a quota floor (subdir-per-consumer
+  in v1, project-quota where the FS supports it).
+- The CT `mp*` reconcile into the bind, via
+  [lxc-vm-reconciler.md](lxc-vm-reconciler.md) §2.5.
+
+Tmpfs scratch is a "host lifecycle" concern because the host owns
+the RAM; CT-side binds are downstream of the host policy.
+
+---
+
 ## 2. OS / package updates
+
+Update verbs are **shipped**: `projects/system/src/update.rs` plus
+the tool defs in `projects/tools-def` under `orca_lifecycle`
+(`update-check`, `update-apply`, `doctor`). Per-distro package-manager
+drivers + declarative update policy below are the extension surface,
+not greenfield.
 
 `apt`, `apk`, `dnf`, `pacman`, `pkg`, `opkg` — all behind one verb,
 per-distro logic in rust:

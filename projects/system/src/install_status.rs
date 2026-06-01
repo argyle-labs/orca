@@ -44,13 +44,17 @@ pub struct McpStatus {
     pub registered: bool,
 }
 
-/// Machine-readable install status — fully typed replacement for the
-/// legacy `serde_json::Value` reporter in `server::commands::install`.
+/// Machine-readable install status — fully typed install state.
+///
+/// Reused directly by `system.detail` (consolidation pass dedups the
+/// parallel `PathInstalled`/`PathLinked`/... structs that previously
+/// lived in `system::system`).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct InstallStatusReport {
     pub binary: BinaryStatus,
     pub claude_md: ClaudeMdStatus,
     pub vault: VaultStatus,
+    pub agents: ClaudeMdStatus,
     pub pki: PkiStatus,
     pub mcp: McpStatus,
 }
@@ -61,6 +65,7 @@ pub fn install_status_report() -> Result<InstallStatusReport> {
 
     let binary_path = install_bin_path(&home);
     let claude_md_path = home.join(".claude/CLAUDE.md");
+    let agents_path = home.join(".claude/agents");
     let vault_dir = home.join(APP_STATE_DIR);
     let pki_dir = vault_dir.join(APP_PKI_DIR);
     let pki_ca = pki::ca_cert_path(&pki_dir);
@@ -79,6 +84,10 @@ pub fn install_status_report() -> Result<InstallStatusReport> {
         vault: VaultStatus {
             exists: vault_dir.exists(),
             path: vault_dir,
+        },
+        agents: ClaudeMdStatus {
+            linked: is_symlink(&agents_path),
+            path: agents_path,
         },
         pki: PkiStatus {
             initialized: pki_ca.exists() && pki_server.exists(),
@@ -136,6 +145,10 @@ mod tests {
             vault: VaultStatus {
                 exists: true,
                 path: PathBuf::from("/home/x/.orca"),
+            },
+            agents: ClaudeMdStatus {
+                linked: false,
+                path: PathBuf::from("/home/x/.claude/agents"),
             },
             pki: PkiStatus {
                 initialized: false,

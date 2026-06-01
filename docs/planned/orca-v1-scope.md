@@ -1,5 +1,14 @@
 # Orca v1 — framework scope
 
+> **Sequencing note.** This doc captures the framework-level v1
+> build map (config store, scheduler, bootstrap, GitHub App, git
+> sync, exec verb, plugin contract). Canonical phasing across all
+> orca work — including the system-lifecycle items not covered here
+> (LXC/VM reconciler, host updates, drivers, UPS, storage shares,
+> backup) — lives in [`../ROADMAP.md`](../ROADMAP.md). Treat this
+> file as scope detail for the Phase 0 / 1.3 / Phase 2 framework
+> slices of the roadmap.
+
 Orca is a **generic** infrastructure tool framework. No homelab assumptions, no "meerkat" or "rebuy" strings in core. Consumers (meerkat, rebuy plugin, anyone else) point at it via a bootstrap file and get a uniform CLI/MCP/REST/WASM surface.
 
 Sizing: **S** ≤ 1 day · **M** 1–3 days · **L** 3–7 days · **XL** > 1 week.
@@ -10,17 +19,31 @@ Sizing: **S** ≤ 1 day · **M** 1–3 days · **L** 3–7 days · **XL** > 1 we
 
 | Capability | Module | Status |
 |---|---|---|
-| Tool framework (one def → CLI + MCP + REST + WASM) | `utils/tool` | Prod |
-| Proxmox API (VM/LXC, snapshot, `lxc_exec`) | `integrations/proxmox` | Prod |
-| NFS / SMB mount + probe + lazy unmount | `integrations/{nfs,smb}` | Prod |
-| ntfy push + heartbeat | `integrations/ntfy` | Prod |
-| Docker Compose CLI wrapper | `integrations/docker/compose` | Prod |
-| Dockge / Unraid GraphQL / Home Assistant REST | `integrations/{dockge,unraid,homeassistant}` | Prod |
-| Secrets store (encrypted, SQLite) | `mcp/secrets_service` | Prod |
-| Plugin host (mTLS + JSON-RPC) | `server/plugin_host` | Prod |
-| Pod mesh (mTLS, mDNS discovery, cert rotation) | `server/pod` | Prod |
-| Config loader (~/.orca, env) | `utils/config` | Prod |
-| Git plugin (libgit2: clone/pull/commit/push) | reference plugin | Prod |
+| Tool framework (one def → CLI + MCP + REST + WASM) | `projects/utils` (tool defs in `projects/tools-def`) | Prod |
+| Proxmox API (VM/LXC, snapshot, `lxc_exec`) | `projects/plugins/proxmox` | Prod |
+| NFS / SMB mount + probe + lazy unmount | `projects/plugins/{nfs,smb}` | Prod |
+| ntfy push + heartbeat | `projects/plugins/ntfy` | Prod |
+| Docker Compose CLI wrapper | `projects/plugins/docker` | Prod |
+| Dockge / Unraid GraphQL / Home Assistant REST | `projects/plugins/{dockge,unraid,homeassistant}` | Prod |
+| Secrets store (encrypted, SQLite) + `SecretBackend` insertion point | `projects/auth/src/secrets.rs` | Prod |
+| PKI (CA, peer cert mint/rotate) | `projects/auth/src/pki.rs` + `projects/pod/src/cert_rotation.rs` | Prod |
+| Plugin host (mTLS + JSON-RPC) | `projects/pod` + `projects/plugins/runtime` | Prod |
+| Pod mesh (mTLS, mDNS discovery, cert rotation) | `projects/pod` | Prod |
+| Config loader (~/.orca, env) | `projects/utils` config | Prod |
+| Git plugin (libgit2: clone/pull/commit/push) | `projects/utils` git + reference plugin | Prod |
+| **Config store** (rows, history, schemas; CRUD verbs) | `projects/db/src/config_store.rs` (+ `projects/db/migrations/`) | Prod (P0 §3.1) |
+| **Scheduler** (cron tick, `scheduler_runs` observability, periodic primitive) | `projects/system/src/scheduler.rs` + `projects/system/src/periodic.rs` | Prod (P0 §3.4) |
+| Install / pair / lifecycle verbs (install, uninstall, doctor, update-check/apply) | `projects/system/src/install.rs` + `projects/system/src/update.rs` | Prod |
+
+P0 (§3.1 config store + §3.4 scheduler) is shipped. **Next up: P1 §3.6 GitHub App**, then §3.5 bootstrap, then §3.2 git sync — see §5.
+
+Module-path note: integrations have moved from `integrations/*` to
+`projects/plugins/*`. The secrets surface lives in `projects/auth/src/secrets.rs`
+— not in a separate `mcp/secrets_service` crate. Namespace cleanup
+(`docker-runtime.*` → `docker.runtime.*`, `pod.*` → `system.peer.*`,
+etc.) is delegated to [namespace-consolidation.md](namespace-consolidation.md);
+§3.8 here is the strings-and-bindings sweep, not the tool-namespace
+restructure.
 
 ---
 

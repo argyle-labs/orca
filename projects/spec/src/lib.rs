@@ -1,13 +1,11 @@
-//! `namespace.spec.*` and `namespace.spec.graphql.*` tool surface.
+//! `spec.*`, `spec.graphql.*`, `schema.*`, `schema.view.*` tool surfaces.
 //!
-//! These tools thunk to:
-//!   - [`db::openapi_specs_registry`] for OpenAPI list/register/refresh/delete
-//!   - [`graphql::introspection`] + [`graphql::shopify_proxy`] for GraphQL
-//!   - the inline `sync_mcp_specs` below for MCP-driven spec sync (kept here
-//!     because `db` cannot depend on `mcp` without a cycle, and this is the
-//!     one MCP-using spec primitive)
-//!
-//! Per [[feedback_no_indirection]], tool bodies inline the work directly.
+//! Specs (OpenAPI/GraphQL) and schemas (DB) are first-class objects that
+//! assign to a namespace via `namespace_id`. Tool bodies call directly into
+//! the relevant plugins (`graphql`, `mcp`, `database`) per
+//! [[feedback_no_indirection]].
+
+mod schema;
 
 use anyhow::{Context, Result, anyhow};
 use derive::orca_tool;
@@ -15,7 +13,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use db::openapi_specs_registry::{
-    self as registry, DbSpecRow, RegisterSpecResult, SpecMetaRow, SyncMcpSpecsResult,
+    self as registry, RegisterSpecResult, SpecMetaRow, SyncMcpSpecsResult,
 };
 use graphql::introspection::{
     GraphQlEnum as GqlEnum, GraphQlInfo as GqlInfo, GraphQlOperation as GqlOp,
@@ -32,15 +30,6 @@ pub struct ListSpecsArgs {}
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListSpecsOutput {
     pub specs: Vec<SpecMetaRow>,
-}
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct ListDbSpecsArgs {}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct ListDbSpecsOutput {
-    pub specs: Vec<DbSpecRow>,
 }
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -247,7 +236,7 @@ mod mcp_sync {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// List every registered OpenAPI / GraphQL spec — filesystem-resident, DB-backed, and plugin-declared — with per-source metadata.
-#[orca_tool(domain = "namespace.spec", verb = "list")]
+#[orca_tool(domain = "spec", verb = "list")]
 async fn list_specs(
     _args: ListSpecsArgs,
     _ctx: &contract::ToolCtx,
@@ -257,19 +246,8 @@ async fn list_specs(
     })
 }
 
-/// List URL-registered + MCP-synced specs from orca.db (the DB-backed slice only).
-#[orca_tool(domain = "namespace.spec", verb = "list-db")]
-async fn list_db_specs(
-    _args: ListDbSpecsArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<ListDbSpecsOutput> {
-    Ok(ListDbSpecsOutput {
-        specs: registry::list_db_specs().await?,
-    })
-}
-
 /// [MUTATES STATE] Fetch a JSON OpenAPI spec from `url` and persist it under `name` in orca.db.
-#[orca_tool(domain = "namespace.spec", verb = "create")]
+#[orca_tool(domain = "spec", verb = "create")]
 async fn spec_create(
     args: RegisterSpecArgs,
     _ctx: &contract::ToolCtx,
@@ -278,7 +256,7 @@ async fn spec_create(
 }
 
 /// [MUTATES STATE] Re-fetch a previously-registered spec from its stored URL and update orca.db.
-#[orca_tool(domain = "namespace.spec", verb = "refresh")]
+#[orca_tool(domain = "spec", verb = "refresh")]
 async fn refresh_spec(
     args: RefreshSpecArgs,
     _ctx: &contract::ToolCtx,
@@ -287,7 +265,7 @@ async fn refresh_spec(
 }
 
 /// [MUTATES STATE] Remove a spec from orca.db. Returns `removed: true` when a row was deleted.
-#[orca_tool(domain = "namespace.spec", verb = "delete")]
+#[orca_tool(domain = "spec", verb = "delete")]
 async fn spec_delete(
     args: UnregisterSpecArgs,
     _ctx: &contract::ToolCtx,
@@ -298,7 +276,7 @@ async fn spec_delete(
 }
 
 /// [MUTATES STATE] Connect to `server` (an MCP server), call its `{prefix}_spec_list` and `{prefix}_spec_schema` tools, and upsert every advertised repo into orca.db.
-#[orca_tool(domain = "namespace.spec", verb = "sync-mcp")]
+#[orca_tool(domain = "spec", verb = "sync-mcp")]
 async fn sync_mcp_specs(
     args: SyncMcpSpecsArgs,
     _ctx: &contract::ToolCtx,
@@ -314,7 +292,7 @@ fn validate_repo(repo: &str) -> bool {
 }
 
 /// Parse the local `<repo>.graphql` SDL into a structured types/queries/mutations view.
-#[orca_tool(domain = "namespace.spec.graphql", verb = "detail")]
+#[orca_tool(domain = "spec.graphql", verb = "detail")]
 async fn spec_graphql_detail(
     args: GetSpecGraphqlInfoArgs,
     _ctx: &contract::ToolCtx,
@@ -330,7 +308,7 @@ async fn spec_graphql_detail(
 }
 
 /// Proxy a GraphQL request to a Shopify shop using the configured shop+token. Returns the raw upstream JSON body.
-#[orca_tool(domain = "namespace.spec.graphql", verb = "update", cli = skip)]
+#[orca_tool(domain = "spec.graphql", verb = "update", cli = skip)]
 async fn spec_graphql_update(
     args: ProxyGraphqlArgs,
     _ctx: &contract::ToolCtx,

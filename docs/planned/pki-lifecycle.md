@@ -24,6 +24,19 @@ Sizing: **S** ≤ 1 day · **M** 1–3 days · **L** 3–7 days · **XL** > 1 we
 This doc adds revocation, CA rotation, and the response procedure
 for a known compromise.
 
+**Shipped anchors** (extend, don't greenfield):
+
+- `projects/auth/src/pki.rs` — CA + cert mint primitives.
+- `projects/pod/src/cert_rotation.rs` — periodic rotation tied to
+  the `projects/system/src/periodic.rs` primitive.
+- Tool defs in `projects/tools-def/src/orca_pki.rs` —
+  `pki.ca.create`, `pki.cert.create`, `pki.list`.
+
+**Remaining gap: revocation.** Today rotation is the only
+invalidation path; there is no fast revoke. The CRDT-based
+revocation set in §2 below is the new surface that has no shipped
+equivalent.
+
 ---
 
 ## 2. Revocation

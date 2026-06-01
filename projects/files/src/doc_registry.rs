@@ -71,7 +71,7 @@ pub struct DocIgnorePatternMutationResult {
 // ── Tools ───────────────────────────────────────────────────────────────────
 
 /// List all documentation roots registered in orca.db.
-#[orca_tool(domain = "namespace.doc.root", verb = "list")]
+#[orca_tool(domain = "doc.root", verb = "list")]
 async fn list_doc_roots(
     _args: ListFileRootsArgs,
     _ctx: &contract::ToolCtx,
@@ -90,7 +90,7 @@ async fn list_doc_roots(
 }
 
 /// [MUTATES STATE] Register a documentation root directory in orca.db.
-#[orca_tool(domain = "namespace.doc.root", verb = "create")]
+#[orca_tool(domain = "doc.root", verb = "create")]
 async fn add_doc_root(
     args: AddFileRootArgs,
     _ctx: &contract::ToolCtx,
@@ -110,7 +110,7 @@ async fn add_doc_root(
 }
 
 /// [MUTATES STATE] Remove a documentation root from orca.db by name.
-#[orca_tool(domain = "namespace.doc.root", verb = "delete")]
+#[orca_tool(domain = "doc.root", verb = "delete")]
 async fn remove_doc_root(
     args: RemoveFileRootArgs,
     _ctx: &contract::ToolCtx,
@@ -124,7 +124,7 @@ async fn remove_doc_root(
 }
 
 /// List directory names excluded from all doc roots (e.g. node_modules, .git).
-#[orca_tool(domain = "namespace.doc.pattern", verb = "list")]
+#[orca_tool(domain = "doc.pattern", verb = "list")]
 async fn list_doc_ignore_patterns(
     _args: ListDocIgnorePatternsArgs,
     _ctx: &contract::ToolCtx,
@@ -135,7 +135,7 @@ async fn list_doc_ignore_patterns(
 }
 
 /// [MUTATES STATE] Add a directory name to the global doc ignore list.
-#[orca_tool(domain = "namespace.doc.pattern", verb = "create")]
+#[orca_tool(domain = "doc.pattern", verb = "create")]
 async fn add_doc_ignore_pattern(
     args: DocIgnorePatternArgs,
     _ctx: &contract::ToolCtx,
@@ -149,7 +149,7 @@ async fn add_doc_ignore_pattern(
 }
 
 /// [MUTATES STATE] Remove a directory name from the global doc ignore list.
-#[orca_tool(domain = "namespace.doc.pattern", verb = "delete")]
+#[orca_tool(domain = "doc.pattern", verb = "delete")]
 async fn remove_doc_ignore_pattern(
     args: DocIgnorePatternArgs,
     _ctx: &contract::ToolCtx,

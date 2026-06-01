@@ -253,6 +253,28 @@ LLM-specific engines split from `system.engine.*`. When the LLM crate is built, 
 
 ---
 
+## Collisions to watch out for
+
+Two `server`-side namespaces already exist and **must not** be
+shadowed by planned-doc nouns:
+
+- **`projects/server/src/jobs/`** — agent execution jobs (chat + tool
+  loop, conversation lifecycle). Not backup jobs. The backup framework
+  in [backup-restore.md](backup-restore.md) uses the namespace
+  **`backup_job`** specifically to avoid this collision. Reserve
+  `system.job.*` for agent jobs; `system.backup.job.*` for backups.
+- **`projects/server/src/log_cmd.rs`** — conversation/session logs
+  (search / sessions / recall). Not host or container logs. The
+  host-wide log surface in [observability.md](observability.md) §4
+  uses `system.host.log.*` (or similar prefix), not `system.log.*`.
+  `log_query` as an MCP tool name is fine; as a noun prefix it
+  collides.
+
+Any future namespace consolidation pass must preserve these two
+distinctions.
+
+---
+
 ## Backward Compatibility
 
 Aliases (old name → new name) kept for one release cycle, then removed.

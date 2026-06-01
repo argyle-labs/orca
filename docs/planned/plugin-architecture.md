@@ -1,262 +1,236 @@
-# Orca Plugin Ecosystem Architecture
+# Plugin architecture — two tiers
 
-## Plugin types
+Orca has two plugin tiers. Both are first-class. The earlier
+"everything is MCP-stdio" design is superseded — see the bottom of
+this doc for what's preserved from it.
 
-Orca supports two classes of plugin. Both speak MCP JSON-RPC 2.0 over stdio.
-The difference is deployment model and what they talk to.
-
-### Host plugins
-Run on a specific infrastructure host. Probe local services at startup.
-Tools reflect what's reachable on that host — connectors that fail to probe
-are silently skipped.
-
-Example: **meerkat** — deployed to willow via SSH stdio. Speaks to Proxmox,
-Docker, Unraid, NFS/SMB, and other on-host services.
-
-Transport: `ssh root@willow /usr/local/bin/meerkat --stdio`
-
-### Service plugins
-Run anywhere (local, any server, as a subprocess). Talk to application APIs
-over HTTP. No host-specific probing — if the API is unreachable, the tool
-returns an error rather than being unregistered.
-
-Examples: **jaguar** (arr stack), **ibis** (media), **ferret** (download clients).
-
-Transport: typically a local subprocess — `node /usr/local/lib/jaguar/index.js --stdio`
-
----
-
-## Spec-first implementation
-
-Every service plugin must be built against the service's published API spec.
-Pull the spec before writing any connector code. Specs are the source of truth
-for field names, types, required parameters, and pagination patterns.
-
-Known specs:
-
-| Service | Spec location |
-|---------|--------------|
-| Sonarr | `http://{host}:{port}/api/v3/openapi` |
-| Radarr | `http://{host}:{port}/api/v3/openapi` |
-| Lidarr | `http://{host}:{port}/api/v1/openapi` |
-| Prowlarr | `http://{host}:{port}/api/v1/openapi` |
-| Readarr | `http://{host}:{port}/api/v1/openapi` |
-| Jellyfin | `http://{host}:{port}/api-docs/openapi.json` (or published at api.jellyfin.org) |
-| Audiobookshelf | `http://{host}:{port}/api-docs` (Swagger UI) |
-| Navidrome | OpenSubsonic API — `opensubsonic.org/docs/endpoints/` |
-| Calibre-Web | No official OpenAPI — scrape or use Calibre's internal OPDS |
-| Kavita | `http://{host}:{port}/api/swagger/index.html` |
-| Komga | `http://{host}:{port}/v3/api-docs` |
-| Immich | `http://{host}:{port}/api-docs` (published at immich.app/docs/api) |
-| qBittorrent | No OpenAPI — documented at github.com/qbittorrent/qBittorrent/wiki |
-| SABnzbd | No OpenAPI — documented at sabnzbd.org/wiki/configuration/api |
-
-For services without OpenAPI specs, fetch the HTML docs and write a spec stub
-before implementing. Tools must match actual field names from the spec —
-no guessing.
-
----
-
-## Planned service plugins
-
-### jaguar (TypeScript) — arr stack
-
-**Repo:** `scottdkey/jaguar`
-**Runtime:** Node.js (single compiled JS via tsup)
-**Spec:** Pull OpenAPI from each running instance at startup (`/api/v3/openapi`)
-
-Handles: Sonarr, Radarr, Lidarr, Prowlarr, Bazarr, Readarr, Mylar3, Kapowarr.
-All v3-compatible arr apps share the same API surface. One connector type.
-
-Config:
-```toml
-[[server]]
-name      = "sonarr"
-type      = "arr"
-address   = "http://10.10.10.x:8989"
-token_env = "SONARR_API_KEY"
-
-[[server]]
-name      = "radarr"
-type      = "arr"
-address   = "http://10.10.10.x:7878"
-token_env = "RADARR_API_KEY"
-
-[[server]]
-name      = "prowlarr"
-type      = "arr"
-address   = "http://10.10.10.x:9696"
-token_env = "PROWLARR_API_KEY"
+```
+┌─────────────────────────────────────────────────────────────┐
+│ orca daemon (single binary)                                 │
+│                                                             │
+│  ┌────────────────────┐      ┌──────────────────────────┐   │
+│  │ Core integrations  │      │ Reconcilers              │   │
+│  │ (in-process Rust)  │◀────▶│  - lxc-vm-reconciler     │   │
+│  │                    │ call │  - storage-shares        │   │
+│  │  proxmox, nfs,     │ into │  - host-lifecycle        │   │
+│  │  smb, docker,      │      │  - backup-restore        │   │
+│  │  dockge, unraid,   │      │  - secrets/envs          │   │
+│  │  homeassistant,    │      │                          │   │
+│  │  pbs, opnsense,    │      │ NOT plugins. orca-       │   │
+│  │  adguard           │      │ internal subsystems.     │   │
+│  └────────────────────┘      └──────────────────────────┘   │
+│           ▲                            │                    │
+│           │ in-process fn call         │ MCP tool call      │
+│           │                            ▼                    │
+│           │           ┌──────────────────────────────┐      │
+│           │           │ Plugin host runtime          │      │
+│           │           │ (subprocess + mTLS JSON-RPC) │      │
+│           │           └──────────────┬───────────────┘      │
+│           │                          │                      │
+└───────────┼──────────────────────────┼──────────────────────┘
+            │                          │
+            ▼                          ▼
+   (function dispatch)          ┌──────────────────────┐
+                                │ SDK / 3rd-party      │
+                                │ (orca-plugin.toml +  │
+                                │  MCP-stdio sidecar)  │
+                                │  jaguar, ibis,       │
+                                │  ferret, etc.        │
+                                └──────────────────────┘
 ```
 
-Tools (per instance, spec-verified against OpenAPI):
-- `{name}.arr.health` — version and health check
-- `{name}.arr.queue` — active download queue (progress, ETA, protocol)
-- `{name}.arr.wanted` — missing / cutoff-unmet items
-- `{name}.arr.history` — recent grabs, imports, failures
-- `{name}.arr.search` — trigger automatic search for an item
-- `{name}.arr.calendar` — upcoming releases (configurable day range)
-- `{name}.arr.library` — series/movie/artist/book list with monitored state
-- `{name}.arr.command` — send a named command (RefreshSeries, RssSync, etc.)
-- `{name}.arr.rootfolder` — configured root folders with disk usage
-- `{name}.arr.tag.list` / `.add` / `.remove`
-- `{name}.arr.indexer.list` — indexers and sync status (Prowlarr)
-- `{name}.arr.blocklist` — blocked releases
+## Tier 1 — Core integrations (in-process Rust crates)
+
+What's already shipped. Each lives at `projects/plugins/<name>/` as a
+Rust crate, linked into the orca binary at build time, dispatched by
+the `#[orca_tool]` macro.
+
+**Members:** proxmox, nfs, smb, docker, dockge, unraid, homeassistant,
+agents, arr, db, graphql, llm, mcp, openapi, runtime. Future:
+pbs, opnsense, adguard, caddy.
+
+> **Note:** `projects/plugins/ntfy/` is **not** a plugin despite
+> living under `plugins/` — its own `lib.rs` declares it a library
+> ("no plugin scaffolding"). Tracked for relocation in ROADMAP CC.2.
+
+**Properties:**
+
+- In-process function call from reconcilers. No IPC overhead.
+- Shipped + signed as part of the orca release.
+- Sees orca's secret backend, config store, mesh — same memory.
+- Lifecycle = orca's lifecycle.
+- Owned by the orca repo. Adding one requires PR review.
+
+## Tier 2 — SDK / third-party (orca-plugin.toml + MCP-stdio)
+
+For experimental, user-owned, or non-Rust integrations. Spec lives in
+[`../plugin-authoring.md`](../plugin-authoring.md).
+
+**Members:** jaguar (TS / arr), ibis (Kotlin / media), ferret (TS /
+download clients), anything a user writes.
+
+**Properties:**
+
+- Separate process. MCP JSON-RPC 2.0 over stdio (subprocess) or mTLS
+  JSON-RPC over the pod mesh.
+- Declares itself via `orca-plugin.toml`.
+- Owns its own secrets via `[plugin.secrets]` declaration — see §4.
+- Crashes are isolated. Lifecycle independent of orca.
+- Written in any language with an MCP SDK.
+
+## Tier-selection criteria
+
+Pick **Tier 1 (in-process)** when:
+
+- Hot path (called many times per reconcile loop).
+- Tight coupling to orca internals (secret backend access, mesh, audit).
+- Lifecycle must match the daemon (e.g. mesh peer discovery).
+- Ownership belongs to the orca core team.
+
+Pick **Tier 2 (SDK)** when:
+
+- Cold path / event-driven.
+- Calls an external service whose churn is independent of orca.
+- Written in a non-Rust language (JS, Kotlin, Python).
+- Third-party ownership.
+
+Default: integrations that already exist in `projects/plugins/` stay
+in Tier 1. New integrations against external APIs default to Tier 2
+unless one of the Tier 1 criteria applies.
 
 ---
 
-### ibis (Kotlin) — media and library servers
+## Reconcilers ≠ plugins
 
-**Repo:** `scottdkey/ibis`
-**Runtime:** JVM fat JAR (Java 17+) or GraalVM native image
-**Spec:** Pull OpenAPI/Swagger at startup where available; OpenSubsonic for Navidrome
+This distinction is load-bearing. Reconcilers are **orca-internal
+subsystems** that observe desired state vs realized state and emit
+drift events. They are not pluggable; they ship with orca.
 
-Unified tool surface across all media and library server types. Each server type
-exposes what it can — sessions only makes sense for streaming servers, not ebook
-managers. Tools that don't apply to a server type return a capability error.
+| Subsystem | What it reconciles | Calls into |
+|---|---|---|
+| lxc-vm-reconciler | meerkat/proxmox/configs/*.conf ↔ live /etc/pve/* | proxmox plugin (Tier 1) |
+| storage-shares | shares.toml ↔ /etc/exports + smb.conf + Avahi + wsdd | nfs, smb plugins (Tier 1) |
+| host-lifecycle | drivers.toml + updates.toml ↔ host state | system + plugin adapters |
+| backup-restore | backup policies ↔ snapshot inventory | pbs, arr, homeassistant plugins |
+| secrets/envs | declared projections ↔ realized envs on targets | secret backends + adapter plugins |
+| network (planned) | DNS / firewall / DHCP declarations ↔ live | adguard, opnsense plugins |
 
-Handles:
-- **Jellyfin / Emby** — video/music streaming (`/api-docs/openapi.json`)
-- **Plex** — video/music streaming (XML API, no OpenAPI; use plex.tv docs)
-- **Audiobookshelf** — audiobooks and podcasts (Swagger at `/api-docs`)
-- **Navidrome** — music streaming (OpenSubsonic API)
-- **Calibre-Web** — ebook library (OPDS + custom REST; limited API)
-- **Kavita** — manga/comics/ebooks (Swagger at `/api/swagger/index.html`)
-- **Komga** — comics/manga (OpenAPI at `/v3/api-docs`)
-- **Immich** — photo management (OpenAPI at `/api-docs`)
+### How a reconciler invokes a plugin
 
-Unified tool surface:
-- `{name}.media.sessions` — active playback/streaming sessions (streaming servers only)
-- `{name}.media.libraries` — library list with item counts and last scan
-- `{name}.media.scan` — trigger library scan (full or path-specific)
-- `{name}.media.search` — search by title, author, year, genre, tag
-- `{name}.media.item.list` — paginated item listing with filters
-- `{name}.media.item.info` — detailed item metadata
-- `{name}.media.activity` — recent plays/reads/downloads
-- `{name}.media.users` — user list with last active (servers that support multi-user)
-- `{name}.media.schedule` — scheduled tasks and last run status (where applicable)
-- `{name}.media.stats` — library statistics (item count, duration, storage)
+**Tier 1 (in-process):** the reconciler holds a typed handle to the
+plugin crate and calls Rust functions directly. Errors are `Result<T,
+E>`; cancellation is `tokio::CancellationToken`. No serialization.
 
-Config:
-```toml
-[[server]]
-name      = "jellyfin"
-type      = "jellyfin"
-address   = "http://10.10.10.x:8096"
-token_env = "JELLYFIN_API_KEY"
-
-[[server]]
-name      = "audiobookshelf"
-type      = "audiobookshelf"
-address   = "http://10.10.10.x:13378"
-token_env = "ABS_API_KEY"
-
-[[server]]
-name      = "navidrome"
-type      = "navidrome"
-address   = "http://10.10.10.x:4533"
-user_env  = "NAVIDROME_USER"
-pass_env  = "NAVIDROME_PASS"
-
-[[server]]
-name      = "kavita"
-type      = "kavita"
-address   = "http://10.10.10.x:5000"
-token_env = "KAVITA_API_KEY"
-
-[[server]]
-name      = "immich"
-type      = "immich"
-address   = "http://10.10.10.x:2283"
-token_env = "IMMICH_API_KEY"
+```rust
+// inside the lxc-vm-reconciler
+self.proxmox.lxc_set(node, vmid, &delta).await?;
 ```
 
----
+**Tier 2 (SDK):** the reconciler issues an MCP tool call through the
+plugin host runtime. Args are serialized JSON; errors are MCP error
+codes. The plugin host owns subprocess lifecycle, mTLS, and retries.
 
-### ferret (TypeScript) — download clients
-
-**Repo:** `scottdkey/ferret`
-**Runtime:** Node.js (single compiled JS via tsup)
-**Spec:** No OpenAPI for most clients; implement against documented APIs
-
-Handles: qBittorrent, SABnzbd, NZBGet, Transmission.
-
-Tools (per instance):
-- `{name}.dl.queue` — active downloads with speed, ETA, category, ratio
-- `{name}.dl.pause` / `.resume` — pause/resume one download or all
-- `{name}.dl.delete` — remove download (optional data deletion)
-- `{name}.dl.add` — add by URL, magnet, or NZB file path
-- `{name}.dl.history` — completed downloads
-- `{name}.dl.stats` — current speeds, session totals
-- `{name}.dl.categories` — configured categories/labels
-- `{name}.dl.speedlimit` — get/set global speed limit
-- `{name}.dl.free` — free disk space on download directory
-
-Config:
-```toml
-[[server]]
-name     = "qbit"
-type     = "qbittorrent"
-address  = "http://10.10.10.x:8080"
-user_env = "QBIT_USER"
-pass_env = "QBIT_PASS"
-
-[[server]]
-name      = "sabnzbd"
-type      = "sabnzbd"
-address   = "http://10.10.10.x:8080"
-token_env = "SABNZBD_API_KEY"
+```rust
+// inside any reconciler
+self.plugins.call("jaguar", "sonarr.arr.health", json!({})).await?;
 ```
 
----
-
-## How plugins absorb into Orca securely
-
-1. **Plugin publishes a standard tool surface** — tools follow
-   `{instance}.{domain}.{operation}`. Claude discovers them via `tools/list`
-   without knowing which plugin or language implements them.
-
-2. **Orca federates, not proxies** — aggregates all plugin tool lists, routes
-   calls. Claude sees one flat namespace.
-
-3. **Secrets stay with the plugin** — each plugin process reads its own env
-   vars. Orca's config only specifies the transport (command/args).
-
-4. **Context scoping** — each context declares which plugins are active.
-   `tools/list` only returns tools for the active context. A rebuy session
-   never sees jaguar's arr tools.
-
-5. **Plugin updates are independent** — `orca plugin update jaguar` restarts
-   just that process. No Orca restart.
-
-6. **Failure is isolated** — if ibis is unreachable, only media tools disappear.
-   Everything else continues.
-
-7. **Spec validation at startup** — service plugins fetch the API spec from
-   the configured server at startup and validate their tool schemas against it.
-   If the spec has changed (e.g. server was upgraded), the plugin logs a warning
-   and falls back to its bundled spec version.
+Reconcilers never depend on whether the called plugin is Tier 1 or
+Tier 2 at the design level — but the call site is different. There's
+no auto-bridging; the reconciler picks the right surface explicitly.
 
 ---
 
-## Implementation order
+## `[plugin.secrets]` — secrets contract for Tier 2
 
-1. Deploy meerkat to willow and validate (current focus)
-2. **jaguar** (TypeScript, arr stack) — most frequently queried domain
-3. **ferret** (TypeScript, download clients) — can share jaguar's repo initially as a package
-4. **ibis** (Kotlin, media) — lower urgency; interim: use meerkat's graphql connector for Jellyfin
+Tier 2 plugins must declare the secrets and envs they require so the
+env+secret reconciler (ROADMAP §1.11) can project them. The orca-side
+projection layer reads this block; the plugin reads the resulting env
+vars normally.
+
+```toml
+[plugin]
+id      = "jaguar"
+version = "0.3.0"
+
+[plugin.secrets]
+# Required secrets — handle resolves via the configured backend.
+SONARR_API_KEY  = { handle = "op://Orca/services.sonarr/api_key",  required = true }
+RADARR_API_KEY  = { handle = "op://Orca/services.radarr/api_key",  required = true }
+
+# Required non-secret envs — cleartext OK, projected as plain env.
+SONARR_URL = { value = "http://10.10.10.x:8989", required = true }
+RADARR_URL = { value = "http://10.10.10.x:7878", required = true }
+
+# Optional — plugin operates without them but logs a warning.
+PROWLARR_API_KEY = { handle = "op://Orca/services.prowlarr/api_key", required = false }
+```
+
+Tier 1 plugins declare the same contract in code (typed struct on the
+plugin crate's config). Both feed into the projection adapter in
+`projects/plugins/<env-projection>/` (planned, ROADMAP §1.11).
+
+**Handle grammar:** see [secrets-identity.md](secrets-identity.md). One
+1Password vault per orca deployment (default `Orca`); items are named
+`automations.<host>` or `services.<name>` (the dot is part of the
+*item title*, not a URI separator — 1Password `op://` is exactly
+three segments).
 
 ---
 
-## MCP reference implementation
+## Spec-first for service plugins
 
-Each plugin needs:
-- Read JSON-RPC 2.0 from stdin, write to stdout (newline-delimited)
-- Handle `initialize`, `ping`, `tools/list`, `tools/call`
-- Silence on notifications (requests with no `id`)
-- Errors as `{"error": {"code": -32603, "message": "..."}}`
+Every Tier 2 plugin that wraps a documented HTTP API must be built
+against the published spec. Pull the spec before writing connector
+code. Service inventories (jaguar, ibis, ferret) live in
+[plugin-authoring.md](../plugin-authoring.md).
 
-Reference implementations:
-- **Go** — `meerkat/internal/mcp/server.go`
-- **TypeScript** — use `@modelcontextprotocol/sdk` (official Anthropic SDK)
-- **Kotlin** — `io.modelcontextprotocol:kotlin-sdk` or implement protocol directly
+---
+
+## What's shipped, what's missing
+
+### Shipped (Tier 1)
+
+`projects/plugins/{agents, arr, db, docker, dockge, graphql,
+homeassistant, llm, mcp, nfs, ntfy, openapi, proxmox, runtime, smb,
+unraid}` — all in-process today.
+
+### Shipped (Tier 2 infrastructure)
+
+`projects/plugins/runtime` — subprocess host + mTLS JSON-RPC.
+`projects/sdk` — multi-language SDK (rust / go / ts / kotlin).
+`orca-plugin.toml` manifest spec — see [plugin-authoring.md](../plugin-authoring.md).
+
+### Missing
+
+- **`[plugin.secrets]` block parsing + projection wiring.** Plugin
+  manifests can declare; the env-projection reconciler that consumes
+  the declaration is ROADMAP §1.11.
+- **Tier 2 example in tree.** jaguar / ibis / ferret are planned —
+  none shipped yet.
+- **Tier 1 → Tier 2 graduation path** (a Rust plugin moving out of
+  process) is undocumented. Punt until a real case exists.
+
+---
+
+## Superseded design notes
+
+Earlier drafts modeled all integrations — including proxmox, nfs, smb,
+docker — as MCP-stdio sidecars. That is no longer the architecture.
+What is preserved from those drafts:
+
+- Tool naming convention `{instance}.{domain}.{operation}`.
+- Federated tool surface — Claude / clients see one flat namespace.
+- Spec-first for HTTP-API plugins.
+- Secrets stay with the process that uses them.
+
+What is **not** preserved:
+
+- Per-plugin `mode` and `mcp_transport` DB columns (dropped in
+  migrations `20260530130000__plugins_drop_mode.up.sql` and
+  `20260530140000__plugins_drop_mcp_transport.up.sql`). Don't bring
+  them back.
+- The "host plugin vs service plugin" distinction as a stored
+  attribute. It's a deployment-time fact, not a contract field.
+- The implication that meerkat is a plugin. Meerkat is retired (orca
+  `feedback_no_rebuy_or_meerkat_in_orca.md`).

@@ -6,6 +6,7 @@
 //! domain (typed file/root operations) rather than a primitive.
 
 pub mod atomic;
+pub mod doc_registry;
 pub mod embedded;
 pub mod markdown;
 pub mod ops;

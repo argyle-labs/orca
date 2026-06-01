@@ -1,18 +1,17 @@
-//! `namespace.schema` CRUD + `namespace.schema.view` tools. CRUD reaches
-//! straight into `db::schema_databases::*`; view tools call into [`crate::view`].
+//! `schema.*` + `schema.view.*` tools. Schema databases (MySQL/Postgres/SQLite)
+//! are first-class objects registered in orca.db that assign to a namespace.
+//! Tools call into `database` (the db plugin) for the heavy introspection +
+//! tabbed view rendering.
 
 use derive::orca_tool;
 
-use crate::types::{
-    AddSchemaArgs, GetSchemaArgs, GetSchemaDomainsArgs, GetSchemaDomainsOutput, GetSchemaOutput,
-    ListSchemasArgs, ListSchemasOutput, RemoveSchemaArgs, SchemaDbEntry, SchemaMutationResult,
+use database::types::{
+    AddSchemaArgs, GetSchemaArgs, GetSchemaOutput, ListSchemasArgs, ListSchemasOutput,
+    RemoveSchemaArgs, SchemaDbEntry, SchemaMutationResult,
 };
-use crate::view;
+use database::view;
 
-// ── Registry CRUD ───────────────────────────────────────────────────────────
-
-/// List all MySQL/MariaDB/Postgres/SQLite schema databases registered in orca.db.
-#[orca_tool(domain = "namespace.schema", verb = "list")]
+#[orca_tool(domain = "schema", verb = "list")]
 async fn list_schemas(
     _args: ListSchemasArgs,
     _ctx: &contract::ToolCtx,
@@ -36,7 +35,7 @@ async fn list_schemas(
 }
 
 /// [MUTATES STATE] Add or update a schema database in orca.db. Use container OR host/port, not both.
-#[orca_tool(domain = "namespace.schema", verb = "create")]
+#[orca_tool(domain = "schema", verb = "create")]
 async fn add_schema(
     args: AddSchemaArgs,
     _ctx: &contract::ToolCtx,
@@ -62,7 +61,7 @@ async fn add_schema(
 }
 
 /// [MUTATES STATE] Remove a schema database from orca.db by name.
-#[orca_tool(domain = "namespace.schema", verb = "delete")]
+#[orca_tool(domain = "schema", verb = "delete")]
 async fn remove_schema(
     args: RemoveSchemaArgs,
     _ctx: &contract::ToolCtx,
@@ -75,26 +74,15 @@ async fn remove_schema(
     })
 }
 
-// ── Schema view ─────────────────────────────────────────────────────────────
-
-/// Return the multi-tab schema view across every configured database. Result is `{ tabs, showTabs, errors? }`.
-#[orca_tool(domain = "namespace.schema.view", verb = "detail")]
-async fn schema_view_detail(
+/// Multi-tab introspection across every configured database. Result is
+/// `{ tabs, showTabs, errors?, domains }` — full schema view including the
+/// flattened domain list that the old `schema.view.list` returned separately.
+#[orca_tool(domain = "schema", verb = "detail")]
+async fn schema_detail(
     _args: GetSchemaArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<GetSchemaOutput> {
     view::build_schema_response()
         .await
         .map_err(|e| anyhow::anyhow!(e.to_string()))
-}
-
-/// Return the flattened list of domain definitions across every configured database.
-#[orca_tool(domain = "namespace.schema.view", verb = "list")]
-async fn schema_view_list(
-    _args: GetSchemaDomainsArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<GetSchemaDomainsOutput> {
-    Ok(GetSchemaDomainsOutput {
-        domains: view::build_schema_domains(),
-    })
 }

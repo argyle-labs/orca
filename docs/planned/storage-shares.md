@@ -1,5 +1,11 @@
 # Storage shares — native NFS/SMB/mDNS management — scope
 
+> **HARD RULE — user-triggered changes only.** Orca detects drift,
+> notifies, and waits. The user runs `orca apply <change-id>` (or
+> accepts a UI prompt). No reconciler ever auto-applies. Edits to
+> `/etc/exports` / `smb.conf` / Avahi / wsdd are emitted as pending
+> changes for operator review. See ROADMAP §1.11.
+
 Goal: stop hand-editing `/etc/exports`, `/etc/samba/smb.conf`, Avahi
 service files, and `wsdd` units on storage hosts. Make orca own
 **share definitions** as config-as-code and reconcile the on-host
@@ -13,11 +19,19 @@ Sizing: **S** ≤ 1 day · **M** 1–3 days · **L** 3–7 days · **XL** > 1 we
 ## 1. Why
 
 - Today every share is hand-configured per host. The scottkey gateway
-  (`pool.scottkey.me`, re-exporting willow storage) had working NFS +
-  SMB but appeared in macOS Finder as a generic **"PC" with no
-  browseable shares**, while the Unraid boxes (maple/willow) appear as
-  **Mac** with full share lists — because Unraid auto-wires `vfs_fruit`
-  + Avahi and orca-managed hosts do not.
+  (**tyr**, `10.10.10.29` — formerly pool-gw, re-exporting the
+  underlying pool) had working NFS + SMB but appeared in macOS Finder
+  as a generic **"PC" with no browseable shares**, while the Unraid
+  boxes appear as **Mac** with full share lists — because Unraid
+  auto-wires `vfs_fruit` + Avahi and orca-managed hosts do not.
+- Legacy willow (`10.10.10.10`) is **retired 2026-06-01**. All
+  consumers (frigg, baldur, freyr, njord) now mount through tyr at
+  `/mnt/pool/*`; willow direct-mounts are rollback path only. tyr is
+  canonical, willow is legacy.
+- Client-side mount plugins (`projects/plugins/nfs`,
+  `projects/plugins/smb`) are **shipped**. The greenfield work in
+  this doc is the **server-side reconciler** for exports + smb.conf +
+  Avahi + wsdd, plus mount-option policy on the client side.
 - Correct cross-platform serving needs *three* moving parts kept in
   sync per share, which is exactly the kind of drift orca exists to
   eliminate:
@@ -148,7 +162,106 @@ rest of the orca MCP/REST surface.
 
 ---
 
-## 7. Cross-refs
+## 7. Current state (2026-06-01) — what orca must subsume
+
+This section captures the manual state the reconciler needs to be
+**bit-for-bit compatible with** at takeover, so we can verify parity
+([[schema-evolution.md]]) before retiring the hand-rolled configs.
+
+### Server side (tyr, 10.10.10.29)
+
+Canonical export list lives in `reference_tyr_exports`. Exports today:
+
+```
+/srv/pool/data       → 100.64.0.0/10, 10.10.10.0/24
+/srv/pool/backups    → 100.64.0.0/10, 10.10.10.0/24
+/srv/pool/downloads  → 100.64.0.0/10, 10.10.10.0/24
+/srv/pool/orca       → 100.64.0.0/10, 10.10.10.0/24
+/srv/pool/isos       → 100.64.0.0/10, 10.10.10.0/24
+```
+
+Not yet served from tyr but in scope per §1: `vfs_fruit` + Avahi
+`_smb._tcp` / `_device-info._tcp` / `_adisk._tcp`, and `wsdd` for
+Windows browsing. Tracking under [[project_crossplatform_shares]].
+
+### Client side (post-cutover 2026-06-01)
+
+All downstream consumers point at the gateway, not willow directly
+([[feedback_clients_default_gateway]]):
+
+| Host           | Method                          | Mount paths                                                  |
+| -------------- | ------------------------------- | ------------------------------------------------------------ |
+| frigg (PVE)    | fstab + `x-systemd.automount`   | `/mnt/pool/{data,backups}`                                   |
+| baldur (Alpine)| autofs `/etc/autofs/auto.pool`  | `/mnt/pool/{data,backups}`                                   |
+| freyr (Alpine) | autofs `/etc/autofs/auto.pool`  | `/mnt/pool/{data,backups,downloads}`                         |
+| njord (LXC)    | PVE bind via `mp0`/`mp1` on host| `/mnt/pool/data` → `/mnt/data`, `/mnt/pool/backups/njord` → `/mnt/backups` |
+
+Canonical NFS mount options (across all client autofs/fstab):
+
+```
+vers=4.2,soft,softreval,timeo=50,retrans=2,nconnect=4,actimeo=30
+```
+
+Plus fstab-only: `_netdev,nofail,x-systemd.automount,x-systemd.idle-timeout=0`.
+Plus autofs-only: `--timeout=60 --ghost` (or `--timeout=0` for storage hosts).
+
+### 7a. NFS mount-option policy
+
+Today there is no policy — willow direct-mounts used
+`rsize/wsize=1048576`; pool mounts (above) use `262144`. Same host,
+same kernel, different numbers, no rationale.
+
+Reconciler picks **one** baseline per use-case and applies it
+uniformly through the share/mount layer:
+
+| Use-case | Workload | `rsize/wsize` | Other |
+|---|---|---|---|
+| `data` (media, appdata reads + writes) | Mostly large sequential reads, occasional config writes | `1048576` | `nconnect=4`, `actimeo=30` (the willow-era numbers — media benefits from the larger I/O window) |
+| `backups` | Append-heavy, large writes, low concurrency | `1048576` | `nconnect=2` (don't burn slots on a low-concurrency target), `actimeo=60` (attr churn on backup dirs is wasteful) |
+| `config` / `orca` (small files, attr-sensitive, latency-critical) | Lots of small reads, frequent stat() | `262144` | `nconnect=4`, `actimeo=5` (need fresh attrs on config) |
+
+Decision: keep `rsize/wsize=1048576` for data and backups (the
+willow-era setting is right for sequential workloads), drop to
+`262144` only for the config/orca share where attr-cache pressure
+dominates. Pool's current global `262144` undersells data throughput;
+fix at takeover.
+
+Common across all: `vers=4.2,soft,softreval,timeo=50,retrans=2`.
+
+### Client reconciliation — needed but not in §3 yet
+
+Today only the **server** side is in scope. The cutover surfaced that
+clients also drift (stale handles, missing tyr fstab, autofs maps
+forgotten on new hosts). The reconciler should also own:
+
+1. A `pool_mount` resource on each consumer (declarative `/mnt/pool/*`
+   bindings → autofs map or systemd mount, OS-appropriate).
+2. Stale-handle detection (the frigg `/mnt/pool/data` outage on 2026-06-01
+   was a stale NFS handle that took manual `umount -f` + automount
+   restart). dpinger-style watchdog needed.
+3. Failover: when tyr's primary backend (willow) is down, the gateway
+   should re-export from maple ([[feedback_storage_abstraction]],
+   [[feedback_storage_replication_policy]]). Re-export logic landed
+   in nfs-monitor (commit 7c1ad09); failover behaviour not yet
+   validated under fault injection.
+
+### Related parity work
+
+- **Syncthing → orca replication**: maple ↔ willow uses Syncthing
+  today ([[project_tyr_consolidation_syncthing]]). Cross-host UID
+  mismatch surfaced as chmod-permission-denied pull errors; mitigated
+  by `ignorePerms=true` ([[feedback_syncthing_ignore_perms]]). Orca's
+  replacement must default to ignore-perms semantics or do real
+  UID-mapping on receive.
+- **OPNsense gateway monitoring**: not storage-specific but the same
+  class of "silent backend failure" — see
+  [[feedback_opnsense_gateway_monitoring]]. Pattern: every routing or
+  re-export gateway needs an explicit liveness probe; "interface up"
+  is not "tunnel/export healthy".
+
+---
+
+## 8. Cross-refs
 
 - [orca-as-logic-layer.md](orca-as-logic-layer.md) — umbrella migration.
 - [backup-restore.md](backup-restore.md) — backups consume these shares.

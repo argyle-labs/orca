@@ -23,6 +23,7 @@ dispatch    = { path = "../dispatch" }
 contract   = { path = "../contract", default-features = false }
 derive      = { path = "../derive" }
 system          = { path = "../system" }
+dev             = { path = "../dev" }
 schemars        = { workspace = true }
 serde           = { workspace = true }
 serde_json      = { workspace = true }

@@ -10,8 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::dev::{
-    apply_update_dev, check_for_update_dev, clear_dev_source, cmd_dev_enable, read_dev_source,
-    write_dev_source,
+    apply_update_dev, check_for_update_dev, clear_dev_source, read_dev_source, write_dev_source,
 };
 use crate::install::{InstallReport, cmd_install_report, cmd_uninstall_report};
 use crate::update::{
@@ -32,23 +31,87 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct EmptyArgs {}
 
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct ProjectsListReport {
-    pub projects: Vec<String>,
-}
-
 // ── install / delete ───────────────────────────────────────────────────────
 
-/// [MUTATES STATE] Install orca on this host: wire symlinks, register MCP server, install binary.
-#[orca_tool(domain = "system", verb = "create", local_only = true)]
-async fn system_create(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> Result<InstallReport> {
-    Ok(cmd_install_report())
+/// Args for [`system_install`]. Empty by default — does the user-level
+/// install. Pass `service_user` (and optional `home_dir` / `admin_pubkey`)
+/// to also provision a system service user with SSH access (Linux, root).
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+pub struct SystemInstallArgs {
+    /// Service user name. When set, also runs the service-user bootstrap
+    /// (`useradd`, group membership, linger, optional SSH key). Linux-only;
+    /// no-op on macOS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub service_user: Option<String>,
+    /// Home directory for the service user (default: `/var/lib/orca`).
+    /// Ignored when `service_user` is unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub home_dir: Option<String>,
+    /// SSH pubkey to append to the service user's `authorized_keys`.
+    /// Ignored when `service_user` is unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub admin_pubkey: Option<String>,
+    /// HTTP port the daemon supervisor should bind. Defaults to the
+    /// workspace-wide `APP_REST_HTTP_PORT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub port: Option<u16>,
 }
 
-/// [MUTATES STATE] Uninstall orca from this host: remove binary, MCP registration, and CLAUDE.md symlinks.
+/// [MUTATES STATE] Install orca on this host. Always wires the user-level
+/// install (binary, ~/.claude symlinks, MCP registration, PKI). When
+/// `service_user` is set, also bootstraps a system service user with SSH
+/// access — replaces the former separate `system.bootstrap` tool.
+#[orca_tool(domain = "system", verb = "install", local_only = true)]
+async fn system_install(
+    args: SystemInstallArgs,
+    _ctx: &contract::ToolCtx,
+) -> Result<InstallReport> {
+    let mut report = cmd_install_report();
+    if let Some(user) = &args.service_user {
+        let home = args
+            .home_dir
+            .as_deref()
+            .unwrap_or(crate::sysadmin::DEFAULT_SERVICE_HOME);
+        match crate::sysadmin::bootstrap(args.admin_pubkey.clone(), user, home) {
+            Ok(()) => report
+                .done
+                .push(format!("service user '{user}' (home: {home})")),
+            Err(e) => report
+                .errors
+                .push(format!("service-user bootstrap failed: {e}")),
+        }
+    }
+    let port = args.port.unwrap_or(crate::daemon::DEFAULT_HTTP_PORT);
+    match crate::daemon::install(port, args.service_user.clone()) {
+        Ok(()) => report
+            .done
+            .push(format!("daemon supervisor installed on port {port}")),
+        Err(e) => report
+            .errors
+            .push(format!("daemon supervisor install failed: {e}")),
+    }
+    Ok(report)
+}
+
+/// [MUTATES STATE] Uninstall orca from this host: remove binary, MCP
+/// registration, CLAUDE.md symlinks, AND the daemon supervisor unit
+/// (launchd / systemd / openrc / unraid). Absorbed the former
+/// `system.daemon.uninstall`.
 #[orca_tool(domain = "system", verb = "delete", local_only = true)]
 async fn system_delete(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> Result<InstallReport> {
-    Ok(cmd_uninstall_report())
+    let mut report = cmd_uninstall_report();
+    match crate::daemon::uninstall_service() {
+        Ok(()) => report.done.push("daemon supervisor removed".to_string()),
+        Err(e) => report
+            .errors
+            .push(format!("daemon supervisor removal failed: {e}")),
+    }
+    Ok(report)
 }
 
 // ── system.update — the one tool ───────────────────────────────────────────
@@ -129,9 +192,32 @@ pub struct SystemUpdateArgs {
     #[serde(default)]
     #[cfg_attr(feature = "cli", arg(long))]
     pub os_packages: bool,
+
+    /// Force a re-detect of host addressing channels (LAN + Tailscale +
+    /// settings overrides). Was `system.host.refresh`. Drives the
+    /// `HostRefreshHook` registered at server startup.
+    #[serde(default)]
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub refresh_host: bool,
+
+    /// Daemon action: "stop" (SIGTERM), "park" (SIGUSR1, release port),
+    /// or "reclaim" (SIGUSR2, take port back). Was the
+    /// `system.daemon.{stop,park,reclaim}` family.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub daemon: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+/// Result of a `system.update` call.
+///
+/// Every field carries `#[serde(default)]` so a controller running rc.N can
+/// decode a response from a peer running rc.N-1 even when the older peer
+/// omits a field that was added later. Without this, a single missing field
+/// would fail the entire decode and the controller would report failure for
+/// a call that actually applied successfully on the peer. See
+/// [[project-update-path-fix-plan-2026-06-01]] fix #1.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Default)]
+#[serde(default)]
 pub struct SystemUpdateOutput {
     pub current_version: String,
     pub channel: String,
@@ -154,7 +240,7 @@ pub struct SystemUpdateOutput {
 #[orca_tool(domain = "system", verb = "update", refresh_runtime = true)]
 async fn system_update(
     args: SystemUpdateArgs,
-    _ctx: &contract::ToolCtx,
+    ctx: &contract::ToolCtx,
 ) -> Result<SystemUpdateOutput> {
     prune_check_cache();
 
@@ -178,10 +264,12 @@ async fn system_update(
         let prior = read_channel_marker().unwrap_or(Channel::Stable);
         if raw == "dev" {
             dev_mode_requested = true;
-            tokio::task::spawn_blocking(cmd_dev_enable)
-                .await
-                .context("dev_enable join")??;
-            notes.push("dev mode enabled (tracking GitHub HEAD)".into());
+            let ch = Channel::Dev;
+            write_channel_marker(&ch).context("write channel marker")?;
+            notes.push(
+                "channel set to dev — run `orca dev enable` to start the cargo-watch supervisor"
+                    .into(),
+            );
         } else {
             let ch = Channel::parse(raw);
             write_channel_marker(&ch).context("write channel marker")?;
@@ -262,6 +350,40 @@ async fn system_update(
         }
     }
 
+    // ── 3a. daemon signal (was `system.daemon.{stop,park,reclaim}`) ───────
+    if let Some(action) = args.daemon.as_deref() {
+        let result = match action {
+            "stop" => crate::daemon::stop().map(|pid| format!("daemon stop sent (pid {pid})")),
+            "park" => crate::daemon::park().map(|pid| format!("daemon parked (pid {pid})")),
+            "reclaim" => {
+                crate::daemon::reclaim().map(|pid| format!("daemon reclaim sent (pid {pid})"))
+            }
+            other => Err(anyhow::anyhow!(
+                "daemon action '{other}' not one of: stop|park|reclaim"
+            )),
+        };
+        match result {
+            Ok(msg) => notes.push(msg),
+            Err(e) => errors.push(format!("daemon action failed: {e}")),
+        }
+    }
+
+    // ── 3b. host-addressing refresh (was `system.host.refresh`) ───────────
+    if args.refresh_host {
+        match db::open_default() {
+            Ok(conn) => {
+                if let Ok(hook) =
+                    ctx.service::<std::sync::Arc<dyn crate::host::HostRefreshHook + Send + Sync>>()
+                    && let Err(e) = hook.refresh(&conn)
+                {
+                    errors.push(format!("host refresh hook failed: {e}"));
+                }
+                notes.push("host addressing channels re-detected".to_string());
+            }
+            Err(e) => errors.push(format!("host refresh db open failed: {e}")),
+        }
+    }
+
     // ── 3. OS package upgrade ──────────────────────────────────────────────
     if args.os_packages {
         match run_os_package_update().await {
@@ -283,6 +405,8 @@ async fn system_update(
         || args.tailscale_v4.is_some()
         || args.tailscale_v6.is_some()
         || args.os_packages
+        || args.refresh_host
+        || args.daemon.is_some()
         || args.dev_source.is_some()
         || args.clear_dev_source
         || args.unpin
@@ -585,25 +709,6 @@ pub async fn startup_update_check() {
     }
 }
 
-// ── projects.list ───────────────────────────────────────────────────────────
-
-/// List projects (memory directories under the orca vault root).
-#[orca_tool(domain = "namespace.project", verb = "list")]
-async fn projects_list(_args: EmptyArgs, ctx: &contract::ToolCtx) -> Result<ProjectsListReport> {
-    let mut out = Vec::new();
-    if ctx.config.memory_root.exists() {
-        for entry in std::fs::read_dir(&ctx.config.memory_root)?.flatten() {
-            if entry.path().is_dir()
-                && let Some(name) = entry.file_name().to_str()
-            {
-                out.push(name.to_string());
-            }
-        }
-        out.sort();
-    }
-    Ok(ProjectsListReport { projects: out })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,44 +717,39 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    fn ctx_with_memory(root: PathBuf) -> ToolCtx {
-        ToolCtx::new(Arc::new(Config {
-            anthropic_api_key: None,
-            lmstudio_url: String::new(),
-            ollama_url: String::new(),
-            default_model: Model::LMStudio {
-                id: String::new(),
-                url: String::new(),
-            },
-            app_dir: PathBuf::from("/tmp"),
-            memory_root: root,
-            db_path: PathBuf::from("/tmp/orca-tools-commands-test.db"),
-            ports: Default::default(),
-        }))
-    }
-
-    #[tokio::test]
-    async fn projects_list_reads_memory_root_subdirs() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("alpha")).unwrap();
-        std::fs::create_dir(dir.path().join("beta")).unwrap();
-        std::fs::write(dir.path().join("README.md"), "x").unwrap();
-        let ctx = ctx_with_memory(dir.path().to_path_buf());
-        let r = projects_list(EmptyArgs {}, &ctx).await.unwrap();
-        assert_eq!(r.projects, vec!["alpha".to_string(), "beta".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn projects_list_empty_when_root_missing() {
-        let ctx = ctx_with_memory(PathBuf::from("/tmp/orca-nonexistent-memory-root"));
-        let r = projects_list(EmptyArgs {}, &ctx).await.unwrap();
-        assert!(r.projects.is_empty());
-    }
-
     #[test]
     fn normalise_version_adds_v_prefix() {
         assert_eq!(normalise_version("0.0.4"), "v0.0.4");
         assert_eq!(normalise_version("v0.0.4"), "v0.0.4");
         assert_eq!(normalise_version("0.0.4-rc.3"), "v0.0.4-rc.3");
+    }
+
+    // Simulates an rc.N controller decoding the response payload from a
+    // peer running an older rc.N-1 build that omits fields the controller
+    // learned about later. Prior to the `#[serde(default)]` attribute a
+    // missing field would fail the whole decode and the controller would
+    // falsely report the peer's successful apply as a failure. See
+    // [[project-update-path-fix-plan-2026-06-01]] fix #1.
+    #[test]
+    fn system_update_output_decodes_older_peer_response() {
+        let older_peer_json = r#"{
+            "applied": "v0.0.5-rc.3",
+            "notes": ["binary swapped"],
+            "errors": []
+        }"#;
+        let decoded: SystemUpdateOutput = serde_json::from_str(older_peer_json).unwrap();
+        assert_eq!(decoded.applied.as_deref(), Some("v0.0.5-rc.3"));
+        assert_eq!(decoded.notes, vec!["binary swapped".to_string()]);
+        assert!(decoded.errors.is_empty());
+        assert!(decoded.current_version.is_empty());
+        assert!(decoded.channel.is_empty());
+        assert!(decoded.available_versions.is_empty());
+    }
+
+    #[test]
+    fn system_update_output_decodes_empty_object() {
+        let decoded: SystemUpdateOutput = serde_json::from_str("{}").unwrap();
+        assert!(decoded.applied.is_none());
+        assert!(decoded.errors.is_empty());
     }
 }

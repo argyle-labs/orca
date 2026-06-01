@@ -26,8 +26,6 @@ inventory     = { workspace = true }
 
 utils = { path = "../utils" }
 db         = { package = "db", path = "../db" }
-mcp        = { path = "../plugins/mcp" }
-graphql    = { path = "../plugins/graphql" }
 dirs       = { workspace = true }
 anyhow     = { workspace = true }
 async-trait = { workspace = true }

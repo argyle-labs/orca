@@ -37,7 +37,9 @@ db         = { package = "db", path = "../db", features = ["cli"] }
 auth     = { path = "../auth",     features = ["cli"] }
 pod      = { path = "../pod",      features = ["cli"] }
 system   = { path = "../system",   features = ["cli"] }
+dev      = { path = "../dev" }
 namespace = { path = "../namespace", features = ["cli"] }
+spec     = { path = "../spec",      features = ["cli"] }
 agents   = { path = "../plugins/agents",   features = ["cli"] }
 plugins  = { path = "../plugins/runtime",  features = ["cli"] }
 files    = { path = "../files",    features = ["cli"] }

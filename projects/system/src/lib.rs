@@ -14,7 +14,6 @@
 
 pub mod host;
 pub mod host_identity;
-pub mod host_status;
 pub mod system_info_types;
 pub mod topology;
 pub mod update_state;
@@ -42,22 +41,15 @@ pub mod scheduler;
 
 pub mod diagnostic;
 
-// Subcommand handler modules. These currently mix clap action enums + impl;
-// the next slice converts each public entry into a `#[orca_tool]` and lets the
-// macro emit the CLI surface, killing the action enums.
 pub mod daemon;
-#[cfg(feature = "cli")]
-pub mod dev_serve;
 #[cfg(feature = "cli")]
 pub mod hook;
 pub mod package;
 pub mod sysadmin;
 
-// Docker-compose service listing + test runner (system.infra.*) and the
-// liveness probe (system.health). Absorbed from the dissolved `fleet` crate.
-pub mod infra;
-pub mod meta;
-
-// Moved 2026-05-29 from dissolved `platform` crate.
-pub mod engine;
-pub mod sweep;
+// Relocated 2026-06-01:
+// - `engine` (LLM backend registry) → `projects/plugins/llm/src/engine.rs`.
+// - `sweep` (workspace cargo-machete/deny) → `projects/dev/src/sweep.rs`.
+// - `dev_serve` (HTTP server for dev-source binaries) → `projects/dev/src/dev_serve.rs`.
+// - The `cmd_dev_*` supervisor functions from `dev.rs` → `projects/dev/src/mode.rs`.
+//   The remaining `dev.rs` holds the URL-fetch path used by `system.update`.

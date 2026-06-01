@@ -1,23 +1,35 @@
-//! Docker domain tools — engine state, compose service listing, lifecycle
-//! actions, log fetch, and the cross-project log services aggregator.
+//! Docker tool surface — flat 4-tool surface (`docker.{list, detail, update,
+//! delete}`) that covers everything the previous 10-tool 3-level surface did.
+//!
+//! Sub-resources (services / runtimes / engine) are discriminated by the
+//! `kind` field on each tool's args. Tool bodies dispatch internally and
+//! return a flat output with only the populated fields.
+//!
+//! Pod awareness: callers pass `--peer <host>` to dispatch any of these
+//! tools to a remote orca peer (universal opt-out via `local_only=true`
+//! on the macro; docker tools are all opt-in to remote dispatch).
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-use crate::{Compose, ComposeError, Engine};
 use std::path::{Path, PathBuf};
 
 use derive::orca_tool;
 
-fn map_engine(e: Engine) -> DockerEngineKind {
-    match e {
-        Engine::Colima => DockerEngineKind::Colima,
-        Engine::Desktop => DockerEngineKind::Desktop,
-        Engine::None => DockerEngineKind::None,
-    }
+use crate::{Compose, ComposeError, Engine};
+
+// ── Resource discriminator ──────────────────────────────────────────────────
+
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DockerKind {
+    #[default]
+    Service,
+    Runtime,
+    Engine,
 }
 
-// ── Shared row shapes ───────────────────────────────────────────────────────
+// ── Row shapes ──────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "lowercase")]
@@ -43,316 +55,15 @@ pub struct DockerServiceRow {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct DockerServicesView {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compose_file: Option<String>,
-    pub services: Vec<DockerServiceRow>,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct DockerActionResult {
-    pub output: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compose_file: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct DockerLogProject {
+pub struct DockerProjectRow {
     pub project: String,
     pub path: String,
     pub services: Vec<DockerServiceRow>,
 }
 
-// ── Args / Outputs ──────────────────────────────────────────────────────────
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct GetDockerEngineArgs {}
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct StartDockerEngineArgs {}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct StartDockerEngineOutput {
-    pub output: String,
-}
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct GetDockerServicesArgs {
-    /// Absolute path to the docker-compose project directory.
-    pub path: String,
-}
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct RunDockerActionArgs {
-    pub project_path: String,
-    /// `up`, `down`, `restart`, `start`, `stop`, `build`, `pull`, `logs`.
-    pub action: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tail: Option<u32>,
-}
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct GetLogsArgs {
-    /// Absolute path to the compose project.
-    pub project: String,
-    /// Specific service name; omit to read across all services.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service: Option<String>,
-    /// Number of log lines to return (default 200).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tail: Option<u32>,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct GetLogsOutput {
-    pub output: String,
-}
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct GetLogServicesArgs {
-    /// Directory to scan for compose projects. Defaults to `$HOME/code`.
-    #[cfg_attr(feature = "cli", arg(long))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub root: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct GetLogServicesOutput {
-    pub projects: Vec<DockerLogProject>,
-}
-
-/// Live CPU/memory stats for one running container.
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct DockerContainerStats {
-    pub id: String,
-    pub name: String,
-    /// CPU usage as a percentage of total host capacity (all cores).
-    pub cpu_percent: f64,
-    /// RSS-equivalent working set in MB.
-    pub mem_usage_mb: u64,
-    /// Container memory limit in MB (`0` = unlimited / host RAM).
-    pub mem_limit_mb: u64,
-    /// Block I/O read bytes since container start.
-    pub block_read_bytes: u64,
-    /// Block I/O write bytes since container start.
-    pub block_write_bytes: u64,
-    /// Net rx bytes.
-    pub net_rx_bytes: u64,
-    /// Net tx bytes.
-    pub net_tx_bytes: u64,
-}
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct DockerStatsArgs {}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct DockerStatsOutput {
-    pub containers: Vec<DockerContainerStats>,
-}
-
-// ── Native dispatch ─────────────────────────────────────────────────────────
-
-/// Probe the local docker engine (colima | desktop | none) and whether it is running.
-#[orca_tool(domain = "docker.engine", verb = "detail")]
-async fn docker_engine_detail(
-    _args: GetDockerEngineArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<DockerEngineStatus> {
-    let s = crate::engine::status().await;
-    Ok(DockerEngineStatus {
-        engine: map_engine(s.engine),
-        running: s.running,
-    })
-}
-
-/// [MUTATES STATE] Start the local docker engine. Returns the start-command output.
-#[orca_tool(domain = "docker.engine", verb = "update")]
-async fn docker_engine_update(
-    _args: StartDockerEngineArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<StartDockerEngineOutput> {
-    let output = crate::engine::start().await?;
-    Ok(StartDockerEngineOutput { output })
-}
-
-/// List the compose services under `path` with state/health/ports plus the
-/// resolved compose-file path.
-#[orca_tool(domain = "docker.service", verb = "list")]
-async fn docker_service_list(
-    args: GetDockerServicesArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<DockerServicesView> {
-    let Some(compose) = Compose::find(Path::new(&args.path)) else {
-        return Ok(DockerServicesView {
-            compose_file: None,
-            services: Vec::new(),
-        });
-    };
-    let services = compose.services().await.map_err(anyhow::Error::from)?;
-    Ok(DockerServicesView {
-        compose_file: compose.file().to_str().map(str::to_string),
-        services: services
-            .into_iter()
-            .map(|s| DockerServiceRow {
-                name: s.name,
-                state: s.state,
-                running: s.running,
-                health: s.health,
-                ports: s.ports,
-            })
-            .collect(),
-    })
-}
-
-/// [MUTATES STATE] Run a docker-compose lifecycle action against the compose
-/// project at `project_path`.
-#[orca_tool(domain = "docker.service", verb = "update")]
-async fn docker_service_update(
-    args: RunDockerActionArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<DockerActionResult> {
-    let compose = Compose::find(Path::new(&args.project_path))
-        .ok_or_else(|| anyhow::anyhow!("no compose file under {}", args.project_path))?;
-    let output = compose
-        .run_action(&args.action, args.service.as_deref(), args.tail)
-        .await
-        .map_err(|e| match e {
-            ComposeError::UnknownAction(a) => anyhow::anyhow!("unknown action: {a}"),
-            other => anyhow::Error::from(other),
-        })?;
-    Ok(DockerActionResult {
-        output,
-        compose_file: compose.file().to_str().map(str::to_string),
-    })
-}
-
-/// Read docker-compose logs from the project at `project` (optionally scoped
-/// to a service).
-#[orca_tool(domain = "docker.service", verb = "detail")]
-async fn docker_service_detail(
-    args: GetLogsArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<GetLogsOutput> {
-    let tail = args.tail.unwrap_or(200);
-    let compose = Compose::find(Path::new(&args.project))
-        .ok_or_else(|| anyhow::anyhow!("no compose file under {}", args.project))?;
-    let svc = args.service.as_deref();
-    let services: Vec<&str> = svc.into_iter().collect();
-    let output = compose
-        .logs(&services, tail)
-        .await
-        .map_err(anyhow::Error::from)?;
-    Ok(GetLogsOutput { output })
-}
-
-/// List every docker-compose project under a projects root with its service
-/// states. Powers the cross-project logs panel.
-#[orca_tool(domain = "docker.service", verb = "list-logs")]
-async fn docker_service_list_logs(
-    args: GetLogServicesArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<GetLogServicesOutput> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let root = args.root.unwrap_or_else(|| format!("{home}/code"));
-
-    let entries = match std::fs::read_dir(&root) {
-        Ok(e) => e,
-        Err(_) => {
-            return Ok(GetLogServicesOutput {
-                projects: Vec::new(),
-            });
-        }
-    };
-
-    let project_dirs: Vec<PathBuf> = entries
-        .flatten()
-        .filter_map(|e| {
-            let p = e.path();
-            if p.is_dir() && Compose::find(&p).is_some() {
-                Some(p)
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let mut out = Vec::with_capacity(project_dirs.len());
-    for project_path in project_dirs {
-        let path_str = project_path.to_string_lossy().into_owned();
-        let name = project_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path_str.clone());
-
-        let services = match Compose::find(&project_path) {
-            None => Vec::new(),
-            Some(c) => match c.services().await {
-                Ok(s) => s
-                    .into_iter()
-                    .map(|s| DockerServiceRow {
-                        name: s.name,
-                        state: s.state,
-                        running: s.running,
-                        health: s.health,
-                        ports: s.ports,
-                    })
-                    .collect(),
-                Err(_) => Vec::new(),
-            },
-        };
-
-        out.push(DockerLogProject {
-            project: name,
-            path: path_str,
-            services,
-        });
-    }
-
-    Ok(GetLogServicesOutput { projects: out })
-}
-
-/// Live CPU + memory stats for all running containers (`docker stats --no-stream`).
-/// Returns an empty list when docker is not running or no containers are up.
-#[orca_tool(domain = "docker.service", verb = "list-stats")]
-async fn docker_service_list_stats(
-    _args: DockerStatsArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<DockerStatsOutput> {
-    let raw = crate::containers::live_stats().await?;
-    let containers = raw
-        .into_iter()
-        .map(|s| DockerContainerStats {
-            id: s.id,
-            name: s.name,
-            cpu_percent: s.cpu_percent,
-            mem_usage_mb: s.mem_usage_mb,
-            mem_limit_mb: s.mem_limit_mb,
-            block_read_bytes: s.block_read_bytes,
-            block_write_bytes: s.block_write_bytes,
-            net_rx_bytes: s.net_rx_bytes,
-            net_tx_bytes: s.net_tx_bytes,
-        })
-        .collect();
-    Ok(DockerStatsOutput { containers })
-}
-
-// ── Docker runtimes (registered endpoints in orca.db) ───────────────────────
-
-#[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct DockerRuntimeEntry {
+pub struct DockerRuntimeRow {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub socket_path: Option<String>,
@@ -363,94 +74,393 @@ pub struct DockerRuntimeEntry {
     pub enabled: bool,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct ListDockerRuntimesArgs {}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct ListDockerRuntimesOutput {
-    pub runtimes: Vec<DockerRuntimeEntry>,
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+pub struct DockerContainerStats {
+    pub id: String,
+    pub name: String,
+    pub cpu_percent: f64,
+    pub mem_usage_mb: u64,
+    pub mem_limit_mb: u64,
+    pub block_read_bytes: u64,
+    pub block_write_bytes: u64,
+    pub net_rx_bytes: u64,
+    pub net_tx_bytes: u64,
 }
+
+fn map_engine(e: Engine) -> DockerEngineKind {
+    match e {
+        Engine::Colima => DockerEngineKind::Colima,
+        Engine::Desktop => DockerEngineKind::Desktop,
+        Engine::None => DockerEngineKind::None,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// docker.list
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[serde(default)]
+pub struct DockerListArgs {
+    /// `service` (default) | `runtime` | `engine`.
+    #[cfg_attr(feature = "cli", arg(long, default_value = "service"))]
+    pub kind: DockerKind,
+    /// (service) Single compose project path. Mutually exclusive with `root`.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub path: Option<String>,
+    /// (service) Scan this directory for compose projects (default `$HOME/code`).
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub root: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DockerListOutput {
+    /// Populated when listing one compose project's services.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compose_file: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<DockerServiceRow>,
+    /// Populated when scanning a root for compose projects.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<DockerProjectRow>,
+    /// Populated when `kind=runtime`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub runtimes: Vec<DockerRuntimeRow>,
+    /// Populated when `kind=engine`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<DockerEngineStatus>,
+}
+
+/// List docker resources. Discriminated by `kind`:
+/// - `service` + `path` → compose services at that project.
+/// - `service` + `root` → every compose project under root with its services.
+/// - `runtime` → registered docker runtimes in orca.db.
+/// - `engine` → local docker engine status (colima/desktop/none + running).
+#[orca_tool(domain = "docker", verb = "list")]
+async fn docker_list(
+    args: DockerListArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<DockerListOutput> {
+    let mut out = DockerListOutput::default();
+    match args.kind {
+        DockerKind::Engine => {
+            let s = crate::engine::status().await;
+            out.engine = Some(DockerEngineStatus {
+                engine: map_engine(s.engine),
+                running: s.running,
+            });
+        }
+        DockerKind::Runtime => {
+            let conn = db::open_default()?;
+            out.runtimes = db::docker_runtimes::list(&conn)?
+                .into_iter()
+                .map(|r| DockerRuntimeRow {
+                    name: r.name,
+                    socket_path: r.socket_path,
+                    host: r.host,
+                    url: r.url,
+                    enabled: r.enabled,
+                })
+                .collect();
+        }
+        DockerKind::Service => match (args.path.as_deref(), args.root.as_deref()) {
+            (Some(_), Some(_)) => anyhow::bail!("pass either --path or --root, not both"),
+            (Some(path), None) => {
+                if let Some(compose) = Compose::find(Path::new(path)) {
+                    let services = compose.services().await.map_err(anyhow::Error::from)?;
+                    out.compose_file = compose.file().to_str().map(str::to_string);
+                    out.services = services
+                        .into_iter()
+                        .map(|s| DockerServiceRow {
+                            name: s.name,
+                            state: s.state,
+                            running: s.running,
+                            health: s.health,
+                            ports: s.ports,
+                        })
+                        .collect();
+                }
+            }
+            (None, root_opt) => {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let root = root_opt
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("{home}/code"));
+                let Ok(entries) = std::fs::read_dir(&root) else {
+                    return Ok(out);
+                };
+                let project_dirs: Vec<PathBuf> = entries
+                    .flatten()
+                    .filter_map(|e| {
+                        let p = e.path();
+                        (p.is_dir() && Compose::find(&p).is_some()).then_some(p)
+                    })
+                    .collect();
+                for project_path in project_dirs {
+                    let path_str = project_path.to_string_lossy().into_owned();
+                    let name = project_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path_str.clone());
+                    let services = match Compose::find(&project_path) {
+                        None => Vec::new(),
+                        Some(c) => c
+                            .services()
+                            .await
+                            .map(|svcs| {
+                                svcs.into_iter()
+                                    .map(|s| DockerServiceRow {
+                                        name: s.name,
+                                        state: s.state,
+                                        running: s.running,
+                                        health: s.health,
+                                        ports: s.ports,
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    };
+                    out.projects.push(DockerProjectRow {
+                        project: name,
+                        path: path_str,
+                        services,
+                    });
+                }
+            }
+        },
+    }
+    Ok(out)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// docker.detail
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[serde(default)]
+pub struct DockerDetailArgs {
+    /// `service` (default) | `engine`. `runtime` detail not currently supported.
+    #[cfg_attr(feature = "cli", arg(long, default_value = "service"))]
+    pub kind: DockerKind,
+    /// (service) Absolute path to the compose project.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub path: Option<String>,
+    /// (service) Specific service name; omit for project-wide logs.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub service: Option<String>,
+    /// (service) Number of log lines (default 200).
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub tail: Option<u32>,
+    /// (service) Include live container stats.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub stats: bool,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DockerDetailOutput {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub logs: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stats: Vec<DockerContainerStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<DockerEngineStatus>,
+}
+
+#[orca_tool(domain = "docker", verb = "detail")]
+async fn docker_detail(
+    args: DockerDetailArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<DockerDetailOutput> {
+    let mut out = DockerDetailOutput::default();
+    match args.kind {
+        DockerKind::Engine => {
+            let s = crate::engine::status().await;
+            out.engine = Some(DockerEngineStatus {
+                engine: map_engine(s.engine),
+                running: s.running,
+            });
+        }
+        DockerKind::Runtime => anyhow::bail!("docker.detail for kind=runtime not supported"),
+        DockerKind::Service => {
+            if let Some(path) = args.path.as_deref() {
+                let compose = Compose::find(Path::new(path))
+                    .ok_or_else(|| anyhow::anyhow!("no compose file under {path}"))?;
+                let tail = args.tail.unwrap_or(200);
+                let svc = args.service.as_deref();
+                let services: Vec<&str> = svc.into_iter().collect();
+                out.logs = compose
+                    .logs(&services, tail)
+                    .await
+                    .map_err(anyhow::Error::from)?;
+            }
+            if args.stats {
+                let raw = crate::containers::live_stats().await?;
+                out.stats = raw
+                    .into_iter()
+                    .map(|s| DockerContainerStats {
+                        id: s.id,
+                        name: s.name,
+                        cpu_percent: s.cpu_percent,
+                        mem_usage_mb: s.mem_usage_mb,
+                        mem_limit_mb: s.mem_limit_mb,
+                        block_read_bytes: s.block_read_bytes,
+                        block_write_bytes: s.block_write_bytes,
+                        net_rx_bytes: s.net_rx_bytes,
+                        net_tx_bytes: s.net_tx_bytes,
+                    })
+                    .collect();
+            }
+        }
+    }
+    Ok(out)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// docker.update
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DockerUpdateArgs {
+    /// `service` (default) | `runtime` | `engine`.
+    #[cfg_attr(feature = "cli", arg(long, default_value = "service"))]
+    pub kind: DockerKind,
+    /// (engine) `start` is the only action; (service) `up`/`down`/`restart`/
+    /// `start`/`stop`/`build`/`pull`/`logs`. Ignored for runtime.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub action: Option<String>,
+    /// (service) Absolute compose project path.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub project_path: Option<String>,
+    /// (service) Optional service to scope the action to.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub service: Option<String>,
+    /// (service) Tail for `logs` action.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub tail: Option<u32>,
+    /// (runtime) Name of the runtime to register.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub name: Option<String>,
+    /// (runtime) Provide socket_path, host, or url.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub socket_path: Option<String>,
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub host: Option<String>,
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub url: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DockerUpdateOutput {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub output: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compose_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied: Option<String>,
+}
+
+#[orca_tool(domain = "docker", verb = "update")]
+async fn docker_update(
+    args: DockerUpdateArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<DockerUpdateOutput> {
+    let mut out = DockerUpdateOutput::default();
+    match args.kind {
+        DockerKind::Engine => {
+            let action = args.action.as_deref().unwrap_or("start");
+            if action != "start" {
+                anyhow::bail!("docker.update kind=engine supports action=start only");
+            }
+            out.output = crate::engine::start().await?;
+            out.applied = Some("engine-start".into());
+        }
+        DockerKind::Service => {
+            let project_path = args
+                .project_path
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("project_path required for kind=service"))?;
+            let action = args
+                .action
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("action required for kind=service"))?;
+            let compose = Compose::find(Path::new(project_path))
+                .ok_or_else(|| anyhow::anyhow!("no compose file under {project_path}"))?;
+            out.output = compose
+                .run_action(action, args.service.as_deref(), args.tail)
+                .await
+                .map_err(|e| match e {
+                    ComposeError::UnknownAction(a) => anyhow::anyhow!("unknown action: {a}"),
+                    other => anyhow::Error::from(other),
+                })?;
+            out.compose_file = compose.file().to_str().map(str::to_string);
+            out.applied = Some(format!("service-{action}"));
+        }
+        DockerKind::Runtime => {
+            let name = args
+                .name
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("name required for kind=runtime"))?;
+            if args.socket_path.is_none() && args.host.is_none() && args.url.is_none() {
+                anyhow::bail!("provide socket_path, host, or url");
+            }
+            let row = db::docker_runtimes::RuntimeRow {
+                name: name.to_string(),
+                socket_path: args.socket_path,
+                host: args.host,
+                url: args.url,
+                enabled: true,
+            };
+            let conn = db::open_default()?;
+            db::docker_runtimes::upsert(&conn, &row)?;
+            out.applied = Some(format!("runtime-upserted:{name}"));
+        }
+    }
+    Ok(out)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// docker.delete
+// ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct AddDockerRuntimeArgs {
+pub struct DockerDeleteArgs {
+    /// `runtime` is the only kind currently supported.
+    #[cfg_attr(feature = "cli", arg(long, default_value = "runtime"))]
+    #[serde(default)]
+    pub kind: DockerKind,
+    /// Name of the runtime to remove.
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub socket_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct DockerRuntimeMutationResult {
+pub struct DockerDeleteOutput {
     pub name: String,
     pub changed: bool,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct RemoveDockerRuntimeArgs {
-    pub name: String,
-}
-
-/// List all Docker runtimes registered in orca.db.
-#[orca_tool(domain = "docker.runtime", verb = "list")]
-async fn docker_runtime_list(
-    _args: ListDockerRuntimesArgs,
+#[orca_tool(domain = "docker", verb = "delete")]
+async fn docker_delete(
+    args: DockerDeleteArgs,
     _ctx: &contract::ToolCtx,
-) -> anyhow::Result<ListDockerRuntimesOutput> {
-    let conn = db::open_default()?;
-    let runtimes = db::docker_runtimes::list(&conn)?
-        .into_iter()
-        .map(|r| DockerRuntimeEntry {
-            name: r.name,
-            socket_path: r.socket_path,
-            host: r.host,
-            url: r.url,
-            enabled: r.enabled,
-        })
-        .collect();
-    Ok(ListDockerRuntimesOutput { runtimes })
-}
-
-/// [MUTATES STATE] Register a Docker runtime in orca.db. Provide socketPath, host, or url.
-#[orca_tool(domain = "docker.runtime", verb = "create")]
-async fn docker_runtime_create(
-    args: AddDockerRuntimeArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<DockerRuntimeMutationResult> {
-    if args.socket_path.is_none() && args.host.is_none() && args.url.is_none() {
-        anyhow::bail!("provide socket_path, host, or url");
+) -> anyhow::Result<DockerDeleteOutput> {
+    match args.kind {
+        DockerKind::Runtime => {
+            let conn = db::open_default()?;
+            let changed = db::docker_runtimes::remove(&conn, &args.name)?;
+            Ok(DockerDeleteOutput {
+                name: args.name,
+                changed,
+            })
+        }
+        other => anyhow::bail!("docker.delete kind={other:?} not supported"),
     }
-    let row = db::docker_runtimes::RuntimeRow {
-        name: args.name.clone(),
-        socket_path: args.socket_path,
-        host: args.host,
-        url: args.url,
-        enabled: true,
-    };
-    let conn = db::open_default()?;
-    db::docker_runtimes::upsert(&conn, &row)?;
-    Ok(DockerRuntimeMutationResult {
-        name: args.name,
-        changed: true,
-    })
-}
-
-/// [MUTATES STATE] Remove a Docker runtime from orca.db by name.
-#[orca_tool(domain = "docker.runtime", verb = "delete")]
-async fn docker_runtime_delete(
-    args: RemoveDockerRuntimeArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<DockerRuntimeMutationResult> {
-    let conn = db::open_default()?;
-    let changed = db::docker_runtimes::remove(&conn, &args.name)?;
-    Ok(DockerRuntimeMutationResult {
-        name: args.name,
-        changed,
-    })
 }

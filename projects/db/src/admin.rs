@@ -59,13 +59,13 @@ empty_args!(DbStatusArgs);
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct DbLifecycleUpdateArgs {
+pub struct DbUpdateArgs {
     /// "migrate" | "up" | "down"
     pub action: String,
 }
 
 /// Show current schema version and pending-migration count.
-#[orca_tool(domain = "system.db", verb = "detail")]
+#[orca_tool(domain = "db", verb = "detail")]
 async fn db_detail(
     _args: DbStatusArgs,
     _ctx: &contract::ToolCtx,
@@ -85,9 +85,9 @@ async fn db_detail(
 /// - `migrate`: apply all pending migrations.
 /// - `up`: apply the next pending migration (one step).
 /// - `down`: revert the most recently applied migration (one step).
-#[orca_tool(domain = "system.db.lifecycle", verb = "update")]
-async fn db_lifecycle_update(
-    args: DbLifecycleUpdateArgs,
+#[orca_tool(domain = "db", verb = "update")]
+async fn db_update(
+    args: DbUpdateArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<DbMigrateReport> {
     match args.action.as_str() {
@@ -122,19 +122,15 @@ mod tests {
         }))
     }
 
-    fn migrate_args(action: &str) -> DbLifecycleUpdateArgs {
-        DbLifecycleUpdateArgs {
+    fn migrate_args(action: &str) -> DbUpdateArgs {
+        DbUpdateArgs {
             action: action.into(),
         }
     }
 
     #[tokio::test]
-    async fn db_lifecycle_rejects_unknown_action() {
+    async fn db_update_rejects_unknown_action() {
         let ctx = empty_ctx();
-        assert!(
-            db_lifecycle_update(migrate_args("bogus"), &ctx)
-                .await
-                .is_err()
-        );
+        assert!(db_update(migrate_args("bogus"), &ctx).await.is_err());
     }
 }

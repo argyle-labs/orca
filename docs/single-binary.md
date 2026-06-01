@@ -1,48 +1,59 @@
 # Single Binary
 
-The brain binary ships alone. No `projects/frontend/` directory, no npm runtime, no separate install steps at the target machine.
+The orca binary ships alone. No separate web server process, no
+node runtime at the target machine, no docker requirement for the
+daemon itself.
 
 ## How it works
 
-`rust-embed` compiles `projects/frontend/dist/` into the binary at build time. In release mode, every asset — HTML, JS, CSS, source maps — is a `&'static [u8]` slice baked into the executable. At runtime, `brain serve` reads from the embedded map instead of the filesystem.
+`rust-embed` compiles `projects/frontend/build/` into the binary
+at build time. In release mode every asset — HTML, JS, CSS, source
+maps — is a `&'static [u8]` slice baked into the executable. At
+runtime, the daemon's HTTP server reads from the embedded map
+instead of the filesystem.
 
-```rust
-#[derive(rust_embed::RustEmbed)]
-#[folder = "frontend/dist/"]   // relative to projects/server/
-struct Assets;
-```
-
-The same pattern applies to `docs/` (this directory): `docs/lib.rs` embeds all markdown files so they're accessible via the API and MCP tools without any filesystem dependency.
+The same pattern applies to docs (when needed) — markdown is
+served from the embedded map without any filesystem dependency on
+the target host.
 
 ## Build sequence
 
-`make build` runs these steps in order:
+The release build is driven by `scripts/build-host.sh` and
+`scripts/release-lib.sh` (`project_release_pipeline_arch.md`):
 
-1. `cd projects/frontend && npm ci && npm run build` — produces `projects/frontend/dist/`
-2. `cargo build --release` — `rust-embed` picks up `frontend/dist/` and the docs during compilation
+1. Frontend build under `projects/frontend/` produces `build/`.
+2. `cargo build --release` picks up `frontend/build/` via
+   `rust-embed` and produces the orca binary.
 
-`frontend/dist/` must exist before `cargo build --release`. This is why they can't run in parallel — the Rust step needs the output of the frontend step.
+`frontend/build/` must exist before `cargo build --release`. This
+is why they don't run in parallel — the Rust step needs the output
+of the frontend step.
 
 ## Dev mode
 
-In dev mode (`brain serve --dev` or `make dev`):
-- The Rust server binds `127.0.0.1:12000` and serves only API routes
-- Vite runs separately on `:12001` and proxies `/api/` to `:12000`
-- `rust-embed` is still compiled in, but debug builds don't need `frontend/dist/` to exist
+In dev mode the Rust server binds REST/HTTP on `:12000` and serves
+only API routes. Vite runs separately on its dev port and proxies
+`/api/` to `:12000`. The frontend embed is debug-disabled — only
+release builds bundle the site.
 
-This means the frontend doesn't need to be built for `cargo build` (debug). It only needs to exist for `cargo build --release`.
+For per-host dev mode (peer running HEAD on its own host),
+see `project_dev_mode_toolchain_bootstrap.md` and `project_dev_channel_plan.md`.
 
-## Size tradeoff
+## Self-update
 
-The full site bundle (Svelte 5 + SvelteKit + all dependencies) is smaller than the previous React + Mantine stack — approximately 1–2 MB before compression. This is an accepted tradeoff for the single-binary goal. The binary is installed on a developer's machine and run as a local service — distribution size is not a primary concern.
+`projects/system/src/update.rs` handles binary replacement
+in-process — orca self-updates without sudo
+(`feedback_orca_self_updates_no_sudo.md`). Channels: stable / rc /
+dev. `--version <semver>` pins and bypasses the monotonic-newer
+veto (`feedback_dev_mode_does_not_block_updates.md`). Updates fan
+out across the pod via mesh-relay — non-networked peers update via
+a connected relay (`project_update_paths_first_class.md`,
+`project_must_update_our_systems.md`).
 
-If size becomes critical in the future, large libraries (`@xyflow/svelte`, Scalar) could be loaded from a CDN by externalizing them in the Vite build config. This would require internet access to load the UI.
+## Why one binary
 
-## Updating the site
-
-```sh
-make build    # rebuild frontend + recompile binary
-make install  # build + copy to ~/.local/bin/brain
-```
-
-The old binary continues serving the old site until replaced.
+Deployment is `cp orca ~/.local/bin/orca` (or the equivalent
+service-user path for the system-managed daemon). No Docker, no
+node runtime at the install target, no separate web server
+process. See [`architecture.md`](architecture.md) for the
+four-surface tool model that makes this work.

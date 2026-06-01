@@ -40,7 +40,7 @@ pub struct SetPluginDataOutput {
 }
 
 /// Read a single key from a plugin's encrypted KV store in orca.db.
-#[orca_tool(domain = "system.plugin.data", verb = "get")]
+#[orca_tool(domain = "plugin.data", verb = "get")]
 async fn get_plugin_data(
     args: GetPluginDataArgs,
     _ctx: &contract::ToolCtx,
@@ -60,7 +60,7 @@ async fn get_plugin_data(
 }
 
 /// [MUTATES STATE] Upsert a single key in a plugin's encrypted KV store in orca.db.
-#[orca_tool(domain = "system.plugin.data", verb = "set", cli = skip)]
+#[orca_tool(domain = "plugin.data", verb = "set", cli = skip)]
 async fn set_plugin_data(
     args: SetPluginDataArgs,
     _ctx: &contract::ToolCtx,

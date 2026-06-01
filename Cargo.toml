@@ -123,6 +123,7 @@ members = [
     # (no `orca-tools-` prefix). Each crate's `#[orca_tool]` fns and their
     # service trait live in the same module file.
     "projects/auth",
+    "projects/dev",
     "projects/inventory-tests",
     "projects/plugins/agents",
     "projects/plugins/runtime",
@@ -131,6 +132,7 @@ members = [
     "projects/plugins/llm",
     "projects/plugins/mcp",
     "projects/namespace",
+    "projects/spec",
     "projects/pod",
     "projects/system",
     "projects/utils",
@@ -157,6 +159,7 @@ default-members = [
     "projects/dispatch",
     "projects/derive",
     "projects/auth",
+    "projects/dev",
     "projects/inventory-tests",
     "projects/plugins/agents",
     "projects/plugins/runtime",
@@ -165,6 +168,7 @@ default-members = [
     "projects/plugins/llm",
     "projects/plugins/mcp",
     "projects/namespace",
+    "projects/spec",
     "projects/pod",
     "projects/system",
     "projects/utils",

@@ -13,42 +13,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::system_info_types::SystemInfoReport;
 
-use crate::install_status::install_status_report;
+use crate::daemon::{self, DaemonRuntimeStatus};
+use crate::diagnostic::{self, DoctorEntry};
+use crate::host::{HostChannel, os_hostname};
+use crate::install_status::{
+    BinaryStatus, ClaudeMdStatus, McpStatus, PkiStatus, VaultStatus, install_status_report,
+};
 use crate::system_info::current_or_collect;
 use crate::update_state::{read_channel_marker, read_version_pin};
 use contract::config::{APP_LOGS_SUBDIR, APP_STATE_DIR};
 use derive::orca_tool;
 
-// ── Shared shapes ───────────────────────────────────────────────────────────
-
-#[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct PathInstalled {
-    pub installed: bool,
-    pub path: String,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct PathLinked {
-    pub linked: bool,
-    pub path: String,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct PathExists {
-    pub exists: bool,
-    pub path: String,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct PathInitialized {
-    pub initialized: bool,
-    pub path: String,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct McpRegistration {
-    pub registered: bool,
-}
+// Install-status path shapes (`BinaryStatus`/`ClaudeMdStatus`/...) are
+// defined in `install_status.rs` and reused directly here — there used to
+// be a parallel set (`PathInstalled`/`PathLinked`/`PathExists`/
+// `PathInitialized`/`McpRegistration`) defined locally; the dedup pass
+// collapsed them onto the install-status types.
 
 /// Storage footprint snapshot — surfaces orca.db and log-dir sizes so
 /// operators can spot bloat. Per project_db_size_and_retention: orca.db
@@ -70,12 +50,12 @@ pub struct StorageReport {
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct SystemStatusReport {
-    pub binary: PathInstalled,
-    pub claude_md: PathLinked,
-    pub vault: PathExists,
-    pub agents: PathLinked,
-    pub pki: PathInitialized,
-    pub mcp: McpRegistration,
+    pub binary: BinaryStatus,
+    pub claude_md: ClaudeMdStatus,
+    pub vault: VaultStatus,
+    pub agents: ClaudeMdStatus,
+    pub pki: PkiStatus,
+    pub mcp: McpStatus,
 
     // ── Runtime (formerly system.runtime.detail) ────────────────────────────
     /// Orca version from `CARGO_PKG_VERSION` at build time.
@@ -101,6 +81,23 @@ pub struct SystemStatusReport {
     pub system: Option<SystemInfoReport>,
     /// orca.db + logs dir footprint. Used by UI host drawer + alerts.
     pub storage: StorageReport,
+    /// Doctor entries (ok/warn/error) covering vault, agents, logs dir,
+    /// memory root, and auth config. Was a standalone `system.diagnostic`
+    /// tool; folded in here per the flat-namespace consolidation.
+    pub diagnostic: Vec<DoctorEntry>,
+    /// Operator-visible host name (from the `display_name` addressing
+    /// channel, falling back to OS `hostname`).
+    pub display_name: String,
+    /// Stable machine identifier persisted to `~/.orca/machine_id`.
+    pub machine_id: String,
+    /// Every addressing channel for this host (LAN, Tailscale, manual
+    /// overrides, etc.). Was `system.host.detail.channels`.
+    pub channels: Vec<HostChannel>,
+    /// Runtime snapshot of the orca daemon: running / pid / port /
+    /// uptime_seconds. Was `system.daemon.status`. The `mode` and
+    /// `version` of the running daemon are sourced into the parent
+    /// fields above.
+    pub daemon: DaemonRuntimeStatus,
 }
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -135,46 +132,30 @@ async fn system_detail(
     let channel = read_channel_marker().map(|c| c.as_marker().to_string());
     let pinned_to = read_version_pin();
     let system = Some((*current_or_collect()).clone());
+    let diagnostic = diagnostic::collect(&ctx.config)?;
 
-    // `~/.claude/agents` symlink isn't tracked by the typed install report
-    // yet; surface it as not-linked with an empty path until the typed
-    // reporter learns about it. Matches prior behaviour for hosts that never
-    // had the legacy symlink populated.
-    let agents_path = report
-        .claude_md
-        .path
-        .parent()
-        .map(|p| p.join("agents"))
+    let conn = db::open_default()?;
+    let channels: Vec<HostChannel> = db::host_addressing::list_host_addressing(&conn)?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    let display_name = channels
+        .iter()
+        .find(|c| c.key == "display_name")
+        .map(|c| c.value.clone())
+        .unwrap_or_else(os_hostname);
+    let machine_id = std::fs::read_to_string(ctx.config.app_dir.join("machine_id"))
+        .map(|s| s.trim().to_string())
         .unwrap_or_default();
-    let agents_linked = agents_path
-        .symlink_metadata()
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false);
+    let daemon = daemon::collect_runtime_status()?;
 
     Ok(SystemStatusReport {
-        binary: PathInstalled {
-            installed: report.binary.installed,
-            path: report.binary.path.to_string_lossy().into_owned(),
-        },
-        claude_md: PathLinked {
-            linked: report.claude_md.linked,
-            path: report.claude_md.path.to_string_lossy().into_owned(),
-        },
-        vault: PathExists {
-            exists: report.vault.exists,
-            path: report.vault.path.to_string_lossy().into_owned(),
-        },
-        agents: PathLinked {
-            linked: agents_linked,
-            path: agents_path.to_string_lossy().into_owned(),
-        },
-        pki: PathInitialized {
-            initialized: report.pki.initialized,
-            path: report.pki.path.to_string_lossy().into_owned(),
-        },
-        mcp: McpRegistration {
-            registered: report.mcp.registered,
-        },
+        binary: report.binary,
+        claude_md: report.claude_md,
+        vault: report.vault,
+        agents: report.agents,
+        pki: report.pki,
+        mcp: report.mcp,
         version: env!("ORCA_VERSION").into(),
         target: env!("ORCA_BUILD_TARGET").into(),
         frontend: frontend.into(),
@@ -183,6 +164,11 @@ async fn system_detail(
         pinned_to,
         system,
         storage,
+        diagnostic,
+        display_name,
+        machine_id,
+        channels,
+        daemon,
     })
 }
 

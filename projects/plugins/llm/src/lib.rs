@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod discovery;
+pub mod engine;
 pub mod local;
 pub mod resolve;
 pub mod tools;

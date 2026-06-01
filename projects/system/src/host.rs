@@ -1,26 +1,15 @@
-//! Host addressing tools.
+//! Host addressing primitives.
 //!
-//! Two OrcaTool defs:
-//!   - `system.host.detail` — snapshot of every addressing channel for this host.
-//!   - `system.host.refresh` — force a re-detect (LAN + Tailscale + manual rows).
-//!
-//! Writes (hostname, fqdn, lan_v4, lan_v6, tailscale_v4, tailscale_v6) are
-//! handled by `system.update` per [[feedback-one-tool-per-resource]].
-//!
-//! Migrated to the `#[orca_tool]` proc-macro as the proof-of-shape pilot.
+//! Reads (display_name / machine_id / addressing channels) surface as
+//! fields on `system.detail`. Writes (hostname, fqdn, lan_v4, lan_v6,
+//! tailscale_v4, tailscale_v6, force-refresh) are handled by
+//! `system.update`. There is no `system.host.*` orca_tool — host
+//! information is a detail of the system, not a separate resource.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use derive::orca_tool;
-
-// ── Args / Output types (shared by every surface) ────────────────
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct EmptyArgs {}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct HostChannel {
     pub key: String,
     pub value: String,
@@ -28,58 +17,35 @@ pub struct HostChannel {
     pub detected_at: i64,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct HostInfoOutput {
-    pub display_name: String,
-    pub machine_id: String,
-    pub channels: Vec<HostChannel>,
-}
-
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct HostRefreshOutput {
-    pub channels: Vec<HostChannel>,
-}
-
-// ── Native bodies + tool registrations ──────────────────────────────────────
-
-mod native_support {
-    use super::*;
-    use anyhow::Result;
-    use db;
-
-    impl From<db::host_addressing::HostAddressingRow> for HostChannel {
-        fn from(r: db::host_addressing::HostAddressingRow) -> Self {
-            Self {
-                key: r.key,
-                value: r.value,
-                source: r.source,
-                detected_at: r.detected_at,
-            }
+impl From<db::host_addressing::HostAddressingRow> for HostChannel {
+    fn from(r: db::host_addressing::HostAddressingRow) -> Self {
+        Self {
+            key: r.key,
+            value: r.value,
+            source: r.source,
+            detected_at: r.detected_at,
         }
     }
-
-    /// Best-effort OS hostname read for the info snapshot. We mirror the
-    /// `hostname` Command path used inside the daemon's host_identity init —
-    /// the cached static there isn't reachable from this crate.
-    pub(super) fn os_hostname() -> String {
-        std::process::Command::new("hostname")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "unknown".to_string())
-    }
-
-    /// Hook the server registers at startup so `host.refresh` can drive
-    /// `host_identity::refresh_and_persist` without this domain crate
-    /// depending on the server crate.
-    pub trait HostRefreshHook: Send + Sync {
-        fn refresh(&self, conn: &db::Conn) -> Result<()>;
-    }
 }
 
-pub use native_support::HostRefreshHook;
+/// Best-effort OS hostname read. Used by `system.detail` to fill
+/// `display_name` when no `display_name` channel has been set.
+pub(crate) fn os_hostname() -> String {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Hook the server registers at startup so `system.update --refresh-host`
+/// can drive `host_identity::refresh_and_persist` without this domain
+/// crate depending on the server crate.
+pub trait HostRefreshHook: Send + Sync {
+    fn refresh(&self, conn: &db::Conn) -> anyhow::Result<()>;
+}
 
 pub trait ProvideHostRefresh {
     fn host_refresh(&self) -> std::sync::Arc<dyn HostRefreshHook + Send + Sync>;
@@ -89,54 +55,9 @@ pub fn register_host_refresh(ctx: &mut contract::ToolCtx, p: &impl ProvideHostRe
     ctx.register_service(p.host_refresh());
 }
 
-/// Local host snapshot: display name, machine_id, and every addressing channel.
-#[orca_tool(domain = "system.host", verb = "detail")]
-async fn host_detail(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<HostInfoOutput> {
-    let conn = db::open_default()?;
-    let channels: Vec<HostChannel> = db::host_addressing::list_host_addressing(&conn)?
-        .into_iter()
-        .map(Into::into)
-        .collect();
-    let display_name = channels
-        .iter()
-        .find(|c| c.key == "display_name")
-        .map(|c| c.value.clone())
-        .unwrap_or_else(native_support::os_hostname);
-    let machine_id = contract::config::Config::load()
-        .ok()
-        .and_then(|c| std::fs::read_to_string(c.app_dir.join("machine_id")).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-
-    Ok(HostInfoOutput {
-        display_name,
-        machine_id,
-        channels,
-    })
-}
-
-/// Re-detect every host addressing channel (LAN + Tailscale + settings overrides).
-#[orca_tool(domain = "system.host", verb = "refresh")]
-async fn host_refresh(
-    _args: EmptyArgs,
-    ctx: &contract::ToolCtx,
-) -> anyhow::Result<HostRefreshOutput> {
-    let conn = db::open_default()?;
-    if let Ok(hook) = ctx.service::<std::sync::Arc<dyn HostRefreshHook + Send + Sync>>() {
-        hook.refresh(&conn)?;
-    }
-    let channels = db::host_addressing::list_host_addressing(&conn)?
-        .into_iter()
-        .map(Into::into)
-        .collect();
-    Ok(HostRefreshOutput { channels })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::empty_ctx as make_ctx;
-    use std::sync::Arc;
 
     #[test]
     fn host_channel_from_row_copies_fields() {
@@ -155,96 +76,7 @@ mod tests {
 
     #[test]
     fn os_hostname_returns_non_empty() {
-        // The detect path shells out to `hostname`; on any sane test host this
-        // returns a non-empty string. Falls back to "unknown" if not.
-        let h = native_support::os_hostname();
+        let h = os_hostname();
         assert!(!h.is_empty());
-    }
-
-    #[tokio::test]
-    async fn host_info_uses_display_name_channel_when_present() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        let ctx = make_ctx();
-        db::with_db_path(path.clone(), async move {
-            let conn = db::open_default().unwrap();
-            db::host_addressing::upsert_host_addressing(&conn, "display_name", "testbox", "manual")
-                .unwrap();
-            db::host_addressing::upsert_host_addressing(&conn, "lan_v4", "10.0.0.5", "autodetect")
-                .unwrap();
-            drop(conn);
-
-            let out = host_detail(EmptyArgs {}, &ctx).await.unwrap();
-            assert_eq!(out.display_name, "testbox");
-            assert_eq!(out.channels.len(), 2);
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn host_info_falls_back_to_os_hostname_when_no_channel() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let ctx = make_ctx();
-        db::with_db_path(tmp.path().to_path_buf(), async move {
-            let out = host_detail(EmptyArgs {}, &ctx).await.unwrap();
-            assert!(!out.display_name.is_empty());
-            assert_eq!(out.channels.len(), 0);
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn host_refresh_without_hook_returns_existing_channels() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let ctx = make_ctx();
-        db::with_db_path(tmp.path().to_path_buf(), async move {
-            let conn = db::open_default().unwrap();
-            db::host_addressing::upsert_host_addressing(&conn, "lan_v4", "10.0.0.9", "autodetect")
-                .unwrap();
-            drop(conn);
-
-            let out = host_refresh(EmptyArgs {}, &ctx).await.unwrap();
-            assert_eq!(out.channels.len(), 1);
-            assert_eq!(out.channels[0].key, "lan_v4");
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn host_refresh_invokes_registered_hook() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        struct CountingHook {
-            called: Arc<AtomicBool>,
-        }
-        impl HostRefreshHook for CountingHook {
-            fn refresh(&self, conn: &db::Conn) -> anyhow::Result<()> {
-                self.called.store(true, Ordering::SeqCst);
-                db::host_addressing::upsert_host_addressing(
-                    conn,
-                    "tailscale_v4",
-                    "100.64.0.1",
-                    "autodetect",
-                )?;
-                Ok(())
-            }
-        }
-
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let called = Arc::new(AtomicBool::new(false));
-        let hook: Arc<dyn HostRefreshHook + Send + Sync> = Arc::new(CountingHook {
-            called: called.clone(),
-        });
-        let mut ctx = make_ctx();
-        ctx.register_service(hook);
-
-        db::with_db_path(tmp.path().to_path_buf(), async move {
-            let out = host_refresh(EmptyArgs {}, &ctx).await.unwrap();
-            assert!(called.load(Ordering::SeqCst));
-            assert_eq!(out.channels.len(), 1);
-            assert_eq!(out.channels[0].key, "tailscale_v4");
-            assert_eq!(out.channels[0].value, "100.64.0.1");
-        })
-        .await;
     }
 }

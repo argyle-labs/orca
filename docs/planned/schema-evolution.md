@@ -143,11 +143,34 @@ orca config migrate --from v0.7 --to v0.8 --repo /path/to/meerkat
 ```
 
 Reads the repo, rewrites files in place, opens a PR via the
-git-provider API (per the [git-provider rule](../../meerkat/.../feedback_git_provider_api.md)).
-Idempotent: re-running on an already-migrated repo is a no-op.
+git-provider API (hybrid rule: provider trait — octocrab / Gitea /
+GitLab — for hosted repos, libgit2 working-tree for airgap / DR /
+generic remotes). Idempotent: re-running on an already-migrated
+repo is a no-op.
 
-Migrations are versioned with the orca release; each one ships
-with a test that round-trips a known fixture repo.
+### 4.2.1 In-repo DB migrations — concrete pattern
+
+Orca's own SQLite schema follows the same parity rule. Migrations
+live at:
+
+```
+projects/db/migrations/<YYYYMMDDHHMMSS>__<slug>.up.sql
+projects/db/migrations/<YYYYMMDDHHMMSS>__<slug>.down.sql
+```
+
+Recent examples (verified 2026-06-01):
+
+- `20260530120000__plugin_tools_namespace.{up,down}.sql`
+- `20260530130000__plugins_drop_mode.{up,down}.sql`
+- `20260530140000__plugins_drop_mcp_transport.{up,down}.sql`
+
+Each schema change also mirrors the `CREATE` in `apply_schema()` in
+`projects/db/src/lib.rs` — fresh installs use `apply_schema`,
+existing DBs use the timestamped migration. Both must land in the
+same commit; one without the other is a parity gap by definition.
+
+Migrations are versioned with the orca release; each breaking one
+ships with a test that round-trips a known fixture repo.
 
 ### 4.3 Version pinning
 

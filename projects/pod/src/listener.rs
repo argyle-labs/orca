@@ -10,12 +10,12 @@
 //! (pod-bootstrap.orca.local) — see super::bootstrap.
 
 use anyhow::{Context, Result};
+use dev::mode::{cmd_dev_disable, cmd_dev_enable, cmd_dev_sync};
 use orca_sdk::framing::{read_frame, write_frame};
 use orca_sdk::jsonrpc::{ErrorObject, Message, Request, Response};
 use orca_sdk::pki::{self, PeerRole};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use system::dev::{cmd_dev_disable, cmd_dev_enable, cmd_dev_sync};
 use tokio_rustls::server::TlsStream;
 use tracing::warn;
 use utils::state::DaemonMode;
@@ -324,7 +324,8 @@ async fn handle_dev_sync() -> Result<PodDevSyncResult> {
 /// Handle `pod/dev-enable`: flip the peer into dev mode (clone repo if
 /// missing, park production daemon, spawn cargo-watch).
 async fn handle_dev_enable() -> Result<PodDevEnableResult> {
-    match tokio::task::spawn_blocking(cmd_dev_enable).await {
+    let token = system::update::resolve_github_token();
+    match tokio::task::spawn_blocking(move || cmd_dev_enable(&token)).await {
         Ok(Ok(r)) => Ok(PodDevEnableResult {
             status: "enabled".into(),
             detail: None,
