@@ -28,6 +28,11 @@
     status?: string | null;
     addresses?: { kind: string; value: string }[] | null;
     sys?: SystemInfoReport | null;
+    // Set after a successful peer-dispatched mutation. Polling refreshes
+    // (refreshPodPeers) read from the local mesh cache, which lags behind
+    // the peer's true state by one mesh sync. While this window is active,
+    // preserve fields the action authoritatively changed.
+    actionLockUntil?: number;
   }
 
   let instances = $state<Instance[]>([]);
@@ -132,12 +137,27 @@
   // not on every poll tick that updates instance data.
   type VersionEntry = { tag: string; prerelease: boolean; published_at: string | null; is_current: boolean };
   let drawerVersionSelect = $state('');
+  let drawerChannelSelect = $state('stable');
+
+  function inferChannel(version: string | null | undefined, fallback: string | null | undefined): string {
+    const v = version ?? '';
+    if (/-dev/i.test(v)) return 'dev';
+    if (/-rc/i.test(v)) return 'rc';
+    if (v) return 'stable';
+    return fallback ?? 'stable';
+  }
+
+  function instChannel(i: { version: string | null; pinnedTo?: string | null; channel?: string | null } | null): string {
+    if (!i) return 'stable';
+    return inferChannel(i.pinnedTo ?? i.version, i.channel);
+  }
   let drawerVersions = $state<VersionEntry[]>([]);
   let drawerVersionsLoading = $state(false);
   let drawerOpenedForId = $state<string | null>(null);
   let updateResult = $state<{ notes: string[]; errors: string[] } | null>(null);
   let updatePending = $state(false);
   let secureToggling = $state(false);
+  let popoverOpen = $state<Record<string, boolean>>({ stable: false, rc: false, dev: false });
 
   // 1-second live poll; DB writes happen every 10 s (host_status_writer)
   const POLL_MS = 1000;
@@ -332,32 +352,41 @@
 
       const local = instances.find((i) => i.role === 'local');
       // Filter out the synthetic local-host row — it duplicates the LOCAL card.
+      const now = Date.now();
+      const existingById = new Map(instances.map((i) => [i.id, i] as const));
       const podRows: Instance[] = (peersResult ?? [])
         .filter((p) => !p.local)
         .map((p) => {
+          const id = `system:${p.peer_id}`;
+          const prev = existingById.get(id);
           const storedSys = sysById.get(p.peer_id) ?? null;
           const sys = p.system ?? storedSys;
+          // Within the action-lock window, the local mesh cache hasn't
+          // reconciled the peer's authoritative state yet — preserve fields
+          // the just-completed action mutated.
+          const locked = prev && prev.actionLockUntil && now < prev.actionLockUntil;
           return {
-            id: `system:${p.peer_id}`,
+            id,
             peerId: p.peer_id,
             label: p.hostname || p.peer_id,
             origin: `${p.addr}:${p.port}`,
             port: p.port,
             role: 'system' as const,
-            version: p.version ?? null,
+            version: locked ? prev.version : (p.version ?? null),
             target: p.target ?? null,
             mode: p.mode ?? null,
-            channel: p.channel ?? null,
-            updateAvailable: p.update_available ?? false,
-            updateLatest: p.update_latest ?? null,
-            pinnedTo: p.pinned_to ?? null,
+            channel: locked ? prev.channel : (p.channel ?? null),
+            updateAvailable: locked ? prev.updateAvailable : (p.update_available ?? false),
+            updateLatest: locked ? prev.updateLatest : (p.update_latest ?? null),
+            pinnedTo: locked ? prev.pinnedTo : (p.pinned_to ?? null),
             health: p.status === 'active' ? 'up' : 'down',
             error: null,
-            lastChecked: Date.now(),
+            lastChecked: now,
             secure: { local: p.local_secure, peer: p.peer_secure },
             status: p.status,
             addresses: (p.addresses ?? []).map((a) => ({ kind: a.kind, value: a.value })),
             sys,
+            actionLockUntil: prev?.actionLockUntil,
           };
         });
       instances = local ? [local, ...podRows] : podRows;
@@ -448,6 +477,7 @@
     if (selectedInst && selectedInst.id !== drawerOpenedForId) {
       drawerOpenedForId = selectedInst.id;
       drawerVersionSelect = selectedInst.version ? `v${selectedInst.version}` : '';
+      drawerChannelSelect = inferChannel(selectedInst.version, selectedInst.channel);
       drawerVersions = [];
       updateResult = null;
       void probeUpdateState();
@@ -481,7 +511,10 @@
       if (selectedInst) {
         selectedInst.channel = r.channel;
         selectedInst.pinnedTo = r.pinned_to;
+        selectedInst.actionLockUntil = Date.now() + 15000;
         if (r.current_version) selectedInst.version = r.current_version;
+        if (r.current_version) drawerVersionSelect = `v${r.current_version}`;
+        if (r.channel) drawerChannelSelect = r.channel;
         if (r.latest) {
           selectedInst.updateLatest = r.latest;
           selectedInst.updateAvailable =
@@ -511,7 +544,10 @@
       if (selectedInst) {
         selectedInst.channel = r.channel;
         selectedInst.pinnedTo = r.pinned_to;
+        selectedInst.actionLockUntil = Date.now() + 15000;
         if (r.current_version) selectedInst.version = r.current_version;
+        if (r.current_version) drawerVersionSelect = `v${r.current_version}`;
+        if (r.channel) drawerChannelSelect = r.channel;
         if (r.latest) {
           selectedInst.updateLatest = r.latest;
           selectedInst.updateAvailable =
@@ -519,7 +555,10 @@
         }
         instances = [...instances];
       }
-      void (selectedInst.role === 'local' ? refreshLocal(selectedInst) : refreshPodPeers());
+      // Don't immediately refresh from polling sources — for `role==='system'`
+      // (remote peer) the mesh hasn't propagated the new pin/channel/version
+      // state back yet, so a refresh here clobbers the authoritative response
+      // we just got from the peer itself. Polling will reconcile on its own.
     } catch (e) {
       console.warn('system update failed:', e);
       updateResult = { notes: [], errors: [e instanceof Error ? e.message : String(e)] };
@@ -530,6 +569,18 @@
 
   async function applyChannelUpdate(channel: string) {
     await runSystemUpdate({ channel });
+  }
+
+  async function applyUpdateSelection() {
+    const args: Record<string, unknown> = {};
+    if (drawerChannelSelect && drawerChannelSelect !== inferChannel(selectedInst?.version, selectedInst?.channel)) {
+      args.channel = drawerChannelSelect;
+    }
+    if (drawerVersionSelect && drawerVersionSelect !== `v${selectedInst?.version ?? ''}`) {
+      args.version = drawerVersionSelect;
+    }
+    if (Object.keys(args).length === 0) return;
+    await runSystemUpdate(args);
   }
 
   async function applySelectedVersion() {
@@ -553,7 +604,7 @@
       const next = !(inst.sys?.self_secure ?? false);
       const args: Record<string, unknown> = { self_secure: next };
       if (inst.role === 'system') args.peer_id = inst.peerId;
-      const result = await callTool<{ self_secure: boolean }>('systemPodUpdate', args);
+      const result = await callTool<{ self_secure: boolean }>('podUpdate', args);
       // Optimistically apply the authoritative response from the tool. The
       // background puller only refreshes host_status every 60 s, so without
       // this patch the UI would lag a full sync tick before reflecting the
@@ -1041,114 +1092,68 @@
 
       <div class="section-head">Update</div>
       <div class="update-controls">
-        <div class="version-line">
-          <span class="version-label">Current</span>
-          <code>{selectedInst.version ?? '—'}</code>
-          {#if selectedInst.updateAvailable && selectedInst.updateLatest}
-            <span class="update-pill avail">→ {selectedInst.updateLatest}</span>
-          {:else if selectedInst.version}
-            <span class="update-pill ok">up to date</span>
-          {/if}
+        <div class="update-setting-row">
+          <span class="update-setting-label">
+            Version
+            {#if selectedInst.pinnedTo}
+              <span class="pin-badge" title={`Pinned to ${selectedInst.pinnedTo} — unpin to follow latest on channel`}>📌</span>
+            {/if}
+          </span>
+          <select
+            class="version-input"
+            bind:value={drawerVersionSelect}
+            disabled={updatePending || !!selectedInst.pinnedTo}
+          >
+            {#if selectedInst.version && !drawerVersions.some((v) => v.tag === `v${selectedInst!.version}`)}
+              <option value={`v${selectedInst.version}`}>v{selectedInst.version} (current)</option>
+            {/if}
+            {#each drawerVersions as v}
+              <option value={v.tag}>{v.tag}{selectedInst.version && v.tag === `v${selectedInst.version}` ? ' (current)' : ''}</option>
+            {/each}
+          </select>
         </div>
-
-        {#if selectedInst.pinnedTo}
-          <div class="version-line">
-            <span class="version-label">Pinned</span>
-            <code>{selectedInst.pinnedTo}</code>
-          </div>
-        {/if}
 
         <div class="update-setting-row">
           <span class="update-setting-label">Channel</span>
           <div class="channel-segment">
             {#each ['stable', 'rc', 'dev'] as ch}
-              {@const isCurrent = (selectedInst.channel ?? 'stable') === ch}
-              {@const upToDate = isCurrent && !selectedInst.updateAvailable && selectedInst.version}
-              <Popover bind:open={popoverOpen[ch]} align="end" width={260}>
-                {#snippet trigger()}
-                  <button
-                    class="channel-btn"
-                    class:active={isCurrent}
-                    aria-haspopup="dialog"
-                    aria-expanded={popoverOpen[ch]}
-                    disabled={updatePending}
-                    onclick={() => {
-                      popoverOpen = {
-                        stable: false, rc: false, dev: false, [ch]: !popoverOpen[ch],
-                      };
-                    }}
-                  >{ch}</button>
-                {/snippet}
-                {#snippet children()}
-                  <div class="channel-confirm">
-                    {#if isCurrent}
-                      {#if selectedInst.updateAvailable && selectedInst.updateLatest}
-                        <p class="channel-confirm-title">Update on <strong>{ch}</strong>?</p>
-                        <p class="version-diff">
-                          <code>{selectedInst.version ?? '—'}</code>
-                          <span class="arrow">→</span>
-                          <code class="next">{selectedInst.updateLatest}</code>
-                        </p>
-                      {:else if upToDate}
-                        <p class="channel-confirm-title">Already on latest <strong>{ch}</strong>.</p>
-                        <p class="version-diff"><code>{selectedInst.version}</code></p>
-                      {:else}
-                        <p class="channel-confirm-title">Re-check <strong>{ch}</strong>?</p>
-                      {/if}
-                    {:else}
-                      <p class="channel-confirm-title">Switch to <strong>{ch}</strong> + update?</p>
-                      <p class="version-diff">
-                        <code>{selectedInst.version ?? '—'}</code>
-                        <span class="muted">({selectedInst.channel ?? 'stable'})</span>
-                        <span class="arrow">→</span>
-                        <code class="next">latest {ch}</code>
-                      </p>
-                    {/if}
-                    <div class="confirm-actions">
-                      <button
-                        class="ctrl-btn"
-                        onclick={() => { popoverOpen[ch] = false; }}
-                      >Cancel</button>
-                      {#if !(isCurrent && upToDate)}
-                        <button
-                          class="ctrl-btn primary"
-                          disabled={updatePending}
-                          onclick={() => applyChannelUpdate(ch)}
-                        >{updatePending ? 'Updating…' : (isCurrent ? 'Update' : 'Switch')}</button>
-                      {/if}
-                    </div>
-                  </div>
-                {/snippet}
-              </Popover>
+              <button
+                class="channel-btn"
+                class:active={drawerChannelSelect === ch}
+                disabled={updatePending || !!selectedInst.pinnedTo}
+                onclick={() => (drawerChannelSelect = ch)}
+                title={selectedInst.pinnedTo ? 'Unpin to change channel' : `Select ${ch} channel`}
+              >{ch}</button>
             {/each}
           </div>
         </div>
 
-        <div class="update-setting-row">
-          <span class="update-setting-label">Version</span>
-          <div class="version-pick">
-            <select
-              class="version-input"
-              bind:value={drawerVersionSelect}
-              disabled={updatePending || drawerVersions.length === 0}
-            >
-              {#each drawerVersions as v}
-                <option value={v.tag}>{v.tag}{v.is_current ? ' (current)' : ''}{v.prerelease ? ' — rc' : ''}</option>
-              {/each}
-            </select>
+        {#if !selectedInst.pinnedTo && selectedInst.updateAvailable && selectedInst.updateLatest}
+          <p class="pinned-hint avail">Update available: <code>{selectedInst.updateLatest}</code></p>
+        {/if}
+
+        <div class="update-actions-row">
+          {#if selectedInst.pinnedTo}
             <button
               class="ctrl-btn"
-              onclick={applySelectedVersion}
-              disabled={updatePending || !drawerVersionSelect}
-              title="Apply this specific version"
-            >Apply</button>
+              onclick={clearPin}
+              disabled={updatePending}
+              title="Release pin — host will follow latest on its channel"
+            >{updatePending ? 'Working…' : 'Unpin'}</button>
+          {:else}
             <button
               class="ctrl-btn"
               onclick={pinSelectedVersion}
               disabled={updatePending || !drawerVersionSelect}
-              title="Pin and apply this specific version"
+              title="Pin host to selected version"
             >Pin</button>
-          </div>
+          {/if}
+          <button
+            class="ctrl-btn primary"
+            onclick={applyUpdateSelection}
+            disabled={updatePending || !!selectedInst.pinnedTo || (`v${selectedInst.version ?? ''}` === drawerVersionSelect && inferChannel(selectedInst.version, selectedInst.channel) === drawerChannelSelect)}
+            title="Apply selected channel and version"
+          >{updatePending ? 'Updating…' : 'Apply'}</button>
         </div>
 
         {#if updateResult}
@@ -1743,34 +1748,6 @@
     flex-direction: column;
     gap: var(--space-2);
   }
-  .version-line {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    font-size: var(--text-sm);
-  }
-  .version-label {
-    font-size: var(--text-xs);
-    color: var(--color-text-dim);
-  }
-  .update-pill {
-    font-size: var(--text-xs);
-    padding: 2px 8px;
-    border-radius: 999px;
-    border: 1px solid var(--color-border);
-  }
-  .update-pill.ok {
-    color: var(--color-text-dim);
-  }
-  .update-pill.avail {
-    color: var(--color-accent, #4ea1ff);
-    border-color: var(--color-accent, #4ea1ff);
-  }
-  .version-pick {
-    display: flex;
-    gap: var(--space-2);
-    align-items: center;
-  }
   .version-input {
     background: color-mix(in srgb, var(--color-bg) 60%, transparent);
     border: 1px solid var(--color-border);
@@ -1781,43 +1758,6 @@
     font-size: var(--text-sm);
     flex: 1;
     min-width: 22ch;
-  }
-  .version-pick {
-    width: 100%;
-  }
-  .channel-confirm {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    padding: var(--space-3);
-  }
-  .channel-confirm-title {
-    margin: 0;
-    font-size: var(--text-sm);
-    color: var(--color-text);
-  }
-  .version-diff {
-    margin: 0;
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 6px;
-    font-size: var(--text-xs);
-  }
-  .version-diff .arrow {
-    color: var(--color-text-dim);
-  }
-  .version-diff .next {
-    color: var(--color-accent, #4f86f7);
-  }
-  .version-diff .muted {
-    color: var(--color-text-dim);
-  }
-  .confirm-actions {
-    display: flex;
-    gap: var(--space-2);
-    justify-content: flex-end;
-    margin-top: var(--space-1);
   }
   .version-input:focus {
     outline: none;
@@ -1860,6 +1800,32 @@
   .channel-btn:disabled {
     opacity: 0.45;
     cursor: not-allowed;
+  }
+  .channel-btn.active:disabled {
+    opacity: 1;
+    cursor: default;
+  }
+  .update-actions-row {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+  .pinned-hint {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--color-text-dim);
+  }
+  .pinned-hint.avail {
+    color: var(--color-accent, #4f86f7);
+  }
+  .pin-badge {
+    font-size: var(--text-xs);
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-accent, #4f86f7) 18%, transparent);
+    color: var(--color-accent, #4f86f7);
+    border: 1px solid color-mix(in srgb, var(--color-accent, #4f86f7) 40%, transparent);
+    white-space: nowrap;
   }
   .ctrl-btn {
     background: var(--color-bg);

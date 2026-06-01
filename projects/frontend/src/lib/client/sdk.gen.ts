@@ -18,6 +18,15 @@ import type {
   AuthMeData,
   AuthMeErrors,
   AuthMeResponses,
+  AuthSessionCreateData,
+  AuthSessionCreateErrors,
+  AuthSessionCreateResponses,
+  AuthSessionDeleteData,
+  AuthSessionDeleteErrors,
+  AuthSessionDeleteResponses,
+  AuthSessionDetailData,
+  AuthSessionDetailErrors,
+  AuthSessionDetailResponses,
   AuthSigninData,
   AuthSigninErrors,
   AuthSigninResponses,
@@ -28,6 +37,15 @@ import type {
   AuthSignupResponses,
   AuthSignupStatusData,
   AuthSignupStatusResponses,
+  AuthTokenCreateData,
+  AuthTokenCreateErrors,
+  AuthTokenCreateResponses,
+  AuthTokenDeleteData,
+  AuthTokenDeleteErrors,
+  AuthTokenDeleteResponses,
+  AuthTokenListData,
+  AuthTokenListErrors,
+  AuthTokenListResponses,
   DockerEngineDetailData,
   DockerEngineDetailErrors,
   DockerEngineDetailResponses,
@@ -79,12 +97,12 @@ import type {
   NamespaceCreateData,
   NamespaceCreateErrors,
   NamespaceCreateResponses,
-  NamespaceCurrentData,
-  NamespaceCurrentErrors,
-  NamespaceCurrentResponses,
   NamespaceDeleteData,
   NamespaceDeleteErrors,
   NamespaceDeleteResponses,
+  NamespaceDetailData,
+  NamespaceDetailErrors,
+  NamespaceDetailResponses,
   NamespaceDocListCommandsData,
   NamespaceDocListCommandsErrors,
   NamespaceDocListCommandsResponses,
@@ -121,9 +139,6 @@ import type {
   NamespaceShareListData,
   NamespaceShareListErrors,
   NamespaceShareListResponses,
-  NamespaceShowData,
-  NamespaceShowErrors,
-  NamespaceShowResponses,
   NamespaceSpecCreateData,
   NamespaceSpecCreateErrors,
   NamespaceSpecCreateResponses,
@@ -154,6 +169,9 @@ import type {
   NamespaceUseData,
   NamespaceUseErrors,
   NamespaceUseResponses,
+  PodDetailData,
+  PodDetailErrors,
+  PodDetailResponses,
   PodForgetData,
   PodForgetErrors,
   PodForgetResponses,
@@ -181,9 +199,27 @@ import type {
   PodStatusListData,
   PodStatusListErrors,
   PodStatusListResponses,
+  PodSyncData,
+  PodSyncErrors,
+  PodSyncResponses,
   PodTrustData,
   PodTrustErrors,
   PodTrustResponses,
+  PodUpdateData,
+  PodUpdateErrors,
+  PodUpdateResponses,
+  SecretsDeleteData,
+  SecretsDeleteErrors,
+  SecretsDeleteResponses,
+  SecretsDetailData,
+  SecretsDetailErrors,
+  SecretsDetailResponses,
+  SecretsListData,
+  SecretsListErrors,
+  SecretsListResponses,
+  SecretsSetData,
+  SecretsSetErrors,
+  SecretsSetResponses,
   SystemAgentBackendClearKeyData,
   SystemAgentBackendClearKeyErrors,
   SystemAgentBackendClearKeyResponses,
@@ -214,24 +250,6 @@ import type {
   SystemAgentListData,
   SystemAgentListErrors,
   SystemAgentListResponses,
-  SystemAuthSessionCreateData,
-  SystemAuthSessionCreateErrors,
-  SystemAuthSessionCreateResponses,
-  SystemAuthSessionDeleteData,
-  SystemAuthSessionDeleteErrors,
-  SystemAuthSessionDeleteResponses,
-  SystemAuthSessionDetailData,
-  SystemAuthSessionDetailErrors,
-  SystemAuthSessionDetailResponses,
-  SystemAuthTokenCreateData,
-  SystemAuthTokenCreateErrors,
-  SystemAuthTokenCreateResponses,
-  SystemAuthTokenDeleteData,
-  SystemAuthTokenDeleteErrors,
-  SystemAuthTokenDeleteResponses,
-  SystemAuthTokenListData,
-  SystemAuthTokenListErrors,
-  SystemAuthTokenListResponses,
   SystemBootstrapData,
   SystemBootstrapErrors,
   SystemBootstrapResponses,
@@ -304,9 +322,6 @@ import type {
   SystemHostRefreshData,
   SystemHostRefreshErrors,
   SystemHostRefreshResponses,
-  SystemHostSetData,
-  SystemHostSetErrors,
-  SystemHostSetResponses,
   SystemInfraServiceDetailData,
   SystemInfraServiceDetailErrors,
   SystemInfraServiceDetailResponses,
@@ -388,12 +403,6 @@ import type {
   SystemPluginUpdateData,
   SystemPluginUpdateErrors,
   SystemPluginUpdateResponses,
-  SystemPodDetailData,
-  SystemPodDetailErrors,
-  SystemPodDetailResponses,
-  SystemPodUpdateData,
-  SystemPodUpdateErrors,
-  SystemPodUpdateResponses,
   SystemScheduleListData,
   SystemScheduleListErrors,
   SystemScheduleListResponses,
@@ -403,45 +412,12 @@ import type {
   SystemScheduleStatusData,
   SystemScheduleStatusErrors,
   SystemScheduleStatusResponses,
-  SystemSecretBackendsData,
-  SystemSecretBackendsErrors,
-  SystemSecretBackendsResponses,
-  SystemSecretDeleteData,
-  SystemSecretDeleteErrors,
-  SystemSecretDeleteResponses,
-  SystemSecretDetailData,
-  SystemSecretDetailErrors,
-  SystemSecretDetailResponses,
-  SystemSecretListData,
-  SystemSecretListErrors,
-  SystemSecretListResponses,
-  SystemSecretSetData,
-  SystemSecretSetErrors,
-  SystemSecretSetResponses,
   SystemSweepOrganizationData,
   SystemSweepOrganizationErrors,
   SystemSweepOrganizationResponses,
   SystemUpdateData,
   SystemUpdateErrors,
   SystemUpdateResponses,
-  SystemUpdateStateApplyData,
-  SystemUpdateStateApplyErrors,
-  SystemUpdateStateApplyResponses,
-  SystemUpdateStateCheckData,
-  SystemUpdateStateCheckErrors,
-  SystemUpdateStateCheckResponses,
-  SystemUpdateStateClearSourceData,
-  SystemUpdateStateClearSourceErrors,
-  SystemUpdateStateClearSourceResponses,
-  SystemUpdateStatePinData,
-  SystemUpdateStatePinErrors,
-  SystemUpdateStatePinResponses,
-  SystemUpdateStateSetSourceData,
-  SystemUpdateStateSetSourceErrors,
-  SystemUpdateStateSetSourceResponses,
-  SystemUpdateStateUnpinData,
-  SystemUpdateStateUnpinErrors,
-  SystemUpdateStateUnpinResponses,
 } from './types.gen';
 
 export type Options<
@@ -570,6 +546,120 @@ export const authLogout = <ThrowOnError extends boolean = false>(
 ) =>
   (options.client ?? client).post<AuthLogoutResponses, AuthLogoutErrors, ThrowOnError>({
     url: '/api/v1/auth.logout',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Authenticate with a provider. Anthropic: pass `key`. GitHub: device-flow. Atlassian: PKCE.
+ *
+ * [MUTATES STATE] Authenticate with a provider. Anthropic: pass `key`. GitHub: device-flow. Atlassian: PKCE.
+ */
+export const authSessionCreate = <ThrowOnError extends boolean = false>(
+  options: Options<AuthSessionCreateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    AuthSessionCreateResponses,
+    AuthSessionCreateErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/auth.session.create',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove a stored credential. `removed=false` if nothing was stored.
+ *
+ * [MUTATES STATE] Remove a stored credential. `removed=false` if nothing was stored.
+ */
+export const authSessionDelete = <ThrowOnError extends boolean = false>(
+  options: Options<AuthSessionDeleteData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    AuthSessionDeleteResponses,
+    AuthSessionDeleteErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/auth.session.delete',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Snapshot every configured credential the host knows about (Anthropic key + OAuth tokens).
+ *
+ * Snapshot every configured credential the host knows about (Anthropic key + OAuth tokens).
+ */
+export const authSessionDetail = <ThrowOnError extends boolean = false>(
+  options: Options<AuthSessionDetailData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    AuthSessionDetailResponses,
+    AuthSessionDetailErrors,
+    ThrowOnError
+  >({
+    url: '/api/v1/auth.session.detail',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Mint a new REST/MCP bearer token on THIS host. Plaintext is returned exactly once and cannot be recovered from the DB. Token only authenticates calls to this host's `:12000` — not to other peers.
+ *
+ * [MUTATES STATE] Mint a new REST/MCP bearer token on THIS host. Plaintext is returned exactly once and cannot be recovered from the DB. Token only authenticates calls to this host's `:12000` — not to other peers.
+ */
+export const authTokenCreate = <ThrowOnError extends boolean = false>(
+  options: Options<AuthTokenCreateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<AuthTokenCreateResponses, AuthTokenCreateErrors, ThrowOnError>({
+    url: '/api/v1/auth.token.create',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Revoke a token by id. Returns `revoked=false` if the id wasn't found.
+ *
+ * [MUTATES STATE] Revoke a token by id. Returns `revoked=false` if the id wasn't found.
+ */
+export const authTokenDelete = <ThrowOnError extends boolean = false>(
+  options: Options<AuthTokenDeleteData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<AuthTokenDeleteResponses, AuthTokenDeleteErrors, ThrowOnError>({
+    url: '/api/v1/auth.token.delete',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List all REST/MCP bearer tokens registered on this host. Token hashes are not returned.
+ *
+ * List all REST/MCP bearer tokens registered on this host. Token hashes are not returned.
+ */
+export const authTokenList = <ThrowOnError extends boolean = false>(
+  options: Options<AuthTokenListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<AuthTokenListResponses, AuthTokenListErrors, ThrowOnError>({
+    url: '/api/v1/auth.token.list',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -725,9 +815,9 @@ export const dockerServiceList = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * List every docker-compose project under the rebuy root with its service states. Powers the cross-project logs panel.
+ * List every docker-compose project under a projects root with its service states. Powers the cross-project logs panel.
  *
- * List every docker-compose project under the rebuy root with its service states. Powers the cross-project logs panel.
+ * List every docker-compose project under a projects root with its service states. Powers the cross-project logs panel.
  */
 export const dockerServiceListLogs = <ThrowOnError extends boolean = false>(
   options: Options<DockerServiceListLogsData, ThrowOnError>,
@@ -907,23 +997,6 @@ export const namespaceCreate = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * Show the currently active namespace (or None).
- *
- * Show the currently active namespace (or None).
- */
-export const namespaceCurrent = <ThrowOnError extends boolean = false>(
-  options: Options<NamespaceCurrentData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<NamespaceCurrentResponses, NamespaceCurrentErrors, ThrowOnError>({
-    url: '/api/v1/namespace.current',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
  * [MUTATES STATE] Delete a namespace (owner only).
  *
  * [MUTATES STATE] Delete a namespace (owner only).
@@ -933,6 +1006,23 @@ export const namespaceDelete = <ThrowOnError extends boolean = false>(
 ) =>
   (options.client ?? client).post<NamespaceDeleteResponses, NamespaceDeleteErrors, ThrowOnError>({
     url: '/api/v1/namespace.delete',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Show details of a namespace (defaults to the active one).
+ *
+ * Show details of a namespace (defaults to the active one).
+ */
+export const namespaceDetail = <ThrowOnError extends boolean = false>(
+  options: Options<NamespaceDetailData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<NamespaceDetailResponses, NamespaceDetailErrors, ThrowOnError>({
+    url: '/api/v1/namespace.detail',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1189,23 +1279,6 @@ export const namespaceShareList = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * Show details of a namespace (defaults to the active one).
- *
- * Show details of a namespace (defaults to the active one).
- */
-export const namespaceShow = <ThrowOnError extends boolean = false>(
-  options: Options<NamespaceShowData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<NamespaceShowResponses, NamespaceShowErrors, ThrowOnError>({
-    url: '/api/v1/namespace.show',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
  * [MUTATES STATE] Fetch a JSON OpenAPI spec from `url` and persist it under `name` in orca.db.
  *
  * [MUTATES STATE] Fetch a JSON OpenAPI spec from `url` and persist it under `name` in orca.db.
@@ -1412,6 +1485,23 @@ export const namespaceUse = <ThrowOnError extends boolean = false>(
   });
 
 /**
+ * Days-remaining + rotation state for every mesh cert on this host, plus the current `self_secure` (Tier-2 secrets-storage) setting.
+ *
+ * Days-remaining + rotation state for every mesh cert on this host, plus the current `self_secure` (Tier-2 secrets-storage) setting.
+ */
+export const podDetail = <ThrowOnError extends boolean = false>(
+  options: Options<PodDetailData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodDetailResponses, PodDetailErrors, ThrowOnError>({
+    url: '/api/v1/pod.detail',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
  * Forget a stale/orphan peer_id mesh-wide: hard-delete it here AND fan a one-way notice to every live member so they drop it too. Use for orphans left by machine_id churn or decommissioned hosts — NOT for evicting a live peer (that's `pod kick`).
  *
  * Forget a stale/orphan peer_id mesh-wide: hard-delete it here AND fan a one-way notice to every live member so they drop it too. Use for orphans left by machine_id churn or decommissioned hosts — NOT for evicting a live peer (that's `pod kick`).
@@ -1565,6 +1655,23 @@ export const podStatusList = <ThrowOnError extends boolean = false>(
   });
 
 /**
+ * Force a one-shot replication tick on this host (or — with `peer_id` set — on the named remote peer via the universal peer-dispatch path) and return a per-source-peer report. Replaces "wait 60s for the background tick to fire and hope it worked." `peer` arg optionally filters which source peer we pull from (hostname / peer_id / addr) — omit to pull from every paired peer. Admin: this is operator-facing and can surface mesh errors.
+ *
+ * Force a one-shot replication tick on this host (or — with `peer_id` set — on the named remote peer via the universal peer-dispatch path) and return a per-source-peer report. Replaces "wait 60s for the background tick to fire and hope it worked." `peer` arg optionally filters which source peer we pull from (hostname / peer_id / addr) — omit to pull from every paired peer. Admin: this is operator-facing and can surface mesh errors.
+ */
+export const podSync = <ThrowOnError extends boolean = false>(
+  options: Options<PodSyncData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodSyncResponses, PodSyncErrors, ThrowOnError>({
+    url: '/api/v1/pod.sync',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
  * Set trust for a paired peer. Without `push`, mutates OUR local trust (`local_secure`). With `push: true`, executes on the remote peer over mTLS so THEY trust US (`peer_secure` from our perspective).
  *
  * Set trust for a paired peer. Without `push`, mutates OUR local trust (`local_secure`). With `push: true`, executes on the remote peer over mTLS so THEY trust US (`peer_secure` from our perspective).
@@ -1574,6 +1681,91 @@ export const podTrust = <ThrowOnError extends boolean = false>(
 ) =>
   (options.client ?? client).post<PodTrustResponses, PodTrustErrors, ThrowOnError>({
     url: '/api/v1/pod.trust',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * Update pod-level settings on this host or — when `peer_id` is set — on the named remote peer over the pod mesh. Currently exposes `self_secure` (Tier-2 secrets-storage permission). Admin-only because flipping it can authorize secrets replication into this host.
+ *
+ * Update pod-level settings on this host or — when `peer_id` is set — on the named remote peer over the pod mesh. Currently exposes `self_secure` (Tier-2 secrets-storage permission). Admin-only because flipping it can authorize secrets replication into this host.
+ */
+export const podUpdate = <ThrowOnError extends boolean = false>(
+  options: Options<PodUpdateData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<PodUpdateResponses, PodUpdateErrors, ThrowOnError>({
+    url: '/api/v1/pod.update',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Remove a secret. The inline value is zeroed; for external backends only the orca registration is removed (the upstream vault is untouched).
+ *
+ * [MUTATES STATE] Remove a secret. The inline value is zeroed; for external backends only the orca registration is removed (the upstream vault is untouched).
+ */
+export const secretsDelete = <ThrowOnError extends boolean = false>(
+  options: Options<SecretsDeleteData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SecretsDeleteResponses, SecretsDeleteErrors, ThrowOnError>({
+    url: '/api/v1/secrets.delete',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [SENSITIVE] Fetch a secret value by name. Resolves via the configured backend.
+ *
+ * [SENSITIVE] Fetch a secret value by name. Resolves via the configured backend.
+ */
+export const secretsDetail = <ThrowOnError extends boolean = false>(
+  options: Options<SecretsDetailData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SecretsDetailResponses, SecretsDetailErrors, ThrowOnError>({
+    url: '/api/v1/secrets.detail',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * List configured secrets (names + backends + metadata). Never returns values.
+ *
+ * List configured secrets (names + backends + metadata). Never returns values.
+ */
+export const secretsList = <ThrowOnError extends boolean = false>(
+  options: Options<SecretsListData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SecretsListResponses, SecretsListErrors, ThrowOnError>({
+    url: '/api/v1/secrets.list',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * [MUTATES STATE] Create or update a secret. For 'inline' backend, `value` is required; for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field'). Write the secret on a remote system with the top-level `--peer <h>` flag.
+ *
+ * [MUTATES STATE] Create or update a secret. For 'inline' backend, `value` is required; for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field'). Write the secret on a remote system with the top-level `--peer <h>` flag.
+ */
+export const secretsSet = <ThrowOnError extends boolean = false>(
+  options: Options<SecretsSetData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<SecretsSetResponses, SecretsSetErrors, ThrowOnError>({
+    url: '/api/v1/secrets.set',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1784,132 +1976,6 @@ export const systemAgentList = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * [MUTATES STATE] Authenticate with a provider. Anthropic: pass `key`. GitHub: device-flow. Atlassian: PKCE.
- *
- * [MUTATES STATE] Authenticate with a provider. Anthropic: pass `key`. GitHub: device-flow. Atlassian: PKCE.
- */
-export const systemAuthSessionCreate = <ThrowOnError extends boolean = false>(
-  options: Options<SystemAuthSessionCreateData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemAuthSessionCreateResponses,
-    SystemAuthSessionCreateErrors,
-    ThrowOnError
-  >({
-    url: '/api/v1/system.auth.session.create',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Remove a stored credential. `removed=false` if nothing was stored.
- *
- * [MUTATES STATE] Remove a stored credential. `removed=false` if nothing was stored.
- */
-export const systemAuthSessionDelete = <ThrowOnError extends boolean = false>(
-  options: Options<SystemAuthSessionDeleteData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemAuthSessionDeleteResponses,
-    SystemAuthSessionDeleteErrors,
-    ThrowOnError
-  >({
-    url: '/api/v1/system.auth.session.delete',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Snapshot every configured credential the host knows about (Anthropic key + OAuth tokens).
- *
- * Snapshot every configured credential the host knows about (Anthropic key + OAuth tokens).
- */
-export const systemAuthSessionDetail = <ThrowOnError extends boolean = false>(
-  options: Options<SystemAuthSessionDetailData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemAuthSessionDetailResponses,
-    SystemAuthSessionDetailErrors,
-    ThrowOnError
-  >({
-    url: '/api/v1/system.auth.session.detail',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Mint a new REST/MCP bearer token on THIS host. Plaintext is returned exactly once and cannot be recovered from the DB. Token only authenticates calls to this host's `:12000` — not to other peers.
- *
- * [MUTATES STATE] Mint a new REST/MCP bearer token on THIS host. Plaintext is returned exactly once and cannot be recovered from the DB. Token only authenticates calls to this host's `:12000` — not to other peers.
- */
-export const systemAuthTokenCreate = <ThrowOnError extends boolean = false>(
-  options: Options<SystemAuthTokenCreateData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemAuthTokenCreateResponses,
-    SystemAuthTokenCreateErrors,
-    ThrowOnError
-  >({
-    url: '/api/v1/system.auth.token.create',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Revoke a token by id. Returns `revoked=false` if the id wasn't found.
- *
- * [MUTATES STATE] Revoke a token by id. Returns `revoked=false` if the id wasn't found.
- */
-export const systemAuthTokenDelete = <ThrowOnError extends boolean = false>(
-  options: Options<SystemAuthTokenDeleteData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemAuthTokenDeleteResponses,
-    SystemAuthTokenDeleteErrors,
-    ThrowOnError
-  >({
-    url: '/api/v1/system.auth.token.delete',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * List all REST/MCP bearer tokens registered on this host. Token hashes are not returned.
- *
- * List all REST/MCP bearer tokens registered on this host. Token hashes are not returned.
- */
-export const systemAuthTokenList = <ThrowOnError extends boolean = false>(
-  options: Options<SystemAuthTokenListData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemAuthTokenListResponses,
-    SystemAuthTokenListErrors,
-    ThrowOnError
-  >({
-    url: '/api/v1/system.auth.token.list',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
  * Create the orca service user and configure SSH access. Idempotent. Designed to run as root immediately after the binary is placed, before `daemon install --service-user orca`.
  *
  * Create the orca service user and configure SSH access. Idempotent. Designed to run as root immediately after the binary is placed, before `daemon install --service-user orca`.
@@ -1999,9 +2065,9 @@ export const systemConfigSet = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * [MUTATES STATE] Install orca on this host: wire symlinks, register MCP server, install binary. `local_only`: bootstrap-style op that wires local filesystem; not meaningful via pod/exec.
+ * [MUTATES STATE] Install orca on this host: wire symlinks, register MCP server, install binary.
  *
- * [MUTATES STATE] Install orca on this host: wire symlinks, register MCP server, install binary. `local_only`: bootstrap-style op that wires local filesystem; not meaningful via pod/exec.
+ * [MUTATES STATE] Install orca on this host: wire symlinks, register MCP server, install binary.
  */
 export const systemCreate = <ThrowOnError extends boolean = false>(
   options: Options<SystemCreateData, ThrowOnError>,
@@ -2172,9 +2238,9 @@ export const systemDbLifecycleUpdate = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * [MUTATES STATE] Uninstall orca from this host: remove binary, MCP registration, and CLAUDE.md symlinks. `local_only`: tears down local filesystem; not meaningful via pod/exec.
+ * [MUTATES STATE] Uninstall orca from this host: remove binary, MCP registration, and CLAUDE.md symlinks.
  *
- * [MUTATES STATE] Uninstall orca from this host: remove binary, MCP registration, and CLAUDE.md symlinks. `local_only`: tears down local filesystem; not meaningful via pod/exec.
+ * [MUTATES STATE] Uninstall orca from this host: remove binary, MCP registration, and CLAUDE.md symlinks.
  */
 export const systemDelete = <ThrowOnError extends boolean = false>(
   options: Options<SystemDeleteData, ThrowOnError>,
@@ -2362,26 +2428,9 @@ export const systemHostRefresh = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * Write a manual host addressing override (display_name, fqdn, or a channel value).
+ * Fetch docker compose logs for a running service. Specify the project path and service name.
  *
- * Write a manual host addressing override (display_name, fqdn, or a channel value).
- */
-export const systemHostSet = <ThrowOnError extends boolean = false>(
-  options: Options<SystemHostSetData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<SystemHostSetResponses, SystemHostSetErrors, ThrowOnError>({
-    url: '/api/v1/system.host.set',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Fetch docker compose logs for a running rebuy service. Specify the project path and service name.
- *
- * Fetch docker compose logs for a running rebuy service. Specify the project path and service name.
+ * Fetch docker compose logs for a running service. Specify the project path and service name.
  */
 export const systemInfraServiceDetail = <ThrowOnError extends boolean = false>(
   options: Options<SystemInfraServiceDetailData, ThrowOnError>,
@@ -2400,9 +2449,9 @@ export const systemInfraServiceDetail = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * List all running docker compose services across all rebuy projects. Returns project name, path, and per-service state/health/ports.
+ * List all running docker compose services under a projects root. Returns project name, path, and per-service state/health/ports.
  *
- * List all running docker compose services across all rebuy projects. Returns project name, path, and per-service state/health/ports.
+ * List all running docker compose services under a projects root. Returns project name, path, and per-service state/health/ports.
  */
 export const systemInfraServiceList = <ThrowOnError extends boolean = false>(
   options: Options<SystemInfraServiceListData, ThrowOnError>,
@@ -2918,40 +2967,6 @@ export const systemPluginUpdate = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * Days-remaining + rotation state for every mesh cert on this host, plus the current `self_secure` (Tier-2 secrets-storage) setting.
- *
- * Days-remaining + rotation state for every mesh cert on this host, plus the current `self_secure` (Tier-2 secrets-storage) setting.
- */
-export const systemPodDetail = <ThrowOnError extends boolean = false>(
-  options: Options<SystemPodDetailData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<SystemPodDetailResponses, SystemPodDetailErrors, ThrowOnError>({
-    url: '/api/v1/system.pod.detail',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Update pod-level settings on this host or — when `peer_id` is set — on the named remote peer over the pod mesh. Currently exposes `self_secure` (Tier-2 secrets-storage permission). Admin-only because flipping it can authorize secrets replication into this host.
- *
- * Update pod-level settings on this host or — when `peer_id` is set — on the named remote peer over the pod mesh. Currently exposes `self_secure` (Tier-2 secrets-storage permission). Admin-only because flipping it can authorize secrets replication into this host.
- */
-export const systemPodUpdate = <ThrowOnError extends boolean = false>(
-  options: Options<SystemPodUpdateData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<SystemPodUpdateResponses, SystemPodUpdateErrors, ThrowOnError>({
-    url: '/api/v1/system.pod.update',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
  * List schedule rows with their next firing time.
  *
  * List schedule rows with their next firing time.
@@ -3015,103 +3030,6 @@ export const systemScheduleStatus = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * List backend kinds available on this host (lets the UI render a backend picker).
- *
- * List backend kinds available on this host (lets the UI render a backend picker).
- */
-export const systemSecretBackends = <ThrowOnError extends boolean = false>(
-  options: Options<SystemSecretBackendsData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemSecretBackendsResponses,
-    SystemSecretBackendsErrors,
-    ThrowOnError
-  >({
-    url: '/api/v1/system.secret.backends',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Remove a secret. The inline value is zeroed; for external backends only the orca registration is removed (the upstream vault is untouched).
- *
- * [MUTATES STATE] Remove a secret. The inline value is zeroed; for external backends only the orca registration is removed (the upstream vault is untouched).
- */
-export const systemSecretDelete = <ThrowOnError extends boolean = false>(
-  options: Options<SystemSecretDeleteData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemSecretDeleteResponses,
-    SystemSecretDeleteErrors,
-    ThrowOnError
-  >({
-    url: '/api/v1/system.secret.delete',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [SENSITIVE] Fetch a secret value by name. Resolves via the configured backend.
- *
- * [SENSITIVE] Fetch a secret value by name. Resolves via the configured backend.
- */
-export const systemSecretDetail = <ThrowOnError extends boolean = false>(
-  options: Options<SystemSecretDetailData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemSecretDetailResponses,
-    SystemSecretDetailErrors,
-    ThrowOnError
-  >({
-    url: '/api/v1/system.secret.detail',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * List configured secrets (names + backends + metadata). Never returns values.
- *
- * List configured secrets (names + backends + metadata). Never returns values.
- */
-export const systemSecretList = <ThrowOnError extends boolean = false>(
-  options: Options<SystemSecretListData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<SystemSecretListResponses, SystemSecretListErrors, ThrowOnError>({
-    url: '/api/v1/system.secret.list',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * [MUTATES STATE] Create or update a secret. For 'inline' backend, `value` is required; for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field'). Write the secret on a remote system with the top-level `--peer <h>` flag.
- *
- * [MUTATES STATE] Create or update a secret. For 'inline' backend, `value` is required; for external backends, `ref_path` is required (e.g. 'op://Vault/Item/field'). Write the secret on a remote system with the top-level `--peer <h>` flag.
- */
-export const systemSecretSet = <ThrowOnError extends boolean = false>(
-  options: Options<SystemSecretSetData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<SystemSecretSetResponses, SystemSecretSetErrors, ThrowOnError>({
-    url: '/api/v1/system.secret.set',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
  * Run the organization sweep — unused-dependency scans (cargo-machete + cargo-udeps) and advisory check (cargo-deny). Each sub-tool reports independently; missing binaries surface as `not_installed` rather than erroring the whole sweep.
  *
  * Run the organization sweep — unused-dependency scans (cargo-machete + cargo-udeps) and advisory check (cargo-deny). Each sub-tool reports independently; missing binaries surface as `not_installed` rather than erroring the whole sweep.
@@ -3133,141 +3051,15 @@ export const systemSweepOrganization = <ThrowOnError extends boolean = false>(
   });
 
 /**
- * [MUTATES STATE] Update orca on this host. Optionally pass `version` to switch channel or pin before applying: "stable" | "rc" | "dev" | "<semver>". "dev" tracks GitHub HEAD via cargo-watch. Omit to apply the latest on the current channel. Run on a remote system with the top-level `--peer <h>` flag.
+ * [MUTATES STATE] The single system-update tool. Covers orca binary updates, host identity (hostname/fqdn/addressing), and OS package upgrades. Omit every arg for a read-only state probe.
  *
- * [MUTATES STATE] Update orca on this host. Optionally pass `version` to switch channel or pin before applying: "stable" | "rc" | "dev" | "<semver>". "dev" tracks GitHub HEAD via cargo-watch. Omit to apply the latest on the current channel. Run on a remote system with the top-level `--peer <h>` flag.
+ * [MUTATES STATE] The single system-update tool. Covers orca binary updates, host identity (hostname/fqdn/addressing), and OS package upgrades. Omit every arg for a read-only state probe.
  */
 export const systemUpdate = <ThrowOnError extends boolean = false>(
   options: Options<SystemUpdateData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemUpdateResponses, SystemUpdateErrors, ThrowOnError>({
     url: '/api/v1/system.update',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Apply the latest update on the configured channel. Reads `~/.orca/channel` when no channel given; rewrites it on success. Uses dev-source when set.
- *
- * Apply the latest update on the configured channel. Reads `~/.orca/channel` when no channel given; rewrites it on success. Uses dev-source when set.
- */
-export const systemUpdateStateApply = <ThrowOnError extends boolean = false>(
-  options: Options<SystemUpdateStateApplyData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemUpdateStateApplyResponses,
-    SystemUpdateStateApplyErrors,
-    ThrowOnError
-  >({
-    url: '/api/v1/system.update-state.apply',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Preview only — resolve the target version on the channel and cache its sha256. Does NOT replace the running binary.
- *
- * Preview only — resolve the target version on the channel and cache its sha256. Does NOT replace the running binary.
- */
-export const systemUpdateStateCheck = <ThrowOnError extends boolean = false>(
-  options: Options<SystemUpdateStateCheckData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemUpdateStateCheckResponses,
-    SystemUpdateStateCheckErrors,
-    ThrowOnError
-  >({
-    url: '/api/v1/system.update-state.check',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Clear the dev-source URL, reverting to GitHub-based updates.
- *
- * Clear the dev-source URL, reverting to GitHub-based updates.
- */
-export const systemUpdateStateClearSource = <ThrowOnError extends boolean = false>(
-  options: Options<SystemUpdateStateClearSourceData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemUpdateStateClearSourceResponses,
-    SystemUpdateStateClearSourceErrors,
-    ThrowOnError
-  >({
-    url: '/api/v1/system.update-state.clear-source',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Pin to a version. Future `system.update.apply` runs will not upgrade past this.
- *
- * Pin to a version. Future `system.update.apply` runs will not upgrade past this.
- */
-export const systemUpdateStatePin = <ThrowOnError extends boolean = false>(
-  options: Options<SystemUpdateStatePinData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemUpdateStatePinResponses,
-    SystemUpdateStatePinErrors,
-    ThrowOnError
-  >({
-    url: '/api/v1/system.update-state.pin',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Set a dev-source URL. Future `system.update.apply` runs pull from there instead of GitHub.
- *
- * Set a dev-source URL. Future `system.update.apply` runs pull from there instead of GitHub.
- */
-export const systemUpdateStateSetSource = <ThrowOnError extends boolean = false>(
-  options: Options<SystemUpdateStateSetSourceData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemUpdateStateSetSourceResponses,
-    SystemUpdateStateSetSourceErrors,
-    ThrowOnError
-  >({
-    url: '/api/v1/system.update-state.set-source',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * Clear the version pin. `system.update.apply` resumes following the channel.
- *
- * Clear the version pin. `system.update.apply` resumes following the channel.
- */
-export const systemUpdateStateUnpin = <ThrowOnError extends boolean = false>(
-  options: Options<SystemUpdateStateUnpinData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemUpdateStateUnpinResponses,
-    SystemUpdateStateUnpinErrors,
-    ThrowOnError
-  >({
-    url: '/api/v1/system.update-state.unpin',
     ...options,
     headers: {
       'Content-Type': 'application/json',
