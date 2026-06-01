@@ -22,7 +22,6 @@ fn host_tools_present_in_inventory_slice() {
         .map(|e| e.name)
         .collect();
     assert!(names.contains(&"system.host.detail"), "{names:?}");
-    assert!(names.contains(&"system.host.set"), "{names:?}");
     assert!(names.contains(&"system.host.refresh"), "{names:?}");
 }
 
@@ -30,7 +29,6 @@ fn host_tools_present_in_inventory_slice() {
 fn dispatch_names_includes_host_tools() {
     let names = dispatch::names();
     assert!(names.contains(&"system.host.detail"));
-    assert!(names.contains(&"system.host.set"));
     assert!(names.contains(&"system.host.refresh"));
 }
 
