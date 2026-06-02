@@ -17,19 +17,21 @@ use system as _;
 
 #[test]
 fn host_tools_present_in_inventory_slice() {
+    // Post-consolidation: `system.host.*` was folded into `system.*` per the
+    // one-tool-per-resource rule. Sanity-check the canonical surface instead.
     let names: Vec<&'static str> = inventory::iter::<ToolRegistration>
         .into_iter()
         .map(|e| e.name)
         .collect();
-    assert!(names.contains(&"system.host.detail"), "{names:?}");
-    assert!(names.contains(&"system.host.refresh"), "{names:?}");
+    assert!(names.contains(&"system.detail"), "{names:?}");
+    assert!(names.contains(&"system.update"), "{names:?}");
 }
 
 #[test]
 fn dispatch_names_includes_host_tools() {
     let names = dispatch::names();
-    assert!(names.contains(&"system.host.detail"));
-    assert!(names.contains(&"system.host.refresh"));
+    assert!(names.contains(&"system.detail"));
+    assert!(names.contains(&"system.update"));
 }
 
 #[test]
@@ -50,6 +52,9 @@ fn pod_tools_present_in_inventory_slice() {
 
 #[test]
 fn inventory_slice_has_full_migrated_set() {
+    // Floor sized to the current consolidated surface (~82). Bump only when
+    // a real surface expansion lands — this guards against accidental
+    // wholesale loss of registrations, not against ongoing consolidation.
     let count = inventory::iter::<ToolRegistration>.into_iter().count();
-    assert!(count >= 128, "expected >=128 tools, got {count}");
+    assert!(count >= 70, "expected >=70 tools, got {count}");
 }
