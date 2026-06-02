@@ -256,11 +256,93 @@ work that consumes this primitive.
 
 ---
 
-### 1.6 — Drivers (folded into §1.2)
+### 1.6 Resource nicknames + grouping + exposure
 
-Driver lifecycle is part of `system.update` per the
-one-tool-per-resource rule. Scope, exit criteria, and DKMS
-coordination live in §1.2. Slot kept to preserve numbering.
+**Scope.** Every orca-managed resource (host, service,
+instance, data row) has:
+
+1. An editable **nickname**, unique across the pod, default =
+   app/host name, multi-instance disambiguation by **purpose**
+   not numbering. Full rule in
+   `feedback_resource_nicknames_and_fqdn`.
+2. Optional **group membership.** Resources can be grouped
+   (`media`, `proxmox`, `storage-gateways`, etc.) or stand
+   alone. Groups can be queried as a single unit
+   (`config.list --group media`) or exposed collectively
+   (one route fronting all media services) or individually.
+   Same data, two views.
+3. **Local-by-default exposure on every surface.** Every piece
+   of orca data — nicknames included — is added to the local
+   config store and immediately available on **CLI, MCP, REST,
+   and WASM** without any DNS / FQDN / reverse-proxy work. The
+   mesh dispatch surface already handles cross-host access by
+   `peer_id` + nickname; no domain required.
+4. **FQDN as optional, opt-in exposure path.** If the operator
+   wants `sonarr.scottkey.me` to resolve publicly, that's a
+   separate **opt-in** layer on top — §1.14 DNS reconciler +
+   Phase 2 reverse-proxy publish the same resource externally
+   via `<nickname>.<fqdn.domain>`. Resources are fully
+   functional with **no FQDN configured** — orca core does not
+   require an operator domain to operate.
+
+**`config` shape** (per §1.10 one-tool-per-resource):
+
+- `config.update <resource>.nickname <name>` — rename.
+- `config.update <resource>.group <group>` (or
+  `--groups a,b,c` for multi).
+- `config.update <resource>.expose.fqdn true|false` — opt in
+  to external FQDN publishing (default `false`).
+- `config.update fqdn.domain <value>` — operator's domain.
+  Empty by default; orca works without it.
+- `config.list [--nicknames] [--group <g>] [--exposed]` —
+  read-only views.
+
+Uniqueness is enforced for nicknames; groups are free-form.
+Renames cascade atomically: any active FQDN publish, mDNS
+advertise, reverse-proxy route, UI label all rewrite per
+change_id.
+
+**Driver lifecycle note.** Slot previously was the
+"drivers folded into §1.2" stub. Drivers still live under
+§1.2 `system.update`. Slot repurposed for the
+naming/grouping/exposure layer since that's a real
+cross-cutting resource concern.
+
+**Shipped.** Peer IDs + container IDs in the config store +
+topology collector + mesh dispatch (CLI/MCP/REST already work
+by peer_id today). No nickname layer, no group layer, no
+exposure toggle, no FQDN derivation.
+
+**Missing.** Nickname + group columns on every resource row;
+uniqueness constraint on nickname; default-assignment logic
+(new host → host name; new service → app name; multi-instance
+→ operator disambiguates by purpose); group membership +
+group-aware listing; `expose.fqdn` toggle wired to §1.14;
+optional FQDN derivation from `<nickname>.<fqdn.domain>`;
+cascade-on-rename across all active exposure surfaces.
+
+**Exit criteria.** Every resource in `config.list` has a
+unique nickname and (optionally) one or more groups. Every
+resource is callable on CLI/MCP/REST/WASM by nickname
+**without any FQDN configured**. With `fqdn.domain` set + a
+resource's `expose.fqdn = true`, `<nickname>.<fqdn.domain>`
+resolves dual-stack via §1.14 and the reverse-proxy route
+exists. Renaming is one `config.update` + one `config.apply`,
+propagates everywhere automatically. Orca core test fixtures
+use `host-a` / `host-b` (covers prior CC.1).
+
+**Blocks on.** §1.11 (apply flow), §1.10 (config-as-code so
+nicknames + groups + exposure persist into the repo).
+
+**Unblocks.** §1.14 DNS reconciler (consumes nicknames for
+opt-in FQDN), §1.7 storage-share advertise (consumes host
+nicknames), Phase 2 caddy plugin (reverse-proxy routes keyed
+on nicknames; respects `expose.fqdn`), Phase 2 service
+catalog (display layer; uses groups for collapsing).
+
+**Detail.** `feedback_resource_nicknames_and_fqdn` memory
+(canonical — to be expanded with grouping + exposure rules).
+`docs/planned/resource-naming.md` TBD when work starts.
 
 ---
 
@@ -374,13 +456,21 @@ Push-based pod subscribe for realtime (`feedback_optimistic_ui_updates`,
 puller.
 
 **Shipped** — `host_status`, `scheduler_runs`, topology collectors,
-ntfy push. UI tree+table views designed in
-`docs/planned/ui-topology-views.md`.
+ntfy push. UI tree+table+network-map views designed in
+`docs/planned/ui-topology-views.md`; network-map renders the
+§1.21 relationship graph including cycles.
 
 **Missing** — Per-host retention policy enforcement (today metrics
-can grow unbounded), drift aggregate view, lifecycle-event timeline
-(install → pair → update → reboot → restore → reconcile, one
-chronological feed).
+can grow unbounded; retention is **per-system config**, not global
+— see `feedback_per_system_history_retention`; Systems-dashboard
+top-level selector is the *default for newly-paired systems*,
+overridable per-system on its settings page), drift aggregate
+view, lifecycle-event timeline (install → pair → update → reboot
+→ restore → reconcile, one chronological feed). Network-map view
+must support pan/zoom (mouse + touch), drag, optional
+collapse/expand of subtrees, edge-kind filtering — all without
+breaking on §1.21 cycles. Full interaction spec in
+`docs/planned/ui-topology-views.md`.
 
 **Exit criteria** — Operator can answer "did the lifecycle event
 succeed?" from one screen for any host. db_size_bytes stays under
@@ -390,28 +480,57 @@ the per-host policy.
 
 ---
 
-### 1.10 Config-as-code — bidirectional GitHub sync
+### 1.10 Config-as-code — bidirectional git sync (provider-agnostic)
 
 **Core goal.** Orca is the system; the operator's specific
-implementation lives in a **thin configs-as-code github repo**
+implementation lives in a **thin configs-as-code git repo**
 (meerkat is one such repo — the user's own instance — but orca
 itself is generic; any operator runs their own equivalent).
-Bidirectional sync between orca state and the github repo is a
+Bidirectional sync between orca state and the repo is a
 first-class capability.
+
+**`config` is just another orca resource.** Same one-tool-per-
+resource shape as `system`, `env`, `secret`, etc. — callable
+over the mesh from any peer:
+
+- `orca config get <key>`
+- `orca config update <key> <value>` (or `--file …` for a TOML
+  blob)
+- `orca config delete <key>`
+- `orca config list [--host <h>] [--drift]`
+- `orca config apply <change_id>` — the user-triggered apply
+  per the HARD RULE.
+
+All of these resolve to the same underlying `config_store`
+rows that already ship (`projects/db/src/config_store.rs`); the
+git remote is just the durable mirror.
+
+**Provider-agnostic.** Any git remote works: GitHub, Gitea,
+GitLab, self-hosted bare git, file://, ssh://. A future
+self-hosted Gitea instance running on the pod is a first-class
+target — the same code path that talks to GitHub talks to
+Gitea. Provider-specific features (webhooks, app tokens, PR
+APIs) live behind a `GitProvider` trait (see meerkat memory
+`feedback_git_provider_api.md`); the **core sync loop uses
+plain git** (libgit2 / git CLI) so the offline / airgapped /
+DR paths never depend on a hosted provider being reachable.
 
 **Two directions:**
 
-1. **orca → github** — Every operator-triggered change made
-   through orca (CLI / MCP / UI / WASM) that modifies declared
-   state writes a commit to the linked github repo. Each commit
-   carries the operator identity, the change reason, and the
-   `change_id` from the §1.11 apply flow. Branch-per-environment
-   if the operator wants it; default is direct-to-main.
-2. **github → orca** — A push to the linked branch is detected
-   (webhook or polled fetch on a tick), diffed against current
-   declared state, and surfaced as a pending change set. **No
+1. **orca → repo** — Every operator-triggered `config update`
+   or `config delete` (via CLI / MCP / UI / WASM) that modifies
+   declared state writes a commit to the linked repo. Each
+   commit carries the operator identity, the change reason,
+   and the `change_id` from the §1.11 apply flow. Push happens
+   via plain git over the configured remote URL — no provider
+   API required.
+2. **repo → orca** — A new commit on the linked branch is
+   detected (provider webhook *if available*, polled `git
+   fetch` on a tick otherwise), diffed against current declared
+   state, and surfaced via `orca config list --drift`. **No
    auto-apply** per the HARD RULE — drift detection + §1.20
-   notification only; operator runs `orca apply <change_id>`.
+   notification only; operator runs `orca config apply
+   <change_id>`.
 
 The repo holds **thin configs only** — no data, no cleartext
 secrets (handle references only per §1.11), no per-stack
@@ -419,41 +538,63 @@ volumes. Backups (§1.8) handle data; the repo handles intent.
 
 **Scope:**
 
-- Repo binding: `orca config repo add <git-url>` records the
-  remote + auth (deploy key or GitHub App token via §1.11).
-- One-way bootstrap: `orca config repo import` accepts an
+- Remote linkage as a config row itself: `orca config update
+  remote.url <git-url>` + `remote.auth <secret-handle>` —
+  no new `repo add` verb. Provider is auto-detected from the
+  URL (github.com → GitHub, gitea.* → Gitea, etc.) but defaults
+  to "generic git" — sync works even when provider detection
+  fails.
+- One-way bootstrap: `orca config import <path>` accepts an
   existing repo of compose stacks + per-host configs (today's
   meerkat) and walks it into declared state.
 - Outbound writer: every apply persists the resulting state
-  diff as a commit. Atomicity per change_id.
-- Inbound watcher: GitHub webhook receiver (or polled fetch
-  every N minutes for hosts behind NAT without a tunnel), diff
-  against live, emit pending-change set.
-- Conflict policy: github push and an in-flight orca apply
-  both touching the same file → §1.20 ack-required event;
+  diff as a commit, pushed via plain git. Atomicity per
+  change_id.
+- Inbound watcher: webhook receiver where the provider supports
+  it; polled `git fetch` every N minutes as the universal
+  fallback. Polling is the default — webhooks are optimization.
+- Conflict policy: external push and an in-flight orca apply
+  both touching the same key → §1.20 ack-required event;
   operator picks a side.
 - Repo-side schema: `config/<host>/*.toml` is the canonical
-  layout (consistent with §1.2 updates.toml, §1.6 drivers.toml
-  folded into §1.2, §1.7 shares.toml, §1.14 dns/firewall/dhcp,
-  §1.16 power.toml).
+  layout (consistent with §1.2 updates.toml, §1.7 shares.toml,
+  §1.14 dns/firewall/dhcp, §1.16 power.toml).
 - Identity: commits use the orca operator identity (§1.11
   unified user identity), not a service account, so audit
-  trails go through to GitHub.
+  trails carry across to whichever provider hosts the repo.
+- `GitProvider` trait for provider-specific surfaces (PR open,
+  webhook register, deploy-key mint) — orthogonal to the core
+  sync loop. Implementations: github, gitea, gitlab, generic
+  (no-op for everything beyond plain-git push/fetch).
 
-**Shipped** — Nothing. Today meerkat is hand-edited; orca writes
-to its local config store with no remote.
+**Future: self-hosted Gitea.** Running our own Gitea instance
+(orca-managed, on the pod) is a goal but not a prerequisite
+for §1.10 — the provider-agnostic core means a future
+Gitea-on-pod just slots in as another `GitProvider` impl, and
+the same configs-as-code repo can be migrated by changing
+`remote.url`. Tracked as a Phase 2 item.
 
-**Missing** — Repo binding verbs, outbound commit writer,
-inbound watcher (webhook + polled), conflict-resolution UX,
-import path for existing repos, schema for repo-side TOML
-layout.
+**Shipped** — Local config store rows (`projects/db/src/config_store.rs`).
+No remote sync, no git wiring, no provider trait.
 
-**Exit criteria** — `orca config repo add <url>` links a repo.
-Every operator-triggered apply commits a corresponding change
-to that repo. A direct push to the repo surfaces as a pending
-change in `orca config drift list` within one tick and emits
-a §1.20 event. `orca config repo import` walks today's meerkat
-repo into orca's config store without losing fidelity.
+**Missing** — `config` tool surface (`get`/`update`/`delete`/
+`list`/`apply`) over the mesh, outbound commit writer over plain
+git, polled inbound fetcher, optional provider webhook
+receivers, `GitProvider` trait + per-provider impls,
+conflict-resolution UX, `config import` for existing repos,
+schema for repo-side TOML layout.
+
+**Exit criteria** — `orca config update remote.url <url>`
+links a repo on any git provider (or a bare git endpoint).
+Every operator-triggered `config update`/`delete` commits a
+corresponding change to that repo via plain git push. A direct
+push to the repo surfaces as drift in `orca config list
+--drift` within one tick (polled fetch) and emits a §1.20
+event. `orca config import` walks today's meerkat repo into
+orca's config store without losing fidelity. A self-hosted
+Gitea instance and a GitHub-hosted repo are interchangeable
+from orca's perspective. Every `config` verb is callable over
+the mesh from any peer.
 
 **Blocks on** — §1.11 (apply flow + secret handle resolution
 for git auth), §1.20 (drift notifications + apply prompts).
@@ -461,7 +602,8 @@ Hard prerequisite for retiring hand-edited meerkat under the
 parity rule.
 
 **Detail** — `docs/planned/config-as-code-sync.md` (TBD; create
-when work starts).
+when work starts). See also `feedback_git_provider_api.md`
+(provider trait vs libgit2 split).
 
 ---
 
@@ -599,29 +741,47 @@ decommission); §1.12b for the escrow-re-share path.
 
 ---
 
-### 1.14 Network reconciler — DNS / firewall / DHCP
+### 1.14 Network reconciler — DNS / firewall / DHCP / switches / APs
 
-**Scope** — Declarative DNS (Adguard) records, OPNsense firewall
-rules, DHCP reservations. Dual-stack (A + AAAA) per
-`project_dns_dualstack`. Gateway-monitoring config per
-`feedback_opnsense_gateway_monitoring` (don't ship `monitor_disable=1`
-defaults). Specific records beat wildcards.
+**Scope** — Declarative network state across every device with
+an API:
 
-**Shipped** — Nothing yet. Adguard + OPNsense plugins are Tier 1
-slots (`projects/plugins/{adguard,opnsense}/`) — not yet created.
+- **OPNsense** (router) — firewall rules, gateway list,
+  routing table, ARP/NDP, DHCP reservations.
+- **Adguard** (DNS) — A/AAAA/CNAME records. Dual-stack
+  required (per `project_dns_dualstack`). Specific records
+  beat wildcards.
+- **MikroTik (RouterOS)** — managed switch + secondary router
+  surface. REST API (v7) / legacy API protocol. Bridge port +
+  wireless tables for §1.21 `connects` edges.
+- **UniFi (Network Controller)** — managed APs + UniFi
+  switches. HTTP API. SSID config, port profiles, client →
+  AP mappings.
 
-**Missing** — Both plugins (Tier 1 in-process), declarative TOML
-schemas under `config/<host>/{dns,firewall,dhcp}.toml`, dual-stack
-validation, drift surface.
+Gateway-monitoring policy per `feedback_opnsense_gateway_monitoring`
+(don't ship `monitor_disable=1` defaults). All four plugins
+also feed §1.21 relationship graph as their primary edge
+source.
+
+**Shipped** — Nothing yet. All four plugins are Tier 1 slots
+(`projects/plugins/{opnsense,adguard,mikrotik,unifi}/`) — not
+yet created.
+
+**Missing** — All four plugins (Tier 1 in-process), declarative
+TOML schemas under `config/<host>/{dns,firewall,dhcp}.toml`
+plus `config/network/{switches,aps}.toml`, dual-stack
+validation, edge emission into §1.21, drift surface.
 
 **Exit criteria** — Every record currently in Adguard + every
-OPNsense rule is declared in the config repo. `pool.scottkey.me`
-resolves dual-stack from declaration. Adding a new host gets DNS
-+ DHCP + firewall holes in one operator-driven apply.
+OPNsense rule is declared in the config repo. Every nickname
+from §1.6 resolves dual-stack as `<nickname>.<fqdn.domain>`.
+Adding a new host gets DNS + DHCP + firewall holes in one
+operator-driven apply.
 
-**Blocks on** — §1.11 (needs secret backend for OPNsense API
-tokens). Apply prompts route through §1.20 (firewall changes are
-the canonical `requires_ack` event class).
+**Blocks on** — §1.6 (nickname → FQDN mapping), §1.11 (secret
+backend for OPNsense API tokens). Apply prompts route through
+§1.20 (firewall changes are the canonical `requires_ack` event
+class).
 
 ---
 
@@ -801,6 +961,166 @@ all four surfaces; symmetric with `system.install`.
 
 ---
 
+### 1.21 Resource relationships + network/topology graph
+
+**Scope.** A directed, cycle-tolerant **typed-edge graph**
+across every nicknamed resource (per §1.6). Edge kinds:
+`hosts`, `connects`, `routes`, `exposes`, `depends_on`,
+`replicates`, `backs_up`, `escrows` (extensible). Walkable
+both ways. **Strange loops are first-class** — orca explicitly
+models cases like "loki hosts the opnsense VM which routes
+loki" without breaking. Full data model in
+`feedback_resource_relationships_and_graph`.
+
+This drives:
+
+- **Network map UI** (extends `docs/planned/ui-topology-views.md`)
+  — node-link diagram; physical + logical layers; filter by
+  edge kind; cycles drawn honestly.
+- **Failure-domain queries** — "if X dies, what goes with it?"
+  Preflight for any reconciler apply that takes a node offline.
+- **Ancestry walks** in either direction — "what exposes
+  sonarr?" / "what does opnsense reach?" — exposed on
+  CLI/MCP/REST/WASM (no domain needed, per §1.6 local-by-default
+  rule).
+
+Edges come from:
+
+- **Plugins first** — every network device with an API gets a
+  Tier 1 plugin that emits edges directly. MikroTik (RouterOS
+  REST + bridge/wireless tables → `connects`), UniFi (Network
+  Controller API → AP/switch/client mappings → `connects` +
+  `routes`), OPNsense (REST → `routes` + ARP/NDP), Adguard
+  (DNS cross-ref). Plus the shipped Proxmox / Docker / Unraid
+  collectors for `hosts`. §1.17 contributes `replicates`,
+  §1.8 contributes `backs_up`, §1.12b contributes `escrows`.
+- **Manual operator declaration** *only* for things no plugin
+  can observe (unmanaged dumb switches, specific physical
+  cable runs the operator wants documented). Edges carry a
+  provenance field — plugin-emitted edges refresh on each
+  tick; manual edges are never auto-deleted.
+
+**`config` shape** (one-tool-per-resource):
+
+- `config.update relationship.<id> kind=<k> from=<nickname> to=<nickname> [meta…]`
+- `config.delete relationship.<id>`
+- `config.list --relationships [--kind <k>] [--from <n>] [--to <n>]`
+- `config.walk <nickname> --direction <down|up> [--kinds <k1,k2>]`
+  — bounded walk with cycle detection, returns the visited
+  sub-graph as typed edges.
+
+**Shipped.** Nothing as a graph. `parent_peer_id` on host_status
+hints at one `hosts` edge per peer but isn't generalized.
+Topology collector observes hosts/CTs/containers but doesn't
+materialize edges.
+
+**Missing.** `relationships` table in the config store;
+`RelationshipKind` enum; auto-inference adapters per source
+(topology collector, §1.14, §1.17, §1.8, §1.12b); manual-edge
+verbs; bidirectional bounded-walk query; cycle-detection;
+network-map UI view; failure-domain preflight integration with
+every reconciler `apply` path.
+
+**Exit criteria.** The two walk examples from the canonical
+memory both return correct typed-edge chains by query:
+
+- `opnsense → mikrotik → frigg → maple → syncthing`
+- `loki → opnsense → mikrotik → 1gb switch → access point → mint`
+
+Cycle case (loki ↔ opnsense) is queryable in either direction
+without infinite recursion. Network-map UI renders all of the
+above with cycles visible. Failure-domain preflight catches
+"removing loki would also drop opnsense + everything opnsense
+routes."
+
+**Blocks on.** §1.6 (nicknames are the node identity), §1.10
+(graph persists in config repo), §1.11 (apply flow for manual
+edge edits).
+
+**Unblocks.** §1.9 network-map UI; failure-domain preflight
+across every reconciler in Phase 1; Phase 2 service-catalog
+(uses `depends_on` for ordering).
+
+**Detail.** `feedback_resource_relationships_and_graph` memory
+(canonical). `docs/planned/relationships-graph.md` TBD when
+work starts.
+
+---
+
+### 1.22 Service-type inference + plugin auto-binding
+
+**Scope.** When orca observes a new LXC / VM / Docker
+container, it **infers what service is running** (sonarr, plex,
+home-assistant, opnsense, etc.) and **auto-binds the matching
+plugin** without operator wiring. Multi-signal detection with
+confidence levels; high confidence auto-binds, medium emits a
+§1.20 ack-required prompt, low marks as `unknown`. Full data
+model + signal ordering in
+`feedback_service_type_inference_and_autobinding`.
+
+This is what makes the plugin surface useful at scale: once
+bound, a resource automatically gets action verbs
+(`orca <service> <verb>`), telemetry, dashboards, §1.21
+`depends_on` edges, §1.5 service-aware health, and §1.8 native
+backup — all for free, no manual wiring.
+
+**Signals (combined for confidence):** image / LXC template
+name; container labels (`orca.service` override + standard
+OCI labels); nickname; exposed ports; HTTP API fingerprint
+(`/api/v3/system/status` etc.); in-guest process listing as
+last resort; mDNS / DNS-SD where applicable. Plugins declare
+their own fingerprints — adding a plugin extends detection
+automatically.
+
+**Confidence behavior** (per user-triggered-only rule):
+
+- **High** (≥2 strong independent signals): auto-bind +
+  audit-log the signals.
+- **Medium**: §1.20 notification with `apply <change_id>` link
+  ("I think this is sonarr v4 — bind?"). Operator confirms.
+- **Low**: mark `unknown` with detected hints; operator
+  binds via `config.update <resource>.service <type>`.
+
+Override is always available; manually-bound resources have
+provenance `manual` and detection never overwrites them.
+Re-evaluation runs on image/template change.
+
+**Shipped.** Topology collector observes
+hosts/CTs/VMs/containers. Per-service openapi plugins exist
+(arr stack, plex, jellyfin, etc.). No inference layer, no
+auto-binding.
+
+**Missing.** Detection engine in the topology collector; plugin
+fingerprint declarations in `orca-plugin.toml` + Tier 1
+registration; confidence scoring; auto-bind audit; medium-
+confidence prompt wiring through §1.20; multi-plugin binding;
+explainable `config.list <resource>` showing the signals that
+drove the binding; manual override + provenance.
+
+**Exit criteria.** A fresh meerkat install with every Tier 1
+plugin enabled auto-detects + auto-binds every existing arr /
+plex / jellyfin / homeassistant / opnsense / dockge / etc.
+instance with no operator wiring. `config.list --unbound`
+shows the long tail of un-inferred resources for manual
+review. Every bound resource exposes its plugin's full action
++ data + dashboard surface immediately.
+
+**Blocks on.** §1.6 (nicknames as resource identity),
+§1.10 (config-as-code stores bindings), §1.11 (apply flow for
+medium-confidence prompts), §1.20 (notification surface).
+Soft-blocks on per-plugin fingerprint declarations (every
+plugin landing gets a fingerprint block).
+
+**Unblocks.** Phase 2 service-surface parity — once auto-bind
+works, the per-service action / data / dashboard work is just
+plugin development.
+
+**Detail.** `feedback_service_type_inference_and_autobinding`
+memory (canonical). `docs/planned/service-type-inference.md`
+TBD when work starts.
+
+---
+
 ### 1.20 Notifications — unified dispatcher + escalation
 
 **Scope** — `projects/notify/` crate exposing one generic `Event`
@@ -890,23 +1210,6 @@ item closes.
 
 ---
 
-## Cross-cutting cleanup (Phase 1)
-
-Tracked-but-not-yet-fixed code issues. **No code edits without
-a roadmap discussion** — items here are roadmap entries only.
-
-### CC.1 — Remove meerkat hostnames from orca core test fixtures
-
-Pure rename. Files:
-
-- `projects/db/src/plugin_tools.rs` L221-265 — `sonarr-willow`,
-  `radarr-maple`, `sonarr-maple`.
-- `projects/db/src/plugin_types.rs` L141-155 — same names.
-- `projects/pod/src/caller_token.rs:246` — `"baldur"`.
-
-Replace with neutral `host-a`, `host-b`, etc. Enforces
-`feedback_no_rebuy_or_meerkat_in_orca.md`.
-
 ## Phase 2 — Service surface parity
 
 Begins only after Phase 1 closes. Each meerkat script + plugin +
@@ -968,49 +1271,28 @@ can say "no" with a reason.
 
 ## Cross-cutting standing rules
 
-These apply at every phase. Drawn from orca + meerkat memory.
+These apply at every phase. **Pointer list only** — the rules
+themselves live in memory (canonical source). If a rule needs
+to change, edit the memory; this list just names which rules
+are load-bearing across phases.
 
-- **User-triggered changes only** — orca **never** auto-applies
-  changes to envs, secrets, system state, or host config. Drift
-  detection + notification only; the operator decides when and
-  what to apply. No self-healing, no auto-reproject, no scheduled
-  apply, no "while you were away" reconciliation. Applies to all
-  Phase 1 work.
-- **Parity rule** — no retirement of existing automation until orca
-  passes the four-check parity test on every target host:
-  functional / side-effect / failure-mode / operational.
-  (meerkat `feedback_parity_rule.md`)
-- **Personal 1Password only** — homelab + orca secrets go in
-  personal 1Password; never the rebuy/work account.
-  (meerkat `feedback_personal_1password_only.md`, orca
-  `feedback_op_personal_only.md`)
-- **Native backup APIs first** — service-native endpoints before
-  volume-tar; restore + drill fixture per source.
-  (meerkat `feedback_native_backup_apis.md`)
-- **Storage abstraction, no host names in targets** — backup /
-  snapshot targets reference storage-pool names, not hosts.
-  (meerkat `feedback_storage_abstraction.md`)
-- **In-repo migrations + schema-evolution discipline** — schema
-  changes ship as migrations in `projects/db/migrations/`. No
-  down-migrations that re-insert removed personal/banned names.
-  Detail: `docs/planned/schema-evolution.md`. (orca
-  `feedback_no_data_migrations_for_name_cleanups.md`,
-  `project_db_squash.md`)
-- **No "meerkat" or "rebuy" strings in orca core** — orca is the
-  system; meerkat is the user's *specific implementation* of orca
-  (a thin configs-as-code github repo). Anyone running orca has
-  their own equivalent. Rebuy is a separate plugin consumer.
-  (orca `feedback_no_rebuy_or_meerkat_in_orca.md`,
-  `feedback_orca_vs_meerkat_identity.md`)
-- **One tool per resource** — `system.update` is the single update
-  surface; no per-verb tool families. (orca
-  `feedback_one_tool_per_resource.md`)
-- **Orca self-updates without sudo** — manual ssh + sudo by an
-  agent is an orca bug, not a peer problem. (orca
-  `feedback_orca_self_updates_no_sudo.md`)
-- **Never blind-trust caller identity** — recipient verifies role
-  from its own replicated users data. (orca
-  `feedback_zero_trust_no_blind_trust.md`)
+- User-triggered changes only — `feedback_user_triggered_changes_only`
+- Parity rule before retirement — meerkat `feedback_parity_rule`
+- Personal 1Password only — meerkat `feedback_personal_1password_only`,
+  orca `feedback_op_personal_only`
+- Native backup APIs first — meerkat `feedback_native_backup_apis`
+- Storage abstraction, no host names in targets — meerkat
+  `feedback_storage_abstraction`
+- In-repo migrations + schema-evolution discipline — orca
+  `feedback_no_data_migrations_for_name_cleanups`, `project_db_squash`;
+  detail in `docs/planned/schema-evolution.md`
+- orca-vs-meerkat identity / no "meerkat" or "rebuy" in orca core —
+  orca `feedback_no_rebuy_or_meerkat_in_orca`,
+  `feedback_orca_vs_meerkat_identity`
+- One tool per resource (sub-domains OK when they're real domains) —
+  orca `feedback_one_tool_per_resource`
+- Orca self-updates without sudo — orca `feedback_orca_self_updates_no_sudo`
+- Never blind-trust caller identity — orca `feedback_zero_trust_no_blind_trust`
 
 ---
 
@@ -1062,22 +1344,35 @@ genuinely needs an upstream's exit criteria.
 4. **§1.11 — envs + secrets projection** (orca-native promoted,
    1Password backend, per-node toggles, mesh resolution,
    `[plugin.secrets]` wiring). Every other reconciler needs this.
-5. **§1.10 — config-as-code github sync** (bidirectional;
-   outbound commits + inbound diff-on-push). Lands right after
-   §1.11 so applies start producing commits from the very first
-   reconciler.
-6. **§1.1 — LXC + VM reconciler** (njord-driven; first concrete
+5. **§1.10 — config-as-code git sync** (bidirectional;
+   outbound commits + inbound diff-on-push; provider-agnostic).
+   Lands right after §1.11 so applies start producing commits
+   from the very first reconciler.
+6. **§1.6 — resource nicknames + grouping** (uniqueness +
+   default assignment + cascade-on-rename + group membership;
+   FQDN exposure is optional). Lands before §1.1 so every new
+   resource gets a nickname from day one.
+7. **§1.21 — resource relationships + topology graph**
+   (typed-edge directed graph, cycle-tolerant, bidirectional
+   walks, network-map UI). Lands here so every reconciler that
+   follows contributes its own edge kind from day one.
+8. **§1.22 — service-type inference + plugin auto-binding**
+   (multi-signal detection with confidence; auto-bind on high,
+   ack-prompt on medium, manual on low). Lands here so the
+   LXC reconciler's first new CT gets auto-bound to its plugin.
+9. **§1.1 — LXC + VM reconciler** (njord-driven; first concrete
    consumer of the env+secret layer + the user-triggered apply
-   pattern).
-7. **§1.4 — drift detection** (per-noun checkers, event schema,
-   aggregate view). Becomes meaningful once §1.1 emits events.
-   Also covers github-push drift via §1.10.
-8. **§1.5 — inner-service health probes** (post-lifecycle gate
-   for §1.1 + §1.2).
-9. **§1.2 — host update lifecycle** (per-distro package drivers,
-   GPU/accelerator drivers + DKMS, reboot hook chain, rolling
-   selector — all under one `system.update` surface).
-10. **§1.7 — storage server-side reconciler + runtime health**
+   pattern; uses §1.6 nicknames + §1.21 `hosts` edges + §1.22
+   plugin binding).
+10. **§1.4 — drift detection** (per-noun checkers, event schema,
+    aggregate view). Becomes meaningful once §1.1 emits events.
+    Also covers github-push drift via §1.10.
+11. **§1.5 — inner-service health probes** (post-lifecycle gate
+    for §1.1 + §1.2; service-aware via §1.22 plugin binding).
+12. **§1.2 — host update lifecycle** (per-distro package drivers,
+    GPU/accelerator drivers + DKMS, reboot hook chain, rolling
+    selector — all under one `system.update` surface).
+13. **§1.7 — storage server-side reconciler + runtime health**
     (tyr exports + smb.conf + Avahi + wsdd from
     `config/tyr/shares.toml`, plus nfs-monitor-equivalent failover).
 

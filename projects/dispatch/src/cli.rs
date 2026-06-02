@@ -247,18 +247,11 @@ macro_rules! register_op {
 
             fn build() -> clap::Command {
                 let cmd = clap::Command::new($verb).about($summary);
-                let cmd = <<$tool as OrcaToolDef>::Args as clap::Args>::augment_args(cmd);
-                // Cross-cutting: every tool gains `--peer <PEER>`. When set,
-                // we ship the typed Args to that peer over pod/exec and
-                // deserialize the typed Output back. REMOTE_OK gate is
-                // enforced on the peer side; remote_ok=false tools 401.
-                cmd.arg(
-                    clap::Arg::new("__peer")
-                        .long("peer")
-                        .value_name("PEER")
-                        .help("Run on a paired peer (hostname like 'host-e', peer_id, addr, or `local`) instead of this host; ambiguous hostnames are rejected")
-                        .required(false),
-                )
+                // Cross-cutting `--peer <PEER>` is registered as a global flag
+                // on the root command (see `build_root`) and propagates to
+                // every subcommand automatically. Don't redeclare it here —
+                // clap rejects duplicate `long` names on globals.
+                <<$tool as OrcaToolDef>::Args as clap::Args>::augment_args(cmd)
             }
 
             fn run(
@@ -267,7 +260,9 @@ macro_rules! register_op {
             ) -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = ::anyhow::Result<()>> + Send>> {
                 let m = m.clone();
                 Box::pin(async move {
-                    let peer = m.get_one::<String>("__peer").cloned();
+                    // `try_dispatch` already lifted the global `--peer` value
+                    // onto the ctx clone before invoking us; read it there.
+                    let peer = ctx.peer().map(|s| s.to_string());
                     let args = <<$tool as OrcaToolDef>::Args as clap::FromArgMatches>::from_arg_matches(&m)
                         .map_err(|e| ::anyhow::anyhow!("{e}"))?;
                     let $out: <$tool as OrcaToolDef>::Output = if let Some(peer) = peer {
