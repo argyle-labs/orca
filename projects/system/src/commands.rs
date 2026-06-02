@@ -133,20 +133,13 @@ pub struct SystemUpdateArgs {
     #[cfg_attr(feature = "cli", arg(long))]
     pub channel: Option<String>,
 
-    /// Apply a specific version (semver, leading `v` optional). Does NOT pin unless `--pin` is also set.
+    /// Apply a specific version (semver, leading `v` optional). Selecting a
+    /// non-channel-latest version implicitly pins to that version; selecting
+    /// the channel-latest version implicitly unpins. Omit to update to the
+    /// channel latest (which also unpins if currently pinned).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "cli", arg(long))]
     pub version: Option<String>,
-
-    /// Pin to the version about to be applied (or to `version` if given). Future updates won't cross it.
-    #[serde(default)]
-    #[cfg_attr(feature = "cli", arg(long))]
-    pub pin: bool,
-
-    /// Clear the version pin.
-    #[serde(default)]
-    #[cfg_attr(feature = "cli", arg(long))]
-    pub unpin: bool,
 
     /// Set the dev-source URL (orca fetches binaries from there instead of GitHub).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -293,10 +286,6 @@ async fn system_update(
             }
         }
     }
-    if args.unpin {
-        clear_version_pin().context("clear version pin")?;
-        notes.push("pin cleared".into());
-    }
     if let Some(src) = args
         .dev_source
         .as_deref()
@@ -422,9 +411,7 @@ async fn system_update(
         || args.refresh_host
         || args.daemon.is_some()
         || args.dev_source.is_some()
-        || args.clear_dev_source
-        || args.unpin
-        || args.pin;
+        || args.clear_dev_source;
     let binary_intent =
         args.version.is_some() || channel_changed || (!any_non_binary && !dev_mode_requested);
 
@@ -464,13 +451,28 @@ async fn system_update(
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
+            // Pin policy lives in the version arg itself: selecting a
+            // non-channel-latest version pins to it; selecting the channel
+            // latest unpins. See [[feedback-one-tool-per-resource]].
             let normalised = normalise_version(ver);
-            if args.pin {
-                if let Err(e) = write_version_pin(&normalised) {
-                    errors.push(format!("pin failed: {e}"));
-                } else {
-                    notes.push(format!("pinned to {normalised}"));
+            let latest_tag = match list_versions(&ch_marker, &token).await {
+                Ok(v) => v.first().map(|e| e.tag.clone()),
+                Err(e) => {
+                    errors.push(format!("list versions failed: {e}"));
+                    None
                 }
+            };
+            let is_latest = latest_tag.as_deref() == Some(normalised.as_str());
+            if is_latest {
+                if let Err(e) = clear_version_pin() {
+                    errors.push(format!("clear pin failed: {e}"));
+                } else if read_version_pin().is_none() {
+                    notes.push("pin cleared".into());
+                }
+            } else if let Err(e) = write_version_pin(&normalised) {
+                errors.push(format!("pin failed: {e}"));
+            } else {
+                notes.push(format!("pinned to {normalised}"));
             }
             match apply_specific_version(&ch_marker, &normalised, &token).await {
                 Ok(v) => {
@@ -480,31 +482,24 @@ async fn system_update(
                 Err(e) => errors.push(format!("apply v{normalised} failed: {e}")),
             }
         } else {
+            // No version arg → update to channel latest. Any existing pin is
+            // released (per #6: "If pinned and newer exists → apply unpins
+            // and goes to latest").
             match check_for_update(&ch_marker, &token).await {
-                Ok(Some(info)) => {
-                    if let Some(pin) = resolve_pin_veto(&info.version) {
-                        notes.push(format!(
-                            "pinned to {pin}; available v{} — pass --unpin to upgrade",
-                            info.version
-                        ));
-                    } else {
-                        match apply_update(&info, &token).await {
-                            Ok(()) => {
-                                if args.pin {
-                                    let pin_v = format!("v{}", info.version);
-                                    if let Err(e) = write_version_pin(&pin_v) {
-                                        errors.push(format!("pin failed: {e}"));
-                                    } else {
-                                        notes.push(format!("pinned to {pin_v}"));
-                                    }
-                                }
-                                applied = Some(info.version.clone());
-                                notes.push(format!("applied v{}", info.version));
+                Ok(Some(info)) => match apply_update(&info, &token).await {
+                    Ok(()) => {
+                        if read_version_pin().is_some() {
+                            if let Err(e) = clear_version_pin() {
+                                errors.push(format!("clear pin failed: {e}"));
+                            } else {
+                                notes.push("pin cleared".into());
                             }
-                            Err(e) => errors.push(format!("apply failed: {e}")),
                         }
+                        applied = Some(info.version.clone());
+                        notes.push(format!("applied v{}", info.version));
                     }
-                }
+                    Err(e) => errors.push(format!("apply failed: {e}")),
+                },
                 Ok(None) => notes.push(format!("already up to date on {}", ch_marker.as_marker())),
                 Err(e) => errors.push(format!("check failed: {e}")),
             }

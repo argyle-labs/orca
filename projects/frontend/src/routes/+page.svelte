@@ -642,6 +642,9 @@
   }
 
   async function applyUpdateSelection() {
+    // S1 semantics (2026-06-02): no separate pin/unpin args. The backend
+    // derives pin state from the version arg — selecting non-latest pins,
+    // selecting latest unpins, omitting version updates to latest + unpins.
     const args: Record<string, unknown> = {};
     if (drawerChannelSelect && drawerChannelSelect !== inferChannel(selectedInst?.version, selectedInst?.channel)) {
       args.channel = drawerChannelSelect;
@@ -649,25 +652,8 @@
     if (drawerVersionSelect && drawerVersionSelect !== `v${selectedInst?.version ?? ''}`) {
       args.version = drawerVersionSelect;
     }
-    if (selectedInst?.pinnedTo) {
-      args.unpin = true;
-    }
     if (Object.keys(args).length === 0) return;
     await runSystemUpdate(args);
-  }
-
-  async function applySelectedVersion() {
-    if (!drawerVersionSelect) return;
-    await runSystemUpdate({ version: drawerVersionSelect });
-  }
-
-  async function pinSelectedVersion() {
-    if (!drawerVersionSelect) return;
-    await runSystemUpdate({ version: drawerVersionSelect, pin: true });
-  }
-
-  async function clearPin() {
-    await runSystemUpdate({ unpin: true });
   }
 
   async function toggleSecure(inst: Instance) {
@@ -1211,26 +1197,11 @@
         {/if}
 
         <div class="update-actions-row">
-          {#if selectedInst.pinnedTo}
-            <button
-              class="ctrl-btn"
-              onclick={clearPin}
-              disabled={updatePending}
-              title="Release pin — host will follow latest on its channel"
-            >{updatePending ? 'Working…' : 'Unpin'}</button>
-          {:else}
-            <button
-              class="ctrl-btn"
-              onclick={pinSelectedVersion}
-              disabled={updatePending || !drawerVersionSelect}
-              title="Pin host to selected version"
-            >Pin</button>
-          {/if}
           <button
             class="ctrl-btn primary"
             onclick={applyUpdateSelection}
             disabled={updatePending || (!selectedInst.pinnedTo && `v${selectedInst.version ?? ''}` === drawerVersionSelect && inferChannel(selectedInst.version, selectedInst.channel) === drawerChannelSelect)}
-            title="Apply selected channel and version"
+            title="Apply selected channel and version — selecting a non-latest version pins; selecting latest unpins"
           >{updatePending ? 'Updating…' : 'Apply'}</button>
         </div>
 

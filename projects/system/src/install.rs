@@ -474,7 +474,16 @@ fn materialize_agents_to(
     label: &str,
     report: &mut InstallReport,
 ) {
-    if let Err(e) = std::fs::create_dir_all(target_dir) {
+    // Resolve symlinks: if target_dir is a symlink (broken or live), create
+    // the link's destination instead so create_dir_all doesn't trip EEXIST
+    // on the link entry when the destination is missing.
+    let resolved = std::fs::read_link(target_dir).unwrap_or_else(|_| target_dir.to_path_buf());
+    let real_target = if resolved.is_absolute() {
+        resolved
+    } else {
+        target_dir.parent().unwrap_or(target_dir).join(resolved)
+    };
+    if let Err(e) = std::fs::create_dir_all(&real_target) {
         report.err(format!("{label}: mkdir failed: {e}"));
         return;
     }

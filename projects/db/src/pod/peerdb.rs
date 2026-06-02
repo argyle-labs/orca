@@ -87,6 +87,18 @@ pub fn upsert_discovery(
     Ok(())
 }
 
+/// Delete pod_discovery rows whose hostname matches ours but whose pubkey_fp
+/// differs — those are previous identities of THIS host (key rotation,
+/// daemon reinstall, factory reset) that would otherwise show up as
+/// "STALE SELF IDENTITY" in the UI on every deploy.
+pub fn evict_stale_self(conn: &Connection, hostname: &str, pubkey_fp: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM pod_discovery WHERE hostname = ? AND pubkey_fp <> ?",
+        params![hostname, pubkey_fp],
+    )?;
+    Ok(())
+}
+
 pub fn list_discovery(conn: &Connection) -> Result<Vec<DiscoveryRow>> {
     let mut stmt = conn.prepare(
         "SELECT pubkey_fp, peer_id, hostname, addr, port, state, can_invite,

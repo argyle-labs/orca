@@ -589,15 +589,29 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
     }
 
     match pod::mdns::build_advertisement(pki_dir.to_path_buf(), db::ports::mesh_port()) {
-        Ok(ad) => match pod::mdns::Mdns::start(ad) {
-            Ok(handle) => {
-                info!("[pod] mDNS responder + discoverer up");
-                // Leak the handle for daemon lifetime — the discovery task
-                // owns the daemon clone and rebroadcast happens on republish.
-                std::mem::forget(handle);
+        Ok(ad) => {
+            // Self-heal stale-self identity rows: a pod_discovery row whose
+            // hostname matches ours but whose pubkey_fp differs is a previous
+            // identity (key rotation, daemon reinstall, factory reset) that
+            // would otherwise show up in the UI as "DEAD/STALE SELF IDENTITY"
+            // every deploy. Evict on startup; mDNS will repopulate the
+            // current-identity row within a few seconds.
+            match db::open_default() {
+                Ok(conn) => {
+                    if let Err(e) = db::pod::evict_stale_self(&conn, &ad.hostname, &ad.pubkey_fp) {
+                        tracing::warn!("[pod] stale-self eviction failed: {e:#}");
+                    }
+                }
+                Err(e) => tracing::warn!("[pod] stale-self eviction: db open failed: {e:#}"),
             }
-            Err(e) => tracing::warn!("[pod] mDNS start failed: {e:#}"),
-        },
+            match pod::mdns::Mdns::start(ad) {
+                Ok(handle) => {
+                    info!("[pod] mDNS responder + discoverer up");
+                    std::mem::forget(handle);
+                }
+                Err(e) => tracing::warn!("[pod] mDNS start failed: {e:#}"),
+            }
+        }
         Err(e) => tracing::warn!("[pod] cannot build mDNS advertisement: {e:#}"),
     }
 

@@ -86,12 +86,7 @@ kill-dev:
 # Install logic (symlink strip, idempotent copy, codesign) lives in
 # scripts/release-lib.sh::install_orca_binary so Make and CI runners agree.
 deploy:
-	@if [ ! -x target/$(HOST_TARGET)/release/orca ]; then \
-		echo "deploy: target/$(HOST_TARGET)/release/orca missing — building"; \
-		$(MAKE) build; \
-	else \
-		echo "deploy: using existing target/$(HOST_TARGET)/release/orca (run 'make build' to rebuild)"; \
-	fi
+	@$(MAKE) build
 	@$(MAKE) kill-dev
 	bash scripts/install-binary.sh target/$(HOST_TARGET)/release/orca $(INSTALL_PATH)
 	$(INSTALL_PATH) system install
