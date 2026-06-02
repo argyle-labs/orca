@@ -411,12 +411,15 @@ fn collect_agent_entries(home: &Path) -> Vec<AgentEntry> {
 
 /// Materialize every agent (embedded + external sources) to
 /// `~/.claude/agents/<name>.md` so Claude Code's native Agent picker
-/// discovers them automatically. Also writes per-project copies under
-/// each known `~/code/<project>/.claude/agents/`.
+/// discovers them automatically.
 ///
 /// Overwrite policy: unconditional. Re-run on every `orca install` /
 /// `orca update` / daemon start. Users who want to edit an agent's prompt
 /// should fork it to a different name (e.g. `wolf-custom.md`).
+///
+/// Also actively cleans up any per-project `<project>/.claude/agents/<name>.md`
+/// files orca wrote in a previous version — those should only ever live in the
+/// global dir.
 fn step_claude_agents(home: &Path, report: &mut InstallReport) {
     let entries = collect_agent_entries(home);
 
@@ -431,13 +434,29 @@ fn step_claude_agents(home: &Path, report: &mut InstallReport) {
         if project.vault_name == "global" {
             continue;
         }
-        let target = project.root.join(".claude/agents");
-        materialize_agents_to(
-            &entries,
-            &target,
-            &format!("{}/.claude/agents", project.root.display()),
-            report,
-        );
+        let dir = project.root.join(".claude/agents");
+        if !dir.exists() {
+            continue;
+        }
+        let mut removed = 0usize;
+        for entry in &entries {
+            let path = dir.join(format!("{}.md", entry.name));
+            if path.exists() && std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            report.ok(format!(
+                "{}: removed {removed} stale per-project agents",
+                dir.display()
+            ));
+        }
+        if std::fs::read_dir(&dir)
+            .map(|mut it| it.next().is_none())
+            .unwrap_or(false)
+        {
+            _ = std::fs::remove_dir(&dir);
+        }
     }
 
     let from_external = entries.iter().filter(|e| e.origin != "embedded").count();

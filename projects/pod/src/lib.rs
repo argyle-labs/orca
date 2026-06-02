@@ -780,7 +780,7 @@ async fn pod_update(
     if let Some(ref peer_id) = args.peer_id {
         let dispatch = server_pod::exec(
             peer_id,
-            "system.pod.update",
+            "pod.update",
             serde_json::json!({ "self_secure": args.self_secure }),
             ctx.caller(),
         )
