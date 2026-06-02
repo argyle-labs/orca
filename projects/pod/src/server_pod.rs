@@ -14,6 +14,11 @@ use crate::pki_dir;
 use crate::scheduler::{OFFER_TTL_SECS, mint_pairing_code, push_offer};
 use db::pod as pdb;
 
+#[derive(serde::Deserialize)]
+struct DetailProbePayload {
+    system: Option<system::system_info_types::SystemInfoReport>,
+}
+
 pub async fn list_enriched() -> Result<Vec<PodPeerDto>> {
     list_enriched_impl().await
 }
@@ -716,11 +721,8 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
         // returns from its own `system.detail` tool. Lets the UI drawer hydrate
         // without an on-open RPC for remote peers.
         if let Some(d) = detail_by_peer.get(&p.peer_id)
-            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&d.payload)
-            && let Some(sys_val) = v.get("system")
-            && let Ok(sys) = serde_json::from_value::<system::system_info_types::SystemInfoReport>(
-                sys_val.clone(),
-            )
+            && let Ok(payload) = serde_json::from_str::<DetailProbePayload>(&d.payload)
+            && let Some(sys) = payload.system
         {
             p.system = Some(sys);
         }

@@ -218,6 +218,7 @@ mod tests {
             pinned_to: None,
             update_latest: None,
             update_available: None,
+            update_checked_secs: None,
             system: None,
         }
     }

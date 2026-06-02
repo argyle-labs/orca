@@ -37,14 +37,14 @@ pub fn spawn_periodic() {
     if SPAWNED.set(()).is_err() {
         return;
     }
-    let _ = spawn(
+    std::mem::drop(spawn(
         PeriodicSpec {
             name: "pod.peer_update_probe.tick",
             initial_delay: Duration::from_secs(10),
             interval: Duration::from_secs(PROBE_INTERVAL_SECS),
         },
         system::periodic::boxed(probe_tick),
-    );
+    ));
 }
 
 async fn probe_tick() -> Result<()> {
