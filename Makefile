@@ -94,7 +94,7 @@ deploy:
 	fi
 	@$(MAKE) kill-dev
 	bash scripts/install-binary.sh target/$(HOST_TARGET)/release/orca $(INSTALL_PATH)
-	$(INSTALL_PATH) system daemon install
+	$(INSTALL_PATH) system install
 	@echo "daemon installed"
 
 # Build debug binary and install to $(INSTALL_PATH). `make dev` runs
@@ -139,14 +139,16 @@ dev:
 run:
 	$(OP_RUN) $(INSTALL_PATH) serve
 
-# Build and install as a system daemon (launchd on macOS, systemd on Linux)
+# Build and install as a system daemon (launchd on macOS, systemd on Linux).
+# `system install` absorbed the former `system daemon install`.
 daemon-install: deploy
-	$(INSTALL_PATH) system daemon install
-	@echo "daemon installed — check status with: orca system daemon status"
+	$(INSTALL_PATH) system install
+	@echo "daemon installed — check status with: orca system detail"
 
-# Remove daemon service file and stop the service
+# Remove daemon service file and stop the service. `system delete` absorbed
+# the former `system daemon uninstall`.
 daemon-uninstall:
-	$(INSTALL_PATH) system daemon uninstall
+	$(INSTALL_PATH) system delete
 
 # Database migrations
 # Usage:
