@@ -18,9 +18,6 @@ pub mod system_info_types;
 pub mod topology;
 pub mod update_state;
 
-#[cfg(test)]
-pub(crate) mod test_support;
-
 pub mod update;
 
 pub mod dev;

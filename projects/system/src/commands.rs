@@ -712,10 +712,6 @@ pub async fn startup_update_check() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use contract::ToolCtx;
-    use contract::config::{Config, Model};
-    use std::path::PathBuf;
-    use std::sync::Arc;
 
     #[test]
     fn normalise_version_adds_v_prefix() {
