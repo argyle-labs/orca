@@ -62,6 +62,9 @@ pub struct FsSearchHit {
 pub struct FsRootEntry {
     pub name: String,
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub enabled: bool,
     pub exists: bool,
     pub file_count: u32,
 }
@@ -79,9 +82,18 @@ pub struct FsListArgs {
     pub path: String,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
 pub struct FsListOutput {
+    /// Populated when listing a directory (path supplied).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub entries: Vec<FsEntry>,
+    /// Populated when listing registered roots (no path/root supplied).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<FsRootEntry>,
+    /// Populated alongside `roots` — global ignore patterns.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ignore_patterns: Vec<String>,
 }
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -160,35 +172,75 @@ pub struct FsStatOutput {
 }
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct FsRootsListArgs {}
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FsUpdateArgs {
+    /// Write a file: provide `path` (absolute or `~/`-prefixed) + `content`.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub path: Option<String>,
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub content: Option<String>,
 
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct FsRootsListOutput {
-    pub roots: Vec<FsRootEntry>,
+    /// Register/update a root: provide `register_root_name` + `register_root_path`
+    /// (+ optional `register_root_description`).
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub register_root_name: Option<String>,
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub register_root_path: Option<String>,
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub register_root_description: Option<String>,
+
+    /// Add a global ignore pattern.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub add_ignore_pattern: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FsUpdateOutput {
+    pub applied: Vec<String>,
+}
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FsDeleteArgs {
+    /// Delete a file at `path` (absolute or `~/`-prefixed).
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub path: Option<String>,
+
+    /// Unregister a root by name.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub unregister_root: Option<String>,
+
+    /// Remove a global ignore pattern.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub remove_ignore_pattern: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FsDeleteOutput {
+    pub applied: Vec<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Tools — call free fns in the crate root directly. No service trait.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// List the registered filesystem roots — named path aliases consumed by every other `files.*` tool.
-#[orca_tool(domain = "files.roots", verb = "list", role = "read")]
-async fn fs_roots_list(
-    _args: FsRootsListArgs,
-    ctx: &contract::ToolCtx,
-) -> anyhow::Result<FsRootsListOutput> {
-    Ok(FsRootsListOutput {
-        roots: crate::roots_list(&ctx.config).await?,
-    })
-}
-
-/// One-level directory listing. Provide `root` for a named alias or omit it for an absolute / `~/`-prefixed path.
+/// List filesystem resources. No args → registered roots + global ignore
+/// patterns. With `path` (and optional `root`) → directory contents at that path.
 #[orca_tool(domain = "files", verb = "list", role = "read")]
 async fn fs_list(args: FsListArgs, ctx: &contract::ToolCtx) -> anyhow::Result<FsListOutput> {
-    Ok(FsListOutput {
-        entries: crate::list(&ctx.config, args.root.as_deref(), &args.path).await?,
-    })
+    let mut out = FsListOutput::default();
+    if args.root.is_none() && args.path.is_empty() {
+        out.roots = crate::roots_list(&ctx.config).await?;
+        let conn = db::open_default()?;
+        out.ignore_patterns = db::docs::list_ignore_patterns(&conn)?;
+    } else {
+        out.entries = crate::list(&ctx.config, args.root.as_deref(), &args.path).await?;
+    }
+    Ok(out)
 }
 
 /// Recursive directory tree. Compacted by default; pass `raw=true` for the unmodified filesystem layout.
@@ -233,4 +285,89 @@ async fn fs_search(args: FsSearchArgs, ctx: &contract::ToolCtx) -> anyhow::Resul
 #[orca_tool(domain = "files", verb = "stat", role = "read")]
 async fn fs_stat(args: FsStatArgs, ctx: &contract::ToolCtx) -> anyhow::Result<FsStatOutput> {
     crate::stat(&ctx.config, args.root.as_deref(), &args.path).await
+}
+
+/// [MUTATES STATE] Combine any of: write a file (`path` + `content`),
+/// register/update a root (`register_root_*`), add a global ignore pattern
+/// (`add_ignore_pattern`).
+#[orca_tool(domain = "files", verb = "update")]
+async fn fs_update(args: FsUpdateArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<FsUpdateOutput> {
+    let mut out = FsUpdateOutput::default();
+
+    match (args.path.as_deref(), args.content.as_deref()) {
+        (Some(p), Some(c)) => {
+            let written = crate::ops::write_file(p, c)?;
+            out.applied.push(format!("wrote:{written}"));
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            anyhow::bail!("file write needs both `path` and `content`");
+        }
+        (None, None) => {}
+    }
+
+    if let Some(name) = &args.register_root_name {
+        let path = args
+            .register_root_path
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("register_root_path required"))?;
+        let row = db::docs::RootRow {
+            name: name.clone(),
+            path,
+            description: args.register_root_description.clone(),
+            enabled: true,
+        };
+        let conn = db::open_default()?;
+        db::docs::upsert_root(&conn, &row)?;
+        out.applied.push(format!("root-upserted:{name}"));
+    }
+
+    if let Some(pattern) = &args.add_ignore_pattern {
+        let conn = db::open_default()?;
+        let changed = db::docs::add_ignore_pattern(&conn, pattern)?;
+        out.applied.push(format!(
+            "pattern-added:{pattern}:{}",
+            if changed { "yes" } else { "absent" }
+        ));
+    }
+
+    if out.applied.is_empty() {
+        anyhow::bail!("no files.update operation specified");
+    }
+    Ok(out)
+}
+
+/// [MUTATES STATE] Combine any of: delete a file (`path`), unregister a root
+/// (`unregister_root`), remove a global ignore pattern (`remove_ignore_pattern`).
+#[orca_tool(domain = "files", verb = "delete")]
+async fn fs_delete(args: FsDeleteArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<FsDeleteOutput> {
+    let mut out = FsDeleteOutput::default();
+
+    if let Some(p) = &args.path {
+        let resolved = crate::ops::expand_tilde(p);
+        crate::ops::remove(std::path::Path::new(&resolved))?;
+        out.applied.push(format!("file-deleted:{resolved}"));
+    }
+
+    if let Some(name) = &args.unregister_root {
+        let conn = db::open_default()?;
+        let changed = db::docs::remove_root(&conn, name)?;
+        out.applied.push(format!(
+            "root-removed:{name}:{}",
+            if changed { "yes" } else { "absent" }
+        ));
+    }
+
+    if let Some(pattern) = &args.remove_ignore_pattern {
+        let conn = db::open_default()?;
+        let changed = db::docs::remove_ignore_pattern(&conn, pattern)?;
+        out.applied.push(format!(
+            "pattern-removed:{pattern}:{}",
+            if changed { "yes" } else { "absent" }
+        ));
+    }
+
+    if out.applied.is_empty() {
+        anyhow::bail!("no files.delete operation specified");
+    }
+    Ok(out)
 }

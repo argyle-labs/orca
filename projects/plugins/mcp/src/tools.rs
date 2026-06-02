@@ -1,23 +1,26 @@
-//! `system.mcp.*` and `system.mcp.federation.*` orca_tools. Direct calls to
-//! `db::mcp_servers` / `db::tool_mappings` for the registry CRUD; federation
-//! tools use [`crate::client::McpPool`].
-#![allow(clippy::disallowed_types)] // MCP `arguments` blob — opaque per the MCP spec
+//! MCP tool surface — flat surface (`mcp.{list, detail, update, delete, run}`).
+//! An MCP server is the resource; its tool mappings nest into the row.
+//! `update` covers register / map / unmap / sync — args determine which.
+//!
+//! `mcp.run` envelopes opaque MCP `tools/call` payloads — that JSON shape is
+//! upstream-defined by the MCP spec so the typed surface stops at the
+//! envelope.
+#![allow(clippy::disallowed_types)]
 
 use derive::orca_tool;
-use serde_json::Value;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json as sj;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::client::McpPool;
 use crate::sync::mcp_sync_server;
 use crate::types::{
-    AddMcpServerArgs, ListMcpServersArgs, ListMcpServersOutput, ListMcpToolsArgs,
-    ListMcpToolsOutput, ListToolMappingsArgs, ListToolMappingsOutput, MapToolArgs, MapToolResult,
-    MappingEntry, McpContent, McpServerEntry, McpServerMutationResult, McpToolEntry,
-    RemoveMcpServerArgs, RunMcpToolArgs, RunMcpToolOutput, SyncToolsArgs, SyncToolsOutput,
-    SyncToolsServerEntry, UnmapToolArgs, UnmapToolResult,
+    MappingEntry, McpContent, McpServerEntry, McpToolEntry, SyncToolsOutput, SyncToolsServerEntry,
 };
+use utils::json_schema::JsonSchemaNode;
 
-/// Build an `McpPool` rooted at orca's default DB path.
 fn make_mcp_pool() -> McpPool {
     use contract::config::{APP_DB_FILE, APP_STATE_DIR};
     if let Ok(path) = std::env::var("ORCA_DB_PATH") {
@@ -29,232 +32,388 @@ fn make_mcp_pool() -> McpPool {
     McpPool::new()
 }
 
-// ── MCP registry CRUD ───────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// mcp.list — every registered MCP server with mappings nested
+// ═══════════════════════════════════════════════════════════════════════════
 
-/// List all MCP servers registered in orca.db (orca's own managed registry). Does not include ~/.claude.json servers managed by Claude Code directly.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct McpServerRow {
+    #[serde(flatten)]
+    pub server: McpServerEntry,
+    pub mappings: Vec<MappingEntry>,
+}
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+pub struct McpListArgs {}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct McpListOutput {
+    pub servers: Vec<McpServerRow>,
+}
+
+/// List every registered MCP server with its tool mappings nested.
 #[orca_tool(domain = "mcp", verb = "list")]
-async fn list_mcp_servers(
-    _args: ListMcpServersArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<ListMcpServersOutput> {
+async fn mcp_list(_args: McpListArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<McpListOutput> {
     let conn = db::open_default()?;
-    let servers = db::mcp_servers::list(&conn)?
+    let servers = db::mcp_servers::list(&conn)?;
+    let all_mappings = db::tool_mappings::all(&conn)?;
+    let rows = servers
         .into_iter()
-        .map(|s| McpServerEntry {
-            name: s.name,
-            command: s.command,
-            args: s.args,
-            env: s.env,
-            enabled: s.enabled,
+        .map(|s| {
+            let mappings = all_mappings
+                .iter()
+                .filter(|m| m.mcp_name == s.name)
+                .map(|m| MappingEntry {
+                    orca_tool: m.orca_tool.clone(),
+                    mcp_name: m.mcp_name.clone(),
+                    external_tool: m.external_tool.clone(),
+                    match_type: m.match_type.clone(),
+                    confidence: m.confidence,
+                    enabled: m.enabled,
+                })
+                .collect();
+            McpServerRow {
+                server: McpServerEntry {
+                    name: s.name,
+                    command: s.command,
+                    args: s.args,
+                    env: s.env,
+                    enabled: s.enabled,
+                },
+                mappings,
+            }
         })
         .collect();
-    Ok(ListMcpServersOutput { servers })
+    Ok(McpListOutput { servers: rows })
 }
 
-/// [MUTATES STATE] Add or update an MCP server in orca.db. Use when registering a new MCP server for orca to federate.
-#[orca_tool(domain = "mcp", verb = "create")]
-async fn add_mcp_server(
-    args: AddMcpServerArgs,
+// ═══════════════════════════════════════════════════════════════════════════
+// mcp.detail — one server + mappings + live tool advertisement
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct McpDetailArgs {
+    /// Server name. Omit to return the full federated tool catalogue across all servers.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct McpDetailOutput {
+    /// Populated when `name` was supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<McpServerRow>,
+    /// Live tool advertisement. When `name` is set, only that server's tools;
+    /// when omitted, every registered server's tools.
+    pub tools: Vec<McpToolEntry>,
+}
+
+#[orca_tool(domain = "mcp", verb = "detail")]
+async fn mcp_detail(
+    args: McpDetailArgs,
     _ctx: &contract::ToolCtx,
-) -> anyhow::Result<McpServerMutationResult> {
-    let row = db::mcp_servers::ServerRow {
-        name: args.name.clone(),
-        command: args.command,
-        args: args.args.unwrap_or_default(),
-        env: args.env.unwrap_or_default(),
-        enabled: true,
+) -> anyhow::Result<McpDetailOutput> {
+    let pool = make_mcp_pool();
+    let raw_tools = pool.all_tools().await;
+
+    let filter_name = args.name.as_deref();
+    let tools: Vec<McpToolEntry> = raw_tools
+        .into_iter()
+        .filter_map(|v| {
+            let server = v.get("server").and_then(|s| s.as_str())?.to_string();
+            if let Some(n) = filter_name
+                && server != n
+            {
+                return None;
+            }
+            Some(McpToolEntry {
+                server,
+                name: v
+                    .get("name")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                description: v
+                    .get("description")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                input_schema: v
+                    .get("inputSchema")
+                    .cloned()
+                    .and_then(|x| sj::from_value::<JsonSchemaNode>(x).ok())
+                    .unwrap_or_default(),
+            })
+        })
+        .collect();
+
+    let server = if let Some(name) = filter_name {
+        let conn = db::open_default()?;
+        let servers = db::mcp_servers::list(&conn)?;
+        let s = servers
+            .into_iter()
+            .find(|s| s.name == name)
+            .ok_or_else(|| anyhow::anyhow!("server '{name}' not found"))?;
+        let mappings = db::tool_mappings::list(&conn, name)?
+            .into_iter()
+            .map(|m| MappingEntry {
+                orca_tool: m.orca_tool,
+                mcp_name: m.mcp_name,
+                external_tool: m.external_tool,
+                match_type: m.match_type,
+                confidence: m.confidence,
+                enabled: m.enabled,
+            })
+            .collect();
+        Some(McpServerRow {
+            server: McpServerEntry {
+                name: s.name,
+                command: s.command,
+                args: s.args,
+                env: s.env,
+                enabled: s.enabled,
+            },
+            mappings,
+        })
+    } else {
+        None
     };
-    let conn = db::open_default()?;
-    db::mcp_servers::upsert(&conn, &row)?;
-    Ok(McpServerMutationResult {
-        name: args.name,
-        changed: true,
-    })
+
+    Ok(McpDetailOutput { server, tools })
 }
 
-/// [MUTATES STATE] Remove an MCP server from orca.db by name.
-#[orca_tool(domain = "mcp", verb = "delete")]
-async fn remove_mcp_server(
-    args: RemoveMcpServerArgs,
+// ═══════════════════════════════════════════════════════════════════════════
+// mcp.update — register/update a server, map/unmap a tool, or sync
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct McpUpdateArgs {
+    /// Server name. Required for register/map/unmap/sync (unless `sync_all=true`).
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub name: Option<String>,
+    /// Register-or-update: when set, upserts the server row using `name`+this+args+env.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub command: Option<String>,
+    /// Arg list for the server command.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub args: Option<Vec<String>>,
+    /// Env map (REST/MCP only — CLI K=V parsing not currently supported).
+    #[cfg_attr(feature = "cli", arg(skip))]
+    pub env: Option<HashMap<String, String>>,
+
+    /// Tool mapping: set `map_orca_tool` + `map_external_tool` (uses `name` as the server).
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub map_orca_tool: Option<String>,
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub map_external_tool: Option<String>,
+    /// Remove a tool mapping by orca tool name.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub unmap_orca_tool: Option<String>,
+
+    /// Auto-discover and map tools. Requires either `name` or `sync_all=true`.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub sync: bool,
+    /// When set with `sync`, runs against every registered server.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub sync_all: bool,
+    /// Fuzzy-match threshold for `sync` (default 0.8).
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub sync_threshold: Option<f64>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct McpUpdateOutput {
+    /// Notes per applied sub-operation.
+    pub applied: Vec<String>,
+    /// Populated when `sync` ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SyncToolsOutput>,
+}
+
+/// [MUTATES STATE] Register/update a server, add or remove a tool mapping,
+/// and/or run a tool sync. Multiple sub-operations can be combined.
+#[orca_tool(domain = "mcp", verb = "update")]
+async fn mcp_update(
+    args: McpUpdateArgs,
     _ctx: &contract::ToolCtx,
-) -> anyhow::Result<McpServerMutationResult> {
+) -> anyhow::Result<McpUpdateOutput> {
+    let mut out = McpUpdateOutput::default();
+    let conn = db::open_default()?;
+
+    if let Some(command) = &args.command {
+        let name = args
+            .name
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("name required to register a server"))?;
+        let row = db::mcp_servers::ServerRow {
+            name: name.to_string(),
+            command: command.clone(),
+            args: args.args.clone().unwrap_or_default(),
+            env: args.env.clone().unwrap_or_default(),
+            enabled: true,
+        };
+        db::mcp_servers::upsert(&conn, &row)?;
+        out.applied.push(format!("server-upserted:{name}"));
+    }
+
+    match (
+        args.map_orca_tool.as_deref(),
+        args.map_external_tool.as_deref(),
+    ) {
+        (Some(orca), Some(ext)) => {
+            let name = args
+                .name
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("name required to create a mapping"))?;
+            let servers = db::mcp_servers::list(&conn)?;
+            if !servers.iter().any(|s| s.name == name) {
+                anyhow::bail!("MCP server '{name}' not registered");
+            }
+            db::tool_mappings::upsert(
+                &conn,
+                &db::tool_mappings::MappingRow {
+                    orca_tool: orca.to_string(),
+                    mcp_name: name.to_string(),
+                    external_tool: ext.to_string(),
+                    match_type: "explicit".to_string(),
+                    confidence: None,
+                    enabled: true,
+                },
+            )?;
+            out.applied.push(format!("mapping:{orca}->{name}:{ext}"));
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            anyhow::bail!("map_orca_tool and map_external_tool must be set together");
+        }
+        (None, None) => {}
+    }
+
+    if let Some(orca) = &args.unmap_orca_tool {
+        let changed = db::tool_mappings::remove(&conn, orca)?;
+        out.applied.push(format!(
+            "unmapped:{orca}:{}",
+            if changed { "yes" } else { "absent" }
+        ));
+    }
+
+    if args.sync {
+        let threshold = args.sync_threshold.unwrap_or(0.8);
+        let servers = db::mcp_servers::list(&conn)?;
+        let targets: Vec<&db::mcp_servers::ServerRow> = if args.sync_all {
+            servers.iter().collect()
+        } else {
+            let name = args
+                .name
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("sync requires name or sync_all=true"))?;
+            vec![
+                servers
+                    .iter()
+                    .find(|s| s.name == name)
+                    .ok_or_else(|| anyhow::anyhow!("server '{name}' not found"))?,
+            ]
+        };
+        let results = targets
+            .into_iter()
+            .map(|s| match mcp_sync_server(s, threshold) {
+                Ok((added, skipped)) => SyncToolsServerEntry {
+                    server: s.name.clone(),
+                    added: added as u32,
+                    skipped: skipped as u32,
+                    error: None,
+                },
+                Err(e) => SyncToolsServerEntry {
+                    server: s.name.clone(),
+                    added: 0,
+                    skipped: 0,
+                    error: Some(e.to_string()),
+                },
+            })
+            .collect();
+        out.sync = Some(SyncToolsOutput { results });
+        out.applied.push("sync".to_string());
+    }
+
+    if out.applied.is_empty() {
+        anyhow::bail!("no update operation specified");
+    }
+    Ok(out)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// mcp.delete — remove a server (cascades mappings)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct McpDeleteArgs {
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct McpDeleteOutput {
+    pub name: String,
+    pub changed: bool,
+}
+
+#[orca_tool(domain = "mcp", verb = "delete")]
+async fn mcp_delete(
+    args: McpDeleteArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<McpDeleteOutput> {
     let conn = db::open_default()?;
     let changed = db::mcp_servers::remove(&conn, &args.name)?;
-    Ok(McpServerMutationResult {
+    Ok(McpDeleteOutput {
         name: args.name,
         changed,
     })
 }
 
-/// [MUTATES STATE] Map an orca tool name to a specific tool on a registered MCP server.
-#[orca_tool(domain = "mcp.mapping", verb = "create")]
-async fn mcp_mapping_create(
-    args: MapToolArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<MapToolResult> {
-    let conn = db::open_default()?;
-    let servers = db::mcp_servers::list(&conn)?;
-    if !servers.iter().any(|s| s.name == args.name) {
-        anyhow::bail!(
-            "MCP server '{}' not found — register it first with add_mcp_server",
-            args.name
-        );
-    }
-    let row = db::tool_mappings::MappingRow {
-        orca_tool: args.orca_tool.clone(),
-        mcp_name: args.name.clone(),
-        external_tool: args.external_tool.clone(),
-        match_type: "explicit".to_string(),
-        confidence: None,
-        enabled: true,
-    };
-    db::tool_mappings::upsert(&conn, &row)?;
-    Ok(MapToolResult {
-        orca_tool: args.orca_tool,
-        mcp_name: args.name,
-        external_tool: args.external_tool,
-    })
+// ═══════════════════════════════════════════════════════════════════════════
+// mcp.run — execute a tool on a registered MCP server (RPC verb)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct McpRunArgs {
+    pub server: String,
+    pub tool: String,
+    /// Opaque MCP `tools/call` arguments — upstream-defined per the MCP spec.
+    #[serde(default)]
+    #[cfg_attr(feature = "cli", arg(skip))]
+    pub args: Option<sj::Map<String, sj::Value>>,
 }
 
-/// [MUTATES STATE] Remove a tool mapping from orca.db.
-#[orca_tool(domain = "mcp.mapping", verb = "delete")]
-async fn mcp_mapping_delete(
-    args: UnmapToolArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<UnmapToolResult> {
-    let conn = db::open_default()?;
-    let changed = db::tool_mappings::remove(&conn, &args.orca_tool)?;
-    Ok(UnmapToolResult {
-        orca_tool: args.orca_tool,
-        changed,
-    })
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpRunOutput {
+    pub content: Vec<McpContent>,
+    pub is_error: bool,
+    /// Opaque structured payload — upstream-defined per the MCP spec.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<sj::Value>,
 }
 
-/// [MUTATES STATE] Auto-discover and map tools from registered MCP servers. Provide name or set all=true.
-#[orca_tool(domain = "mcp", verb = "sync")]
-async fn sync_tools(
-    args: SyncToolsArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<SyncToolsOutput> {
-    let threshold = args.threshold.unwrap_or(0.8);
-    let all = args.all.unwrap_or(false);
-    let name = args.name.as_deref();
-    if !all && name.is_none() {
-        anyhow::bail!("provide name or set all=true");
-    }
-    let conn = db::open_default()?;
-    let servers = db::mcp_servers::list(&conn)?;
-    let targets: Vec<&db::mcp_servers::ServerRow> = if all {
-        servers.iter().collect()
-    } else {
-        let n = name.expect("checked above");
-        vec![
-            servers
-                .iter()
-                .find(|s| s.name == n)
-                .ok_or_else(|| anyhow::anyhow!("server '{n}' not found"))?,
-        ]
-    };
-    let mut results = Vec::new();
-    for s in targets {
-        match mcp_sync_server(s, threshold) {
-            Ok((added, skipped)) => results.push(SyncToolsServerEntry {
-                server: s.name.clone(),
-                added: added as u32,
-                skipped: skipped as u32,
-                error: None,
-            }),
-            Err(e) => results.push(SyncToolsServerEntry {
-                server: s.name.clone(),
-                added: 0,
-                skipped: 0,
-                error: Some(e.to_string()),
-            }),
-        }
-    }
-    Ok(SyncToolsOutput { results })
-}
-
-/// List all tool mappings in orca.db, optionally filtered by server name.
-#[orca_tool(domain = "mcp.mapping", verb = "list")]
-async fn mcp_mapping_list(
-    args: ListToolMappingsArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<ListToolMappingsOutput> {
-    let conn = db::open_default()?;
-    let rows = if let Some(n) = args.name.as_deref() {
-        db::tool_mappings::list(&conn, n)?
-    } else {
-        db::tool_mappings::all(&conn)?
-    };
-    let mappings = rows
-        .into_iter()
-        .map(|r| MappingEntry {
-            orca_tool: r.orca_tool,
-            mcp_name: r.mcp_name,
-            external_tool: r.external_tool,
-            match_type: r.match_type,
-            confidence: r.confidence,
-            enabled: r.enabled,
-        })
-        .collect();
-    Ok(ListToolMappingsOutput { mappings })
-}
-
-// ── MCP federation passthrough ──────────────────────────────────────────────
-
-/// List every tool advertised by every registered MCP server (connects on demand).
-#[orca_tool(domain = "mcp.federation", verb = "list-tools")]
-async fn list_mcp_tools(
-    _args: ListMcpToolsArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<ListMcpToolsOutput> {
-    let pool = make_mcp_pool();
-    let raw = pool.all_tools().await;
-    let tools = raw
-        .into_iter()
-        .map(|v| McpToolEntry {
-            server: v
-                .get("server")
-                .and_then(|s| s.as_str())
-                .unwrap_or("")
-                .to_string(),
-            name: v
-                .get("name")
-                .and_then(|s| s.as_str())
-                .unwrap_or("")
-                .to_string(),
-            description: v
-                .get("description")
-                .and_then(|s| s.as_str())
-                .unwrap_or("")
-                .to_string(),
-            input_schema: v
-                .get("inputSchema")
-                .cloned()
-                .and_then(|x| serde_json::from_value(x).ok())
-                .unwrap_or_default(),
-        })
-        .collect();
-    Ok(ListMcpToolsOutput { tools })
-}
-
-/// [MUTATES STATE] Invoke a tool on a registered MCP server. Returns the typed `tools/call` envelope (`{ content, isError, structuredContent? }`).
-#[orca_tool(domain = "mcp.federation", verb = "run", cli = skip)]
-async fn run_mcp_tool(
-    args: RunMcpToolArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<RunMcpToolOutput> {
+/// [MUTATES STATE] Invoke a tool on a registered MCP server. Returns the typed
+/// `tools/call` envelope.
+#[orca_tool(domain = "mcp", verb = "run", cli = skip)]
+async fn mcp_run(args: McpRunArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<McpRunOutput> {
     let arguments = match args.args {
-        Some(m) => Value::Object(m),
-        None => serde_json::json!({}),
+        Some(m) => sj::Value::Object(m),
+        None => sj::json!({}),
     };
     let pool = Arc::new(make_mcp_pool());
     let client = pool
         .get_or_connect(&args.server)
         .await
         .map_err(|e| anyhow::anyhow!("connect to mcp server '{}': {e}", args.server))?;
-    let cid = "tool:run_mcp_tool";
+    let cid = "tool:mcp.run";
     let raw = match client.call_tool(&args.tool, arguments, cid).await {
         Ok(v) => v,
         Err(e) => {
@@ -268,14 +427,11 @@ async fn run_mcp_tool(
     Ok(parse_mcp_call_result(raw))
 }
 
-/// Parse the JSON-RPC `result` value of an MCP `tools/call` response into a
-/// typed envelope. Tolerant of partially-shaped servers: missing fields fall
-/// back to sensible defaults rather than failing the call.
-fn parse_mcp_call_result(raw: Value) -> RunMcpToolOutput {
+fn parse_mcp_call_result(raw: sj::Value) -> McpRunOutput {
     let obj = match raw {
-        Value::Object(m) => m,
+        sj::Value::Object(m) => m,
         other => {
-            return RunMcpToolOutput {
+            return McpRunOutput {
                 content: vec![McpContent {
                     kind: "text".to_string(),
                     text: Some(other.to_string()),
@@ -296,10 +452,10 @@ fn parse_mcp_call_result(raw: Value) -> RunMcpToolOutput {
     let structured_content = obj.get("structuredContent").cloned();
 
     let content = match obj.get("content") {
-        Some(Value::Array(items)) => items
+        Some(sj::Value::Array(items)) => items
             .iter()
             .map(|item| {
-                serde_json::from_value::<McpContent>(item.clone()).unwrap_or_else(|_| McpContent {
+                sj::from_value::<McpContent>(item.clone()).unwrap_or_else(|_| McpContent {
                     kind: item
                         .get("type")
                         .and_then(|v| v.as_str())
@@ -324,7 +480,7 @@ fn parse_mcp_call_result(raw: Value) -> RunMcpToolOutput {
         _ => Vec::new(),
     };
 
-    RunMcpToolOutput {
+    McpRunOutput {
         content,
         is_error,
         structured_content,

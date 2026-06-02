@@ -47,7 +47,7 @@ roadmap stays grounded.
 | Config store (SQLite, history, schemas, owner-routing) | `projects/db/src/config_store.rs` + `projects/db/migrations/` |
 | Pod mesh: mTLS, mDNS discovery, peer pairing, dispatch, cert rotation | `projects/pod` |
 | Secrets store (encrypted SQLite) + auth + PKI (CA, peer mint/rotate) | `projects/auth/src/{secrets.rs, pki.rs}` |
-| Topology collector (proxmox CT/VM + docker containers, drift-aware) | `projects/system/src/topology/` |
+| Topology collector (proxmox CT/VM + docker containers, drift-detecting — never applies; notification only per the user-triggered-changes rule) | `projects/system/src/topology/` |
 | Proxmox API plugin (VM/LXC list, snapshot, `lxc_exec`) | `projects/plugins/proxmox` |
 | NFS + SMB client plugins (mount, probe, lazy unmount, failover) | `projects/plugins/{nfs,smb}` |
 | Docker / Dockge / Unraid GraphQL / Home Assistant collectors | `projects/plugins/{docker,dockge,unraid,homeassistant}` |
@@ -82,13 +82,15 @@ state; cannot apply. Topology collector exists.
 registry, `pct set` apply path, bind-source probe, inner-service
 gate, tmpfs scratch model, restore-aware wrapper, drift detection
 periodic job, `orca proxmox guest {drift,reconcile,start,stop,restore}`
-verbs. Retire `proxmox/lxcs/*.sh` (njord.sh etc).
+verbs.
 
 **Exit criteria** — `orca proxmox guest reconcile <vmid>` is a
 no-op on every CT in meerkat. `pct start` via orca only succeeds
 when inner service comes up healthy. `vzrestore` recorded in audit
 DB with PBS snapshot id. Drift detection has zero diverged keys
-across the fleet for 7 consecutive days.
+across the fleet for 7 consecutive days. `proxmox/lxcs/*.sh`
+(njord.sh etc.) retired under the parity rule once exit criteria
+are met on every meerkat CT.
 
 **Blocks on** — None. Config store is shipped; this is greenfield
 on top.
@@ -103,69 +105,105 @@ parity gap.
 
 ---
 
-### 1.2 Host update lifecycle
+### 1.2 Host update lifecycle (including drivers)
 
-**Scope** — `orca host update {list,plan,apply}` per-distro
-(`apt`/`apk`/`dnf`/`pacman`/`pkg`/`opkg`), declarative
-`config/<host>/updates.toml` (schedule, security-apply, hold,
-reboot-window), reboot/shutdown with ordered pre-hook chain
-(drain caddy → stop docker → unmount nfs), distributed rolling
-reboots with health gate.
+**Scope** — Single `system.update` tool surface covers **all**
+update-class work on a host per the one-tool-per-resource rule
+(`feedback_one_tool_per_resource.md`):
 
-**Shipped** — Orca self-update including OS-update wiring lives
-in `projects/system/src/update.rs` (single `system.update` tool
-covers all update concerns per `feedback_one_tool_per_resource.md`).
-Host-level package-manager drivers and declarative update policy
-are extension surface, not greenfield.
+1. **Orca self-update** (shipped).
+2. **OS package updates** — per-distro drivers
+   (`apt`/`apk`/`dnf`/`pacman`/`pkg`/`opkg`) behind one verb,
+   declarative `config/<host>/updates.toml` (schedule,
+   security-apply, hold, reboot-window).
+3. **Drivers** — GPU + accelerator drivers under the same
+   surface, declarative `config/<host>/drivers.toml`. DKMS-aware
+   kernel coordination (post-kernel-upgrade rebuild + verify
+   load — the load-bearing piece; silent failed rebuilds today
+   produce ghost outages). Container Toolkit hook into docker
+   daemon config. NVIDIA / AMD (ROCm) / Intel (compute-runtime,
+   media-driver) as the v1 set; NVIDIA first (highest churn,
+   biggest operator pain).
+4. **Reboot / shutdown** with ordered pre-hook chain (drain
+   caddy → stop docker → unmount nfs), distributed rolling
+   reboots with health gate via §1.5.
 
-**Missing** — Per-distro package-manager drivers behind one verb,
-TOML policy schema, reboot hook chain executor, rolling selector.
+Kernel upgrade is the integration point between (2) and (3) —
+package-manager bumps kernel, driver pin must rebuild + verify
+load before the host comes back into rotation.
+
+**Shipped** — `system.update` tool surface; orca self-update
+path inside it (`projects/system/src/update.rs`). Per-distro OS
+drivers, driver-lifecycle subsystem, policy schema, and reboot
+orchestration are the gap.
+
+**Missing** — Per-distro package-manager drivers; driver
+subsystem (DKMS rebuild + verify, Container Toolkit hook, status
+with kernel-module-loaded indicator); TOML policy schemas for
+updates.toml + drivers.toml; reboot hook chain executor; rolling
+selector; drift catches driver/kernel mismatch.
 
 **Exit criteria** — `orca host update apply --reboot if-needed`
-drains caddy, stops docker, reboots, comes back, verifies health,
-on every host. `orca host reboot --selector "role=docker" --strategy rolling`
-works across the fleet without manual sequencing.
+drains caddy, stops docker, reboots, comes back, **verifies
+driver load against pin**, verifies inner-service health, on
+every host. Driver pin survives kernel upgrade. `orca host
+reboot --selector "role=docker" --strategy rolling` works across
+the fleet without manual sequencing.
 
 **Blocks on** — None.
 
-**Detail** — `docs/planned/host-lifecycle.md` §2–§3.
+**Detail** — `docs/planned/host-lifecycle.md` §1–§3.
 
 ---
 
 ### 1.3 Host install hardening
 
 **Scope** — `scripts/install.sh` + `projects/system/src/install.rs`
-already do the heavy lifting. Hardening list: idempotent
-re-install (re-running install does not churn pubkeys or systemd
-unit), pair-token rotation (today pairing codes live in journal
-grep — needs first-class storage + rotation), per-platform unit
-templates (currently linux-user-systemd; Unraid uses
-`/mnt/user/appdata/orca/bin/` per `project_unraid_persistence_via_appdata.md`),
-release-artifact verification (sigstore/cosign vs minisign
-decision still open per `project_security_hardening_v1` H1
-deferred), bootstrap.toml loader for first-run repo+app provisioning.
+already do the heavy lifting. The whole first-run story is
+**install + (optionally) restore from backup** — no separate
+`bootstrap.toml` declarative pre-config file. A fresh host runs
+install to get into the pod, and either:
+(a) starts empty and is configured by an operator running normal
+    orca commands (envs/secrets project in, reconcilers apply,
+    etc.), or
+(b) restores from a §1.8 backup of a prior host of the same role.
 
-**Shipped** — `install.sh` pull + push paths (`scripts/deploy-host.sh`),
-orca service user with linger, root-owned authorized_keys via
-`--admin-pubkey`, automatic `daemon install` + PKI ca-init at
-end of root flow, channel pin (`~/.orca/channel`).
+Hardening list:
 
-**Missing** — Bootstrap.toml schema + first-run flow, pair-token
-table (replacing log-grep), unit-template per OS variant, signed
-binary verification, `orca bootstrap doctor`.
+- Idempotent re-install (re-running install does not churn
+  pubkeys or systemd unit).
+- Pair-token rotation (today pairing codes live in journal grep
+  — needs first-class storage + rotation).
+- Per-platform unit templates (currently linux-user-systemd;
+  Unraid uses `/mnt/user/appdata/orca/bin/` per
+  `project_unraid_persistence_via_appdata.md`).
+- Release-artifact verification (sigstore/cosign vs minisign —
+  see open decision #1).
+- NTP prereq landing (chrony or systemd-timesyncd; surface made
+  first-class in §1.15).
 
-**Exit criteria** — Fresh host bootstraps with one ssh + a
-`bootstrap.toml` reference, no log-grep for pairing codes, signed
-binary verified before exec, re-running install on a paired host
-is a true no-op.
+**Shipped** — `install.sh` pull + push paths
+(`scripts/deploy-host.sh`), orca service user with linger,
+root-owned authorized_keys via `--admin-pubkey`, automatic
+`daemon install` + PKI ca-init at end of root flow, channel pin
+(`~/.orca/channel`).
 
-**Blocks on** — None. Note: `bootstrap.toml` repo discovery is
-enhanced by `orca-v1-scope.md` §3.6 (GitHub App, deferred) but not
-required; install + a manually-pointed `bootstrap.toml` works
-without it.
+**Missing** — Pair-token table (replacing log-grep), unit-template
+per OS variant, signed binary verification, `orca bootstrap
+doctor`, NTP prereq landing.
 
-**Detail** — `docs/install-runbook.md` + `docs/planned/install-bootstrap.md` +
-`docs/planned/orca-v1-scope.md` §3.5–§3.6.
+**Exit criteria** — Fresh host bootstraps with one ssh, no
+log-grep for pairing codes, signed binary verified before exec,
+re-running install on a paired host is a true no-op. A fresh
+host of an existing role can be restored from §1.8 backup
+(install → `pod add --token` → `orca <role> restore <snapshot>`)
+with zero hand-edited config files.
+
+**Blocks on** — None.
+
+**Detail** — `docs/install-runbook.md` +
+`docs/planned/install-bootstrap.md` (to be revised to drop
+bootstrap.toml).
 
 ---
 
@@ -186,7 +224,7 @@ schema, retention policy, fleet-aggregate drift view in UI.
 drift within one tick (≤10 min). Operator can see "12 hosts have
 driver drift, 3 CTs have config drift" at a glance.
 
-**Blocks on** — §1.1 (first concrete consumer); §1.6 driver state.
+**Blocks on** — §1.1 (first concrete consumer); §1.2 driver state.
 
 ---
 
@@ -208,56 +246,62 @@ trait, post-lifecycle gate (single retry + alert), wiring into
 reconcile + reboot paths.
 
 **Exit criteria** — A CT restart by orca never returns success
-when the inner service is `enabled but inactive`. Plex/jellyfin/
-sonarr/etc. all report through one verb.
+when the inner service is `enabled but inactive`. The generic
+primitive exists, with **at least one service wired as proof**
+(plex on njord is the natural first consumer). Full
+plex/jellyfin/sonarr/etc. coverage is Phase 2 service-surface
+work that consumes this primitive.
 
 **Blocks on** — §1.1.
 
 ---
 
-### 1.6 Driver lifecycle
+### 1.6 — Drivers (folded into §1.2)
 
-**Scope** — `orca host driver {list,install,update,remove,status}`
-with declarative `config/<host>/drivers.toml`. DKMS-aware kernel
-coordination (post-kernel-upgrade rebuild + verify load).
-Container Toolkit hook into docker daemon config. NVIDIA / AMD
-(ROCm) / Intel (compute-runtime, media-driver) as the v1 set.
-
-**Shipped** — Nothing yet.
-
-**Missing** — Everything. NVIDIA first (highest churn, biggest
-operator pain). DKMS verification step is the load-bearing piece —
-silent failed rebuilds today produce ghost outages.
-
-**Exit criteria** — Driver pin survives kernel upgrade. Status
-shows kernel-module-loaded indicator. Drift catches mismatch.
-
-**Blocks on** — Phase 1.2 (kernel upgrade is a host-update event;
-pin coordination needs both sides).
-
-**Detail** — `docs/planned/host-lifecycle.md` §1.
+Driver lifecycle is part of `system.update` per the
+one-tool-per-resource rule. Scope, exit criteria, and DKMS
+coordination live in §1.2. Slot kept to preserve numbering.
 
 ---
 
-### 1.7 Storage-gateway server-side reconciler
+### 1.7 Storage server-side — declarative shares + runtime health
 
-**Scope** — Today `projects/plugins/{nfs,smb}` are client-only.
-Tyr (10.10.10.29) needs declarative NFS exports + smb.conf + Avahi
-+ wsdd as a single share spec: one TOML row produces NFS export +
-SMB share with fruit + mDNS advertise + WSD broadcast for
-cross-platform discovery (Mac/Win/Linux).
+**Scope** — Full storage-server surface, not just declaration.
+Today `projects/plugins/{nfs,smb}` are client-only and meerkat
+ships a shell `nfs-monitor` script (`compose/nfs-monitor/`) that
+covers gateway re-export health. Orca absorbs both:
 
-**Shipped** — Client side.
+1. **Declarative reconciler** — one share-spec TOML row produces
+   NFS export + SMB share (fruit defaults) + Avahi advertise +
+   WSD broadcast for cross-platform discovery (Mac/Win/Linux).
+   Gateway-mode detection (a host can be both client and server
+   for different roots).
+2. **Runtime health + failover** (was nfs-monitor) — periodic
+   mountpoint liveness on backing pools, `exportfs -ra` refresh
+   on change, read-only failover when a backend pool dies, drift
+   event when re-export state diverges from desired. Same
+   primitive runs on tyr today; the containerized-orca deploy
+   target (Phase 2) runs the same binary, so the runtime-health
+   surface is inherited unchanged — no second implementation.
+
+**Shipped** — Client side (`projects/plugins/{nfs,smb}`). Runtime
+health is a meerkat shell script (`nfs-monitor`), not in orca.
 
 **Missing** — Server-side reconciler for exports/smb.conf/Avahi/wsdd,
-share TOML schema, gateway-mode detection (a host is both client
-and server for different roots), declarative SMB+fruit defaults.
+share TOML schema, gateway-mode detection, declarative SMB+fruit
+defaults, runtime mountpoint probe + auto-re-export refresh +
+read-only failover, drift event emission to §1.20.
 
 **Exit criteria** — Tyr's `/srv/pool/*` exports + shares + mDNS +
 wsdd are reconciled from `config/tyr/shares.toml` with zero
-hand-edited config files on the host.
+hand-edited config files on the host. Backend-pool death triggers
+read-only failover within one tick and emits a `requires_ack`
+event via §1.20. `compose/nfs-monitor/` retired under the parity
+rule.
 
-**Blocks on** — None.
+**Blocks on** — None for the reconciler. Runtime health emits
+through §1.20 (notifications) — degrades gracefully if §1.20 not
+yet shipped (logs only).
 
 **Detail** — `docs/planned/storage-shares.md`. See meerkat memory:
 `project_tyr_storage_gateway.md`, `project_crossplatform_shares.md`,
@@ -301,8 +345,9 @@ but not orchestrated.
 
 **Missing** — pbs plugin (CRUD over VM/CT snapshots, retention,
 prune), service-native backup verbs registered into the canonical
-`orca <service> backup` surface, restore drill harness, offsite
-sync.
+`orca <service> backup` surface, restore drill harness. (Offsite
+*destination* lives in §1.21 orca-cloud; §1.8 owns producing the
+streams, §1.21 owns receiving them.)
 
 **Exit criteria** — Every service in meerkat has `orca <name>
 backup` + `orca <name> restore` working, with a drill fixture in
@@ -329,7 +374,8 @@ Push-based pod subscribe for realtime (`feedback_optimistic_ui_updates`,
 puller.
 
 **Shipped** — `host_status`, `scheduler_runs`, topology collectors,
-ntfy push. UI tree view roadmap'd in `project_ui_topology_views.md`.
+ntfy push. UI tree+table views designed in
+`docs/planned/ui-topology-views.md`.
 
 **Missing** — Per-host retention policy enforcement (today metrics
 can grow unbounded), drift aggregate view, lifecycle-event timeline
@@ -344,19 +390,78 @@ the per-host policy.
 
 ---
 
-### 1.10 Schema-evolution discipline
+### 1.10 Config-as-code — bidirectional GitHub sync
 
-**Scope** — Already practiced (per `project_db_squash`, the v2
-baseline migration). Make sure docs reflect: in-repo migrations
-for schema changes, never down-migrations that re-insert removed
-names, parity rule before any retirement.
+**Core goal.** Orca is the system; the operator's specific
+implementation lives in a **thin configs-as-code github repo**
+(meerkat is one such repo — the user's own instance — but orca
+itself is generic; any operator runs their own equivalent).
+Bidirectional sync between orca state and the github repo is a
+first-class capability.
 
-**Shipped** — Practice. Migrations live at `projects/db/migrations/`.
+**Two directions:**
 
-**Missing** — Doc alignment only.
+1. **orca → github** — Every operator-triggered change made
+   through orca (CLI / MCP / UI / WASM) that modifies declared
+   state writes a commit to the linked github repo. Each commit
+   carries the operator identity, the change reason, and the
+   `change_id` from the §1.11 apply flow. Branch-per-environment
+   if the operator wants it; default is direct-to-main.
+2. **github → orca** — A push to the linked branch is detected
+   (webhook or polled fetch on a tick), diffed against current
+   declared state, and surfaced as a pending change set. **No
+   auto-apply** per the HARD RULE — drift detection + §1.20
+   notification only; operator runs `orca apply <change_id>`.
 
-**Exit criteria** — `docs/planned/schema-evolution.md` matches
-shipped behavior. Hard rules live in this ROADMAP's "Cross-cutting standing rules" section.
+The repo holds **thin configs only** — no data, no cleartext
+secrets (handle references only per §1.11), no per-stack
+volumes. Backups (§1.8) handle data; the repo handles intent.
+
+**Scope:**
+
+- Repo binding: `orca config repo add <git-url>` records the
+  remote + auth (deploy key or GitHub App token via §1.11).
+- One-way bootstrap: `orca config repo import` accepts an
+  existing repo of compose stacks + per-host configs (today's
+  meerkat) and walks it into declared state.
+- Outbound writer: every apply persists the resulting state
+  diff as a commit. Atomicity per change_id.
+- Inbound watcher: GitHub webhook receiver (or polled fetch
+  every N minutes for hosts behind NAT without a tunnel), diff
+  against live, emit pending-change set.
+- Conflict policy: github push and an in-flight orca apply
+  both touching the same file → §1.20 ack-required event;
+  operator picks a side.
+- Repo-side schema: `config/<host>/*.toml` is the canonical
+  layout (consistent with §1.2 updates.toml, §1.6 drivers.toml
+  folded into §1.2, §1.7 shares.toml, §1.14 dns/firewall/dhcp,
+  §1.16 power.toml).
+- Identity: commits use the orca operator identity (§1.11
+  unified user identity), not a service account, so audit
+  trails go through to GitHub.
+
+**Shipped** — Nothing. Today meerkat is hand-edited; orca writes
+to its local config store with no remote.
+
+**Missing** — Repo binding verbs, outbound commit writer,
+inbound watcher (webhook + polled), conflict-resolution UX,
+import path for existing repos, schema for repo-side TOML
+layout.
+
+**Exit criteria** — `orca config repo add <url>` links a repo.
+Every operator-triggered apply commits a corresponding change
+to that repo. A direct push to the repo surfaces as a pending
+change in `orca config drift list` within one tick and emits
+a §1.20 event. `orca config repo import` walks today's meerkat
+repo into orca's config store without losing fidelity.
+
+**Blocks on** — §1.11 (apply flow + secret handle resolution
+for git auth), §1.20 (drift notifications + apply prompts).
+Hard prerequisite for retiring hand-edited meerkat under the
+parity rule.
+
+**Detail** — `docs/planned/config-as-code-sync.md` (TBD; create
+when work starts).
 
 ---
 
@@ -402,8 +507,10 @@ view never reveals values). Out-of-band rotation (in any backend)
 emits a pending-change notification listing affected consumers;
 nothing projects until `orca apply`.
 
-**Blocks on.** §1.1 (first concrete consumer); unblocks §1.2, §1.3,
-§1.5, §1.8 — all need real envs/secrets.
+**Blocks on.** Nothing — §1.11 ships standalone. §1.1 is the
+first concrete consumer (per linear work order, §1.11 lands
+*before* §1.1). Unblocks §1.1, §1.2, §1.5, §1.8, §1.14 — all
+need real envs/secrets.
 
 **Detail.** Full design — backend matrix, topology patterns A/B,
 mesh resolution, bundle convention, projection adapters,
@@ -456,8 +563,8 @@ peers); `orca pod rejoin` verb; escrow-quorum safety gate.
 **Exit criteria** — A wiped + reinstalled host can recover its
 identity-anchored secrets without operator re-paste.
 
-**Blocks on** — §1.8 §4.4 (escrow infrastructure), §1.12a (basic
-enrollment).
+**Blocks on** — §1.8 (escrow infrastructure in
+`docs/planned/backup-restore.md` §4.4), §1.12a (basic enrollment).
 
 **Detail** — `docs/planned/discovery-enrollment.md`; escrow in
 `docs/planned/backup-restore.md` §4.4.
@@ -478,9 +585,10 @@ purge.
 hand-driven.
 
 **Missing** — `orca pod remove <host>` verb; reconciler hook for
-"host left the pod" cascade; share re-distribution for escrowed
-keys; safety gate (refuse if removing the host drops escrow
-quorum below k-of-n).
+"host left the pod" cascade; **send-side re-share** of escrowed
+key fragments held by the departing host (the receive-side rejoin
+counterpart lives in §1.12b); safety gate (refuse if removing the
+host drops escrow quorum below k-of-n).
 
 **Exit criteria** — Removing a host is a single verb that leaves
 zero orphaned references in any other reconciler's state. Audit
@@ -511,7 +619,9 @@ OPNsense rule is declared in the config repo. `pool.scottkey.me`
 resolves dual-stack from declaration. Adding a new host gets DNS
 + DHCP + firewall holes in one operator-driven apply.
 
-**Blocks on** — §1.11 (needs secret backend for OPNsense API tokens).
+**Blocks on** — §1.11 (needs secret backend for OPNsense API
+tokens). Apply prompts route through §1.20 (firewall changes are
+the canonical `requires_ack` event class).
 
 ---
 
@@ -536,28 +646,87 @@ fire a drift event; cert / scheduler / audit code can rely on
 
 ---
 
-### 1.16 UPS-coordinated shutdown
+### 1.16 UPS ecosystem — power monitoring, ordered shutdown, recovery boot
 
-**Scope** — Already designed in `host-lifecycle.md` §4 (NUT
-listener on UPS-USB host; broadcast low-battery → ordered shutdown
-across the fleet → UPS-host shuts down last). Surfacing it here
-because it's invisible in the current roadmap.
+**Current state** — UPSs are USB-attached directly to **maple**
+and **willow**. Each host runs its own apcupsd / NUT instance
+and shuts itself down on low battery. Other hosts on the same
+UPS circuits have no awareness — they hard-die when AC drops.
+Battery window per UPS is ~30 min, so there is real time to
+shut the fleet down cleanly if the orchestration exists.
 
-**Shipped** — `host-lifecycle.md` §4 design only.
+**Scope** — A full UPS ecosystem in three layers:
 
-**Missing** — NUT integration plugin (Tier 1), per-host
-declarative shutdown order, dry-run mode, integration with
-update-lifecycle pre-hook chain (§1.2).
+1. **Power topology map** — declarative `config/power.toml`
+   describes which UPS feeds which hosts, which host has the
+   UPS-USB link (the "UPS coordinator" for that circuit), and
+   the per-host **shutdown order** + **boot order** (workloads
+   stop first; storage gateways second; coordinator last;
+   inverse on boot). Reconciler validates the graph (every host
+   maps to at least one UPS, every UPS has exactly one
+   coordinator, no cycles).
+2. **NUT listener + broadcast** — coordinator runs NUT (or
+   apcupsd), watches battery state, broadcasts events
+   (`ac_lost`, `battery_low`, `runtime_below_threshold`) over
+   the mesh to all peers on the same circuit. Peers act on
+   their declared role: workloads start drain hooks, storage
+   gateways flush + go read-only, etc. Coordinator self-shuts
+   last when runtime drops below the per-circuit floor (default
+   3 min reserve so the shutdown command itself has headroom).
+3. **Recovery boot** — when AC returns and the coordinator boots,
+   it issues Wake-on-LAN to its dependents in declared boot
+   order, with a §1.5 inner-service health gate between tiers.
+   Hosts that can't WoL (laptops, hosts with WoL disabled in
+   BIOS) get flagged in the topology map as "manual recovery"
+   so the operator sees what's missing.
 
-**Exit criteria** — Pulling the wall power on the UPS triggers an
-orderly fleet shutdown in declared order; the UPS-host is last;
-power restoration drives the inverse boot order via Wake-on-LAN
-where available.
+The 30 min battery window is the design budget: drain hooks +
+ordered shutdown across the fleet must complete with reserve
+to spare. Dry-run mode (`orca power simulate ac-loss`) walks
+the graph and reports projected runtime cost per host without
+actually shutting anything down.
 
-**Blocks on** — §1.2 (shares the pre-hook executor); §1.5
-(post-boot health gate).
+**Shipped** — Per-host apcupsd/NUT on maple + willow (meerkat
+shell + systemd). No cross-host awareness. `host-lifecycle.md`
+§4 has the original design sketch — superseded by this item's
+scope.
 
-**Detail** — `docs/planned/host-lifecycle.md` §4.
+**Missing** —
+
+- Power-topology TOML schema + reconciler.
+- NUT-integration plugin (Tier 1; one driver shared by apcupsd
+  + NUT since both expose similar event streams).
+- Mesh event class for power events (rides on the dispatch
+  surface that already exists; adds `power.*` event kinds).
+- Per-host drain-hook executor — shared with §1.2 reboot hook
+  chain.
+- WoL sender + per-host MAC + interface declaration; "manual
+  recovery" flag for non-WoL hosts.
+- `orca power {status,simulate,test-shutdown}` verbs.
+- Audit trail: every shutdown/boot triggered by UPS events is
+  recorded with the precipitating UPS state.
+
+**Exit criteria** — Pulling the wall plug on the maple UPS
+shuts the maple-circuit fleet down in declared order within
+budget (workloads → gateways → coordinator), with no hard
+power-offs. AC restoration brings the same hosts back via WoL
+in inverse order, each tier gated on §1.5 health. The willow
+circuit behaves identically. `orca power status` shows AC
+state + estimated runtime + dependent-host list per circuit.
+Per-host apcupsd shell config retired under the parity rule.
+
+**Blocks on** — §1.2 (shared drain-hook executor), §1.5
+(post-boot health gate). Power-topology map can be drafted
+in parallel with §1.1.
+
+**Detail** — `docs/planned/host-lifecycle.md` §4 (to be
+expanded with the three-layer scope above).
+
+**Open decisions** — see open decision #6 (coordinator
+selection per circuit); add: should the coordinator role
+failover if the UPS-USB host itself is offline at AC-loss
+time? (Today: hard-die. Future: secondary peer watches
+heartbeat and acts as backup coordinator — needs design.)
 
 ---
 
@@ -584,7 +753,8 @@ catches divergence). Failover for replicated tiers works without
 manual data movement.
 
 **Blocks on** — §1.7 (share-side schema), §1.11 (replication
-credentials).
+credentials). Hard prerequisite for §1.21 orca-cloud (offsite
+replica enforces the same policy).
 
 **Detail** — `docs/planned/storage-replication.md`.
 
@@ -594,7 +764,7 @@ credentials).
 
 **Scope** — Health-check verb: peer reachability, cert expiry,
 drift summary, secret-backend reachability. Pre-flight check
-before any reconciler `apply`. Sizing: M.
+before any reconciler `apply`.
 
 **Shipped** — Nothing first-class. Today health is surfaced
 piecemeal (`orca pod peers`, install-report, manual log grep).
@@ -605,7 +775,9 @@ registry, JSON output, severity levels, integration into
 
 **Exit criteria** — `orca system doctor` returns a single
 pass/fail per host with itemized failures; reconciler `apply`
-refuses to start with `doctor` failures unless `--force`.
+refuses to start with `doctor` failures unless `--force`. A
+failing check is the canonical `requires_ack` event class for
+§1.20 (notifications).
 
 **Blocks on** — None (consumes shipped primitives).
 
@@ -615,7 +787,7 @@ refuses to start with `doctor` failures unless `--force`.
 
 **Scope** — Promote the existing `cmd_uninstall_report` helper
 (`projects/system/src/install.rs:191`) to a proper `#[orca_tool]`
-surface. Pairs with §1.13 host decommission. Sizing: S.
+surface. Pairs with §1.13 host decommission.
 
 **Shipped** — In-process helper exists; no tool surface.
 
@@ -629,6 +801,95 @@ all four surfaces; symmetric with `system.install`.
 
 ---
 
+### 1.20 Notifications — unified dispatcher + escalation
+
+**Scope** — `projects/notify/` crate exposing one generic `Event`
+shape and a single `Backend` trait. Multi-backend dispatch (ntfy,
+email, Slack, Discord, SMS, generic webhook) all rendering the
+same event. **Escalation chains** for events that require ack:
+Discord first, email if no ack, SMS / Pagerduty after that.
+**Ack ≠ approve** — acking silences escalation; approving
+triggers `orca apply`. Both surfaces can coexist on one event.
+
+Drives the user-facing edge of every Phase 1 capability: drift
+(§1.4), rotation (§1.11), lifecycle events (§1.9), host updates
+(§1.2), restore outcomes (§1.8), reconciler apply prompts
+(§§1.1/1.7/1.14), inner-service health (§1.5).
+
+**Shipped** — `projects/plugins/ntfy/` thin library — one
+backend, no abstraction, no escalation. Heartbeat + send only.
+
+**Missing** —
+
+- `projects/notify/` crate scaffold + `Event` + `Backend` trait
+  + dispatcher.
+- Rendering matrix per backend (Slack Block Kit, Discord embeds,
+  email html, ntfy headers, SMS truncation).
+- Routing engine (class / severity / host → backends; TOML
+  declarative).
+- Escalation engine: `Event` carries `requires_ack` / `retrigger`
+  / `escalation`; each `EscalationStep` has its own `retrigger`
+  (re-fire cadence at current step) + `advance_after` (time before
+  moving to next step); `max_total` ceiling on the chain;
+  persistent `(event_id, step_index, last_fired_at, step_entered_at)`
+  in SQLite (survives daemon restart); ack-stops-chain across all
+  surfaces; parallel-step ack coordination; 5-minute de-dupe
+  window on `(class, host, source, correlation)`. Events with
+  `requires_ack` but no `escalation` re-fire on `Event.retrigger`
+  forever (bounded by 24h default ceiling).
+- Backends: ntfy (port existing code), email (SMTP), Slack
+  (webhook + Events API), Discord (webhook + Interactions), SMS
+  (Twilio first), generic webhook.
+- **Native push notifications** (deferred until Phase 3 mobile +
+  PWA apps exist; sender lives in §1.21 orca-cloud): Web Push
+  (VAPID) for PWA, APNs for iOS, FCM for Android — same `Event`
+  shape, same `Backend` trait, action buttons map to the
+  platform's interactive-notification surface. Per-operator
+  device-token registration via `orca user device link <platform>
+  <token>`. Tracked in §1.20's backend list so the abstraction
+  is push-aware from day one even though the adapters land
+  alongside the apps.
+- Authenticated apply-links for non-interactive surfaces (email,
+  SMS, mobile push) — short-TTL signed URLs into the same `orca
+  apply` path as CLI. **Single signer shared with §1.21
+  orca-cloud** (push backends mint links via the same primitive;
+  no second link-signer).
+- `orca ack <event_id>` CLI verb + UI dismiss + interaction
+  endpoints for chat platforms.
+- `orca user link <backend> <id>` for mapping chat identities to
+  orca operators (interactive backends need this).
+
+**Exit criteria** —
+
+- Every Phase 1 emitter (drift, rotation, lifecycle, reconciler)
+  calls `notify::emit(Event)` — no caller knows or names a
+  specific backend.
+- Critical events with `requires_ack = true` escalate through
+  the configured policy and **always** reach the operator
+  within `max_total`, or terminate gracefully with a "gave up"
+  message.
+- Acking on any surface (button, link, SMS reply, CLI, UI) stops
+  the chain across all surfaces; other surfaces get an
+  "Acked via X by @user" update.
+- `projects/plugins/ntfy/` is retired; ntfy is `projects/notify/backends/ntfy.rs`.
+  Phase 0 shipped-table row for ntfy is updated to point at
+  `projects/notify/` as part of this item's close-out.
+- No special-case rendering for email — it follows the same
+  `Event` shape, with action buttons rendered as authenticated
+  signed links.
+
+**Blocks on** — None for the core dispatcher + non-push backends
+(ntfy / email / Slack / Discord / SMS / webhook). The push
+backends (Web Push / APNs / FCM) block on §1.21 (orca-cloud as
+the publicly-reachable sender) and on Phase 3 (mobile + PWA apps
+exist to receive). Can ship the dispatcher in parallel with
+reconciler work since emitters land progressively as each Phase 1
+item closes.
+
+**Detail** — `docs/planned/notifications.md`.
+
+---
+
 ## Cross-cutting cleanup (Phase 1)
 
 Tracked-but-not-yet-fixed code issues. **No code edits without
@@ -636,7 +897,7 @@ a roadmap discussion** — items here are roadmap entries only.
 
 ### CC.1 — Remove meerkat hostnames from orca core test fixtures
 
-Sizing: S. Pure rename. Files:
+Pure rename. Files:
 
 - `projects/db/src/plugin_tools.rs` L221-265 — `sonarr-willow`,
   `radarr-maple`, `sonarr-maple`.
@@ -645,17 +906,6 @@ Sizing: S. Pure rename. Files:
 
 Replace with neutral `host-a`, `host-b`, etc. Enforces
 `feedback_no_rebuy_or_meerkat_in_orca.md`.
-
-### CC.2 — Move `projects/plugins/ntfy/` out of `plugins/`
-
-Sizing: S. Per `projects/plugins/ntfy/src/lib.rs` L1-2: "no
-plugin scaffolding — this is a library." Move to
-`projects/utils/ntfy/` or fold into `projects/app-kit/`. Update
-workspace `Cargo.toml` + consumers. Drop ntfy from Tier 1
-enumeration in `docs/planned/plugin-architecture.md` (done in
-this audit).
-
----
 
 ## Phase 2 — Service surface parity
 
@@ -683,9 +933,18 @@ Headline items, in roughly the order they unblock fleet operation:
 - **OSS media plugins** — arr stack / qBittorrent / SABnzbd as
   first-party plugins under a separate identity per
   `feedback_oss_media_terminology.md`, `feedback_oss_media_separate_identity.md`.
-- **Unified credentials** — SMB login == orca login, 1Password
-  backend, baseline password rotation. Detail:
-  `docs/planned/secrets-identity.md` + `feedback_unified_credentials.md`.
+- **Unified user identity** — SMB login == orca login (the
+  *identity unification* layer, distinct from §1.11's secret
+  *storage* layer); baseline password rotation policy across the
+  fleet. Detail: `docs/planned/secrets-identity.md` (identity
+  section) + `feedback_unified_credentials.md`.
+- **Alternative deploy targets + orca-cloud offsite** —
+  containerized orca (same binary in Docker) + VPS-hosted
+  orca-cloud as backup destination, escrow holder, and
+  push-notification broker. Deferred until Phase 1 core is
+  solid; full scope captured in orca memory
+  `project_deploy_targets_and_orca_cloud.md`. Promote to
+  `docs/planned/deploy-targets.md` when work begins.
 
 ---
 
@@ -728,18 +987,21 @@ These apply at every phase. Drawn from orca + meerkat memory.
 - **Native backup APIs first** — service-native endpoints before
   volume-tar; restore + drill fixture per source.
   (meerkat `feedback_native_backup_apis.md`)
-- **Clients default to the gateway** — mount `pool.scottkey.me`
-  (failover), never willow/maple directly.
-  (meerkat `feedback_clients_default_gateway.md`)
 - **Storage abstraction, no host names in targets** — backup /
   snapshot targets reference storage-pool names, not hosts.
   (meerkat `feedback_storage_abstraction.md`)
-- **In-repo migrations** — schema changes ship as migrations in
-  `projects/db/migrations/`. No down-migrations that re-insert
-  removed personal/banned names. (orca `feedback_no_data_migrations_for_name_cleanups.md`,
+- **In-repo migrations + schema-evolution discipline** — schema
+  changes ship as migrations in `projects/db/migrations/`. No
+  down-migrations that re-insert removed personal/banned names.
+  Detail: `docs/planned/schema-evolution.md`. (orca
+  `feedback_no_data_migrations_for_name_cleanups.md`,
   `project_db_squash.md`)
-- **No "meerkat" or "rebuy" strings in orca core** — those are
-  separate consumers. (orca `feedback_no_rebuy_or_meerkat_in_orca.md`)
+- **No "meerkat" or "rebuy" strings in orca core** — orca is the
+  system; meerkat is the user's *specific implementation* of orca
+  (a thin configs-as-code github repo). Anyone running orca has
+  their own equivalent. Rebuy is a separate plugin consumer.
+  (orca `feedback_no_rebuy_or_meerkat_in_orca.md`,
+  `feedback_orca_vs_meerkat_identity.md`)
 - **One tool per resource** — `system.update` is the single update
   surface; no per-verb tool families. (orca
   `feedback_one_tool_per_resource.md`)
@@ -757,9 +1019,11 @@ These apply at every phase. Drawn from orca + meerkat memory.
 1. **Release signing — cosign vs minisign.** H1 from
    `project_security_hardening_v1` deferred. Install hardening
    (§1.3) cannot close until the verifier is wired into install.sh.
-2. **Bootstrap.toml repo discovery vs GitHub App.** Detail in
-   `orca-v1-scope.md` §3.5–§3.6. Fresh-host first-run flow needs
-   one or the other resolved.
+2. ~~Bootstrap.toml repo discovery vs GitHub App.~~ **Resolved
+   2026-06-01:** no `bootstrap.toml`. First-run flow is install
+   + (optional) `orca <role> restore <snapshot>` from §1.8
+   backup. GitHub App stays in `orca-v1-scope.md` §3.6 as a
+   deferred Phase 2/3 enhancement, not a Phase 1 blocker.
 3. **Drift policy granularity per LXC.** `preserve-runtime-additions`
    on `mp*` is the njord-style default — is there a CT where we
    want `fail-on-drift` on `mp*` instead? Operator override exists;
@@ -798,30 +1062,53 @@ genuinely needs an upstream's exit criteria.
 4. **§1.11 — envs + secrets projection** (orca-native promoted,
    1Password backend, per-node toggles, mesh resolution,
    `[plugin.secrets]` wiring). Every other reconciler needs this.
-5. **§1.1 — LXC + VM reconciler** (njord-driven; first concrete
+5. **§1.10 — config-as-code github sync** (bidirectional;
+   outbound commits + inbound diff-on-push). Lands right after
+   §1.11 so applies start producing commits from the very first
+   reconciler.
+6. **§1.1 — LXC + VM reconciler** (njord-driven; first concrete
    consumer of the env+secret layer + the user-triggered apply
    pattern).
-6. **§1.4 — drift detection** (per-noun checkers, event schema,
+7. **§1.4 — drift detection** (per-noun checkers, event schema,
    aggregate view). Becomes meaningful once §1.1 emits events.
-7. **§1.5 — inner-service health probes** (post-lifecycle gate
+   Also covers github-push drift via §1.10.
+8. **§1.5 — inner-service health probes** (post-lifecycle gate
    for §1.1 + §1.2).
-8. **§1.2 — host update lifecycle** (per-distro drivers, reboot
-   hook chain, rolling selector).
-9. **§1.6 — driver lifecycle** (DKMS-aware, blocks on §1.2).
-10. **§1.7 — storage-gateway server-side reconciler** (tyr exports
-    + smb.conf + Avahi + wsdd from `config/tyr/shares.toml`).
+9. **§1.2 — host update lifecycle** (per-distro package drivers,
+   GPU/accelerator drivers + DKMS, reboot hook chain, rolling
+   selector — all under one `system.update` surface).
+10. **§1.7 — storage server-side reconciler + runtime health**
+    (tyr exports + smb.conf + Avahi + wsdd from
+    `config/tyr/shares.toml`, plus nfs-monitor-equivalent failover).
+
+Ships in parallel with the sequence above (no upstream blocker):
+
+- **§1.20 — notifications dispatcher + escalation.** Lands the
+  `projects/notify/` crate + `Event` + `Backend` trait early so
+  every Phase 1 emitter (drift, rotation, lifecycle, reconciler
+  apply prompts, restore outcomes, inner-service health) calls
+  `notify::emit` from day one. Ntfy backend ports first; other
+  backends land progressively. Retires `projects/plugins/ntfy/`.
+
+Ships alongside §1.1 (preflight + symmetry):
+
+- **§1.18 — `orca system doctor`.** Wanted as preflight for every
+  reconciler `apply` from §1.1 onward.
+- **§1.19 — `orca system uninstall`.** Small chore; ship whenever
+  symmetric with §1.13 enrollment work.
 
 Then in priority order without strict blocking:
 
 - §1.8 backup plugin + native-API-first
-- §1.12b pod rejoin (escrow recovery — needs §1.8 §4.4)
+- §1.12b pod rejoin (escrow recovery — needs §1.8 escrow infra
+  per `docs/planned/backup-restore.md` §4.4)
 - §1.13 host decommission
 - §1.14 network reconciler (DNS / firewall / DHCP)
 - §1.15 NTP / clock management surface
 - §1.16 UPS-coordinated shutdown
 - §1.17 storage replication policy
-- §1.9 topology / observability minimum
-- §1.10 schema-evolution docs
+- §1.9 topology / observability minimum (UI design in
+  `docs/planned/ui-topology-views.md`)
 
 Phase 2 (service surface) begins only after the top-10 sequence
 above is closed.

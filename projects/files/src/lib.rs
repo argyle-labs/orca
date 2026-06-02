@@ -6,7 +6,6 @@
 //! domain (typed file/root operations) rather than a primitive.
 
 pub mod atomic;
-pub mod doc_registry;
 pub mod embedded;
 pub mod markdown;
 pub mod ops;
@@ -105,6 +104,8 @@ pub async fn roots_list(config: &Config) -> Result<Vec<FsRootEntry>> {
             FsRootEntry {
                 name: r.name.clone(),
                 path: r.path.to_string_lossy().into_owned(),
+                description: None,
+                enabled: true,
                 exists,
                 file_count: count as u32,
             }
@@ -113,6 +114,8 @@ pub async fn roots_list(config: &Config) -> Result<Vec<FsRootEntry>> {
     out.push(FsRootEntry {
         name: EMBEDDED_ROOT.to_string(),
         path: "(embedded in binary)".to_string(),
+        description: Some("embedded in binary".to_string()),
+        enabled: true,
         exists: true,
         file_count: embedded_file_count() as u32,
     });
