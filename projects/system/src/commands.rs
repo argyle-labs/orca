@@ -428,7 +428,18 @@ async fn system_update(
     let binary_intent =
         args.version.is_some() || channel_changed || (!any_non_binary && !dev_mode_requested);
 
-    let ch_marker = read_channel_marker().unwrap_or(Channel::Stable);
+    // Effective channel = max(stored pref, channel implied by running version).
+    // If the binary is an rc but the marker says stable (common on hosts
+    // installed without explicit channel selection), treat the host as rc
+    // for update-check purposes so we don't compare an rc.9 binary against
+    // the latest *stable* release and report a phantom "v0.0.5 available".
+    let stored = read_channel_marker().unwrap_or(Channel::Stable);
+    let implied = Channel::from_version(CURRENT_VERSION);
+    let ch_marker = match (stored, implied) {
+        (Channel::Dev, _) | (_, Channel::Dev) => Channel::Dev,
+        (Channel::Rc, _) | (_, Channel::Rc) => Channel::Rc,
+        _ => Channel::Stable,
+    };
     let token = resolve_github_token();
 
     if binary_intent && !matches!(ch_marker, Channel::Dev) {

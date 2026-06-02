@@ -514,7 +514,12 @@
         selectedInst.actionLockUntil = Date.now() + 15000;
         if (r.current_version) selectedInst.version = r.current_version;
         if (r.current_version) drawerVersionSelect = `v${r.current_version}`;
-        if (r.channel) drawerChannelSelect = r.channel;
+        // Channel pill reflects the RUNNING binary, not the stored pref.
+        // A host pinned to rc.9 should show "rc" even if its channel marker
+        // was never written (defaults to stable). Server now does the same
+        // for `latest`, but we recompute here too so the UI doesn't depend
+        // on probe ordering.
+        drawerChannelSelect = inferChannel(r.current_version, r.channel);
         if (r.latest) {
           selectedInst.updateLatest = r.latest;
           selectedInst.updateAvailable =
@@ -547,7 +552,7 @@
         selectedInst.actionLockUntil = Date.now() + 15000;
         if (r.current_version) selectedInst.version = r.current_version;
         if (r.current_version) drawerVersionSelect = `v${r.current_version}`;
-        if (r.channel) drawerChannelSelect = r.channel;
+        drawerChannelSelect = inferChannel(r.current_version, r.channel);
         if (r.latest) {
           selectedInst.updateLatest = r.latest;
           selectedInst.updateAvailable =

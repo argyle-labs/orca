@@ -96,6 +96,23 @@ impl Channel {
         }
     }
 
+    /// Infer the channel implied by a version string. `0.0.6-rc.9` → Rc,
+    /// `0.0.6-dev.0` → Dev, `0.0.6` → Stable. Used to choose the effective
+    /// channel when the stored pref disagrees with the running binary —
+    /// e.g. a host installed via the rc.9 release artifact but with no
+    /// channel marker written would otherwise report itself as stable and
+    /// trigger a phantom "downgrade available" badge.
+    pub fn from_version(v: &str) -> Self {
+        let s = v.trim_start_matches('v');
+        if s.contains("-dev") {
+            Self::Dev
+        } else if s.contains("-rc") {
+            Self::Rc
+        } else {
+            Self::Stable
+        }
+    }
+
     pub fn accepts(&self, tag: &str) -> bool {
         match self {
             // stable: only tags with no pre-release suffix
