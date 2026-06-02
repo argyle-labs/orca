@@ -29,50 +29,9 @@ impl From<db::llm::Provider> for ProviderDto {
     }
 }
 
-/// Resolve the backend kind. Empty `supplied` infers from URL — port 11434
-/// implies Ollama, otherwise LM Studio. Non-empty must be one of the two.
-pub(crate) fn infer_kind(url: &str, supplied: &str) -> anyhow::Result<String> {
-    let kind = if supplied.is_empty() {
-        if url.contains(":11434") {
-            "ollama"
-        } else {
-            "lmstudio"
-        }
-        .to_string()
-    } else {
-        supplied.to_string()
-    };
-    match kind.as_str() {
-        "ollama" | "lmstudio" => Ok(kind),
-        other => anyhow::bail!("unknown backend kind '{other}' (want: ollama|lmstudio)"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn infer_kind_uses_supplied_value() {
-        assert_eq!(infer_kind("http://x", "ollama").unwrap(), "ollama");
-        assert_eq!(infer_kind("http://x", "lmstudio").unwrap(), "lmstudio");
-    }
-
-    #[test]
-    fn infer_kind_defaults_to_lmstudio() {
-        assert_eq!(infer_kind("http://localhost:1234", "").unwrap(), "lmstudio");
-    }
-
-    #[test]
-    fn infer_kind_defaults_to_ollama_on_11434() {
-        assert_eq!(infer_kind("http://localhost:11434", "").unwrap(), "ollama");
-    }
-
-    #[test]
-    fn infer_kind_rejects_unknown() {
-        let e = infer_kind("http://x", "bogus").unwrap_err();
-        assert!(e.to_string().contains("unknown backend kind"));
-    }
 
     #[test]
     fn provider_dto_from_db_row_copies_fields() {
