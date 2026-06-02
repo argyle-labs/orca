@@ -329,7 +329,7 @@ fn install_service(binary: &str, port: u16) -> Result<()> {
     let service = format!(
         "[Unit]\nDescription={APP_NAME} daemon\nAfter=network.target\n\n\
          [Service]\nExecStart={binary} daemon --port {port}\n\
-         Environment=HOME={home}\nRestart=on-failure\nRestartSec=5\n\
+         Environment=HOME={home}\nRestart=always\nRestartSec=5\n\
          StandardOutput=append:{daemon_log}\nStandardError=append:{daemon_log}\n\n\
          [Install]\nWantedBy=default.target\n"
     );
@@ -412,7 +412,7 @@ fn install_systemd_system(binary: &str, port: u16, user: &str, home: &str) -> Re
         "[Unit]\nDescription={APP_NAME} daemon\nAfter=network.target\n\n\
          [Service]\nType=simple\nUser={user}\n\
          Environment=HOME={home}\nExecStart={binary} daemon --port {port}\n\
-         Restart=on-failure\nRestartSec=5\n\
+         Restart=always\nRestartSec=5\n\
          StandardOutput=append:{daemon_log}\nStandardError=append:{daemon_log}\n\n\
          [Install]\nWantedBy=multi-user.target\n"
     );

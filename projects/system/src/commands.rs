@@ -232,6 +232,20 @@ pub struct SystemUpdateOutput {
     pub os_package_result: Option<String>,
     pub notes: Vec<String>,
     pub errors: Vec<String>,
+    /// Present when a binary swap landed but the daemon has not yet been
+    /// observed running the new version. Cleared on daemon startup once
+    /// `current_version` matches `target`. Lets remote callers distinguish
+    /// "apply succeeded and restarted" from "apply succeeded but supervisor
+    /// never restarted us" — the latter previously returned identical
+    /// success.
+    pub pending_restart: Option<PendingRestart>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Default, Clone)]
+#[serde(default)]
+pub struct PendingRestart {
+    pub target: String,
+    pub age_secs: u64,
 }
 
 /// [MUTATES STATE] The single system-update tool. Covers orca binary updates,
@@ -500,6 +514,9 @@ async fn system_update(
     };
     let latest = available_versions.first().map(|v| v.tag.clone());
 
+    let pending_restart = crate::update::read_pending_restart()
+        .map(|(target, age_secs)| PendingRestart { target, age_secs });
+
     Ok(SystemUpdateOutput {
         current_version: CURRENT_VERSION.to_string(),
         channel: ch_marker.as_marker().to_string(),
@@ -514,6 +531,7 @@ async fn system_update(
         os_package_result,
         notes,
         errors,
+        pending_restart,
     })
 }
 

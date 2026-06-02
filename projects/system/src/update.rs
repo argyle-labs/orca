@@ -306,10 +306,13 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
         let persist_bin = persist_dir.join("orca");
         std::fs::create_dir_all(persist_dir)
             .with_context(|| format!("create unraid appdata dir {}", persist_dir.display()))?;
-        std::fs::copy(&current, &persist_bin).with_context(|| {
-            format!(
-                "mirror new binary to {} (unraid appdata persistence)",
-                persist_bin.display()
+        std::fs::copy(&current, &persist_bin).map_err(|e| {
+            anyhow::anyhow!(
+                "mirror new binary to {} (unraid appdata persistence): {} (kind={:?}, errno={:?})",
+                persist_bin.display(),
+                e,
+                e.kind(),
+                e.raw_os_error(),
             )
         })?;
         println!(
@@ -319,8 +322,30 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
     }
 
     println!("[orca] updated to v{} — scheduling restart", info.version);
-    schedule_self_restart();
+    write_pending_restart_marker(&info.version);
+    let method = schedule_self_restart();
+    println!("[orca] restart method: {method}");
     Ok(())
+}
+
+/// Write a marker indicating an apply just completed and we expect the
+/// daemon to come back on `target`. The post-restart daemon checks this on
+/// startup; remote clients can read it via system.detail to verify the
+/// swap actually took effect (apply returning success only means the bytes
+/// hit disk — the supervisor restart is the part that's been silently
+/// failing on hosts where the daemon runs as a non-root user without
+/// polkit auth to `systemctl restart`).
+fn write_pending_restart_marker(target: &str) {
+    let Some(home) = files::ops::orca_home() else {
+        return;
+    };
+    let path = home.join("pending_restart");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let body = format!("{target}\n{now}\n");
+    _ = std::fs::write(&path, body);
 }
 
 #[cfg(target_os = "linux")]
@@ -338,36 +363,85 @@ pub fn is_unraid() -> bool {
 /// Falls back to a plain SIGTERM-to-self for daemons not under a supervisor
 /// (e.g. nohup'd dev runs) — they have to be restarted manually, but at
 /// least we don't keep serving a deleted-inode old binary.
-fn schedule_self_restart() {
-    // `sh -c` is intentional here: we need `sleep N; if ... fi` executed as a
-    // single detached background process. The only dynamic value is `my_pid`
-    // which is a `u32` (no shell-special chars possible). All other content is
-    // a compile-time static.
+fn schedule_self_restart() -> &'static str {
+    // Pick the restart method first so we can report it back to the caller.
+    // On Linux under a system-mode systemd unit, `systemctl restart` requires
+    // polkit auth that an unprivileged `User=orca` daemon does NOT have — the
+    // call returns "Access denied" and the daemon keeps running the stale
+    // binary. Self-SIGTERM is privilege-free and, paired with `Restart=always`
+    // in the unit, gets the same outcome.
     let my_pid = std::process::id();
-    #[cfg(target_os = "macos")]
-    let cmd = format!(
-        "sleep 2; if launchctl list 2>/dev/null | grep -q com.orca.daemon; then \
-             launchctl kickstart -k gui/$(id -u)/com.orca.daemon; \
-         else kill -TERM {my_pid}; fi"
-    );
-    #[cfg(target_os = "linux")]
-    let cmd = format!(
-        "sleep 2; \
-         if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active orca.service >/dev/null 2>&1; then \
-             systemctl --user restart orca.service; \
-         elif command -v systemctl >/dev/null 2>&1 && systemctl is-active orca.service >/dev/null 2>&1; then \
-             systemctl restart orca.service; \
-         else kill -TERM {my_pid}; fi"
-    );
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let cmd = format!("sleep 2; kill -TERM {my_pid}");
+    let (method, cmd): (&'static str, String);
 
-    _ = std::process::Command::new("sh")
+    #[cfg(target_os = "macos")]
+    {
+        method = "launchctl-kickstart-or-self-sigterm";
+        cmd = format!(
+            "sleep 2; if launchctl list 2>/dev/null | grep -q com.orca.daemon; then \
+                 launchctl kickstart -k gui/$(id -u)/com.orca.daemon; \
+             else kill -TERM {my_pid}; fi"
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Detect supervisor for reporting; the action itself is always self-
+        // SIGTERM (works regardless of user/system mode, and respawn is
+        // owned by the supervisor's `Restart=always`).
+        let supervised = std::path::Path::new("/run/systemd/system").exists();
+        method = if supervised {
+            "systemd-self-sigterm"
+        } else {
+            "unsupervised-self-sigterm"
+        };
+        cmd = format!("sleep 2; kill -TERM {my_pid}");
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        method = "self-sigterm";
+        cmd = format!("sleep 2; kill -TERM {my_pid}");
+    }
+
+    let spawned = std::process::Command::new("sh")
         .args(["-c", &cmd])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn();
+        .spawn()
+        .is_ok();
+    if !spawned {
+        return "spawn-failed";
+    }
+    method
+}
+
+/// Read the pending-restart marker written by [`apply_update`]. Returns
+/// `(target_version, age_seconds)` if present, else `None`.
+///
+/// Callers in the tool response use this to surface "applied but daemon
+/// did not actually restart" — a class of failure that was previously
+/// silent (apply returns OK, in-process binary swap succeeds, but the
+/// supervisor never relaunches so `current_version` keeps reporting the
+/// stale compile-time constant).
+pub fn read_pending_restart() -> Option<(String, u64)> {
+    let home = files::ops::orca_home()?;
+    let raw = std::fs::read_to_string(home.join("pending_restart")).ok()?;
+    let mut lines = raw.lines();
+    let target = lines.next()?.trim().to_string();
+    let ts: u64 = lines.next()?.trim().parse().ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(ts);
+    let age = now.saturating_sub(ts);
+    Some((target, age))
+}
+
+/// Best-effort: clear the pending-restart marker. Called on daemon startup
+/// once the running version matches the target — i.e., the restart took.
+pub fn clear_pending_restart() {
+    if let Some(home) = files::ops::orca_home() {
+        _ = std::fs::remove_file(home.join("pending_restart"));
+    }
 }
 
 pub async fn download_asset(

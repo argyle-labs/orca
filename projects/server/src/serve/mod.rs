@@ -114,6 +114,22 @@ pub async fn run(dev: bool, port: u16, db_path: std::path::PathBuf) -> Result<()
 pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
 
+    // If we restarted because of an in-progress update, verify the swap took
+    // and clear the marker. `system.update` surfaces the marker on stale
+    // daemons so a remote probe can tell apply-but-no-restart apart from
+    // apply-and-restarted.
+    if let Some((target, age)) = system::update::read_pending_restart() {
+        let running = env!("CARGO_PKG_VERSION");
+        if target.trim_start_matches('v') == running {
+            tracing::info!("[update] restart verified: now running v{running}");
+            system::update::clear_pending_restart();
+        } else {
+            tracing::warn!(
+                "[update] pending_restart marker present: target={target} running={running} age_secs={age}"
+            );
+        }
+    }
+
     let pki_dir = db_path
         .parent()
         .unwrap_or(std::path::Path::new("."))
