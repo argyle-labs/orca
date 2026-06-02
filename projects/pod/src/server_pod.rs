@@ -583,6 +583,7 @@ async fn local_peer_row() -> PodPeerDto {
         pinned_to,
         update_latest: None,
         update_available: None,
+        update_checked_secs: None,
         system: Some((*system::system_info::current_or_collect()).clone()),
     }
 }
@@ -632,8 +633,8 @@ pub fn local_peer_id() -> String {
 async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
     let own = local_peer_id();
     let own_for_blocking = own.clone();
-    let (active, inactive, status_by_peer) =
-        tokio::task::spawn_blocking(move || -> Result<(_, _, _)> {
+    let (active, inactive, status_by_peer, update_by_peer, detail_by_peer) =
+        tokio::task::spawn_blocking(move || -> Result<(_, _, _, _, _)> {
             let conn = db::open_default()?;
             let peers = db::pod::list_peer_summaries(&conn)?;
             let status_rows = db::host_status::latest_per_peer(&conn)?;
@@ -641,6 +642,20 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
                 std::collections::HashMap::new();
             for r in status_rows {
                 map.insert(r.peer_id.clone(), r);
+            }
+            let mut updates: std::collections::HashMap<
+                String,
+                db::peer_update_state::PeerUpdateState,
+            > = std::collections::HashMap::new();
+            for r in db::peer_update_state::list_all(&conn)? {
+                updates.insert(r.peer_id.clone(), r);
+            }
+            let mut details: std::collections::HashMap<
+                String,
+                db::peer_detail_state::PeerDetailState,
+            > = std::collections::HashMap::new();
+            for r in db::peer_detail_state::list_all(&conn)? {
+                details.insert(r.peer_id.clone(), r);
             }
             let (active, inactive): (Vec<PodPeerDto>, Vec<PodPeerDto>) = peers
                 .into_iter()
@@ -652,7 +667,7 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
                     dto
                 })
                 .partition(|p| p.status == "active");
-            Ok((active, inactive, map))
+            Ok((active, inactive, map, updates, details))
         })
         .await??;
 
@@ -673,6 +688,41 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
             p.mode = rt.mode;
             p.channel = rt.channel;
             p.pinned_to = rt.pinned_to;
+        }
+        // Persisted `system.update {}` probe results override the in-memory
+        // runtime_cache for the version/channel/pin fields when both are
+        // present — the probe is authoritative per peer, the runtime_cache
+        // sometimes carries `system.detail` stale across daemon restarts.
+        // Always set update_available/update_latest/update_checked_secs from
+        // the probe; runtime_cache doesn't track those.
+        if let Some(u) = update_by_peer.get(&p.peer_id) {
+            if u.version.is_some() {
+                p.version.clone_from(&u.version);
+            }
+            if u.channel.is_some() {
+                p.channel.clone_from(&u.channel);
+            }
+            p.pinned_to.clone_from(&u.pinned_to);
+            p.update_latest.clone_from(&u.latest);
+            p.update_available = Some(u.update_available);
+            if let Some(checked) = u.checked_at {
+                let now = chrono::Utc::now().timestamp();
+                let age = (now - checked).max(0) as u64;
+                p.update_checked_secs = Some(age);
+            }
+        }
+        // Cached `system.detail {}` probe payload — overrides `p.system` (which
+        // came from the host_status mirror) with the fresher report the peer
+        // returns from its own `system.detail` tool. Lets the UI drawer hydrate
+        // without an on-open RPC for remote peers.
+        if let Some(d) = detail_by_peer.get(&p.peer_id)
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&d.payload)
+            && let Some(sys_val) = v.get("system")
+            && let Ok(sys) = serde_json::from_value::<system::system_info_types::SystemInfoReport>(
+                sys_val.clone(),
+            )
+        {
+            p.system = Some(sys);
         }
         out.push(p);
     }

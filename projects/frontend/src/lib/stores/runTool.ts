@@ -19,7 +19,7 @@ export type ToolName = keyof typeof sdk;
  * Hey-api functions accept an options object; we pass `body` for POSTs and
  * an empty object for GETs. The dispatcher hides the difference.
  */
-type AnyToolFn = (opts?: { body?: unknown }) => Promise<{
+type AnyToolFn = (opts?: { body?: unknown; headers?: Record<string, string> }) => Promise<{
   data?: unknown;
   error?: unknown;
   response?: Response;
@@ -51,6 +51,7 @@ export async function runTool(
 export async function callTool<T = unknown>(
   name: ToolName,
   args: Record<string, unknown> = {},
+  opts: { peer?: string | null } = {},
 ): Promise<T> {
   const fn = (sdk as unknown as Record<string, AnyToolFn>)[name as string];
   if (typeof fn !== 'function') {
@@ -61,7 +62,16 @@ export async function callTool<T = unknown>(
   // refuses), POSTs need a body so the request gets a Content-Type and
   // doesn't 415. Detect by inspecting the compiled source.
   const wantsBody = !/\.(get|head)\(/.test(fn.toString());
-  const res = await fn(wantsBody ? { body: args } : undefined);
+  // `X-Orca-Peer` is the universal peer-dispatch trigger on the server:
+  // the dispatcher proxies the call to the named peer over the pod mesh
+  // before invoking the tool. Skip for the synthetic "local" peer_id so
+  // we don't bounce loopback calls through the mesh.
+  const headers: Record<string, string> | undefined =
+    opts.peer && opts.peer !== 'local' ? { 'X-Orca-Peer': opts.peer } : undefined;
+  const callOpts: { body?: unknown; headers?: Record<string, string> } = {};
+  if (wantsBody) callOpts.body = args;
+  if (headers) callOpts.headers = headers;
+  const res = await fn(Object.keys(callOpts).length ? callOpts : undefined);
   if (res.error || !res.response?.ok) {
     const msg =
       (res.error as { error?: string } | undefined)?.error ??

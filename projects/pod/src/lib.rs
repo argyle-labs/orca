@@ -94,6 +94,11 @@ pub struct PodPeerDto {
     /// `pinned_to`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_available: Option<bool>,
+    /// Age in seconds of the last successful `system.update {}` probe against
+    /// this peer. `None` until the periodic probe has succeeded at least
+    /// once (or for the synthetic local-host row).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_checked_secs: Option<u64>,
     /// Cross-platform OS / hardware / process / network snapshot reported
     /// by the peer's `system.runtime-spec`. `None` when the probe failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -532,6 +537,7 @@ mod dto_conversions {
                 pinned_to: None,
                 update_latest: None,
                 update_available: None,
+                update_checked_secs: None,
                 system: None,
             }
         }
@@ -846,7 +852,9 @@ pub mod subscribe;
 pub mod subscribe_client;
 pub mod subscribe_demand;
 pub mod subscribe_wire;
+pub mod system_detail_probe;
 pub mod transport;
+pub mod update_state_probe;
 
 pub use bootstrap::handle_pod_bootstrap_connection;
 pub use listener::handle_pod_connection;

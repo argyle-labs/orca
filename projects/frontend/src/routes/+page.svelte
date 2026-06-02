@@ -20,6 +20,7 @@
     channel: string | null;
     updateAvailable: boolean;
     updateLatest: string | null;
+    updateCheckedSecs: number | null;
     pinnedTo: string | null;
     health: 'up' | 'down' | 'unknown';
     error: string | null;
@@ -264,6 +265,7 @@
         channel?: string | null;
         update_available?: boolean | null;
         update_latest?: string | null;
+        update_checked_secs?: number | null;
         pinned_to?: string | null;
         addresses?: { kind: string; value: string }[];
         system?: SystemInfoReport | null;
@@ -378,6 +380,7 @@
             channel: locked ? prev.channel : (p.channel ?? null),
             updateAvailable: locked ? prev.updateAvailable : (p.update_available ?? false),
             updateLatest: locked ? prev.updateLatest : (p.update_latest ?? null),
+            updateCheckedSecs: locked ? prev.updateCheckedSecs : (p.update_checked_secs ?? null),
             pinnedTo: locked ? prev.pinnedTo : (p.pinned_to ?? null),
             health: p.status === 'active' ? 'up' : 'down',
             error: null,
@@ -480,9 +483,30 @@
       drawerChannelSelect = inferChannel(selectedInst.version, selectedInst.channel);
       drawerVersions = [];
       updateResult = null;
-      void probeUpdateState();
+      // For the local instance, probe immediately — self-state can change
+      // out of band (operator running `orca` in another terminal, etc).
+      // For remote peers, hydrate from the pod.list row that the periodic
+      // probe keeps fresh in `peer_update_state`; the drawer surfaces a
+      // Refresh button if the user wants a forced re-probe of that peer.
+      if (selectedInst.role === 'local') {
+        void probeUpdateState();
+      } else {
+        hydrateDrawerFromInstance();
+      }
     }
   });
+
+  // Pull the drawer's update fields from the already-loaded `pod.list` row
+  // for the selected instance. No network call.
+  function hydrateDrawerFromInstance() {
+    if (!selectedInst) return;
+    if (selectedInst.updateLatest) {
+      // Synthesize a single-entry list so the version <select> shows the
+      // peer's running version as the default; the actual list is only
+      // populated by an explicit Refresh.
+    }
+    drawerVersions = [];
+  }
 
   type SystemUpdateResp = {
     current_version: string;
@@ -500,13 +524,51 @@
     errors: string[];
   };
 
+  let detailRefreshing = $state(false);
+
+  // Force a fresh `system.detail` call against the selected peer. For remote
+  // peers the periodic `peer_detail_probe` keeps `inst.sys` warm via pod.list,
+  // so users normally don't need this; it's here parity with the Update
+  // section's Refresh for cases where the drawer needs immediate hydration.
+  async function refreshDetail() {
+    if (!selectedInst) return;
+    detailRefreshing = true;
+    try {
+      const peer = selectedInst.role === 'system' ? selectedInst.peerId : null;
+      const s = await callTool<{
+        version: string;
+        target: string;
+        mode?: string;
+        channel?: string;
+        pinned_to?: string;
+        system?: SystemInfoReport | null;
+      }>('systemDetail', {}, { peer });
+      if (selectedInst) {
+        selectedInst.version = s.version ?? selectedInst.version;
+        selectedInst.target = s.target ?? selectedInst.target;
+        selectedInst.mode = s.mode ?? selectedInst.mode;
+        selectedInst.channel = s.channel ?? selectedInst.channel;
+        selectedInst.pinnedTo = s.pinned_to ?? selectedInst.pinnedTo;
+        selectedInst.sys = s.system ?? selectedInst.sys;
+        selectedInst.lastChecked = Date.now();
+        instances = [...instances];
+      }
+    } catch (e) {
+      console.warn('system.detail refresh failed:', e);
+    } finally {
+      detailRefreshing = false;
+    }
+  }
+
   async function probeUpdateState() {
     if (!selectedInst) return;
     drawerVersionsLoading = true;
     try {
-      const args: Record<string, unknown> = {};
-      if (selectedInst.role === 'system') args.peer_id = selectedInst.peerId;
-      const r = await callTool<SystemUpdateResp>('systemUpdate', args);
+      // READ-ONLY probe: empty args. Routing to the selected peer happens
+      // via the `X-Orca-Peer` header (see callTool); the body MUST stay
+      // empty so the server treats this as a state read, not a mutation.
+      const peer = selectedInst.role === 'system' ? selectedInst.peerId : null;
+      const r = await callTool<SystemUpdateResp>('systemUpdate', {}, { peer });
       drawerVersions = r.available_versions ?? [];
       if (selectedInst) {
         selectedInst.channel = r.channel;
@@ -542,8 +604,11 @@
     updatePending = true;
     updateResult = null;
     try {
-      if (selectedInst.role === 'system') args.peer_id = selectedInst.peerId;
-      const r = await callTool<SystemUpdateResp>('systemUpdate', args);
+      // Route to the peer via `X-Orca-Peer` header — `peer_id` is not a
+      // field on `SystemUpdateArgs` and would be silently dropped if passed
+      // in the body. See callTool() for how the header is plumbed.
+      const peer = selectedInst.role === 'system' ? selectedInst.peerId : null;
+      const r = await callTool<SystemUpdateResp>('systemUpdate', args, { peer });
       updateResult = { notes: r.notes ?? [], errors: r.errors ?? [] };
       drawerVersions = r.available_versions ?? drawerVersions;
       if (selectedInst) {
@@ -583,6 +648,9 @@
     }
     if (drawerVersionSelect && drawerVersionSelect !== `v${selectedInst?.version ?? ''}`) {
       args.version = drawerVersionSelect;
+    }
+    if (selectedInst?.pinnedTo) {
+      args.unpin = true;
     }
     if (Object.keys(args).length === 0) return;
     await runSystemUpdate(args);
@@ -643,6 +711,7 @@
       channel: null,
       updateAvailable: false,
       updateLatest: null,
+      updateCheckedSecs: null,
       pinnedTo: null,
       health: 'unknown',
       error: null,
@@ -901,23 +970,9 @@
               {/each}
             {/if}
           </div>
-          {@const rawStats = [
-            inst.sys.cpu_usage_percent != null ? `cpu ${inst.sys.cpu_usage_percent.toFixed(0)}%` : null,
-            inst.sys.mem_used_mb != null ? `mem ${fmtMb(inst.sys.mem_used_mb)}/${fmtMb(inst.sys.mem_total_mb)}` : null,
-            inst.sys.load_avg_1 != null ? `load ${inst.sys.load_avg_1.toFixed(2)}` : null,
-            inst.sys.system_uptime_secs != null ? `up ${fmtUptime(inst.sys.system_uptime_secs)}` : null,
-          ].filter((x): x is string => x != null)}
-          {#if rawStats.length > 0}
-            <p class="stat-raw">{rawStats.join(' · ')}</p>
-          {/if}
         {/if}
 
         <div class="card-footer">
-          <div class="primary-urls">
-            {#each reachableAddrs(inst) as url (url)}
-              <span class="primary-url">{url}</span>
-            {/each}
-          </div>
           <span class="details-hint">Details →</span>
         </div>
       </div>
@@ -1007,7 +1062,16 @@
         />
         <span class="hostname">{selectedInst.sys?.hostname ?? selectedInst.label}</span>
       </div>
-      <button class="icon-btn" onclick={closeDrawer} title="Close">✕</button>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <button
+          class="ctrl-btn"
+          style="font-size:11px; padding:2px 8px;"
+          onclick={refreshDetail}
+          disabled={detailRefreshing}
+          title="Force a fresh system.detail probe of this peer"
+        >{detailRefreshing ? 'Refreshing…' : 'Refresh'}</button>
+        <button class="icon-btn" onclick={closeDrawer} title="Close">✕</button>
+      </div>
     </div>
 
     <div class="drawer-body">
@@ -1095,7 +1159,16 @@
         </div>
       {/if}
 
-      <div class="section-head">Update</div>
+      <div class="section-head">
+        Update
+        <button
+          class="ctrl-btn"
+          style="margin-left:8px; font-size:11px; padding:2px 8px;"
+          onclick={probeUpdateState}
+          disabled={drawerVersionsLoading || updatePending}
+          title="Re-probe this peer's update state"
+        >{drawerVersionsLoading ? 'Probing…' : 'Refresh'}</button>
+      </div>
       <div class="update-controls">
         <div class="update-setting-row">
           <span class="update-setting-label">
@@ -1107,7 +1180,7 @@
           <select
             class="version-input"
             bind:value={drawerVersionSelect}
-            disabled={updatePending || !!selectedInst.pinnedTo}
+            disabled={updatePending}
           >
             {#if selectedInst.version && !drawerVersions.some((v) => v.tag === `v${selectedInst!.version}`)}
               <option value={`v${selectedInst.version}`}>v{selectedInst.version} (current)</option>
@@ -1125,9 +1198,9 @@
               <button
                 class="channel-btn"
                 class:active={drawerChannelSelect === ch}
-                disabled={updatePending || !!selectedInst.pinnedTo}
+                disabled={updatePending}
                 onclick={() => (drawerChannelSelect = ch)}
-                title={selectedInst.pinnedTo ? 'Unpin to change channel' : `Select ${ch} channel`}
+                title={`Select ${ch} channel`}
               >{ch}</button>
             {/each}
           </div>
@@ -1156,7 +1229,7 @@
           <button
             class="ctrl-btn primary"
             onclick={applyUpdateSelection}
-            disabled={updatePending || !!selectedInst.pinnedTo || (`v${selectedInst.version ?? ''}` === drawerVersionSelect && inferChannel(selectedInst.version, selectedInst.channel) === drawerChannelSelect)}
+            disabled={updatePending || (!selectedInst.pinnedTo && `v${selectedInst.version ?? ''}` === drawerVersionSelect && inferChannel(selectedInst.version, selectedInst.channel) === drawerChannelSelect)}
             title="Apply selected channel and version"
           >{updatePending ? 'Updating…' : 'Apply'}</button>
         </div>

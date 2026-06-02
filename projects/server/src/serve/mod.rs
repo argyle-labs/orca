@@ -538,6 +538,8 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     pod::host_status_writer::spawn_local_writer();
     pod::host_status_writer::spawn_sync_puller();
     pod::host_status_replica::spawn_fleet_replicator();
+    pod::update_state_probe::spawn_periodic();
+    pod::system_detail_probe::spawn_periodic();
     plugins::host::start(
         pki_dir,
         db::ports::mesh_port(),
