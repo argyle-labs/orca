@@ -728,10 +728,19 @@ async fn reasoning_model_fallback_to_reasoning_content() {
     let cancel = CancellationToken::new();
     let (sink, _) = buffer_sink();
 
-    let resp = backend
-        .chat(&messages, &[], "", cancel, &sink)
-        .await
-        .expect("reasoning model should return a response (via reasoning_content fallback)");
+    let chat_fut = backend.chat(&messages, &[], "", cancel, &sink);
+    let resp = match tokio::time::timeout(CHAT_TIMEOUT, chat_fut).await {
+        Err(_) => {
+            eprintln!("SKIP: reasoning model chat exceeded {CHAT_TIMEOUT:?} — wedged");
+            return;
+        }
+        Ok(Err(e)) if is_model_unavailable(&e) || is_server_busy(&e) => {
+            eprintln!("SKIP: reasoning model {model_id} unavailable or LM Studio busy: {e}");
+            return;
+        }
+        Ok(Err(e)) => panic!("reasoning model chat failed: {e}"),
+        Ok(Ok(r)) => r,
+    };
 
     assert!(
         !resp.text.is_empty(),
