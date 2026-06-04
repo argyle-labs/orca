@@ -323,9 +323,20 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
     if is_unraid() {
         let persist_dir = std::path::Path::new("/mnt/user/appdata/orca/bin");
         let persist_bin = persist_dir.join("orca");
-        std::fs::create_dir_all(persist_dir)
-            .with_context(|| format!("create unraid appdata dir {}", persist_dir.display()))?;
-        std::fs::copy(&current, &persist_bin).map_err(|e| {
+        // When the live rc.orca already runs the daemon directly out of
+        // appdata, `current_binary_path()` IS `persist_bin`. Copying a file
+        // onto itself with `std::fs::copy` opens dst with O_TRUNC before
+        // reading src → silently truncates the binary to 0 bytes. This
+        // exact path bricked willow + maple twice (2026-06-02, 2026-06-03).
+        let same_path = std::fs::canonicalize(&current).ok()
+            == std::fs::canonicalize(&persist_bin).ok()
+            && std::fs::canonicalize(&current).is_ok();
+        if same_path {
+            println!("[orca] running from appdata already — skipping persist mirror");
+        } else {
+            std::fs::create_dir_all(persist_dir)
+                .with_context(|| format!("create unraid appdata dir {}", persist_dir.display()))?;
+            std::fs::copy(&current, &persist_bin).map_err(|e| {
             anyhow::anyhow!(
                 "mirror new binary to {} (unraid appdata persistence): {} (kind={:?}, errno={:?})",
                 persist_bin.display(),
@@ -334,16 +345,17 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
                 e.raw_os_error(),
             )
         })?;
-        // FUSE shfs on /mnt/user/appdata has been observed to leave a 0-byte
-        // file behind while reporting success. Verify the mirror matches the
-        // bytes we just installed; bail loudly if not so the host doesn't
-        // come back from reboot to a broken binary.
-        verify_on_disk(&persist_bin, &binary, &info.version)
-            .context("unraid appdata mirror verification failed")?;
-        println!(
-            "[orca] mirrored to {} (unraid appdata)",
-            persist_bin.display()
-        );
+            // FUSE shfs on /mnt/user/appdata has been observed to leave a 0-byte
+            // file behind while reporting success. Verify the mirror matches the
+            // bytes we just installed; bail loudly if not so the host doesn't
+            // come back from reboot to a broken binary.
+            verify_on_disk(&persist_bin, &binary, &info.version)
+                .context("unraid appdata mirror verification failed")?;
+            println!(
+                "[orca] mirrored to {} (unraid appdata)",
+                persist_bin.display()
+            );
+        }
     }
 
     println!("[orca] updated to v{} — scheduling restart", info.version);
