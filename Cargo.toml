@@ -67,6 +67,15 @@ utoipa = { version = "5", features = ["axum_extras"] }
 schemars = { version = "1", features = ["derive"] }
 jsonschema = { version = "0.46.5", default-features = false }
 
+# Typed GraphQL client codegen. Used by per-backend integration crates that
+# need to call a remote GraphQL API with typed structs instead of opaque
+# JSON (see [[feedback-no-serde-json-value]]). `graphql_client` is the
+# runtime + derive; `graphql_client_codegen` is the build-script-time
+# codegen helper that turns an introspection JSON + .graphql query files
+# into typed Rust modules.
+graphql_client = { version = "0.14", default-features = false }
+graphql_client_codegen = "0.14"
+
 # Hashing & RNG
 sha2 = "0.11"
 rand = "0.10"
@@ -150,6 +159,7 @@ members = [
     "projects/plugins/smb",
     "projects/plugins/arr",
     "projects/plugins/unraid",
+    "projects/plugins/unraid-generated",
 ]
 default-members = [
     "projects/db",
@@ -183,6 +193,7 @@ default-members = [
     "projects/plugins/smb",
     "projects/plugins/arr",
     "projects/plugins/unraid",
+    "projects/plugins/unraid-generated",
 ]
 resolver = "2"
 

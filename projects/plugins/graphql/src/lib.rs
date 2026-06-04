@@ -107,6 +107,59 @@ impl Client {
         Ok(envelope)
     }
 
+    /// Execute a typed [`graphql_client::GraphQLQuery`] against `endpoint`,
+    /// returning the typed `ResponseData`. This is the path callers should
+    /// use whenever they have a codegen'd query (see
+    /// [[feedback-no-serde-json-value]]) — the raw [`Self::query`] is kept
+    /// for the schemaless introspection + shopify-proxy passthrough cases.
+    pub async fn query_typed<Q>(
+        &self,
+        endpoint: &str,
+        variables: Q::Variables,
+        headers: Option<&HashMap<String, String>>,
+        insecure: bool,
+    ) -> Result<Q::ResponseData, GraphQlErrors>
+    where
+        Q: graphql_client::GraphQLQuery,
+    {
+        let body = Q::build_query(variables);
+        let mut builder = self.http.post(endpoint).json(body);
+        if let Some(h) = headers {
+            builder = builder.headers(h.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        if insecure {
+            builder = builder.insecure(true);
+        }
+        let resp = builder.send().await?;
+        let envelope: graphql_client::Response<Q::ResponseData> = resp.json()?;
+        if let Some(errors) = envelope.errors.filter(|e| !e.is_empty()) {
+            let summary = errors
+                .iter()
+                .map(|e| e.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            // Re-pack into the schemaless envelope so existing error-path
+            // matchers keep working. Typed callers only need `Ok` payloads.
+            let response = Box::new(GraphQlResponse {
+                data: Default::default(),
+                errors: errors
+                    .into_iter()
+                    .map(|e| GraphQlError {
+                        message: e.message,
+                        path: None,
+                        locations: None,
+                        extensions: None,
+                    })
+                    .collect(),
+                extensions: None,
+            });
+            return Err(GraphQlErrors::ServerErrors { summary, response });
+        }
+        envelope
+            .data
+            .ok_or_else(|| GraphQlErrors::Http(HttpError::Decode("missing data field".into())))
+    }
+
     /// Run the standard `__schema` introspection query.
     pub async fn introspect(
         &self,

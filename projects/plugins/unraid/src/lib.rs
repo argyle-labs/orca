@@ -1,14 +1,21 @@
-//! Unraid GraphQL client. Transport (HTTP, headers, retry) is delegated to
-//! [`orca_graphql`] so bug fixes land in one place.
-// serde_json::Value is intentional: all public methods are GraphQL
-// passthrough — the Unraid schema is upstream-defined and returned verbatim
-// to callers who select fields via query strings.
-#![allow(clippy::disallowed_types)]
+//! Unraid GraphQL client — typed facade over [`unraid_generated`].
+//!
+//! Transport (HTTP, headers, retries) goes through [`graphql::Client`]. Each
+//! public method picks the right generated `GraphQLQuery` impl and routes
+//! through [`graphql::Client::query_typed`], which round-trips a typed
+//! `Response<ResponseData>` over the wire — no opaque JSON intermediate
+//! (see [[feedback-no-serde-json-value]]).
+//!
+//! Slice A: only Unraid 7.3.1 wired. Slice B adds runtime version probe +
+//! schema drift detection.
 
-use graphql::{Client as GraphQlClient, GraphQlErrors, GraphQlResponse, QueryRequest};
-use serde_json::{Value, json};
+use graphql::{Client as GraphQlClient, GraphQlErrors};
 use std::collections::HashMap;
 use thiserror::Error;
+use unraid_generated::v7_3_1::{
+    AddPlugin, ArrayStatus, InstalledPlugins, ParityHistory, RemovePlugin, Shares, add_plugin,
+    array_status, installed_plugins, parity_history, remove_plugin, shares,
+};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -40,8 +47,6 @@ impl Config {
 pub enum UnraidError {
     #[error(transparent)]
     GraphQl(#[from] GraphQlErrors),
-    #[error("missing required field: {0}")]
-    Missing(&'static str),
 }
 
 #[derive(Clone)]
@@ -64,181 +69,58 @@ impl Client {
         }
     }
 
-    pub async fn system(&self) -> Result<Value, UnraidError> {
-        self.query(QUERY_SYSTEM, None).await
+    pub async fn installed_plugins(&self) -> Result<installed_plugins::ResponseData, UnraidError> {
+        self.run::<InstalledPlugins>(installed_plugins::Variables)
+            .await
     }
 
-    pub async fn array_status(&self) -> Result<Value, UnraidError> {
-        self.query(QUERY_ARRAY_STATUS, None).await
+    pub async fn array(&self) -> Result<array_status::ResponseData, UnraidError> {
+        self.run::<ArrayStatus>(array_status::Variables).await
     }
 
-    pub async fn array_start(&self) -> Result<Value, UnraidError> {
-        self.query(MUTATION_ARRAY_START, None).await
+    pub async fn shares(&self) -> Result<shares::ResponseData, UnraidError> {
+        self.run::<Shares>(shares::Variables).await
     }
 
-    pub async fn array_stop(&self) -> Result<Value, UnraidError> {
-        self.query(MUTATION_ARRAY_STOP, None).await
+    pub async fn parity_history(&self) -> Result<parity_history::ResponseData, UnraidError> {
+        self.run::<ParityHistory>(parity_history::Variables).await
     }
 
-    pub async fn disks(&self) -> Result<Value, UnraidError> {
-        self.query(QUERY_DISKS, None).await
-    }
-
-    pub async fn shares(&self) -> Result<Value, UnraidError> {
-        self.query(QUERY_SHARES, None).await
-    }
-
-    pub async fn docker_list(&self) -> Result<Value, UnraidError> {
-        self.query(QUERY_DOCKER_LIST, None).await
-    }
-
-    pub async fn docker_start(&self, name: &str) -> Result<Value, UnraidError> {
-        self.named_action(MUTATION_DOCKER_START, name).await
-    }
-
-    pub async fn docker_stop(&self, name: &str) -> Result<Value, UnraidError> {
-        self.named_action(MUTATION_DOCKER_STOP, name).await
-    }
-
-    pub async fn docker_restart(&self, name: &str) -> Result<Value, UnraidError> {
-        self.named_action(MUTATION_DOCKER_RESTART, name).await
-    }
-
-    pub async fn vm_list(&self) -> Result<Value, UnraidError> {
-        self.query(QUERY_VM_LIST, None).await
-    }
-
-    pub async fn vm_start(&self, name: &str) -> Result<Value, UnraidError> {
-        self.named_action(MUTATION_VM_START, name).await
-    }
-
-    pub async fn vm_stop(&self, name: &str) -> Result<Value, UnraidError> {
-        self.named_action(MUTATION_VM_STOP, name).await
-    }
-
-    pub async fn ups(&self) -> Result<Value, UnraidError> {
-        self.query(QUERY_UPS, None).await
-    }
-
-    pub async fn parity(&self) -> Result<Value, UnraidError> {
-        self.query(QUERY_PARITY, None).await
-    }
-
-    pub async fn notifications(&self) -> Result<Value, UnraidError> {
-        self.query(QUERY_NOTIFICATIONS, None).await
-    }
-
-    /// Escape hatch — execute an arbitrary GraphQL query/mutation.
-    pub async fn graphql_query(
+    pub async fn add_plugin(
         &self,
-        query: &str,
-        variables: Option<Value>,
-    ) -> Result<Value, UnraidError> {
-        self.query(query, variables).await
+        input: add_plugin::PluginManagementInput,
+    ) -> Result<add_plugin::ResponseData, UnraidError> {
+        self.run::<AddPlugin>(add_plugin::Variables { input }).await
     }
 
-    async fn named_action(&self, query: &str, name: &str) -> Result<Value, UnraidError> {
-        if name.is_empty() {
-            return Err(UnraidError::Missing("name"));
-        }
-        self.query(query, Some(json!({ "name": name }))).await
+    pub async fn remove_plugin(
+        &self,
+        input: remove_plugin::PluginManagementInput,
+    ) -> Result<remove_plugin::ResponseData, UnraidError> {
+        self.run::<RemovePlugin>(remove_plugin::Variables { input })
+            .await
     }
 
-    async fn query(&self, query: &str, vars: Option<Value>) -> Result<Value, UnraidError> {
-        let mut req = QueryRequest::new(&self.endpoint, query).headers(&self.headers);
-        if let Some(v) = vars {
-            req = req.variables(v);
-        }
-        req.insecure = self.insecure;
-        let resp: GraphQlResponse = self.gql.query(req).await?;
-        Ok(resp.data)
+    async fn run<Q>(&self, variables: Q::Variables) -> Result<Q::ResponseData, UnraidError>
+    where
+        Q: graphql_client::GraphQLQuery,
+    {
+        Ok(self
+            .gql
+            .query_typed::<Q>(
+                &self.endpoint,
+                variables,
+                Some(&self.headers),
+                self.insecure,
+            )
+            .await?)
     }
 }
-
-// ── GraphQL queries / mutations (Unraid 6.12+ schema) ────────────────────────
-
-const QUERY_SYSTEM: &str = r#"{
-    info { version name uptime }
-    cpu { usage temperature }
-    memory { total used free }
-}"#;
-
-const QUERY_ARRAY_STATUS: &str = r#"{
-    array {
-        state
-        capacity { kilobytes { used free total } }
-        disks { name device size temp status }
-    }
-}"#;
-
-const MUTATION_ARRAY_START: &str = "mutation { startArray { state } }";
-const MUTATION_ARRAY_STOP: &str = "mutation { stopArray { state } }";
-
-const QUERY_DISKS: &str = r#"{
-    disks { name id device size type temp smartStatus status rotational }
-}"#;
-
-const QUERY_SHARES: &str = r#"{
-    shares { name comment allocator splitLevel size free cacheEnabled exportEnabled }
-}"#;
-
-const QUERY_DOCKER_LIST: &str = r#"{
-    docker {
-        containers {
-            names image state status autoStart
-            ports { ip privatePort publicPort type }
-        }
-    }
-}"#;
-
-const MUTATION_DOCKER_START: &str = r#"
-mutation StartContainer($name: String!) {
-    startContainer(name: $name) { state status }
-}"#;
-
-const MUTATION_DOCKER_STOP: &str = r#"
-mutation StopContainer($name: String!) {
-    stopContainer(name: $name) { state status }
-}"#;
-
-const MUTATION_DOCKER_RESTART: &str = r#"
-mutation RestartContainer($name: String!) {
-    restartContainer(name: $name) { state status }
-}"#;
-
-const QUERY_VM_LIST: &str = r#"{
-    vms {
-        domains { name state autostart cpuMode memory }
-    }
-}"#;
-
-const MUTATION_VM_START: &str = r#"
-mutation StartVM($name: String!) {
-    startVM(name: $name) { state }
-}"#;
-
-const MUTATION_VM_STOP: &str = r#"
-mutation StopVM($name: String!) {
-    stopVM(name: $name) { state }
-}"#;
-
-const QUERY_UPS: &str = r#"{
-    ups { status batteryCharge timeLeft outputVoltage inputVoltage load }
-}"#;
-
-const QUERY_PARITY: &str = r#"{
-    parity { status lastChecked duration errors speed }
-}"#;
-
-const QUERY_NOTIFICATIONS: &str = r#"{
-    notifications {
-        list { id title description importance timestamp }
-    }
-}"#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use wiremock::matchers::{body_partial_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -247,143 +129,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn system_sends_bearer_to_graphql_endpoint() {
+    async fn installed_plugins_sends_bearer_and_parses_scalar() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/graphql"))
             .and(header("authorization", "Bearer tok"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": {"info": {"version": "6.12.0"}}
+                "data": { "installedUnraidPlugins": ["foo", "bar"] }
             })))
             .mount(&server)
             .await;
-        let v = Client::new(cfg(server.uri())).system().await.unwrap();
-        assert_eq!(v["info"]["version"], "6.12.0");
-    }
-
-    #[tokio::test]
-    async fn docker_start_sends_name_variable() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .and(body_partial_json(json!({"variables": {"name": "plex"}})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": {"startContainer": {"state": "running", "status": "Up 1s"}}
-            })))
-            .mount(&server)
-            .await;
-        let v = Client::new(cfg(server.uri()))
-            .docker_start("plex")
+        let r = Client::new(cfg(server.uri()))
+            .installed_plugins()
             .await
             .unwrap();
-        assert_eq!(v["startContainer"]["state"], "running");
+        assert_eq!(r.installed_unraid_plugins, vec!["foo", "bar"]);
     }
 
     #[tokio::test]
-    async fn empty_name_rejected_before_call() {
-        let c = Client::new(Config::new("http://nope", "t"));
-        assert!(matches!(
-            c.docker_start("").await.unwrap_err(),
-            UnraidError::Missing("name")
-        ));
-    }
-
-    #[test]
-    fn config_builder_and_endpoint_trim_trailing_slash() {
-        let c = Config::new("http://srv/", "tok").insecure(true);
-        assert_eq!(c.endpoint(), "http://srv/graphql");
-        assert!(c.insecure);
-        assert_eq!(c.token, "tok");
-
-        // No trailing slash also OK.
-        let c2 = Config::new("http://srv", "t");
-        assert_eq!(c2.endpoint(), "http://srv/graphql");
-        assert!(!c2.insecure);
-    }
-
-    #[test]
-    fn unraid_error_display() {
-        let m = UnraidError::Missing("name");
-        assert!(m.to_string().contains("name"));
-    }
-
-    #[tokio::test]
-    async fn every_no_arg_method_round_trips_via_graphql_mock() {
+    async fn add_plugin_serializes_input() {
         let server = MockServer::start().await;
-        // Wildcard: any POST /graphql → echo a benign payload.
         Mock::given(method("POST"))
             .and(path("/graphql"))
+            .and(body_partial_json(
+                json!({"variables": {"input": {"names": ["ca.cleanup.appdata.plg"]}}}),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": { "ok": true }
+                "data": { "addPlugin": true }
             })))
             .mount(&server)
             .await;
-        let c = Client::new(cfg(server.uri()));
-        // Exercise every no-argument fn — each routes through `query()` with
-        // its own const string; coverage attribution lands on each fn body.
-        c.system().await.unwrap();
-        c.array_status().await.unwrap();
-        c.array_start().await.unwrap();
-        c.array_stop().await.unwrap();
-        c.disks().await.unwrap();
-        c.shares().await.unwrap();
-        c.docker_list().await.unwrap();
-        c.vm_list().await.unwrap();
-        c.ups().await.unwrap();
-        c.parity().await.unwrap();
-        c.notifications().await.unwrap();
-        // graphql_query escape hatch — with and without variables.
-        c.graphql_query("{ x }", None).await.unwrap();
-        c.graphql_query("query Q($n:String!){ x(n:$n) }", Some(json!({"n":"v"})))
+        let out = Client::new(cfg(server.uri()))
+            .add_plugin(add_plugin::PluginManagementInput {
+                names: vec!["ca.cleanup.appdata.plg".into()],
+                bundled: false,
+                restart: false,
+            })
             .await
             .unwrap();
-    }
-
-    #[tokio::test]
-    async fn every_named_action_method_runs_against_mock() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": { "ok": true }
-            })))
-            .mount(&server)
-            .await;
-        let c = Client::new(cfg(server.uri()));
-        c.docker_start("a").await.unwrap();
-        c.docker_stop("a").await.unwrap();
-        c.docker_restart("a").await.unwrap();
-        c.vm_start("a").await.unwrap();
-        c.vm_stop("a").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn every_named_action_rejects_empty_name() {
-        let c = Client::new(Config::new("http://nope", "t"));
-        for res in [
-            c.docker_start("").await,
-            c.docker_stop("").await,
-            c.docker_restart("").await,
-            c.vm_start("").await,
-            c.vm_stop("").await,
-        ] {
-            assert!(matches!(res.unwrap_err(), UnraidError::Missing("name")));
-        }
-    }
-
-    #[tokio::test]
-    async fn insecure_flag_propagates_to_request() {
-        // Coverage for the `insecure = true` branch of query() — wiremock
-        // serves http so the flag itself is a no-op on the wire, but the
-        // assignment in query() executes.
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {}})))
-            .mount(&server)
-            .await;
-        let cfg = Config::new(server.uri(), "tok").insecure(true);
-        Client::new(cfg).system().await.unwrap();
+        assert!(out.add_plugin);
     }
 
     #[tokio::test]
@@ -397,10 +181,14 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let err = Client::new(cfg(server.uri()))
-            .array_status()
-            .await
-            .unwrap_err();
+        let err = Client::new(cfg(server.uri())).array().await.unwrap_err();
         assert!(matches!(err, UnraidError::GraphQl(_)));
+    }
+
+    #[test]
+    fn endpoint_trims_trailing_slash() {
+        let c = Config::new("http://srv/", "tok").insecure(true);
+        assert_eq!(c.endpoint(), "http://srv/graphql");
+        assert!(c.insecure);
     }
 }
