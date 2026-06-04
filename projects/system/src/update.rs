@@ -264,9 +264,15 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
     verify_sha256(&binary, &expected)?;
     println!("[orca] checksum OK");
 
-    // Write to a temp file beside the current binary, then atomic rename
+    // Write to a temp file beside the current binary, then atomic rename.
+    // Stash the current binary first so we can roll back on post-swap
+    // verification failure — silent zero-byte writes (e.g. FUSE shfs
+    // truncating on /mnt/user/appdata) used to leave the host with no
+    // working binary and a falsely-successful `applied` response.
     let current = current_binary_path()?;
     let tmp = current.with_extension("tmp");
+    let backup = current.with_extension("prev");
+    let backed_up = std::fs::copy(&current, &backup).is_ok();
 
     std::fs::write(&tmp, &binary).context("failed to write temp binary")?;
 
@@ -280,6 +286,19 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
     }
 
     std::fs::rename(&tmp, &current).context("failed to replace binary")?;
+
+    // Verify what actually hit disk — not just what we held in memory. The
+    // pre-rename sha check covers download integrity; this covers
+    // filesystem-level corruption (truncation, partial writes on FUSE).
+    if let Err(e) = verify_on_disk(&current, &binary, &info.version) {
+        if backed_up {
+            _ = std::fs::rename(&backup, &current);
+        }
+        return Err(e.context("post-swap binary verification failed; rolled back"));
+    }
+    if backed_up {
+        _ = std::fs::remove_file(&backup);
+    }
 
     // macOS: ad-hoc sign so Gatekeeper accepts the new binary on next launch.
     // Without this the launchd daemon gets SIGKILLed on respawn (exit -9).
@@ -315,6 +334,12 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
                 e.raw_os_error(),
             )
         })?;
+        // FUSE shfs on /mnt/user/appdata has been observed to leave a 0-byte
+        // file behind while reporting success. Verify the mirror matches the
+        // bytes we just installed; bail loudly if not so the host doesn't
+        // come back from reboot to a broken binary.
+        verify_on_disk(&persist_bin, &binary, &info.version)
+            .context("unraid appdata mirror verification failed")?;
         println!(
             "[orca] mirrored to {} (unraid appdata)",
             persist_bin.display()
@@ -470,6 +495,54 @@ pub fn current_binary_path() -> Result<PathBuf> {
 }
 
 // ── sha256 helpers ────────────────────────────────────────────────────────────
+
+/// Verify a freshly-written binary on disk:
+///   1. file size matches the expected byte count
+///   2. sha256 of the file contents matches the expected hash
+///   3. exec'ing `<path> --version` prints the expected version string
+///
+/// Fails closed — any check that can't run is treated as a verification
+/// failure so a silent filesystem fault (FUSE truncation, partial write,
+/// permission flip) cannot masquerade as a successful update.
+pub fn verify_on_disk(path: &std::path::Path, expected_bytes: &[u8], version: &str) -> Result<()> {
+    let on_disk = std::fs::read(path)
+        .with_context(|| format!("read back {} for verification", path.display()))?;
+    if on_disk.len() != expected_bytes.len() {
+        bail!(
+            "size mismatch at {}: expected {} bytes, got {}",
+            path.display(),
+            expected_bytes.len(),
+            on_disk.len()
+        );
+    }
+    let expected_hash = utils::hash::sha256_hex(expected_bytes);
+    let got_hash = utils::hash::sha256_hex(&on_disk);
+    if got_hash != expected_hash {
+        bail!(
+            "sha256 mismatch at {}: expected {}, got {}",
+            path.display(),
+            expected_hash,
+            got_hash
+        );
+    }
+    let out = std::process::Command::new(path)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("exec {} --version", path.display()))?;
+    if !out.status.success() {
+        bail!("{} --version exited {}", path.display(), out.status);
+    }
+    let printed = String::from_utf8_lossy(&out.stdout);
+    if !printed.contains(version) {
+        bail!(
+            "{} --version printed {:?}, expected to contain {:?}",
+            path.display(),
+            printed.trim(),
+            version
+        );
+    }
+    Ok(())
+}
 
 /// Verify `data` matches `expected` hex sha256. Returns `Err` on mismatch.
 pub fn verify_sha256(data: &[u8], expected: &str) -> Result<()> {
