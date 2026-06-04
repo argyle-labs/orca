@@ -9,12 +9,16 @@
 //! Slice A: only Unraid 7.3.1 wired. Slice B adds runtime version probe +
 //! schema drift detection.
 
+pub mod schema_pull;
+pub mod version;
+
 use graphql::{Client as GraphQlClient, GraphQlErrors};
 use std::collections::HashMap;
 use thiserror::Error;
 use unraid_generated::v7_3_1::{
-    AddPlugin, ArrayStatus, InstalledPlugins, ParityHistory, RemovePlugin, Shares, add_plugin,
-    array_status, installed_plugins, parity_history, remove_plugin, shares,
+    AddPlugin, ArrayStatus, InstalledPlugins, ParityHistory, RemovePlugin, Shares, VarsVersion,
+    add_plugin, array_status, installed_plugins, parity_history, remove_plugin, shares,
+    vars_version,
 };
 
 #[derive(Debug, Clone)]
@@ -91,6 +95,15 @@ impl Client {
         input: add_plugin::PluginManagementInput,
     ) -> Result<add_plugin::ResponseData, UnraidError> {
         self.run::<AddPlugin>(add_plugin::Variables { input }).await
+    }
+
+    /// Probe the running Unraid version via `vars { version }`. Requires
+    /// a valid bearer token — introspection is open but version isn't.
+    /// Returns the raw version string ("7.3.1", "7.3.0-rc1", etc.) so
+    /// callers can route to the matching generated client module.
+    pub async fn probe_version(&self) -> Result<Option<String>, UnraidError> {
+        let data = self.run::<VarsVersion>(vars_version::Variables).await?;
+        Ok(data.vars.version)
     }
 
     pub async fn remove_plugin(
@@ -183,6 +196,23 @@ mod tests {
             .await;
         let err = Client::new(cfg(server.uri())).array().await.unwrap_err();
         assert!(matches!(err, UnraidError::GraphQl(_)));
+    }
+
+    #[tokio::test]
+    async fn probe_version_returns_string() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "vars": { "version": "7.3.1" } }
+            })))
+            .mount(&server)
+            .await;
+        let v = Client::new(cfg(server.uri()))
+            .probe_version()
+            .await
+            .unwrap();
+        assert_eq!(v.as_deref(), Some("7.3.1"));
     }
 
     #[test]

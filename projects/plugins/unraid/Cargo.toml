@@ -11,6 +11,8 @@ path = "src/lib.rs"
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
+anyhow      = { workspace = true }
+sha2        = { workspace = true }
 graphql_client = { workspace = true }
 utils   = { path = "../../utils" }
 graphql = { path = "../graphql" }
@@ -19,6 +21,7 @@ unraid-generated = { path = "../unraid-generated" }
 [dev-dependencies]
 tokio       = { workspace = true }
 wiremock    = "0.6"
+tempfile    = { workspace = true }
 
 [lints]
 workspace = true

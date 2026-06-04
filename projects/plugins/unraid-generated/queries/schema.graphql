@@ -1,4 +1,0 @@
-# Placeholder. The codegen reads the committed introspection JSON in
-# projects/plugins/unraid/schemas/<version>.introspection.json. Keep this
-# file so editors that expect a sibling .graphql schema next to queries
-# don't complain; build.rs ignores it.
