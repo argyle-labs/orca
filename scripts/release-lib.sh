@@ -41,8 +41,11 @@ DIST_DIR="${REPO_ROOT}/dist-release"
 
 # ── target sets ─────────────────────────────────────────────────────────────
 
+# Full catalog. Kept intact so opt-in builds (or a future fleet that needs
+# them) can request these without re-adding entries.
+#
 # All Linux targets are cross-compiled via cargo-zigbuild from any host.
-LINUX_TARGETS=(
+LINUX_TARGETS_ALL=(
   x86_64-unknown-linux-gnu
   x86_64-unknown-linux-musl
   aarch64-unknown-linux-gnu
@@ -51,14 +54,37 @@ LINUX_TARGETS=(
 # macOS targets require a macOS host (no osxcross).
 MAC_TARGETS_ALL=(aarch64-apple-darwin x86_64-apple-darwin)
 
+# Subset actually deployed today (2026-06-03):
+#   - aarch64-apple-darwin  → mint (M3 Max workstation)
+#   - x86_64-unknown-linux-gnu  → willow, maple (Unraid), frigg, loki, thor (Proxmox/Debian)
+#   - x86_64-unknown-linux-musl → baldur, freyr (Alpine)
+# Skipped: aarch64-linux-{gnu,musl}, x86_64-apple-darwin (no host on the fleet).
+# When a new host arch joins the fleet, add it here. To temporarily build
+# everything in the catalog, set RELEASE_TARGETS_ALL=1 in the environment.
+LINUX_TARGETS_ACTIVE=(
+  x86_64-unknown-linux-gnu
+  x86_64-unknown-linux-musl
+)
+MAC_TARGETS_ACTIVE=(aarch64-apple-darwin)
+
+# Back-compat alias — older callers may still reference LINUX_TARGETS.
+LINUX_TARGETS=("${LINUX_TARGETS_ALL[@]}")
+
 # Default target list for the current host. Callers can override by setting
-# RELEASE_TARGETS="t1 t2 ..." in the environment, or by passing the list to
+# RELEASE_TARGETS="t1 t2 ..." in the environment, or RELEASE_TARGETS_ALL=1 to
+# fall back to every catalog target, or by passing the list to
 # build_orca_targets directly.
 default_targets() {
   local out=()
+  local mac_set=("${MAC_TARGETS_ACTIVE[@]}")
+  local linux_set=("${LINUX_TARGETS_ACTIVE[@]}")
+  if [ "${RELEASE_TARGETS_ALL:-0}" = "1" ]; then
+    mac_set=("${MAC_TARGETS_ALL[@]}")
+    linux_set=("${LINUX_TARGETS_ALL[@]}")
+  fi
   case "$(uname -s)" in
-    Darwin) out=("${MAC_TARGETS_ALL[@]}" "${LINUX_TARGETS[@]}") ;;
-    *)      out=("${LINUX_TARGETS[@]}") ;;
+    Darwin) out=("${mac_set[@]}" "${linux_set[@]}") ;;
+    *)      out=("${linux_set[@]}") ;;
   esac
   printf '%s\n' "${out[@]}"
 }

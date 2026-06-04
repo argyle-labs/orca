@@ -413,12 +413,25 @@ fn schedule_self_restart() -> &'static str {
         // SIGTERM (works regardless of user/system mode, and respawn is
         // owned by the supervisor's `Restart=always`).
         let supervised = std::path::Path::new("/run/systemd/system").exists();
-        method = if supervised {
-            "systemd-self-sigterm"
+        if is_unraid() {
+            // Unraid has no systemd / openrc — `rc.orca` is fired once at boot
+            // via `/boot/config/go` and never re-runs unless something calls
+            // it. Plain self-SIGTERM leaves the daemon dead until next reboot,
+            // which has bitten us repeatedly (willow + maple, 2026-06-03).
+            // Detach a `rc.orca restart` so the script kills the old pid and
+            // starts a fresh one with the just-swapped binary.
+            method = "unraid-rc-restart";
+            cmd = format!(
+                "sleep 2; /etc/rc.d/rc.orca restart >/dev/null 2>&1 || kill -TERM {my_pid}"
+            );
         } else {
-            "unsupervised-self-sigterm"
-        };
-        cmd = format!("sleep 2; kill -TERM {my_pid}");
+            method = if supervised {
+                "systemd-self-sigterm"
+            } else {
+                "unsupervised-self-sigterm"
+            };
+            cmd = format!("sleep 2; kill -TERM {my_pid}");
+        }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
