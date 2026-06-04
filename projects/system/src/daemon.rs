@@ -139,6 +139,20 @@ pub(crate) fn install(port: u16, service_user: Option<String>) -> Result<()> {
                 anyhow::bail!("--service-user requires running as root");
             }
             validate_shell_safe("--service-user", &user)?;
+            // On Unraid the orca user's home MUST be the appdata path so
+            // state/db/pki/secrets persist across reboot. `home_dir_of` falls
+            // back to `/var/lib/<user>` (tmpfs, wiped on Unraid reboot) when
+            // the user doesn't exist yet or has no passwd entry — relying on
+            // it has bricked pod membership twice. Force the canonical home
+            // here. See [[project-unraid-rc-orca-home-bug]],
+            // [[project-unraid-persistence-via-appdata]].
+            #[cfg(target_os = "linux")]
+            let home = if matches!(detect_linux_init(), LinuxInit::Unraid) {
+                "/mnt/user/appdata/orca".to_string()
+            } else {
+                home_dir_of(&user)?
+            };
+            #[cfg(not(target_os = "linux"))]
             let home = home_dir_of(&user)?;
             validate_shell_safe("home directory", &home)?;
             ensure_pki_for_home(&home)?;
@@ -541,22 +555,41 @@ pub fn render_unraid_rc_script(
 
 #[cfg(target_os = "linux")]
 fn install_unraid(binary: &str, port: u16, user: &str, home: &str) -> Result<()> {
-    // Unraid wipes most of `/` on reboot — only `/boot` is persistent. So we
-    // install four things and re-stage them on every boot via /boot/config/go:
-    //   1. /boot/config/plugins/orca/bin/orca  — persistent copy of the binary
-    //   2. /boot/config/plugins/orca/rc.orca   — persistent copy of the init script
-    //   3. /etc/rc.d/rc.orca                   — runtime init script
-    //   4. /var/lib/orca/.local/bin/orca       — runtime binary (restored from USB)
+    // Unraid wipes `/` on reboot but `/mnt/user/appdata` (real fs, orca-owned)
+    // and `/boot` (USB, root-only vfat) both persist. We split persistence:
+    //
+    //   binary       → /mnt/user/appdata/orca/bin/orca   (appdata; orca can
+    //                  write directly, so `orca update` and self-update don't
+    //                  need sudo; see [[project-unraid-persistence-via-appdata]])
+    //   rc.orca      → /boot/config/plugins/orca/rc.orca (USB; required, since
+    //                  /etc/rc.d is tmpfs and rc.orca must be on a path the
+    //                  `/boot/config/go` hook can read at boot before appdata
+    //                  shares are mounted)
+    //
+    // /boot/config/go re-stages the init script + creates the orca user; the
+    // appdata binary is already on disk so nothing copies it on boot. The
+    // runtime $BIN ($HOME/.local/bin/orca) is staged from appdata by rc.orca's
+    // own `stage_bin` (also covers the post-update restart path).
     use std::os::unix::fs::PermissionsExt;
 
-    let persist_dir = "/boot/config/plugins/orca";
-    std::fs::create_dir_all(format!("{persist_dir}/bin"))?;
+    let appdata_dir = "/mnt/user/appdata/orca";
+    let appdata_bin_dir = format!("{appdata_dir}/bin");
+    std::fs::create_dir_all(&appdata_bin_dir)?;
+    // appdata is the orca user's home — make sure it owns the tree so future
+    // `orca update` calls writing here can do so without sudo.
+    _ = Command::new("chown")
+        .args(["-R", &format!("{user}:{user}"), appdata_dir])
+        .status();
 
-    // 1. Persist the binary on USB so it survives reboots. The runtime binary
-    //    at $BIN lives in RAM and is re-staged from this copy by the go hook.
-    let persist_bin = format!("{persist_dir}/bin/orca");
+    // 1. Persist the binary in appdata. The runtime binary at $BIN is staged
+    //    from this copy by rc.orca's stage_bin; `orca update` writes here
+    //    directly via apply_binary, keeping persist + runtime in lockstep.
+    let persist_bin = format!("{appdata_bin_dir}/orca");
     std::fs::copy(binary, &persist_bin)?;
     std::fs::set_permissions(&persist_bin, std::fs::Permissions::from_mode(0o755))?;
+    _ = Command::new("chown")
+        .args([&format!("{user}:{user}"), &persist_bin])
+        .status();
     println!("{} wrote {}", "✓".green(), persist_bin);
 
     let rc_path = format!("/etc/rc.d/rc.{APP_NAME}");
@@ -565,24 +598,26 @@ fn install_unraid(binary: &str, port: u16, user: &str, home: &str) -> Result<()>
     std::fs::set_permissions(&rc_path, std::fs::Permissions::from_mode(0o755))?;
     println!("{} wrote {}", "✓".green(), rc_path);
 
-    // 2. Persistent copy of the init script on USB.
-    let persist_path = format!("{persist_dir}/rc.{APP_NAME}");
+    // 2. Persistent copy of the init script on USB (required — /etc/rc.d is
+    //    tmpfs and won't survive reboot; appdata isn't mounted yet when
+    //    /boot/config/go runs).
+    let usb_persist_dir = "/boot/config/plugins/orca";
+    std::fs::create_dir_all(usb_persist_dir)?;
+    let persist_path = format!("{usb_persist_dir}/rc.{APP_NAME}");
     std::fs::copy(&rc_path, &persist_path)?;
     println!("{} wrote {}", "✓".green(), persist_path);
 
-    // Hook into /boot/config/go so the user, binary, and rc script are all
-    // re-staged on every boot. Order matters: useradd before stage, stage
-    // before rc.orca start (rc.orca's stage_bin also runs, but doing it in go
-    // ensures the binary is present even if something else needs it first).
+    // Hook into /boot/config/go: create the orca user, restore the rc script
+    // from USB, and start. Binary persistence is appdata-native so no copy
+    // here. Order matters: useradd before rc.orca start (rc.orca runs as that
+    // user via runuser).
     let go_path = "/boot/config/go";
     let marker = "# --- orca daemon (managed by `orca daemon install`) ---";
     let hook = format!(
         "\n{marker}\n\
          id {user} >/dev/null 2>&1 || useradd -r -m -d {home} -s /bin/bash {user} || true\n\
          mkdir -p {home}/.local/bin\n\
-         cp -f {persist_bin} {binary}\n\
-         chmod 0755 {binary}\n\
-         chown {user}:{user} {binary} 2>/dev/null || true\n\
+         chown {user}:{user} {home} 2>/dev/null || true\n\
          cp -f {persist_path} {rc_path}\n\
          chmod +x {rc_path}\n\
          {rc_path} start\n\
@@ -691,8 +726,8 @@ mod tests {
         // wiped on Unraid reboot) instead of the appdata path. The fix is
         // an explicit `env HOME=$HOME` after `--`.
         let s = render_unraid_rc_script(
-            "/var/lib/orca/.local/bin/orca",
-            "/boot/config/plugins/orca/bin/orca",
+            "/mnt/user/appdata/orca/.local/bin/orca",
+            "/mnt/user/appdata/orca/bin/orca",
             "orca",
             "/mnt/user/appdata/orca",
             12000,

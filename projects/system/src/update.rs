@@ -36,6 +36,13 @@ pub fn resolve_github_token() -> String {
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TARGET: &str = env!("ORCA_BUILD_TARGET");
+
+/// Rust target triple this binary was compiled for. Exposed for the
+/// delegate-on-miss flow: a peer that lacks `github_token` asks a paired
+/// peer to fetch the release asset matching this target.
+pub fn build_target() -> &'static str {
+    BUILD_TARGET
+}
 // Current stable as of 2026-05 — check https://docs.github.com/en/rest/about-the-rest-api/api-versions
 const GITHUB_API_VERSION: &str = "2022-11-28";
 
@@ -264,6 +271,22 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
     verify_sha256(&binary, &expected)?;
     println!("[orca] checksum OK");
 
+    apply_binary(&binary, &info.version)
+}
+
+/// Swap the running binary with `bytes` and schedule a supervisor restart.
+///
+/// Caller is responsible for any pre-swap integrity check on `bytes`
+/// (e.g. sha256 against a release checksum). This function handles only
+/// what's downstream of the verified bytes: atomic tmp-write + rename,
+/// post-swap on-disk re-verification with rollback, macOS codesigning,
+/// Unraid appdata mirror with the self-copy guard, the pending_restart
+/// marker, and the detached supervisor restart.
+///
+/// Extracted from `apply_update` (slice S1 of delegate-on-miss) so the
+/// delegate-fetched-from-peer path can share the swap codepath without
+/// going through GitHub. See [[project-github-token-auto-provision]].
+pub fn apply_binary(bytes: &[u8], version: &str) -> Result<()> {
     // Write to a temp file beside the current binary, then atomic rename.
     // Stash the current binary first so we can roll back on post-swap
     // verification failure — silent zero-byte writes (e.g. FUSE shfs
@@ -274,7 +297,7 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
     let backup = current.with_extension("prev");
     let backed_up = std::fs::copy(&current, &backup).is_ok();
 
-    std::fs::write(&tmp, &binary).context("failed to write temp binary")?;
+    std::fs::write(&tmp, bytes).context("failed to write temp binary")?;
 
     // Set executable bit on Unix
     #[cfg(unix)]
@@ -290,7 +313,7 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
     // Verify what actually hit disk — not just what we held in memory. The
     // pre-rename sha check covers download integrity; this covers
     // filesystem-level corruption (truncation, partial writes on FUSE).
-    if let Err(e) = verify_on_disk(&current, &binary, &info.version) {
+    if let Err(e) = verify_on_disk(&current, bytes, version) {
         if backed_up {
             _ = std::fs::rename(&backup, &current);
         }
@@ -349,7 +372,7 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
             // file behind while reporting success. Verify the mirror matches the
             // bytes we just installed; bail loudly if not so the host doesn't
             // come back from reboot to a broken binary.
-            verify_on_disk(&persist_bin, &binary, &info.version)
+            verify_on_disk(&persist_bin, bytes, version)
                 .context("unraid appdata mirror verification failed")?;
             println!(
                 "[orca] mirrored to {} (unraid appdata)",
@@ -358,8 +381,8 @@ pub async fn apply_update(info: &UpdateInfo, token: &str) -> Result<()> {
         }
     }
 
-    println!("[orca] updated to v{} — scheduling restart", info.version);
-    write_pending_restart_marker(&info.version);
+    println!("[orca] updated to v{version} — scheduling restart");
+    write_pending_restart_marker(version);
     let method = schedule_self_restart();
     println!("[orca] restart method: {method}");
     Ok(())
@@ -492,6 +515,72 @@ pub fn clear_pending_restart() {
     if let Some(home) = files::ops::orca_home() {
         _ = std::fs::remove_file(home.join("pending_restart"));
     }
+}
+
+/// Resolve a release tag + target triple to a verified binary blob.
+///
+/// Looks up the GitHub release for `v_tag` (with or without `v` prefix),
+/// finds the asset named `orca-<version>-<target>` (or legacy
+/// `orca-<target>`), downloads the asset + `.sha256` checksum, and verifies
+/// the asset against the checksum. Returns `(bytes, sha256_hex, version)`.
+///
+/// `target` is an explicit Rust target triple (`x86_64-unknown-linux-gnu`,
+/// `aarch64-apple-darwin`, etc.) — the caller may be on a different arch
+/// from the host that holds the GitHub token. This is the engine for the
+/// peer-dispatched `system.fetch_release_asset` tool (delegate-on-miss).
+pub async fn fetch_release_asset(
+    v_tag: &str,
+    target: &str,
+    token: &str,
+) -> Result<(Vec<u8>, String, String)> {
+    if token.is_empty() {
+        bail!("no github token available — set secret 'github_token' or export GITHUB_TOKEN");
+    }
+    let v_tag = if v_tag.starts_with('v') {
+        v_tag.to_string()
+    } else {
+        format!("v{v_tag}")
+    };
+    let client = utils::http::Client::new();
+    let user_agent = format!("{APP_NAME}/{CURRENT_VERSION}");
+    let url = format!("{APP_REPO_API_URL}/releases/tags/{v_tag}");
+    let resp = client
+        .get(url)
+        .bearer(token)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
+        .header("User-Agent", &user_agent)
+        .send()
+        .await
+        .with_context(|| format!("fetch release {v_tag}"))?;
+    let release: Release = resp.json().context("parse release json")?;
+    let stripped = release.tag_name.trim_start_matches('v').to_string();
+    let versioned = format!("{APP_NAME}-{stripped}-{target}");
+    let legacy = format!("{APP_NAME}-{target}");
+    let asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == versioned)
+        .or_else(|| release.assets.iter().find(|a| a.name == legacy))
+        .with_context(|| format!("no asset for {v_tag} matching {versioned} or {legacy}"))?;
+    let checksum_name = format!("{}.sha256", asset.name);
+    let checksum_url = release
+        .assets
+        .iter()
+        .find(|a| a.name == checksum_name)
+        .map(|a| a.url.clone())
+        .with_context(|| format!("no checksum asset {checksum_name} for {v_tag}"))?;
+
+    let cs_bytes = download_asset(&client, &checksum_url, token).await?;
+    let cs_str = String::from_utf8_lossy(&cs_bytes);
+    let expected = cs_str
+        .split_whitespace()
+        .next()
+        .map(|s| s.to_string())
+        .with_context(|| format!("checksum file empty at {checksum_url}"))?;
+    let bytes = download_asset(&client, &asset.url, token).await?;
+    verify_sha256(&bytes, &expected)?;
+    Ok((bytes, expected, stripped))
 }
 
 pub async fn download_asset(

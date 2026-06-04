@@ -14,14 +14,17 @@ use crate::dev::{
 };
 use crate::install::{InstallReport, cmd_install_report, cmd_uninstall_report};
 use crate::update::{
-    UpdateInfo, VersionEntry, apply_update, check_for_update, list_versions, prune_check_cache,
-    resolve_github_token,
+    UpdateInfo, VersionEntry, apply_binary, apply_update, build_target, check_for_update,
+    fetch_release_asset, list_versions, prune_check_cache, resolve_github_token, verify_sha256,
 };
 use crate::update_state::{
     Channel, clear_version_pin, read_channel_marker, read_version_pin, resolve_pin_veto,
     write_channel_marker, write_version_pin,
 };
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
+use contract::RemoteExec;
 use derive::orca_tool;
+use std::sync::Arc;
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -112,6 +115,92 @@ async fn system_delete(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> Result<Ins
             .push(format!("daemon supervisor removal failed: {e}")),
     }
     Ok(report)
+}
+
+// ── system.fetch_release_asset — delegate-on-miss holder side ─────────────
+//
+// Peer-dispatchable. A peer whose `github_token` secret is empty calls this
+// on a paired peer that DOES hold the token; the holder fetches the release
+// from GitHub, verifies the sha256, and returns the binary bytes
+// base64-encoded for the JSON-only wire transport. The token never leaves
+// the holder. See [[project-github-token-auto-provision]] and
+// [[project-secret-delegation-not-distribution]].
+
+/// Args for [`system_fetch_release_asset`].
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+pub struct FetchReleaseAssetArgs {
+    /// Release tag to fetch, with or without `v` prefix (e.g. `0.0.6-rc.15`
+    /// or `v0.0.6-rc.15`). Optional — when omitted the holder resolves the
+    /// channel's latest tag using its own GitHub token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub version: Option<String>,
+    /// Rust target triple of the requester (e.g. `x86_64-unknown-linux-gnu`,
+    /// `aarch64-apple-darwin`). The holder may be on a different arch, so
+    /// the caller MUST specify the asset they need.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub target: String,
+    /// Channel the requester wants the latest of (`stable` | `rc`). Required
+    /// when `version` is omitted; ignored when `version` is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub channel: Option<String>,
+}
+
+/// Result of [`system_fetch_release_asset`]. `asset_b64` is base64-STANDARD
+/// of the raw binary bytes; `sha256` is the hex digest the holder verified
+/// against the release `.sha256` blob (callers MUST re-verify after decode
+/// before swapping).
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+pub struct FetchReleaseAssetOutput {
+    pub asset_b64: String,
+    pub sha256: String,
+    pub version: String,
+}
+
+/// Fetch a release asset from GitHub on behalf of a peer that lacks the
+/// `github_token` secret. Resolves the token locally, downloads the asset
+/// for the requested `target`, verifies sha256 against the release
+/// checksum blob, and returns the bytes base64-encoded.
+#[orca_tool(domain = "system", verb = "fetch_release_asset")]
+async fn system_fetch_release_asset(
+    args: FetchReleaseAssetArgs,
+    _ctx: &contract::ToolCtx,
+) -> Result<FetchReleaseAssetOutput> {
+    let token = resolve_github_token();
+    if token.is_empty() {
+        anyhow::bail!(
+            "this peer has no github_token — cannot serve fetch_release_asset for delegate-on-miss"
+        );
+    }
+    let v_tag = match args
+        .version
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(v) => v.to_string(),
+        None => {
+            let ch_name = args.channel.as_deref().unwrap_or("stable");
+            let channel = crate::update_state::Channel::parse(ch_name);
+            if matches!(channel, crate::update_state::Channel::Dev) {
+                anyhow::bail!("channel `dev` has no GitHub releases to fetch");
+            }
+            let info = crate::update::check_for_update(&channel, &token)
+                .await?
+                .with_context(|| {
+                    format!("channel `{ch_name}` has no release newer than this peer to serve")
+                })?;
+            info.version
+        }
+    };
+    let (bytes, sha256, version) = fetch_release_asset(&v_tag, &args.target, &token).await?;
+    Ok(FetchReleaseAssetOutput {
+        asset_b64: B64.encode(&bytes),
+        sha256,
+        version,
+    })
 }
 
 // ── system.update — the one tool ───────────────────────────────────────────
@@ -431,8 +520,17 @@ async fn system_update(
 
     if binary_intent && !matches!(ch_marker, Channel::Dev) {
         if token.is_empty() && read_dev_source().is_none() {
-            errors
-                .push("no github token — set secret 'github_token' or export GITHUB_TOKEN".into());
+            // delegate-on-miss: try paired peers that may hold the token.
+            // See [[project-github-token-auto-provision]],
+            // [[project-secret-delegation-not-distribution]].
+            match delegate_fetch_and_apply(args.version.as_deref(), &ch_marker, ctx).await {
+                Ok(Some(v)) => {
+                    applied = Some(v.clone());
+                    notes.push(format!("applied v{v} (via delegate-on-miss)"));
+                }
+                Ok(None) => notes.push("delegate-on-miss: already up to date".into()),
+                Err(e) => errors.push(format!("delegate-on-miss failed: {e}")),
+            }
         } else if let Some(src) = read_dev_source() {
             match check_for_update_dev(&src).await {
                 Ok(Some(v)) => match apply_update_dev(&src).await {
@@ -542,6 +640,87 @@ async fn system_update(
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
+
+/// Delegate-on-miss: when this peer has no `github_token` secret, ask a
+/// paired secure peer that does hold one to fetch the release asset on our
+/// behalf. The token never leaves the holder; we get back the verified bytes.
+///
+/// Returns `Ok(Some(version))` if a peer served the asset and the local
+/// binary swap succeeded, `Ok(None)` if no `version` was specified (the
+/// caller surfaces a hint), or `Err(_)` when candidate peers existed but
+/// every one failed (aggregated reasons in the message).
+///
+/// This slice requires an explicit `--version`. Channel-latest delegation
+/// (asking the holder to resolve the channel's newest tag itself) is a
+/// follow-up — see [[project-github-token-auto-provision]].
+async fn delegate_fetch_and_apply(
+    version: Option<&str>,
+    channel: &Channel,
+    ctx: &contract::ToolCtx,
+) -> Result<Option<String>> {
+    let pinned = version
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(normalise_version);
+    let target = build_target().to_string();
+
+    let conn = db::open_default().context("open orca.db for peer enumeration")?;
+    let candidates: Vec<db::pod::peerdb::PeerRow> = db::pod::peerdb::list_peers(&conn)
+        .context("list paired peers")?
+        .into_iter()
+        .filter(|p| p.departed_at.is_none() && p.peer_secure)
+        .collect();
+    if candidates.is_empty() {
+        anyhow::bail!("no paired secure peers available to delegate fetch");
+    }
+
+    // Sanity: surface a clear error if no transport is registered, rather
+    // than letting the macro-emitted peer_dispatch fail per-peer.
+    ctx.service::<Arc<dyn RemoteExec>>()
+        .context("no RemoteExec transport registered for delegate fetch")?;
+
+    let mut errs: Vec<String> = Vec::new();
+    for peer in &candidates {
+        let args = FetchReleaseAssetArgs {
+            version: pinned.clone(),
+            target: target.clone(),
+            channel: Some(channel.as_marker().to_string()),
+        };
+        // Setting ctx.peer triggers the macro-emitted peer_dispatch stanza
+        // inside `system_fetch_release_asset`, routing the call through
+        // RemoteExec to `peer.peer_hostname` and returning the typed
+        // `FetchReleaseAssetOutput` directly.
+        let peered = ctx.clone().with_peer(peer.peer_hostname.clone());
+        let out = match system_fetch_release_asset(args, &peered).await {
+            Ok(o) => o,
+            Err(e) => {
+                errs.push(format!("{}: {e}", peer.peer_hostname));
+                continue;
+            }
+        };
+        let bytes = match B64.decode(out.asset_b64.as_bytes()) {
+            Ok(b) => b,
+            Err(e) => {
+                errs.push(format!("{}: base64 decode: {e}", peer.peer_hostname));
+                continue;
+            }
+        };
+        if let Err(e) = verify_sha256(&bytes, &out.sha256) {
+            errs.push(format!("{}: sha256 verify: {e}", peer.peer_hostname));
+            continue;
+        }
+        if let Err(e) = apply_binary(&bytes, &out.version) {
+            errs.push(format!("{}: apply_binary: {e}", peer.peer_hostname));
+            continue;
+        }
+        return Ok(Some(out.version));
+    }
+    anyhow::bail!(
+        "all {} delegate peers failed: {}",
+        candidates.len(),
+        errs.join("; ")
+    );
+}
 
 fn normalise_version(v: &str) -> String {
     if v.starts_with('v') {
