@@ -379,112 +379,111 @@ jobs:
         run: test -f projects/frontend/dist/index.html
 
   # ── Package native installers (RC) ───────────────────────────────────────
-  # One matrix → one definition for every native package format orca emits
-  # via `system build --format <fmt>`. Each entry downloads its matching
-  # binary, runs the packager, and uploads the result. publish-rc picks
-  # them all up via the `orca-pkg-*` artifact pattern.
-  #
-  # Format coverage:
-  #   deb       — Debian/Ubuntu/Proxmox (PVE is Debian under the hood)
-  #   rpm       — RHEL/Fedora/Rocky
-  #   apk       — Alpine (writes APKBUILD source recipe, not the .apk itself —
-  #               build via abuild in a follow-up job when needed)
-  #   pkgbuild  — Arch/AUR (writes PKGBUILD recipe, same caveat)
-  #   homebrew  — macOS Homebrew formula (.rb)
-  #   pkg       — macOS Installer (.pkg, unsigned in CI today)
-  #   plg       — Unraid plugin manifest, see
-  #               [[project-unraid-plugin-install-blocked-on-graphql]]
+  # Single codepath with `make release rc` — both call
+  # `build_native_packages` in scripts/release-lib.sh. The matrix here
+  # exists only to split linux + darwin runners (pkgbuild is Xcode CLT only);
+  # everything else runs through the same shell function.
+  # HARD RULE: [[feedback-ci-makefile-parity]] — never duplicate packaging
+  # logic in this workflow. New format? Add it to build_native_packages.
   package-native:
-    name: Package ${{ matrix.format }} (${{ matrix.arch }})
+    name: Package native (${{ matrix.os }})
     needs: [version, build-rust]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { format: deb,      runner: ubuntu-latest,    target: x86_64-unknown-linux-gnu,   arch: x86_64,  apt: dpkg-dev }
-          - { format: deb,      runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,  arch: aarch64, apt: dpkg-dev }
-          - { format: rpm,      runner: ubuntu-latest,    target: x86_64-unknown-linux-gnu,   arch: x86_64,  apt: rpm }
-          - { format: rpm,      runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,  arch: aarch64, apt: rpm }
-          - { format: apk,      runner: ubuntu-latest,    target: x86_64-unknown-linux-musl,  arch: x86_64,  apt: '' }
-          - { format: pkgbuild, runner: ubuntu-latest,    target: x86_64-unknown-linux-gnu,   arch: x86_64,  apt: '' }
-          - { format: homebrew, runner: ubuntu-latest,    target: x86_64-unknown-linux-gnu,   arch: x86_64,  apt: '' }
-          - { format: pkg,      runner: macos-latest,     target: x86_64-apple-darwin,        arch: x86_64,  apt: '' }
-          - { format: pkg,      runner: macos-latest,     target: aarch64-apple-darwin,       arch: aarch64, apt: '' }
-          - { format: plg,      runner: ubuntu-latest,    target: x86_64-unknown-linux-gnu,   arch: x86_64,  apt: '' }
+          - { os: linux,  runner: ubuntu-latest, apt: 'dpkg-dev rpm' }
+          - { os: darwin, runner: macos-latest,  apt: '' }
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
-          name: orca-${{ matrix.target }}
-          path: bin/
-      - name: Install packager (${{ matrix.apt }})
-        if: matrix.apt != ''
+          pattern: 'orca-*-unknown-*'
+          path: dist-release/
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: 'orca-*-apple-*'
+          path: dist-release/
+          merge-multiple: true
+      - name: Install linux packagers
+        if: matrix.os == 'linux'
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
-      - name: Build ${{ matrix.format }}
+      - name: Build native packages
         run: |
           set -euo pipefail
-          chmod +x bin/orca-${{ matrix.target }}
-          mkdir -p out
-          bin/orca-${{ matrix.target }} system build \
-            --format ${{ matrix.format }} \
-            --binary bin/orca-${{ matrix.target }} \
-            --arch ${{ matrix.arch }} \
-            --out-dir out
-          ls -lh out/
+          chmod +x dist-release/orca-* || true
+          source scripts/release-lib.sh
+          build_native_packages
+          ls -lh dist-release/
       - uses: actions/upload-artifact@v4
         with:
-          name: orca-pkg-${{ matrix.format }}-${{ matrix.arch }}
-          path: out/
+          name: orca-pkg-${{ matrix.os }}
+          path: |
+            dist-release/*.deb
+            dist-release/*.rpm
+            dist-release/*.pkg
+            dist-release/*.rb
+            dist-release/orca.plg
+            dist-release/APKBUILD
+            dist-release/PKGBUILD
           retention-days: 7
+          if-no-files-found: ignore
 
   # ── Package native installers (stable) ───────────────────────────────────
-  # Mirror of package-native for the rebuilt stable binaries. Same matrix,
-  # different artifact suffix so publish-stable's `orca-*-stable` pattern
-  # picks them up.
   package-native-stable:
-    name: Package ${{ matrix.format }} (${{ matrix.arch }}, stable)
+    name: Package native (${{ matrix.os }}, stable)
     needs: [version, build-rust-stable]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { format: deb,      runner: ubuntu-latest,    target: x86_64-unknown-linux-gnu,   arch: x86_64,  apt: dpkg-dev }
-          - { format: deb,      runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,  arch: aarch64, apt: dpkg-dev }
-          - { format: rpm,      runner: ubuntu-latest,    target: x86_64-unknown-linux-gnu,   arch: x86_64,  apt: rpm }
-          - { format: rpm,      runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,  arch: aarch64, apt: rpm }
-          - { format: apk,      runner: ubuntu-latest,    target: x86_64-unknown-linux-musl,  arch: x86_64,  apt: '' }
-          - { format: pkgbuild, runner: ubuntu-latest,    target: x86_64-unknown-linux-gnu,   arch: x86_64,  apt: '' }
-          - { format: homebrew, runner: ubuntu-latest,    target: x86_64-unknown-linux-gnu,   arch: x86_64,  apt: '' }
-          - { format: pkg,      runner: macos-latest,     target: x86_64-apple-darwin,        arch: x86_64,  apt: '' }
-          - { format: pkg,      runner: macos-latest,     target: aarch64-apple-darwin,       arch: aarch64, apt: '' }
-          - { format: plg,      runner: ubuntu-latest,    target: x86_64-unknown-linux-gnu,   arch: x86_64,  apt: '' }
+          - { os: linux,  runner: ubuntu-latest, apt: 'dpkg-dev rpm' }
+          - { os: darwin, runner: macos-latest,  apt: '' }
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
-          name: orca-${{ matrix.target }}-stable
-          path: bin/
-      - name: Install packager (${{ matrix.apt }})
-        if: matrix.apt != ''
-        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
-      - name: Build ${{ matrix.format }}
+          pattern: 'orca-*-stable'
+          path: dist-release/
+          merge-multiple: true
+      - name: Strip -stable suffix from artifact filenames
         run: |
           set -euo pipefail
-          chmod +x bin/orca-${{ matrix.target }}
-          mkdir -p out
-          bin/orca-${{ matrix.target }} system build \
-            --format ${{ matrix.format }} \
-            --binary bin/orca-${{ matrix.target }} \
-            --arch ${{ matrix.arch }} \
-            --out-dir out
-          ls -lh out/
+          # The build-rust-stable matrix uploads as orca-<triple>-stable;
+          # build_native_packages expects orca-<triple>. Restore canonical
+          # names so the shared lib finds them.
+          cd dist-release
+          for f in *-stable; do
+            [ -e "$f" ] || continue
+            mv "$f" "${f%-stable}"
+          done
+          ls -lh
+      - name: Install linux packagers
+        if: matrix.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
+      - name: Build native packages
+        run: |
+          set -euo pipefail
+          chmod +x dist-release/orca-* || true
+          source scripts/release-lib.sh
+          build_native_packages
+          ls -lh dist-release/
       - uses: actions/upload-artifact@v4
         with:
-          name: orca-pkg-${{ matrix.format }}-${{ matrix.arch }}-stable
-          path: out/
+          name: orca-pkg-${{ matrix.os }}-stable
+          path: |
+            dist-release/*.deb
+            dist-release/*.rpm
+            dist-release/*.pkg
+            dist-release/*.rb
+            dist-release/orca.plg
+            dist-release/APKBUILD
+            dist-release/PKGBUILD
           retention-days: 7
+          if-no-files-found: ignore
 
   # ── Publish RC (manual approval) ─────────────────────────────────────────
   # Version math + build are upstream; publish waits on every test job so a

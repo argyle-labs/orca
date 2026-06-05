@@ -90,7 +90,25 @@ default_targets() {
 }
 
 host_target() {
-  rustc -vV | awk '/^host:/ {print $2}'
+  # Prefer rustc so we agree with cargo's notion of host. Fall back to
+  # uname so this works on CI runners that haven't installed a toolchain
+  # (the package-native job downloads pre-built binaries — no rustc).
+  if command -v rustc >/dev/null 2>&1; then
+    rustc -vV | awk '/^host:/ {print $2}'
+    return
+  fi
+  local os arch
+  case "$(uname -s)" in
+    Darwin) os=apple-darwin ;;
+    Linux)  os=unknown-linux-gnu ;;
+    *) die "host_target: unsupported OS $(uname -s)" ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64) arch=x86_64 ;;
+    arm64|aarch64) arch=aarch64 ;;
+    *) die "host_target: unsupported arch $(uname -m)" ;;
+  esac
+  echo "${arch}-${os}"
 }
 
 # ── log helpers ─────────────────────────────────────────────────────────────
@@ -430,7 +448,9 @@ build_orca_targets() {
   [ "${#targets[@]}" -gt 0 ] || die "build_orca_targets: no targets given"
 
   mkdir -p "$DIST_DIR"
-  rm -f "$DIST_DIR"/orca-* "$DIST_DIR"/*.sha256 "$DIST_DIR"/*.sha256.bak
+  rm -f "$DIST_DIR"/orca-* "$DIST_DIR"/*.sha256 "$DIST_DIR"/*.sha256.bak \
+        "$DIST_DIR"/*.deb "$DIST_DIR"/*.rpm "$DIST_DIR"/*.pkg "$DIST_DIR"/*.rb \
+        "$DIST_DIR"/orca.plg "$DIST_DIR"/APKBUILD "$DIST_DIR"/PKGBUILD
 
   local parallel jobs
   parallel=$(release_parallel_targets "${#targets[@]}")
@@ -463,7 +483,8 @@ build_orca_targets() {
 
 # Print asset paths for `gh release create`. Args: target1 target2 ...
 # Emits both the versioned and legacy unversioned aliases (see stage_target_asset
-# for the transition rationale).
+# for the transition rationale), then native-package artifacts produced by
+# build_native_packages (skipped silently if none present).
 release_asset_paths() {
   local version t
   version="$(current_cargo_version)"
@@ -472,6 +493,73 @@ release_asset_paths() {
     echo "${DIST_DIR}/orca-${version}-${t}.sha256"
     echo "${DIST_DIR}/orca-${t}"
     echo "${DIST_DIR}/orca-${t}.sha256"
+  done
+  # Native packages live next to the binaries in dist-release/. Globs
+  # are safe — missing matches expand to nothing under `nullglob`.
+  local f
+  shopt -s nullglob
+  for f in \
+    "$DIST_DIR"/*.deb \
+    "$DIST_DIR"/*.rpm \
+    "$DIST_DIR"/*.pkg \
+    "$DIST_DIR"/*.rb \
+    "$DIST_DIR"/orca.plg \
+    "$DIST_DIR"/APKBUILD \
+    "$DIST_DIR"/PKGBUILD; do
+    echo "$f"
+  done
+  shopt -u nullglob
+}
+
+# Build every native installer format the host can produce, alongside the
+# binaries in dist-release/. Mirrors the package-native matrix in
+# .github/workflows/release.yml (see [[feedback-ci-makefile-parity]]).
+#
+# Each format runs `orca system build --format <fmt>` via the freshly built
+# host-target binary; package.rs handles the per-format details. Formats
+# whose external tool is missing (dpkg-deb, rpmbuild, pkgbuild) are skipped
+# with a warning instead of failing the release — local hosts rarely have
+# every packager installed.
+build_native_packages() {
+  local host
+  host="$(host_target)"
+  local runner="${DIST_DIR}/orca-${host}"
+  [ -x "$runner" ] || die "build_native_packages: host binary ${runner} missing — run build_orca_targets first"
+
+  # (format, target-arch, target-triple, required-tool) per matrix entry.
+  # An empty required-tool means the format only writes source files.
+  local rows=(
+    "deb      x86_64  x86_64-unknown-linux-gnu   dpkg-deb"
+    "deb      aarch64 aarch64-unknown-linux-gnu  dpkg-deb"
+    "rpm      x86_64  x86_64-unknown-linux-gnu   rpmbuild"
+    "rpm      aarch64 aarch64-unknown-linux-gnu  rpmbuild"
+    "apk      x86_64  x86_64-unknown-linux-musl  "
+    "pkgbuild x86_64  x86_64-unknown-linux-gnu   "
+    "homebrew x86_64  x86_64-unknown-linux-gnu   "
+    "pkg      x86_64  x86_64-apple-darwin        pkgbuild"
+    "pkg      aarch64 aarch64-apple-darwin       pkgbuild"
+    "plg      x86_64  x86_64-unknown-linux-gnu   "
+  )
+
+  local row fmt arch triple tool bin
+  for row in "${rows[@]}"; do
+    read -r fmt arch triple tool <<< "$row"
+    bin="${DIST_DIR}/orca-${triple}"
+    if [ ! -f "$bin" ]; then
+      log "skip ${fmt}/${arch} — ${bin} not in build set"
+      continue
+    fi
+    if [ -n "$tool" ] && ! command -v "$tool" >/dev/null 2>&1; then
+      log "skip ${fmt}/${arch} — missing ${tool}"
+      continue
+    fi
+    log "package ${fmt}/${arch} (binary: orca-${triple})"
+    "$runner" system build \
+      --format "$fmt" \
+      --binary "$bin" \
+      --arch "$arch" \
+      --out-dir "$DIST_DIR" \
+      || die "package ${fmt}/${arch} failed"
   done
 }
 
@@ -554,6 +642,7 @@ bump_and_build() {
   write_cargo_version "$new"
   build_frontend
   build_orca_targets "${targets[@]}"
+  build_native_packages
 }
 
 # Bash-3.2-safe replacement for `mapfile`. Reads stdin of $2 into array $1.
