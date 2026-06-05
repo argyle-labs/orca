@@ -448,7 +448,7 @@ build_orca_targets() {
   [ "${#targets[@]}" -gt 0 ] || die "build_orca_targets: no targets given"
 
   mkdir -p "$DIST_DIR"
-  rm -f "$DIST_DIR"/orca-* "$DIST_DIR"/*.sha256 "$DIST_DIR"/*.sha256.bak \
+  rm -rf "$DIST_DIR"/orca-* "$DIST_DIR"/*.sha256 "$DIST_DIR"/*.sha256.bak \
         "$DIST_DIR"/*.deb "$DIST_DIR"/*.rpm "$DIST_DIR"/*.pkg "$DIST_DIR"/*.rb \
         "$DIST_DIR"/orca.plg "$DIST_DIR"/APKBUILD "$DIST_DIR"/PKGBUILD
 
