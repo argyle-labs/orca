@@ -42,6 +42,7 @@ if-addrs = { version = "0.14" }
 chrono = { workspace = true }
 dirs = { workspace = true }
 sha2 = { workspace = true }
+md-5 = "0.10"
 base64 = "0.22"
 cron         = { workspace = true }
 colored      = { workspace = true }

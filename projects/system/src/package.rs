@@ -33,6 +33,10 @@ pub enum PackageFormat {
     Pkg,
     /// Homebrew — writes a formula .rb file, no build tool required
     Homebrew,
+    /// Unraid — writes a `.plg` plugin manifest. The Unraid plugin
+    /// manager owns lifecycle (install/restart/remove), retiring the
+    /// ssh+rc.orca bootstrap path. See [[project-unraid-plugin-install-blocked-on-graphql]].
+    Plg,
 }
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
@@ -64,6 +68,15 @@ pub struct PackageBuildArgs {
     /// macOS Developer ID Installer identity for productsign (.pkg signing).
     #[cfg_attr(feature = "cli", arg(long))]
     pub pkg_sign_identity: Option<String>,
+    /// `.plg` only — URL where the published `.plg` file itself will
+    /// live (Unraid uses this to check for plugin updates). Defaults to
+    /// the github-releases convention for this version.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub plg_url: Option<String>,
+    /// `.plg` only — URL where the binary payload will live. Defaults
+    /// to the github-releases convention for the current arch.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub plg_binary_url: Option<String>,
 }
 
 fn default_out_dir() -> PathBuf {
@@ -112,6 +125,14 @@ async fn system_build(args: PackageBuildArgs, _ctx: &ToolCtx) -> Result<PackageB
             &args.out_dir,
         )?,
         PackageFormat::Homebrew => build_homebrew(VERSION, &args.out_dir)?,
+        PackageFormat::Plg => build_plg(
+            &binary,
+            VERSION,
+            &arch,
+            args.plg_url.as_deref(),
+            args.plg_binary_url.as_deref(),
+            &args.out_dir,
+        )?,
     }
 
     Ok(PackageBuildOutput {
@@ -638,6 +659,170 @@ end
     Ok(())
 }
 
+// ── .plg (Unraid plugin manifest) ─────────────────────────────────────────────
+
+/// Build an Unraid plugin manifest (`.plg`). The Unraid plugin manager
+/// downloads the binary referenced by `<URL>` (verifying `<MD5>`), then
+/// runs the inline install script. Removal runs the inline remove
+/// script. This retires the ssh+scp bootstrap and the
+/// "orca daemon dies after rc swap" symptom — see
+/// [[project-unraid-daemon-dies-after-swap]].
+fn build_plg(
+    binary: &Path,
+    version: &str,
+    arch: &str,
+    plg_url: Option<&str>,
+    plg_binary_url: Option<&str>,
+    out_dir: &Path,
+) -> Result<()> {
+    let triple = match arch {
+        "x86_64" => "x86_64-unknown-linux-gnu",
+        "aarch64" => "aarch64-unknown-linux-gnu",
+        a => a,
+    };
+    let plg_url = plg_url.map(str::to_string).unwrap_or_else(|| {
+        format!("https://github.com/scottdkey/orca/releases/download/v{version}/orca.plg")
+    });
+    let binary_url = plg_binary_url.map(str::to_string).unwrap_or_else(|| {
+        format!(
+            "https://github.com/scottdkey/orca/releases/download/v{version}/orca-{version}-{triple}"
+        )
+    });
+    let md5 = md5_hex(binary)?;
+
+    // Inline install/remove scripts mirror what install_unraid() in
+    // daemon.rs writes today: persist the binary in appdata, write
+    // rc.orca to /etc/rc.d AND /boot/config/plugins/orca (USB
+    // persistence past reboot), hook /boot/config/go, start.
+    let install_script = render_plg_install_script();
+    let remove_script = render_plg_remove_script();
+
+    let plg = format!(
+        r#"<?xml version="1.0" standalone="yes"?>
+<!DOCTYPE PLUGIN [
+<!ENTITY name      "orca">
+<!ENTITY author    "scottdkey">
+<!ENTITY version   "{version}">
+<!ENTITY launch    "Settings/Orca">
+<!ENTITY pluginURL "{plg_url}">
+<!ENTITY md5       "{md5}">
+<!ENTITY plugin    "/boot/config/plugins/orca">
+<!ENTITY appdata   "/mnt/user/appdata/orca">
+<!ENTITY binary    "{binary_url}">
+]>
+<PLUGIN  name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;" min="6.10" launch="&launch;">
+
+  <CHANGES>
+## &version;
+- Managed install via Unraid plugin manager (retires ssh bootstrap).
+  </CHANGES>
+
+  <!-- Download the binary to the USB plugin dir; verified by MD5. -->
+  <FILE Name="&plugin;/bin/orca">
+    <URL>&binary;</URL>
+    <MD5>&md5;</MD5>
+  </FILE>
+
+  <!-- Install: stage to appdata, write rc.orca, hook /boot/config/go, start. -->
+  <FILE Run="/bin/bash">
+    <INLINE>
+<![CDATA[
+{install_script}
+]]>
+    </INLINE>
+  </FILE>
+
+  <!-- Remove: stop daemon, tear down rc.orca + go-hook + plugin dirs. -->
+  <FILE Run="/bin/bash" Method="remove">
+    <INLINE>
+<![CDATA[
+{remove_script}
+]]>
+    </INLINE>
+  </FILE>
+</PLUGIN>
+"#
+    );
+
+    let path = out_dir.join("orca.plg");
+    std::fs::write(&path, &plg)?;
+    println!("{} {}", "✓".green(), path.display());
+    println!("  publish: upload alongside the binary to the github release");
+    println!("  install: from Unraid → Plugins → Install Plugin → paste {plg_url}");
+    Ok(())
+}
+
+fn render_plg_install_script() -> &'static str {
+    // Note: keep this in sync with `install_unraid()` in daemon.rs. The
+    // .plg path is the new front door; the orca-side fn becomes a
+    // fallback for non-plugin-manager environments.
+    r#"#!/bin/bash
+set -e
+PLUGIN=/boot/config/plugins/orca
+APPDATA=/mnt/user/appdata/orca
+USER=orca
+HOME_DIR=/home/orca
+PORT=12000
+
+id "$USER" >/dev/null 2>&1 || useradd -r -m -d "$HOME_DIR" -s /bin/bash "$USER" || true
+mkdir -p "$APPDATA/bin" "$APPDATA/logs" "$HOME_DIR/.local/bin"
+chown -R "$USER:$USER" "$APPDATA" "$HOME_DIR" 2>/dev/null || true
+
+# Stage the binary from the USB plugin dir into appdata so orca self-update
+# (which writes to appdata) and rc.orca's stage_bin stay in lockstep.
+install -m 0755 -o "$USER" -g "$USER" "$PLUGIN/bin/orca" "$APPDATA/bin/orca"
+
+# rc.orca lives in /etc/rc.d (tmpfs — wiped on reboot) AND on USB so
+# /boot/config/go can restore it before appdata mounts.
+"$APPDATA/bin/orca" daemon install --service-user "$USER" --port "$PORT" || {
+  echo "orca daemon install failed; rc.orca will be regenerated on next start" >&2
+}
+
+# Start now via the rc script that `daemon install` just wrote.
+/etc/rc.d/rc.orca start || true
+echo "orca installed: appdata=$APPDATA, port=$PORT"
+"#
+}
+
+fn render_plg_remove_script() -> &'static str {
+    r#"#!/bin/bash
+PLUGIN=/boot/config/plugins/orca
+
+/etc/rc.d/rc.orca stop 2>/dev/null || true
+"$PLUGIN/bin/orca" daemon uninstall 2>/dev/null || true
+
+# Drop the managed block from /boot/config/go, written by `daemon install`.
+GO=/boot/config/go
+if [ -f "$GO" ]; then
+  awk '
+    /# --- orca daemon \(managed by/ { skip=1; next }
+    /# --- end orca daemon ---/      { skip=0; next }
+    !skip
+  ' "$GO" > "$GO.tmp" && mv "$GO.tmp" "$GO"
+fi
+
+rm -f /etc/rc.d/rc.orca
+rm -rf "$PLUGIN"
+# Note: appdata is intentionally preserved — it holds the binary, logs,
+# and orca.db. Remove /mnt/user/appdata/orca by hand if you want a full
+# wipe.
+echo "orca removed (appdata preserved)"
+"#
+}
+
+fn md5_hex(path: &Path) -> Result<String> {
+    // md5 is used here because Unraid's plugin manager verifies the
+    // FILE block with an MD5 entity — not our choice. The hash is
+    // checksum-only (collision-resistance isn't needed for upstream-
+    // signed CDNs); sha256 isn't accepted by the plugin manager.
+    use md5::Digest;
+    let mut f = std::fs::File::open(path)?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf)?;
+    let hash = md5::Md5::new().chain_update(&buf).finalize();
+    Ok(hash.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn write_script(path: &Path, content: &str) -> Result<()> {
@@ -722,6 +907,46 @@ mod tests {
         assert!(s.contains("brew services"));
         // Formula uses brew services, NOT orca daemon install
         assert!(!s.contains("daemon install"));
+    }
+
+    #[test]
+    fn plg_emits_valid_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("orca");
+        std::fs::write(&bin, b"fake binary contents").unwrap();
+        build_plg(&bin, "0.0.6-rc.17", "x86_64", None, None, dir.path()).unwrap();
+        let s = std::fs::read_to_string(dir.path().join("orca.plg")).unwrap();
+        assert!(s.starts_with("<?xml"));
+        assert!(s.contains("<!DOCTYPE PLUGIN"));
+        assert!(s.contains("<!ENTITY version   \"0.0.6-rc.17\">"));
+        assert!(s.contains("orca-0.0.6-rc.17-x86_64-unknown-linux-gnu"));
+        assert!(s.contains("Method=\"remove\""));
+        // md5 of "fake binary contents"
+        let expected = {
+            use md5::Digest;
+            let h = md5::Md5::new()
+                .chain_update(b"fake binary contents")
+                .finalize();
+            h.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        };
+        assert!(s.contains(&expected), "manifest must embed payload md5");
+    }
+
+    #[test]
+    fn plg_install_script_creates_orca_user_and_starts_daemon() {
+        let s = render_plg_install_script();
+        assert!(s.contains("useradd"));
+        assert!(s.contains("daemon install"));
+        assert!(s.contains("rc.orca start"));
+    }
+
+    #[test]
+    fn plg_remove_script_preserves_appdata() {
+        let s = render_plg_remove_script();
+        assert!(s.contains("rc.orca stop"));
+        assert!(s.contains("daemon uninstall"));
+        assert!(s.contains("rm -rf \"$PLUGIN\""));
+        assert!(!s.contains("rm -rf /mnt/user/appdata/orca"));
     }
 
     #[test]
