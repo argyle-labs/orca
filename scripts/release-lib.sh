@@ -506,6 +506,7 @@ release_asset_paths() {
     "$DIST_DIR"/orca.plg \
     "$DIST_DIR"/APKBUILD \
     "$DIST_DIR"/PKGBUILD; do
+    [ -e "$f" ] || continue
     echo "$f"
   done
   shopt -u nullglob
