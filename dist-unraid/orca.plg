@@ -2,10 +2,10 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "orca">
 <!ENTITY author    "scottdkey">
-<!ENTITY version   "0.0.7-rc.4">
+<!ENTITY version   "0.0.7-rc.5">
 <!ENTITY launch    "Settings/Orca">
 <!ENTITY pluginURL "file:///boot/config/plugins/orca.plg">
-<!ENTITY md5       "c2c48092c0c579ffd7bd5c6110cd6ba8">
+<!ENTITY md5       "368e738e1a5d2240e7a459f84fb95ca9">
 <!ENTITY plugin    "/boot/config/plugins/orca">
 <!ENTITY appdata   "/mnt/user/appdata/orca">
 <!ENTITY binary    "file:///boot/config/plugins/orca/bin/orca">

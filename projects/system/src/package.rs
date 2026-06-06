@@ -769,6 +769,7 @@ PORT=12000
 LOG_DIR="$APPDATA/.orca/logs"
 LOG_FILE="$LOG_DIR/daemon.log"
 PID_FILE=/var/run/orca.pid
+WRAPPER=/var/run/orca-wrapper.sh
 
 id "$USER" >/dev/null 2>&1 || useradd -r -m -d "$HOME_DIR" -s /bin/bash "$USER" || true
 mkdir -p "$APPDATA/bin" "$LOG_DIR"
@@ -781,12 +782,12 @@ install -m 0755 -o "$USER" -g "$USER" "$PLUGIN/bin/orca" "$APPDATA/bin/orca"
 "$APPDATA/bin/orca" system install --service-user "$USER" --port "$PORT" \
   || echo "warn: system install reported errors (continuing)" >&2
 
-# Stop any previously-running daemon so we never end up with two racing
-# for 0.0.0.0:12002. pgrep -f catches stale supervisors whose pid file
-# was lost. Wait until the port is actually free before starting.
+# Stop any previously-running daemon (and its respawn wrapper) so we
+# never end up with two racing for 0.0.0.0:12002.
 if [ -f "$PID_FILE" ]; then
   kill "$(cat "$PID_FILE")" 2>/dev/null || true
 fi
+pkill -f "$WRAPPER" 2>/dev/null || true
 pkill -x orca 2>/dev/null || true
 for _ in 1 2 3 4 5; do
   if ! ss -tlnp 2>/dev/null | grep -q ":$PORT "; then break; fi
@@ -794,16 +795,34 @@ for _ in 1 2 3 4 5; do
 done
 rm -f "$PID_FILE"
 
-# Start the daemon. HOME must be set explicitly — `runuser -u <user>`
-# without `-l` does NOT swap HOME, and the daemon stores PKI/state under
-# $HOME (see [[project-unraid-rc-orca-home-bug]]).
-nohup runuser -u "$USER" -- env HOME="$HOME_DIR" \
-  "$APPDATA/bin/orca" daemon --port "$PORT" \
-  >> "$LOG_FILE" 2>&1 &
+# Respawn wrapper. The inner `orca daemon` is what self-SIGTERMs on
+# `system update`; the wrapper's loop re-execs APPDATA/bin/orca (which
+# self-update has already overwritten). Without this, every binary swap
+# on Unraid leaves the daemon dead — the recurring bug we're retiring.
+# See [[project-unraid-daemon-dies-after-swap]].
+cat > "$WRAPPER" <<EOF
+#!/bin/bash
+# orca respawn wrapper — written by .plg install. Restarts the daemon
+# on every exit until the wrapper itself is killed (plugin remove or
+# the next .plg install).
+while true; do
+  runuser -u $USER -- env HOME=$HOME_DIR \
+    "\$0_target" daemon --port $PORT >> "$LOG_FILE" 2>&1
+  status=\$?
+  echo "[wrapper] orca exited (status=\$status); respawning in 1s" >> "$LOG_FILE"
+  sleep 1
+done
+EOF
+# Inline the binary path into the wrapper. Using \$0_target above would
+# require a second file; cleaner to template it in.
+sed -i "s|\"\\\$0_target\"|$APPDATA/bin/orca|g" "$WRAPPER"
+chmod 0755 "$WRAPPER"
+
+nohup "$WRAPPER" </dev/null >> "$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"
 chown "$USER:$USER" "$LOG_FILE" 2>/dev/null || true
 
-echo "orca installed: appdata=$APPDATA, port=$PORT, pid=$(cat "$PID_FILE")"
+echo "orca installed: appdata=$APPDATA, port=$PORT, wrapper_pid=$(cat "$PID_FILE")"
 "#
 }
 
@@ -814,17 +833,21 @@ fn render_plg_remove_script() -> &'static str {
     r#"#!/bin/bash
 PLUGIN=/boot/config/plugins/orca
 PID_FILE=/var/run/orca.pid
+WRAPPER=/var/run/orca-wrapper.sh
 PORT=12000
 
+# Kill the respawn wrapper FIRST so it doesn't restart the daemon out
+# from under us. Then the inner daemon.
 if [ -f "$PID_FILE" ]; then
   kill "$(cat "$PID_FILE")" 2>/dev/null || true
 fi
+pkill -f "$WRAPPER" 2>/dev/null || true
 pkill -x orca 2>/dev/null || true
 for _ in 1 2 3 4 5; do
   if ! pgrep -x orca >/dev/null 2>&1; then break; fi
   sleep 1
 done
-rm -f "$PID_FILE"
+rm -f "$PID_FILE" "$WRAPPER"
 
 rm -rf "$PLUGIN"
 # Note: appdata is intentionally preserved — it holds the binary, logs,
@@ -966,12 +989,15 @@ mod tests {
         assert!(s.contains("system install --service-user"));
         // Daemon is started directly, NOT via /etc/rc.d/rc.orca.
         assert!(!s.contains("rc.orca"));
-        assert!(s.contains("daemon --port \"$PORT\""));
         // HOME must be preserved across `runuser` (was the 2026-06-02 bug,
-        // moved from the retired rc.orca template).
-        assert!(s.contains("runuser -u \"$USER\" -- env HOME="));
+        // moved from the retired rc.orca template). Wrapper does this.
+        assert!(s.contains("runuser -u $USER -- env HOME="));
         // Two-daemon race guard — see [[project-unraid-rc-orca-stale-pid-race]].
         assert!(s.contains("pkill -x orca"));
+        // Respawn wrapper so `system update`'s self-SIGTERM doesn't leave
+        // the daemon dead — see [[project-unraid-daemon-dies-after-swap]].
+        assert!(s.contains("while true"));
+        assert!(s.contains("respawning in 1s"));
     }
 
     #[test]

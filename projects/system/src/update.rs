@@ -449,16 +449,15 @@ fn schedule_self_restart() -> &'static str {
         // owned by the supervisor's `Restart=always`).
         let supervised = std::path::Path::new("/run/systemd/system").exists();
         if is_unraid() {
-            // Unraid has no systemd / openrc — `rc.orca` is fired once at boot
-            // via `/boot/config/go` and never re-runs unless something calls
-            // it. Plain self-SIGTERM leaves the daemon dead until next reboot,
-            // which has bitten us repeatedly (willow + maple, 2026-06-03).
-            // Detach a `rc.orca restart` so the script kills the old pid and
-            // starts a fresh one with the just-swapped binary.
-            method = "unraid-rc-restart";
-            cmd = format!(
-                "sleep 2; /etc/rc.d/rc.orca restart >/dev/null 2>&1 || kill -TERM {my_pid}"
-            );
+            // Unraid: the .plg install script wraps the daemon launch in a
+            // respawn loop (see `render_plg_install_script` in package.rs).
+            // Self-SIGTERM kills the inner `orca daemon`; the wrapper's `while`
+            // re-execs APPDATA/bin/orca, picking up the just-swapped binary.
+            // Retired the `/etc/rc.d/rc.orca restart` path 2026-06-06 along
+            // with the rc.orca script itself — see
+            // [[project-unraid-rc-orca-stale-pid-race]].
+            method = "unraid-plg-respawn";
+            cmd = format!("sleep 2; kill -TERM {my_pid}");
         } else {
             method = if supervised {
                 "systemd-self-sigterm"
