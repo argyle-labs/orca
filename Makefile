@@ -1,4 +1,4 @@
-.PHONY: build install install-hooks deploy dev run watch watch-server watch-test watch-wasm clean prune check release rc promote audit lint format format-check test test-changed coverage coverage-html coverage-touched cache-stats daemon-install daemon-uninstall kill-dev migrate up down init doctor \
+.PHONY: build install install-hooks deploy dev run watch watch-server watch-test watch-wasm clean prune check release rc promote audit lint format format-check test test-changed coverage coverage-html coverage-touched cache-stats daemon-install daemon-uninstall kill-dev migrate up down init doctor unraid-install \
   ci release-build release-build-host release-frontend release-sdk-ts release-sdk-kotlin release-checksums release-stage release-publish release-clean
 
 INSTALL_PATH := $(HOME)/.local/bin/orca
@@ -91,6 +91,19 @@ deploy:
 	bash scripts/install-binary.sh target/$(HOST_TARGET)/release/orca $(INSTALL_PATH)
 	$(INSTALL_PATH) system install
 	@echo "daemon installed"
+
+# Install orca on a private-repo Unraid host via the plugin manager. Cross-
+# compiles the linux binary, builds a local-flavored .plg whose binary URL is
+# a file:// path on the box, scp's both files, then runs `plugin install`
+# remotely. Bootstraps willow/maple without a public release URL — see
+# scripts/unraid-install-plg.sh.
+#
+# Usage: make unraid-install HOST=willow [ARCH=x86_64]
+HOST ?=
+ARCH ?= x86_64
+unraid-install:
+	@[ -n "$(HOST)" ] || { echo "usage: make unraid-install HOST=<host> [ARCH=x86_64|aarch64]"; exit 2; }
+	bash scripts/unraid-install-plg.sh $(HOST) --arch $(ARCH)
 
 # Build debug binary and install to $(INSTALL_PATH). `make dev` runs
 # target/debug/orca directly — this target is for the rare case you want the

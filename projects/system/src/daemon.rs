@@ -584,8 +584,20 @@ fn install_unraid(binary: &str, port: u16, user: &str, home: &str) -> Result<()>
     // 1. Persist the binary in appdata. The runtime binary at $BIN is staged
     //    from this copy by rc.orca's stage_bin; `orca update` writes here
     //    directly via apply_binary, keeping persist + runtime in lockstep.
+    //
+    //    The .plg install path runs `$APPDATA/bin/orca system install`, so
+    //    `binary` IS already `persist_bin` and copying file-onto-self fails
+    //    with ETXTBSY ("Text file busy") because the file is executing.
+    //    Treat self == self as already-persisted and skip the copy.
     let persist_bin = format!("{appdata_bin_dir}/orca");
-    std::fs::copy(binary, &persist_bin)?;
+    let already_persisted = std::fs::canonicalize(binary)
+        .ok()
+        .zip(std::fs::canonicalize(&persist_bin).ok())
+        .map(|(a, b)| a == b)
+        .unwrap_or(false);
+    if !already_persisted {
+        std::fs::copy(binary, &persist_bin)?;
+    }
     std::fs::set_permissions(&persist_bin, std::fs::Permissions::from_mode(0o755))?;
     _ = Command::new("chown")
         .args([&format!("{user}:{user}"), &persist_bin])

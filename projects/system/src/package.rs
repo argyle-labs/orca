@@ -1,8 +1,9 @@
 //! `orca package build` — generate distributable packages from the current binary.
 //!
-//! Each format's postinst/postinstall delegates to `orca system bootstrap` +
-//! `orca daemon install`, so non-systemd init (OpenRC, Unraid, launchd) is
-//! handled automatically by the existing detect_linux_init() dispatch.
+//! Each format's postinst/postinstall delegates to `orca system install`
+//! (which absorbed the former `system bootstrap` + `daemon install`), so
+//! non-systemd init (OpenRC, Unraid, launchd) is handled automatically by
+//! the existing detect_linux_init() dispatch.
 
 use anyhow::Result;
 use colored::Colorize;
@@ -205,13 +206,12 @@ fn build_deb(
     write_script(
         &debian.join("postinst"),
         "#!/bin/sh\nset -e\n\
-         /usr/local/bin/orca system bootstrap 2>/dev/null || true\n\
-         /usr/local/bin/orca daemon install --service-user orca 2>/dev/null || true\n",
+         /usr/local/bin/orca system install --service-user orca 2>/dev/null || true\n",
     )?;
     write_script(
         &debian.join("prerm"),
         "#!/bin/sh\nset -e\n\
-         /usr/local/bin/orca daemon uninstall 2>/dev/null || true\n",
+         /usr/local/bin/orca system delete 2>/dev/null || true\n",
     )?;
 
     let bin_dir = staging.join("usr/local/bin");
@@ -299,10 +299,9 @@ fn build_rpm(
              mkdir -p %{{buildroot}}/usr/local/bin\n\
              install -m 755 orca %{{buildroot}}/usr/local/bin/orca\n\n\
              %post\n\
-             /usr/local/bin/orca system bootstrap 2>/dev/null || true\n\
-             /usr/local/bin/orca daemon install --service-user orca 2>/dev/null || true\n\n\
+             /usr/local/bin/orca system install --service-user orca 2>/dev/null || true\n\n\
              %preun\n\
-             /usr/local/bin/orca daemon uninstall 2>/dev/null || true\n\n\
+             /usr/local/bin/orca system delete 2>/dev/null || true\n\n\
              %files\n\
              /usr/local/bin/orca\n"
         ),
@@ -375,11 +374,10 @@ fn build_apk(binary: &Path, version: &str, arch: &str, out_dir: &Path) -> Result
              \tinstall -Dm755 \"$srcdir/orca\" \"$pkgdir/usr/local/bin/orca\"\n\
              }}\n\n\
              post_install() {{\n\
-             \t/usr/local/bin/orca system bootstrap 2>/dev/null || true\n\
-             \t/usr/local/bin/orca daemon install --service-user orca 2>/dev/null || true\n\
+             \t/usr/local/bin/orca system install --service-user orca 2>/dev/null || true\n\
              }}\n\n\
              pre_deinstall() {{\n\
-             \t/usr/local/bin/orca daemon uninstall 2>/dev/null || true\n\
+             \t/usr/local/bin/orca system delete 2>/dev/null || true\n\
              }}\n"
         ),
     )?;
@@ -436,11 +434,10 @@ fn build_pkgbuild(version: &str, arch: &str, out_dir: &Path) -> Result<()> {
                  install -Dm755 \"$pkgname-$_ver-${{CARCH}}\" \"$pkgdir/usr/local/bin/orca\"\n\
              }}\n\n\
              post_install() {{\n\
-                 /usr/local/bin/orca system bootstrap 2>/dev/null || true\n\
-                 /usr/local/bin/orca daemon install --service-user orca 2>/dev/null || true\n\
+                 /usr/local/bin/orca system install --service-user orca 2>/dev/null || true\n\
              }}\n\n\
              pre_remove() {{\n\
-                 /usr/local/bin/orca daemon uninstall 2>/dev/null || true\n\
+                 /usr/local/bin/orca system delete 2>/dev/null || true\n\
              }}\n"
         ),
     )?;
@@ -506,9 +503,9 @@ set -e
 # Detect the actual logged-in user (the installer runs as root).
 REAL_USER=$(stat -f \"%Su\" /dev/console 2>/dev/null || echo \"$USER\")
 if [ -n \"$REAL_USER\" ] && [ \"$REAL_USER\" != \"root\" ]; then
-   sudo -u \"$REAL_USER\" /usr/local/bin/orca daemon install 2>/dev/null || true
+   sudo -u \"$REAL_USER\" /usr/local/bin/orca system install 2>/dev/null || true
 else
-   /usr/local/bin/orca daemon install 2>/dev/null || true
+   /usr/local/bin/orca system install 2>/dev/null || true
 fi
 ",
     )?;
@@ -609,7 +606,7 @@ fn build_pkg(
 
 fn build_homebrew(version: &str, out_dir: &Path) -> Result<()> {
     // Homebrew formula: uses the `service` block for launchd instead of
-    // `orca daemon install`, which keeps Homebrew as the service manager.
+    // `orca system install`, which keeps Homebrew as the service manager.
     let formula = format!(
         "class Orca < Formula
   desc \"Orca AI daemon\"
@@ -642,7 +639,7 @@ fn build_homebrew(version: &str, out_dir: &Path) -> Result<()> {
   end
 
   def post_install
-    system bin/\"orca\", \"install\"
+    system bin/\"orca\", \"system\", \"install\"
   rescue StandardError
     nil
   end
@@ -774,11 +771,11 @@ install -m 0755 -o "$USER" -g "$USER" "$PLUGIN/bin/orca" "$APPDATA/bin/orca"
 
 # rc.orca lives in /etc/rc.d (tmpfs — wiped on reboot) AND on USB so
 # /boot/config/go can restore it before appdata mounts.
-"$APPDATA/bin/orca" daemon install --service-user "$USER" --port "$PORT" || {
-  echo "orca daemon install failed; rc.orca will be regenerated on next start" >&2
+"$APPDATA/bin/orca" system install --service-user "$USER" --port "$PORT" || {
+  echo "orca system install failed; rc.orca will be regenerated on next start" >&2
 }
 
-# Start now via the rc script that `daemon install` just wrote.
+# Start now via the rc script that `system install` just wrote.
 /etc/rc.d/rc.orca start || true
 echo "orca installed: appdata=$APPDATA, port=$PORT"
 "#
@@ -789,9 +786,9 @@ fn render_plg_remove_script() -> &'static str {
 PLUGIN=/boot/config/plugins/orca
 
 /etc/rc.d/rc.orca stop 2>/dev/null || true
-"$PLUGIN/bin/orca" daemon uninstall 2>/dev/null || true
+"$PLUGIN/bin/orca" system delete 2>/dev/null || true
 
-# Drop the managed block from /boot/config/go, written by `daemon install`.
+# Drop the managed block from /boot/config/go, written by `system install`.
 GO=/boot/config/go
 if [ -f "$GO" ]; then
   awk '
@@ -892,9 +889,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         build_pkgbuild("0.0.4", "x86_64", dir.path()).unwrap();
         let s = std::fs::read_to_string(dir.path().join("PKGBUILD")).unwrap();
-        assert!(s.contains("orca system bootstrap"));
-        assert!(s.contains("orca daemon install --service-user orca"));
-        assert!(s.contains("orca daemon uninstall"));
+        assert!(s.contains("orca system install --service-user orca"));
+        assert!(s.contains("orca system delete"));
+        // `system bootstrap` was folded into `system install` — must not reappear.
+        assert!(!s.contains("system bootstrap"));
     }
 
     #[test]
@@ -905,7 +903,8 @@ mod tests {
         assert!(s.contains("class Orca < Formula"));
         assert!(s.contains("service do"));
         assert!(s.contains("brew services"));
-        // Formula uses brew services, NOT orca daemon install
+        // Formula uses brew services + post_install bootstrap; the legacy
+        // `daemon install` surface no longer exists.
         assert!(!s.contains("daemon install"));
     }
 
@@ -936,7 +935,7 @@ mod tests {
     fn plg_install_script_creates_orca_user_and_starts_daemon() {
         let s = render_plg_install_script();
         assert!(s.contains("useradd"));
-        assert!(s.contains("daemon install"));
+        assert!(s.contains("system install"));
         assert!(s.contains("rc.orca start"));
     }
 
@@ -944,7 +943,7 @@ mod tests {
     fn plg_remove_script_preserves_appdata() {
         let s = render_plg_remove_script();
         assert!(s.contains("rc.orca stop"));
-        assert!(s.contains("daemon uninstall"));
+        assert!(s.contains("system delete"));
         assert!(s.contains("rm -rf \"$PLUGIN\""));
         assert!(!s.contains("rm -rf /mnt/user/appdata/orca"));
     }

@@ -1,0 +1,90 @@
+<?xml version="1.0" standalone="yes"?>
+<!DOCTYPE PLUGIN [
+<!ENTITY name      "orca">
+<!ENTITY author    "scottdkey">
+<!ENTITY version   "0.0.7-rc.3">
+<!ENTITY launch    "Settings/Orca">
+<!ENTITY pluginURL "file:///boot/config/plugins/orca.plg">
+<!ENTITY md5       "d7d2f4d62eb3ee5ddeb4cf5e42179267">
+<!ENTITY plugin    "/boot/config/plugins/orca">
+<!ENTITY appdata   "/mnt/user/appdata/orca">
+<!ENTITY binary    "file:///boot/config/plugins/orca/bin/orca">
+]>
+<PLUGIN  name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;" min="6.10" launch="&launch;">
+
+  <CHANGES>
+## &version;
+- Managed install via Unraid plugin manager (retires ssh bootstrap).
+  </CHANGES>
+
+  <!-- Download the binary to the USB plugin dir; verified by MD5. -->
+  <FILE Name="&plugin;/bin/orca">
+    <URL>&binary;</URL>
+    <MD5>&md5;</MD5>
+  </FILE>
+
+  <!-- Install: stage to appdata, write rc.orca, hook /boot/config/go, start. -->
+  <FILE Run="/bin/bash">
+    <INLINE>
+<![CDATA[
+#!/bin/bash
+set -e
+PLUGIN=/boot/config/plugins/orca
+APPDATA=/mnt/user/appdata/orca
+USER=orca
+HOME_DIR=/home/orca
+PORT=12000
+
+id "$USER" >/dev/null 2>&1 || useradd -r -m -d "$HOME_DIR" -s /bin/bash "$USER" || true
+mkdir -p "$APPDATA/bin" "$APPDATA/logs" "$HOME_DIR/.local/bin"
+chown -R "$USER:$USER" "$APPDATA" "$HOME_DIR" 2>/dev/null || true
+
+# Stage the binary from the USB plugin dir into appdata so orca self-update
+# (which writes to appdata) and rc.orca's stage_bin stay in lockstep.
+install -m 0755 -o "$USER" -g "$USER" "$PLUGIN/bin/orca" "$APPDATA/bin/orca"
+
+# rc.orca lives in /etc/rc.d (tmpfs — wiped on reboot) AND on USB so
+# /boot/config/go can restore it before appdata mounts.
+"$APPDATA/bin/orca" system install --service-user "$USER" --port "$PORT" || {
+  echo "orca system install failed; rc.orca will be regenerated on next start" >&2
+}
+
+# Start now via the rc script that `system install` just wrote.
+/etc/rc.d/rc.orca start || true
+echo "orca installed: appdata=$APPDATA, port=$PORT"
+
+]]>
+    </INLINE>
+  </FILE>
+
+  <!-- Remove: stop daemon, tear down rc.orca + go-hook + plugin dirs. -->
+  <FILE Run="/bin/bash" Method="remove">
+    <INLINE>
+<![CDATA[
+#!/bin/bash
+PLUGIN=/boot/config/plugins/orca
+
+/etc/rc.d/rc.orca stop 2>/dev/null || true
+"$PLUGIN/bin/orca" system delete 2>/dev/null || true
+
+# Drop the managed block from /boot/config/go, written by `system install`.
+GO=/boot/config/go
+if [ -f "$GO" ]; then
+  awk '
+    /# --- orca daemon \(managed by/ { skip=1; next }
+    /# --- end orca daemon ---/      { skip=0; next }
+    !skip
+  ' "$GO" > "$GO.tmp" && mv "$GO.tmp" "$GO"
+fi
+
+rm -f /etc/rc.d/rc.orca
+rm -rf "$PLUGIN"
+# Note: appdata is intentionally preserved — it holds the binary, logs,
+# and orca.db. Remove /mnt/user/appdata/orca by hand if you want a full
+# wipe.
+echo "orca removed (appdata preserved)"
+
+]]>
+    </INLINE>
+  </FILE>
+</PLUGIN>
