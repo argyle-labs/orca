@@ -111,4 +111,4 @@ echo "→ plugin install on $HOST"
 ssh "root@$HOST" "plugin install /tmp/orca.plg"
 
 echo "✓ orca installed on $HOST via .plg (version $VERSION)"
-echo "  verify: ssh root@$HOST /etc/rc.d/rc.orca status"
+echo "  verify: ssh root@$HOST \"ss -tlnp | grep -E ':(12000|12002|12443)'\""
