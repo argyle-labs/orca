@@ -750,55 +750,82 @@ fn build_plg(
 }
 
 fn render_plg_install_script() -> &'static str {
-    // Note: keep this in sync with `install_unraid()` in daemon.rs. The
-    // .plg path is the new front door; the orca-side fn becomes a
-    // fallback for non-plugin-manager environments.
+    // The Unraid plugin manager owns lifecycle: this script runs at plugin
+    // install AND at every boot (rc.local iterates installed .plg files).
+    // It MUST be idempotent.
+    //
+    // The rc.orca + /boot/config/go path was retired 2026-06-06 — see
+    // [[project-unraid-rc-orca-stale-pid-race]]. `system install` on Unraid
+    // is now bootstrap-only (no lifecycle), and the daemon is started here
+    // directly with a pgrep-based de-dupe to avoid the two-daemons-racing
+    // bug that broke 12002 binding.
     r#"#!/bin/bash
 set -e
 PLUGIN=/boot/config/plugins/orca
 APPDATA=/mnt/user/appdata/orca
 USER=orca
-HOME_DIR=/home/orca
+HOME_DIR="$APPDATA"
 PORT=12000
+LOG_DIR="$APPDATA/.orca/logs"
+LOG_FILE="$LOG_DIR/daemon.log"
+PID_FILE=/var/run/orca.pid
 
 id "$USER" >/dev/null 2>&1 || useradd -r -m -d "$HOME_DIR" -s /bin/bash "$USER" || true
-mkdir -p "$APPDATA/bin" "$APPDATA/logs" "$HOME_DIR/.local/bin"
-chown -R "$USER:$USER" "$APPDATA" "$HOME_DIR" 2>/dev/null || true
+mkdir -p "$APPDATA/bin" "$LOG_DIR"
+chown -R "$USER:$USER" "$APPDATA" 2>/dev/null || true
 
-# Stage the binary from the USB plugin dir into appdata so orca self-update
-# (which writes to appdata) and rc.orca's stage_bin stay in lockstep.
+# Stage the binary from the USB plugin dir into appdata.
 install -m 0755 -o "$USER" -g "$USER" "$PLUGIN/bin/orca" "$APPDATA/bin/orca"
 
-# rc.orca lives in /etc/rc.d (tmpfs — wiped on reboot) AND on USB so
-# /boot/config/go can restore it before appdata mounts.
-"$APPDATA/bin/orca" system install --service-user "$USER" --port "$PORT" || {
-  echo "orca system install failed; rc.orca will be regenerated on next start" >&2
-}
+# Bootstrap-only: creates user dirs + PKI, no lifecycle. Idempotent.
+"$APPDATA/bin/orca" system install --service-user "$USER" --port "$PORT" \
+  || echo "warn: system install reported errors (continuing)" >&2
 
-# Start now via the rc script that `system install` just wrote.
-/etc/rc.d/rc.orca start || true
-echo "orca installed: appdata=$APPDATA, port=$PORT"
+# Stop any previously-running daemon so we never end up with two racing
+# for 0.0.0.0:12002. pgrep -f catches stale supervisors whose pid file
+# was lost. Wait until the port is actually free before starting.
+if [ -f "$PID_FILE" ]; then
+  kill "$(cat "$PID_FILE")" 2>/dev/null || true
+fi
+pkill -x orca 2>/dev/null || true
+for _ in 1 2 3 4 5; do
+  if ! ss -tlnp 2>/dev/null | grep -q ":$PORT "; then break; fi
+  sleep 1
+done
+rm -f "$PID_FILE"
+
+# Start the daemon. HOME must be set explicitly — `runuser -u <user>`
+# without `-l` does NOT swap HOME, and the daemon stores PKI/state under
+# $HOME (see [[project-unraid-rc-orca-home-bug]]).
+nohup runuser -u "$USER" -- env HOME="$HOME_DIR" \
+  "$APPDATA/bin/orca" daemon --port "$PORT" \
+  >> "$LOG_FILE" 2>&1 &
+echo $! > "$PID_FILE"
+chown "$USER:$USER" "$LOG_FILE" 2>/dev/null || true
+
+echo "orca installed: appdata=$APPDATA, port=$PORT, pid=$(cat "$PID_FILE")"
 "#
 }
 
 fn render_plg_remove_script() -> &'static str {
+    // Mirror of the install script's start: kill via pid file with
+    // pgrep backstop, verify the process is actually gone before
+    // declaring success.
     r#"#!/bin/bash
 PLUGIN=/boot/config/plugins/orca
+PID_FILE=/var/run/orca.pid
+PORT=12000
 
-/etc/rc.d/rc.orca stop 2>/dev/null || true
-"$PLUGIN/bin/orca" system delete 2>/dev/null || true
-
-# Drop the managed block from /boot/config/go, written by `system install`.
-GO=/boot/config/go
-if [ -f "$GO" ]; then
-  awk '
-    /# --- orca daemon \(managed by/ { skip=1; next }
-    /# --- end orca daemon ---/      { skip=0; next }
-    !skip
-  ' "$GO" > "$GO.tmp" && mv "$GO.tmp" "$GO"
+if [ -f "$PID_FILE" ]; then
+  kill "$(cat "$PID_FILE")" 2>/dev/null || true
 fi
+pkill -x orca 2>/dev/null || true
+for _ in 1 2 3 4 5; do
+  if ! pgrep -x orca >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+rm -f "$PID_FILE"
 
-rm -f /etc/rc.d/rc.orca
 rm -rf "$PLUGIN"
 # Note: appdata is intentionally preserved — it holds the binary, logs,
 # and orca.db. Remove /mnt/user/appdata/orca by hand if you want a full
@@ -935,15 +962,27 @@ mod tests {
     fn plg_install_script_creates_orca_user_and_starts_daemon() {
         let s = render_plg_install_script();
         assert!(s.contains("useradd"));
-        assert!(s.contains("system install"));
-        assert!(s.contains("rc.orca start"));
+        // Bootstrap-only `system install` (no lifecycle).
+        assert!(s.contains("system install --service-user"));
+        // Daemon is started directly, NOT via /etc/rc.d/rc.orca.
+        assert!(!s.contains("rc.orca"));
+        assert!(s.contains("daemon --port \"$PORT\""));
+        // HOME must be preserved across `runuser` (was the 2026-06-02 bug,
+        // moved from the retired rc.orca template).
+        assert!(s.contains("runuser -u \"$USER\" -- env HOME="));
+        // Two-daemon race guard — see [[project-unraid-rc-orca-stale-pid-race]].
+        assert!(s.contains("pkill -x orca"));
     }
 
     #[test]
     fn plg_remove_script_preserves_appdata() {
         let s = render_plg_remove_script();
-        assert!(s.contains("rc.orca stop"));
-        assert!(s.contains("system delete"));
+        // Lifecycle is owned by this script directly now — no rc.orca,
+        // no `system delete` (which would tear down installed state we
+        // want to preserve across plugin re-installs).
+        assert!(!s.contains("rc.orca"));
+        assert!(!s.contains("system delete"));
+        assert!(s.contains("pkill -x orca"));
         assert!(s.contains("rm -rf \"$PLUGIN\""));
         assert!(!s.contains("rm -rf /mnt/user/appdata/orca"));
     }
