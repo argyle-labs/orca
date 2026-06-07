@@ -41,7 +41,7 @@ pub fn install(ctx: Arc<ToolCtx>) {
 /// Dispatch a tool through the shared inventory, returning its structured
 /// JSON output. Returns `Err` when the dispatcher has not been installed yet
 /// (daemon not fully started) or when the tool itself errors.
-pub async fn dispatch(name: &str, args: Value) -> Result<Value> {
+pub async fn dispatch(name: &str, args: Value, correlation_id: Option<String>) -> Result<Value> {
     let ctx = {
         let guard = CTX.lock().expect("pod dispatcher mutex poisoned");
         guard
@@ -49,6 +49,13 @@ pub async fn dispatch(name: &str, args: Value) -> Result<Value> {
             .ok_or_else(|| anyhow::anyhow!("pod dispatcher not installed yet"))?
             .clone()
     };
+    // Inherit the originator's correlation_id so this peer's logs join the
+    // same trace as the host that initiated the request.
+    if let Some(cid) = correlation_id {
+        let mut local = (*ctx).clone();
+        local.set_correlation_id(Some(cid));
+        return dispatch::dispatch(name, args, &local).await;
+    }
     dispatch::dispatch(name, args, &ctx).await
 }
 
