@@ -573,8 +573,11 @@ impl contract::RemoteExec for PodRemoteExec {
         tool: &str,
         args: serde_json::Value,
         caller: Option<contract::CallerIdentity>,
+        correlation_id: Option<String>,
     ) -> anyhow::Result<serde_json::Value> {
-        Ok(server_pod::exec(peer, tool, args, caller).await?.result)
+        Ok(server_pod::exec(peer, tool, args, caller, correlation_id)
+            .await?
+            .result)
     }
 
     async fn refresh_peer_runtime(&self, peer: &str) -> anyhow::Result<()> {
@@ -783,6 +786,7 @@ async fn pod_update(
             "pod.update",
             serde_json::json!({ "self_secure": args.self_secure }),
             ctx.caller(),
+            ctx.correlation_id().map(str::to_string),
         )
         .await?;
         return Ok(serde_json::from_value(dispatch.result)?);
@@ -1147,6 +1151,13 @@ mod exec_wire {
         pub caller_role: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub caller_token: Option<orca_sdk::pki::SignedEnvelope>,
+        /// End-to-end trace id stamped by the originating REST/SDK request
+        /// (or synthesized by the daemon middleware). The recipient sets it
+        /// on its per-request ctx + tracing span so a single browser action
+        /// shows up under one trace id across every host's logs. Optional
+        /// for back-compat with older peers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub correlation_id: Option<String>,
     }
 
     /// Wire result of `pod/exec` — `result` is the tool's serialized output.
@@ -1164,7 +1175,7 @@ pub use exec_wire::{PodExecParams, PodExecResult};
 /// `REMOTE_OK` flag and 401s anything not in its allowlist.
 #[allow(clippy::disallowed_types)]
 pub async fn exec(host: &str, tool: &str, args: serde_json::Value) -> Result<PodExecResult> {
-    exec_as(host, tool, args, None).await
+    exec_as(host, tool, args, None, None).await
 }
 
 /// Same as [`exec`] but on behalf of a local operator. Mints an Ed25519-signed
@@ -1177,6 +1188,7 @@ pub async fn exec_as(
     tool: &str,
     args: serde_json::Value,
     caller: Option<contract::CallerIdentity>,
+    correlation_id: Option<String>,
 ) -> Result<PodExecResult> {
     let (caller_role, caller_token) = match caller {
         Some(id) => {
@@ -1194,6 +1206,7 @@ pub async fn exec_as(
             args,
             caller_role,
             caller_token,
+            correlation_id,
         }),
         Duration::from_secs(120),
     )

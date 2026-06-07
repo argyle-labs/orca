@@ -150,7 +150,15 @@ pub async fn exec_remote<T: contract::OrcaToolDef>(
     // ambient operator identity on ToolCtx is set at build_tool_ctx; the
     // transport mints a signed caller token from it so the recipient can verify
     // origin and derive the role from its replicated users table.
-    let result = svc.exec(peer, T::NAME, args_value, ctx.caller()).await?;
+    let result = svc
+        .exec(
+            peer,
+            T::NAME,
+            args_value,
+            ctx.caller(),
+            ctx.correlation_id().map(str::to_string),
+        )
+        .await?;
     #[allow(clippy::disallowed_types)]
     let out: T::Output = serde_json::from_value(result)
         .map_err(|e| anyhow::anyhow!("decode {} output from peer {peer}: {e}", T::NAME))?;

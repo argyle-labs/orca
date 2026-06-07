@@ -167,6 +167,7 @@ pub async fn push_trust(
         "pod.trust",
         serde_json::json!({ "peer_id": own_id, "on": on, "push": false }),
         caller,
+        None,
     )
     .await?;
     let remote: PodTrustOutput = serde_json::from_value(dispatch.result)?;
@@ -389,6 +390,7 @@ pub async fn exec(
     tool: &str,
     args: serde_json::Value,
     caller: Option<contract::CallerIdentity>,
+    correlation_id: Option<String>,
 ) -> Result<PodExecDispatch> {
     // "local" / "localhost" → loopback round-trip via the same /api/v1
     // path peers use. Lets the same code path validate the allowlist
@@ -404,7 +406,7 @@ pub async fn exec(
         resolve_peer_addr(&peers, peer)?
     };
 
-    let r = crate::exec_as(&addr, tool, args, caller).await?;
+    let r = crate::exec_as(&addr, tool, args, caller, correlation_id).await?;
     Ok(PodExecDispatch {
         peer: peer.to_string(),
         tool: r.tool,

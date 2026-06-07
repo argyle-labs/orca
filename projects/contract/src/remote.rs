@@ -34,6 +34,7 @@ pub trait RemoteExec: Send + Sync {
         tool: &str,
         args: serde_json::Value,
         caller: Option<CallerIdentity>,
+        correlation_id: Option<String>,
     ) -> Result<serde_json::Value>;
 
     /// Best-effort: force-refresh the runtime snapshot (version / channel /
@@ -62,6 +63,7 @@ mod tests {
             tool: &str,
             args: serde_json::Value,
             caller: Option<CallerIdentity>,
+            _correlation_id: Option<String>,
         ) -> Result<serde_json::Value> {
             Ok(json!({
                 "peer": peer,
@@ -99,6 +101,7 @@ mod tests {
                     username: "scott".into(),
                     role: "admin".into(),
                 }),
+                None,
             )
             .await
             .unwrap();
