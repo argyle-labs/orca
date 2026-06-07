@@ -15,6 +15,12 @@ use serde_json::{Map, Value, json};
 /// cost unless someone actually emits the spec.
 pub struct OpenApiToolRegistration {
     pub name: &'static str,
+    /// Short human-friendly title from `#[orca_tool(..., title = "...")]`.
+    /// `None` when the author didn't set one — fall back to `name` at render
+    /// time. Distinct from `description` (the doc-comment markdown body) so
+    /// the API reference can show one as the nav label and the other as the
+    /// detail panel content.
+    pub title: Option<&'static str>,
     pub description: &'static str,
     pub domain: &'static str,
     pub args_schema: fn() -> Value,
@@ -55,14 +61,26 @@ pub fn inject_tool_paths(spec: &mut Value) {
         strip_meta(&mut args_schema);
         strip_meta(&mut output_schema);
 
-        // Summary = canonical tool name (drives the Scalar left-nav title).
-        // Description = doc comment, with the hand-written `[MUTATES STATE]`
-        // prefix stripped — POST already signals state mutation visually, so
-        // the prefix is redundant noise in the description body.
-        let clean_desc = entry
+        // Summary = explicit `title = "..."` from the macro, else fall back
+        // to the canonical tool name. Drives the Scalar left-nav label AND
+        // the right-pane header — must stay structurally distinct from
+        // `description` (the doc-comment body), so we deliberately suppress
+        // the description when it would echo the title verbatim (the
+        // `no doc comment` case where `entry.description == entry.name`).
+        let summary = entry.title.unwrap_or(entry.name);
+        let clean_desc_owned: String = entry
             .description
             .strip_prefix("[MUTATES STATE] ")
-            .unwrap_or(entry.description);
+            .unwrap_or(entry.description)
+            .to_string();
+        let description_field: Value = if clean_desc_owned == entry.name
+            || clean_desc_owned.is_empty()
+            || clean_desc_owned == summary
+        {
+            Value::Null
+        } else {
+            Value::String(clean_desc_owned)
+        };
         // CLI + MCP invocation forms rendered as Scalar code-sample tabs on
         // the same operation page. Surfaces the 1:1 parity guarantee: every
         // `#[orca_tool]` is callable identically over REST, CLI, and MCP.
@@ -78,8 +96,8 @@ pub fn inject_tool_paths(spec: &mut Value) {
         let path_item = json!({
             "post": {
                 "operationId": operation_id_for(entry.name),
-                "summary": entry.name,
-                "description": clean_desc,
+                "summary": summary,
+                "description": description_field,
                 "tags": [domain],
                 "x-codeSamples": [
                     { "lang": "shell", "label": "CLI",  "source": format!("{cli_form} '<args-json>'") },

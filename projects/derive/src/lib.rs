@@ -75,6 +75,11 @@ struct ToolAttr {
     /// requires `AuthIdentity::role == "admin"`. Set via
     /// `#[orca_tool(..., role = "admin")]`.
     role: Option<LitStr>,
+    /// Short human-friendly title shown in the API reference left nav
+    /// (Scalar `summary` field). Doc comment is reserved for the full
+    /// markdown description body. Set via `#[orca_tool(..., title = "...")]`;
+    /// when absent, the canonical tool name (`<domain>.<verb>`) is used.
+    title: Option<LitStr>,
 }
 
 impl Parse for ToolAttr {
@@ -86,6 +91,7 @@ impl Parse for ToolAttr {
         let mut remote_ok = true;
         let mut refresh_runtime = false;
         let mut role: Option<LitStr> = None;
+        let mut title: Option<LitStr> = None;
         for nv in items {
             let key = nv
                 .path
@@ -155,6 +161,9 @@ impl Parse for ToolAttr {
                     }
                     role = Some(s);
                 }
+                "title" => {
+                    title = Some(lit_str(&nv.value)?);
+                }
                 "cli" => {
                     // accept either an ident (cli = manual) or a string ("manual")
                     cli_mode = Some(match &nv.value {
@@ -186,6 +195,7 @@ impl Parse for ToolAttr {
             remote_ok,
             refresh_runtime,
             role,
+            title,
         })
     }
 }
@@ -485,6 +495,15 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
 
     let description = collect_doc(&item.attrs).unwrap_or_else(|| fn_name_str.clone());
 
+    // Explicit `title = "..."` from the macro attr. Emitted as
+    // `Option<&'static str>` so the OpenAPI renderer can fall back to the
+    // tool name when no title is set. Kept distinct from `description` so
+    // authors can have a concise nav label AND a full markdown body.
+    let title_tokens = match attr.title.as_ref() {
+        Some(s) => quote! { ::core::option::Option::Some(#s) },
+        None => quote! { ::core::option::Option::None },
+    };
+
     let domain = attr.domain;
     let verb = attr.verb;
     let tool_name = format!("{}.{}", domain.value(), verb.value());
@@ -648,6 +667,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
         ::inventory::submit! {
             ::dispatch::openapi::OpenApiToolRegistration {
                 name: #tool_name,
+                title: #title_tokens,
                 description: #description,
                 domain: #domain,
                 args_schema: || {
