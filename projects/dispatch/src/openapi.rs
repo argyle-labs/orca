@@ -51,7 +51,17 @@ pub fn inject_tool_paths(spec: &mut Value) {
         let path = format!("/api/v1/{}", entry.name);
         let mut args_schema = (entry.args_schema)();
         let mut output_schema = (entry.output_schema)();
-        let domain = entry.domain.to_string();
+        // Tag by the ROOT domain only (`auth.session` → `auth`) so every
+        // sub-resource collapses into one group in the Scalar nav. The
+        // dotted operation name in `summary` already conveys the hierarchy
+        // (`auth.session.create` reads as auth → session → create at a
+        // glance), so we don't also need x-tagGroups duplicating the work.
+        let domain = entry
+            .domain
+            .split_once('.')
+            .map(|(root, _)| root)
+            .unwrap_or(entry.domain)
+            .to_string();
         tags_seen.insert(domain.clone());
 
         hoist_defs(&mut args_schema, &mut hoisted_defs);
@@ -157,27 +167,11 @@ pub fn inject_tool_paths(spec: &mut Value) {
         }
     }
 
-    // Emit `x-tagGroups` (Scalar/Redoc extension) so the left nav renders
-    // hierarchically: `auth.session` / `auth.token` collapse under an
-    // `auth` heading instead of appearing as sibling top-level groups.
-    // Grouping derives from dotted domain prefixes — any tag containing
-    // a `.` rolls up under the prefix before the first dot.
-    if !tags_seen.is_empty() {
-        let mut groups: std::collections::BTreeMap<String, Vec<String>> =
-            std::collections::BTreeMap::new();
-        for tag in &tags_seen {
-            let parent = tag.split_once('.').map(|(p, _)| p).unwrap_or(tag);
-            groups
-                .entry(parent.to_string())
-                .or_default()
-                .push(tag.clone());
-        }
-        let x_tag_groups: Vec<Value> = groups
-            .into_iter()
-            .map(|(name, tags)| json!({ "name": name, "tags": tags }))
-            .collect();
-        obj.insert("x-tagGroups".to_string(), Value::Array(x_tag_groups));
-    }
+    // Note: `x-tagGroups` is deliberately NOT emitted. With root-domain
+    // tagging above (`auth.session` → `auth`), every sub-resource already
+    // lands in its parent's tag group naturally; an `x-tagGroups` parent
+    // named `auth` would collide with the `auth` tag and render twice in
+    // Scalar's left nav.
 
     // Append any new domain tags so generated SDKs group methods correctly.
     if !tags_seen.is_empty() {

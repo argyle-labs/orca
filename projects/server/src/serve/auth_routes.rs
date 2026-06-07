@@ -146,7 +146,7 @@ pub(crate) fn public_signup_enabled(conn: &db::Conn) -> bool {
 
 #[utoipa::path(
     get,
-    path = "/api/auth/signup_status",
+    path = "/api/auth/web/signup_status",
     operation_id = "authSignupStatus",
     responses(
         (status = 200, description = "Whether sign-up is currently allowed", body = SignupStatus),
@@ -182,7 +182,7 @@ pub async fn signup_status() -> Response {
 
 #[utoipa::path(
     post,
-    path = "/api/auth/signup",
+    path = "/api/auth/web/signup",
     operation_id = "authSignup",
     request_body = SignupRequest,
     responses(
@@ -246,7 +246,7 @@ pub async fn signup(Json(req): Json<SignupRequest>) -> Response {
 
 #[utoipa::path(
     post,
-    path = "/api/auth/signin",
+    path = "/api/auth/web/signin",
     operation_id = "authSignin",
     request_body = SigninRequest,
     responses(
@@ -333,7 +333,7 @@ fn issue_session(conn: &db::Conn, user_id: &str, username: &str, role: &str) -> 
 
 #[utoipa::path(
     post,
-    path = "/api/auth/signout",
+    path = "/api/auth/web/signout",
     operation_id = "authSignout",
     responses(
         (status = 200, description = "Session revoked; clear-cookie sent"),
@@ -364,7 +364,7 @@ pub async fn signout(req: Request) -> Response {
 
 #[utoipa::path(
     post,
-    path = "/api/auth/change_password",
+    path = "/api/auth/web/change_password",
     operation_id = "authChangePassword",
     request_body = ChangePasswordRequest,
     responses(
@@ -422,7 +422,7 @@ pub async fn change_password(
 
 #[utoipa::path(
     get,
-    path = "/api/auth/me",
+    path = "/api/auth/web/me",
     operation_id = "authMe",
     responses(
         (status = 200, description = "Current identity", body = MeOk),
