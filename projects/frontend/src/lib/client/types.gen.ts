@@ -9,8 +9,6 @@ export type ClientOptions = {
  */
 export type AdditionalProperties = boolean | JsonSchemaNode;
 
-export type AdvisorySeverity = 'critical' | 'high' | 'medium' | 'low' | 'none';
-
 export type AgentBackendOverrideEntry = {
   agent: string;
   backend: string;
@@ -52,6 +50,11 @@ export type AuthProviderStatus = {
   provider: string;
 };
 
+export type BinaryStatus = {
+  installed: boolean;
+  path: string;
+};
+
 export type CertInfo = {
   cn: string;
   days_remaining: number;
@@ -69,6 +72,11 @@ export type ChangePasswordRequest = {
   new_password: string;
 };
 
+export type ClaudeMdStatus = {
+  linked: boolean;
+  path: string;
+};
+
 export type ConfigRowOut = {
   host_owner: string;
   id: string;
@@ -80,28 +88,19 @@ export type ConfigRowOut = {
   updated_by: string;
 };
 
-export type DbSpecRow = {
-  cachedAt?: string | null;
-  enabled: boolean;
-  name: string;
-  pathCount?: number | null;
-  sourceMcp?: string | null;
-  url?: string | null;
-};
-
-export type DenyAdvisory = {
-  id: string;
-  package: string;
-  severity: AdvisorySeverity;
-  title: string;
-  url?: string | null;
-  version: string;
-};
-
-export type DenyReport = {
-  advisories: Array<DenyAdvisory>;
-  error?: string | null;
-  status: ToolStatus;
+/**
+ * Runtime snapshot of the orca daemon (pid/port/uptime + liveness).
+ *
+ * Surfaced as `system.detail.daemon`. The `version`, `mode`, and binary
+ * path fields callers might expect already live on the parent
+ * `SystemStatusReport` (sourced from the daemon state file) — don't
+ * duplicate them here.
+ */
+export type DaemonRuntimeStatus = {
+  pid?: number | null;
+  port?: number | null;
+  running: boolean;
+  uptime_seconds?: number | null;
 };
 
 /**
@@ -109,53 +108,32 @@ export type DenyReport = {
  */
 export type Dependency = Array<string> | JsonSchemaNode;
 
-export type DependencyKind = 'normal' | 'dev' | 'build';
-
-/**
- * Live CPU/memory stats for one running container.
- */
 export type DockerContainerStats = {
-  /**
-   * Block I/O read bytes since container start.
-   */
   block_read_bytes: number;
-  /**
-   * Block I/O write bytes since container start.
-   */
   block_write_bytes: number;
-  /**
-   * CPU usage as a percentage of total host capacity (all cores).
-   */
   cpu_percent: number;
   id: string;
-  /**
-   * Container memory limit in MB (`0` = unlimited / host RAM).
-   */
   mem_limit_mb: number;
-  /**
-   * RSS-equivalent working set in MB.
-   */
   mem_usage_mb: number;
   name: string;
-  /**
-   * Net rx bytes.
-   */
   net_rx_bytes: number;
-  /**
-   * Net tx bytes.
-   */
   net_tx_bytes: number;
 };
 
 export type DockerEngineKind = 'colima' | 'desktop' | 'none';
 
-export type DockerLogProject = {
+export type DockerEngineStatus = {
+  engine: DockerEngineKind;
+  running: boolean;
+};
+
+export type DockerProjectRow = {
   path: string;
   project: string;
   services: Array<DockerServiceRow>;
 };
 
-export type DockerRuntimeEntry = {
+export type DockerRuntimeRow = {
   enabled: boolean;
   host?: string | null;
   name: string;
@@ -182,13 +160,6 @@ export type DoctorEntry = {
  */
 export type ExclusiveLimit = number | boolean;
 
-export type FileRootRegEntry = {
-  description?: string | null;
-  enabled: boolean;
-  name: string;
-  path: string;
-};
-
 export type FsEntry = {
   name: string;
   path: string;
@@ -199,6 +170,8 @@ export type FsEntry = {
 export type FsNodeKind = 'file' | 'dir';
 
 export type FsRootEntry = {
+  description?: string | null;
+  enabled: boolean;
   exists: boolean;
   file_count: number;
   name: string;
@@ -258,33 +231,6 @@ export type GpuInfo = {
   vendor: string;
   vram_total_mb?: number | null;
   vram_used_mb?: number | null;
-};
-
-export type GraphQlEnum = {
-  description?: string | null;
-  name: string;
-  values: Array<string>;
-};
-
-export type GraphQlField = {
-  description?: string | null;
-  name: string;
-  required: boolean;
-  typeName: string;
-};
-
-export type GraphQlOperation = {
-  args: Array<GraphQlField>;
-  deprecated: boolean;
-  description?: string | null;
-  name: string;
-  returns: string;
-};
-
-export type GraphQlType = {
-  description?: string | null;
-  fields: Array<GraphQlField>;
-  name: string;
 };
 
 export type HostChannel = {
@@ -362,12 +308,6 @@ export type JsonSchemaNode =
       Object: SchemaObject;
     };
 
-export type MacheteReport = {
-  error?: string | null;
-  findings: Array<UnusedDependency>;
-  status: ToolStatus;
-};
-
 export type MappingEntry = {
   confidence?: number | null;
   enabled: boolean;
@@ -384,18 +324,19 @@ export type McpContent = {
   type: string;
 };
 
-export type McpRegistration = {
-  registered: boolean;
-};
-
-export type McpServerEntry = {
+export type McpServerRow = {
   args: Array<string>;
   command: string;
   enabled: boolean;
   env: {
     [key: string]: string;
   };
+  mappings: Array<MappingEntry>;
   name: string;
+};
+
+export type McpStatus = {
+  registered: boolean;
 };
 
 export type McpToolEntry = {
@@ -409,11 +350,6 @@ export type MeOk = {
   role: string;
   user_id: string;
   username: string;
-};
-
-export type MemoryFile = {
-  content: string;
-  name: string;
 };
 
 export type NamespaceShareEntry = {
@@ -442,27 +378,7 @@ export type NetIfaceDto = {
   name: string;
 };
 
-export type PackageFormat = 'deb' | 'rpm' | 'apk' | 'pkgbuild' | 'pkg' | 'homebrew';
-
-export type PathExists = {
-  exists: boolean;
-  path: string;
-};
-
-export type PathInitialized = {
-  initialized: boolean;
-  path: string;
-};
-
-export type PathInstalled = {
-  installed: boolean;
-  path: string;
-};
-
-export type PathLinked = {
-  linked: boolean;
-  path: string;
-};
+export type PackageFormat = 'deb' | 'rpm' | 'apk' | 'pkgbuild' | 'pkg' | 'homebrew' | 'plg';
 
 /**
  * Per-peer outcome of a single sync (push or pull). `pod sync` returns these
@@ -481,9 +397,21 @@ export type PeerSyncReport = {
   status: string;
 };
 
+export type PendingRestart = {
+  age_secs?: number;
+  target?: string;
+};
+
 export type PkiCertEntry = {
   cert_path: string;
   plugin_id: string;
+};
+
+export type PkiKind = 'ca' | 'cert';
+
+export type PkiStatus = {
+  initialized: boolean;
+  path: string;
 };
 
 export type PluginCredEntry = {
@@ -495,7 +423,15 @@ export type PluginCredEntry = {
   updatedAt: string;
 };
 
-export type PluginEntry = {
+export type PluginRow = {
+  /**
+   * Stored credential keys (values never returned).
+   */
+  credentials: Array<PluginCredEntry>;
+  /**
+   * Stored data keys (values fetched via `plugin.detail` with `data_key`).
+   */
+  dataKeys: Array<string>;
   enabled: boolean;
   id: string;
   tier: string;
@@ -619,6 +555,12 @@ export type PodPeerDto = {
    */
   update_available?: boolean | null;
   /**
+   * Age in seconds of the last successful `system.update {}` probe against
+   * this peer. `None` until the periodic probe has succeeded at least
+   * once (or for the synthetic local-host row).
+   */
+  update_checked_secs?: number | null;
+  /**
    * Latest release tag visible to the peer on its channel. Pulled from
    * `system.update-check`; `None` when the probe failed or timed out.
    */
@@ -641,20 +583,6 @@ export type PodPendingOfferDto = {
   peer_pubkey_fp: string;
   pod_id?: string | null;
   ttl_secs: number;
-};
-
-export type ProjectServices = {
-  path: string;
-  project: string;
-  services: Array<ServiceState>;
-};
-
-export type ProviderDto = {
-  created_at: string;
-  enabled: boolean;
-  kind: string;
-  name: string;
-  url: string;
 };
 
 export type ScheduleEntry = {
@@ -788,13 +716,6 @@ export type SecretEntry = {
   updated_at: string;
 };
 
-export type ServiceState = {
-  health?: string | null;
-  name: string;
-  ports: Array<string>;
-  state: string;
-};
-
 export type SessionOk = {
   role: string;
   user_id: string;
@@ -814,27 +735,6 @@ export type SignupRequest = {
 export type SignupStatus = {
   allowed: boolean;
   reason: string;
-};
-
-export type SpecFilesPresence = {
-  full: boolean;
-  public: boolean;
-};
-
-export type SpecMetaRow = {
-  baseUrl?: string | null;
-  capturedAt?: string | null;
-  files: SpecFilesPresence;
-  hasGraphql: boolean;
-  namespace: string;
-  pathCount?: number | null;
-  project: string;
-  repo: string;
-  /**
-   * "manual" | "url" | "mcp" | "plugin"
-   */
-  source: string;
-  sourceMcp?: string | null;
 };
 
 /**
@@ -858,6 +758,10 @@ export type StorageReport = {
    */
   logs_dir_bytes: number;
   logs_dir_path: string;
+};
+
+export type SyncToolsOutput = {
+  results: Array<SyncToolsServerEntry>;
 };
 
 export type SyncToolsServerEntry = {
@@ -936,6 +840,21 @@ export type SystemInfoReport = {
   mem_available_mb?: number | null;
   mem_total_mb?: number | null;
   mem_used_mb?: number | null;
+  /**
+   * `true` when this host's mesh accept loop (plugin host, default
+   * port 12002) currently holds a TCP listener. `false` when the
+   * bind failed at startup, the host was stopped, or it has not yet
+   * started. Surfaces silent mesh-port bind failures that previously
+   * rendered a host as "healthy" in `system_detail` while it was
+   * invisible to peers. See [[project-system-detail-hides-mesh-bind-failure]].
+   */
+  mesh_listening?: boolean | null;
+  /**
+   * Port the mesh accept loop is configured to bind. Paired with
+   * `mesh_listening` so operators can see *which* port is (or isn't)
+   * open without cross-referencing config.
+   */
+  mesh_port?: number | null;
   orca_dir?: string | null;
   orca_fs_avail_gb?: number | null;
   orca_fs_total_gb?: number | null;
@@ -1007,8 +926,6 @@ export type SystemInfoReport = {
   virtualization?: string | null;
 };
 
-export type ToolStatus = 'ok' | 'not_installed' | 'errored';
-
 /**
  * One child entity a host claims to run. The inference layer matches each
  * claim's `macs` against other peers' `interfaces[].mac` to derive
@@ -1041,19 +958,9 @@ export type TopologyClaim = {
   provider_instance: string;
 };
 
-export type UdepsReport = {
-  error?: string | null;
-  findings: Array<UnusedDependency>;
-  status: ToolStatus;
-};
-
-export type UnusedDependency = {
-  /**
-   * Workspace crate that declared the unused dep.
-   */
-  crate_name: string;
-  dependency: string;
-  kind: DependencyKind;
+export type VaultStatus = {
+  exists: boolean;
+  path: string;
 };
 
 /**
@@ -1062,17 +969,17 @@ export type UnusedDependency = {
  * when the tag matches the running binary's `CURRENT_VERSION`.
  */
 export type VersionEntry = {
-  is_current: boolean;
-  prerelease: boolean;
+  is_current?: boolean;
+  prerelease?: boolean;
   published_at?: string | null;
-  tag: string;
+  tag?: string;
 };
 
 export type AuthChangePasswordData = {
   body: ChangePasswordRequest;
   path?: never;
   query?: never;
-  url: '/api/auth/change_password';
+  url: '/api/auth/web/change_password';
 };
 
 export type AuthChangePasswordErrors = {
@@ -1102,7 +1009,7 @@ export type AuthMeData = {
   body?: never;
   path?: never;
   query?: never;
-  url: '/api/auth/me';
+  url: '/api/auth/web/me';
 };
 
 export type AuthMeErrors = {
@@ -1127,7 +1034,7 @@ export type AuthSigninData = {
   body: SigninRequest;
   path?: never;
   query?: never;
-  url: '/api/auth/signin';
+  url: '/api/auth/web/signin';
 };
 
 export type AuthSigninErrors = {
@@ -1152,7 +1059,7 @@ export type AuthSignoutData = {
   body?: never;
   path?: never;
   query?: never;
-  url: '/api/auth/signout';
+  url: '/api/auth/web/signout';
 };
 
 export type AuthSignoutResponses = {
@@ -1166,7 +1073,7 @@ export type AuthSignupData = {
   body: SignupRequest;
   path?: never;
   query?: never;
-  url: '/api/auth/signup';
+  url: '/api/auth/web/signup';
 };
 
 export type AuthSignupErrors = {
@@ -1199,7 +1106,7 @@ export type AuthSignupStatusData = {
   body?: never;
   path?: never;
   query?: never;
-  url: '/api/auth/signup_status';
+  url: '/api/auth/web/signup_status';
 };
 
 export type AuthSignupStatusResponses = {
@@ -1210,6 +1117,210 @@ export type AuthSignupStatusResponses = {
 };
 
 export type AuthSignupStatusResponse = AuthSignupStatusResponses[keyof AuthSignupStatusResponses];
+
+export type AgentBackendDetailData = {
+  /**
+   * AgentBackendDetailArgs
+   */
+  body: {
+    [key: string]: unknown;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/agent.backend.detail';
+};
+
+export type AgentBackendDetailErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type AgentBackendDetailError = AgentBackendDetailErrors[keyof AgentBackendDetailErrors];
+
+export type AgentBackendDetailResponses = {
+  /**
+   * AgentBackendStatusOutput
+   *
+   * Tool result
+   */
+  200: {
+    api_key_in_db: boolean;
+    api_key_masked?: string | null;
+    mode: string;
+    overrides: Array<AgentBackendOverrideEntry>;
+    use_server_anthropic: boolean;
+  };
+};
+
+export type AgentBackendDetailResponse =
+  AgentBackendDetailResponses[keyof AgentBackendDetailResponses];
+
+export type AgentBackendUpdateData = {
+  /**
+   * AgentBackendUpdateArgs
+   *
+   * [MUTATES STATE] Update one or more agent-backend settings: mode, API key,
+   * per-agent override, server-side Anthropic toggle. All fields optional;
+   * only the supplied fields are applied. Returns the fresh full status.
+   */
+  body: {
+    /**
+     * Anthropic API key to store in the encrypted orca DB.
+     */
+    api_key?: string | null;
+    /**
+     * Remove the stored Anthropic API key.
+     */
+    clear_api_key?: boolean;
+    /**
+     * Global backend mode: "local" | "claude" | "hybrid".
+     */
+    mode?: string | null;
+    /**
+     * Per-agent override: set with `--override-agent NAME --override-backend
+     * {local|claude}`. Clear with `--override-backend clear`.
+     */
+    override_agent?: string | null;
+    override_backend?: string | null;
+    /**
+     * Toggle whether the orca server makes Anthropic API calls directly.
+     */
+    use_server_anthropic?: boolean | null;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/agent.backend.update';
+};
+
+export type AgentBackendUpdateErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type AgentBackendUpdateError = AgentBackendUpdateErrors[keyof AgentBackendUpdateErrors];
+
+export type AgentBackendUpdateResponses = {
+  /**
+   * AgentBackendStatusOutput
+   *
+   * Tool result
+   */
+  200: {
+    api_key_in_db: boolean;
+    api_key_masked?: string | null;
+    mode: string;
+    overrides: Array<AgentBackendOverrideEntry>;
+    use_server_anthropic: boolean;
+  };
+};
+
+export type AgentBackendUpdateResponse =
+  AgentBackendUpdateResponses[keyof AgentBackendUpdateResponses];
+
+export type AgentGetData = {
+  /**
+   * GetAgentArgs
+   */
+  body: {
+    name: string;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/agent.get';
+};
+
+export type AgentGetErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type AgentGetError = AgentGetErrors[keyof AgentGetErrors];
+
+export type AgentGetResponses = {
+  /**
+   * GetAgentOutput
+   *
+   * Tool result
+   */
+  200: {
+    name: string;
+    prompt: string;
+  };
+};
+
+export type AgentGetResponse = AgentGetResponses[keyof AgentGetResponses];
+
+export type AgentListData = {
+  /**
+   * ListAgentsArgs
+   */
+  body: {
+    [key: string]: unknown;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/agent.list';
+};
+
+export type AgentListErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type AgentListError = AgentListErrors[keyof AgentListErrors];
+
+export type AgentListResponses = {
+  /**
+   * ListAgentsOutput
+   *
+   * Tool result
+   */
+  200: {
+    agents: Array<AgentEntry>;
+  };
+};
+
+export type AgentListResponse = AgentListResponses[keyof AgentListResponses];
 
 export type AgentRunData = {
   /**
@@ -1657,109 +1768,24 @@ export type AuthTokenListResponses = {
 
 export type AuthTokenListResponse = AuthTokenListResponses[keyof AuthTokenListResponses];
 
-export type DockerEngineDetailData = {
+export type ConfigDeleteData = {
   /**
-   * GetDockerEngineArgs
+   * ConfigDeleteArgs
    */
   body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/docker.engine.detail';
-};
-
-export type DockerEngineDetailErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type DockerEngineDetailError = DockerEngineDetailErrors[keyof DockerEngineDetailErrors];
-
-export type DockerEngineDetailResponses = {
-  /**
-   * DockerEngineStatus
-   *
-   * Tool result
-   */
-  200: {
-    engine: DockerEngineKind;
-    running: boolean;
-  };
-};
-
-export type DockerEngineDetailResponse =
-  DockerEngineDetailResponses[keyof DockerEngineDetailResponses];
-
-export type DockerEngineUpdateData = {
-  /**
-   * StartDockerEngineArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/docker.engine.update';
-};
-
-export type DockerEngineUpdateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type DockerEngineUpdateError = DockerEngineUpdateErrors[keyof DockerEngineUpdateErrors];
-
-export type DockerEngineUpdateResponses = {
-  /**
-   * StartDockerEngineOutput
-   *
-   * Tool result
-   */
-  200: {
-    output: string;
-  };
-};
-
-export type DockerEngineUpdateResponse =
-  DockerEngineUpdateResponses[keyof DockerEngineUpdateResponses];
-
-export type DockerRuntimeCreateData = {
-  /**
-   * AddDockerRuntimeArgs
-   */
-  body: {
+    /**
+     * host_owner. Defaults to the local host's display_name.
+     */
     host?: string | null;
     name: string;
-    socketPath?: string | null;
-    url?: string | null;
+    noun: string;
   };
   path?: never;
   query?: never;
-  url: '/api/v1/docker.runtime.create';
+  url: '/api/v1/config.delete';
 };
 
-export type DockerRuntimeCreateErrors = {
+export type ConfigDeleteErrors = {
   /**
    * Unknown tool
    */
@@ -1774,36 +1800,41 @@ export type DockerRuntimeCreateErrors = {
   };
 };
 
-export type DockerRuntimeCreateError = DockerRuntimeCreateErrors[keyof DockerRuntimeCreateErrors];
+export type ConfigDeleteError = ConfigDeleteErrors[keyof ConfigDeleteErrors];
 
-export type DockerRuntimeCreateResponses = {
+export type ConfigDeleteResponses = {
   /**
-   * DockerRuntimeMutationResult
+   * ConfigDeleteOutput
    *
    * Tool result
    */
   200: {
-    changed: boolean;
-    name: string;
+    removed: boolean;
   };
 };
 
-export type DockerRuntimeCreateResponse =
-  DockerRuntimeCreateResponses[keyof DockerRuntimeCreateResponses];
+export type ConfigDeleteResponse = ConfigDeleteResponses[keyof ConfigDeleteResponses];
 
-export type DockerRuntimeDeleteData = {
+export type ConfigGetData = {
   /**
-   * RemoveDockerRuntimeArgs
+   * ConfigGetArgs
    */
   body: {
+    /**
+     * Row name (e.g. "plex", "host.backup").
+     */
     name: string;
+    /**
+     * Row noun (service, schedule, backup_job, …).
+     */
+    noun: string;
   };
   path?: never;
   query?: never;
-  url: '/api/v1/docker.runtime.delete';
+  url: '/api/v1/config.get';
 };
 
-export type DockerRuntimeDeleteErrors = {
+export type ConfigGetErrors = {
   /**
    * Unknown tool
    */
@@ -1818,36 +1849,136 @@ export type DockerRuntimeDeleteErrors = {
   };
 };
 
-export type DockerRuntimeDeleteError = DockerRuntimeDeleteErrors[keyof DockerRuntimeDeleteErrors];
+export type ConfigGetError = ConfigGetErrors[keyof ConfigGetErrors];
 
-export type DockerRuntimeDeleteResponses = {
+export type ConfigGetResponses = {
   /**
-   * DockerRuntimeMutationResult
+   * ConfigGetOutput
    *
    * Tool result
    */
   200: {
-    changed: boolean;
-    name: string;
+    row?: ConfigRowOut | null;
   };
 };
 
-export type DockerRuntimeDeleteResponse =
-  DockerRuntimeDeleteResponses[keyof DockerRuntimeDeleteResponses];
+export type ConfigGetResponse = ConfigGetResponses[keyof ConfigGetResponses];
 
-export type DockerRuntimeListData = {
+export type ConfigListData = {
   /**
-   * ListDockerRuntimesArgs
+   * ConfigListArgs
+   */
+  body: {
+    /**
+     * Filter by host_owner.
+     */
+    host?: string | null;
+    /**
+     * Filter by noun (service, schedule, backup_job, nfs_watch, …).
+     */
+    noun?: string | null;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/config.list';
+};
+
+export type ConfigListErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type ConfigListError = ConfigListErrors[keyof ConfigListErrors];
+
+export type ConfigListResponses = {
+  /**
+   * ConfigListOutput
+   *
+   * Tool result
+   */
+  200: {
+    rows: Array<ConfigRowOut>;
+  };
+};
+
+export type ConfigListResponse = ConfigListResponses[keyof ConfigListResponses];
+
+export type ConfigSetData = {
+  /**
+   * ConfigSetArgs
+   */
+  body: {
+    /**
+     * host_owner. Defaults to the local host's display_name. Must equal
+     * the local host until cross-host routing lands (§3.3).
+     */
+    host?: string | null;
+    /**
+     * JSON payload for the row. Must be a valid JSON document.
+     */
+    json: string;
+    name: string;
+    noun: string;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/config.set';
+};
+
+export type ConfigSetErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type ConfigSetError = ConfigSetErrors[keyof ConfigSetErrors];
+
+export type ConfigSetResponses = {
+  /**
+   * ConfigSetOutput
+   *
+   * Tool result
+   */
+  200: {
+    created: boolean;
+    row: ConfigRowOut;
+  };
+};
+
+export type ConfigSetResponse = ConfigSetResponses[keyof ConfigSetResponses];
+
+export type DbDetailData = {
+  /**
+   * DbStatusArgs
    */
   body: {
     [key: string]: unknown;
   };
   path?: never;
   query?: never;
-  url: '/api/v1/docker.runtime.list';
+  url: '/api/v1/db.detail';
 };
 
-export type DockerRuntimeListErrors = {
+export type DbDetailErrors = {
   /**
    * Unknown tool
    */
@@ -1862,46 +1993,154 @@ export type DockerRuntimeListErrors = {
   };
 };
 
-export type DockerRuntimeListError = DockerRuntimeListErrors[keyof DockerRuntimeListErrors];
+export type DbDetailError = DbDetailErrors[keyof DbDetailErrors];
 
-export type DockerRuntimeListResponses = {
+export type DbDetailResponses = {
   /**
-   * ListDockerRuntimesOutput
+   * DbStatusReport
    *
    * Tool result
    */
   200: {
-    runtimes: Array<DockerRuntimeEntry>;
+    /**
+     * Highest applied migration version (YYYYMMDDHHMMSS timestamp, or 0 if
+     * only the apply_schema baseline has run).
+     */
+    current: number;
+    /**
+     * Pending migration count (total - applied).
+     */
+    pending: number;
+    /**
+     * Total migrations compiled into this orca binary.
+     */
+    total: number;
   };
 };
 
-export type DockerRuntimeListResponse =
-  DockerRuntimeListResponses[keyof DockerRuntimeListResponses];
+export type DbDetailResponse = DbDetailResponses[keyof DbDetailResponses];
 
-export type DockerServiceDetailData = {
+export type DbUpdateData = {
   /**
-   * GetLogsArgs
+   * DbUpdateArgs
    */
   body: {
     /**
-     * Absolute path to the compose project.
+     * "migrate" | "up" | "down"
      */
-    project: string;
+    action: string;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/db.update';
+};
+
+export type DbUpdateErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type DbUpdateError = DbUpdateErrors[keyof DbUpdateErrors];
+
+export type DbUpdateResponses = {
+  /**
+   * DbMigrateReport
+   *
+   * Tool result
+   */
+  200: {
+    after: number;
     /**
-     * Specific service name; omit to read across all services.
+     * Number of migrations applied (or rolled back) in this call.
+     */
+    applied: number;
+    before: number;
+    direction: string;
+  };
+};
+
+export type DbUpdateResponse = DbUpdateResponses[keyof DbUpdateResponses];
+
+export type DockerDeleteData = {
+  /**
+   * DockerDeleteArgs
+   */
+  body: {
+    /**
+     * Runtime name to remove.
+     */
+    runtime: string;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/docker.delete';
+};
+
+export type DockerDeleteErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type DockerDeleteError = DockerDeleteErrors[keyof DockerDeleteErrors];
+
+export type DockerDeleteResponses = {
+  /**
+   * DockerDeleteOutput
+   *
+   * Tool result
+   */
+  200: {
+    changed: boolean;
+    name: string;
+  };
+};
+
+export type DockerDeleteResponse = DockerDeleteResponses[keyof DockerDeleteResponses];
+
+export type DockerDetailData = {
+  /**
+   * DockerDetailArgs
+   */
+  body: {
+    /**
+     * Compose project path.
+     */
+    path: string;
+    /**
+     * Optional service to scope logs.
      */
     service?: string | null;
     /**
-     * Number of log lines to return (default 200).
+     * Tail length for logs (default 200).
      */
     tail?: number | null;
   };
   path?: never;
   query?: never;
-  url: '/api/v1/docker.service.detail';
+  url: '/api/v1/docker.detail';
 };
 
-export type DockerServiceDetailErrors = {
+export type DockerDetailErrors = {
   /**
    * Unknown tool
    */
@@ -1916,85 +2155,45 @@ export type DockerServiceDetailErrors = {
   };
 };
 
-export type DockerServiceDetailError = DockerServiceDetailErrors[keyof DockerServiceDetailErrors];
+export type DockerDetailError = DockerDetailErrors[keyof DockerDetailErrors];
 
-export type DockerServiceDetailResponses = {
+export type DockerDetailResponses = {
   /**
-   * GetLogsOutput
-   *
-   * Tool result
-   */
-  200: {
-    output: string;
-  };
-};
-
-export type DockerServiceDetailResponse =
-  DockerServiceDetailResponses[keyof DockerServiceDetailResponses];
-
-export type DockerServiceListData = {
-  /**
-   * GetDockerServicesArgs
-   */
-  body: {
-    /**
-     * Absolute path to the docker-compose project directory.
-     */
-    path: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/docker.service.list';
-};
-
-export type DockerServiceListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type DockerServiceListError = DockerServiceListErrors[keyof DockerServiceListErrors];
-
-export type DockerServiceListResponses = {
-  /**
-   * DockerServicesView
+   * DockerDetailOutput
    *
    * Tool result
    */
   200: {
     composeFile?: string | null;
+    logs: string;
     services: Array<DockerServiceRow>;
+    stats: Array<DockerContainerStats>;
   };
 };
 
-export type DockerServiceListResponse =
-  DockerServiceListResponses[keyof DockerServiceListResponses];
+export type DockerDetailResponse = DockerDetailResponses[keyof DockerDetailResponses];
 
-export type DockerServiceListLogsData = {
+export type DockerListData = {
   /**
-   * GetLogServicesArgs
+   * DockerListArgs
    */
   body: {
     /**
-     * Directory to scan for compose projects. Defaults to `$HOME/code`.
+     * Single compose project path. Returns its services.
+     */
+    path?: string | null;
+    /**
+     * Scan this directory for compose projects (default `$HOME/code`).
+     * Mutually exclusive with `path`.
      */
     root?: string | null;
   };
   path?: never;
   query?: never;
-  url: '/api/v1/docker.service.list-logs';
+  url: '/api/v1/docker.list';
 };
 
-export type DockerServiceListLogsErrors = {
+export type DockerListErrors = {
   /**
    * Unknown tool
    */
@@ -2009,86 +2208,73 @@ export type DockerServiceListLogsErrors = {
   };
 };
 
-export type DockerServiceListLogsError =
-  DockerServiceListLogsErrors[keyof DockerServiceListLogsErrors];
+export type DockerListError = DockerListErrors[keyof DockerListErrors];
 
-export type DockerServiceListLogsResponses = {
+export type DockerListResponses = {
   /**
-   * GetLogServicesOutput
+   * DockerListOutput
    *
    * Tool result
    */
   200: {
-    projects: Array<DockerLogProject>;
+    /**
+     * Services for a single project (`path` arg) — empty otherwise.
+     */
+    composeFile?: string | null;
+    /**
+     * Local engine status (always populated).
+     */
+    engine?: DockerEngineStatus;
+    /**
+     * Project scan results (`root` arg) — empty otherwise.
+     */
+    projects?: Array<DockerProjectRow>;
+    /**
+     * Registered docker runtimes (always populated).
+     */
+    runtimes?: Array<DockerRuntimeRow>;
+    services?: Array<DockerServiceRow>;
   };
 };
 
-export type DockerServiceListLogsResponse =
-  DockerServiceListLogsResponses[keyof DockerServiceListLogsResponses];
+export type DockerListResponse = DockerListResponses[keyof DockerListResponses];
 
-export type DockerServiceListStatsData = {
+export type DockerUpdateData = {
   /**
-   * DockerStatsArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/docker.service.list-stats';
-};
-
-export type DockerServiceListStatsErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type DockerServiceListStatsError =
-  DockerServiceListStatsErrors[keyof DockerServiceListStatsErrors];
-
-export type DockerServiceListStatsResponses = {
-  /**
-   * DockerStatsOutput
-   *
-   * Tool result
-   */
-  200: {
-    containers: Array<DockerContainerStats>;
-  };
-};
-
-export type DockerServiceListStatsResponse =
-  DockerServiceListStatsResponses[keyof DockerServiceListStatsResponses];
-
-export type DockerServiceUpdateData = {
-  /**
-   * RunDockerActionArgs
+   * DockerUpdateArgs
    */
   body: {
     /**
      * `up`, `down`, `restart`, `start`, `stop`, `build`, `pull`, `logs`.
      */
-    action: string;
-    projectPath: string;
+    action?: string | null;
+    /**
+     * Start the local docker engine (colima/desktop).
+     */
+    engineStart?: boolean;
+    host?: string | null;
+    /**
+     * Run a compose lifecycle action. Set `path` and `action`.
+     */
+    path?: string | null;
+    /**
+     * Register a docker runtime — also set `socket_path`, `host`, or `url`.
+     */
+    runtimeName?: string | null;
+    /**
+     * Scope the compose action to one service.
+     */
     service?: string | null;
+    socketPath?: string | null;
     tail?: number | null;
+    url?: string | null;
   };
   path?: never;
   query?: never;
-  url: '/api/v1/docker.service.update';
+  url: '/api/v1/docker.update';
 };
 
-export type DockerServiceUpdateErrors = {
+export type DockerUpdateErrors = {
   /**
    * Unknown tool
    */
@@ -2103,22 +2289,75 @@ export type DockerServiceUpdateErrors = {
   };
 };
 
-export type DockerServiceUpdateError = DockerServiceUpdateErrors[keyof DockerServiceUpdateErrors];
+export type DockerUpdateError = DockerUpdateErrors[keyof DockerUpdateErrors];
 
-export type DockerServiceUpdateResponses = {
+export type DockerUpdateResponses = {
   /**
-   * DockerActionResult
+   * DockerUpdateOutput
    *
    * Tool result
    */
   200: {
+    applied?: Array<string>;
     composeFile?: string | null;
-    output: string;
+    output?: string;
   };
 };
 
-export type DockerServiceUpdateResponse =
-  DockerServiceUpdateResponses[keyof DockerServiceUpdateResponses];
+export type DockerUpdateResponse = DockerUpdateResponses[keyof DockerUpdateResponses];
+
+export type FilesDeleteData = {
+  /**
+   * FsDeleteArgs
+   */
+  body: {
+    /**
+     * Delete a file at `path` (absolute or `~/`-prefixed).
+     */
+    path?: string | null;
+    /**
+     * Remove a global ignore pattern.
+     */
+    removeIgnorePattern?: string | null;
+    /**
+     * Unregister a root by name.
+     */
+    unregisterRoot?: string | null;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/files.delete';
+};
+
+export type FilesDeleteErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type FilesDeleteError = FilesDeleteErrors[keyof FilesDeleteErrors];
+
+export type FilesDeleteResponses = {
+  /**
+   * FsDeleteOutput
+   *
+   * Tool result
+   */
+  200: {
+    applied?: Array<string>;
+  };
+};
+
+export type FilesDeleteResponse = FilesDeleteResponses[keyof FilesDeleteResponses];
 
 export type FilesListData = {
   /**
@@ -2163,7 +2402,18 @@ export type FilesListResponses = {
    * Tool result
    */
   200: {
-    entries: Array<FsEntry>;
+    /**
+     * Populated when listing a directory (path supplied).
+     */
+    entries?: Array<FsEntry>;
+    /**
+     * Populated alongside `roots` — global ignore patterns.
+     */
+    ignorePatterns?: Array<string>;
+    /**
+     * Populated when listing registered roots (no path/root supplied).
+     */
+    roots?: Array<FsRootEntry>;
   };
 };
 
@@ -2224,48 +2474,6 @@ export type FilesReadResponses = {
 };
 
 export type FilesReadResponse = FilesReadResponses[keyof FilesReadResponses];
-
-export type FilesRootsListData = {
-  /**
-   * FsRootsListArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/files.roots.list';
-};
-
-export type FilesRootsListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type FilesRootsListError = FilesRootsListErrors[keyof FilesRootsListErrors];
-
-export type FilesRootsListResponses = {
-  /**
-   * FsRootsListOutput
-   *
-   * Tool result
-   */
-  200: {
-    roots: Array<FsRootEntry>;
-  };
-};
-
-export type FilesRootsListResponse = FilesRootsListResponses[keyof FilesRootsListResponses];
 
 export type FilesSearchData = {
   /**
@@ -2416,6 +2624,487 @@ export type FilesTreeResponses = {
 };
 
 export type FilesTreeResponse = FilesTreeResponses[keyof FilesTreeResponses];
+
+export type FilesUpdateData = {
+  /**
+   * FsUpdateArgs
+   */
+  body: {
+    /**
+     * Add a global ignore pattern.
+     */
+    addIgnorePattern?: string | null;
+    content?: string | null;
+    /**
+     * Write a file: provide `path` (absolute or `~/`-prefixed) + `content`.
+     */
+    path?: string | null;
+    registerRootDescription?: string | null;
+    /**
+     * Register/update a root: provide `register_root_name` + `register_root_path`
+     * (+ optional `register_root_description`).
+     */
+    registerRootName?: string | null;
+    registerRootPath?: string | null;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/files.update';
+};
+
+export type FilesUpdateErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type FilesUpdateError = FilesUpdateErrors[keyof FilesUpdateErrors];
+
+export type FilesUpdateResponses = {
+  /**
+   * FsUpdateOutput
+   *
+   * Tool result
+   */
+  200: {
+    applied?: Array<string>;
+  };
+};
+
+export type FilesUpdateResponse = FilesUpdateResponses[keyof FilesUpdateResponses];
+
+export type McpDeleteData = {
+  /**
+   * McpDeleteArgs
+   */
+  body: {
+    name: string;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/mcp.delete';
+};
+
+export type McpDeleteErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type McpDeleteError = McpDeleteErrors[keyof McpDeleteErrors];
+
+export type McpDeleteResponses = {
+  /**
+   * McpDeleteOutput
+   *
+   * Tool result
+   */
+  200: {
+    changed: boolean;
+    name: string;
+  };
+};
+
+export type McpDeleteResponse = McpDeleteResponses[keyof McpDeleteResponses];
+
+export type McpDetailData = {
+  /**
+   * McpDetailArgs
+   */
+  body: {
+    /**
+     * Server name. Omit to return the full federated tool catalogue across all servers.
+     */
+    name?: string | null;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/mcp.detail';
+};
+
+export type McpDetailErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type McpDetailError = McpDetailErrors[keyof McpDetailErrors];
+
+export type McpDetailResponses = {
+  /**
+   * McpDetailOutput
+   *
+   * Tool result
+   */
+  200: {
+    /**
+     * Populated when `name` was supplied.
+     */
+    server?: McpServerRow | null;
+    /**
+     * Live tool advertisement. When `name` is set, only that server's tools;
+     * when omitted, every registered server's tools.
+     */
+    tools?: Array<McpToolEntry>;
+  };
+};
+
+export type McpDetailResponse = McpDetailResponses[keyof McpDetailResponses];
+
+export type McpListData = {
+  /**
+   * McpListArgs
+   */
+  body: {
+    [key: string]: unknown;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/mcp.list';
+};
+
+export type McpListErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type McpListError = McpListErrors[keyof McpListErrors];
+
+export type McpListResponses = {
+  /**
+   * McpListOutput
+   *
+   * Tool result
+   */
+  200: {
+    servers: Array<McpServerRow>;
+  };
+};
+
+export type McpListResponse = McpListResponses[keyof McpListResponses];
+
+export type McpRunData = {
+  /**
+   * McpRunArgs
+   */
+  body: {
+    /**
+     * Opaque MCP `tools/call` arguments — upstream-defined per the MCP spec.
+     */
+    args?: {
+      [key: string]: unknown;
+    } | null;
+    server: string;
+    tool: string;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/mcp.run';
+};
+
+export type McpRunErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type McpRunError = McpRunErrors[keyof McpRunErrors];
+
+export type McpRunResponses = {
+  /**
+   * McpRunOutput
+   *
+   * Tool result
+   */
+  200: {
+    content: Array<McpContent>;
+    isError: boolean;
+    /**
+     * Opaque structured payload — upstream-defined per the MCP spec.
+     */
+    structuredContent?: unknown;
+  };
+};
+
+export type McpRunResponse = McpRunResponses[keyof McpRunResponses];
+
+export type McpUpdateData = {
+  /**
+   * McpUpdateArgs
+   */
+  body: {
+    /**
+     * Arg list for the server command.
+     */
+    args?: Array<string> | null;
+    /**
+     * Register-or-update: when set, upserts the server row using `name`+this+args+env.
+     */
+    command?: string | null;
+    /**
+     * Env map (REST/MCP only — CLI K=V parsing not currently supported).
+     */
+    env?: {
+      [key: string]: string;
+    } | null;
+    mapExternalTool?: string | null;
+    /**
+     * Tool mapping: set `map_orca_tool` + `map_external_tool` (uses `name` as the server).
+     */
+    mapOrcaTool?: string | null;
+    /**
+     * Server name. Required for register/map/unmap/sync (unless `sync_all=true`).
+     */
+    name?: string | null;
+    /**
+     * Auto-discover and map tools. Requires either `name` or `sync_all=true`.
+     */
+    sync?: boolean;
+    /**
+     * When set with `sync`, runs against every registered server.
+     */
+    syncAll?: boolean;
+    /**
+     * Fuzzy-match threshold for `sync` (default 0.8).
+     */
+    syncThreshold?: number | null;
+    /**
+     * Remove a tool mapping by orca tool name.
+     */
+    unmapOrcaTool?: string | null;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/mcp.update';
+};
+
+export type McpUpdateErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type McpUpdateError = McpUpdateErrors[keyof McpUpdateErrors];
+
+export type McpUpdateResponses = {
+  /**
+   * McpUpdateOutput
+   *
+   * Tool result
+   */
+  200: {
+    /**
+     * Notes per applied sub-operation.
+     */
+    applied?: Array<string>;
+    /**
+     * Populated when `sync` ran.
+     */
+    sync?: SyncToolsOutput | null;
+  };
+};
+
+export type McpUpdateResponse = McpUpdateResponses[keyof McpUpdateResponses];
+
+export type NamespaceAccessCreateData = {
+  /**
+   * NamespaceShareArgs
+   */
+  body: {
+    /**
+     * `viewer` | `collaborator`
+     */
+    role: string;
+    spec: string;
+    user: string;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/namespace.access.create';
+};
+
+export type NamespaceAccessCreateErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type NamespaceAccessCreateError =
+  NamespaceAccessCreateErrors[keyof NamespaceAccessCreateErrors];
+
+export type NamespaceAccessCreateResponses = {
+  /**
+   * NamespaceMutationResult
+   *
+   * Tool result
+   */
+  200: {
+    changed: boolean;
+    id: string;
+    name: string;
+  };
+};
+
+export type NamespaceAccessCreateResponse =
+  NamespaceAccessCreateResponses[keyof NamespaceAccessCreateResponses];
+
+export type NamespaceAccessDeleteData = {
+  /**
+   * NamespaceUnshareArgs
+   */
+  body: {
+    spec: string;
+    user: string;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/namespace.access.delete';
+};
+
+export type NamespaceAccessDeleteErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type NamespaceAccessDeleteError =
+  NamespaceAccessDeleteErrors[keyof NamespaceAccessDeleteErrors];
+
+export type NamespaceAccessDeleteResponses = {
+  /**
+   * NamespaceMutationResult
+   *
+   * Tool result
+   */
+  200: {
+    changed: boolean;
+    id: string;
+    name: string;
+  };
+};
+
+export type NamespaceAccessDeleteResponse =
+  NamespaceAccessDeleteResponses[keyof NamespaceAccessDeleteResponses];
+
+export type NamespaceAccessListData = {
+  /**
+   * NamespaceSpecArgs
+   */
+  body: {
+    /**
+     * Namespace id or name.
+     */
+    spec: string;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/namespace.access.list';
+};
+
+export type NamespaceAccessListErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type NamespaceAccessListError = NamespaceAccessListErrors[keyof NamespaceAccessListErrors];
+
+export type NamespaceAccessListResponses = {
+  /**
+   * NamespaceSharesReport
+   *
+   * Tool result
+   */
+  200: {
+    namespace_id: string;
+    shares: Array<NamespaceShareEntry>;
+  };
+};
+
+export type NamespaceAccessListResponse =
+  NamespaceAccessListResponses[keyof NamespaceAccessListResponses];
 
 export type NamespaceCreateData = {
   /**
@@ -2568,320 +3257,6 @@ export type NamespaceDetailResponses = {
 
 export type NamespaceDetailResponse = NamespaceDetailResponses[keyof NamespaceDetailResponses];
 
-export type NamespaceDocListCommandsData = {
-  /**
-   * ListCommandsArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/namespace.doc.list-commands';
-};
-
-export type NamespaceDocListCommandsErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceDocListCommandsError =
-  NamespaceDocListCommandsErrors[keyof NamespaceDocListCommandsErrors];
-
-export type NamespaceDocListCommandsResponses = {
-  /**
-   * ListCommandsOutput
-   *
-   * Tool result
-   */
-  200: {
-    commands: Array<string>;
-  };
-};
-
-export type NamespaceDocListCommandsResponse =
-  NamespaceDocListCommandsResponses[keyof NamespaceDocListCommandsResponses];
-
-export type NamespaceDocPatternCreateData = {
-  /**
-   * DocIgnorePatternArgs
-   */
-  body: {
-    pattern: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/namespace.doc.pattern.create';
-};
-
-export type NamespaceDocPatternCreateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceDocPatternCreateError =
-  NamespaceDocPatternCreateErrors[keyof NamespaceDocPatternCreateErrors];
-
-export type NamespaceDocPatternCreateResponses = {
-  /**
-   * DocIgnorePatternMutationResult
-   *
-   * Tool result
-   */
-  200: {
-    changed: boolean;
-    pattern: string;
-  };
-};
-
-export type NamespaceDocPatternCreateResponse =
-  NamespaceDocPatternCreateResponses[keyof NamespaceDocPatternCreateResponses];
-
-export type NamespaceDocPatternDeleteData = {
-  /**
-   * DocIgnorePatternArgs
-   */
-  body: {
-    pattern: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/namespace.doc.pattern.delete';
-};
-
-export type NamespaceDocPatternDeleteErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceDocPatternDeleteError =
-  NamespaceDocPatternDeleteErrors[keyof NamespaceDocPatternDeleteErrors];
-
-export type NamespaceDocPatternDeleteResponses = {
-  /**
-   * DocIgnorePatternMutationResult
-   *
-   * Tool result
-   */
-  200: {
-    changed: boolean;
-    pattern: string;
-  };
-};
-
-export type NamespaceDocPatternDeleteResponse =
-  NamespaceDocPatternDeleteResponses[keyof NamespaceDocPatternDeleteResponses];
-
-export type NamespaceDocPatternListData = {
-  /**
-   * ListDocIgnorePatternsArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/namespace.doc.pattern.list';
-};
-
-export type NamespaceDocPatternListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceDocPatternListError =
-  NamespaceDocPatternListErrors[keyof NamespaceDocPatternListErrors];
-
-export type NamespaceDocPatternListResponses = {
-  /**
-   * ListDocIgnorePatternsOutput
-   *
-   * Tool result
-   */
-  200: {
-    patterns: Array<string>;
-  };
-};
-
-export type NamespaceDocPatternListResponse =
-  NamespaceDocPatternListResponses[keyof NamespaceDocPatternListResponses];
-
-export type NamespaceDocRootCreateData = {
-  /**
-   * AddFileRootArgs
-   */
-  body: {
-    description?: string | null;
-    name: string;
-    path: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/namespace.doc.root.create';
-};
-
-export type NamespaceDocRootCreateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceDocRootCreateError =
-  NamespaceDocRootCreateErrors[keyof NamespaceDocRootCreateErrors];
-
-export type NamespaceDocRootCreateResponses = {
-  /**
-   * FileRootMutationResult
-   *
-   * Tool result
-   */
-  200: {
-    changed: boolean;
-    name: string;
-  };
-};
-
-export type NamespaceDocRootCreateResponse =
-  NamespaceDocRootCreateResponses[keyof NamespaceDocRootCreateResponses];
-
-export type NamespaceDocRootDeleteData = {
-  /**
-   * RemoveFileRootArgs
-   */
-  body: {
-    name: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/namespace.doc.root.delete';
-};
-
-export type NamespaceDocRootDeleteErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceDocRootDeleteError =
-  NamespaceDocRootDeleteErrors[keyof NamespaceDocRootDeleteErrors];
-
-export type NamespaceDocRootDeleteResponses = {
-  /**
-   * FileRootMutationResult
-   *
-   * Tool result
-   */
-  200: {
-    changed: boolean;
-    name: string;
-  };
-};
-
-export type NamespaceDocRootDeleteResponse =
-  NamespaceDocRootDeleteResponses[keyof NamespaceDocRootDeleteResponses];
-
-export type NamespaceDocRootListData = {
-  /**
-   * ListFileRootsArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/namespace.doc.root.list';
-};
-
-export type NamespaceDocRootListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceDocRootListError =
-  NamespaceDocRootListErrors[keyof NamespaceDocRootListErrors];
-
-export type NamespaceDocRootListResponses = {
-  /**
-   * ListFileRootsOutput
-   *
-   * Tool result
-   */
-  200: {
-    roots: Array<FileRootRegEntry>;
-  };
-};
-
-export type NamespaceDocRootListResponse =
-  NamespaceDocRootListResponses[keyof NamespaceDocRootListResponses];
-
 export type NamespaceListData = {
   /**
    * NamespaceListArgs
@@ -2923,612 +3298,6 @@ export type NamespaceListResponses = {
 };
 
 export type NamespaceListResponse = NamespaceListResponses[keyof NamespaceListResponses];
-
-export type NamespaceProjectListData = {
-  /**
-   * EmptyArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/namespace.project.list';
-};
-
-export type NamespaceProjectListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceProjectListError =
-  NamespaceProjectListErrors[keyof NamespaceProjectListErrors];
-
-export type NamespaceProjectListResponses = {
-  /**
-   * ProjectsListReport
-   *
-   * Tool result
-   */
-  200: {
-    projects: Array<string>;
-  };
-};
-
-export type NamespaceProjectListResponse =
-  NamespaceProjectListResponses[keyof NamespaceProjectListResponses];
-
-export type NamespaceShareCreateData = {
-  /**
-   * NamespaceShareArgs
-   */
-  body: {
-    /**
-     * `viewer` | `collaborator`
-     */
-    role: string;
-    spec: string;
-    user: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/namespace.share.create';
-};
-
-export type NamespaceShareCreateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceShareCreateError =
-  NamespaceShareCreateErrors[keyof NamespaceShareCreateErrors];
-
-export type NamespaceShareCreateResponses = {
-  /**
-   * NamespaceMutationResult
-   *
-   * Tool result
-   */
-  200: {
-    changed: boolean;
-    id: string;
-    name: string;
-  };
-};
-
-export type NamespaceShareCreateResponse =
-  NamespaceShareCreateResponses[keyof NamespaceShareCreateResponses];
-
-export type NamespaceShareDeleteData = {
-  /**
-   * NamespaceUnshareArgs
-   */
-  body: {
-    spec: string;
-    user: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/namespace.share.delete';
-};
-
-export type NamespaceShareDeleteErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceShareDeleteError =
-  NamespaceShareDeleteErrors[keyof NamespaceShareDeleteErrors];
-
-export type NamespaceShareDeleteResponses = {
-  /**
-   * NamespaceMutationResult
-   *
-   * Tool result
-   */
-  200: {
-    changed: boolean;
-    id: string;
-    name: string;
-  };
-};
-
-export type NamespaceShareDeleteResponse =
-  NamespaceShareDeleteResponses[keyof NamespaceShareDeleteResponses];
-
-export type NamespaceShareListData = {
-  /**
-   * NamespaceSpecArgs
-   */
-  body: {
-    /**
-     * Namespace id or name.
-     */
-    spec: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/namespace.share.list';
-};
-
-export type NamespaceShareListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceShareListError = NamespaceShareListErrors[keyof NamespaceShareListErrors];
-
-export type NamespaceShareListResponses = {
-  /**
-   * NamespaceSharesReport
-   *
-   * Tool result
-   */
-  200: {
-    namespace_id: string;
-    shares: Array<NamespaceShareEntry>;
-  };
-};
-
-export type NamespaceShareListResponse =
-  NamespaceShareListResponses[keyof NamespaceShareListResponses];
-
-export type NamespaceSpecCreateData = {
-  /**
-   * RegisterSpecArgs
-   */
-  body: {
-    name: string;
-    url: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/namespace.spec.create';
-};
-
-export type NamespaceSpecCreateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceSpecCreateError = NamespaceSpecCreateErrors[keyof NamespaceSpecCreateErrors];
-
-export type NamespaceSpecCreateResponses = {
-  /**
-   * RegisterSpecResult
-   *
-   * Tool result
-   */
-  200: {
-    cachedAt?: string | null;
-    enabled: boolean;
-    name: string;
-    pathCount?: number | null;
-    sourceMcp?: string | null;
-    url?: string | null;
-  };
-};
-
-export type NamespaceSpecCreateResponse =
-  NamespaceSpecCreateResponses[keyof NamespaceSpecCreateResponses];
-
-export type NamespaceSpecDeleteData = {
-  /**
-   * UnregisterSpecArgs
-   */
-  body: {
-    name: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/namespace.spec.delete';
-};
-
-export type NamespaceSpecDeleteErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceSpecDeleteError = NamespaceSpecDeleteErrors[keyof NamespaceSpecDeleteErrors];
-
-export type NamespaceSpecDeleteResponses = {
-  /**
-   * UnregisterSpecOutput
-   *
-   * Tool result
-   */
-  200: {
-    removed: boolean;
-  };
-};
-
-export type NamespaceSpecDeleteResponse =
-  NamespaceSpecDeleteResponses[keyof NamespaceSpecDeleteResponses];
-
-export type NamespaceSpecDetailData = {
-  /**
-   * SpecDetailArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/namespace.spec.detail';
-};
-
-export type NamespaceSpecDetailErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceSpecDetailError = NamespaceSpecDetailErrors[keyof NamespaceSpecDetailErrors];
-
-export type NamespaceSpecDetailResponses = {
-  /**
-   * SpecDetailReport
-   *
-   * Tool result
-   */
-  200: {
-    /**
-     * Orca's own OpenAPI JSON document, pretty-printed.
-     */
-    spec: string;
-  };
-};
-
-export type NamespaceSpecDetailResponse =
-  NamespaceSpecDetailResponses[keyof NamespaceSpecDetailResponses];
-
-export type NamespaceSpecGraphqlDetailData = {
-  /**
-   * GetSpecGraphqlInfoArgs
-   */
-  body: {
-    repo: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/namespace.spec.graphql.detail';
-};
-
-export type NamespaceSpecGraphqlDetailErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceSpecGraphqlDetailError =
-  NamespaceSpecGraphqlDetailErrors[keyof NamespaceSpecGraphqlDetailErrors];
-
-export type NamespaceSpecGraphqlDetailResponses = {
-  /**
-   * GraphQlInfoData
-   *
-   * Tool result
-   */
-  200: {
-    enums: Array<GraphQlEnum>;
-    inputs: Array<GraphQlType>;
-    mutations: Array<GraphQlOperation>;
-    queries: Array<GraphQlOperation>;
-    repo: string;
-    subscriptions: Array<GraphQlOperation>;
-    types: Array<GraphQlType>;
-  };
-};
-
-export type NamespaceSpecGraphqlDetailResponse =
-  NamespaceSpecGraphqlDetailResponses[keyof NamespaceSpecGraphqlDetailResponses];
-
-export type NamespaceSpecGraphqlUpdateData = {
-  /**
-   * ProxyGraphqlArgs
-   */
-  body: {
-    operation_name?: string | null;
-    query: string;
-    repo: string;
-    shop: string;
-    token: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/namespace.spec.graphql.update';
-};
-
-export type NamespaceSpecGraphqlUpdateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceSpecGraphqlUpdateError =
-  NamespaceSpecGraphqlUpdateErrors[keyof NamespaceSpecGraphqlUpdateErrors];
-
-export type NamespaceSpecGraphqlUpdateResponses = {
-  /**
-   * GraphqlProxyResult
-   *
-   * `body` is opaque — GraphQL response shapes vary per query and are not owned by orca.
-   */
-  200: {
-    status: number;
-  };
-};
-
-export type NamespaceSpecGraphqlUpdateResponse =
-  NamespaceSpecGraphqlUpdateResponses[keyof NamespaceSpecGraphqlUpdateResponses];
-
-export type NamespaceSpecListData = {
-  /**
-   * ListSpecsArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/namespace.spec.list';
-};
-
-export type NamespaceSpecListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceSpecListError = NamespaceSpecListErrors[keyof NamespaceSpecListErrors];
-
-export type NamespaceSpecListResponses = {
-  /**
-   * ListSpecsOutput
-   *
-   * Tool result
-   */
-  200: {
-    specs: Array<SpecMetaRow>;
-  };
-};
-
-export type NamespaceSpecListResponse =
-  NamespaceSpecListResponses[keyof NamespaceSpecListResponses];
-
-export type NamespaceSpecListDbData = {
-  /**
-   * ListDbSpecsArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/namespace.spec.list-db';
-};
-
-export type NamespaceSpecListDbErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceSpecListDbError = NamespaceSpecListDbErrors[keyof NamespaceSpecListDbErrors];
-
-export type NamespaceSpecListDbResponses = {
-  /**
-   * ListDbSpecsOutput
-   *
-   * Tool result
-   */
-  200: {
-    specs: Array<DbSpecRow>;
-  };
-};
-
-export type NamespaceSpecListDbResponse =
-  NamespaceSpecListDbResponses[keyof NamespaceSpecListDbResponses];
-
-export type NamespaceSpecRefreshData = {
-  /**
-   * RefreshSpecArgs
-   */
-  body: {
-    name: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/namespace.spec.refresh';
-};
-
-export type NamespaceSpecRefreshErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceSpecRefreshError =
-  NamespaceSpecRefreshErrors[keyof NamespaceSpecRefreshErrors];
-
-export type NamespaceSpecRefreshResponses = {
-  /**
-   * RegisterSpecResult
-   *
-   * Tool result
-   */
-  200: {
-    cachedAt?: string | null;
-    enabled: boolean;
-    name: string;
-    pathCount?: number | null;
-    sourceMcp?: string | null;
-    url?: string | null;
-  };
-};
-
-export type NamespaceSpecRefreshResponse =
-  NamespaceSpecRefreshResponses[keyof NamespaceSpecRefreshResponses];
-
-export type NamespaceSpecSyncMcpData = {
-  /**
-   * SyncMcpSpecsArgs
-   */
-  body: {
-    server: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/namespace.spec.sync-mcp';
-};
-
-export type NamespaceSpecSyncMcpErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type NamespaceSpecSyncMcpError =
-  NamespaceSpecSyncMcpErrors[keyof NamespaceSpecSyncMcpErrors];
-
-export type NamespaceSpecSyncMcpResponses = {
-  /**
-   * SyncMcpSpecsResult
-   *
-   * Tool result
-   */
-  200: {
-    errors: Array<string>;
-    server: string;
-    synced: number;
-  };
-};
-
-export type NamespaceSpecSyncMcpResponse =
-  NamespaceSpecSyncMcpResponses[keyof NamespaceSpecSyncMcpResponses];
 
 export type NamespaceUseData = {
   /**
@@ -3576,6 +3345,331 @@ export type NamespaceUseResponses = {
 };
 
 export type NamespaceUseResponse = NamespaceUseResponses[keyof NamespaceUseResponses];
+
+export type PkiCreateData = {
+  /**
+   * PkiCreateArgs
+   */
+  body: {
+    /**
+     * (cert) `general` (default) or `sensitive`.
+     */
+    capability?: string | null;
+    /**
+     * `ca` (default) initializes the orca CA + server cert; `cert` issues a plugin cert.
+     */
+    kind?: PkiKind;
+    /**
+     * (cert) Plugin id to issue for.
+     */
+    plugin_id?: string | null;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/pki.create';
+};
+
+export type PkiCreateErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type PkiCreateError = PkiCreateErrors[keyof PkiCreateErrors];
+
+export type PkiCreateResponses = {
+  /**
+   * PkiCreateOutput
+   *
+   * Tool result
+   */
+  200: {
+    caPath?: string;
+    capability?: string;
+    certPath?: string;
+    /**
+     * Did this call create new material (false when the CA already existed).
+     */
+    created?: boolean;
+    keyPath?: string;
+    pluginId?: string;
+    serverCertPath?: string;
+  };
+};
+
+export type PkiCreateResponse = PkiCreateResponses[keyof PkiCreateResponses];
+
+export type PkiListData = {
+  /**
+   * PkiListArgs
+   */
+  body: {
+    [key: string]: unknown;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/pki.list';
+};
+
+export type PkiListErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type PkiListError = PkiListErrors[keyof PkiListErrors];
+
+export type PkiListResponses = {
+  /**
+   * PkiListOutput
+   *
+   * Tool result
+   */
+  200: {
+    certs: Array<PkiCertEntry>;
+  };
+};
+
+export type PkiListResponse = PkiListResponses[keyof PkiListResponses];
+
+export type PluginDeleteData = {
+  /**
+   * PluginDeleteArgs
+   */
+  body: {
+    /**
+     * Remove a stored credential by key (leaves the plugin in place).
+     */
+    credKey?: string | null;
+    /**
+     * Remove a stored data entry by key (leaves the plugin in place).
+     */
+    dataKey?: string | null;
+    id: string;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/plugin.delete';
+};
+
+export type PluginDeleteErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type PluginDeleteError = PluginDeleteErrors[keyof PluginDeleteErrors];
+
+export type PluginDeleteResponses = {
+  /**
+   * PluginDeleteOutput
+   *
+   * Tool result
+   */
+  200: {
+    applied?: Array<string>;
+    id?: string;
+  };
+};
+
+export type PluginDeleteResponse = PluginDeleteResponses[keyof PluginDeleteResponses];
+
+export type PluginDetailData = {
+  /**
+   * PluginDetailArgs
+   */
+  body: {
+    /**
+     * Fetch the value of a specific data key.
+     */
+    data_key?: string | null;
+    id: string;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/plugin.detail';
+};
+
+export type PluginDetailErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type PluginDetailError = PluginDetailErrors[keyof PluginDetailErrors];
+
+export type PluginDetailResponses = {
+  /**
+   * PluginDetailOutput
+   *
+   * Tool result
+   */
+  200: {
+    /**
+     * Populated when `data_key` was supplied — the JSON value at that key.
+     */
+    dataValue?: unknown;
+    plugin: PluginRow;
+  };
+};
+
+export type PluginDetailResponse = PluginDetailResponses[keyof PluginDetailResponses];
+
+export type PluginListData = {
+  /**
+   * PluginListArgs
+   */
+  body: {
+    /**
+     * Filter by tier (omit for all).
+     */
+    tier?: string | null;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/plugin.list';
+};
+
+export type PluginListErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type PluginListError = PluginListErrors[keyof PluginListErrors];
+
+export type PluginListResponses = {
+  /**
+   * PluginListOutput
+   *
+   * Tool result
+   */
+  200: {
+    plugins: Array<PluginRow>;
+  };
+};
+
+export type PluginListResponse = PluginListResponses[keyof PluginListResponses];
+
+export type PluginUpdateData = {
+  /**
+   * PluginUpdateArgs
+   */
+  body: {
+    /**
+     * Store a credential value. `cred_key` + `cred_value`.
+     */
+    credKey?: string | null;
+    /**
+     * Sync stored credentials to the plugin's runtime environment.
+     */
+    credSync?: boolean;
+    credValue?: string | null;
+    /**
+     * Set a plugin data entry. `data_key` + `data_value` (JSON, REST/MCP only).
+     */
+    dataKey?: string | null;
+    dataValue?: unknown;
+    /**
+     * Enable / disable the plugin.
+     */
+    enabled?: boolean | null;
+    /**
+     * Existing plugin id — required for every operation other than install.
+     */
+    id?: string | null;
+    /**
+     * Optional instance id override when installing.
+     */
+    instanceId?: string | null;
+    /**
+     * Install path. Manifest URL or local file.
+     */
+    manifest?: string | null;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/plugin.update';
+};
+
+export type PluginUpdateErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type PluginUpdateError = PluginUpdateErrors[keyof PluginUpdateErrors];
+
+export type PluginUpdateResponses = {
+  /**
+   * PluginUpdateOutput
+   *
+   * Tool result
+   */
+  200: {
+    applied?: Array<string>;
+    /**
+     * Populated when `manifest` install ran.
+     */
+    installedId?: string | null;
+  };
+};
+
+export type PluginUpdateResponse = PluginUpdateResponses[keyof PluginUpdateResponses];
 
 export type PodDetailData = {
   /**
@@ -3685,6 +3779,59 @@ export type PodForgetResponses = {
 };
 
 export type PodForgetResponse = PodForgetResponses[keyof PodForgetResponses];
+
+export type PodHistoryData = {
+  /**
+   * HostStatusDetailArgs
+   */
+  body: {
+    /**
+     * Maximum rows to return. Defaults to 256 — enough for a day at 1/min
+     * with room to spare; pass a lower value for sparkline-style queries.
+     */
+    limit?: number | null;
+    /**
+     * Peer whose history to read. Use `local` to read this host's own rows.
+     */
+    peer_id: string;
+    /**
+     * Return only rows with `snapshot_at_unix > since`. Omit to read the
+     * full retained history (capped at `MAX_ROWS_PER_PEER` in storage).
+     */
+    since_unix?: number | null;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/pod.history';
+};
+
+export type PodHistoryErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type PodHistoryError = PodHistoryErrors[keyof PodHistoryErrors];
+
+export type PodHistoryResponses = {
+  /**
+   * Array_of_HostStatusRowDto
+   *
+   * Tool result
+   */
+  200: Array<HostStatusRowDto>;
+};
+
+export type PodHistoryResponse = PodHistoryResponses[keyof PodHistoryResponses];
 
 export type PodJoinData = {
   /**
@@ -4005,99 +4152,6 @@ export type PodRecoverResponses = {
 
 export type PodRecoverResponse = PodRecoverResponses[keyof PodRecoverResponses];
 
-export type PodStatusDetailData = {
-  /**
-   * HostStatusDetailArgs
-   */
-  body: {
-    /**
-     * Maximum rows to return. Defaults to 256 — enough for a day at 1/min
-     * with room to spare; pass a lower value for sparkline-style queries.
-     */
-    limit?: number | null;
-    /**
-     * Peer whose history to read. Use `local` to read this host's own rows.
-     */
-    peer_id: string;
-    /**
-     * Return only rows with `snapshot_at_unix > since`. Omit to read the
-     * full retained history (capped at `MAX_ROWS_PER_PEER` in storage).
-     */
-    since_unix?: number | null;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/pod.status.detail';
-};
-
-export type PodStatusDetailErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type PodStatusDetailError = PodStatusDetailErrors[keyof PodStatusDetailErrors];
-
-export type PodStatusDetailResponses = {
-  /**
-   * Array_of_HostStatusRowDto
-   *
-   * Tool result
-   */
-  200: Array<HostStatusRowDto>;
-};
-
-export type PodStatusDetailResponse = PodStatusDetailResponses[keyof PodStatusDetailResponses];
-
-export type PodStatusListData = {
-  /**
-   * HostStatusRowsArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/pod.status.list';
-};
-
-export type PodStatusListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type PodStatusListError = PodStatusListErrors[keyof PodStatusListErrors];
-
-export type PodStatusListResponses = {
-  /**
-   * Array_of_HostStatusRowDto
-   *
-   * Tool result
-   */
-  200: Array<HostStatusRowDto>;
-};
-
-export type PodStatusListResponse = PodStatusListResponses[keyof PodStatusListResponses];
-
 export type PodSyncData = {
   /**
    * PodSyncArgs
@@ -4252,6 +4306,145 @@ export type PodUpdateResponses = {
 };
 
 export type PodUpdateResponse = PodUpdateResponses[keyof PodUpdateResponses];
+
+export type ScheduleListData = {
+  /**
+   * ScheduleListArgs
+   */
+  body: {
+    /**
+     * Filter by host_owner.
+     */
+    host?: string | null;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/schedule.list';
+};
+
+export type ScheduleListErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type ScheduleListError = ScheduleListErrors[keyof ScheduleListErrors];
+
+export type ScheduleListResponses = {
+  /**
+   * ScheduleListOutput
+   *
+   * Tool result
+   */
+  200: {
+    schedules: Array<ScheduleEntry>;
+  };
+};
+
+export type ScheduleListResponse = ScheduleListResponses[keyof ScheduleListResponses];
+
+export type ScheduleRunData = {
+  /**
+   * ScheduleRunArgs
+   */
+  body: {
+    /**
+     * Schedule row name (the `name` in config_rows). Invokes the row's
+     * `job` immediately, out-of-band from the scheduler loop.
+     */
+    name: string;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/schedule.run';
+};
+
+export type ScheduleRunErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type ScheduleRunError = ScheduleRunErrors[keyof ScheduleRunErrors];
+
+export type ScheduleRunResponses = {
+  /**
+   * ScheduleRunOutput
+   *
+   * Tool result
+   */
+  200: {
+    duration_ms: number;
+    error?: string | null;
+    job: string;
+    ok: boolean;
+  };
+};
+
+export type ScheduleRunResponse = ScheduleRunResponses[keyof ScheduleRunResponses];
+
+export type ScheduleStatusData = {
+  /**
+   * ScheduleStatusArgs
+   */
+  body: {
+    /**
+     * If provided, return only this job's status.
+     */
+    job?: string | null;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/schedule.status';
+};
+
+export type ScheduleStatusErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type ScheduleStatusError = ScheduleStatusErrors[keyof ScheduleStatusErrors];
+
+export type ScheduleStatusResponses = {
+  /**
+   * ScheduleStatusOutput
+   *
+   * Tool result
+   */
+  200: {
+    jobs: Array<JobStatus>;
+  };
+};
+
+export type ScheduleStatusResponse = ScheduleStatusResponses[keyof ScheduleStatusResponses];
 
 export type SecretsDeleteData = {
   /**
@@ -4439,19 +4632,19 @@ export type SecretsSetResponses = {
 
 export type SecretsSetResponse = SecretsSetResponses[keyof SecretsSetResponses];
 
-export type SystemAgentBackendClearKeyData = {
+export type SpecDetailData = {
   /**
-   * ClearArgs
+   * SpecDetailArgs
    */
   body: {
     [key: string]: unknown;
   };
   path?: never;
   query?: never;
-  url: '/api/v1/system.agent.backend.clear-key';
+  url: '/api/v1/spec.detail';
 };
 
-export type SystemAgentBackendClearKeyErrors = {
+export type SpecDetailErrors = {
   /**
    * Unknown tool
    */
@@ -4466,933 +4659,75 @@ export type SystemAgentBackendClearKeyErrors = {
   };
 };
 
-export type SystemAgentBackendClearKeyError =
-  SystemAgentBackendClearKeyErrors[keyof SystemAgentBackendClearKeyErrors];
+export type SpecDetailError = SpecDetailErrors[keyof SpecDetailErrors];
 
-export type SystemAgentBackendClearKeyResponses = {
+export type SpecDetailResponses = {
   /**
-   * ApiKeyMutationResult
-   *
-   * Outcome of a mutation against the encrypted API-key slot.
-   */
-  200: {
-    masked?: string | null;
-    message: string;
-    present: boolean;
-  };
-};
-
-export type SystemAgentBackendClearKeyResponse =
-  SystemAgentBackendClearKeyResponses[keyof SystemAgentBackendClearKeyResponses];
-
-export type SystemAgentBackendDetailData = {
-  /**
-   * AgentBackendStatusArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.agent.backend.detail';
-};
-
-export type SystemAgentBackendDetailErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemAgentBackendDetailError =
-  SystemAgentBackendDetailErrors[keyof SystemAgentBackendDetailErrors];
-
-export type SystemAgentBackendDetailResponses = {
-  /**
-   * AgentBackendStatusOutput
+   * SpecDetailReport
    *
    * Tool result
    */
   200: {
-    api_key_in_db: boolean;
-    api_key_masked?: string | null;
-    mode: string;
-    overrides: Array<AgentBackendOverrideEntry>;
-    use_server_anthropic: boolean;
-  };
-};
-
-export type SystemAgentBackendDetailResponse =
-  SystemAgentBackendDetailResponses[keyof SystemAgentBackendDetailResponses];
-
-export type SystemAgentBackendOverrideData = {
-  /**
-   * OverrideArgs
-   */
-  body: {
-    agent: string;
     /**
-     * "local" | "claude" | "clear" (clear removes the override)
+     * Orca's own OpenAPI JSON document, pretty-printed.
      */
-    backend: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.agent.backend.override';
-};
-
-export type SystemAgentBackendOverrideErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
+    spec: string;
   };
 };
 
-export type SystemAgentBackendOverrideError =
-  SystemAgentBackendOverrideErrors[keyof SystemAgentBackendOverrideErrors];
+export type SpecDetailResponse = SpecDetailResponses[keyof SpecDetailResponses];
 
-export type SystemAgentBackendOverrideResponses = {
+export type SystemBuildData = {
   /**
-   * OverrideResult
-   *
-   * Tool result
-   */
-  200: {
-    agent: string;
-    backend?: string | null;
-    cleared: boolean;
-  };
-};
-
-export type SystemAgentBackendOverrideResponse =
-  SystemAgentBackendOverrideResponses[keyof SystemAgentBackendOverrideResponses];
-
-export type SystemAgentBackendSetKeyData = {
-  /**
-   * SetArgs
-   */
-  body: {
-    key: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.agent.backend.set-key';
-};
-
-export type SystemAgentBackendSetKeyErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemAgentBackendSetKeyError =
-  SystemAgentBackendSetKeyErrors[keyof SystemAgentBackendSetKeyErrors];
-
-export type SystemAgentBackendSetKeyResponses = {
-  /**
-   * ApiKeyMutationResult
-   *
-   * Outcome of a mutation against the encrypted API-key slot.
-   */
-  200: {
-    masked?: string | null;
-    message: string;
-    present: boolean;
-  };
-};
-
-export type SystemAgentBackendSetKeyResponse =
-  SystemAgentBackendSetKeyResponses[keyof SystemAgentBackendSetKeyResponses];
-
-export type SystemAgentBackendSetModeData = {
-  /**
-   * SetModeArgs
+   * PackageBuildArgs
    */
   body: {
     /**
-     * "local" | "claude" | "hybrid"
+     * CPU architecture override for cross-compiled binaries (x86_64 or aarch64).
      */
-    mode: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.agent.backend.set-mode';
-};
-
-export type SystemAgentBackendSetModeErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemAgentBackendSetModeError =
-  SystemAgentBackendSetModeErrors[keyof SystemAgentBackendSetModeErrors];
-
-export type SystemAgentBackendSetModeResponses = {
-  /**
-   * SetModeResult
-   *
-   * Tool result
-   */
-  200: {
-    mode: string;
-  };
-};
-
-export type SystemAgentBackendSetModeResponse =
-  SystemAgentBackendSetModeResponses[keyof SystemAgentBackendSetModeResponses];
-
-export type SystemAgentBackendUseServerAnthropicData = {
-  /**
-   * UseServerAnthropicArgs
-   */
-  body: {
-    enabled: boolean;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.agent.backend.use-server-anthropic';
-};
-
-export type SystemAgentBackendUseServerAnthropicErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemAgentBackendUseServerAnthropicError =
-  SystemAgentBackendUseServerAnthropicErrors[keyof SystemAgentBackendUseServerAnthropicErrors];
-
-export type SystemAgentBackendUseServerAnthropicResponses = {
-  /**
-   * UseServerAnthropicResult
-   *
-   * Tool result
-   */
-  200: {
-    enabled: boolean;
-  };
-};
-
-export type SystemAgentBackendUseServerAnthropicResponse =
-  SystemAgentBackendUseServerAnthropicResponses[keyof SystemAgentBackendUseServerAnthropicResponses];
-
-export type SystemAgentGetData = {
-  /**
-   * GetAgentArgs
-   */
-  body: {
-    name: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.agent.get';
-};
-
-export type SystemAgentGetErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemAgentGetError = SystemAgentGetErrors[keyof SystemAgentGetErrors];
-
-export type SystemAgentGetResponses = {
-  /**
-   * GetAgentOutput
-   *
-   * Tool result
-   */
-  200: {
-    name: string;
-    prompt: string;
-  };
-};
-
-export type SystemAgentGetResponse = SystemAgentGetResponses[keyof SystemAgentGetResponses];
-
-export type SystemAgentGetConfigData = {
-  /**
-   * GetConfigArgs
-   */
-  body: {
-    name?: string | null;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.agent.get-config';
-};
-
-export type SystemAgentGetConfigErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemAgentGetConfigError =
-  SystemAgentGetConfigErrors[keyof SystemAgentGetConfigErrors];
-
-export type SystemAgentGetConfigResponses = {
-  /**
-   * GetConfigOutput
-   *
-   * Tool result
-   */
-  200: {
-    available: Array<string>;
-    content?: string | null;
-    name?: string | null;
-  };
-};
-
-export type SystemAgentGetConfigResponse =
-  SystemAgentGetConfigResponses[keyof SystemAgentGetConfigResponses];
-
-export type SystemAgentGetContextData = {
-  /**
-   * GetContextArgs
-   */
-  body: {
-    project: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.agent.get-context';
-};
-
-export type SystemAgentGetContextErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemAgentGetContextError =
-  SystemAgentGetContextErrors[keyof SystemAgentGetContextErrors];
-
-export type SystemAgentGetContextResponses = {
-  /**
-   * GetContextOutput
-   *
-   * Tool result
-   */
-  200: {
-    exists: boolean;
-    files: Array<MemoryFile>;
-    index?: string | null;
-    project: string;
-  };
-};
-
-export type SystemAgentGetContextResponse =
-  SystemAgentGetContextResponses[keyof SystemAgentGetContextResponses];
-
-export type SystemAgentListData = {
-  /**
-   * ListAgentsArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.agent.list';
-};
-
-export type SystemAgentListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemAgentListError = SystemAgentListErrors[keyof SystemAgentListErrors];
-
-export type SystemAgentListResponses = {
-  /**
-   * ListAgentsOutput
-   *
-   * Tool result
-   */
-  200: {
-    agents: Array<AgentEntry>;
-  };
-};
-
-export type SystemAgentListResponse = SystemAgentListResponses[keyof SystemAgentListResponses];
-
-export type SystemBootstrapData = {
-  /**
-   * BootstrapArgs
-   */
-  body: {
+    arch?: string | null;
     /**
-     * SSH pubkey to add to the service user's authorized_keys.
+     * Binary to package (default: running executable).
      */
-    admin_pubkey?: string | null;
-    /**
-     * Home directory for the service user (default: /var/lib/orca).
-     */
-    home_dir?: string;
-    /**
-     * Service user name (default: orca).
-     */
-    service_user?: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.bootstrap';
-};
-
-export type SystemBootstrapErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemBootstrapError = SystemBootstrapErrors[keyof SystemBootstrapErrors];
-
-export type SystemBootstrapResponses = {
-  /**
-   * BootstrapOutput
-   *
-   * Tool result
-   */
-  200: {
-    home_dir: string;
-    user: string;
-  };
-};
-
-export type SystemBootstrapResponse = SystemBootstrapResponses[keyof SystemBootstrapResponses];
-
-export type SystemConfigDeleteData = {
-  /**
-   * ConfigDeleteArgs
-   */
-  body: {
-    /**
-     * host_owner. Defaults to the local host's display_name.
-     */
-    host?: string | null;
-    name: string;
-    noun: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.config.delete';
-};
-
-export type SystemConfigDeleteErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemConfigDeleteError = SystemConfigDeleteErrors[keyof SystemConfigDeleteErrors];
-
-export type SystemConfigDeleteResponses = {
-  /**
-   * ConfigDeleteOutput
-   *
-   * Tool result
-   */
-  200: {
-    removed: boolean;
-  };
-};
-
-export type SystemConfigDeleteResponse =
-  SystemConfigDeleteResponses[keyof SystemConfigDeleteResponses];
-
-export type SystemConfigGetData = {
-  /**
-   * ConfigGetArgs
-   */
-  body: {
-    /**
-     * Row name (e.g. "plex", "host.backup").
-     */
-    name: string;
-    /**
-     * Row noun (service, schedule, backup_job, …).
-     */
-    noun: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.config.get';
-};
-
-export type SystemConfigGetErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemConfigGetError = SystemConfigGetErrors[keyof SystemConfigGetErrors];
-
-export type SystemConfigGetResponses = {
-  /**
-   * ConfigGetOutput
-   *
-   * Tool result
-   */
-  200: {
-    row?: ConfigRowOut | null;
-  };
-};
-
-export type SystemConfigGetResponse = SystemConfigGetResponses[keyof SystemConfigGetResponses];
-
-export type SystemConfigListData = {
-  /**
-   * ConfigListArgs
-   */
-  body: {
-    /**
-     * Filter by host_owner.
-     */
-    host?: string | null;
-    /**
-     * Filter by noun (service, schedule, backup_job, nfs_watch, …).
-     */
-    noun?: string | null;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.config.list';
-};
-
-export type SystemConfigListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemConfigListError = SystemConfigListErrors[keyof SystemConfigListErrors];
-
-export type SystemConfigListResponses = {
-  /**
-   * ConfigListOutput
-   *
-   * Tool result
-   */
-  200: {
-    rows: Array<ConfigRowOut>;
-  };
-};
-
-export type SystemConfigListResponse = SystemConfigListResponses[keyof SystemConfigListResponses];
-
-export type SystemConfigSetData = {
-  /**
-   * ConfigSetArgs
-   */
-  body: {
-    /**
-     * host_owner. Defaults to the local host's display_name. Must equal
-     * the local host until cross-host routing lands (§3.3).
-     */
-    host?: string | null;
-    /**
-     * JSON payload for the row. Must be a valid JSON document.
-     */
-    json: string;
-    name: string;
-    noun: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.config.set';
-};
-
-export type SystemConfigSetErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemConfigSetError = SystemConfigSetErrors[keyof SystemConfigSetErrors];
-
-export type SystemConfigSetResponses = {
-  /**
-   * ConfigSetOutput
-   *
-   * Tool result
-   */
-  200: {
-    created: boolean;
-    row: ConfigRowOut;
-  };
-};
-
-export type SystemConfigSetResponse = SystemConfigSetResponses[keyof SystemConfigSetResponses];
-
-export type SystemCreateData = {
-  /**
-   * EmptyArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.create';
-};
-
-export type SystemCreateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemCreateError = SystemCreateErrors[keyof SystemCreateErrors];
-
-export type SystemCreateResponses = {
-  /**
-   * InstallReport
-   *
-   * Tool result
-   */
-  200: {
-    done: Array<string>;
-    errors: Array<string>;
-    skipped: Array<string>;
-  };
-};
-
-export type SystemCreateResponse = SystemCreateResponses[keyof SystemCreateResponses];
-
-export type SystemDaemonInstallData = {
-  /**
-   * DaemonInstallArgs
-   */
-  body: {
-    /**
-     * HTTP port to bind.
-     */
-    port?: number;
-    /**
-     * Install as a SYSTEM service running as this user (requires root).
-     */
-    service_user?: string | null;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.daemon.install';
-};
-
-export type SystemDaemonInstallErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemDaemonInstallError = SystemDaemonInstallErrors[keyof SystemDaemonInstallErrors];
-
-export type SystemDaemonInstallResponses = {
-  /**
-   * DaemonInstallOutput
-   *
-   * Tool result
-   */
-  200: {
-    installed: boolean;
-    port: number;
-  };
-};
-
-export type SystemDaemonInstallResponse =
-  SystemDaemonInstallResponses[keyof SystemDaemonInstallResponses];
-
-export type SystemDaemonParkData = {
-  /**
-   * DaemonParkArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.daemon.park';
-};
-
-export type SystemDaemonParkErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemDaemonParkError = SystemDaemonParkErrors[keyof SystemDaemonParkErrors];
-
-export type SystemDaemonParkResponses = {
-  /**
-   * DaemonSignalOutput
-   *
-   * Tool result
-   */
-  200: {
-    pid: number;
-  };
-};
-
-export type SystemDaemonParkResponse = SystemDaemonParkResponses[keyof SystemDaemonParkResponses];
-
-export type SystemDaemonReclaimData = {
-  /**
-   * DaemonReclaimArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.daemon.reclaim';
-};
-
-export type SystemDaemonReclaimErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemDaemonReclaimError = SystemDaemonReclaimErrors[keyof SystemDaemonReclaimErrors];
-
-export type SystemDaemonReclaimResponses = {
-  /**
-   * DaemonSignalOutput
-   *
-   * Tool result
-   */
-  200: {
-    pid: number;
-  };
-};
-
-export type SystemDaemonReclaimResponse =
-  SystemDaemonReclaimResponses[keyof SystemDaemonReclaimResponses];
-
-export type SystemDaemonStatusData = {
-  /**
-   * DaemonStatusArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.daemon.status';
-};
-
-export type SystemDaemonStatusErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemDaemonStatusError = SystemDaemonStatusErrors[keyof SystemDaemonStatusErrors];
-
-export type SystemDaemonStatusResponses = {
-  /**
-   * DaemonStatusOutput
-   *
-   * Tool result
-   */
-  200: {
     binary?: string | null;
-    mode?: string | null;
-    pid?: number | null;
-    port?: number | null;
-    running: boolean;
-    uptime_seconds?: number | null;
-    version?: string | null;
-  };
-};
-
-export type SystemDaemonStatusResponse =
-  SystemDaemonStatusResponses[keyof SystemDaemonStatusResponses];
-
-export type SystemDaemonStopData = {
-  /**
-   * DaemonStopArgs
-   */
-  body: {
-    [key: string]: unknown;
+    /**
+     * macOS Developer ID Application identity for codesign (binary signing).
+     */
+    codesign_identity?: string | null;
+    /**
+     * Package format: deb / rpm / apk / pkgbuild / pkg / homebrew. Auto-detected when omitted.
+     */
+    format?: PackageFormat | null;
+    /**
+     * Maintainer string embedded in deb/rpm package metadata.
+     */
+    maintainer?: string;
+    /**
+     * Write the finished package into this directory.
+     */
+    out_dir?: string;
+    /**
+     * macOS Developer ID Installer identity for productsign (.pkg signing).
+     */
+    pkg_sign_identity?: string | null;
+    /**
+     * `.plg` only — URL where the binary payload will live. Defaults
+     * to the github-releases convention for the current arch.
+     */
+    plg_binary_url?: string | null;
+    /**
+     * `.plg` only — URL where the published `.plg` file itself will
+     * live (Unraid uses this to check for plugin updates). Defaults to
+     * the github-releases convention for this version.
+     */
+    plg_url?: string | null;
   };
   path?: never;
   query?: never;
-  url: '/api/v1/system.daemon.stop';
+  url: '/api/v1/system.build';
 };
 
-export type SystemDaemonStopErrors = {
+export type SystemBuildErrors = {
   /**
    * Unknown tool
    */
@@ -5407,171 +4742,23 @@ export type SystemDaemonStopErrors = {
   };
 };
 
-export type SystemDaemonStopError = SystemDaemonStopErrors[keyof SystemDaemonStopErrors];
+export type SystemBuildError = SystemBuildErrors[keyof SystemBuildErrors];
 
-export type SystemDaemonStopResponses = {
+export type SystemBuildResponses = {
   /**
-   * DaemonSignalOutput
+   * PackageBuildOutput
    *
    * Tool result
    */
   200: {
-    pid: number;
+    arch: string;
+    format: PackageFormat;
+    out_dir: string;
+    version: string;
   };
 };
 
-export type SystemDaemonStopResponse = SystemDaemonStopResponses[keyof SystemDaemonStopResponses];
-
-export type SystemDaemonUninstallData = {
-  /**
-   * DaemonUninstallArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.daemon.uninstall';
-};
-
-export type SystemDaemonUninstallErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemDaemonUninstallError =
-  SystemDaemonUninstallErrors[keyof SystemDaemonUninstallErrors];
-
-export type SystemDaemonUninstallResponses = {
-  /**
-   * DaemonUninstallOutput
-   *
-   * Tool result
-   */
-  200: {
-    uninstalled: boolean;
-  };
-};
-
-export type SystemDaemonUninstallResponse =
-  SystemDaemonUninstallResponses[keyof SystemDaemonUninstallResponses];
-
-export type SystemDbDetailData = {
-  /**
-   * DbStatusArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.db.detail';
-};
-
-export type SystemDbDetailErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemDbDetailError = SystemDbDetailErrors[keyof SystemDbDetailErrors];
-
-export type SystemDbDetailResponses = {
-  /**
-   * DbStatusReport
-   *
-   * Tool result
-   */
-  200: {
-    /**
-     * Highest applied migration version (YYYYMMDDHHMMSS timestamp, or 0 if
-     * only the apply_schema baseline has run).
-     */
-    current: number;
-    /**
-     * Pending migration count (total - applied).
-     */
-    pending: number;
-    /**
-     * Total migrations compiled into this orca binary.
-     */
-    total: number;
-  };
-};
-
-export type SystemDbDetailResponse = SystemDbDetailResponses[keyof SystemDbDetailResponses];
-
-export type SystemDbLifecycleUpdateData = {
-  /**
-   * DbLifecycleUpdateArgs
-   */
-  body: {
-    /**
-     * "migrate" | "up" | "down"
-     */
-    action: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.db.lifecycle.update';
-};
-
-export type SystemDbLifecycleUpdateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemDbLifecycleUpdateError =
-  SystemDbLifecycleUpdateErrors[keyof SystemDbLifecycleUpdateErrors];
-
-export type SystemDbLifecycleUpdateResponses = {
-  /**
-   * DbMigrateReport
-   *
-   * Tool result
-   */
-  200: {
-    after: number;
-    /**
-     * Number of migrations applied (or rolled back) in this call.
-     */
-    applied: number;
-    before: number;
-    direction: string;
-  };
-};
-
-export type SystemDbLifecycleUpdateResponse =
-  SystemDbLifecycleUpdateResponses[keyof SystemDbLifecycleUpdateResponses];
+export type SystemBuildResponse = SystemBuildResponses[keyof SystemBuildResponses];
 
 export type SystemDeleteData = {
   /**
@@ -5653,19 +4840,46 @@ export type SystemDetailResponses = {
    * Tool result
    */
   200: {
-    agents: PathLinked;
-    binary: PathInstalled;
+    agents: ClaudeMdStatus;
+    binary: BinaryStatus;
     /**
      * Release channel marker (`stable` | `rc` | `dev`). `None` when no
      * channel marker has been written.
      */
     channel?: string | null;
-    claude_md: PathLinked;
+    /**
+     * Every addressing channel for this host (LAN, Tailscale, manual
+     * overrides, etc.). Was `system.host.detail.channels`.
+     */
+    channels: Array<HostChannel>;
+    claude_md: ClaudeMdStatus;
+    /**
+     * Runtime snapshot of the orca daemon: running / pid / port /
+     * uptime_seconds. Was `system.daemon.status`. The `mode` and
+     * `version` of the running daemon are sourced into the parent
+     * fields above.
+     */
+    daemon: DaemonRuntimeStatus;
+    /**
+     * Doctor entries (ok/warn/error) covering vault, agents, logs dir,
+     * memory root, and auth config. Was a standalone `system.diagnostic`
+     * tool; folded in here per the flat-namespace consolidation.
+     */
+    diagnostic: Array<DoctorEntry>;
+    /**
+     * Operator-visible host name (from the `display_name` addressing
+     * channel, falling back to OS `hostname`).
+     */
+    display_name: string;
     /**
      * "embedded" when this binary was built with the `ui` feature on, "disabled" otherwise.
      */
     frontend: string;
-    mcp: McpRegistration;
+    /**
+     * Stable machine identifier persisted to `~/.orca/machine_id`.
+     */
+    machine_id: string;
+    mcp: McpStatus;
     /**
      * Daemon operating mode: "daemon" | "parked" | "dev". `None` when the
      * state file is absent (binary not running as the registered daemon).
@@ -5675,7 +4889,7 @@ export type SystemDetailResponses = {
      * Active version pin if any (`orca update --pin`).
      */
     pinned_to?: string | null;
-    pki: PathInitialized;
+    pki: PkiStatus;
     /**
      * orca.db + logs dir footprint. Used by UI host drawer + alerts.
      */
@@ -5689,7 +4903,7 @@ export type SystemDetailResponses = {
      * Build target triple of this binary (e.g. `aarch64-apple-darwin`).
      */
     target: string;
-    vault: PathExists;
+    vault: VaultStatus;
     /**
      * Orca version from `CARGO_PKG_VERSION` at build time.
      */
@@ -5699,19 +4913,154 @@ export type SystemDetailResponses = {
 
 export type SystemDetailResponse = SystemDetailResponses[keyof SystemDetailResponses];
 
-export type SystemDiagnosticListData = {
+export type SystemFetchReleaseAssetData = {
   /**
-   * DoctorArgs
+   * FetchReleaseAssetArgs
+   *
+   * Args for [`system_fetch_release_asset`].
+   */
+  body: {
+    /**
+     * Channel the requester wants the latest of (`stable` | `rc`). Required
+     * when `version` is omitted; ignored when `version` is present.
+     */
+    channel?: string | null;
+    /**
+     * Rust target triple of the requester (e.g. `x86_64-unknown-linux-gnu`,
+     * `aarch64-apple-darwin`). The holder may be on a different arch, so
+     * the caller MUST specify the asset they need.
+     */
+    target: string;
+    /**
+     * Release tag to fetch, with or without `v` prefix (e.g. `0.0.6-rc.15`
+     * or `v0.0.6-rc.15`). Optional — when omitted the holder resolves the
+     * channel's latest tag using its own GitHub token.
+     */
+    version?: string | null;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/system.fetch_release_asset';
+};
+
+export type SystemFetchReleaseAssetErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type SystemFetchReleaseAssetError =
+  SystemFetchReleaseAssetErrors[keyof SystemFetchReleaseAssetErrors];
+
+export type SystemFetchReleaseAssetResponses = {
+  /**
+   * FetchReleaseAssetOutput
+   *
+   * Result of [`system_fetch_release_asset`]. `asset_b64` is base64-STANDARD
+   * of the raw binary bytes; `sha256` is the hex digest the holder verified
+   * against the release `.sha256` blob (callers MUST re-verify after decode
+   * before swapping).
+   */
+  200: {
+    asset_b64: string;
+    sha256: string;
+    version: string;
+  };
+};
+
+export type SystemFetchReleaseAssetResponse =
+  SystemFetchReleaseAssetResponses[keyof SystemFetchReleaseAssetResponses];
+
+export type SystemInstallData = {
+  /**
+   * SystemInstallArgs
+   *
+   * Args for [`system_install`]. Empty by default — does the user-level
+   * install. Pass `service_user` (and optional `home_dir` / `admin_pubkey`)
+   * to also provision a system service user with SSH access (Linux, root).
+   */
+  body: {
+    /**
+     * SSH pubkey to append to the service user's `authorized_keys`.
+     * Ignored when `service_user` is unset.
+     */
+    admin_pubkey?: string | null;
+    /**
+     * Home directory for the service user (default: `/var/lib/orca`).
+     * Ignored when `service_user` is unset.
+     */
+    home_dir?: string | null;
+    /**
+     * HTTP port the daemon supervisor should bind. Defaults to the
+     * workspace-wide `APP_REST_HTTP_PORT`.
+     */
+    port?: number | null;
+    /**
+     * Service user name. When set, also runs the service-user bootstrap
+     * (`useradd`, group membership, linger, optional SSH key). Linux-only;
+     * no-op on macOS.
+     */
+    service_user?: string | null;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/system.install';
+};
+
+export type SystemInstallErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type SystemInstallError = SystemInstallErrors[keyof SystemInstallErrors];
+
+export type SystemInstallResponses = {
+  /**
+   * InstallReport
+   *
+   * Tool result
+   */
+  200: {
+    done: Array<string>;
+    errors: Array<string>;
+    skipped: Array<string>;
+  };
+};
+
+export type SystemInstallResponse = SystemInstallResponses[keyof SystemInstallResponses];
+
+export type SystemKillData = {
+  /**
+   * SystemKillArgs
    */
   body: {
     [key: string]: unknown;
   };
   path?: never;
   query?: never;
-  url: '/api/v1/system.diagnostic.list';
+  url: '/api/v1/system.kill';
 };
 
-export type SystemDiagnosticListErrors = {
+export type SystemKillErrors = {
   /**
    * Unknown tool
    */
@@ -5726,540 +5075,11 @@ export type SystemDiagnosticListErrors = {
   };
 };
 
-export type SystemDiagnosticListError =
-  SystemDiagnosticListErrors[keyof SystemDiagnosticListErrors];
+export type SystemKillError = SystemKillErrors[keyof SystemKillErrors];
 
-export type SystemDiagnosticListResponses = {
+export type SystemKillResponses = {
   /**
-   * DoctorReport
-   *
-   * Tool result
-   */
-  200: {
-    entries: Array<DoctorEntry>;
-  };
-};
-
-export type SystemDiagnosticListResponse =
-  SystemDiagnosticListResponses[keyof SystemDiagnosticListResponses];
-
-export type SystemEngineCreateData = {
-  /**
-   * AddArgs
-   */
-  body: {
-    /**
-     * Backend kind: "lmstudio" | "ollama". Inferred from port 11434 if empty.
-     */
-    kind?: string;
-    /**
-     * Display name, e.g. "lmstudio-local".
-     */
-    name: string;
-    /**
-     * Base URL, e.g. "http://localhost:1234".
-     */
-    url: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.engine.create';
-};
-
-export type SystemEngineCreateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemEngineCreateError = SystemEngineCreateErrors[keyof SystemEngineCreateErrors];
-
-export type SystemEngineCreateResponses = {
-  /**
-   * EngineOpResult
-   *
-   * Outcome of a mutation (add/remove/enable/disable).
-   */
-  200: {
-    /**
-     * Human-readable summary of what happened.
-     */
-    message: string;
-  };
-};
-
-export type SystemEngineCreateResponse =
-  SystemEngineCreateResponses[keyof SystemEngineCreateResponses];
-
-export type SystemEngineDeleteData = {
-  /**
-   * NameArgs
-   */
-  body: {
-    /**
-     * Backend name.
-     */
-    name: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.engine.delete';
-};
-
-export type SystemEngineDeleteErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemEngineDeleteError = SystemEngineDeleteErrors[keyof SystemEngineDeleteErrors];
-
-export type SystemEngineDeleteResponses = {
-  /**
-   * EngineOpResult
-   *
-   * Outcome of a mutation (add/remove/enable/disable).
-   */
-  200: {
-    /**
-     * Human-readable summary of what happened.
-     */
-    message: string;
-  };
-};
-
-export type SystemEngineDeleteResponse =
-  SystemEngineDeleteResponses[keyof SystemEngineDeleteResponses];
-
-export type SystemEngineListData = {
-  /**
-   * EmptyArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.engine.list';
-};
-
-export type SystemEngineListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemEngineListError = SystemEngineListErrors[keyof SystemEngineListErrors];
-
-export type SystemEngineListResponses = {
-  /**
-   * ProviderList
-   *
-   * Newtype wrapping `Vec<ProviderDto>` so it crosses the WASM boundary with a
-   * real TS array type (`ProviderDto[]`) instead of `any`.
-   */
-  200: Array<ProviderDto>;
-};
-
-export type SystemEngineListResponse = SystemEngineListResponses[keyof SystemEngineListResponses];
-
-export type SystemEngineUpdateData = {
-  /**
-   * UpdateArgs
-   */
-  body: {
-    /**
-     * true = enable for model discovery, false = disable without removing.
-     */
-    enabled: boolean;
-    /**
-     * Backend name.
-     */
-    name: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.engine.update';
-};
-
-export type SystemEngineUpdateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemEngineUpdateError = SystemEngineUpdateErrors[keyof SystemEngineUpdateErrors];
-
-export type SystemEngineUpdateResponses = {
-  /**
-   * EngineOpResult
-   *
-   * Outcome of a mutation (add/remove/enable/disable).
-   */
-  200: {
-    /**
-     * Human-readable summary of what happened.
-     */
-    message: string;
-  };
-};
-
-export type SystemEngineUpdateResponse =
-  SystemEngineUpdateResponses[keyof SystemEngineUpdateResponses];
-
-export type SystemHealthData = {
-  /**
-   * HealthArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.health';
-};
-
-export type SystemHealthErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemHealthError = SystemHealthErrors[keyof SystemHealthErrors];
-
-export type SystemHealthResponses = {
-  /**
-   * HealthOutput
-   *
-   * Tool result
-   */
-  200: {
-    ok: boolean;
-  };
-};
-
-export type SystemHealthResponse = SystemHealthResponses[keyof SystemHealthResponses];
-
-export type SystemHostDetailData = {
-  /**
-   * EmptyArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.host.detail';
-};
-
-export type SystemHostDetailErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemHostDetailError = SystemHostDetailErrors[keyof SystemHostDetailErrors];
-
-export type SystemHostDetailResponses = {
-  /**
-   * HostInfoOutput
-   *
-   * Tool result
-   */
-  200: {
-    channels: Array<HostChannel>;
-    display_name: string;
-    machine_id: string;
-  };
-};
-
-export type SystemHostDetailResponse = SystemHostDetailResponses[keyof SystemHostDetailResponses];
-
-export type SystemHostRefreshData = {
-  /**
-   * EmptyArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.host.refresh';
-};
-
-export type SystemHostRefreshErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemHostRefreshError = SystemHostRefreshErrors[keyof SystemHostRefreshErrors];
-
-export type SystemHostRefreshResponses = {
-  /**
-   * HostRefreshOutput
-   *
-   * Tool result
-   */
-  200: {
-    channels: Array<HostChannel>;
-  };
-};
-
-export type SystemHostRefreshResponse =
-  SystemHostRefreshResponses[keyof SystemHostRefreshResponses];
-
-export type SystemInfraServiceDetailData = {
-  /**
-   * GetServiceLogsArgs
-   */
-  body: {
-    /**
-     * Absolute path to the project directory.
-     */
-    project: string;
-    /**
-     * Service name as defined in docker-compose.
-     */
-    service: string;
-    /**
-     * Number of log lines to return (default: 200).
-     */
-    tail?: number | null;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.infra.service.detail';
-};
-
-export type SystemInfraServiceDetailErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemInfraServiceDetailError =
-  SystemInfraServiceDetailErrors[keyof SystemInfraServiceDetailErrors];
-
-export type SystemInfraServiceDetailResponses = {
-  /**
-   * GetServiceLogsOutput
-   *
-   * Tool result
-   */
-  200: {
-    output: string;
-    project: string;
-    service: string;
-  };
-};
-
-export type SystemInfraServiceDetailResponse =
-  SystemInfraServiceDetailResponses[keyof SystemInfraServiceDetailResponses];
-
-export type SystemInfraServiceListData = {
-  /**
-   * ListServicesArgs
-   */
-  body: {
-    /**
-     * Directory to scan for compose projects. Defaults to `$HOME/code`.
-     */
-    root?: string | null;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.infra.service.list';
-};
-
-export type SystemInfraServiceListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemInfraServiceListError =
-  SystemInfraServiceListErrors[keyof SystemInfraServiceListErrors];
-
-export type SystemInfraServiceListResponses = {
-  /**
-   * ListServicesOutput
-   *
-   * Tool result
-   */
-  200: {
-    projects: Array<ProjectServices>;
-  };
-};
-
-export type SystemInfraServiceListResponse =
-  SystemInfraServiceListResponses[keyof SystemInfraServiceListResponses];
-
-export type SystemInfraTestCreateData = {
-  /**
-   * RunTestsArgs
-   */
-  body: {
-    /**
-     * Which suite to run: rust | frontend | e2e | all (default: rust).
-     */
-    suite?: string | null;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.infra.test.create';
-};
-
-export type SystemInfraTestCreateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemInfraTestCreateError =
-  SystemInfraTestCreateErrors[keyof SystemInfraTestCreateErrors];
-
-export type SystemInfraTestCreateResponses = {
-  /**
-   * RunTestsOutput
-   *
-   * Tool result
-   */
-  200: {
-    duration_ms: number;
-    exit_code: number;
-    failed: number;
-    output: string;
-    passed: number;
-    suite: string;
-  };
-};
-
-export type SystemInfraTestCreateResponse =
-  SystemInfraTestCreateResponses[keyof SystemInfraTestCreateResponses];
-
-export type SystemKillStaleData = {
-  /**
-   * KillStaleArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.kill-stale';
-};
-
-export type SystemKillStaleErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemKillStaleError = SystemKillStaleErrors[keyof SystemKillStaleErrors];
-
-export type SystemKillStaleResponses = {
-  /**
-   * KillStaleOutput
+   * SystemKillOutput
    *
    * Tool result
    */
@@ -6268,1294 +5088,7 @@ export type SystemKillStaleResponses = {
   };
 };
 
-export type SystemKillStaleResponse = SystemKillStaleResponses[keyof SystemKillStaleResponses];
-
-export type SystemMcpCreateData = {
-  /**
-   * AddMcpServerArgs
-   */
-  body: {
-    args?: Array<string> | null;
-    command: string;
-    env?: {
-      [key: string]: string;
-    } | null;
-    name: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.mcp.create';
-};
-
-export type SystemMcpCreateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemMcpCreateError = SystemMcpCreateErrors[keyof SystemMcpCreateErrors];
-
-export type SystemMcpCreateResponses = {
-  /**
-   * McpServerMutationResult
-   *
-   * Tool result
-   */
-  200: {
-    changed: boolean;
-    name: string;
-  };
-};
-
-export type SystemMcpCreateResponse = SystemMcpCreateResponses[keyof SystemMcpCreateResponses];
-
-export type SystemMcpDeleteData = {
-  /**
-   * RemoveMcpServerArgs
-   */
-  body: {
-    name: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.mcp.delete';
-};
-
-export type SystemMcpDeleteErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemMcpDeleteError = SystemMcpDeleteErrors[keyof SystemMcpDeleteErrors];
-
-export type SystemMcpDeleteResponses = {
-  /**
-   * McpServerMutationResult
-   *
-   * Tool result
-   */
-  200: {
-    changed: boolean;
-    name: string;
-  };
-};
-
-export type SystemMcpDeleteResponse = SystemMcpDeleteResponses[keyof SystemMcpDeleteResponses];
-
-export type SystemMcpFederationListToolsData = {
-  /**
-   * ListMcpToolsArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.mcp.federation.list-tools';
-};
-
-export type SystemMcpFederationListToolsErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemMcpFederationListToolsError =
-  SystemMcpFederationListToolsErrors[keyof SystemMcpFederationListToolsErrors];
-
-export type SystemMcpFederationListToolsResponses = {
-  /**
-   * ListMcpToolsOutput
-   *
-   * Tool result
-   */
-  200: {
-    tools: Array<McpToolEntry>;
-  };
-};
-
-export type SystemMcpFederationListToolsResponse =
-  SystemMcpFederationListToolsResponses[keyof SystemMcpFederationListToolsResponses];
-
-export type SystemMcpFederationRunData = {
-  /**
-   * RunMcpToolArgs
-   */
-  body: {
-    args?: {
-      [key: string]: unknown;
-    } | null;
-    server: string;
-    tool: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.mcp.federation.run';
-};
-
-export type SystemMcpFederationRunErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemMcpFederationRunError =
-  SystemMcpFederationRunErrors[keyof SystemMcpFederationRunErrors];
-
-export type SystemMcpFederationRunResponses = {
-  /**
-   * RunMcpToolOutput
-   *
-   * Tool result
-   */
-  200: {
-    content: Array<McpContent>;
-    isError: boolean;
-  };
-};
-
-export type SystemMcpFederationRunResponse =
-  SystemMcpFederationRunResponses[keyof SystemMcpFederationRunResponses];
-
-export type SystemMcpListData = {
-  /**
-   * ListMcpServersArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.mcp.list';
-};
-
-export type SystemMcpListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemMcpListError = SystemMcpListErrors[keyof SystemMcpListErrors];
-
-export type SystemMcpListResponses = {
-  /**
-   * ListMcpServersOutput
-   *
-   * Tool result
-   */
-  200: {
-    servers: Array<McpServerEntry>;
-  };
-};
-
-export type SystemMcpListResponse = SystemMcpListResponses[keyof SystemMcpListResponses];
-
-export type SystemMcpMappingCreateData = {
-  /**
-   * MapToolArgs
-   */
-  body: {
-    external_tool: string;
-    name: string;
-    orca_tool: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.mcp.mapping.create';
-};
-
-export type SystemMcpMappingCreateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemMcpMappingCreateError =
-  SystemMcpMappingCreateErrors[keyof SystemMcpMappingCreateErrors];
-
-export type SystemMcpMappingCreateResponses = {
-  /**
-   * MapToolResult
-   *
-   * Tool result
-   */
-  200: {
-    external_tool: string;
-    mcp_name: string;
-    orca_tool: string;
-  };
-};
-
-export type SystemMcpMappingCreateResponse =
-  SystemMcpMappingCreateResponses[keyof SystemMcpMappingCreateResponses];
-
-export type SystemMcpMappingDeleteData = {
-  /**
-   * UnmapToolArgs
-   */
-  body: {
-    orca_tool: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.mcp.mapping.delete';
-};
-
-export type SystemMcpMappingDeleteErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemMcpMappingDeleteError =
-  SystemMcpMappingDeleteErrors[keyof SystemMcpMappingDeleteErrors];
-
-export type SystemMcpMappingDeleteResponses = {
-  /**
-   * UnmapToolResult
-   *
-   * Tool result
-   */
-  200: {
-    changed: boolean;
-    orca_tool: string;
-  };
-};
-
-export type SystemMcpMappingDeleteResponse =
-  SystemMcpMappingDeleteResponses[keyof SystemMcpMappingDeleteResponses];
-
-export type SystemMcpMappingListData = {
-  /**
-   * ListToolMappingsArgs
-   */
-  body: {
-    /**
-     * Filter by server name (omit for all).
-     */
-    name?: string | null;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.mcp.mapping.list';
-};
-
-export type SystemMcpMappingListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemMcpMappingListError =
-  SystemMcpMappingListErrors[keyof SystemMcpMappingListErrors];
-
-export type SystemMcpMappingListResponses = {
-  /**
-   * ListToolMappingsOutput
-   *
-   * Tool result
-   */
-  200: {
-    mappings: Array<MappingEntry>;
-  };
-};
-
-export type SystemMcpMappingListResponse =
-  SystemMcpMappingListResponses[keyof SystemMcpMappingListResponses];
-
-export type SystemMcpSyncData = {
-  /**
-   * SyncToolsArgs
-   */
-  body: {
-    all?: boolean | null;
-    name?: string | null;
-    threshold?: number | null;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.mcp.sync';
-};
-
-export type SystemMcpSyncErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemMcpSyncError = SystemMcpSyncErrors[keyof SystemMcpSyncErrors];
-
-export type SystemMcpSyncResponses = {
-  /**
-   * SyncToolsOutput
-   *
-   * Tool result
-   */
-  200: {
-    results: Array<SyncToolsServerEntry>;
-  };
-};
-
-export type SystemMcpSyncResponse = SystemMcpSyncResponses[keyof SystemMcpSyncResponses];
-
-export type SystemPackageBuildData = {
-  /**
-   * PackageBuildArgs
-   */
-  body: {
-    /**
-     * CPU architecture override for cross-compiled binaries (x86_64 or aarch64).
-     */
-    arch?: string | null;
-    /**
-     * Binary to package (default: running executable).
-     */
-    binary?: string | null;
-    /**
-     * macOS Developer ID Application identity for codesign (binary signing).
-     */
-    codesign_identity?: string | null;
-    /**
-     * Package format: deb / rpm / apk / pkgbuild / pkg / homebrew. Auto-detected when omitted.
-     */
-    format?: PackageFormat | null;
-    /**
-     * Maintainer string embedded in deb/rpm package metadata.
-     */
-    maintainer?: string;
-    /**
-     * Write the finished package into this directory.
-     */
-    out_dir?: string;
-    /**
-     * macOS Developer ID Installer identity for productsign (.pkg signing).
-     */
-    pkg_sign_identity?: string | null;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.package.build';
-};
-
-export type SystemPackageBuildErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemPackageBuildError = SystemPackageBuildErrors[keyof SystemPackageBuildErrors];
-
-export type SystemPackageBuildResponses = {
-  /**
-   * PackageBuildOutput
-   *
-   * Tool result
-   */
-  200: {
-    arch: string;
-    format: PackageFormat;
-    out_dir: string;
-    version: string;
-  };
-};
-
-export type SystemPackageBuildResponse =
-  SystemPackageBuildResponses[keyof SystemPackageBuildResponses];
-
-export type SystemPkiCaCreateData = {
-  /**
-   * PkiCaInitArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.pki.ca.create';
-};
-
-export type SystemPkiCaCreateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemPkiCaCreateError = SystemPkiCaCreateErrors[keyof SystemPkiCaCreateErrors];
-
-export type SystemPkiCaCreateResponses = {
-  /**
-   * PkiInitReport
-   *
-   * Tool result
-   */
-  200: {
-    ca_path: string;
-    created: boolean;
-    server_cert_path: string;
-  };
-};
-
-export type SystemPkiCaCreateResponse =
-  SystemPkiCaCreateResponses[keyof SystemPkiCaCreateResponses];
-
-export type SystemPkiCertCreateData = {
-  /**
-   * PkiCertIssueArgs
-   */
-  body: {
-    /**
-     * "general" (default) or "sensitive".
-     */
-    capability?: string;
-    plugin_id: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.pki.cert.create';
-};
-
-export type SystemPkiCertCreateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemPkiCertCreateError = SystemPkiCertCreateErrors[keyof SystemPkiCertCreateErrors];
-
-export type SystemPkiCertCreateResponses = {
-  /**
-   * PkiCertReport
-   *
-   * Tool result
-   */
-  200: {
-    capability: string;
-    cert_path: string;
-    key_path: string;
-    plugin_id: string;
-  };
-};
-
-export type SystemPkiCertCreateResponse =
-  SystemPkiCertCreateResponses[keyof SystemPkiCertCreateResponses];
-
-export type SystemPkiListData = {
-  /**
-   * PkiListArgs
-   */
-  body: {
-    [key: string]: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.pki.list';
-};
-
-export type SystemPkiListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemPkiListError = SystemPkiListErrors[keyof SystemPkiListErrors];
-
-export type SystemPkiListResponses = {
-  /**
-   * PkiListReport
-   *
-   * Tool result
-   */
-  200: {
-    certs: Array<PkiCertEntry>;
-  };
-};
-
-export type SystemPkiListResponse = SystemPkiListResponses[keyof SystemPkiListResponses];
-
-export type SystemPluginCreateData = {
-  /**
-   * AddPluginArgs
-   */
-  body: {
-    /**
-     * Optional instance ID override.
-     */
-    instance_id?: string | null;
-    /**
-     * Path or URL to plugin manifest.
-     */
-    manifest: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.plugin.create';
-};
-
-export type SystemPluginCreateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemPluginCreateError = SystemPluginCreateErrors[keyof SystemPluginCreateErrors];
-
-export type SystemPluginCreateResponses = {
-  /**
-   * AddPluginOutput
-   *
-   * Tool result
-   */
-  200: {
-    id: string;
-  };
-};
-
-export type SystemPluginCreateResponse =
-  SystemPluginCreateResponses[keyof SystemPluginCreateResponses];
-
-export type SystemPluginCredCreateData = {
-  /**
-   * SetPluginCredArgs
-   */
-  body: {
-    key: string;
-    plugin: string;
-    value: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.plugin.cred.create';
-};
-
-export type SystemPluginCredCreateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemPluginCredCreateError =
-  SystemPluginCredCreateErrors[keyof SystemPluginCredCreateErrors];
-
-export type SystemPluginCredCreateResponses = {
-  /**
-   * PluginCredMutationResult
-   *
-   * Tool result
-   */
-  200: {
-    changed: boolean;
-    key: string;
-    plugin: string;
-  };
-};
-
-export type SystemPluginCredCreateResponse =
-  SystemPluginCredCreateResponses[keyof SystemPluginCredCreateResponses];
-
-export type SystemPluginCredDeleteData = {
-  /**
-   * RemovePluginCredArgs
-   */
-  body: {
-    key: string;
-    plugin: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.plugin.cred.delete';
-};
-
-export type SystemPluginCredDeleteErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemPluginCredDeleteError =
-  SystemPluginCredDeleteErrors[keyof SystemPluginCredDeleteErrors];
-
-export type SystemPluginCredDeleteResponses = {
-  /**
-   * PluginCredMutationResult
-   *
-   * Tool result
-   */
-  200: {
-    changed: boolean;
-    key: string;
-    plugin: string;
-  };
-};
-
-export type SystemPluginCredDeleteResponse =
-  SystemPluginCredDeleteResponses[keyof SystemPluginCredDeleteResponses];
-
-export type SystemPluginCredListData = {
-  /**
-   * ListPluginCredsArgs
-   */
-  body: {
-    plugin: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.plugin.cred.list';
-};
-
-export type SystemPluginCredListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemPluginCredListError =
-  SystemPluginCredListErrors[keyof SystemPluginCredListErrors];
-
-export type SystemPluginCredListResponses = {
-  /**
-   * ListPluginCredsOutput
-   *
-   * Tool result
-   */
-  200: {
-    credentials: Array<PluginCredEntry>;
-    plugin: string;
-  };
-};
-
-export type SystemPluginCredListResponse =
-  SystemPluginCredListResponses[keyof SystemPluginCredListResponses];
-
-export type SystemPluginCredSyncData = {
-  /**
-   * SyncPluginCredsArgs
-   */
-  body: {
-    plugin: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.plugin.cred.sync';
-};
-
-export type SystemPluginCredSyncErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemPluginCredSyncError =
-  SystemPluginCredSyncErrors[keyof SystemPluginCredSyncErrors];
-
-export type SystemPluginCredSyncResponses = {
-  /**
-   * SyncPluginCredsOutput
-   *
-   * Tool result
-   */
-  200: {
-    plugin: string;
-  };
-};
-
-export type SystemPluginCredSyncResponse =
-  SystemPluginCredSyncResponses[keyof SystemPluginCredSyncResponses];
-
-export type SystemPluginDataGetData = {
-  /**
-   * GetPluginDataArgs
-   */
-  body: {
-    key: string;
-    plugin: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.plugin.data.get';
-};
-
-export type SystemPluginDataGetErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemPluginDataGetError = SystemPluginDataGetErrors[keyof SystemPluginDataGetErrors];
-
-export type SystemPluginDataGetResponses = {
-  /**
-   * GetPluginDataOutput
-   *
-   * Tool result
-   */
-  200: {
-    /**
-     * Stored value — arbitrary JSON. Stored as TEXT in orca.db; the
-     * host parses/serializes at the edge so callers never see a string.
-     */
-    value: unknown;
-  };
-};
-
-export type SystemPluginDataGetResponse =
-  SystemPluginDataGetResponses[keyof SystemPluginDataGetResponses];
-
-export type SystemPluginDataSetData = {
-  /**
-   * SetPluginDataArgs
-   */
-  body: {
-    key: string;
-    plugin: string;
-    /**
-     * Arbitrary JSON value — the host serializes it to TEXT at the storage edge.
-     */
-    value: unknown;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.plugin.data.set';
-};
-
-export type SystemPluginDataSetErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemPluginDataSetError = SystemPluginDataSetErrors[keyof SystemPluginDataSetErrors];
-
-export type SystemPluginDataSetResponses = {
-  /**
-   * SetPluginDataOutput
-   *
-   * Tool result
-   */
-  200: {
-    ok: boolean;
-  };
-};
-
-export type SystemPluginDataSetResponse =
-  SystemPluginDataSetResponses[keyof SystemPluginDataSetResponses];
-
-export type SystemPluginDeleteData = {
-  /**
-   * PluginIdArgs
-   */
-  body: {
-    id: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.plugin.delete';
-};
-
-export type SystemPluginDeleteErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemPluginDeleteError = SystemPluginDeleteErrors[keyof SystemPluginDeleteErrors];
-
-export type SystemPluginDeleteResponses = {
-  /**
-   * PluginMutationResult
-   *
-   * Tool result
-   */
-  200: {
-    /**
-     * `true` when the plugin existed and the operation took effect.
-     */
-    changed: boolean;
-    id: string;
-  };
-};
-
-export type SystemPluginDeleteResponse =
-  SystemPluginDeleteResponses[keyof SystemPluginDeleteResponses];
-
-export type SystemPluginListData = {
-  /**
-   * ListPluginsArgs
-   */
-  body: {
-    /**
-     * Filter by workspace tier (omit for all).
-     */
-    workspace?: string | null;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.plugin.list';
-};
-
-export type SystemPluginListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemPluginListError = SystemPluginListErrors[keyof SystemPluginListErrors];
-
-export type SystemPluginListResponses = {
-  /**
-   * ListPluginsOutput
-   *
-   * Tool result
-   */
-  200: {
-    plugins: Array<PluginEntry>;
-  };
-};
-
-export type SystemPluginListResponse = SystemPluginListResponses[keyof SystemPluginListResponses];
-
-export type SystemPluginUpdateData = {
-  /**
-   * UpdatePluginArgs
-   */
-  body: {
-    /**
-     * true = enable the plugin, false = disable without removing.
-     */
-    enabled: boolean;
-    id: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.plugin.update';
-};
-
-export type SystemPluginUpdateErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemPluginUpdateError = SystemPluginUpdateErrors[keyof SystemPluginUpdateErrors];
-
-export type SystemPluginUpdateResponses = {
-  /**
-   * PluginMutationResult
-   *
-   * Tool result
-   */
-  200: {
-    /**
-     * `true` when the plugin existed and the operation took effect.
-     */
-    changed: boolean;
-    id: string;
-  };
-};
-
-export type SystemPluginUpdateResponse =
-  SystemPluginUpdateResponses[keyof SystemPluginUpdateResponses];
-
-export type SystemScheduleListData = {
-  /**
-   * ScheduleListArgs
-   */
-  body: {
-    /**
-     * Filter by host_owner.
-     */
-    host?: string | null;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.schedule.list';
-};
-
-export type SystemScheduleListErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemScheduleListError = SystemScheduleListErrors[keyof SystemScheduleListErrors];
-
-export type SystemScheduleListResponses = {
-  /**
-   * ScheduleListOutput
-   *
-   * Tool result
-   */
-  200: {
-    schedules: Array<ScheduleEntry>;
-  };
-};
-
-export type SystemScheduleListResponse =
-  SystemScheduleListResponses[keyof SystemScheduleListResponses];
-
-export type SystemScheduleRunData = {
-  /**
-   * ScheduleRunArgs
-   */
-  body: {
-    /**
-     * Schedule row name (the `name` in config_rows). Invokes the row's
-     * `job` immediately, out-of-band from the scheduler loop.
-     */
-    name: string;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.schedule.run';
-};
-
-export type SystemScheduleRunErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemScheduleRunError = SystemScheduleRunErrors[keyof SystemScheduleRunErrors];
-
-export type SystemScheduleRunResponses = {
-  /**
-   * ScheduleRunOutput
-   *
-   * Tool result
-   */
-  200: {
-    duration_ms: number;
-    error?: string | null;
-    job: string;
-    ok: boolean;
-  };
-};
-
-export type SystemScheduleRunResponse =
-  SystemScheduleRunResponses[keyof SystemScheduleRunResponses];
-
-export type SystemScheduleStatusData = {
-  /**
-   * ScheduleStatusArgs
-   */
-  body: {
-    /**
-     * If provided, return only this job's status.
-     */
-    job?: string | null;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.schedule.status';
-};
-
-export type SystemScheduleStatusErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemScheduleStatusError =
-  SystemScheduleStatusErrors[keyof SystemScheduleStatusErrors];
-
-export type SystemScheduleStatusResponses = {
-  /**
-   * ScheduleStatusOutput
-   *
-   * Tool result
-   */
-  200: {
-    jobs: Array<JobStatus>;
-  };
-};
-
-export type SystemScheduleStatusResponse =
-  SystemScheduleStatusResponses[keyof SystemScheduleStatusResponses];
-
-export type SystemSweepOrganizationData = {
-  /**
-   * SweepOrganizationArgs
-   */
-  body: {
-    /**
-     * Cargo workspace root. Defaults to `cargo locate-project --workspace`.
-     */
-    workspace_root?: string | null;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.sweep.organization';
-};
-
-export type SystemSweepOrganizationErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemSweepOrganizationError =
-  SystemSweepOrganizationErrors[keyof SystemSweepOrganizationErrors];
-
-export type SystemSweepOrganizationResponses = {
-  /**
-   * SweepOrganizationOutput
-   *
-   * Tool result
-   */
-  200: {
-    deny: DenyReport;
-    duration_ms: number;
-    machete: MacheteReport;
-    udeps: UdepsReport;
-    workspace_root: string;
-  };
-};
-
-export type SystemSweepOrganizationResponse =
-  SystemSweepOrganizationResponses[keyof SystemSweepOrganizationResponses];
+export type SystemKillResponse = SystemKillResponses[keyof SystemKillResponses];
 
 export type SystemUpdateData = {
   /**
@@ -7581,6 +5114,12 @@ export type SystemUpdateData = {
      */
     clear_dev_source?: boolean;
     /**
+     * Daemon action: "stop" (SIGTERM), "park" (SIGUSR1, release port),
+     * or "reclaim" (SIGUSR2, take port back). Was the
+     * `system.daemon.{stop,park,reclaim}` family.
+     */
+    daemon?: string | null;
+    /**
      * Set the dev-source URL (orca fetches binaries from there instead of GitHub).
      */
     dev_source?: string | null;
@@ -7605,9 +5144,11 @@ export type SystemUpdateData = {
      */
     os_packages?: boolean;
     /**
-     * Pin to the version about to be applied (or to `version` if given). Future updates won't cross it.
+     * Force a re-detect of host addressing channels (LAN + Tailscale +
+     * settings overrides). Was `system.host.refresh`. Drives the
+     * `HostRefreshHook` registered at server startup.
      */
-    pin?: boolean;
+    refresh_host?: boolean;
     /**
      * Manual Tailscale IPv4 override.
      */
@@ -7617,11 +5158,10 @@ export type SystemUpdateData = {
      */
     tailscale_v6?: string | null;
     /**
-     * Clear the version pin.
-     */
-    unpin?: boolean;
-    /**
-     * Apply a specific version (semver, leading `v` optional). Does NOT pin unless `--pin` is also set.
+     * Apply a specific version (semver, leading `v` optional). Selecting a
+     * non-channel-latest version implicitly pins to that version; selecting
+     * the channel-latest version implicitly unpins. Omit to update to the
+     * channel latest (which also unpins if currently pinned).
      */
     version?: string | null;
   };
@@ -7651,21 +5191,37 @@ export type SystemUpdateResponses = {
   /**
    * SystemUpdateOutput
    *
-   * Tool result
+   * Result of a `system.update` call.
+   *
+   * Every field carries `#[serde(default)]` so a controller running rc.N can
+   * decode a response from a peer running rc.N-1 even when the older peer
+   * omits a field that was added later. Without this, a single missing field
+   * would fail the entire decode and the controller would report failure for
+   * a call that actually applied successfully on the peer. See
+   * [[project-update-path-fix-plan-2026-06-01]] fix #1.
    */
   200: {
-    addressing_set: Array<string>;
+    addressing_set?: Array<string>;
     applied?: string | null;
-    available_versions: Array<VersionEntry>;
-    channel: string;
-    current_version: string;
+    available_versions?: Array<VersionEntry>;
+    channel?: string;
+    current_version?: string;
     dev_source?: string | null;
-    errors: Array<string>;
+    errors?: Array<string>;
     fqdn?: string | null;
     hostname?: string | null;
     latest?: string | null;
-    notes: Array<string>;
+    notes?: Array<string>;
     os_package_result?: string | null;
+    /**
+     * Present when a binary swap landed but the daemon has not yet been
+     * observed running the new version. Cleared on daemon startup once
+     * `current_version` matches `target`. Lets remote callers distinguish
+     * "apply succeeded and restarted" from "apply succeeded but supervisor
+     * never restarted us" — the latter previously returned identical
+     * success.
+     */
+    pending_restart?: PendingRestart | null;
     pinned_to?: string | null;
   };
 };

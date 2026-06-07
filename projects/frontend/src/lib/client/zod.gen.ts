@@ -2,8 +2,6 @@
 
 import * as z from 'zod';
 
-export const zAdvisorySeverity = z.enum(['critical', 'high', 'medium', 'low', 'none']);
-
 export const zAgentBackendOverrideEntry = z.object({
   agent: z.string(),
   backend: z.string(),
@@ -31,6 +29,11 @@ export const zAuthProviderStatus = z.object({
   configured: z.boolean(),
   identity: z.string().nullish(),
   provider: z.string(),
+});
+
+export const zBinaryStatus = z.object({
+  installed: z.boolean(),
+  path: z.string(),
 });
 
 export const zCertInfo = z.object({
@@ -71,6 +74,11 @@ export const zChangePasswordRequest = z.object({
   new_password: z.string(),
 });
 
+export const zClaudeMdStatus = z.object({
+  linked: z.boolean(),
+  path: z.string(),
+});
+
 export const zConfigRowOut = z.object({
   host_owner: z.string(),
   id: z.string(),
@@ -82,33 +90,33 @@ export const zConfigRowOut = z.object({
   updated_by: z.string(),
 });
 
-export const zDbSpecRow = z.object({
-  cachedAt: z.string().nullish(),
-  enabled: z.boolean(),
-  name: z.string(),
-  pathCount: z
+/**
+ * Runtime snapshot of the orca daemon (pid/port/uptime + liveness).
+ *
+ * Surfaced as `system.detail.daemon`. The `version`, `mode`, and binary
+ * path fields callers might expect already live on the parent
+ * `SystemStatusReport` (sourced from the daemon state file) — don't
+ * duplicate them here.
+ */
+export const zDaemonRuntimeStatus = z.object({
+  pid: z
     .int()
     .gte(0)
     .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
     .nullish(),
-  sourceMcp: z.string().nullish(),
-  url: z.string().nullish(),
+  port: z.int().gte(0).lte(65535).nullish(),
+  running: z.boolean(),
+  uptime_seconds: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    })
+    .nullish(),
 });
 
-export const zDenyAdvisory = z.object({
-  id: z.string(),
-  package: z.string(),
-  severity: zAdvisorySeverity,
-  title: z.string(),
-  url: z.string().nullish(),
-  version: z.string(),
-});
-
-export const zDependencyKind = z.enum(['normal', 'dev', 'build']);
-
-/**
- * Live CPU/memory stats for one running container.
- */
 export const zDockerContainerStats = z.object({
   block_read_bytes: z.coerce.bigint().gte(BigInt(0)).max(BigInt('18446744073709551615'), {
     error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
@@ -135,7 +143,12 @@ export const zDockerContainerStats = z.object({
 
 export const zDockerEngineKind = z.enum(['colima', 'desktop', 'none']);
 
-export const zDockerRuntimeEntry = z.object({
+export const zDockerEngineStatus = z.object({
+  engine: zDockerEngineKind,
+  running: z.boolean(),
+});
+
+export const zDockerRuntimeRow = z.object({
   enabled: z.boolean(),
   host: z.string().nullish(),
   name: z.string(),
@@ -151,7 +164,7 @@ export const zDockerServiceRow = z.object({
   state: z.string(),
 });
 
-export const zDockerLogProject = z.object({
+export const zDockerProjectRow = z.object({
   path: z.string(),
   project: z.string(),
   services: z.array(zDockerServiceRow),
@@ -167,13 +180,6 @@ export const zDoctorEntry = z.object({
  * `exclusiveMinimum`/`exclusiveMaximum`: numeric in draft-06+, boolean in draft-4.
  */
 export const zExclusiveLimit = z.union([z.number(), z.boolean()]);
-
-export const zFileRootRegEntry = z.object({
-  description: z.string().nullish(),
-  enabled: z.boolean(),
-  name: z.string(),
-  path: z.string(),
-});
 
 export const zFsNodeKind = z.enum(['file', 'dir']);
 
@@ -191,6 +197,8 @@ export const zFsEntry = z.object({
 });
 
 export const zFsRootEntry = z.object({
+  description: z.string().nullish(),
+  enabled: z.boolean(),
   exists: z.boolean(),
   file_count: z
     .int()
@@ -250,33 +258,6 @@ export const zGpuInfo = z.object({
       error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
     })
     .nullish(),
-});
-
-export const zGraphQlEnum = z.object({
-  description: z.string().nullish(),
-  name: z.string(),
-  values: z.array(z.string()),
-});
-
-export const zGraphQlField = z.object({
-  description: z.string().nullish(),
-  name: z.string(),
-  required: z.boolean(),
-  typeName: z.string(),
-});
-
-export const zGraphQlOperation = z.object({
-  args: z.array(zGraphQlField),
-  deprecated: z.boolean(),
-  description: z.string().nullish(),
-  name: z.string(),
-  returns: z.string(),
-});
-
-export const zGraphQlType = z.object({
-  description: z.string().nullish(),
-  fields: z.array(zGraphQlField),
-  name: z.string(),
 });
 
 export const zHostChannel = z.object({
@@ -357,27 +338,23 @@ export const zMcpContent = z.object({
   type: z.string(),
 });
 
-export const zMcpRegistration = z.object({
-  registered: z.boolean(),
-});
-
-export const zMcpServerEntry = z.object({
+export const zMcpServerRow = z.object({
   args: z.array(z.string()),
   command: z.string(),
   enabled: z.boolean(),
   env: z.record(z.string(), z.string()),
+  mappings: z.array(zMappingEntry),
   name: z.string(),
+});
+
+export const zMcpStatus = z.object({
+  registered: z.boolean(),
 });
 
 export const zMeOk = z.object({
   role: z.string(),
   user_id: z.string(),
   username: z.string(),
-});
-
-export const zMemoryFile = z.object({
-  content: z.string(),
-  name: z.string(),
 });
 
 export const zNamespaceShareEntry = z.object({
@@ -407,27 +384,8 @@ export const zPackageFormat = z.union([
   z.literal('pkgbuild'),
   z.literal('pkg'),
   z.literal('homebrew'),
+  z.literal('plg'),
 ]);
-
-export const zPathExists = z.object({
-  exists: z.boolean(),
-  path: z.string(),
-});
-
-export const zPathInitialized = z.object({
-  initialized: z.boolean(),
-  path: z.string(),
-});
-
-export const zPathInstalled = z.object({
-  installed: z.boolean(),
-  path: z.string(),
-});
-
-export const zPathLinked = z.object({
-  linked: z.boolean(),
-  path: z.string(),
-});
 
 /**
  * Per-peer outcome of a single sync (push or pull). `pod sync` returns these
@@ -445,9 +403,28 @@ export const zPeerSyncReport = z.object({
   status: z.string(),
 });
 
+export const zPendingRestart = z.object({
+  age_secs: z.coerce
+    .bigint()
+    .gte(BigInt(0))
+    .max(BigInt('18446744073709551615'), {
+      error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
+    })
+    .optional()
+    .default(BigInt(0)),
+  target: z.string().optional().default(''),
+});
+
 export const zPkiCertEntry = z.object({
   cert_path: z.string(),
   plugin_id: z.string(),
+});
+
+export const zPkiKind = z.enum(['ca', 'cert']);
+
+export const zPkiStatus = z.object({
+  initialized: z.boolean(),
+  path: z.string(),
 });
 
 export const zPluginCredEntry = z.object({
@@ -456,7 +433,9 @@ export const zPluginCredEntry = z.object({
   updatedAt: z.string(),
 });
 
-export const zPluginEntry = z.object({
+export const zPluginRow = z.object({
+  credentials: z.array(zPluginCredEntry),
+  dataKeys: z.array(z.string()),
   enabled: z.boolean(),
   id: z.string(),
   tier: z.string(),
@@ -547,14 +526,6 @@ export const zPodPendingOfferDto = z.object({
     }),
 });
 
-export const zProviderDto = z.object({
-  created_at: z.string(),
-  enabled: z.boolean(),
-  kind: z.string(),
-  name: z.string(),
-  url: z.string(),
-});
-
 export const zScheduleEntry = z.object({
   cron: z.string(),
   host_owner: z.string(),
@@ -577,19 +548,6 @@ export const zSecretEntry = z.object({
   updated_at: z.string(),
 });
 
-export const zServiceState = z.object({
-  health: z.string().nullish(),
-  name: z.string(),
-  ports: z.array(z.string()),
-  state: z.string(),
-});
-
-export const zProjectServices = z.object({
-  path: z.string(),
-  project: z.string(),
-  services: z.array(zServiceState),
-});
-
 export const zSessionOk = z.object({
   role: z.string(),
   user_id: z.string(),
@@ -609,28 +567,6 @@ export const zSignupRequest = z.object({
 export const zSignupStatus = z.object({
   allowed: z.boolean(),
   reason: z.string(),
-});
-
-export const zSpecFilesPresence = z.object({
-  full: z.boolean(),
-  public: z.boolean(),
-});
-
-export const zSpecMetaRow = z.object({
-  baseUrl: z.string().nullish(),
-  capturedAt: z.string().nullish(),
-  files: zSpecFilesPresence,
-  hasGraphql: z.boolean(),
-  namespace: z.string(),
-  pathCount: z
-    .int()
-    .gte(0)
-    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
-    .nullish(),
-  project: z.string(),
-  repo: z.string(),
-  source: z.string(),
-  sourceMcp: z.string().nullish(),
 });
 
 /**
@@ -671,16 +607,8 @@ export const zSyncToolsServerEntry = z.object({
     .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
 });
 
-export const zToolStatus = z.union([
-  z.literal('ok'),
-  z.literal('not_installed'),
-  z.literal('errored'),
-]);
-
-export const zDenyReport = z.object({
-  advisories: z.array(zDenyAdvisory),
-  error: z.string().nullish(),
-  status: zToolStatus,
+export const zSyncToolsOutput = z.object({
+  results: z.array(zSyncToolsServerEntry),
 });
 
 /**
@@ -761,6 +689,8 @@ export const zSystemInfoReport = z.object({
       error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
     })
     .nullish(),
+  mesh_listening: z.boolean().nullish(),
+  mesh_port: z.int().gte(0).lte(65535).nullish(),
   orca_dir: z.string().nullish(),
   orca_fs_avail_gb: z.coerce
     .bigint()
@@ -915,6 +845,13 @@ export const zPodPeerDto = z.object({
   system: zSystemInfoReport.nullish(),
   target: z.string().nullish(),
   update_available: z.boolean().nullish(),
+  update_checked_secs: z.coerce
+    .bigint()
+    .gte(BigInt(0))
+    .max(BigInt('18446744073709551615'), {
+      error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
+    })
+    .nullish(),
   update_latest: z.string().nullish(),
   version: z.string().nullish(),
 });
@@ -928,22 +865,9 @@ export const zPodPeerDto = z.object({
  */
 export const zPodMember = z.union([zPodPeerDto, zPodPendingOfferDto, zPodDiscoveryRowDto]);
 
-export const zUnusedDependency = z.object({
-  crate_name: z.string(),
-  dependency: z.string(),
-  kind: zDependencyKind,
-});
-
-export const zMacheteReport = z.object({
-  error: z.string().nullish(),
-  findings: z.array(zUnusedDependency),
-  status: zToolStatus,
-});
-
-export const zUdepsReport = z.object({
-  error: z.string().nullish(),
-  findings: z.array(zUnusedDependency),
-  status: zToolStatus,
+export const zVaultStatus = z.object({
+  exists: z.boolean(),
+  path: z.string(),
 });
 
 /**
@@ -952,10 +876,10 @@ export const zUdepsReport = z.object({
  * when the tag matches the running binary's `CURRENT_VERSION`.
  */
 export const zVersionEntry = z.object({
-  is_current: z.boolean(),
-  prerelease: z.boolean(),
-  published_at: z.string().nullish(),
-  tag: z.string(),
+  is_current: z.boolean().optional().default(false),
+  prerelease: z.boolean().optional().default(false),
+  published_at: z.string().nullish().default(null),
+  tag: z.string().optional().default(''),
 });
 
 /**
@@ -1140,6 +1064,84 @@ export const zAuthSignupResponse = zSessionOk;
 export const zAuthSignupStatusResponse = zSignupStatus;
 
 /**
+ * AgentBackendDetailArgs
+ */
+export const zAgentBackendDetailBody = z.record(z.string(), z.unknown());
+
+/**
+ * AgentBackendStatusOutput
+ *
+ * Tool result
+ */
+export const zAgentBackendDetailResponse = z.object({
+  api_key_in_db: z.boolean(),
+  api_key_masked: z.string().nullish(),
+  mode: z.string(),
+  overrides: z.array(zAgentBackendOverrideEntry),
+  use_server_anthropic: z.boolean(),
+});
+
+/**
+ * AgentBackendUpdateArgs
+ *
+ * [MUTATES STATE] Update one or more agent-backend settings: mode, API key,
+ * per-agent override, server-side Anthropic toggle. All fields optional;
+ * only the supplied fields are applied. Returns the fresh full status.
+ */
+export const zAgentBackendUpdateBody = z.object({
+  api_key: z.string().nullish().default(null),
+  clear_api_key: z.boolean().optional().default(false),
+  mode: z.string().nullish().default(null),
+  override_agent: z.string().nullish().default(null),
+  override_backend: z.string().nullish().default(null),
+  use_server_anthropic: z.boolean().nullish().default(null),
+});
+
+/**
+ * AgentBackendStatusOutput
+ *
+ * Tool result
+ */
+export const zAgentBackendUpdateResponse = z.object({
+  api_key_in_db: z.boolean(),
+  api_key_masked: z.string().nullish(),
+  mode: z.string(),
+  overrides: z.array(zAgentBackendOverrideEntry),
+  use_server_anthropic: z.boolean(),
+});
+
+/**
+ * GetAgentArgs
+ */
+export const zAgentGetBody = z.object({
+  name: z.string(),
+});
+
+/**
+ * GetAgentOutput
+ *
+ * Tool result
+ */
+export const zAgentGetResponse = z.object({
+  name: z.string(),
+  prompt: z.string(),
+});
+
+/**
+ * ListAgentsArgs
+ */
+export const zAgentListBody = z.record(z.string(), z.unknown());
+
+/**
+ * ListAgentsOutput
+ *
+ * Tool result
+ */
+export const zAgentListResponse = z.object({
+  agents: z.array(zAgentEntry),
+});
+
+/**
  * AgentRunArgs
  */
 export const zAgentRunBody = z.object({
@@ -1296,176 +1298,253 @@ export const zAuthTokenListResponse = z.object({
 });
 
 /**
- * GetDockerEngineArgs
+ * ConfigDeleteArgs
  */
-export const zDockerEngineDetailBody = z.record(z.string(), z.unknown());
-
-/**
- * DockerEngineStatus
- *
- * Tool result
- */
-export const zDockerEngineDetailResponse = z.object({
-  engine: zDockerEngineKind,
-  running: z.boolean(),
-});
-
-/**
- * StartDockerEngineArgs
- */
-export const zDockerEngineUpdateBody = z.record(z.string(), z.unknown());
-
-/**
- * StartDockerEngineOutput
- *
- * Tool result
- */
-export const zDockerEngineUpdateResponse = z.object({
-  output: z.string(),
-});
-
-/**
- * AddDockerRuntimeArgs
- */
-export const zDockerRuntimeCreateBody = z.object({
+export const zConfigDeleteBody = z.object({
   host: z.string().nullish(),
   name: z.string(),
-  socketPath: z.string().nullish(),
-  url: z.string().nullish(),
+  noun: z.string(),
 });
 
 /**
- * DockerRuntimeMutationResult
+ * ConfigDeleteOutput
  *
  * Tool result
  */
-export const zDockerRuntimeCreateResponse = z.object({
-  changed: z.boolean(),
-  name: z.string(),
+export const zConfigDeleteResponse = z.object({
+  removed: z.boolean(),
 });
 
 /**
- * RemoveDockerRuntimeArgs
+ * ConfigGetArgs
  */
-export const zDockerRuntimeDeleteBody = z.object({
+export const zConfigGetBody = z.object({
   name: z.string(),
+  noun: z.string(),
 });
 
 /**
- * DockerRuntimeMutationResult
+ * ConfigGetOutput
  *
  * Tool result
  */
-export const zDockerRuntimeDeleteResponse = z.object({
-  changed: z.boolean(),
-  name: z.string(),
+export const zConfigGetResponse = z.object({
+  row: zConfigRowOut.nullish(),
 });
 
 /**
- * ListDockerRuntimesArgs
+ * ConfigListArgs
  */
-export const zDockerRuntimeListBody = z.record(z.string(), z.unknown());
+export const zConfigListBody = z.object({
+  host: z.string().nullish(),
+  noun: z.string().nullish(),
+});
 
 /**
- * ListDockerRuntimesOutput
+ * ConfigListOutput
  *
  * Tool result
  */
-export const zDockerRuntimeListResponse = z.object({
-  runtimes: z.array(zDockerRuntimeEntry),
+export const zConfigListResponse = z.object({
+  rows: z.array(zConfigRowOut),
 });
 
 /**
- * GetLogsArgs
+ * ConfigSetArgs
  */
-export const zDockerServiceDetailBody = z.object({
-  project: z.string(),
-  service: z.string().nullish(),
-  tail: z
+export const zConfigSetBody = z.object({
+  host: z.string().nullish(),
+  json: z.string(),
+  name: z.string(),
+  noun: z.string(),
+});
+
+/**
+ * ConfigSetOutput
+ *
+ * Tool result
+ */
+export const zConfigSetResponse = z.object({
+  created: z.boolean(),
+  row: zConfigRowOut,
+});
+
+/**
+ * DbStatusArgs
+ */
+export const zDbDetailBody = z.record(z.string(), z.unknown());
+
+/**
+ * DbStatusReport
+ *
+ * Tool result
+ */
+export const zDbDetailResponse = z.object({
+  current: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  pending: z
     .int()
     .gte(0)
-    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
-    .nullish(),
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+  total: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
 });
 
 /**
- * GetLogsOutput
- *
- * Tool result
+ * DbUpdateArgs
  */
-export const zDockerServiceDetailResponse = z.object({
-  output: z.string(),
-});
-
-/**
- * GetDockerServicesArgs
- */
-export const zDockerServiceListBody = z.object({
-  path: z.string(),
-});
-
-/**
- * DockerServicesView
- *
- * Tool result
- */
-export const zDockerServiceListResponse = z.object({
-  composeFile: z.string().nullish(),
-  services: z.array(zDockerServiceRow),
-});
-
-/**
- * GetLogServicesArgs
- */
-export const zDockerServiceListLogsBody = z.object({
-  root: z.string().nullish(),
-});
-
-/**
- * GetLogServicesOutput
- *
- * Tool result
- */
-export const zDockerServiceListLogsResponse = z.object({
-  projects: z.array(zDockerLogProject),
-});
-
-/**
- * DockerStatsArgs
- */
-export const zDockerServiceListStatsBody = z.record(z.string(), z.unknown());
-
-/**
- * DockerStatsOutput
- *
- * Tool result
- */
-export const zDockerServiceListStatsResponse = z.object({
-  containers: z.array(zDockerContainerStats),
-});
-
-/**
- * RunDockerActionArgs
- */
-export const zDockerServiceUpdateBody = z.object({
+export const zDbUpdateBody = z.object({
   action: z.string(),
-  projectPath: z.string(),
-  service: z.string().nullish(),
+});
+
+/**
+ * DbMigrateReport
+ *
+ * Tool result
+ */
+export const zDbUpdateResponse = z.object({
+  after: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  applied: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+  before: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  direction: z.string(),
+});
+
+/**
+ * DockerDeleteArgs
+ */
+export const zDockerDeleteBody = z.object({
+  runtime: z.string(),
+});
+
+/**
+ * DockerDeleteOutput
+ *
+ * Tool result
+ */
+export const zDockerDeleteResponse = z.object({
+  changed: z.boolean(),
+  name: z.string(),
+});
+
+/**
+ * DockerDetailArgs
+ */
+export const zDockerDetailBody = z.object({
+  path: z.string(),
+  service: z.string().nullish().default(null),
   tail: z
     .int()
     .gte(0)
     .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
-    .nullish(),
+    .nullish()
+    .default(null),
 });
 
 /**
- * DockerActionResult
+ * DockerDetailOutput
  *
  * Tool result
  */
-export const zDockerServiceUpdateResponse = z.object({
+export const zDockerDetailResponse = z.object({
   composeFile: z.string().nullish(),
-  output: z.string(),
+  logs: z.string(),
+  services: z.array(zDockerServiceRow),
+  stats: z.array(zDockerContainerStats),
+});
+
+/**
+ * DockerListArgs
+ */
+export const zDockerListBody = z.object({
+  path: z.string().nullish().default(null),
+  root: z.string().nullish().default(null),
+});
+
+/**
+ * DockerListOutput
+ *
+ * Tool result
+ */
+export const zDockerListResponse = z.object({
+  composeFile: z.string().nullish(),
+  engine: zDockerEngineStatus.optional().default({ engine: 'none', running: false }),
+  projects: z.array(zDockerProjectRow).optional(),
+  runtimes: z.array(zDockerRuntimeRow).optional().default([]),
+  services: z.array(zDockerServiceRow).optional(),
+});
+
+/**
+ * DockerUpdateArgs
+ */
+export const zDockerUpdateBody = z.object({
+  action: z.string().nullish().default(null),
+  engineStart: z.boolean().optional().default(false),
+  host: z.string().nullish().default(null),
+  path: z.string().nullish().default(null),
+  runtimeName: z.string().nullish().default(null),
+  service: z.string().nullish().default(null),
+  socketPath: z.string().nullish().default(null),
+  tail: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
+    .nullish()
+    .default(null),
+  url: z.string().nullish().default(null),
+});
+
+/**
+ * DockerUpdateOutput
+ *
+ * Tool result
+ */
+export const zDockerUpdateResponse = z.object({
+  applied: z.array(z.string()).optional().default([]),
+  composeFile: z.string().nullish(),
+  output: z.string().optional(),
+});
+
+/**
+ * FsDeleteArgs
+ */
+export const zFilesDeleteBody = z.object({
+  path: z.string().nullish().default(null),
+  removeIgnorePattern: z.string().nullish().default(null),
+  unregisterRoot: z.string().nullish().default(null),
+});
+
+/**
+ * FsDeleteOutput
+ *
+ * Tool result
+ */
+export const zFilesDeleteResponse = z.object({
+  applied: z.array(z.string()).optional().default([]),
 });
 
 /**
@@ -1482,7 +1561,9 @@ export const zFilesListBody = z.object({
  * Tool result
  */
 export const zFilesListResponse = z.object({
-  entries: z.array(zFsEntry),
+  entries: z.array(zFsEntry).optional(),
+  ignorePatterns: z.array(z.string()).optional(),
+  roots: z.array(zFsRootEntry).optional(),
 });
 
 /**
@@ -1503,20 +1584,6 @@ export const zFilesReadResponse = z.object({
   content: z.string(),
   path: z.string(),
   root: z.string().nullish(),
-});
-
-/**
- * FsRootsListArgs
- */
-export const zFilesRootsListBody = z.record(z.string(), z.unknown());
-
-/**
- * FsRootsListOutput
- *
- * Tool result
- */
-export const zFilesRootsListResponse = z.object({
-  roots: z.array(zFsRootEntry),
 });
 
 /**
@@ -1576,6 +1643,160 @@ export const zFilesTreeBody = z.object({
  */
 export const zFilesTreeResponse = z.object({
   nodes: z.array(zFsTreeNode),
+});
+
+/**
+ * FsUpdateArgs
+ */
+export const zFilesUpdateBody = z.object({
+  addIgnorePattern: z.string().nullish().default(null),
+  content: z.string().nullish().default(null),
+  path: z.string().nullish().default(null),
+  registerRootDescription: z.string().nullish().default(null),
+  registerRootName: z.string().nullish().default(null),
+  registerRootPath: z.string().nullish().default(null),
+});
+
+/**
+ * FsUpdateOutput
+ *
+ * Tool result
+ */
+export const zFilesUpdateResponse = z.object({
+  applied: z.array(z.string()).optional().default([]),
+});
+
+/**
+ * McpDeleteArgs
+ */
+export const zMcpDeleteBody = z.object({
+  name: z.string(),
+});
+
+/**
+ * McpDeleteOutput
+ *
+ * Tool result
+ */
+export const zMcpDeleteResponse = z.object({
+  changed: z.boolean(),
+  name: z.string(),
+});
+
+/**
+ * McpListArgs
+ */
+export const zMcpListBody = z.record(z.string(), z.unknown());
+
+/**
+ * McpListOutput
+ *
+ * Tool result
+ */
+export const zMcpListResponse = z.object({
+  servers: z.array(zMcpServerRow),
+});
+
+/**
+ * McpRunArgs
+ */
+export const zMcpRunBody = z.object({
+  args: z.record(z.string(), z.unknown()).nullish().default(null),
+  server: z.string(),
+  tool: z.string(),
+});
+
+/**
+ * McpRunOutput
+ *
+ * Tool result
+ */
+export const zMcpRunResponse = z.object({
+  content: z.array(zMcpContent),
+  isError: z.boolean(),
+  structuredContent: z.unknown().optional(),
+});
+
+/**
+ * McpUpdateArgs
+ */
+export const zMcpUpdateBody = z.object({
+  args: z.array(z.string()).nullish().default(null),
+  command: z.string().nullish().default(null),
+  env: z.record(z.string(), z.string()).nullish().default(null),
+  mapExternalTool: z.string().nullish().default(null),
+  mapOrcaTool: z.string().nullish().default(null),
+  name: z.string().nullish().default(null),
+  sync: z.boolean().optional().default(false),
+  syncAll: z.boolean().optional().default(false),
+  syncThreshold: z.number().nullish().default(null),
+  unmapOrcaTool: z.string().nullish().default(null),
+});
+
+/**
+ * McpUpdateOutput
+ *
+ * Tool result
+ */
+export const zMcpUpdateResponse = z.object({
+  applied: z.array(z.string()).optional().default([]),
+  sync: zSyncToolsOutput.nullish(),
+});
+
+/**
+ * NamespaceShareArgs
+ */
+export const zNamespaceAccessCreateBody = z.object({
+  role: z.string(),
+  spec: z.string(),
+  user: z.string(),
+});
+
+/**
+ * NamespaceMutationResult
+ *
+ * Tool result
+ */
+export const zNamespaceAccessCreateResponse = z.object({
+  changed: z.boolean(),
+  id: z.string(),
+  name: z.string(),
+});
+
+/**
+ * NamespaceUnshareArgs
+ */
+export const zNamespaceAccessDeleteBody = z.object({
+  spec: z.string(),
+  user: z.string(),
+});
+
+/**
+ * NamespaceMutationResult
+ *
+ * Tool result
+ */
+export const zNamespaceAccessDeleteResponse = z.object({
+  changed: z.boolean(),
+  id: z.string(),
+  name: z.string(),
+});
+
+/**
+ * NamespaceSpecArgs
+ */
+export const zNamespaceAccessListBody = z.object({
+  spec: z.string(),
+});
+
+/**
+ * NamespaceSharesReport
+ *
+ * Tool result
+ */
+export const zNamespaceAccessListResponse = z.object({
+  namespace_id: z.string(),
+  shares: z.array(zNamespaceShareEntry),
 });
 
 /**
@@ -1640,118 +1861,6 @@ export const zNamespaceDetailResponse = z.object({
 });
 
 /**
- * ListCommandsArgs
- */
-export const zNamespaceDocListCommandsBody = z.record(z.string(), z.unknown());
-
-/**
- * ListCommandsOutput
- *
- * Tool result
- */
-export const zNamespaceDocListCommandsResponse = z.object({
-  commands: z.array(z.string()),
-});
-
-/**
- * DocIgnorePatternArgs
- */
-export const zNamespaceDocPatternCreateBody = z.object({
-  pattern: z.string(),
-});
-
-/**
- * DocIgnorePatternMutationResult
- *
- * Tool result
- */
-export const zNamespaceDocPatternCreateResponse = z.object({
-  changed: z.boolean(),
-  pattern: z.string(),
-});
-
-/**
- * DocIgnorePatternArgs
- */
-export const zNamespaceDocPatternDeleteBody = z.object({
-  pattern: z.string(),
-});
-
-/**
- * DocIgnorePatternMutationResult
- *
- * Tool result
- */
-export const zNamespaceDocPatternDeleteResponse = z.object({
-  changed: z.boolean(),
-  pattern: z.string(),
-});
-
-/**
- * ListDocIgnorePatternsArgs
- */
-export const zNamespaceDocPatternListBody = z.record(z.string(), z.unknown());
-
-/**
- * ListDocIgnorePatternsOutput
- *
- * Tool result
- */
-export const zNamespaceDocPatternListResponse = z.object({
-  patterns: z.array(z.string()),
-});
-
-/**
- * AddFileRootArgs
- */
-export const zNamespaceDocRootCreateBody = z.object({
-  description: z.string().nullish(),
-  name: z.string(),
-  path: z.string(),
-});
-
-/**
- * FileRootMutationResult
- *
- * Tool result
- */
-export const zNamespaceDocRootCreateResponse = z.object({
-  changed: z.boolean(),
-  name: z.string(),
-});
-
-/**
- * RemoveFileRootArgs
- */
-export const zNamespaceDocRootDeleteBody = z.object({
-  name: z.string(),
-});
-
-/**
- * FileRootMutationResult
- *
- * Tool result
- */
-export const zNamespaceDocRootDeleteResponse = z.object({
-  changed: z.boolean(),
-  name: z.string(),
-});
-
-/**
- * ListFileRootsArgs
- */
-export const zNamespaceDocRootListBody = z.record(z.string(), z.unknown());
-
-/**
- * ListFileRootsOutput
- *
- * Tool result
- */
-export const zNamespaceDocRootListResponse = z.object({
-  roots: z.array(zFileRootRegEntry),
-});
-
-/**
  * NamespaceListArgs
  */
 export const zNamespaceListBody = z.record(z.string(), z.unknown());
@@ -1763,248 +1872,6 @@ export const zNamespaceListBody = z.record(z.string(), z.unknown());
  */
 export const zNamespaceListResponse = z.object({
   namespaces: z.array(zNamespaceSummary),
-});
-
-/**
- * EmptyArgs
- */
-export const zNamespaceProjectListBody = z.record(z.string(), z.unknown());
-
-/**
- * ProjectsListReport
- *
- * Tool result
- */
-export const zNamespaceProjectListResponse = z.object({
-  projects: z.array(z.string()),
-});
-
-/**
- * NamespaceShareArgs
- */
-export const zNamespaceShareCreateBody = z.object({
-  role: z.string(),
-  spec: z.string(),
-  user: z.string(),
-});
-
-/**
- * NamespaceMutationResult
- *
- * Tool result
- */
-export const zNamespaceShareCreateResponse = z.object({
-  changed: z.boolean(),
-  id: z.string(),
-  name: z.string(),
-});
-
-/**
- * NamespaceUnshareArgs
- */
-export const zNamespaceShareDeleteBody = z.object({
-  spec: z.string(),
-  user: z.string(),
-});
-
-/**
- * NamespaceMutationResult
- *
- * Tool result
- */
-export const zNamespaceShareDeleteResponse = z.object({
-  changed: z.boolean(),
-  id: z.string(),
-  name: z.string(),
-});
-
-/**
- * NamespaceSpecArgs
- */
-export const zNamespaceShareListBody = z.object({
-  spec: z.string(),
-});
-
-/**
- * NamespaceSharesReport
- *
- * Tool result
- */
-export const zNamespaceShareListResponse = z.object({
-  namespace_id: z.string(),
-  shares: z.array(zNamespaceShareEntry),
-});
-
-/**
- * RegisterSpecArgs
- */
-export const zNamespaceSpecCreateBody = z.object({
-  name: z.string(),
-  url: z.string(),
-});
-
-/**
- * RegisterSpecResult
- *
- * Tool result
- */
-export const zNamespaceSpecCreateResponse = z.object({
-  cachedAt: z.string().nullish(),
-  enabled: z.boolean(),
-  name: z.string(),
-  pathCount: z
-    .int()
-    .gte(0)
-    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
-    .nullish(),
-  sourceMcp: z.string().nullish(),
-  url: z.string().nullish(),
-});
-
-/**
- * UnregisterSpecArgs
- */
-export const zNamespaceSpecDeleteBody = z.object({
-  name: z.string(),
-});
-
-/**
- * UnregisterSpecOutput
- *
- * Tool result
- */
-export const zNamespaceSpecDeleteResponse = z.object({
-  removed: z.boolean(),
-});
-
-/**
- * SpecDetailArgs
- */
-export const zNamespaceSpecDetailBody = z.record(z.string(), z.unknown());
-
-/**
- * SpecDetailReport
- *
- * Tool result
- */
-export const zNamespaceSpecDetailResponse = z.object({
-  spec: z.string(),
-});
-
-/**
- * GetSpecGraphqlInfoArgs
- */
-export const zNamespaceSpecGraphqlDetailBody = z.object({
-  repo: z.string(),
-});
-
-/**
- * GraphQlInfoData
- *
- * Tool result
- */
-export const zNamespaceSpecGraphqlDetailResponse = z.object({
-  enums: z.array(zGraphQlEnum),
-  inputs: z.array(zGraphQlType),
-  mutations: z.array(zGraphQlOperation),
-  queries: z.array(zGraphQlOperation),
-  repo: z.string(),
-  subscriptions: z.array(zGraphQlOperation),
-  types: z.array(zGraphQlType),
-});
-
-/**
- * ProxyGraphqlArgs
- */
-export const zNamespaceSpecGraphqlUpdateBody = z.object({
-  operation_name: z.string().nullish(),
-  query: z.string(),
-  repo: z.string(),
-  shop: z.string(),
-  token: z.string(),
-});
-
-/**
- * GraphqlProxyResult
- *
- * `body` is opaque — GraphQL response shapes vary per query and are not owned by orca.
- */
-export const zNamespaceSpecGraphqlUpdateResponse = z.object({
-  status: z.int().gte(0).lte(65535),
-});
-
-/**
- * ListSpecsArgs
- */
-export const zNamespaceSpecListBody = z.record(z.string(), z.unknown());
-
-/**
- * ListSpecsOutput
- *
- * Tool result
- */
-export const zNamespaceSpecListResponse = z.object({
-  specs: z.array(zSpecMetaRow),
-});
-
-/**
- * ListDbSpecsArgs
- */
-export const zNamespaceSpecListDbBody = z.record(z.string(), z.unknown());
-
-/**
- * ListDbSpecsOutput
- *
- * Tool result
- */
-export const zNamespaceSpecListDbResponse = z.object({
-  specs: z.array(zDbSpecRow),
-});
-
-/**
- * RefreshSpecArgs
- */
-export const zNamespaceSpecRefreshBody = z.object({
-  name: z.string(),
-});
-
-/**
- * RegisterSpecResult
- *
- * Tool result
- */
-export const zNamespaceSpecRefreshResponse = z.object({
-  cachedAt: z.string().nullish(),
-  enabled: z.boolean(),
-  name: z.string(),
-  pathCount: z
-    .int()
-    .gte(0)
-    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
-    .nullish(),
-  sourceMcp: z.string().nullish(),
-  url: z.string().nullish(),
-});
-
-/**
- * SyncMcpSpecsArgs
- */
-export const zNamespaceSpecSyncMcpBody = z.object({
-  server: z.string(),
-});
-
-/**
- * SyncMcpSpecsResult
- *
- * Tool result
- */
-export const zNamespaceSpecSyncMcpResponse = z.object({
-  errors: z.array(z.string()),
-  server: z.string(),
-  synced: z
-    .int()
-    .gte(0)
-    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
 });
 
 /**
@@ -2023,6 +1890,122 @@ export const zNamespaceUseResponse = z.object({
   changed: z.boolean(),
   id: z.string(),
   name: z.string(),
+});
+
+/**
+ * PkiCreateArgs
+ */
+export const zPkiCreateBody = z.object({
+  capability: z.string().nullish().default(null),
+  kind: zPkiKind.optional().default('ca'),
+  plugin_id: z.string().nullish().default(null),
+});
+
+/**
+ * PkiCreateOutput
+ *
+ * Tool result
+ */
+export const zPkiCreateResponse = z.object({
+  caPath: z.string().optional(),
+  capability: z.string().optional(),
+  certPath: z.string().optional(),
+  created: z.boolean().optional().default(false),
+  keyPath: z.string().optional(),
+  pluginId: z.string().optional(),
+  serverCertPath: z.string().optional(),
+});
+
+/**
+ * PkiListArgs
+ */
+export const zPkiListBody = z.record(z.string(), z.unknown());
+
+/**
+ * PkiListOutput
+ *
+ * Tool result
+ */
+export const zPkiListResponse = z.object({
+  certs: z.array(zPkiCertEntry),
+});
+
+/**
+ * PluginDeleteArgs
+ */
+export const zPluginDeleteBody = z.object({
+  credKey: z.string().nullish(),
+  dataKey: z.string().nullish(),
+  id: z.string(),
+});
+
+/**
+ * PluginDeleteOutput
+ *
+ * Tool result
+ */
+export const zPluginDeleteResponse = z.object({
+  applied: z.array(z.string()).optional().default([]),
+  id: z.string().optional().default(''),
+});
+
+/**
+ * PluginDetailArgs
+ */
+export const zPluginDetailBody = z.object({
+  data_key: z.string().nullish(),
+  id: z.string(),
+});
+
+/**
+ * PluginDetailOutput
+ *
+ * Tool result
+ */
+export const zPluginDetailResponse = z.object({
+  dataValue: z.unknown().optional(),
+  plugin: zPluginRow,
+});
+
+/**
+ * PluginListArgs
+ */
+export const zPluginListBody = z.object({
+  tier: z.string().nullish().default(null),
+});
+
+/**
+ * PluginListOutput
+ *
+ * Tool result
+ */
+export const zPluginListResponse = z.object({
+  plugins: z.array(zPluginRow),
+});
+
+/**
+ * PluginUpdateArgs
+ */
+export const zPluginUpdateBody = z.object({
+  credKey: z.string().nullish().default(null),
+  credSync: z.boolean().optional().default(false),
+  credValue: z.string().nullish().default(null),
+  dataKey: z.string().nullish().default(null),
+  dataValue: z.unknown().optional().default(null),
+  enabled: z.boolean().nullish().default(null),
+  id: z.string().nullish().default(null),
+  instanceId: z.string().nullish().default(null),
+  manifest: z.string().nullish().default(null),
+});
+
+/**
+ * PluginUpdateOutput
+ *
+ * Tool result
+ */
+export const zPluginUpdateResponse = z.object({
+  applied: z.array(z.string()).optional().default([]),
+  installedId: z.string().nullish(),
 });
 
 /**
@@ -2066,6 +2049,34 @@ export const zPodForgetResponse = z.object({
     .gte(0)
     .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
 });
+
+/**
+ * HostStatusDetailArgs
+ */
+export const zPodHistoryBody = z.object({
+  limit: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
+    .nullish(),
+  peer_id: z.string(),
+  since_unix: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    })
+    .nullish(),
+});
+
+/**
+ * Array_of_HostStatusRowDto
+ *
+ * Tool result
+ */
+export const zPodHistoryResponse = z.array(zHostStatusRowDto);
 
 /**
  * PodJoinArgs
@@ -2213,46 +2224,6 @@ export const zPodRecoverResponse = z.object({
 });
 
 /**
- * HostStatusDetailArgs
- */
-export const zPodStatusDetailBody = z.object({
-  limit: z
-    .int()
-    .gte(0)
-    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
-    .nullish(),
-  peer_id: z.string(),
-  since_unix: z.coerce
-    .bigint()
-    .min(BigInt('-9223372036854775808'), {
-      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
-    })
-    .max(BigInt('9223372036854775807'), {
-      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
-    })
-    .nullish(),
-});
-
-/**
- * Array_of_HostStatusRowDto
- *
- * Tool result
- */
-export const zPodStatusDetailResponse = z.array(zHostStatusRowDto);
-
-/**
- * HostStatusRowsArgs
- */
-export const zPodStatusListBody = z.record(z.string(), z.unknown());
-
-/**
- * Array_of_HostStatusRowDto
- *
- * Tool result
- */
-export const zPodStatusListResponse = z.array(zHostStatusRowDto);
-
-/**
  * PodSyncArgs
  */
 export const zPodSyncBody = z.object({
@@ -2305,6 +2276,64 @@ export const zPodUpdateBody = z.object({
  */
 export const zPodUpdateResponse = z.object({
   self_secure: z.boolean(),
+});
+
+/**
+ * ScheduleListArgs
+ */
+export const zScheduleListBody = z.object({
+  host: z.string().nullish(),
+});
+
+/**
+ * ScheduleListOutput
+ *
+ * Tool result
+ */
+export const zScheduleListResponse = z.object({
+  schedules: z.array(zScheduleEntry),
+});
+
+/**
+ * ScheduleRunArgs
+ */
+export const zScheduleRunBody = z.object({
+  name: z.string(),
+});
+
+/**
+ * ScheduleRunOutput
+ *
+ * Tool result
+ */
+export const zScheduleRunResponse = z.object({
+  duration_ms: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+  error: z.string().nullish(),
+  job: z.string(),
+  ok: z.boolean(),
+});
+
+/**
+ * ScheduleStatusArgs
+ */
+export const zScheduleStatusBody = z.object({
+  job: z.string().nullish(),
+});
+
+/**
+ * ScheduleStatusOutput
+ *
+ * Tool result
+ */
+export const zScheduleStatusResponse = z.object({
+  jobs: z.array(zJobStatus),
 });
 
 /**
@@ -2379,461 +2408,44 @@ export const zSecretsSetResponse = z.object({
 });
 
 /**
- * ClearArgs
+ * SpecDetailArgs
  */
-export const zSystemAgentBackendClearKeyBody = z.record(z.string(), z.unknown());
+export const zSpecDetailBody = z.record(z.string(), z.unknown());
 
 /**
- * ApiKeyMutationResult
- *
- * Outcome of a mutation against the encrypted API-key slot.
- */
-export const zSystemAgentBackendClearKeyResponse = z.object({
-  masked: z.string().nullish(),
-  message: z.string(),
-  present: z.boolean(),
-});
-
-/**
- * AgentBackendStatusArgs
- */
-export const zSystemAgentBackendDetailBody = z.record(z.string(), z.unknown());
-
-/**
- * AgentBackendStatusOutput
+ * SpecDetailReport
  *
  * Tool result
  */
-export const zSystemAgentBackendDetailResponse = z.object({
-  api_key_in_db: z.boolean(),
-  api_key_masked: z.string().nullish(),
-  mode: z.string(),
-  overrides: z.array(zAgentBackendOverrideEntry),
-  use_server_anthropic: z.boolean(),
+export const zSpecDetailResponse = z.object({
+  spec: z.string(),
 });
 
 /**
- * OverrideArgs
+ * PackageBuildArgs
  */
-export const zSystemAgentBackendOverrideBody = z.object({
-  agent: z.string(),
-  backend: z.string(),
-});
-
-/**
- * OverrideResult
- *
- * Tool result
- */
-export const zSystemAgentBackendOverrideResponse = z.object({
-  agent: z.string(),
-  backend: z.string().nullish(),
-  cleared: z.boolean(),
-});
-
-/**
- * SetArgs
- */
-export const zSystemAgentBackendSetKeyBody = z.object({
-  key: z.string(),
-});
-
-/**
- * ApiKeyMutationResult
- *
- * Outcome of a mutation against the encrypted API-key slot.
- */
-export const zSystemAgentBackendSetKeyResponse = z.object({
-  masked: z.string().nullish(),
-  message: z.string(),
-  present: z.boolean(),
-});
-
-/**
- * SetModeArgs
- */
-export const zSystemAgentBackendSetModeBody = z.object({
-  mode: z.string(),
-});
-
-/**
- * SetModeResult
- *
- * Tool result
- */
-export const zSystemAgentBackendSetModeResponse = z.object({
-  mode: z.string(),
-});
-
-/**
- * UseServerAnthropicArgs
- */
-export const zSystemAgentBackendUseServerAnthropicBody = z.object({
-  enabled: z.boolean(),
-});
-
-/**
- * UseServerAnthropicResult
- *
- * Tool result
- */
-export const zSystemAgentBackendUseServerAnthropicResponse = z.object({
-  enabled: z.boolean(),
-});
-
-/**
- * GetAgentArgs
- */
-export const zSystemAgentGetBody = z.object({
-  name: z.string(),
-});
-
-/**
- * GetAgentOutput
- *
- * Tool result
- */
-export const zSystemAgentGetResponse = z.object({
-  name: z.string(),
-  prompt: z.string(),
-});
-
-/**
- * GetConfigArgs
- */
-export const zSystemAgentGetConfigBody = z.object({
-  name: z.string().nullish(),
-});
-
-/**
- * GetConfigOutput
- *
- * Tool result
- */
-export const zSystemAgentGetConfigResponse = z.object({
-  available: z.array(z.string()),
-  content: z.string().nullish(),
-  name: z.string().nullish(),
-});
-
-/**
- * GetContextArgs
- */
-export const zSystemAgentGetContextBody = z.object({
-  project: z.string(),
-});
-
-/**
- * GetContextOutput
- *
- * Tool result
- */
-export const zSystemAgentGetContextResponse = z.object({
-  exists: z.boolean(),
-  files: z.array(zMemoryFile),
-  index: z.string().nullish(),
-  project: z.string(),
-});
-
-/**
- * ListAgentsArgs
- */
-export const zSystemAgentListBody = z.record(z.string(), z.unknown());
-
-/**
- * ListAgentsOutput
- *
- * Tool result
- */
-export const zSystemAgentListResponse = z.object({
-  agents: z.array(zAgentEntry),
-});
-
-/**
- * BootstrapArgs
- */
-export const zSystemBootstrapBody = z.object({
-  admin_pubkey: z.string().nullish(),
-  home_dir: z.string().optional().default('/var/lib/orca'),
-  service_user: z.string().optional().default('orca'),
-});
-
-/**
- * BootstrapOutput
- *
- * Tool result
- */
-export const zSystemBootstrapResponse = z.object({
-  home_dir: z.string(),
-  user: z.string(),
-});
-
-/**
- * ConfigDeleteArgs
- */
-export const zSystemConfigDeleteBody = z.object({
-  host: z.string().nullish(),
-  name: z.string(),
-  noun: z.string(),
-});
-
-/**
- * ConfigDeleteOutput
- *
- * Tool result
- */
-export const zSystemConfigDeleteResponse = z.object({
-  removed: z.boolean(),
-});
-
-/**
- * ConfigGetArgs
- */
-export const zSystemConfigGetBody = z.object({
-  name: z.string(),
-  noun: z.string(),
-});
-
-/**
- * ConfigGetOutput
- *
- * Tool result
- */
-export const zSystemConfigGetResponse = z.object({
-  row: zConfigRowOut.nullish(),
-});
-
-/**
- * ConfigListArgs
- */
-export const zSystemConfigListBody = z.object({
-  host: z.string().nullish(),
-  noun: z.string().nullish(),
-});
-
-/**
- * ConfigListOutput
- *
- * Tool result
- */
-export const zSystemConfigListResponse = z.object({
-  rows: z.array(zConfigRowOut),
-});
-
-/**
- * ConfigSetArgs
- */
-export const zSystemConfigSetBody = z.object({
-  host: z.string().nullish(),
-  json: z.string(),
-  name: z.string(),
-  noun: z.string(),
-});
-
-/**
- * ConfigSetOutput
- *
- * Tool result
- */
-export const zSystemConfigSetResponse = z.object({
-  created: z.boolean(),
-  row: zConfigRowOut,
-});
-
-/**
- * EmptyArgs
- */
-export const zSystemCreateBody = z.record(z.string(), z.unknown());
-
-/**
- * InstallReport
- *
- * Tool result
- */
-export const zSystemCreateResponse = z.object({
-  done: z.array(z.string()),
-  errors: z.array(z.string()),
-  skipped: z.array(z.string()),
-});
-
-/**
- * DaemonInstallArgs
- */
-export const zSystemDaemonInstallBody = z.object({
-  port: z.int().gte(0).lte(65535).optional().default(12000),
-  service_user: z.string().nullish(),
-});
-
-/**
- * DaemonInstallOutput
- *
- * Tool result
- */
-export const zSystemDaemonInstallResponse = z.object({
-  installed: z.boolean(),
-  port: z.int().gte(0).lte(65535),
-});
-
-/**
- * DaemonParkArgs
- */
-export const zSystemDaemonParkBody = z.record(z.string(), z.unknown());
-
-/**
- * DaemonSignalOutput
- *
- * Tool result
- */
-export const zSystemDaemonParkResponse = z.object({
-  pid: z
-    .int()
-    .gte(0)
-    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
-});
-
-/**
- * DaemonReclaimArgs
- */
-export const zSystemDaemonReclaimBody = z.record(z.string(), z.unknown());
-
-/**
- * DaemonSignalOutput
- *
- * Tool result
- */
-export const zSystemDaemonReclaimResponse = z.object({
-  pid: z
-    .int()
-    .gte(0)
-    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
-});
-
-/**
- * DaemonStatusArgs
- */
-export const zSystemDaemonStatusBody = z.record(z.string(), z.unknown());
-
-/**
- * DaemonStatusOutput
- *
- * Tool result
- */
-export const zSystemDaemonStatusResponse = z.object({
+export const zSystemBuildBody = z.object({
+  arch: z.string().nullish(),
   binary: z.string().nullish(),
-  mode: z.string().nullish(),
-  pid: z
-    .int()
-    .gte(0)
-    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' })
-    .nullish(),
-  port: z.int().gte(0).lte(65535).nullish(),
-  running: z.boolean(),
-  uptime_seconds: z.coerce
-    .bigint()
-    .min(BigInt('-9223372036854775808'), {
-      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
-    })
-    .max(BigInt('9223372036854775807'), {
-      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
-    })
-    .nullish(),
-  version: z.string().nullish(),
+  codesign_identity: z.string().nullish(),
+  format: zPackageFormat.nullish(),
+  maintainer: z.string().optional().default('Orca <noreply@orca.local>'),
+  out_dir: z.string().optional().default('.'),
+  pkg_sign_identity: z.string().nullish(),
+  plg_binary_url: z.string().nullish(),
+  plg_url: z.string().nullish(),
 });
 
 /**
- * DaemonStopArgs
- */
-export const zSystemDaemonStopBody = z.record(z.string(), z.unknown());
-
-/**
- * DaemonSignalOutput
+ * PackageBuildOutput
  *
  * Tool result
  */
-export const zSystemDaemonStopResponse = z.object({
-  pid: z
-    .int()
-    .gte(0)
-    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
-});
-
-/**
- * DaemonUninstallArgs
- */
-export const zSystemDaemonUninstallBody = z.record(z.string(), z.unknown());
-
-/**
- * DaemonUninstallOutput
- *
- * Tool result
- */
-export const zSystemDaemonUninstallResponse = z.object({
-  uninstalled: z.boolean(),
-});
-
-/**
- * DbStatusArgs
- */
-export const zSystemDbDetailBody = z.record(z.string(), z.unknown());
-
-/**
- * DbStatusReport
- *
- * Tool result
- */
-export const zSystemDbDetailResponse = z.object({
-  current: z.coerce
-    .bigint()
-    .min(BigInt('-9223372036854775808'), {
-      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
-    })
-    .max(BigInt('9223372036854775807'), {
-      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
-    }),
-  pending: z
-    .int()
-    .gte(0)
-    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
-  total: z
-    .int()
-    .gte(0)
-    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
-});
-
-/**
- * DbLifecycleUpdateArgs
- */
-export const zSystemDbLifecycleUpdateBody = z.object({
-  action: z.string(),
-});
-
-/**
- * DbMigrateReport
- *
- * Tool result
- */
-export const zSystemDbLifecycleUpdateResponse = z.object({
-  after: z.coerce
-    .bigint()
-    .min(BigInt('-9223372036854775808'), {
-      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
-    })
-    .max(BigInt('9223372036854775807'), {
-      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
-    }),
-  applied: z
-    .int()
-    .gte(0)
-    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
-  before: z.coerce
-    .bigint()
-    .min(BigInt('-9223372036854775808'), {
-      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
-    })
-    .max(BigInt('9223372036854775807'), {
-      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
-    }),
-  direction: z.string(),
+export const zSystemBuildResponse = z.object({
+  arch: z.string(),
+  format: zPackageFormat,
+  out_dir: z.string(),
+  version: z.string(),
 });
 
 /**
@@ -2863,701 +2475,89 @@ export const zSystemDetailBody = z.record(z.string(), z.unknown());
  * Tool result
  */
 export const zSystemDetailResponse = z.object({
-  agents: zPathLinked,
-  binary: zPathInstalled,
+  agents: zClaudeMdStatus,
+  binary: zBinaryStatus,
   channel: z.string().nullish(),
-  claude_md: zPathLinked,
+  channels: z.array(zHostChannel),
+  claude_md: zClaudeMdStatus,
+  daemon: zDaemonRuntimeStatus,
+  diagnostic: z.array(zDoctorEntry),
+  display_name: z.string(),
   frontend: z.string(),
-  mcp: zMcpRegistration,
+  machine_id: z.string(),
+  mcp: zMcpStatus,
   mode: z.string().nullish(),
   pinned_to: z.string().nullish(),
-  pki: zPathInitialized,
+  pki: zPkiStatus,
   storage: zStorageReport,
   system: zSystemInfoReport.nullish(),
   target: z.string(),
-  vault: zPathExists,
+  vault: zVaultStatus,
   version: z.string(),
 });
 
 /**
- * DoctorArgs
+ * FetchReleaseAssetArgs
+ *
+ * Args for [`system_fetch_release_asset`].
  */
-export const zSystemDiagnosticListBody = z.record(z.string(), z.unknown());
+export const zSystemFetchReleaseAssetBody = z.object({
+  channel: z.string().nullish(),
+  target: z.string(),
+  version: z.string().nullish(),
+});
 
 /**
- * DoctorReport
+ * FetchReleaseAssetOutput
+ *
+ * Result of [`system_fetch_release_asset`]. `asset_b64` is base64-STANDARD
+ * of the raw binary bytes; `sha256` is the hex digest the holder verified
+ * against the release `.sha256` blob (callers MUST re-verify after decode
+ * before swapping).
+ */
+export const zSystemFetchReleaseAssetResponse = z.object({
+  asset_b64: z.string(),
+  sha256: z.string(),
+  version: z.string(),
+});
+
+/**
+ * SystemInstallArgs
+ *
+ * Args for [`system_install`]. Empty by default — does the user-level
+ * install. Pass `service_user` (and optional `home_dir` / `admin_pubkey`)
+ * to also provision a system service user with SSH access (Linux, root).
+ */
+export const zSystemInstallBody = z.object({
+  admin_pubkey: z.string().nullish(),
+  home_dir: z.string().nullish(),
+  port: z.int().gte(0).lte(65535).nullish(),
+  service_user: z.string().nullish(),
+});
+
+/**
+ * InstallReport
  *
  * Tool result
  */
-export const zSystemDiagnosticListResponse = z.object({
-  entries: z.array(zDoctorEntry),
+export const zSystemInstallResponse = z.object({
+  done: z.array(z.string()),
+  errors: z.array(z.string()),
+  skipped: z.array(z.string()),
 });
 
 /**
- * AddArgs
+ * SystemKillArgs
  */
-export const zSystemEngineCreateBody = z.object({
-  kind: z.string().optional().default(''),
-  name: z.string(),
-  url: z.string(),
-});
+export const zSystemKillBody = z.record(z.string(), z.unknown());
 
 /**
- * EngineOpResult
- *
- * Outcome of a mutation (add/remove/enable/disable).
- */
-export const zSystemEngineCreateResponse = z.object({
-  message: z.string(),
-});
-
-/**
- * NameArgs
- */
-export const zSystemEngineDeleteBody = z.object({
-  name: z.string(),
-});
-
-/**
- * EngineOpResult
- *
- * Outcome of a mutation (add/remove/enable/disable).
- */
-export const zSystemEngineDeleteResponse = z.object({
-  message: z.string(),
-});
-
-/**
- * EmptyArgs
- */
-export const zSystemEngineListBody = z.record(z.string(), z.unknown());
-
-/**
- * ProviderList
- *
- * Newtype wrapping `Vec<ProviderDto>` so it crosses the WASM boundary with a
- * real TS array type (`ProviderDto[]`) instead of `any`.
- */
-export const zSystemEngineListResponse = z.array(zProviderDto);
-
-/**
- * UpdateArgs
- */
-export const zSystemEngineUpdateBody = z.object({
-  enabled: z.boolean(),
-  name: z.string(),
-});
-
-/**
- * EngineOpResult
- *
- * Outcome of a mutation (add/remove/enable/disable).
- */
-export const zSystemEngineUpdateResponse = z.object({
-  message: z.string(),
-});
-
-/**
- * HealthArgs
- */
-export const zSystemHealthBody = z.record(z.string(), z.unknown());
-
-/**
- * HealthOutput
+ * SystemKillOutput
  *
  * Tool result
  */
-export const zSystemHealthResponse = z.object({
-  ok: z.boolean(),
-});
-
-/**
- * EmptyArgs
- */
-export const zSystemHostDetailBody = z.record(z.string(), z.unknown());
-
-/**
- * HostInfoOutput
- *
- * Tool result
- */
-export const zSystemHostDetailResponse = z.object({
-  channels: z.array(zHostChannel),
-  display_name: z.string(),
-  machine_id: z.string(),
-});
-
-/**
- * EmptyArgs
- */
-export const zSystemHostRefreshBody = z.record(z.string(), z.unknown());
-
-/**
- * HostRefreshOutput
- *
- * Tool result
- */
-export const zSystemHostRefreshResponse = z.object({
-  channels: z.array(zHostChannel),
-});
-
-/**
- * GetServiceLogsArgs
- */
-export const zSystemInfraServiceDetailBody = z.object({
-  project: z.string(),
-  service: z.string(),
-  tail: z.coerce
-    .bigint()
-    .gte(BigInt(0))
-    .max(BigInt('18446744073709551615'), {
-      error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
-    })
-    .nullish(),
-});
-
-/**
- * GetServiceLogsOutput
- *
- * Tool result
- */
-export const zSystemInfraServiceDetailResponse = z.object({
-  output: z.string(),
-  project: z.string(),
-  service: z.string(),
-});
-
-/**
- * ListServicesArgs
- */
-export const zSystemInfraServiceListBody = z.object({
-  root: z.string().nullish(),
-});
-
-/**
- * ListServicesOutput
- *
- * Tool result
- */
-export const zSystemInfraServiceListResponse = z.object({
-  projects: z.array(zProjectServices),
-});
-
-/**
- * RunTestsArgs
- */
-export const zSystemInfraTestCreateBody = z.object({
-  suite: z.string().nullish(),
-});
-
-/**
- * RunTestsOutput
- *
- * Tool result
- */
-export const zSystemInfraTestCreateResponse = z.object({
-  duration_ms: z.coerce.bigint().gte(BigInt(0)).max(BigInt('18446744073709551615'), {
-    error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
-  }),
-  exit_code: z
-    .int()
-    .min(-2147483648, { error: 'Invalid value: Expected int32 to be >= -2147483648' })
-    .max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
-  failed: z
-    .int()
-    .gte(0)
-    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
-  output: z.string(),
-  passed: z
-    .int()
-    .gte(0)
-    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
-  suite: z.string(),
-});
-
-/**
- * KillStaleArgs
- */
-export const zSystemKillStaleBody = z.record(z.string(), z.unknown());
-
-/**
- * KillStaleOutput
- *
- * Tool result
- */
-export const zSystemKillStaleResponse = z.object({
+export const zSystemKillResponse = z.object({
   killed_patterns: z.array(z.string()),
-});
-
-/**
- * AddMcpServerArgs
- */
-export const zSystemMcpCreateBody = z.object({
-  args: z.array(z.string()).nullish(),
-  command: z.string(),
-  env: z.record(z.string(), z.string()).nullish(),
-  name: z.string(),
-});
-
-/**
- * McpServerMutationResult
- *
- * Tool result
- */
-export const zSystemMcpCreateResponse = z.object({
-  changed: z.boolean(),
-  name: z.string(),
-});
-
-/**
- * RemoveMcpServerArgs
- */
-export const zSystemMcpDeleteBody = z.object({
-  name: z.string(),
-});
-
-/**
- * McpServerMutationResult
- *
- * Tool result
- */
-export const zSystemMcpDeleteResponse = z.object({
-  changed: z.boolean(),
-  name: z.string(),
-});
-
-/**
- * RunMcpToolArgs
- */
-export const zSystemMcpFederationRunBody = z.object({
-  args: z.record(z.string(), z.unknown()).nullish().default(null),
-  server: z.string(),
-  tool: z.string(),
-});
-
-/**
- * RunMcpToolOutput
- *
- * Tool result
- */
-export const zSystemMcpFederationRunResponse = z.object({
-  content: z.array(zMcpContent),
-  isError: z.boolean(),
-});
-
-/**
- * ListMcpServersArgs
- */
-export const zSystemMcpListBody = z.record(z.string(), z.unknown());
-
-/**
- * ListMcpServersOutput
- *
- * Tool result
- */
-export const zSystemMcpListResponse = z.object({
-  servers: z.array(zMcpServerEntry),
-});
-
-/**
- * MapToolArgs
- */
-export const zSystemMcpMappingCreateBody = z.object({
-  external_tool: z.string(),
-  name: z.string(),
-  orca_tool: z.string(),
-});
-
-/**
- * MapToolResult
- *
- * Tool result
- */
-export const zSystemMcpMappingCreateResponse = z.object({
-  external_tool: z.string(),
-  mcp_name: z.string(),
-  orca_tool: z.string(),
-});
-
-/**
- * UnmapToolArgs
- */
-export const zSystemMcpMappingDeleteBody = z.object({
-  orca_tool: z.string(),
-});
-
-/**
- * UnmapToolResult
- *
- * Tool result
- */
-export const zSystemMcpMappingDeleteResponse = z.object({
-  changed: z.boolean(),
-  orca_tool: z.string(),
-});
-
-/**
- * ListToolMappingsArgs
- */
-export const zSystemMcpMappingListBody = z.object({
-  name: z.string().nullish(),
-});
-
-/**
- * ListToolMappingsOutput
- *
- * Tool result
- */
-export const zSystemMcpMappingListResponse = z.object({
-  mappings: z.array(zMappingEntry),
-});
-
-/**
- * SyncToolsArgs
- */
-export const zSystemMcpSyncBody = z.object({
-  all: z.boolean().nullish(),
-  name: z.string().nullish(),
-  threshold: z.number().nullish(),
-});
-
-/**
- * SyncToolsOutput
- *
- * Tool result
- */
-export const zSystemMcpSyncResponse = z.object({
-  results: z.array(zSyncToolsServerEntry),
-});
-
-/**
- * PackageBuildArgs
- */
-export const zSystemPackageBuildBody = z.object({
-  arch: z.string().nullish(),
-  binary: z.string().nullish(),
-  codesign_identity: z.string().nullish(),
-  format: zPackageFormat.nullish(),
-  maintainer: z.string().optional().default('Orca <noreply@orca.local>'),
-  out_dir: z.string().optional().default('.'),
-  pkg_sign_identity: z.string().nullish(),
-});
-
-/**
- * PackageBuildOutput
- *
- * Tool result
- */
-export const zSystemPackageBuildResponse = z.object({
-  arch: z.string(),
-  format: zPackageFormat,
-  out_dir: z.string(),
-  version: z.string(),
-});
-
-/**
- * PkiCaInitArgs
- */
-export const zSystemPkiCaCreateBody = z.record(z.string(), z.unknown());
-
-/**
- * PkiInitReport
- *
- * Tool result
- */
-export const zSystemPkiCaCreateResponse = z.object({
-  ca_path: z.string(),
-  created: z.boolean(),
-  server_cert_path: z.string(),
-});
-
-/**
- * PkiCertIssueArgs
- */
-export const zSystemPkiCertCreateBody = z.object({
-  capability: z.string().optional().default('general'),
-  plugin_id: z.string(),
-});
-
-/**
- * PkiCertReport
- *
- * Tool result
- */
-export const zSystemPkiCertCreateResponse = z.object({
-  capability: z.string(),
-  cert_path: z.string(),
-  key_path: z.string(),
-  plugin_id: z.string(),
-});
-
-/**
- * PkiListArgs
- */
-export const zSystemPkiListBody = z.record(z.string(), z.unknown());
-
-/**
- * PkiListReport
- *
- * Tool result
- */
-export const zSystemPkiListResponse = z.object({
-  certs: z.array(zPkiCertEntry),
-});
-
-/**
- * AddPluginArgs
- */
-export const zSystemPluginCreateBody = z.object({
-  instance_id: z.string().nullish(),
-  manifest: z.string(),
-});
-
-/**
- * AddPluginOutput
- *
- * Tool result
- */
-export const zSystemPluginCreateResponse = z.object({
-  id: z.string(),
-});
-
-/**
- * SetPluginCredArgs
- */
-export const zSystemPluginCredCreateBody = z.object({
-  key: z.string(),
-  plugin: z.string(),
-  value: z.string(),
-});
-
-/**
- * PluginCredMutationResult
- *
- * Tool result
- */
-export const zSystemPluginCredCreateResponse = z.object({
-  changed: z.boolean(),
-  key: z.string(),
-  plugin: z.string(),
-});
-
-/**
- * RemovePluginCredArgs
- */
-export const zSystemPluginCredDeleteBody = z.object({
-  key: z.string(),
-  plugin: z.string(),
-});
-
-/**
- * PluginCredMutationResult
- *
- * Tool result
- */
-export const zSystemPluginCredDeleteResponse = z.object({
-  changed: z.boolean(),
-  key: z.string(),
-  plugin: z.string(),
-});
-
-/**
- * ListPluginCredsArgs
- */
-export const zSystemPluginCredListBody = z.object({
-  plugin: z.string(),
-});
-
-/**
- * ListPluginCredsOutput
- *
- * Tool result
- */
-export const zSystemPluginCredListResponse = z.object({
-  credentials: z.array(zPluginCredEntry),
-  plugin: z.string(),
-});
-
-/**
- * SyncPluginCredsArgs
- */
-export const zSystemPluginCredSyncBody = z.object({
-  plugin: z.string(),
-});
-
-/**
- * SyncPluginCredsOutput
- *
- * Tool result
- */
-export const zSystemPluginCredSyncResponse = z.object({
-  plugin: z.string(),
-});
-
-/**
- * GetPluginDataArgs
- */
-export const zSystemPluginDataGetBody = z.object({
-  key: z.string(),
-  plugin: z.string(),
-});
-
-/**
- * GetPluginDataOutput
- *
- * Tool result
- */
-export const zSystemPluginDataGetResponse = z.object({
-  value: z.unknown(),
-});
-
-/**
- * SetPluginDataArgs
- */
-export const zSystemPluginDataSetBody = z.object({
-  key: z.string(),
-  plugin: z.string(),
-  value: z.unknown(),
-});
-
-/**
- * SetPluginDataOutput
- *
- * Tool result
- */
-export const zSystemPluginDataSetResponse = z.object({
-  ok: z.boolean(),
-});
-
-/**
- * PluginIdArgs
- */
-export const zSystemPluginDeleteBody = z.object({
-  id: z.string(),
-});
-
-/**
- * PluginMutationResult
- *
- * Tool result
- */
-export const zSystemPluginDeleteResponse = z.object({
-  changed: z.boolean(),
-  id: z.string(),
-});
-
-/**
- * ListPluginsArgs
- */
-export const zSystemPluginListBody = z.object({
-  workspace: z.string().nullish(),
-});
-
-/**
- * ListPluginsOutput
- *
- * Tool result
- */
-export const zSystemPluginListResponse = z.object({
-  plugins: z.array(zPluginEntry),
-});
-
-/**
- * UpdatePluginArgs
- */
-export const zSystemPluginUpdateBody = z.object({
-  enabled: z.boolean(),
-  id: z.string(),
-});
-
-/**
- * PluginMutationResult
- *
- * Tool result
- */
-export const zSystemPluginUpdateResponse = z.object({
-  changed: z.boolean(),
-  id: z.string(),
-});
-
-/**
- * ScheduleListArgs
- */
-export const zSystemScheduleListBody = z.object({
-  host: z.string().nullish(),
-});
-
-/**
- * ScheduleListOutput
- *
- * Tool result
- */
-export const zSystemScheduleListResponse = z.object({
-  schedules: z.array(zScheduleEntry),
-});
-
-/**
- * ScheduleRunArgs
- */
-export const zSystemScheduleRunBody = z.object({
-  name: z.string(),
-});
-
-/**
- * ScheduleRunOutput
- *
- * Tool result
- */
-export const zSystemScheduleRunResponse = z.object({
-  duration_ms: z.coerce
-    .bigint()
-    .min(BigInt('-9223372036854775808'), {
-      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
-    })
-    .max(BigInt('9223372036854775807'), {
-      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
-    }),
-  error: z.string().nullish(),
-  job: z.string(),
-  ok: z.boolean(),
-});
-
-/**
- * ScheduleStatusArgs
- */
-export const zSystemScheduleStatusBody = z.object({
-  job: z.string().nullish(),
-});
-
-/**
- * ScheduleStatusOutput
- *
- * Tool result
- */
-export const zSystemScheduleStatusResponse = z.object({
-  jobs: z.array(zJobStatus),
-});
-
-/**
- * SweepOrganizationArgs
- */
-export const zSystemSweepOrganizationBody = z.object({
-  workspace_root: z.string().nullish(),
-});
-
-/**
- * SweepOrganizationOutput
- *
- * Tool result
- */
-export const zSystemSweepOrganizationResponse = z.object({
-  deny: zDenyReport,
-  duration_ms: z.coerce.bigint().gte(BigInt(0)).max(BigInt('18446744073709551615'), {
-    error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
-  }),
-  machete: zMacheteReport,
-  udeps: zUdepsReport,
-  workspace_root: z.string(),
 });
 
 /**
@@ -3575,50 +2575,61 @@ export const zSystemSweepOrganizationResponse = z.object({
 export const zSystemUpdateBody = z.object({
   channel: z.string().nullish(),
   clear_dev_source: z.boolean().optional().default(false),
+  daemon: z.string().nullish(),
   dev_source: z.string().nullish(),
   fqdn: z.string().nullish(),
   hostname: z.string().nullish(),
   lan_v4: z.string().nullish(),
   lan_v6: z.string().nullish(),
   os_packages: z.boolean().optional().default(false),
-  pin: z.boolean().optional().default(false),
+  refresh_host: z.boolean().optional().default(false),
   tailscale_v4: z.string().nullish(),
   tailscale_v6: z.string().nullish(),
-  unpin: z.boolean().optional().default(false),
   version: z.string().nullish(),
 });
 
 /**
  * SystemUpdateOutput
  *
- * Tool result
+ * Result of a `system.update` call.
+ *
+ * Every field carries `#[serde(default)]` so a controller running rc.N can
+ * decode a response from a peer running rc.N-1 even when the older peer
+ * omits a field that was added later. Without this, a single missing field
+ * would fail the entire decode and the controller would report failure for
+ * a call that actually applied successfully on the peer. See
+ * [[project-update-path-fix-plan-2026-06-01]] fix #1.
  */
 export const zSystemUpdateResponse = z.object({
-  addressing_set: z.array(z.string()),
-  applied: z.string().nullish(),
-  available_versions: z.array(zVersionEntry),
-  channel: z.string(),
-  current_version: z.string(),
-  dev_source: z.string().nullish(),
-  errors: z.array(z.string()),
-  fqdn: z.string().nullish(),
-  hostname: z.string().nullish(),
-  latest: z.string().nullish(),
-  notes: z.array(z.string()),
-  os_package_result: z.string().nullish(),
-  pinned_to: z.string().nullish(),
+  addressing_set: z.array(z.string()).optional().default([]),
+  applied: z.string().nullish().default(null),
+  available_versions: z.array(zVersionEntry).optional().default([]),
+  channel: z.string().optional().default(''),
+  current_version: z.string().optional().default(''),
+  dev_source: z.string().nullish().default(null),
+  errors: z.array(z.string()).optional().default([]),
+  fqdn: z.string().nullish().default(null),
+  hostname: z.string().nullish().default(null),
+  latest: z.string().nullish().default(null),
+  notes: z.array(z.string()).optional().default([]),
+  os_package_result: z.string().nullish().default(null),
+  pending_restart: zPendingRestart.nullish().default(null),
+  pinned_to: z.string().nullish().default(null),
 });
 
 /**
- * ListMcpToolsArgs
+ * McpDetailArgs
  */
-export const zSystemMcpFederationListToolsBody = z.record(z.string(), z.unknown());
+export const zMcpDetailBody = z.object({
+  name: z.string().nullish().default(null),
+});
 
 /**
- * ListMcpToolsOutput
+ * McpDetailOutput
  *
  * Tool result
  */
-export const zSystemMcpFederationListToolsResponse = z.object({
-  tools: z.array(zMcpToolEntry),
+export const zMcpDetailResponse = z.object({
+  server: zMcpServerRow.nullish(),
+  tools: z.array(zMcpToolEntry).optional().default([]),
 });
