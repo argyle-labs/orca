@@ -68,7 +68,7 @@ pub fn embedded_for(probed: &str) -> Option<&'static str> {
         .map(|(_, s)| *s)
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex(&hasher.finalize())
@@ -117,20 +117,32 @@ pub async fn schema_pull(cfg: Config, dir: &Path) -> Result<SchemaPull> {
 }
 
 async fn run_introspection(cfg: &Config) -> Result<String> {
-    // We bypass `graphql::Client::introspect` because that returns a parsed
-    // `GraphQlResponse`. We want the raw JSON bytes so what we commit is
-    // exactly what the server emitted — no re-serialization drift.
     let endpoint = format!("{}/graphql", cfg.base_url.trim_end_matches('/'));
+    let mut headers = std::collections::HashMap::new();
+    headers.insert("x-api-key".to_string(), cfg.api_key.clone());
+    introspect_raw(&endpoint, &headers, cfg.insecure).await
+}
+
+/// Run the standard GraphQL introspection query against `endpoint` and
+/// return the raw response text — verbatim bytes, no re-serialization, so
+/// downstream sha256 matches what the server actually sent. `headers` is
+/// passed through (typically `x-api-key`); `insecure` skips TLS cert
+/// verification (Unraid ships self-signed certs by default).
+pub async fn introspect_raw(
+    endpoint: &str,
+    headers: &std::collections::HashMap<String, String>,
+    insecure: bool,
+) -> Result<String> {
     let body = serde_json::json!({
         "query": graphql::INTROSPECTION_QUERY,
         "operationName": "IntrospectionQuery",
     });
     let http = utils::http::Client::new();
-    let mut builder = http
-        .post(&endpoint)
-        .json(body)
-        .header("Authorization", format!("Bearer {}", cfg.token));
-    if cfg.insecure {
+    let mut builder = http.post(endpoint).json(body);
+    for (k, v) in headers {
+        builder = builder.header(k, v);
+    }
+    if insecure {
         builder = builder.insecure(true);
     }
     let resp = builder.send().await.with_context(|| "introspection POST")?;

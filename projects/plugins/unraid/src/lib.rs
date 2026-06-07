@@ -14,7 +14,8 @@ pub mod tools;
 pub mod version;
 
 use graphql::{Client as GraphQlClient, GraphQlErrors};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 use thiserror::Error;
 use unraid_generated::v7_3_1::{
     AddPlugin, ArrayStatus, InstalledPlugins, ParityHistory, RemovePlugin, Shares, VarsVersion,
@@ -22,18 +23,66 @@ use unraid_generated::v7_3_1::{
     vars_version,
 };
 
+use crate::version::UnraidVersion;
+
+/// Which committed schema module backs a [`Client`].
+///
+/// Only one variant today — adding 7.4 is mechanical:
+/// 1. Drop the introspection JSON in `projects/plugins/unraid/schemas/`.
+/// 2. Add a `V7_4_X` variant.
+/// 3. Each `Client` method `match`es on `self.api` and routes to the
+///    matching `unraid_generated::v7_4_X::*` types.
+///
+/// `#[non_exhaustive]` so future variants don't break downstream
+/// `match` statements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ApiVersion {
+    V7_3_1,
+}
+
+impl ApiVersion {
+    /// The version this enum was generated from.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ApiVersion::V7_3_1 => "7.3.1",
+        }
+    }
+
+    /// Pick an [`ApiVersion`] for a [`UnraidVersion`]. Returns `None`
+    /// when the probed version has no matching committed schema — callers
+    /// should warn via [`Client::warn_on_drift`] and either bail or fall
+    /// back to the newest known variant (currently 7.3.1).
+    pub fn from_probed(v: &UnraidVersion) -> Option<Self> {
+        match v.module? {
+            "v7_3_1" => Some(ApiVersion::V7_3_1),
+            _ => None,
+        }
+    }
+
+    /// Newest committed version. Today: `V7_3_1`.
+    pub fn newest() -> Self {
+        ApiVersion::V7_3_1
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub base_url: String,
-    pub token: String,
+    /// Unraid API key, sent as the `x-api-key` header. Generate one in
+    /// Settings → Management Access → API Keys on the Unraid web UI.
+    /// The `Authorization: Bearer` header is ignored by the Unraid GraphQL
+    /// endpoint — calls without `x-api-key` fall through to browser-session
+    /// CSRF auth and fail with `Invalid CSRF token`.
+    pub api_key: String,
     pub insecure: bool,
 }
 
 impl Config {
-    pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Self {
+    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
-            token: token.into(),
+            api_key: api_key.into(),
             insecure: false,
         }
     }
@@ -54,24 +103,78 @@ pub enum UnraidError {
     GraphQl(#[from] GraphQlErrors),
 }
 
+/// Result of [`Client::warn_on_drift`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DriftStatus {
+    /// Live schema hash == committed schema hash for the probed version.
+    Match,
+    /// Live and committed both exist but their hashes differ.
+    Drifted {
+        version: String,
+        embedded_sha: String,
+        live_sha: String,
+    },
+    /// Live host's version has no committed schema in `unraid-generated`.
+    Unsupported { version: String, live_sha: String },
+    /// `vars { version }` returned null — couldn't determine the version.
+    ProbeReturnedNull,
+    /// Introspection POST failed (network / auth). Caller's actual query
+    /// will surface the underlying error; drift check is best-effort.
+    ProbeFailed,
+}
+
+fn warned_keys() -> &'static Mutex<HashSet<String>> {
+    static SET: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    SET.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
 #[derive(Clone)]
 pub struct Client {
     endpoint: String,
     headers: HashMap<String, String>,
     insecure: bool,
+    api: ApiVersion,
     gql: GraphQlClient,
 }
 
 impl Client {
+    /// Build a client pinned to the newest committed schema
+    /// ([`ApiVersion::newest`]). Use [`Client::new_with`] to pin a
+    /// specific version, or [`Client::new_probed`] to auto-detect.
     pub fn new(cfg: Config) -> Self {
+        Self::new_with(cfg, ApiVersion::newest())
+    }
+
+    /// Build a client pinned to a specific [`ApiVersion`].
+    pub fn new_with(cfg: Config, api: ApiVersion) -> Self {
+        let endpoint = cfg.endpoint();
         let mut headers = HashMap::new();
-        headers.insert("Authorization".to_string(), format!("Bearer {}", cfg.token));
+        headers.insert("x-api-key".to_string(), cfg.api_key);
         Self {
-            endpoint: cfg.endpoint(),
+            endpoint,
             headers,
             insecure: cfg.insecure,
+            api,
             gql: GraphQlClient::new(),
         }
+    }
+
+    /// Probe the live host's version, pick the matching [`ApiVersion`],
+    /// and build a client. Returns `Err` only if the probe call itself
+    /// failed (network / auth); if the probed version has no committed
+    /// schema, falls back to [`ApiVersion::newest`] and emits a drift
+    /// warning on first use.
+    pub async fn new_probed(cfg: Config) -> Result<Self, UnraidError> {
+        let probe = Self::new(cfg.clone());
+        let raw = probe.probe_version().await?.unwrap_or_default();
+        let v = UnraidVersion::parse(&raw);
+        let api = ApiVersion::from_probed(&v).unwrap_or_else(ApiVersion::newest);
+        Ok(Self::new_with(cfg, api))
+    }
+
+    /// The schema version this client routes through.
+    pub fn api_version(&self) -> ApiVersion {
+        self.api
     }
 
     pub async fn installed_plugins(&self) -> Result<installed_plugins::ResponseData, UnraidError> {
@@ -99,12 +202,76 @@ impl Client {
     }
 
     /// Probe the running Unraid version via `vars { version }`. Requires
-    /// a valid bearer token — introspection is open but version isn't.
-    /// Returns the raw version string ("7.3.1", "7.3.0-rc1", etc.) so
-    /// callers can route to the matching generated client module.
+    /// a valid API key (`x-api-key` header) — introspection is open but
+    /// `vars` falls through to browser-session CSRF auth when unkeyed and
+    /// fails. Returns the raw version string ("7.3.1", "7.3.0-rc1", etc.)
+    /// so callers can route to the matching generated client module.
     pub async fn probe_version(&self) -> Result<Option<String>, UnraidError> {
         let data = self.run::<VarsVersion>(vars_version::Variables).await?;
         Ok(data.vars.version)
+    }
+
+    /// Outcome of a [`Client::warn_on_drift`] call.
+    /// `unsupported` means the live host's version has no committed
+    /// schema; `drifted` means we have a committed schema but its hash
+    /// differs from the live introspection.
+    ///
+    /// Both states emit one `tracing::warn` per (endpoint, version, live
+    /// sha) tuple — repeated calls within the same process are silent.
+    pub async fn warn_on_drift(&self) -> Result<DriftStatus, UnraidError> {
+        let version = match self.probe_version().await? {
+            Some(v) => v,
+            None => return Ok(DriftStatus::ProbeReturnedNull),
+        };
+        let embedded = schema_pull::embedded_for(&version);
+        let live_raw =
+            match schema_pull::introspect_raw(&self.endpoint, &self.headers, self.insecure).await {
+                Ok(s) => s,
+                Err(_) => return Ok(DriftStatus::ProbeFailed),
+            };
+        let live_sha = schema_pull::sha256_hex(live_raw.as_bytes());
+        let status = match embedded {
+            None => DriftStatus::Unsupported {
+                version: version.clone(),
+                live_sha: live_sha.clone(),
+            },
+            Some(e) if schema_pull::sha256_hex(e.as_bytes()) == live_sha => DriftStatus::Match,
+            Some(e) => DriftStatus::Drifted {
+                version: version.clone(),
+                embedded_sha: schema_pull::sha256_hex(e.as_bytes()),
+                live_sha: live_sha.clone(),
+            },
+        };
+        // Dedupe key: same endpoint + same version + same live sha = one warn.
+        let key = format!("{}|{}|{}", self.endpoint, version, live_sha);
+        if matches!(
+            status,
+            DriftStatus::Drifted { .. } | DriftStatus::Unsupported { .. }
+        ) && warned_keys()
+            .lock()
+            .expect("warned_keys poisoned")
+            .insert(key)
+        {
+            match &status {
+                DriftStatus::Drifted { embedded_sha, .. } => tracing::warn!(
+                    endpoint = %self.endpoint,
+                    version = %version,
+                    embedded_sha256 = %embedded_sha,
+                    live_sha256 = %live_sha,
+                    "unraid schema drift: live introspection differs from committed schema — \
+                     queries may break; run `unraid.schema --check_drift` to confirm",
+                ),
+                DriftStatus::Unsupported { .. } => tracing::warn!(
+                    endpoint = %self.endpoint,
+                    version = %version,
+                    live_sha256 = %live_sha,
+                    "unraid version has no committed schema — pull one via \
+                     `unraid.schema --from <url> --dir projects/plugins/unraid/schemas`",
+                ),
+                _ => {}
+            }
+        }
+        Ok(status)
     }
 
     pub async fn remove_plugin(
@@ -143,11 +310,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn installed_plugins_sends_bearer_and_parses_scalar() {
+    async fn installed_plugins_sends_api_key_and_parses_scalar() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/graphql"))
-            .and(header("authorization", "Bearer tok"))
+            .and(header("x-api-key", "tok"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "data": { "installedUnraidPlugins": ["foo", "bar"] }
             })))
@@ -214,6 +381,89 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(v.as_deref(), Some("7.3.1"));
+    }
+
+    #[tokio::test]
+    async fn new_probed_selects_api_version_from_live_probe() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "vars": { "version": "7.3.1-rc4" } }
+            })))
+            .mount(&server)
+            .await;
+        let c = Client::new_probed(cfg(server.uri())).await.unwrap();
+        assert_eq!(c.api_version(), ApiVersion::V7_3_1);
+    }
+
+    #[tokio::test]
+    async fn new_probed_falls_back_to_newest_when_unknown_version() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "vars": { "version": "9.9.9" } }
+            })))
+            .mount(&server)
+            .await;
+        let c = Client::new_probed(cfg(server.uri())).await.unwrap();
+        assert_eq!(c.api_version(), ApiVersion::newest());
+    }
+
+    #[test]
+    fn api_version_round_trips_through_parsed_version() {
+        let v = UnraidVersion::parse("7.3.1");
+        assert_eq!(ApiVersion::from_probed(&v), Some(ApiVersion::V7_3_1));
+        assert_eq!(ApiVersion::V7_3_1.as_str(), "7.3.1");
+    }
+
+    #[tokio::test]
+    async fn warn_on_drift_flags_mismatch() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "vars": { "version": "7.3.1" } }
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "__schema": { "queryType": {"name": "Query"} } }
+            })))
+            .mount(&server)
+            .await;
+        let status = Client::new(cfg(server.uri()))
+            .warn_on_drift()
+            .await
+            .unwrap();
+        assert!(matches!(status, DriftStatus::Drifted { .. }));
+    }
+
+    #[tokio::test]
+    async fn warn_on_drift_unsupported_for_unknown_version() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "vars": { "version": "9.9.9" } }
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        let status = Client::new(cfg(server.uri()))
+            .warn_on_drift()
+            .await
+            .unwrap();
+        assert!(matches!(status, DriftStatus::Unsupported { .. }));
     }
 
     #[test]

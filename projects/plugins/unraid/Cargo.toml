@@ -22,6 +22,7 @@ schemars    = { workspace = true }
 inventory   = { workspace = true }
 tokio       = { workspace = true }
 async-trait = { workspace = true }
+tracing     = { workspace = true }
 clap        = { workspace = true, optional = true }
 graphql_client = { workspace = true }
 utils    = { path = "../../utils" }

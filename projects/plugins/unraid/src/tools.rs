@@ -4,7 +4,7 @@
 //! actions selected via args.
 //!
 //! Default behaviour (no args): list embedded schema versions. With
-//! `from` + `token`: probe the live host and either write a fresh
+//! `from` + `api_key`: probe the live host and either write a fresh
 //! introspection JSON (`dir`) or report drift (`check_drift`).
 
 use std::path::PathBuf;
@@ -22,10 +22,11 @@ pub struct UnraidSchemaArgs {
     /// Required to do anything other than list embedded versions.
     #[cfg_attr(feature = "cli", arg(long))]
     pub from: Option<String>,
-    /// Bearer token for the Unraid GraphQL endpoint. Required when `from`
-    /// is set.
+    /// Unraid API key (`x-api-key` header). Required when `from` is set.
+    /// Generate one in the Unraid UI under Settings → Management Access →
+    /// API Keys.
     #[cfg_attr(feature = "cli", arg(long))]
-    pub token: Option<String>,
+    pub api_key: Option<String>,
     /// Accept self-signed TLS certificates (common on Unraid).
     #[cfg_attr(feature = "cli", arg(long, default_value_t = false))]
     pub insecure: bool,
@@ -74,7 +75,7 @@ pub struct UnraidSchemaOutput {
 }
 
 /// Inspect and refresh the Unraid GraphQL schemas used by `unraid::Client`.
-/// Without args: lists embedded versions. With `from` + `token`: probes a
+/// Without args: lists embedded versions. With `from` + `api_key`: probes a
 /// live host and either pulls a fresh introspection (when `dir` set) or
 /// reports drift (when `check_drift` set).
 #[orca_tool(domain = "unraid", verb = "schema")]
@@ -95,11 +96,11 @@ async fn unraid_schema(
         });
     };
 
-    let token = args
-        .token
+    let api_key = args
+        .api_key
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("`token` is required when `from` is set"))?;
-    let cfg = Config::new(from, token).insecure(args.insecure);
+        .ok_or_else(|| anyhow::anyhow!("`api_key` is required when `from` is set"))?;
+    let cfg = Config::new(from, api_key).insecure(args.insecure);
 
     if args.check_drift {
         if args.dir.is_some() {
@@ -195,7 +196,7 @@ mod tests {
         let out = unraid_schema(
             UnraidSchemaArgs {
                 from: Some(server.uri()),
-                token: Some("tok".into()),
+                api_key: Some("tok".into()),
                 dir: Some(tmp.path().to_path_buf()),
                 ..Default::default()
             },
@@ -230,7 +231,7 @@ mod tests {
         let out = unraid_schema(
             UnraidSchemaArgs {
                 from: Some(server.uri()),
-                token: Some("tok".into()),
+                api_key: Some("tok".into()),
                 check_drift: true,
                 ..Default::default()
             },
@@ -245,7 +246,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn from_without_token_errors() {
+    async fn from_without_api_key_errors() {
         let ctx = empty_ctx();
         let err = unraid_schema(
             UnraidSchemaArgs {
@@ -256,7 +257,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err.to_string().contains("token"));
+        assert!(err.to_string().contains("api_key"));
     }
 
     #[tokio::test]
@@ -265,7 +266,7 @@ mod tests {
         let err = unraid_schema(
             UnraidSchemaArgs {
                 from: Some("http://srv".into()),
-                token: Some("tok".into()),
+                api_key: Some("tok".into()),
                 check_drift: true,
                 dir: Some(PathBuf::from("/tmp")),
                 ..Default::default()
