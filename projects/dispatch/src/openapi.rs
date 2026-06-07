@@ -55,12 +55,36 @@ pub fn inject_tool_paths(spec: &mut Value) {
         strip_meta(&mut args_schema);
         strip_meta(&mut output_schema);
 
+        // Summary = canonical tool name (drives the Scalar left-nav title).
+        // Description = doc comment, with the hand-written `[MUTATES STATE]`
+        // prefix stripped — POST already signals state mutation visually, so
+        // the prefix is redundant noise in the description body.
+        let clean_desc = entry
+            .description
+            .strip_prefix("[MUTATES STATE] ")
+            .unwrap_or(entry.description);
+        // CLI + MCP invocation forms rendered as Scalar code-sample tabs on
+        // the same operation page. Surfaces the 1:1 parity guarantee: every
+        // `#[orca_tool]` is callable identically over REST, CLI, and MCP.
+        let cli_form = format!("orca {}", entry.name.replace('.', " "));
+        let mcp_form = entry.name.replace('.', "_");
+        let mcp_sample = serde_json::to_string_pretty(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": mcp_form, "arguments": {} }
+        }))
+        .unwrap_or_default();
         let path_item = json!({
             "post": {
                 "operationId": operation_id_for(entry.name),
-                "summary": entry.description,
-                "description": entry.description,
+                "summary": entry.name,
+                "description": clean_desc,
                 "tags": [domain],
+                "x-codeSamples": [
+                    { "lang": "shell", "label": "CLI",  "source": format!("{cli_form} '<args-json>'") },
+                    { "lang": "json",  "label": "MCP",  "source": mcp_sample },
+                ],
                 "requestBody": {
                     "required": true,
                     "content": {
@@ -113,6 +137,28 @@ pub fn inject_tool_paths(spec: &mut Value) {
                 schemas_obj.entry(k).or_insert(v);
             }
         }
+    }
+
+    // Emit `x-tagGroups` (Scalar/Redoc extension) so the left nav renders
+    // hierarchically: `auth.session` / `auth.token` collapse under an
+    // `auth` heading instead of appearing as sibling top-level groups.
+    // Grouping derives from dotted domain prefixes — any tag containing
+    // a `.` rolls up under the prefix before the first dot.
+    if !tags_seen.is_empty() {
+        let mut groups: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for tag in &tags_seen {
+            let parent = tag.split_once('.').map(|(p, _)| p).unwrap_or(tag);
+            groups
+                .entry(parent.to_string())
+                .or_default()
+                .push(tag.clone());
+        }
+        let x_tag_groups: Vec<Value> = groups
+            .into_iter()
+            .map(|(name, tags)| json!({ "name": name, "tags": tags }))
+            .collect();
+        obj.insert("x-tagGroups".to_string(), Value::Array(x_tag_groups));
     }
 
     // Append any new domain tags so generated SDKs group methods correctly.

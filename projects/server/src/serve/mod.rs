@@ -503,14 +503,6 @@ async fn scalar_handler(
     render_scalar(&spec_url, "API Reference")
 }
 
-async fn scalar_cli_handler() -> axum::response::Response {
-    render_scalar("/api/openapi/cli.json", "orca CLI Reference")
-}
-
-async fn scalar_mcp_handler() -> axum::response::Response {
-    render_scalar("/api/openapi/mcp.json", "orca MCP Reference")
-}
-
 fn render_scalar(spec_url: &str, title: &str) -> axum::response::Response {
     use axum::body::Body;
     use axum::http::{Response, header};
@@ -1002,18 +994,11 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
             "/api/openapi/public.json",
             get(openapi::openapi_public_handler),
         )
-        // Sister specs: same tool registry, framed as CLI / MCP
-        // invocations so the Scalar viewer at /scalar/cli and /scalar/mcp
-        // can present them through the right lens.
-        .route("/api/openapi/cli.json", get(openapi::openapi_cli_handler))
-        .route("/api/openapi/mcp.json", get(openapi::openapi_mcp_handler))
         // Scalar API reference viewer — served by Rust so it works in the
         // prerendered static build (SvelteKit SSR routes don't survive embedding).
-        // The bare /scalar route shows the REST surface; /scalar/cli and
-        // /scalar/mcp point Scalar at the reframed sister specs.
+        // One unified spec: per-operation `x-codeSamples` render REST / CLI /
+        // MCP invocation forms as tabs on the same page.
         .route("/scalar", get(scalar_handler))
-        .route("/scalar/cli", get(scalar_cli_handler))
-        .route("/scalar/mcp", get(scalar_mcp_handler))
         // Open probe: lets the browser TokenGate decide which UI to show
         // (one-click bootstrap vs. paste an existing token).
         .route("/api/auth/bootstrap", get(bootstrap_status_handler))
