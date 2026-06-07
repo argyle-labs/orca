@@ -506,6 +506,14 @@ async fn scalar_handler(
 fn render_scalar(spec_url: &str, title: &str) -> axum::response::Response {
     use axum::body::Body;
     use axum::http::{Response, header};
+    // Inline sign-in widget. Scalar runs same-origin with the API, so the
+    // browser auto-attaches the `orca_session` cookie to every "try it"
+    // request once you sign in here. The widget lives in a fixed banner so
+    // it's visible regardless of which operation is open. It calls
+    // `/api/auth/web/signin` directly with `credentials: include` so the
+    // cookie ends up in the browser jar even though Scalar's own fetcher
+    // doesn't touch it. The "me" probe on load tells you whether an
+    // existing cookie is still good without forcing a sign-in.
     let html = format!(
         r#"<!doctype html>
 <html>
@@ -513,9 +521,94 @@ fn render_scalar(spec_url: &str, title: &str) -> axum::response::Response {
   <title>{title}</title>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>body {{ margin: 0; }}</style>
+  <style>
+    body {{ margin: 0; }}
+    #orca-auth {{
+      position: sticky; top: 0; z-index: 9999;
+      display: flex; gap: 8px; align-items: center;
+      padding: 6px 12px;
+      background: #0f1117; color: #cdd6f4;
+      border-bottom: 1px solid #313244;
+      font: 13px/1.4 ui-sans-serif, system-ui, sans-serif;
+    }}
+    #orca-auth input {{
+      background: #1e1e2e; color: #cdd6f4;
+      border: 1px solid #45475a; border-radius: 4px;
+      padding: 4px 8px; font: inherit;
+    }}
+    #orca-auth button {{
+      background: #89b4fa; color: #11111b; border: 0;
+      border-radius: 4px; padding: 4px 12px; font: inherit;
+      cursor: pointer;
+    }}
+    #orca-auth button:hover {{ background: #74c7ec; }}
+    #orca-auth .status {{ margin-left: auto; opacity: 0.85; }}
+    #orca-auth .ok {{ color: #a6e3a1; }}
+    #orca-auth .err {{ color: #f38ba8; }}
+  </style>
 </head>
 <body>
+  <div id="orca-auth">
+    <strong>orca:</strong>
+    <input id="orca-u" placeholder="username" autocomplete="username" />
+    <input id="orca-p" type="password" placeholder="password" autocomplete="current-password" />
+    <button id="orca-signin" type="button">Sign in</button>
+    <button id="orca-signout" type="button">Sign out</button>
+    <span class="status" id="orca-status">checking session…</span>
+  </div>
+  <script>
+    (function () {{
+      const status = document.getElementById('orca-status');
+      const setStatus = (msg, cls) => {{
+        status.textContent = msg;
+        status.className = 'status ' + (cls || '');
+      }};
+      const checkMe = async () => {{
+        try {{
+          const r = await fetch('/api/auth/web/me', {{
+            credentials: 'include',
+            headers: {{ 'Accept': 'application/json' }},
+          }});
+          if (r.ok) {{
+            const j = await r.json();
+            setStatus(`signed in as ${{j.username}} (${{j.role}})`, 'ok');
+          }} else {{
+            setStatus('not signed in', 'err');
+          }}
+        }} catch (e) {{
+          setStatus(`probe error: ${{e}}`, 'err');
+        }}
+      }};
+      document.getElementById('orca-signin').addEventListener('click', async () => {{
+        const username = document.getElementById('orca-u').value.trim();
+        const password = document.getElementById('orca-p').value;
+        if (!username || !password) {{ setStatus('need username + password', 'err'); return; }}
+        setStatus('signing in…');
+        try {{
+          const r = await fetch('/api/auth/web/signin', {{
+            method: 'POST',
+            credentials: 'include',
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: JSON.stringify({{ username, password }}),
+          }});
+          if (r.ok) {{
+            document.getElementById('orca-p').value = '';
+            await checkMe();
+          }} else {{
+            const txt = await r.text();
+            setStatus(`signin failed: ${{r.status}} ${{txt}}`, 'err');
+          }}
+        }} catch (e) {{ setStatus(`signin error: ${{e}}`, 'err'); }}
+      }});
+      document.getElementById('orca-signout').addEventListener('click', async () => {{
+        try {{
+          await fetch('/api/auth/web/signout', {{ method: 'POST', credentials: 'include' }});
+        }} catch (_e) {{}}
+        await checkMe();
+      }});
+      checkMe();
+    }})();
+  </script>
   <script id="api-reference" data-url="{spec_url}"></script>
   <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
 </body>

@@ -186,11 +186,16 @@ const AUTH_OPEN_PREFIXES: &[&str] = &[
     // decide which sign-in flow to show. Handler enforces loopback + zero-tokens
     // itself, so leaving it open in middleware is safe.
     "/api/auth/bootstrap",
-    // Sign-in / sign-up / sign-up-status: the browser hits these before it
-    // has a session cookie. Handlers validate credentials themselves.
-    "/api/auth/signin",
-    "/api/auth/signup",
-    "/api/auth/signup_status",
+    // Sign-in / sign-up / sign-up-status / sign-out: the browser hits these
+    // before (or to clear) a session cookie. Handlers validate credentials
+    // themselves. NOTE: `/me` and `/change_password` are deliberately NOT
+    // open — they need the cookie→identity chain to run so the handler can
+    // read `req.extensions().get::<AuthIdentity>()`. Opening them here would
+    // make `/me` always return "not signed in" even with a valid cookie.
+    "/api/auth/web/signin",
+    "/api/auth/web/signup",
+    "/api/auth/web/signup_status",
+    "/api/auth/web/signout",
 ];
 
 /// Tool name inside the `/api/v1/` namespace that the bootstrap window is
@@ -692,9 +697,13 @@ mod tests {
     fn is_open_path_matches_known_open_prefixes() {
         assert!(is_open_path("/api/health"));
         assert!(is_open_path("/api/openapi/spec.json"));
-        assert!(is_open_path("/api/auth/signin"));
-        assert!(is_open_path("/api/auth/signup"));
-        assert!(is_open_path("/api/auth/signup_status"));
+        assert!(is_open_path("/api/auth/web/signin"));
+        assert!(is_open_path("/api/auth/web/signup"));
+        assert!(is_open_path("/api/auth/web/signup_status"));
+        assert!(is_open_path("/api/auth/web/me"));
+        // Old top-level paths must NOT be open — they were moved under /web/
+        // 2026-06-07 to disambiguate from the `auth.login` orca-tool surface.
+        assert!(!is_open_path("/api/auth/signin"));
         assert!(is_open_path("/api/auth/bootstrap"));
         assert!(is_open_path("/scalar"));
     }

@@ -43,6 +43,36 @@ pub fn inject_tool_paths(spec: &mut Value) {
         Value::String("https://json-schema.org/draft/2020-12/schema".to_string()),
     );
 
+    // Declare the cookie-based session as a security scheme so Scalar's
+    // per-operation UI can show a lock icon and explain how to authenticate.
+    // The Scalar wrapper page (`render_scalar` in server) renders an inline
+    // sign-in widget that calls `/api/auth/web/signin` and lets the browser
+    // cookie jar do the rest — every subsequent "try it" request is
+    // same-origin so the cookie auto-attaches.
+    let components = obj
+        .entry("components".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if let Some(c) = components.as_object_mut() {
+        let schemes = c
+            .entry("securitySchemes".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Some(s) = schemes.as_object_mut() {
+            s.insert(
+                "cookieAuth".to_string(),
+                json!({
+                    "type": "apiKey",
+                    "in": "cookie",
+                    "name": "orca_session",
+                    "description": "Browser session cookie issued by `POST /api/auth/web/signin`. Sign in via the widget at the top of this page; the cookie auto-attaches to every same-origin Try-It request."
+                }),
+            );
+        }
+    }
+    obj.insert(
+        "security".to_string(),
+        Value::Array(vec![json!({ "cookieAuth": [] })]),
+    );
+
     let mut new_paths: Map<String, Value> = Map::new();
     let mut hoisted_defs: Map<String, Value> = Map::new();
     let mut tags_seen = std::collections::BTreeSet::<String>::new();
