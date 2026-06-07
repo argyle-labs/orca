@@ -769,7 +769,9 @@ PORT=12000
 LOG_DIR="$APPDATA/.orca/logs"
 LOG_FILE="$LOG_DIR/daemon.log"
 PID_FILE=/var/run/orca.pid
-WRAPPER=/var/run/orca-wrapper.sh
+# Wrapper lives under appdata, not /var/run — /var/run is mounted noexec
+# on Unraid (Slackware default), so a wrapper placed there can't execute.
+WRAPPER="$APPDATA/run.sh"
 
 id "$USER" >/dev/null 2>&1 || useradd -r -m -d "$HOME_DIR" -s /bin/bash "$USER" || true
 mkdir -p "$APPDATA/bin" "$LOG_DIR"
@@ -832,8 +834,9 @@ fn render_plg_remove_script() -> &'static str {
     // declaring success.
     r#"#!/bin/bash
 PLUGIN=/boot/config/plugins/orca
+APPDATA=/mnt/user/appdata/orca
 PID_FILE=/var/run/orca.pid
-WRAPPER=/var/run/orca-wrapper.sh
+WRAPPER="$APPDATA/run.sh"
 PORT=12000
 
 # Kill the respawn wrapper FIRST so it doesn't restart the daemon out
