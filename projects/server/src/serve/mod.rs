@@ -496,19 +496,29 @@ async fn bootstrap_status_handler(
 async fn scalar_handler(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> axum::response::Response {
-    use axum::body::Body;
-    use axum::http::{Response, header};
-
     let spec_url = params
         .get("url")
         .cloned()
         .unwrap_or_else(|| "/api/openapi.json".to_string());
+    render_scalar(&spec_url, "API Reference")
+}
 
+async fn scalar_cli_handler() -> axum::response::Response {
+    render_scalar("/api/openapi/cli.json", "orca CLI Reference")
+}
+
+async fn scalar_mcp_handler() -> axum::response::Response {
+    render_scalar("/api/openapi/mcp.json", "orca MCP Reference")
+}
+
+fn render_scalar(spec_url: &str, title: &str) -> axum::response::Response {
+    use axum::body::Body;
+    use axum::http::{Response, header};
     let html = format!(
         r#"<!doctype html>
 <html>
 <head>
-  <title>API Reference</title>
+  <title>{title}</title>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>body {{ margin: 0; }}</style>
@@ -992,9 +1002,18 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
             "/api/openapi/public.json",
             get(openapi::openapi_public_handler),
         )
+        // Sister specs: same tool registry, framed as CLI / MCP
+        // invocations so the Scalar viewer at /scalar/cli and /scalar/mcp
+        // can present them through the right lens.
+        .route("/api/openapi/cli.json", get(openapi::openapi_cli_handler))
+        .route("/api/openapi/mcp.json", get(openapi::openapi_mcp_handler))
         // Scalar API reference viewer — served by Rust so it works in the
         // prerendered static build (SvelteKit SSR routes don't survive embedding).
+        // The bare /scalar route shows the REST surface; /scalar/cli and
+        // /scalar/mcp point Scalar at the reframed sister specs.
         .route("/scalar", get(scalar_handler))
+        .route("/scalar/cli", get(scalar_cli_handler))
+        .route("/scalar/mcp", get(scalar_mcp_handler))
         // Open probe: lets the browser TokenGate decide which UI to show
         // (one-click bootstrap vs. paste an existing token).
         .route("/api/auth/bootstrap", get(bootstrap_status_handler))
