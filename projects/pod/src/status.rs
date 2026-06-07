@@ -1,15 +1,14 @@
-//! `host_status` tools — persisted per-peer system snapshots.
+//! `pod.history` — snapshot history for one peer.
 //!
-//! Two surfaces:
-//!   * `host_status.list` — latest row for every peer present in the local
-//!     DB. Drives the cross-mesh dashboard without a live RPC fanout.
-//!   * `host_status.detail` — full snapshot history for one peer, with an
-//!     optional `since` watermark. Used by the UI for charts and by the
-//!     sync puller to ask peers for rows it doesn't have yet.
+//! Latest-snapshot-per-peer is already returned by `pod.list` (each member
+//! row carries an optional `system` field enriched from the local
+//! `host_status` table), so no separate `pod.status.list` is needed. What
+//! remains is the per-peer timeseries query used by the UI charts and the
+//! sync puller's watermarked pull.
 //!
-//! Authority: the receiving host's DB owns its `peer_id=own` rows. Every
-//! other row was mirrored from a peer via the pull-based sync task. Tools
-//! never mutate state — writers live in the server's background tasks.
+//! Authority: the receiving host's DB owns its own rows; every other row
+//! was mirrored from a peer via the pull-based sync task. The tool is
+//! read-only — writers live in the server's background tasks.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -33,10 +32,6 @@ pub struct HostStatusRowDto {
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub struct HostStatusRows(pub Vec<HostStatusRowDto>);
-
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct HostStatusRowsArgs {}
 
 #[cfg_attr(feature = "cli", derive(clap::Args))]
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -68,20 +63,11 @@ fn rows_to_dtos(rows: Vec<db::host_status::HostStatusRow>) -> Vec<HostStatusRowD
         .collect()
 }
 
-/// Latest persisted snapshot per peer from the local DB. No network IO.
-#[orca_tool(domain = "pod.status", verb = "list")]
-async fn host_status_list(
-    _args: HostStatusRowsArgs,
-    _ctx: &contract::ToolCtx,
-) -> anyhow::Result<HostStatusRows> {
-    let conn = db::open_default()?;
-    let rows = db::host_status::latest_per_peer(&conn)?;
-    Ok(HostStatusRows(rows_to_dtos(rows)))
-}
-
 /// Snapshot history for one peer, newest-first. Both the UI (timeseries)
-/// and the sync puller (watermarked pull) use this.
-#[orca_tool(domain = "pod.status", verb = "detail")]
+/// and the sync puller (watermarked pull) use this. Latest-per-peer is
+/// already on `pod.list` (each member row enriches its `system` field
+/// from the same `host_status` table), so no separate list verb exists.
+#[orca_tool(domain = "pod", verb = "history")]
 async fn host_status_detail(
     args: HostStatusDetailArgs,
     _ctx: &contract::ToolCtx,
@@ -134,23 +120,8 @@ mod tests {
             .unwrap();
     }
 
-    #[tokio::test]
-    async fn host_status_list_returns_latest_per_peer() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let ctx = empty_ctx();
-        db::with_db_path(tmp.path().to_path_buf(), async move {
-            let t = now();
-            seed(&db::open_default().unwrap(), t);
-            let out = host_status_list(HostStatusRowsArgs {}, &ctx).await.unwrap();
-            let mut by_peer: std::collections::HashMap<_, _> =
-                out.0.iter().map(|r| (r.peer_id.clone(), r)).collect();
-            assert_eq!(by_peer.len(), 2);
-            // alpha's newest row is t-100; beta's is t-150.
-            assert_eq!(by_peer.remove("alpha").unwrap().snapshot_at_unix, t - 100);
-            assert_eq!(by_peer.remove("beta").unwrap().snapshot_at_unix, t - 150);
-        })
-        .await;
-    }
+    // host_status_list deleted 2026-06-07: pod.status.list folded into
+    // pod.list (which already enriches members from the same DB table).
 
     #[tokio::test]
     async fn host_status_detail_returns_history_newest_first() {

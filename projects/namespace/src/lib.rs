@@ -163,27 +163,32 @@ async fn namespace_use(
     native::use_namespace(&ctx.config, &args.spec).await
 }
 
-/// [MUTATES STATE] Share a namespace with another user.
-#[orca_tool(domain = "namespace.share", verb = "create")]
-async fn namespace_share_create(
+/// [MUTATES STATE] Grant another user access to a namespace.
+///
+/// `role` is `viewer` (read-only) or `collaborator` (read/write). The word
+/// "share" is intentionally avoided here because orca reserves `share.*`
+/// for filesystem-protocol shares (smb/nfs/s3). Granting another principal
+/// access to a namespace is an access-control change, not a share.
+#[orca_tool(domain = "namespace.access", verb = "create")]
+async fn namespace_access_create(
     args: NamespaceShareArgs,
     ctx: &contract::ToolCtx,
 ) -> anyhow::Result<NamespaceMutationResult> {
     native::share(&ctx.config, &args.spec, &args.user, &args.role).await
 }
 
-/// [MUTATES STATE] Remove a share from a namespace.
-#[orca_tool(domain = "namespace.share", verb = "delete")]
-async fn namespace_share_delete(
+/// [MUTATES STATE] Revoke a user's access to a namespace.
+#[orca_tool(domain = "namespace.access", verb = "delete")]
+async fn namespace_access_delete(
     args: NamespaceUnshareArgs,
     ctx: &contract::ToolCtx,
 ) -> anyhow::Result<NamespaceMutationResult> {
     native::unshare(&ctx.config, &args.spec, &args.user).await
 }
 
-/// List shares on a namespace (owner only).
-#[orca_tool(domain = "namespace.share", verb = "list")]
-async fn namespace_share_list(
+/// List the access grants on a namespace (owner only).
+#[orca_tool(domain = "namespace.access", verb = "list")]
+async fn namespace_access_list(
     args: NamespaceSpecArgs,
     ctx: &contract::ToolCtx,
 ) -> anyhow::Result<NamespaceSharesReport> {

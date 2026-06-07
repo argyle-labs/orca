@@ -117,7 +117,7 @@ async fn system_delete(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> Result<Ins
     Ok(report)
 }
 
-// ── system.fetch_release_asset — delegate-on-miss holder side ─────────────
+// ── system.serve_release — delegate-on-miss holder side ──────────────────
 //
 // Peer-dispatchable. A peer whose `github_token` secret is empty calls this
 // on a paired peer that DOES hold the token; the holder fetches the release
@@ -159,12 +159,12 @@ pub struct FetchReleaseAssetOutput {
     pub version: String,
 }
 
-/// Fetch a release asset from GitHub on behalf of a peer that lacks the
+/// Serve a release asset from GitHub on behalf of a peer that lacks the
 /// `github_token` secret. Resolves the token locally, downloads the asset
 /// for the requested `target`, verifies sha256 against the release
 /// checksum blob, and returns the bytes base64-encoded.
-#[orca_tool(domain = "system", verb = "fetch_release_asset")]
-async fn system_fetch_release_asset(
+#[orca_tool(domain = "system", verb = "serve_release")]
+async fn system_serve_release(
     args: FetchReleaseAssetArgs,
     _ctx: &contract::ToolCtx,
 ) -> Result<FetchReleaseAssetOutput> {
@@ -687,11 +687,11 @@ async fn delegate_fetch_and_apply(
             channel: Some(channel.as_marker().to_string()),
         };
         // Setting ctx.peer triggers the macro-emitted peer_dispatch stanza
-        // inside `system_fetch_release_asset`, routing the call through
+        // inside `system_serve_release`, routing the call through
         // RemoteExec to `peer.peer_hostname` and returning the typed
         // `FetchReleaseAssetOutput` directly.
         let peered = ctx.clone().with_peer(peer.peer_hostname.clone());
-        let out = match system_fetch_release_asset(args, &peered).await {
+        let out = match system_serve_release(args, &peered).await {
             Ok(o) => o,
             Err(e) => {
                 errs.push(format!("{}: {e}", peer.peer_hostname));
