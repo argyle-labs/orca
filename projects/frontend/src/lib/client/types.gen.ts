@@ -4913,73 +4913,6 @@ export type SystemDetailResponses = {
 
 export type SystemDetailResponse = SystemDetailResponses[keyof SystemDetailResponses];
 
-export type SystemFetchReleaseAssetData = {
-  /**
-   * FetchReleaseAssetArgs
-   *
-   * Args for [`system_fetch_release_asset`].
-   */
-  body: {
-    /**
-     * Channel the requester wants the latest of (`stable` | `rc`). Required
-     * when `version` is omitted; ignored when `version` is present.
-     */
-    channel?: string | null;
-    /**
-     * Rust target triple of the requester (e.g. `x86_64-unknown-linux-gnu`,
-     * `aarch64-apple-darwin`). The holder may be on a different arch, so
-     * the caller MUST specify the asset they need.
-     */
-    target: string;
-    /**
-     * Release tag to fetch, with or without `v` prefix (e.g. `0.0.6-rc.15`
-     * or `v0.0.6-rc.15`). Optional — when omitted the holder resolves the
-     * channel's latest tag using its own GitHub token.
-     */
-    version?: string | null;
-  };
-  path?: never;
-  query?: never;
-  url: '/api/v1/system.fetch_release_asset';
-};
-
-export type SystemFetchReleaseAssetErrors = {
-  /**
-   * Unknown tool
-   */
-  404: {
-    error: string;
-  };
-  /**
-   * Tool execution failed
-   */
-  500: {
-    error: string;
-  };
-};
-
-export type SystemFetchReleaseAssetError =
-  SystemFetchReleaseAssetErrors[keyof SystemFetchReleaseAssetErrors];
-
-export type SystemFetchReleaseAssetResponses = {
-  /**
-   * FetchReleaseAssetOutput
-   *
-   * Result of [`system_fetch_release_asset`]. `asset_b64` is base64-STANDARD
-   * of the raw binary bytes; `sha256` is the hex digest the holder verified
-   * against the release `.sha256` blob (callers MUST re-verify after decode
-   * before swapping).
-   */
-  200: {
-    asset_b64: string;
-    sha256: string;
-    version: string;
-  };
-};
-
-export type SystemFetchReleaseAssetResponse =
-  SystemFetchReleaseAssetResponses[keyof SystemFetchReleaseAssetResponses];
-
 export type SystemInstallData = {
   /**
    * SystemInstallArgs
@@ -5089,6 +5022,72 @@ export type SystemKillResponses = {
 };
 
 export type SystemKillResponse = SystemKillResponses[keyof SystemKillResponses];
+
+export type SystemServeReleaseData = {
+  /**
+   * FetchReleaseAssetArgs
+   *
+   * Args for [`system_fetch_release_asset`].
+   */
+  body: {
+    /**
+     * Channel the requester wants the latest of (`stable` | `rc`). Required
+     * when `version` is omitted; ignored when `version` is present.
+     */
+    channel?: string | null;
+    /**
+     * Rust target triple of the requester (e.g. `x86_64-unknown-linux-gnu`,
+     * `aarch64-apple-darwin`). The holder may be on a different arch, so
+     * the caller MUST specify the asset they need.
+     */
+    target: string;
+    /**
+     * Release tag to fetch, with or without `v` prefix (e.g. `0.0.6-rc.15`
+     * or `v0.0.6-rc.15`). Optional — when omitted the holder resolves the
+     * channel's latest tag using its own GitHub token.
+     */
+    version?: string | null;
+  };
+  path?: never;
+  query?: never;
+  url: '/api/v1/system.serve_release';
+};
+
+export type SystemServeReleaseErrors = {
+  /**
+   * Unknown tool
+   */
+  404: {
+    error: string;
+  };
+  /**
+   * Tool execution failed
+   */
+  500: {
+    error: string;
+  };
+};
+
+export type SystemServeReleaseError = SystemServeReleaseErrors[keyof SystemServeReleaseErrors];
+
+export type SystemServeReleaseResponses = {
+  /**
+   * FetchReleaseAssetOutput
+   *
+   * Result of [`system_fetch_release_asset`]. `asset_b64` is base64-STANDARD
+   * of the raw binary bytes; `sha256` is the hex digest the holder verified
+   * against the release `.sha256` blob (callers MUST re-verify after decode
+   * before swapping).
+   */
+  200: {
+    asset_b64: string;
+    sha256: string;
+    version: string;
+  };
+};
+
+export type SystemServeReleaseResponse =
+  SystemServeReleaseResponses[keyof SystemServeReleaseResponses];
 
 export type SystemUpdateData = {
   /**

@@ -235,15 +235,15 @@ import type {
   SystemDetailData,
   SystemDetailErrors,
   SystemDetailResponses,
-  SystemFetchReleaseAssetData,
-  SystemFetchReleaseAssetErrors,
-  SystemFetchReleaseAssetResponses,
   SystemInstallData,
   SystemInstallErrors,
   SystemInstallResponses,
   SystemKillData,
   SystemKillErrors,
   SystemKillResponses,
+  SystemServeReleaseData,
+  SystemServeReleaseErrors,
+  SystemServeReleaseResponses,
   SystemUpdateData,
   SystemUpdateErrors,
   SystemUpdateResponses,
@@ -275,6 +275,13 @@ export const authChangePassword = <ThrowOnError extends boolean = false>(
     AuthChangePasswordErrors,
     ThrowOnError
   >({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/auth/web/change_password',
     ...options,
     headers: {
@@ -287,6 +294,13 @@ export const authMe = <ThrowOnError extends boolean = false>(
   options?: Options<AuthMeData, ThrowOnError>,
 ) =>
   (options?.client ?? client).get<AuthMeResponses, AuthMeErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/auth/web/me',
     ...options,
   });
@@ -295,6 +309,13 @@ export const authSignin = <ThrowOnError extends boolean = false>(
   options: Options<AuthSigninData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<AuthSigninResponses, AuthSigninErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/auth/web/signin',
     ...options,
     headers: {
@@ -307,6 +328,13 @@ export const authSignout = <ThrowOnError extends boolean = false>(
   options?: Options<AuthSignoutData, ThrowOnError>,
 ) =>
   (options?.client ?? client).post<AuthSignoutResponses, unknown, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/auth/web/signout',
     ...options,
   });
@@ -315,6 +343,13 @@ export const authSignup = <ThrowOnError extends boolean = false>(
   options: Options<AuthSignupData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<AuthSignupResponses, AuthSignupErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/auth/web/signup',
     ...options,
     headers: {
@@ -327,6 +362,13 @@ export const authSignupStatus = <ThrowOnError extends boolean = false>(
   options?: Options<AuthSignupStatusData, ThrowOnError>,
 ) =>
   (options?.client ?? client).get<AuthSignupStatusResponses, unknown, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/auth/web/signup_status',
     ...options,
   });
@@ -344,6 +386,13 @@ export const agentBackendDetail = <ThrowOnError extends boolean = false>(
     AgentBackendDetailErrors,
     ThrowOnError
   >({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/agent.backend.detail',
     ...options,
     headers: {
@@ -365,6 +414,13 @@ export const agentBackendUpdate = <ThrowOnError extends boolean = false>(
     AgentBackendUpdateErrors,
     ThrowOnError
   >({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/agent.backend.update',
     ...options,
     headers: {
@@ -382,6 +438,13 @@ export const agentGet = <ThrowOnError extends boolean = false>(
   options: Options<AgentGetData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<AgentGetResponses, AgentGetErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/agent.get',
     ...options,
     headers: {
@@ -399,6 +462,13 @@ export const agentList = <ThrowOnError extends boolean = false>(
   options: Options<AgentListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<AgentListResponses, AgentListErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/agent.list',
     ...options,
     headers: {
@@ -416,6 +486,13 @@ export const agentRun = <ThrowOnError extends boolean = false>(
   options: Options<AgentRunData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<AgentRunResponses, AgentRunErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/agent.run',
     ...options,
     headers: {
@@ -433,6 +510,13 @@ export const authLogin = <ThrowOnError extends boolean = false>(
   options: Options<AuthLoginData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<AuthLoginResponses, AuthLoginErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/auth.login',
     ...options,
     headers: {
@@ -450,6 +534,13 @@ export const authLogout = <ThrowOnError extends boolean = false>(
   options: Options<AuthLogoutData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<AuthLogoutResponses, AuthLogoutErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/auth.logout',
     ...options,
     headers: {
@@ -471,6 +562,13 @@ export const authSessionCreate = <ThrowOnError extends boolean = false>(
     AuthSessionCreateErrors,
     ThrowOnError
   >({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/auth.session.create',
     ...options,
     headers: {
@@ -492,6 +590,13 @@ export const authSessionDelete = <ThrowOnError extends boolean = false>(
     AuthSessionDeleteErrors,
     ThrowOnError
   >({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/auth.session.delete',
     ...options,
     headers: {
@@ -513,6 +618,13 @@ export const authSessionDetail = <ThrowOnError extends boolean = false>(
     AuthSessionDetailErrors,
     ThrowOnError
   >({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/auth.session.detail',
     ...options,
     headers: {
@@ -530,6 +642,13 @@ export const authTokenCreate = <ThrowOnError extends boolean = false>(
   options: Options<AuthTokenCreateData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<AuthTokenCreateResponses, AuthTokenCreateErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/auth.token.create',
     ...options,
     headers: {
@@ -547,6 +666,13 @@ export const authTokenDelete = <ThrowOnError extends boolean = false>(
   options: Options<AuthTokenDeleteData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<AuthTokenDeleteResponses, AuthTokenDeleteErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/auth.token.delete',
     ...options,
     headers: {
@@ -564,6 +690,13 @@ export const authTokenList = <ThrowOnError extends boolean = false>(
   options: Options<AuthTokenListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<AuthTokenListResponses, AuthTokenListErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/auth.token.list',
     ...options,
     headers: {
@@ -581,6 +714,13 @@ export const configDelete = <ThrowOnError extends boolean = false>(
   options: Options<ConfigDeleteData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<ConfigDeleteResponses, ConfigDeleteErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/config.delete',
     ...options,
     headers: {
@@ -598,6 +738,13 @@ export const configGet = <ThrowOnError extends boolean = false>(
   options: Options<ConfigGetData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<ConfigGetResponses, ConfigGetErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/config.get',
     ...options,
     headers: {
@@ -615,6 +762,13 @@ export const configList = <ThrowOnError extends boolean = false>(
   options: Options<ConfigListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<ConfigListResponses, ConfigListErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/config.list',
     ...options,
     headers: {
@@ -632,6 +786,13 @@ export const configSet = <ThrowOnError extends boolean = false>(
   options: Options<ConfigSetData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<ConfigSetResponses, ConfigSetErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/config.set',
     ...options,
     headers: {
@@ -649,6 +810,13 @@ export const dbDetail = <ThrowOnError extends boolean = false>(
   options: Options<DbDetailData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<DbDetailResponses, DbDetailErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/db.detail',
     ...options,
     headers: {
@@ -666,6 +834,13 @@ export const dbUpdate = <ThrowOnError extends boolean = false>(
   options: Options<DbUpdateData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<DbUpdateResponses, DbUpdateErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/db.update',
     ...options,
     headers: {
@@ -683,6 +858,13 @@ export const dockerDelete = <ThrowOnError extends boolean = false>(
   options: Options<DockerDeleteData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<DockerDeleteResponses, DockerDeleteErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/docker.delete',
     ...options,
     headers: {
@@ -700,6 +882,13 @@ export const dockerDetail = <ThrowOnError extends boolean = false>(
   options: Options<DockerDetailData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<DockerDetailResponses, DockerDetailErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/docker.detail',
     ...options,
     headers: {
@@ -717,6 +906,13 @@ export const dockerList = <ThrowOnError extends boolean = false>(
   options: Options<DockerListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<DockerListResponses, DockerListErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/docker.list',
     ...options,
     headers: {
@@ -734,6 +930,13 @@ export const dockerUpdate = <ThrowOnError extends boolean = false>(
   options: Options<DockerUpdateData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<DockerUpdateResponses, DockerUpdateErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/docker.update',
     ...options,
     headers: {
@@ -751,6 +954,13 @@ export const filesDelete = <ThrowOnError extends boolean = false>(
   options: Options<FilesDeleteData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<FilesDeleteResponses, FilesDeleteErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/files.delete',
     ...options,
     headers: {
@@ -768,6 +978,13 @@ export const filesList = <ThrowOnError extends boolean = false>(
   options: Options<FilesListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<FilesListResponses, FilesListErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/files.list',
     ...options,
     headers: {
@@ -785,6 +1002,13 @@ export const filesRead = <ThrowOnError extends boolean = false>(
   options: Options<FilesReadData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<FilesReadResponses, FilesReadErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/files.read',
     ...options,
     headers: {
@@ -802,6 +1026,13 @@ export const filesSearch = <ThrowOnError extends boolean = false>(
   options: Options<FilesSearchData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<FilesSearchResponses, FilesSearchErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/files.search',
     ...options,
     headers: {
@@ -819,6 +1050,13 @@ export const filesStat = <ThrowOnError extends boolean = false>(
   options: Options<FilesStatData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<FilesStatResponses, FilesStatErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/files.stat',
     ...options,
     headers: {
@@ -836,6 +1074,13 @@ export const filesTree = <ThrowOnError extends boolean = false>(
   options: Options<FilesTreeData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<FilesTreeResponses, FilesTreeErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/files.tree',
     ...options,
     headers: {
@@ -853,6 +1098,13 @@ export const filesUpdate = <ThrowOnError extends boolean = false>(
   options: Options<FilesUpdateData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<FilesUpdateResponses, FilesUpdateErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/files.update',
     ...options,
     headers: {
@@ -870,6 +1122,13 @@ export const mcpDelete = <ThrowOnError extends boolean = false>(
   options: Options<McpDeleteData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<McpDeleteResponses, McpDeleteErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/mcp.delete',
     ...options,
     headers: {
@@ -887,6 +1146,13 @@ export const mcpDetail = <ThrowOnError extends boolean = false>(
   options: Options<McpDetailData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<McpDetailResponses, McpDetailErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/mcp.detail',
     ...options,
     headers: {
@@ -904,6 +1170,13 @@ export const mcpList = <ThrowOnError extends boolean = false>(
   options: Options<McpListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<McpListResponses, McpListErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/mcp.list',
     ...options,
     headers: {
@@ -921,6 +1194,13 @@ export const mcpRun = <ThrowOnError extends boolean = false>(
   options: Options<McpRunData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<McpRunResponses, McpRunErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/mcp.run',
     ...options,
     headers: {
@@ -938,6 +1218,13 @@ export const mcpUpdate = <ThrowOnError extends boolean = false>(
   options: Options<McpUpdateData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<McpUpdateResponses, McpUpdateErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/mcp.update',
     ...options,
     headers: {
@@ -959,6 +1246,13 @@ export const namespaceAccessCreate = <ThrowOnError extends boolean = false>(
     NamespaceAccessCreateErrors,
     ThrowOnError
   >({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/namespace.access.create',
     ...options,
     headers: {
@@ -980,6 +1274,13 @@ export const namespaceAccessDelete = <ThrowOnError extends boolean = false>(
     NamespaceAccessDeleteErrors,
     ThrowOnError
   >({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/namespace.access.delete',
     ...options,
     headers: {
@@ -1001,6 +1302,13 @@ export const namespaceAccessList = <ThrowOnError extends boolean = false>(
     NamespaceAccessListErrors,
     ThrowOnError
   >({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/namespace.access.list',
     ...options,
     headers: {
@@ -1018,6 +1326,13 @@ export const namespaceCreate = <ThrowOnError extends boolean = false>(
   options: Options<NamespaceCreateData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<NamespaceCreateResponses, NamespaceCreateErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/namespace.create',
     ...options,
     headers: {
@@ -1035,6 +1350,13 @@ export const namespaceDelete = <ThrowOnError extends boolean = false>(
   options: Options<NamespaceDeleteData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<NamespaceDeleteResponses, NamespaceDeleteErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/namespace.delete',
     ...options,
     headers: {
@@ -1052,6 +1374,13 @@ export const namespaceDetail = <ThrowOnError extends boolean = false>(
   options: Options<NamespaceDetailData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<NamespaceDetailResponses, NamespaceDetailErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/namespace.detail',
     ...options,
     headers: {
@@ -1069,6 +1398,13 @@ export const namespaceList = <ThrowOnError extends boolean = false>(
   options: Options<NamespaceListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<NamespaceListResponses, NamespaceListErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/namespace.list',
     ...options,
     headers: {
@@ -1086,6 +1422,13 @@ export const namespaceUse = <ThrowOnError extends boolean = false>(
   options: Options<NamespaceUseData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<NamespaceUseResponses, NamespaceUseErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/namespace.use',
     ...options,
     headers: {
@@ -1103,6 +1446,13 @@ export const pkiCreate = <ThrowOnError extends boolean = false>(
   options: Options<PkiCreateData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PkiCreateResponses, PkiCreateErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/pki.create',
     ...options,
     headers: {
@@ -1120,6 +1470,13 @@ export const pkiList = <ThrowOnError extends boolean = false>(
   options: Options<PkiListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PkiListResponses, PkiListErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/pki.list',
     ...options,
     headers: {
@@ -1137,6 +1494,13 @@ export const pluginDelete = <ThrowOnError extends boolean = false>(
   options: Options<PluginDeleteData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PluginDeleteResponses, PluginDeleteErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/plugin.delete',
     ...options,
     headers: {
@@ -1154,6 +1518,13 @@ export const pluginDetail = <ThrowOnError extends boolean = false>(
   options: Options<PluginDetailData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PluginDetailResponses, PluginDetailErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/plugin.detail',
     ...options,
     headers: {
@@ -1171,6 +1542,13 @@ export const pluginList = <ThrowOnError extends boolean = false>(
   options: Options<PluginListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PluginListResponses, PluginListErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/plugin.list',
     ...options,
     headers: {
@@ -1188,6 +1566,13 @@ export const pluginUpdate = <ThrowOnError extends boolean = false>(
   options: Options<PluginUpdateData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PluginUpdateResponses, PluginUpdateErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/plugin.update',
     ...options,
     headers: {
@@ -1205,6 +1590,13 @@ export const podDetail = <ThrowOnError extends boolean = false>(
   options: Options<PodDetailData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodDetailResponses, PodDetailErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/pod.detail',
     ...options,
     headers: {
@@ -1222,6 +1614,13 @@ export const podForget = <ThrowOnError extends boolean = false>(
   options: Options<PodForgetData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodForgetResponses, PodForgetErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/pod.forget',
     ...options,
     headers: {
@@ -1239,6 +1638,13 @@ export const podHistory = <ThrowOnError extends boolean = false>(
   options: Options<PodHistoryData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodHistoryResponses, PodHistoryErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/pod.history',
     ...options,
     headers: {
@@ -1256,6 +1662,13 @@ export const podJoin = <ThrowOnError extends boolean = false>(
   options: Options<PodJoinData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodJoinResponses, PodJoinErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/pod.join',
     ...options,
     headers: {
@@ -1273,6 +1686,13 @@ export const podKick = <ThrowOnError extends boolean = false>(
   options: Options<PodKickData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodKickResponses, PodKickErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/pod.kick',
     ...options,
     headers: {
@@ -1290,6 +1710,13 @@ export const podLeave = <ThrowOnError extends boolean = false>(
   options: Options<PodLeaveData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodLeaveResponses, PodLeaveErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/pod.leave',
     ...options,
     headers: {
@@ -1307,6 +1734,13 @@ export const podList = <ThrowOnError extends boolean = false>(
   options: Options<PodListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodListResponses, PodListErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/pod.list',
     ...options,
     headers: {
@@ -1324,6 +1758,13 @@ export const podPing = <ThrowOnError extends boolean = false>(
   options: Options<PodPingData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodPingResponses, PodPingErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/pod.ping',
     ...options,
     headers: {
@@ -1341,6 +1782,13 @@ export const podRecover = <ThrowOnError extends boolean = false>(
   options: Options<PodRecoverData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodRecoverResponses, PodRecoverErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/pod.recover',
     ...options,
     headers: {
@@ -1358,6 +1806,13 @@ export const podSync = <ThrowOnError extends boolean = false>(
   options: Options<PodSyncData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodSyncResponses, PodSyncErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/pod.sync',
     ...options,
     headers: {
@@ -1375,6 +1830,13 @@ export const podTrust = <ThrowOnError extends boolean = false>(
   options: Options<PodTrustData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodTrustResponses, PodTrustErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/pod.trust',
     ...options,
     headers: {
@@ -1392,6 +1854,13 @@ export const podUpdate = <ThrowOnError extends boolean = false>(
   options: Options<PodUpdateData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<PodUpdateResponses, PodUpdateErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/pod.update',
     ...options,
     headers: {
@@ -1409,6 +1878,13 @@ export const scheduleList = <ThrowOnError extends boolean = false>(
   options: Options<ScheduleListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<ScheduleListResponses, ScheduleListErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/schedule.list',
     ...options,
     headers: {
@@ -1426,6 +1902,13 @@ export const scheduleRun = <ThrowOnError extends boolean = false>(
   options: Options<ScheduleRunData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<ScheduleRunResponses, ScheduleRunErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/schedule.run',
     ...options,
     headers: {
@@ -1443,6 +1926,13 @@ export const scheduleStatus = <ThrowOnError extends boolean = false>(
   options: Options<ScheduleStatusData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<ScheduleStatusResponses, ScheduleStatusErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/schedule.status',
     ...options,
     headers: {
@@ -1460,6 +1950,13 @@ export const secretsDelete = <ThrowOnError extends boolean = false>(
   options: Options<SecretsDeleteData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SecretsDeleteResponses, SecretsDeleteErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/secrets.delete',
     ...options,
     headers: {
@@ -1477,6 +1974,13 @@ export const secretsDetail = <ThrowOnError extends boolean = false>(
   options: Options<SecretsDetailData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SecretsDetailResponses, SecretsDetailErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/secrets.detail',
     ...options,
     headers: {
@@ -1494,6 +1998,13 @@ export const secretsList = <ThrowOnError extends boolean = false>(
   options: Options<SecretsListData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SecretsListResponses, SecretsListErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/secrets.list',
     ...options,
     headers: {
@@ -1511,6 +2022,13 @@ export const secretsSet = <ThrowOnError extends boolean = false>(
   options: Options<SecretsSetData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SecretsSetResponses, SecretsSetErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/secrets.set',
     ...options,
     headers: {
@@ -1528,6 +2046,13 @@ export const specDetail = <ThrowOnError extends boolean = false>(
   options: Options<SpecDetailData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SpecDetailResponses, SpecDetailErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/spec.detail',
     ...options,
     headers: {
@@ -1545,6 +2070,13 @@ export const systemBuild = <ThrowOnError extends boolean = false>(
   options: Options<SystemBuildData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemBuildResponses, SystemBuildErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/system.build',
     ...options,
     headers: {
@@ -1562,6 +2094,13 @@ export const systemDelete = <ThrowOnError extends boolean = false>(
   options: Options<SystemDeleteData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemDeleteResponses, SystemDeleteErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/system.delete',
     ...options,
     headers: {
@@ -1579,28 +2118,14 @@ export const systemDetail = <ThrowOnError extends boolean = false>(
   options: Options<SystemDetailData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemDetailResponses, SystemDetailErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/system.detail',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-
-/**
- * system.fetch_release_asset
- *
- * Fetch a release asset from GitHub on behalf of a peer that lacks the `github_token` secret. Resolves the token locally, downloads the asset for the requested `target`, verifies sha256 against the release checksum blob, and returns the bytes base64-encoded.
- */
-export const systemFetchReleaseAsset = <ThrowOnError extends boolean = false>(
-  options: Options<SystemFetchReleaseAssetData, ThrowOnError>,
-) =>
-  (options.client ?? client).post<
-    SystemFetchReleaseAssetResponses,
-    SystemFetchReleaseAssetErrors,
-    ThrowOnError
-  >({
-    url: '/api/v1/system.fetch_release_asset',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1617,6 +2142,13 @@ export const systemInstall = <ThrowOnError extends boolean = false>(
   options: Options<SystemInstallData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemInstallResponses, SystemInstallErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/system.install',
     ...options,
     headers: {
@@ -1634,7 +2166,42 @@ export const systemKill = <ThrowOnError extends boolean = false>(
   options: Options<SystemKillData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemKillResponses, SystemKillErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/system.kill',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+/**
+ * system.serve_release
+ *
+ * Serve a release asset from GitHub on behalf of a peer that lacks the `github_token` secret. Resolves the token locally, downloads the asset for the requested `target`, verifies sha256 against the release checksum blob, and returns the bytes base64-encoded.
+ */
+export const systemServeRelease = <ThrowOnError extends boolean = false>(
+  options: Options<SystemServeReleaseData, ThrowOnError>,
+) =>
+  (options.client ?? client).post<
+    SystemServeReleaseResponses,
+    SystemServeReleaseErrors,
+    ThrowOnError
+  >({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
+    url: '/api/v1/system.serve_release',
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -1651,6 +2218,13 @@ export const systemUpdate = <ThrowOnError extends boolean = false>(
   options: Options<SystemUpdateData, ThrowOnError>,
 ) =>
   (options.client ?? client).post<SystemUpdateResponses, SystemUpdateErrors, ThrowOnError>({
+    security: [
+      {
+        in: 'cookie',
+        name: 'orca_session',
+        type: 'apiKey',
+      },
+    ],
     url: '/api/v1/system.update',
     ...options,
     headers: {

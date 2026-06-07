@@ -2497,31 +2497,6 @@ export const zSystemDetailResponse = z.object({
 });
 
 /**
- * FetchReleaseAssetArgs
- *
- * Args for [`system_fetch_release_asset`].
- */
-export const zSystemFetchReleaseAssetBody = z.object({
-  channel: z.string().nullish(),
-  target: z.string(),
-  version: z.string().nullish(),
-});
-
-/**
- * FetchReleaseAssetOutput
- *
- * Result of [`system_fetch_release_asset`]. `asset_b64` is base64-STANDARD
- * of the raw binary bytes; `sha256` is the hex digest the holder verified
- * against the release `.sha256` blob (callers MUST re-verify after decode
- * before swapping).
- */
-export const zSystemFetchReleaseAssetResponse = z.object({
-  asset_b64: z.string(),
-  sha256: z.string(),
-  version: z.string(),
-});
-
-/**
  * SystemInstallArgs
  *
  * Args for [`system_install`]. Empty by default — does the user-level
@@ -2558,6 +2533,31 @@ export const zSystemKillBody = z.record(z.string(), z.unknown());
  */
 export const zSystemKillResponse = z.object({
   killed_patterns: z.array(z.string()),
+});
+
+/**
+ * FetchReleaseAssetArgs
+ *
+ * Args for [`system_fetch_release_asset`].
+ */
+export const zSystemServeReleaseBody = z.object({
+  channel: z.string().nullish(),
+  target: z.string(),
+  version: z.string().nullish(),
+});
+
+/**
+ * FetchReleaseAssetOutput
+ *
+ * Result of [`system_fetch_release_asset`]. `asset_b64` is base64-STANDARD
+ * of the raw binary bytes; `sha256` is the hex digest the holder verified
+ * against the release `.sha256` blob (callers MUST re-verify after decode
+ * before swapping).
+ */
+export const zSystemServeReleaseResponse = z.object({
+  asset_b64: z.string(),
+  sha256: z.string(),
+  version: z.string(),
 });
 
 /**

@@ -271,13 +271,7 @@
         system?: SystemInfoReport | null;
       };
       type PodMember = { state: 'joined' | 'handshaking' | 'discovered' } & Partial<PodPeer>;
-      const [listResult, statusResult] = await Promise.all([
-        callTool<{ members: PodMember[] }>('podList', {}),
-        callTool<{ peer_id: string; system?: SystemInfoReport | null }[]>(
-          'podStatusList',
-          {},
-        ).catch(() => []),
-      ]);
+      const listResult = await callTool<{ members: PodMember[] }>('podList', {});
       const members = listResult?.members ?? [];
       const joined = members
         .filter((m) => m.state === 'joined')
@@ -348,8 +342,8 @@
       staleRows = [...staleFromJoined, ...staleFromDiscovery];
 
       const sysById = new Map<string, SystemInfoReport | null>();
-      for (const row of statusResult ?? []) {
-        sysById.set(row.peer_id, row.system ?? null);
+      for (const p of joined) {
+        sysById.set(p.peer_id, p.system ?? null);
       }
 
       const local = instances.find((i) => i.role === 'local');

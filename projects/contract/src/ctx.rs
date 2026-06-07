@@ -26,6 +26,13 @@ pub struct ToolCtx {
     /// envelope field. `None` runs locally. Peer routing is opt-out: tools
     /// marked `local_only = true` reject a peer target with a clear error.
     peer_target: Option<String>,
+    /// Per-request correlation id, set by REST middleware from the inbound
+    /// `x-correlation-id` header (or synthesized if absent). Threaded into
+    /// `tracing` spans by tool handlers and propagated as the same header on
+    /// outbound mesh dispatch so a single user action traces end-to-end
+    /// across every host involved. `None` on CLI/MCP paths until those wire
+    /// equivalent ingest points.
+    correlation_id: Option<String>,
     services: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
 }
 
@@ -35,6 +42,7 @@ impl ToolCtx {
             config,
             auth: None,
             peer_target: None,
+            correlation_id: None,
             services: HashMap::new(),
         }
     }
@@ -76,6 +84,18 @@ impl ToolCtx {
     /// The target peer for this invocation, if one was set.
     pub fn peer(&self) -> Option<&str> {
         self.peer_target.as_deref()
+    }
+
+    /// Set the per-request correlation id in-place. REST middleware calls this
+    /// with the ingested (or synthesized) `x-correlation-id` value before
+    /// invoking the tool.
+    pub fn set_correlation_id(&mut self, cid: Option<String>) {
+        self.correlation_id = cid.filter(|s| !s.trim().is_empty());
+    }
+
+    /// The per-request correlation id, if one was set.
+    pub fn correlation_id(&self) -> Option<&str> {
+        self.correlation_id.as_deref()
     }
 
     /// Insert a service handle. `T` is typically `Arc<dyn FooService>` —

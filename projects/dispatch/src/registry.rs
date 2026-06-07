@@ -149,13 +149,22 @@ async fn http_dispatch(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from);
-    let ctx_owned = if caller.is_some() || peer.is_some() {
+    let correlation_id = headers
+        .get("x-correlation-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let ctx_owned = if caller.is_some() || peer.is_some() || correlation_id.is_some() {
         let mut ctx = (*state.ctx).clone();
         if let Some(Extension(c)) = caller {
             ctx.set_caller(Some(c));
         }
         if let Some(p) = peer {
             ctx.set_peer(Some(p));
+        }
+        if let Some(cid) = correlation_id {
+            ctx.set_correlation_id(Some(cid));
         }
         Some(ctx)
     } else {

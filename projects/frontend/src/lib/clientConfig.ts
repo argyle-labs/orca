@@ -16,3 +16,15 @@ client.setConfig({
   baseUrl: '',
   credentials: 'include',
 });
+
+// Stamp every outbound request with a fresh `x-correlation-id`. The server
+// echoes it back on the response and threads it through tool dispatch +
+// pod/exec mesh calls, so a single browser action traces end-to-end across
+// every host involved. `crypto.randomUUID()` is v4, good enough for tracing
+// (the server uses uuidv7 when synthesizing; both round-trip as strings).
+client.interceptors.request.use(request => {
+  if (!request.headers.has('x-correlation-id')) {
+    request.headers.set('x-correlation-id', crypto.randomUUID());
+  }
+  return request;
+});
