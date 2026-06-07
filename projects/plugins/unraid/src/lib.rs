@@ -10,6 +10,7 @@
 //! schema drift detection.
 
 pub mod schema_pull;
+pub mod tools;
 pub mod version;
 
 use graphql::{Client as GraphQlClient, GraphQlErrors};

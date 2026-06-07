@@ -55,7 +55,7 @@ nfs           = { path = "../plugins/nfs" }
 ntfy          = { path = "../plugins/ntfy" }
 proxmox       = { path = "../plugins/proxmox",       features = ["cli"] }
 smb           = { path = "../plugins/smb" }
-unraid        = { path = "../plugins/unraid" }
+unraid        = { path = "../plugins/unraid",        features = ["cli"] }
 
 # CLI
 clap = { workspace = true }
