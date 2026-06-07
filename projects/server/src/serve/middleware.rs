@@ -74,7 +74,12 @@ pub async fn log_requests(req: Request, next: Next) -> Response {
 
     req.extensions_mut().insert(CorrelationId(cid.clone()));
 
-    let response = next.run(req).await;
+    // Per-request span — every `tracing` event emitted while the handler
+    // runs (and any task it awaits in this scope) inherits `correlation_id`
+    // as a structured field, so `jq -c 'select(.correlation_id == "...")'`
+    // pulls the full lifecycle of one request.
+    let span = tracing::info_span!("request", correlation_id = %cid);
+    let response = next.run(req).instrument(span).await;
     let status = response.status().as_u16();
 
     let (mut parts, body) = response.into_parts();
