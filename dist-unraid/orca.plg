@@ -5,7 +5,7 @@
 <!ENTITY version   "0.0.7-rc.5">
 <!ENTITY launch    "Settings/Orca">
 <!ENTITY pluginURL "file:///boot/config/plugins/orca.plg">
-<!ENTITY md5       "6a40671f15983d5c61db4ab99d7b76ab">
+<!ENTITY md5       "54a48e581b1b116d9410f98f44c294f1">
 <!ENTITY plugin    "/boot/config/plugins/orca">
 <!ENTITY appdata   "/mnt/user/appdata/orca">
 <!ENTITY binary    "file:///boot/config/plugins/orca/bin/orca">

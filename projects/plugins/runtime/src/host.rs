@@ -272,14 +272,25 @@ pub fn stop() {
     let mut slot = task_slot().lock().expect("plugin_host slot poisoned");
     if let Some(h) = slot.take() {
         h.abort();
+        utils::mesh_status::set_listening(false);
         info!("[plugin-host] stopped — port released");
     }
 }
 
 async fn run(pki_dir: &Path, port: u16, plugin_registry: PluginRegistry) -> Result<()> {
-    let (listener, acceptor, addr) = bind(pki_dir, port).await?;
+    let bound = bind(pki_dir, port).await;
+    let (listener, acceptor, addr) = match bound {
+        Ok(v) => v,
+        Err(e) => {
+            utils::mesh_status::set_listening(false);
+            return Err(e);
+        }
+    };
+    utils::mesh_status::set_listening(true);
     info!("[plugin-host] listening on {addr} (mTLS)");
-    serve(listener, acceptor, ContextRegistry::new(), plugin_registry).await
+    let r = serve(listener, acceptor, ContextRegistry::new(), plugin_registry).await;
+    utils::mesh_status::set_listening(false);
+    r
 }
 
 /// Bind a TCP listener and build the mTLS acceptor for the plugin host.

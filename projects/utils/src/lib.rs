@@ -11,6 +11,7 @@ pub mod git;
 pub mod hash;
 pub mod http;
 pub mod json_schema;
+pub mod mesh_status;
 pub mod path;
 pub mod search;
 pub mod state;

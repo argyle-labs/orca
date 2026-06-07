@@ -264,6 +264,9 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
         report.self_secure = Some(v);
     }
 
+    report.mesh_listening = Some(utils::mesh_status::is_listening());
+    report.mesh_port = Some(db::ports::mesh_port());
+
     report
 }
 

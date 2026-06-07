@@ -147,6 +147,20 @@ pub struct SystemInfoReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub self_secure: Option<bool>,
 
+    /// `true` when this host's mesh accept loop (plugin host, default
+    /// port 12002) currently holds a TCP listener. `false` when the
+    /// bind failed at startup, the host was stopped, or it has not yet
+    /// started. Surfaces silent mesh-port bind failures that previously
+    /// rendered a host as "healthy" in `system_detail` while it was
+    /// invisible to peers. See [[project-system-detail-hides-mesh-bind-failure]].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_listening: Option<bool>,
+    /// Port the mesh accept loop is configured to bind. Paired with
+    /// `mesh_listening` so operators can see *which* port is (or isn't)
+    /// open without cross-referencing config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_port: Option<u16>,
+
     // ── Network interfaces ──
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interfaces: Vec<NetIfaceDto>,
