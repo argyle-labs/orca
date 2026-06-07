@@ -553,15 +553,25 @@ fn render_scalar(spec_url: &str, title: &str) -> axum::response::Response {
     <input id="orca-u" placeholder="username" autocomplete="username" />
     <input id="orca-p" type="password" placeholder="password" autocomplete="current-password" />
     <button id="orca-signin" type="button">Sign in</button>
-    <button id="orca-signout" type="button">Sign out</button>
+    <button id="orca-signout" type="button" style="display:none">Sign out</button>
     <span class="status" id="orca-status">checking session…</span>
   </div>
   <script>
     (function () {{
       const status = document.getElementById('orca-status');
+      const u = document.getElementById('orca-u');
+      const p = document.getElementById('orca-p');
+      const signinBtn = document.getElementById('orca-signin');
+      const signoutBtn = document.getElementById('orca-signout');
       const setStatus = (msg, cls) => {{
         status.textContent = msg;
         status.className = 'status ' + (cls || '');
+      }};
+      const setSignedIn = (signedIn) => {{
+        u.style.display = signedIn ? 'none' : '';
+        p.style.display = signedIn ? 'none' : '';
+        signinBtn.style.display = signedIn ? 'none' : '';
+        signoutBtn.style.display = signedIn ? '' : 'none';
       }};
       const checkMe = async () => {{
         try {{
@@ -571,11 +581,14 @@ fn render_scalar(spec_url: &str, title: &str) -> axum::response::Response {
           }});
           if (r.ok) {{
             const j = await r.json();
+            setSignedIn(true);
             setStatus(`signed in as ${{j.username}} (${{j.role}})`, 'ok');
           }} else {{
+            setSignedIn(false);
             setStatus('not signed in', 'err');
           }}
         }} catch (e) {{
+          setSignedIn(false);
           setStatus(`probe error: ${{e}}`, 'err');
         }}
       }};
