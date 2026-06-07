@@ -8,6 +8,7 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use std::net::SocketAddr;
+use tracing::Instrument;
 use uuid::Uuid;
 
 pub const CORRELATION_ID_HEADER: &str = "x-correlation-id";
