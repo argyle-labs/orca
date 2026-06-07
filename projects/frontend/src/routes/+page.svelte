@@ -425,7 +425,7 @@
 
   async function loadRetention() {
     try {
-      const data = await callTool<{ row: { json: string } | null }>('systemConfigGet', {
+      const data = await callTool<{ row: { json: string } | null }>('configGet', {
         noun: 'host_status',
         name: 'retention_days',
       });
@@ -438,7 +438,7 @@
   async function setRetention(days: number) {
     retentionSaving = true;
     try {
-      await callTool('systemConfigSet', {
+      await callTool('configSet', {
         noun: 'host_status',
         name: 'retention_days',
         json: String(days),

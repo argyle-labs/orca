@@ -256,6 +256,17 @@ async fn main() -> Result<()> {
             None => Box::new(std::io::stderr()),
         }
     };
+    // JSON line-per-event output so every log entry is a structured object
+    // and `correlation_id` (set by the per-request span in
+    // `serve::middleware::log_requests`) appears as a top-level field on
+    // every event emitted while a request is in flight. `jq`-friendly:
+    // `journalctl -u orca | jq -c 'select(.correlation_id == "...")'` pulls
+    // the full lifecycle of one request — including any logs the tool
+    // handler emits while running.
+    //
+    // `flatten_event(true)` hoists the message + custom fields to the top
+    // level instead of nesting them under `fields:`, so `correlation_id`
+    // (a span field) and the per-event message live side-by-side.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("ORCA_LOG").unwrap_or_else(|_| {
@@ -264,8 +275,11 @@ async fn main() -> Result<()> {
                 )
             }),
         )
-        .with_target(false)
-        .compact()
+        .json()
+        .flatten_event(true)
+        .with_current_span(true)
+        .with_span_list(false)
+        .with_target(true)
         .with_writer(make_writer)
         .init();
 
