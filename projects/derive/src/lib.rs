@@ -624,6 +624,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
                         #tool_name,
                         __args_value,
                         #ctx_param_name.caller(),
+                        #ctx_param_name.correlation_id().map(::std::string::ToString::to_string),
                     )
                     .await?;
                 let __out: #output_ty = ::serde_json::from_value(__out_value)

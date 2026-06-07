@@ -706,7 +706,9 @@ mod tests {
         assert!(is_open_path("/api/auth/web/signin"));
         assert!(is_open_path("/api/auth/web/signup"));
         assert!(is_open_path("/api/auth/web/signup_status"));
-        assert!(is_open_path("/api/auth/web/me"));
+        // `/me` is deliberately NOT open — the cookie middleware must run
+        // and resolve the session identity, otherwise the handler returns 401.
+        assert!(!is_open_path("/api/auth/web/me"));
         // Old top-level paths must NOT be open — they were moved under /web/
         // 2026-06-07 to disambiguate from the `auth.login` orca-tool surface.
         assert!(!is_open_path("/api/auth/signin"));

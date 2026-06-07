@@ -461,6 +461,7 @@ mod tests {
                 tool: &str,
                 args: serde_json::Value,
                 _caller: Option<CallerIdentity>,
+                _correlation_id: Option<String>,
             ) -> anyhow::Result<serde_json::Value> {
                 assert_eq!(peer, "host-x");
                 assert_eq!(tool, "example.echo");

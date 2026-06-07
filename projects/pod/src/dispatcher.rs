@@ -98,7 +98,7 @@ mod tests {
     async fn dispatch_before_install_returns_err() {
         let _g = test_guard().await;
         reset_for_tests();
-        let err = dispatch("some.tool", serde_json::json!({}))
+        let err = dispatch("some.tool", serde_json::json!({}), None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not installed"));
@@ -109,7 +109,7 @@ mod tests {
         let _g = test_guard().await;
         reset_for_tests();
         install(make_ctx());
-        let err = dispatch("ghost.tool", serde_json::json!({}))
+        let err = dispatch("ghost.tool", serde_json::json!({}), None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("ghost.tool") || !err.to_string().is_empty());

@@ -495,9 +495,13 @@ async fn handle_exec(request: Request, peer_cn: &str) -> Result<PodExecResult> {
         )?;
     }
 
-    let result = crate::dispatcher::dispatch(&params.tool, params.args.clone())
-        .await
-        .with_context(|| format!("dispatch pod-relayed tool '{}'", params.tool))?;
+    let result = crate::dispatcher::dispatch(
+        &params.tool,
+        params.args.clone(),
+        params.correlation_id.clone(),
+    )
+    .await
+    .with_context(|| format!("dispatch pod-relayed tool '{}'", params.tool))?;
 
     Ok(PodExecResult {
         tool: params.tool,
