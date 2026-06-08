@@ -129,6 +129,13 @@ pub struct SystemInfoReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub top_processes: Vec<TopProcess>,
 
+    /// Rolling time-series — last N samples from this host's history ring
+    /// (`~/.orca/history/system.jsonl`). Capped at ~720 points (≈1 h at the
+    /// 5 s refresh cadence). Empty until the background refresher has
+    /// written at least one tick.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<SystemHistoryPoint>,
+
     // ── Storage (filesystem hosting ~/.orca) ──
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orca_dir: Option<String>,
@@ -229,6 +236,37 @@ pub struct TopProcess {
     pub cpu_percent: f32,
     /// Resident set size in MiB.
     pub mem_mb: u64,
+}
+
+/// One sample in the per-host rolling history ring. Written every refresh
+/// tick by the daemon, read back as `SystemInfoReport.history`.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Default)]
+pub struct SystemHistoryPoint {
+    /// Unix seconds at sample time.
+    pub ts: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_percent: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_used_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_total_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gpus: Vec<GpuPoint>,
+}
+
+/// One GPU's reading inside a `SystemHistoryPoint`. Matched to a live
+/// `GpuInfo` by `name` (driver-stable across ticks).
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Default)]
+pub struct GpuPoint {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utilization_percent: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vram_used_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vram_total_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature_c: Option<f32>,
 }
 
 /// One GPU detected on the host.

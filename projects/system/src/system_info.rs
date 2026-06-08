@@ -8,6 +8,7 @@
 //!
 //! Relocated from `server::system_info` in slice A3.
 
+pub mod history;
 pub mod system_type;
 
 use crate::system_info_types::{GpuInfo, NetIfaceDto, SystemInfoReport};
@@ -79,6 +80,10 @@ pub fn spawn_refresher() {
             let claims = crate::topology::collect_claims().await;
             let mut snap = snapshot_from_sys(&sys, gpus);
             snap.claims = claims;
+            if let Some(point) = history::point_from(&snap) {
+                history::append(&point);
+            }
+            snap.history = history::read_tail(720);
             if let Ok(mut g) = cache().lock() {
                 *g = Some(Arc::new(snap));
             }
