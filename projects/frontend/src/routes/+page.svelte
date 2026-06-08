@@ -206,17 +206,48 @@
   // Depth-first ordering by parent_peer_id (from system.parent_peer_id).
   // Roots first (no parent or unknown parent), then children indented under
   // them. Local host is always a root. Cycles broken by visited set.
+  // Collapsed-node set for the tree. Click ▾/▸ to toggle.
+  let collapsed = $state<Set<string>>(new Set());
+  function toggleCollapsed(peerId: string) {
+    const next = new Set(collapsed);
+    if (next.has(peerId)) next.delete(peerId);
+    else next.add(peerId);
+    collapsed = next;
+  }
+
   let displayInstances = $derived.by(() => {
     const byPeer = new Map<string, Instance>();
     for (const i of instances) byPeer.set(i.peerId, i);
     if (view === 'table') {
-      return instances.map((inst) => ({ inst, depth: 0 }));
+      return instances.map((inst) => ({ inst, depth: 0, prefix: '', hasChildren: false }));
+    }
+    // Client-side parent inference: match each peer's interface MACs
+    // against every other peer's `system.claims[].macs`. Falls back to
+    // server-set `parent_peer_id` if a claim ever lands there directly.
+    // No backend dependency — the data needed is already in pod.list.
+    const macIndex = new Map<string, string>(); // mac -> claiming peerId
+    for (const inst of instances) {
+      for (const c of inst.sys?.claims ?? []) {
+        for (const m of c.macs ?? []) {
+          if (m) macIndex.set(m.toLowerCase(), inst.peerId);
+        }
+      }
+    }
+    function inferParent(inst: Instance): string | null {
+      const fromServer = inst.sys?.parent_peer_id;
+      if (fromServer && fromServer !== inst.peerId && byPeer.has(fromServer)) return fromServer;
+      for (const iface of inst.sys?.interfaces ?? []) {
+        if (!iface.mac) continue;
+        const claimer = macIndex.get(iface.mac.toLowerCase());
+        if (claimer && claimer !== inst.peerId && byPeer.has(claimer)) return claimer;
+      }
+      return null;
     }
     const childrenOf = new Map<string, Instance[]>();
     const roots: Instance[] = [];
     for (const inst of instances) {
-      const parent = inst.sys?.parent_peer_id;
-      if (parent && parent !== inst.peerId && byPeer.has(parent)) {
+      const parent = inferParent(inst);
+      if (parent) {
         const arr = childrenOf.get(parent) ?? [];
         arr.push(inst);
         childrenOf.set(parent, arr);
@@ -224,17 +255,39 @@
         roots.push(inst);
       }
     }
-    const out: { inst: Instance; depth: number }[] = [];
+    // Sort children alphabetically by hostname so the tree is stable.
+    for (const arr of childrenOf.values()) {
+      arr.sort((a, b) => (a.sys?.hostname ?? a.label).localeCompare(b.sys?.hostname ?? b.label));
+    }
+    roots.sort((a, b) => {
+      // Local host first, then alphabetic.
+      if (a.role === 'local') return -1;
+      if (b.role === 'local') return 1;
+      return (a.sys?.hostname ?? a.label).localeCompare(b.sys?.hostname ?? b.label);
+    });
+
+    const out: { inst: Instance; depth: number; prefix: string; hasChildren: boolean }[] = [];
     const visited = new Set<string>();
-    const walk = (inst: Instance, depth: number) => {
+    // ancestorLast[i] === true means the ancestor at depth i was the LAST
+    // child of its own parent — meaning we render blank space in that
+    // column, not a vertical pipe.
+    const walk = (inst: Instance, depth: number, isLastChild: boolean, ancestorLast: boolean[]) => {
       if (visited.has(inst.peerId)) return;
       visited.add(inst.peerId);
-      out.push({ inst, depth });
-      for (const child of childrenOf.get(inst.peerId) ?? []) walk(child, depth + 1);
+      const prefix = ancestorLast.map((last) => (last ? '   ' : '│  ')).join('') +
+        (depth === 0 ? '' : (isLastChild ? '└─ ' : '├─ '));
+      const kids = childrenOf.get(inst.peerId) ?? [];
+      out.push({ inst, depth, prefix, hasChildren: kids.length > 0 });
+      if (collapsed.has(inst.peerId)) return;
+      for (let i = 0; i < kids.length; i++) {
+        walk(kids[i], depth + 1, i === kids.length - 1, [...ancestorLast, isLastChild]);
+      }
     };
-    for (const r of roots) walk(r, 0);
-    // Any instance left out (cycle break) goes flat at the end.
-    for (const inst of instances) if (!visited.has(inst.peerId)) out.push({ inst, depth: 0 });
+    for (let i = 0; i < roots.length; i++) {
+      walk(roots[i], 0, i === roots.length - 1, []);
+    }
+    for (const inst of instances)
+      if (!visited.has(inst.peerId)) out.push({ inst, depth: 0, prefix: '', hasChildren: false });
     return out;
   });
 
@@ -1072,7 +1125,39 @@
   </div>
 
   <div class="instances" class:tree={view === 'tree'}>
-    {#each displayInstances as { inst, depth } (inst.id)}
+    {#each displayInstances as { inst, depth, prefix, hasChildren } (inst.id)}
+      {#if view === 'tree'}
+        <div
+          class="tree-row"
+          class:down={inst.health === 'down'}
+          onclick={() => goto(`/systems/${inst.peerId}`)}
+          role="button"
+          tabindex="0"
+          onkeydown={(e) => e.key === 'Enter' && goto(`/systems/${inst.peerId}`)}
+        >
+          <span class="tree-prefix" aria-hidden="true">{prefix}</span>
+          {#if hasChildren}
+            <button
+              class="tree-toggle"
+              onclick={(e) => { e.stopPropagation(); toggleCollapsed(inst.peerId); }}
+              title={collapsed.has(inst.peerId) ? 'Expand' : 'Collapse'}
+            >{collapsed.has(inst.peerId) ? '▸' : '▾'}</button>
+          {:else}
+            <span class="tree-toggle-spacer" aria-hidden="true"></span>
+          {/if}
+          <StatusDot ok={inst.health === 'up' ? true : inst.health === 'down' ? false : null} />
+          <span class="hostname">{inst.sys?.hostname ?? inst.label}</span>
+          {#if inst.sys?.system_type}<span class="badge-sm">{inst.sys.system_type}</span>{/if}
+          {#if inst.version}<span class="meta-sm">v{inst.version}</span>{/if}
+          {#if inst.updateAvailable}
+            <span class="update-badge" title="Update available: {inst.updateLatest ?? 'newer version'}">↑ {inst.updateLatest ?? 'update'}</span>
+          {/if}
+          <span class="tree-stats">
+            CPU {cpuPct(inst.sys) != null ? `${cpuPct(inst.sys)!.toFixed(0)}%` : '—'} ·
+            RAM {memPct(inst.sys).toFixed(0)}%
+          </span>
+        </div>
+      {:else}
       <div
         class="instance"
         class:down={inst.health === 'down'}
@@ -1173,6 +1258,7 @@
           <span class="details-hint">Details →</span>
         </div>
       </div>
+      {/if}
     {/each}
   </div>
 
@@ -1706,11 +1792,56 @@
   .instances.tree {
     display: flex;
     flex-direction: column;
+    gap: var(--space-1);
+  }
+  .tree-row {
+    display: flex;
+    align-items: center;
     gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    color: var(--text);
   }
-  .instances.tree .instance.child {
-    border-left: 2px solid var(--border-2, #444);
+  .tree-row:hover { background: var(--surface); }
+  .tree-row.down { opacity: 0.6; }
+  .tree-prefix {
+    font-family: var(--font-mono);
+    color: var(--color-text-dim);
+    white-space: pre;
+    font-size: var(--text-sm);
+    line-height: 1;
   }
+  .tree-toggle {
+    background: none;
+    border: 0;
+    color: var(--muted);
+    cursor: pointer;
+    padding: 0 var(--space-1);
+    font-size: var(--text-sm);
+    line-height: 1;
+  }
+  .tree-toggle:hover { color: var(--text); }
+  .tree-toggle-spacer {
+    display: inline-block;
+    width: calc(var(--space-1) * 2 + 0.6em);
+  }
+  .tree-row .hostname { font-weight: var(--weight-medium); }
+  .tree-stats {
+    margin-left: auto;
+    color: var(--muted);
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .badge-sm {
+    background: var(--code-bg);
+    color: var(--muted);
+    padding: 1px var(--space-2);
+    border-radius: 999px;
+    font-size: var(--text-xs);
+  }
+  .meta-sm { font-size: var(--text-xs); color: var(--muted); }
   .view-toggle {
     display: flex;
     gap: 0.25rem;

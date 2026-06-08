@@ -37,7 +37,6 @@
   let error = $state<string | null>(null);
   let pinnedPid = $state<number | null>(null);
 
-  // Update controls
   let versions = $state<VersionEntry[]>([]);
   let versionsLoading = $state(false);
   let versionSelect = $state('');
@@ -57,15 +56,11 @@
     return fallback ?? 'stable';
   }
 
-  function isLocalPeer(p: PodPeer): boolean {
-    return !!p.local;
-  }
-
   async function probeUpdate() {
     if (!peer) return;
     versionsLoading = true;
     try {
-      const target = isLocalPeer(peer) ? null : peer.peer_id;
+      const target = peer.local ? null : peer.peer_id;
       const r = await callTool<SystemUpdateResp>('systemUpdate', {}, { peer: target });
       versions = r.available_versions ?? [];
       if (r.current_version && !versionSelect) versionSelect = `v${r.current_version}`;
@@ -93,7 +88,7 @@
     updatePending = true;
     updateResult = null;
     try {
-      const target = isLocalPeer(peer) ? null : peer.peer_id;
+      const target = peer.local ? null : peer.peer_id;
       const r = await callTool<SystemUpdateResp>('systemUpdate', args, { peer: target });
       updateResult = { notes: r.notes ?? [], errors: r.errors ?? [] };
       versions = r.available_versions ?? versions;
@@ -116,10 +111,16 @@
   async function refresh() {
     try {
       const r = await callTool<{ members: PodMember[] }>('podList', {});
-      const found = (r.members ?? [])
+      const joined = (r.members ?? [])
         .filter((m) => m.state === 'joined')
-        .map((m) => m as unknown as PodPeer)
-        .find((p) => p.peer_id === id);
+        .map((m) => m as unknown as PodPeer);
+      // `id === 'local'` is the synthetic id the list page uses for "this
+      // host" before pod.list ever assigns a real peer_id. Match the
+      // pod.list member flagged `local: true` so the detail page works for
+      // the local card too.
+      const found = id === 'local'
+        ? joined.find((p) => p.local)
+        : joined.find((p) => p.peer_id === id);
       peer = found ?? null;
       error = found ? null : `peer ${id} not found in pod`;
       if (peer && hydratedForId !== peer.peer_id) {
@@ -143,9 +144,9 @@
     if (pollHandle) clearInterval(pollHandle);
   });
 
-  // ── Chart rendering ────────────────────────────────────────────────────
-  // History points come from the daemon (`report.history`) — server-side
-  // ring, survives drawer/page navigation, capped at ~720 points (≈1 h).
+  // ── Charts ──────────────────────────────────────────────────────────────
+  // Series come from server-side `report.history` (ring per peer). NaN
+  // breaks the path into segments so dropouts read as gaps, not interpolation.
   function chartSegments(
     vals: number[],
     W: number,
@@ -194,7 +195,6 @@
   }
 
   let history = $derived<SystemHistoryPoint[]>(peer?.system?.history ?? []);
-
   let cpuSeries = $derived(history.map((p) => p.cpu_percent ?? NaN));
   let memSeries = $derived(
     history.map((p) =>
@@ -203,8 +203,6 @@
         : NaN,
     ),
   );
-
-  // GPUs: group history points by GPU name. Order matches current report.gpus.
   let gpuNames = $derived(peer?.system?.gpus?.map((g) => g.name) ?? []);
   function gpuSeries(name: string): number[] {
     return history.map((p) => {
@@ -212,11 +210,24 @@
       return g?.utilization_percent ?? NaN;
     });
   }
-
   let procs = $derived<TopProcess[]>(peer?.system?.top_processes ?? []);
-  // Per-process series are NOT in server history (would explode size).
-  // The pinned-process chart shows last value only until we add server-side
-  // per-process retention — for now collapse to a single bar.
+
+  // Time labels for the X axis. 3 ticks: oldest, middle, newest — formatted
+  // relative to "now" so a 1-hour window reads "-1h / -30m / now".
+  function relTime(targetTs: number, nowTs: number): string {
+    const dt = nowTs - targetTs;
+    if (dt < 5) return 'now';
+    if (dt < 60) return `-${Math.round(dt)}s`;
+    if (dt < 3600) return `-${Math.round(dt / 60)}m`;
+    return `-${(dt / 3600).toFixed(1)}h`;
+  }
+  let xAxisLabels = $derived.by(() => {
+    if (history.length < 2) return [] as string[];
+    const now = history[history.length - 1].ts;
+    const first = history[0].ts;
+    const mid = history[Math.floor(history.length / 2)].ts;
+    return [relTime(first, now), relTime(mid, now), 'now'];
+  });
 
   function fmt(n: number | null | undefined, unit: string): string {
     if (n == null || !Number.isFinite(n)) return '—';
@@ -245,20 +256,18 @@
     {/if}
   </div>
 
-  {#if error}
-    <div class="err">{error}</div>
-  {/if}
+  {#if error}<div class="errline">{error}</div>{/if}
 
   {#if peer}
-    <section class="update">
-      <div class="update-head">
+    <section class="panel">
+      <div class="panel-head">
         <h2>Update</h2>
         <button class="btn-sm" onclick={probeUpdate} disabled={versionsLoading || updatePending}>
           {versionsLoading ? 'Probing…' : 'Refresh'}
         </button>
       </div>
-      <div class="update-row">
-        <label>Version{#if peer.pinned_to}<span class="pin" title={`Pinned to ${peer.pinned_to}`}>📌</span>{/if}</label>
+      <div class="row">
+        <span class="row-label">Version{#if peer.pinned_to}<span class="pin" title={`Pinned to ${peer.pinned_to}`}>📌</span>{/if}</span>
         <select bind:value={versionSelect} disabled={updatePending}>
           {#if peer.version && !versions.some((v) => v.tag === `v${peer!.version}`)}
             <option value={`v${peer.version}`}>v{peer.version} (current)</option>
@@ -268,8 +277,8 @@
           {/each}
         </select>
       </div>
-      <div class="update-row">
-        <label>Channel</label>
+      <div class="row">
+        <span class="row-label">Channel</span>
         <div class="seg">
           {#each ['stable', 'rc', 'dev'] as ch}
             <button class:active={channelSelect === ch} disabled={updatePending} onclick={() => (channelSelect = ch)}>{ch}</button>
@@ -279,8 +288,8 @@
       {#if !peer.pinned_to && peer.update_available && peer.update_latest}
         <p class="avail">Update available: <code>{peer.update_latest}</code></p>
       {/if}
-      <div class="update-row">
-        <span></span>
+      <div class="row">
+        <span class="row-label"></span>
         <button
           class="apply"
           onclick={applyUpdate}
@@ -289,7 +298,7 @@
       </div>
       {#if updateResult}
         {#if updateResult.notes.length > 0}<p class="ok">{updateResult.notes.join(' · ')}</p>{/if}
-        {#if updateResult.errors.length > 0}<p class="err">{updateResult.errors.join(' · ')}</p>{/if}
+        {#if updateResult.errors.length > 0}<p class="errline">{updateResult.errors.join(' · ')}</p>{/if}
       {/if}
     </section>
   {/if}
@@ -317,60 +326,55 @@
       </div>
     </section>
 
+    {#snippet chartCell(label: string, valStr: string, vals: number[], color: string, vmax: number, unit: string)}
+      {@const W = 800}
+      {@const H = 120}
+      <div class="chart">
+        <div class="chart-head">
+          <span>{label}</span>
+          <span class="chart-val">{valStr}</span>
+        </div>
+        <div class="chart-body">
+          <div class="y-axis">
+            <span>{unit === '%' ? '100%' : `${Math.round(vmax)}${unit}`}</span>
+            <span>{unit === '%' ? '75%' : `${Math.round(vmax * 0.75)}${unit}`}</span>
+            <span>{unit === '%' ? '50%' : `${Math.round(vmax * 0.5)}${unit}`}</span>
+            <span>{unit === '%' ? '25%' : `${Math.round(vmax * 0.25)}${unit}`}</span>
+            <span>0</span>
+          </div>
+          <svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" style="color: {color}">
+            {#each [0, 0.25, 0.5, 0.75, 1] as g}
+              <line x1="0" x2={W} y1={H * (1 - g)} y2={H * (1 - g)}
+                stroke="var(--color-border)" stroke-width="0.5"
+                opacity={g === 0 || g === 1 ? 0.6 : 0.3} />
+            {/each}
+            {#each chartSegments(vals, W, H, vmax) as seg}
+              <path d={seg.area} fill="currentColor" opacity="0.18" />
+              <path d={seg.line} fill="none" stroke="currentColor" stroke-width="1.5" />
+            {/each}
+          </svg>
+        </div>
+        <div class="x-axis">
+          <span></span>
+          {#each xAxisLabels as t}<span>{t}</span>{/each}
+        </div>
+      </div>
+    {/snippet}
+
     <section class="charts">
       <h2>History <span class="hint">{history.length} samples</span></h2>
       {#if history.length === 0}
         <div class="empty">No history yet — waiting for the first sample.</div>
       {:else}
-        {@const W = 800}
-        {@const H = 120}
-        <div class="chart">
-          <div class="chart-label">CPU<span class="chart-val">{fmt(s.cpu_usage_percent, '%')}</span></div>
-          <svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" style="color:#89b4fa">
-            {#each [0.25, 0.5, 0.75] as g}
-              <line x1="0" x2={W} y1={H * (1 - g)} y2={H * (1 - g)} stroke="currentColor" stroke-width="0.5" opacity="0.15" />
-            {/each}
-            {#each chartSegments(cpuSeries, W, H, 100) as seg}
-              <path d={seg.area} fill="currentColor" opacity="0.18" />
-              <path d={seg.line} fill="none" stroke="currentColor" stroke-width="1.5" />
-            {/each}
-          </svg>
-          <div class="chart-axis"><span>0</span><span>100%</span></div>
-        </div>
-
-        <div class="chart">
-          <div class="chart-label">Memory<span class="chart-val">{fmt(s.mem_used_mb, 'MB')} / {fmt(s.mem_total_mb, 'MB')}</span></div>
-          <svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" style="color:#a6e3a1">
-            {#each [0.25, 0.5, 0.75] as g}
-              <line x1="0" x2={W} y1={H * (1 - g)} y2={H * (1 - g)} stroke="currentColor" stroke-width="0.5" opacity="0.15" />
-            {/each}
-            {#each chartSegments(memSeries, W, H, 100) as seg}
-              <path d={seg.area} fill="currentColor" opacity="0.18" />
-              <path d={seg.line} fill="none" stroke="currentColor" stroke-width="1.5" />
-            {/each}
-          </svg>
-          <div class="chart-axis"><span>0</span><span>100%</span></div>
-        </div>
-
+        {@render chartCell('CPU', fmt(s.cpu_usage_percent, '%'), cpuSeries, 'var(--color-info)', 100, '%')}
+        {@render chartCell('Memory', `${fmt(s.mem_used_mb, 'MB')} / ${fmt(s.mem_total_mb, 'MB')}`, memSeries, 'var(--color-success)', 100, '%')}
         {#each gpuNames as name}
-          <div class="chart">
-            <div class="chart-label">GPU: {name}</div>
-            <svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" style="color:#f5c2e7">
-              {#each [0.25, 0.5, 0.75] as g}
-                <line x1="0" x2={W} y1={H * (1 - g)} y2={H * (1 - g)} stroke="currentColor" stroke-width="0.5" opacity="0.15" />
-              {/each}
-              {#each chartSegments(gpuSeries(name), W, H, 100) as seg}
-                <path d={seg.area} fill="currentColor" opacity="0.18" />
-                <path d={seg.line} fill="none" stroke="currentColor" stroke-width="1.5" />
-              {/each}
-            </svg>
-            <div class="chart-axis"><span>0</span><span>100%</span></div>
-          </div>
+          {@render chartCell(`GPU: ${name}`, '', gpuSeries(name), 'var(--color-accent)', 100, '%')}
         {/each}
       {/if}
     </section>
 
-    <section class="procs">
+    <section class="panel">
       <h2>Top processes</h2>
       <table>
         <thead>
@@ -398,45 +402,207 @@
 </div>
 
 <style>
-  .page { padding: 1rem 1.5rem; max-width: 1100px; margin: 0 auto; }
-  .topbar { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem; }
-  .back { background: none; border: 1px solid #444; color: inherit; padding: 0.25rem 0.6rem; border-radius: 4px; cursor: pointer; }
-  h1 { font-size: 1.4rem; margin: 0; }
-  .badge { background: #313244; padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.75rem; }
-  .meta { font-size: 0.8rem; opacity: 0.7; }
-  .err { color: #f38ba8; padding: 0.5rem 0; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0.75rem; margin-bottom: 1.25rem; }
-  .card { background: #1e1e2e; border: 1px solid #313244; border-radius: 6px; padding: 0.75rem; }
-  .card-title { font-weight: 600; font-size: 0.85rem; margin-bottom: 0.4rem; opacity: 0.85; }
-  .kv { display: flex; justify-content: space-between; font-size: 0.85rem; padding: 0.1rem 0; }
-  .kv span { opacity: 0.7; }
-  .charts h2, .procs h2 { font-size: 0.95rem; margin: 1rem 0 0.5rem; }
-  .hint { opacity: 0.6; font-size: 0.75rem; font-weight: normal; }
-  .empty { opacity: 0.6; padding: 1rem; background: #1e1e2e; border-radius: 6px; }
-  .chart { background: #1e1e2e; border: 1px solid #313244; border-radius: 6px; padding: 0.5rem 0.75rem; margin-bottom: 0.75rem; }
-  .chart-label { display: flex; justify-content: space-between; font-size: 0.8rem; margin-bottom: 0.25rem; }
-  .chart-val { opacity: 0.7; font-variant-numeric: tabular-nums; }
-  .chart svg { width: 100%; height: 120px; display: block; }
-  .chart-axis { display: flex; justify-content: space-between; font-size: 0.7rem; opacity: 0.5; padding-top: 0.15rem; }
-  .procs table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-  .procs th, .procs td { text-align: left; padding: 0.25rem 0.5rem; border-bottom: 1px solid #313244; }
-  .procs tbody tr { cursor: pointer; }
-  .procs tbody tr:hover { background: #2a2a3a; }
-  .procs tbody tr.pinned { background: #383850; }
-  .update { background: #1e1e2e; border: 1px solid #313244; border-radius: 6px; padding: 0.75rem; margin-bottom: 1rem; }
-  .update-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; }
-  .update-head h2 { font-size: 0.95rem; margin: 0; }
-  .update-row { display: grid; grid-template-columns: 110px 1fr; align-items: center; gap: 0.5rem; padding: 0.2rem 0; font-size: 0.85rem; }
-  .update-row label { opacity: 0.8; }
-  .update-row select { background: #11111b; color: inherit; border: 1px solid #45475a; border-radius: 4px; padding: 0.25rem 0.4rem; }
-  .pin { margin-left: 0.3rem; }
-  .seg { display: inline-flex; border: 1px solid #45475a; border-radius: 4px; overflow: hidden; }
-  .seg button { background: none; border: 0; color: inherit; padding: 0.25rem 0.7rem; cursor: pointer; font-size: 0.8rem; }
-  .seg button.active { background: #89b4fa; color: #11111b; }
-  .btn-sm { background: none; border: 1px solid #45475a; color: inherit; padding: 0.15rem 0.6rem; border-radius: 4px; font-size: 0.75rem; cursor: pointer; }
-  .apply { background: #89b4fa; color: #11111b; border: 0; padding: 0.3rem 0.9rem; border-radius: 4px; font-size: 0.85rem; cursor: pointer; }
-  .apply:disabled { opacity: 0.5; cursor: not-allowed; }
-  .avail { font-size: 0.8rem; color: #f9e2af; margin: 0.25rem 0; }
-  .ok { color: #a6e3a1; font-size: 0.8rem; }
-  .err { color: #f38ba8; font-size: 0.8rem; }
+  .page {
+    max-width: var(--content-max);
+    margin: 0 auto;
+    padding: var(--space-6);
+  }
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+  }
+  .back {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: var(--text-sm);
+  }
+  .back:hover { background: var(--surface); }
+  h1 { font-size: var(--text-xl); margin: 0; color: var(--text); }
+  h2 { font-size: var(--text-base); margin: 0 0 var(--space-2); color: var(--text); }
+  .badge {
+    background: var(--code-bg);
+    color: var(--muted);
+    padding: 2px var(--space-2);
+    border-radius: 999px;
+    font-size: var(--text-xs);
+  }
+  .meta { font-size: var(--text-xs); color: var(--muted); }
+  .errline { color: var(--color-error); font-size: var(--text-sm); padding: var(--space-1) 0; }
+  .ok { color: var(--color-success); font-size: var(--text-sm); margin: var(--space-1) 0; }
+  .avail { color: var(--color-warning); font-size: var(--text-sm); margin: var(--space-1) 0; }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: var(--space-4);
+    margin-bottom: var(--space-4);
+  }
+  .panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-2);
+  }
+  .panel-head h2 { margin: 0; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: var(--space-3);
+  }
+  .card-title {
+    font-weight: var(--weight-semibold);
+    font-size: var(--text-sm);
+    margin-bottom: var(--space-2);
+    color: var(--text);
+  }
+  .kv {
+    display: flex;
+    justify-content: space-between;
+    font-size: var(--text-sm);
+    padding: 2px 0;
+    color: var(--text);
+  }
+  .kv span { color: var(--muted); }
+
+  .row {
+    display: grid;
+    grid-template-columns: 110px 1fr;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) 0;
+    font-size: var(--text-sm);
+  }
+  .row-label { color: var(--muted); }
+  .row select {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: var(--space-1) var(--space-2);
+    font: inherit;
+  }
+  .pin { margin-left: var(--space-1); }
+  .seg {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+  }
+  .seg button {
+    background: none;
+    border: 0;
+    color: var(--text);
+    padding: var(--space-1) var(--space-3);
+    cursor: pointer;
+    font-size: var(--text-xs);
+  }
+  .seg button.active { background: var(--accent); color: var(--color-bg); }
+  .btn-sm {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    cursor: pointer;
+  }
+  .btn-sm:hover:not(:disabled) { background: var(--code-bg); }
+  .apply {
+    background: var(--accent);
+    color: var(--color-bg);
+    border: 0;
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
+    cursor: pointer;
+  }
+  .apply:disabled { opacity: var(--opacity-disabled); cursor: not-allowed; }
+
+  .charts h2 { display: flex; align-items: baseline; gap: var(--space-2); }
+  .hint { color: var(--color-text-dim); font-size: var(--text-xs); font-weight: var(--weight-normal); }
+  .empty {
+    color: var(--muted);
+    padding: var(--space-4);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+  }
+
+  /* ── chart ────────────────────────────────────────────────────────────── */
+  .chart {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: var(--space-3);
+    margin-bottom: var(--space-3);
+  }
+  .chart-head {
+    display: flex;
+    justify-content: space-between;
+    font-size: var(--text-sm);
+    color: var(--text);
+    margin-bottom: var(--space-2);
+  }
+  .chart-val { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .chart-body {
+    display: grid;
+    grid-template-columns: 44px 1fr;
+    gap: var(--space-2);
+    align-items: stretch;
+  }
+  .y-axis {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    font-size: var(--text-xs);
+    color: var(--color-text-dim);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    height: 120px;
+  }
+  .chart svg {
+    width: 100%;
+    height: 120px;
+    display: block;
+  }
+  .x-axis {
+    display: grid;
+    grid-template-columns: 44px repeat(3, 1fr);
+    gap: var(--space-2);
+    margin-top: var(--space-1);
+    font-size: var(--text-xs);
+    color: var(--color-text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .x-axis > span:nth-child(2) { text-align: left; }
+  .x-axis > span:nth-child(3) { text-align: center; }
+  .x-axis > span:nth-child(4) { text-align: right; }
+
+  /* ── processes ────────────────────────────────────────────────────────── */
+  table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
+  th, td {
+    text-align: left;
+    padding: var(--space-1) var(--space-2);
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+  }
+  th { color: var(--muted); font-weight: var(--weight-medium); }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: var(--code-bg); }
+  tbody tr.pinned { background: var(--code-bg); outline: 1px solid var(--accent); outline-offset: -1px; }
 </style>
