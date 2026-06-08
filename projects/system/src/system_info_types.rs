@@ -122,6 +122,13 @@ pub struct SystemInfoReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_threads: Option<u32>,
 
+    /// Top processes by CPU usage at snapshot time. Capped at 10 entries
+    /// (drawer renders them as a click-to-histogram table; widening the
+    /// list is cheap server-side but wastes wire bytes the UI can't
+    /// usefully render). Empty when sysinfo failed to enumerate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub top_processes: Vec<TopProcess>,
+
     // ── Storage (filesystem hosting ~/.orca) ──
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orca_dir: Option<String>,
