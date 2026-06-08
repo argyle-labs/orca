@@ -5,6 +5,7 @@
   import { callTool } from '$lib/stores/runTool';
   import type { SystemInfoReport, SystemHistoryPoint, TopProcess } from '$lib/client/types.gen';
 
+  type VersionEntry = { tag: string; prerelease: boolean; published_at: string | null; is_current: boolean };
   type PodPeer = {
     peer_id: string;
     hostname: string;
@@ -14,9 +15,21 @@
     local: boolean;
     version?: string | null;
     channel?: string | null;
+    pinned_to?: string | null;
+    update_available?: boolean | null;
+    update_latest?: string | null;
     system?: SystemInfoReport | null;
   };
   type PodMember = { state: string } & Partial<PodPeer>;
+  type SystemUpdateResp = {
+    current_version: string;
+    channel: string;
+    pinned_to: string | null;
+    available_versions: VersionEntry[];
+    latest: string | null;
+    notes?: string[];
+    errors?: string[];
+  };
 
   let id = $derived($page.params.id);
   let peer = $state<PodPeer | null>(null);
@@ -24,8 +37,81 @@
   let error = $state<string | null>(null);
   let pinnedPid = $state<number | null>(null);
 
+  // Update controls
+  let versions = $state<VersionEntry[]>([]);
+  let versionsLoading = $state(false);
+  let versionSelect = $state('');
+  let channelSelect = $state('stable');
+  let updatePending = $state(false);
+  let updateResult = $state<{ notes: string[]; errors: string[] } | null>(null);
+  let hydratedForId = $state<string | null>(null);
+
   let pollHandle: ReturnType<typeof setInterval> | null = null;
   const POLL_MS = 5000;
+
+  function inferChannel(v: string | null | undefined, fallback: string | null | undefined): string {
+    const s = v ?? '';
+    if (/-dev/i.test(s)) return 'dev';
+    if (/-rc/i.test(s)) return 'rc';
+    if (s) return 'stable';
+    return fallback ?? 'stable';
+  }
+
+  function isLocalPeer(p: PodPeer): boolean {
+    return !!p.local;
+  }
+
+  async function probeUpdate() {
+    if (!peer) return;
+    versionsLoading = true;
+    try {
+      const target = isLocalPeer(peer) ? null : peer.peer_id;
+      const r = await callTool<SystemUpdateResp>('systemUpdate', {}, { peer: target });
+      versions = r.available_versions ?? [];
+      if (r.current_version && !versionSelect) versionSelect = `v${r.current_version}`;
+      channelSelect = inferChannel(r.current_version, r.channel);
+      if (peer) {
+        peer.version = r.current_version || peer.version;
+        peer.channel = r.channel;
+        peer.pinned_to = r.pinned_to;
+        peer.update_latest = r.latest;
+        peer.update_available = !!r.current_version && !!r.latest && r.latest.replace(/^v/, '') !== r.current_version;
+      }
+    } catch (e) {
+      console.warn('probe failed', e);
+    } finally {
+      versionsLoading = false;
+    }
+  }
+
+  async function applyUpdate() {
+    if (!peer) return;
+    const args: Record<string, unknown> = {};
+    if (channelSelect && channelSelect !== inferChannel(peer.version, peer.channel)) args.channel = channelSelect;
+    if (versionSelect && versionSelect !== `v${peer.version ?? ''}`) args.version = versionSelect;
+    if (Object.keys(args).length === 0) return;
+    updatePending = true;
+    updateResult = null;
+    try {
+      const target = isLocalPeer(peer) ? null : peer.peer_id;
+      const r = await callTool<SystemUpdateResp>('systemUpdate', args, { peer: target });
+      updateResult = { notes: r.notes ?? [], errors: r.errors ?? [] };
+      versions = r.available_versions ?? versions;
+      if (peer) {
+        peer.version = r.current_version || peer.version;
+        peer.channel = r.channel;
+        peer.pinned_to = r.pinned_to;
+        peer.update_latest = r.latest;
+        peer.update_available = !!r.current_version && !!r.latest && r.latest.replace(/^v/, '') !== r.current_version;
+        if (r.current_version) versionSelect = `v${r.current_version}`;
+        channelSelect = inferChannel(r.current_version, r.channel);
+      }
+    } catch (e) {
+      updateResult = { notes: [], errors: [e instanceof Error ? e.message : String(e)] };
+    } finally {
+      updatePending = false;
+    }
+  }
 
   async function refresh() {
     try {
@@ -36,6 +122,12 @@
         .find((p) => p.peer_id === id);
       peer = found ?? null;
       error = found ? null : `peer ${id} not found in pod`;
+      if (peer && hydratedForId !== peer.peer_id) {
+        hydratedForId = peer.peer_id;
+        versionSelect = peer.version ? `v${peer.version}` : '';
+        channelSelect = inferChannel(peer.version, peer.channel);
+        void probeUpdate();
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -155,6 +247,51 @@
 
   {#if error}
     <div class="err">{error}</div>
+  {/if}
+
+  {#if peer}
+    <section class="update">
+      <div class="update-head">
+        <h2>Update</h2>
+        <button class="btn-sm" onclick={probeUpdate} disabled={versionsLoading || updatePending}>
+          {versionsLoading ? 'Probing…' : 'Refresh'}
+        </button>
+      </div>
+      <div class="update-row">
+        <label>Version{#if peer.pinned_to}<span class="pin" title={`Pinned to ${peer.pinned_to}`}>📌</span>{/if}</label>
+        <select bind:value={versionSelect} disabled={updatePending}>
+          {#if peer.version && !versions.some((v) => v.tag === `v${peer!.version}`)}
+            <option value={`v${peer.version}`}>v{peer.version} (current)</option>
+          {/if}
+          {#each versions as v}
+            <option value={v.tag}>{v.tag}{peer.version && v.tag === `v${peer.version}` ? ' (current)' : ''}</option>
+          {/each}
+        </select>
+      </div>
+      <div class="update-row">
+        <label>Channel</label>
+        <div class="seg">
+          {#each ['stable', 'rc', 'dev'] as ch}
+            <button class:active={channelSelect === ch} disabled={updatePending} onclick={() => (channelSelect = ch)}>{ch}</button>
+          {/each}
+        </div>
+      </div>
+      {#if !peer.pinned_to && peer.update_available && peer.update_latest}
+        <p class="avail">Update available: <code>{peer.update_latest}</code></p>
+      {/if}
+      <div class="update-row">
+        <span></span>
+        <button
+          class="apply"
+          onclick={applyUpdate}
+          disabled={updatePending || (!peer.pinned_to && `v${peer.version ?? ''}` === versionSelect && inferChannel(peer.version, peer.channel) === channelSelect)}
+        >{updatePending ? 'Updating…' : 'Apply'}</button>
+      </div>
+      {#if updateResult}
+        {#if updateResult.notes.length > 0}<p class="ok">{updateResult.notes.join(' · ')}</p>{/if}
+        {#if updateResult.errors.length > 0}<p class="err">{updateResult.errors.join(' · ')}</p>{/if}
+      {/if}
+    </section>
   {/if}
 
   {#if peer?.system}
@@ -286,4 +423,20 @@
   .procs tbody tr { cursor: pointer; }
   .procs tbody tr:hover { background: #2a2a3a; }
   .procs tbody tr.pinned { background: #383850; }
+  .update { background: #1e1e2e; border: 1px solid #313244; border-radius: 6px; padding: 0.75rem; margin-bottom: 1rem; }
+  .update-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; }
+  .update-head h2 { font-size: 0.95rem; margin: 0; }
+  .update-row { display: grid; grid-template-columns: 110px 1fr; align-items: center; gap: 0.5rem; padding: 0.2rem 0; font-size: 0.85rem; }
+  .update-row label { opacity: 0.8; }
+  .update-row select { background: #11111b; color: inherit; border: 1px solid #45475a; border-radius: 4px; padding: 0.25rem 0.4rem; }
+  .pin { margin-left: 0.3rem; }
+  .seg { display: inline-flex; border: 1px solid #45475a; border-radius: 4px; overflow: hidden; }
+  .seg button { background: none; border: 0; color: inherit; padding: 0.25rem 0.7rem; cursor: pointer; font-size: 0.8rem; }
+  .seg button.active { background: #89b4fa; color: #11111b; }
+  .btn-sm { background: none; border: 1px solid #45475a; color: inherit; padding: 0.15rem 0.6rem; border-radius: 4px; font-size: 0.75rem; cursor: pointer; }
+  .apply { background: #89b4fa; color: #11111b; border: 0; padding: 0.3rem 0.9rem; border-radius: 4px; font-size: 0.85rem; cursor: pointer; }
+  .apply:disabled { opacity: 0.5; cursor: not-allowed; }
+  .avail { font-size: 0.8rem; color: #f9e2af; margin: 0.25rem 0; }
+  .ok { color: #a6e3a1; font-size: 0.8rem; }
+  .err { color: #f38ba8; font-size: 0.8rem; }
 </style>
