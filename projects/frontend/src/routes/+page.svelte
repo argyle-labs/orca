@@ -193,6 +193,51 @@
 
   let selectedInst = $derived(instances.find((i) => i.id === selectedInstId) ?? null);
 
+  // View mode: tree (default, indented by parent_peer_id) or table (flat).
+  // Lives in the URL so refresh / share preserves the choice.
+  let view = $derived(($page.url.searchParams.get('view') === 'table' ? 'table' : 'tree') as 'tree' | 'table');
+  function setView(v: 'tree' | 'table') {
+    const u = new URL($page.url);
+    if (v === 'tree') u.searchParams.delete('view');
+    else u.searchParams.set('view', v);
+    goto(`${u.pathname}${u.search}`, { replaceState: true, keepFocus: true, noScroll: true });
+  }
+
+  // Depth-first ordering by parent_peer_id (from system.parent_peer_id).
+  // Roots first (no parent or unknown parent), then children indented under
+  // them. Local host is always a root. Cycles broken by visited set.
+  let displayInstances = $derived.by(() => {
+    const byPeer = new Map<string, Instance>();
+    for (const i of instances) byPeer.set(i.peerId, i);
+    if (view === 'table') {
+      return instances.map((inst) => ({ inst, depth: 0 }));
+    }
+    const childrenOf = new Map<string, Instance[]>();
+    const roots: Instance[] = [];
+    for (const inst of instances) {
+      const parent = inst.sys?.parent_peer_id;
+      if (parent && parent !== inst.peerId && byPeer.has(parent)) {
+        const arr = childrenOf.get(parent) ?? [];
+        arr.push(inst);
+        childrenOf.set(parent, arr);
+      } else {
+        roots.push(inst);
+      }
+    }
+    const out: { inst: Instance; depth: number }[] = [];
+    const visited = new Set<string>();
+    const walk = (inst: Instance, depth: number) => {
+      if (visited.has(inst.peerId)) return;
+      visited.add(inst.peerId);
+      out.push({ inst, depth });
+      for (const child of childrenOf.get(inst.peerId) ?? []) walk(child, depth + 1);
+    };
+    for (const r of roots) walk(r, 0);
+    // Any instance left out (cycle break) goes flat at the end.
+    for (const inst of instances) if (!visited.has(inst.peerId)) out.push({ inst, depth: 0 });
+    return out;
+  });
+
   function originForLocal(): string {
     if (typeof window === 'undefined') return '';
     return window.location.origin;
@@ -1021,11 +1066,18 @@
     </div>
   {/if}
 
-  <div class="instances">
-    {#each instances as inst (inst.id)}
+  <div class="view-toggle">
+    <button class:active={view === 'tree'} onclick={() => setView('tree')}>Tree</button>
+    <button class:active={view === 'table'} onclick={() => setView('table')}>Table</button>
+  </div>
+
+  <div class="instances" class:tree={view === 'tree'}>
+    {#each displayInstances as { inst, depth } (inst.id)}
       <div
         class="instance"
         class:down={inst.health === 'down'}
+        class:child={depth > 0}
+        style:margin-left="{depth * 24}px"
         onclick={() => goto(`/systems/${inst.peerId}`)}
         role="button"
         tabindex="0"
@@ -1650,6 +1702,33 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
     gap: var(--space-4);
+  }
+  .instances.tree {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .instances.tree .instance.child {
+    border-left: 2px solid var(--border-2, #444);
+  }
+  .view-toggle {
+    display: flex;
+    gap: 0.25rem;
+    margin-bottom: var(--space-3);
+  }
+  .view-toggle button {
+    background: none;
+    border: 1px solid var(--border-2, #444);
+    color: inherit;
+    padding: 0.2rem 0.7rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.8rem;
+  }
+  .view-toggle button.active {
+    background: var(--accent, #89b4fa);
+    color: #11111b;
+    border-color: transparent;
   }
 
   /* ── card ─────────────────────────────────────────────────────────────── */

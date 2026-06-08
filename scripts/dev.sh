@@ -141,7 +141,7 @@ echo ""
 DEV_LINUX_TARGET=x86_64-unknown-linux-gnu
 DEV_BINARY=target/${DEV_LINUX_TARGET}/release/orca
 export ORCA_LOG=${ORCA_LOG:-info,orca=debug,hyper=warn,mio=warn,h2=warn,reqwest=warn,rustls=warn,tower_http=warn,tungstenite=warn,mdns_sd=warn,mdns=warn}
-DEV_SERVER_CMD='while true; do ../../target/debug/orca serve --dev; echo "  [server exited — respawning in 1s]"; sleep 1; done'
+DEV_SERVER_CMD='while true; do ./target/debug/orca serve --dev; echo "  [server exited — respawning in 1s]"; sleep 1; done'
 
 if [[ $SERVE_BINARY -eq 1 ]]; then
   # Linux release build runs as a background -s step after the debug build so
