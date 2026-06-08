@@ -34,6 +34,11 @@
     // the peer's true state by one mesh sync. While this window is active,
     // preserve fields the action authoritatively changed.
     actionLockUntil?: number;
+    // Full version list from this peer's `system.update {}` probe, kept
+    // fresh by the page-level fan-out poll. Empty until the first probe
+    // completes. The drawer reads from this directly so opening it never
+    // needs a Refresh click.
+    availableVersions?: VersionEntry[];
   }
 
   let instances = $state<Instance[]>([]);
@@ -163,10 +168,11 @@
 
   // 1-second live poll; DB writes happen every 10 s (host_status_writer)
   const POLL_MS = 1000;
-  // Per-peer `system.update {}` fan-out cadence. Slower than POLL_MS
-  // because every tick is one mesh round-trip per peer; faster than the
-  // daemon-side periodic (60 s) so the UI feels live.
-  const PROBE_MS = 15000;
+  // Per-peer `system.update {}` fan-out cadence. One mesh call per peer
+  // per tick — heavier than the 1 s pod.list pull, so we space it out.
+  // 60 s matches the daemon-side periodic probe and is enough for "new
+  // version landed on GitHub" detection without hammering the mesh.
+  const PROBE_MS = 60000;
 
   // Preset segments (Custom is always index 3)
   const RETENTION_PRESETS = [
@@ -495,12 +501,10 @@
   // for the selected instance. No network call.
   function hydrateDrawerFromInstance() {
     if (!selectedInst) return;
-    if (selectedInst.updateLatest) {
-      // Synthesize a single-entry list so the version <select> shows the
-      // peer's running version as the default; the actual list is only
-      // populated by an explicit Refresh.
-    }
-    drawerVersions = [];
+    // Use whatever the page-level probe already fetched. If the first
+    // probe hasn't completed yet this is empty, but the next tick of
+    // probeAllInstances will mirror its result into `drawerVersions`.
+    drawerVersions = selectedInst.availableVersions ?? [];
   }
 
   type SystemUpdateResp = {
@@ -749,7 +753,17 @@
           } else {
             target.updateAvailable = false;
           }
+          target.availableVersions = r.available_versions ?? [];
           target.lastChecked = Date.now();
+          // Mirror into the drawer's version select if the user is looking
+          // at this peer right now — keeps the dropdown options live
+          // without forcing a Refresh click.
+          if (selectedInst && selectedInst.id === target.id) {
+            drawerVersions = target.availableVersions;
+            if (!drawerVersionSelect && r.current_version) {
+              drawerVersionSelect = `v${r.current_version}`;
+            }
+          }
         } catch (e) {
           console.debug(`system.update probe failed for ${inst.label}:`, e);
         }

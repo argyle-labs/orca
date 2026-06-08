@@ -18,10 +18,12 @@ set -euo pipefail
 
 HOST="${1:-}"
 ARCH="x86_64"
+PREBUILT_BIN=""
 shift || true
 while [ $# -gt 0 ]; do
   case "$1" in
     --arch) ARCH="$2"; shift 2 ;;
+    --binary) PREBUILT_BIN="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -46,12 +48,17 @@ VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 OUT="$REPO_ROOT/dist-unraid"
 mkdir -p "$OUT"
 
-echo "→ building orca for $TRIPLE (version $VERSION)"
-# Linux targets cross-compile via zigbuild from any host; matches the
-# pattern in scripts/release-lib.sh::build_orca_targets.
-command -v cargo-zigbuild >/dev/null \
-  || { echo "cargo-zigbuild missing — cargo install cargo-zigbuild + brew install zig" >&2; exit 1; }
-cargo zigbuild --release --target "$TRIPLE" -p server
+if [ -n "$PREBUILT_BIN" ]; then
+  [ -x "$PREBUILT_BIN" ] || { echo "prebuilt binary missing or not executable: $PREBUILT_BIN" >&2; exit 1; }
+  echo "→ using prebuilt binary $PREBUILT_BIN (skipping cross-compile)"
+else
+  echo "→ building orca for $TRIPLE (version $VERSION)"
+  # Linux targets cross-compile via zigbuild from any host; matches the
+  # pattern in scripts/release-lib.sh::build_orca_targets.
+  command -v cargo-zigbuild >/dev/null \
+    || { echo "cargo-zigbuild missing — cargo install cargo-zigbuild + brew install zig" >&2; exit 1; }
+  cargo zigbuild --release --target "$TRIPLE" -p server
+fi
 
 # Also build a host-native binary so the .plg generator picks up any
 # package.rs script changes from this working tree — the installed
@@ -60,7 +67,11 @@ cargo zigbuild --release --target "$TRIPLE" -p server
 HOST_TRIPLE="$(rustc -vV | awk '/^host:/ {print $2}')"
 echo "→ building host orca for $HOST_TRIPLE (template-render only)"
 cargo build --release --target "$HOST_TRIPLE" -p server
-BIN_SRC="$REPO_ROOT/target/$TRIPLE/release/orca"
+if [ -n "$PREBUILT_BIN" ]; then
+  BIN_SRC="$PREBUILT_BIN"
+else
+  BIN_SRC="$REPO_ROOT/target/$TRIPLE/release/orca"
+fi
 [ -x "$BIN_SRC" ] || { echo "binary missing: $BIN_SRC" >&2; exit 1; }
 cp "$BIN_SRC" "$OUT/orca"
 
