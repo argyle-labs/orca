@@ -133,6 +133,7 @@
     pairModalOpen = true;
   }
   let pollHandle: ReturnType<typeof setInterval> | null = null;
+  let probeHandle: ReturnType<typeof setInterval> | null = null;
 
   // Drawer update controls — reset only when the SELECTED INSTANCE changes,
   // not on every poll tick that updates instance data.
@@ -162,6 +163,10 @@
 
   // 1-second live poll; DB writes happen every 10 s (host_status_writer)
   const POLL_MS = 1000;
+  // Per-peer `system.update {}` fan-out cadence. Slower than POLL_MS
+  // because every tick is one mesh round-trip per peer; faster than the
+  // daemon-side periodic (60 s) so the UI feels live.
+  const PROBE_MS = 15000;
 
   // Preset segments (Custom is always index 3)
   const RETENTION_PRESETS = [
@@ -477,16 +482,12 @@
       drawerChannelSelect = inferChannel(selectedInst.version, selectedInst.channel);
       drawerVersions = [];
       updateResult = null;
-      // For the local instance, probe immediately — self-state can change
-      // out of band (operator running `orca` in another terminal, etc).
-      // For remote peers, hydrate from the pod.list row that the periodic
-      // probe keeps fresh in `peer_update_state`; the drawer surfaces a
-      // Refresh button if the user wants a forced re-probe of that peer.
-      if (selectedInst.role === 'local') {
-        void probeUpdateState();
-      } else {
-        hydrateDrawerFromInstance();
-      }
+      // Hydrate from the already-loaded pod.list row. Update state
+      // (current_version / latest / available) is kept fresh by the
+      // page-level periodic probe that fans out to every peer regardless
+      // of whether a drawer is open — so the operator can see
+      // update-available badges before clicking in.
+      hydrateDrawerFromInstance();
     }
   });
 
@@ -703,17 +704,59 @@
     refreshPodPeers();
     loadRetention();
     refreshInboundOffers();
+    void probeAllInstances();
     pollHandle = setInterval(() => {
       const loc = instances.find((i) => i.role === 'local');
       if (loc) refreshLocal(loc);
       refreshPodPeers();
       refreshInboundOffers();
     }, POLL_MS);
+    // Per-peer system.update {} fan-out — slower cadence than pod.list
+    // polling because every tick crosses the mesh to every peer. Keeps
+    // updateAvailable / current_version / channel / pinnedTo fresh on every
+    // card (and on any open drawer) without the operator needing to click.
+    probeHandle = setInterval(() => {
+      void probeAllInstances();
+    }, PROBE_MS);
   });
 
   onDestroy(() => {
     if (pollHandle) clearInterval(pollHandle);
+    if (probeHandle) clearInterval(probeHandle);
   });
+
+  // Fan `system.update {}` out to every instance (local + every paired
+  // peer) in parallel. Each response updates that instance's
+  // updateAvailable / updateLatest / current_version / channel / pinned_to
+  // in place. Read-only by contract — the empty args body MUST stay empty.
+  async function probeAllInstances() {
+    const snapshot = instances.filter((i) => i.health !== 'down');
+    await Promise.all(
+      snapshot.map(async (inst) => {
+        const peer = inst.role === 'system' ? inst.peerId : null;
+        try {
+          const r = await callTool<SystemUpdateResp>('systemUpdate', {}, { peer });
+          const target = instances.find((i) => i.id === inst.id);
+          if (!target) return;
+          if (target.actionLockUntil && Date.now() < target.actionLockUntil) return;
+          if (r.current_version) target.version = r.current_version;
+          target.channel = r.channel ?? target.channel;
+          target.pinnedTo = r.pinned_to ?? null;
+          if (r.latest) {
+            target.updateLatest = r.latest;
+            target.updateAvailable =
+              !!r.current_version && r.latest.replace(/^v/, '') !== r.current_version;
+          } else {
+            target.updateAvailable = false;
+          }
+          target.lastChecked = Date.now();
+        } catch (e) {
+          console.debug(`system.update probe failed for ${inst.label}:`, e);
+        }
+      }),
+    );
+    instances = [...instances];
+  }
 
   // Track which instances we've already notified so we don't spam on every poll.
   const notifiedUpdates = new Set<string>();
