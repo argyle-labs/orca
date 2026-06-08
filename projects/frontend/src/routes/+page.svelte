@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { goto } from '$app/navigation';
+  import { page } from '$app/stores';
   import { callTool } from '$lib/stores/runTool';
   import { notifications } from '$lib/stores/notifications';
   import StatusDot from '$lib/components/StatusDot.svelte';
@@ -1024,10 +1026,10 @@
       <div
         class="instance"
         class:down={inst.health === 'down'}
-        onclick={() => (selectedInstId = inst.id)}
+        onclick={() => goto(`/systems/${inst.peerId}`)}
         role="button"
         tabindex="0"
-        onkeydown={(e) => e.key === 'Enter' && (selectedInstId = inst.id)}
+        onkeydown={(e) => e.key === 'Enter' && goto(`/systems/${inst.peerId}`)}
       >
         <div class="card-header">
           <div class="ident">

@@ -233,6 +233,18 @@ export type GpuInfo = {
   vram_used_mb?: number | null;
 };
 
+/**
+ * One GPU's reading inside a `SystemHistoryPoint`. Matched to a live
+ * `GpuInfo` by `name` (driver-stable across ticks).
+ */
+export type GpuPoint = {
+  name: string;
+  temperature_c?: number | null;
+  utilization_percent?: number | null;
+  vram_total_mb?: number | null;
+  vram_used_mb?: number | null;
+};
+
 export type HostChannel = {
   detected_at: number;
   key: string;
@@ -772,6 +784,21 @@ export type SyncToolsServerEntry = {
 };
 
 /**
+ * One sample in the per-host rolling history ring. Written every refresh
+ * tick by the daemon, read back as `SystemInfoReport.history`.
+ */
+export type SystemHistoryPoint = {
+  cpu_percent?: number | null;
+  gpus?: Array<GpuPoint>;
+  mem_total_mb?: number | null;
+  mem_used_mb?: number | null;
+  /**
+   * Unix seconds at sample time.
+   */
+  ts: number;
+};
+
+/**
  * Cross-platform OS / hardware / process / network snapshot. Every field
  * is optional so the same shape works on macOS, Linux, and (eventually)
  * Windows — a collector failure leaves the field `None` rather than
@@ -828,6 +855,13 @@ export type SystemInfoReport = {
    * GPUs detected on this host (NVIDIA via nvidia-smi; AMD via sysfs).
    */
   gpus?: Array<GpuInfo>;
+  /**
+   * Rolling time-series — last N samples from this host's history ring
+   * (`~/.orca/history/system.jsonl`). Capped at ~720 points (≈1 h at the
+   * 5 s refresh cadence). Empty until the background refresher has
+   * written at least one tick.
+   */
+  history?: Array<SystemHistoryPoint>;
   hostname?: string | null;
   interfaces?: Array<NetIfaceDto>;
   kernel_version?: string | null;

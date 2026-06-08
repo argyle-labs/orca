@@ -260,6 +260,30 @@ export const zGpuInfo = z.object({
     .nullish(),
 });
 
+/**
+ * One GPU's reading inside a `SystemHistoryPoint`. Matched to a live
+ * `GpuInfo` by `name` (driver-stable across ticks).
+ */
+export const zGpuPoint = z.object({
+  name: z.string(),
+  temperature_c: z.number().nullish(),
+  utilization_percent: z.number().nullish(),
+  vram_total_mb: z.coerce
+    .bigint()
+    .gte(BigInt(0))
+    .max(BigInt('18446744073709551615'), {
+      error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
+    })
+    .nullish(),
+  vram_used_mb: z.coerce
+    .bigint()
+    .gte(BigInt(0))
+    .max(BigInt('18446744073709551615'), {
+      error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
+    })
+    .nullish(),
+});
+
 export const zHostChannel = z.object({
   detected_at: z.coerce
     .bigint()
@@ -612,6 +636,37 @@ export const zSyncToolsOutput = z.object({
 });
 
 /**
+ * One sample in the per-host rolling history ring. Written every refresh
+ * tick by the daemon, read back as `SystemInfoReport.history`.
+ */
+export const zSystemHistoryPoint = z.object({
+  cpu_percent: z.number().nullish(),
+  gpus: z.array(zGpuPoint).optional(),
+  mem_total_mb: z.coerce
+    .bigint()
+    .gte(BigInt(0))
+    .max(BigInt('18446744073709551615'), {
+      error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
+    })
+    .nullish(),
+  mem_used_mb: z.coerce
+    .bigint()
+    .gte(BigInt(0))
+    .max(BigInt('18446744073709551615'), {
+      error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
+    })
+    .nullish(),
+  ts: z.coerce
+    .bigint()
+    .min(BigInt('-9223372036854775808'), {
+      error: 'Invalid value: Expected int64 to be >= -9223372036854775808',
+    })
+    .max(BigInt('9223372036854775807'), {
+      error: 'Invalid value: Expected int64 to be <= 9223372036854775807',
+    }),
+});
+
+/**
  * One process in the host's top-N-by-CPU snapshot. Names are basenames
  * (e.g. `plex-media-server`), not full argv. Memory is RSS in MiB.
  */
@@ -678,6 +733,7 @@ export const zSystemInfoReport = z.object({
   docker_present: z.boolean().nullish(),
   fqdn: z.string().nullish(),
   gpus: z.array(zGpuInfo).optional(),
+  history: z.array(zSystemHistoryPoint).optional(),
   hostname: z.string().nullish(),
   interfaces: z.array(zNetIfaceDto).optional(),
   kernel_version: z.string().nullish(),
