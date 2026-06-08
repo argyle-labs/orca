@@ -217,6 +217,20 @@ pub struct NetIfaceDto {
     pub loopback: bool,
 }
 
+/// One process in the host's top-N-by-CPU snapshot. Names are basenames
+/// (e.g. `plex-media-server`), not full argv. Memory is RSS in MiB.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Default)]
+pub struct TopProcess {
+    pub pid: u32,
+    pub name: String,
+    /// Aggregate CPU% across all cores (0..=100*N_cores in sysinfo's units;
+    /// the collector normalises to a 0..=100 single-core scale before
+    /// emitting).
+    pub cpu_percent: f32,
+    /// Resident set size in MiB.
+    pub mem_mb: u64,
+}
+
 /// One GPU detected on the host.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Default)]
 pub struct GpuInfo {

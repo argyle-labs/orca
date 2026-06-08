@@ -612,6 +612,22 @@ export const zSyncToolsOutput = z.object({
 });
 
 /**
+ * One process in the host's top-N-by-CPU snapshot. Names are basenames
+ * (e.g. `plex-media-server`), not full argv. Memory is RSS in MiB.
+ */
+export const zTopProcess = z.object({
+  cpu_percent: z.number(),
+  mem_mb: z.coerce.bigint().gte(BigInt(0)).max(BigInt('18446744073709551615'), {
+    error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
+  }),
+  name: z.string(),
+  pid: z
+    .int()
+    .gte(0)
+    .max(4294967295, { error: 'Invalid value: Expected uint32 to be <= 4294967295' }),
+});
+
+/**
  * One child entity a host claims to run. The inference layer matches each
  * claim's `macs` against other peers' `interfaces[].mac` to derive
  * `parent_peer_id`.
@@ -788,6 +804,7 @@ export const zSystemInfoReport = z.object({
       error: 'Invalid value: Expected uint64 to be <= 18446744073709551615',
     })
     .nullish(),
+  top_processes: z.array(zTopProcess).optional(),
   virtualization: z.string().nullish(),
 });
 

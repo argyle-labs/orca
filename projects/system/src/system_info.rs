@@ -162,6 +162,29 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
         report.process_threads = p.tasks().map(|t| t.len() as u32);
     }
 
+    // Top 10 processes by CPU. sysinfo reports cpu_usage() as 0..=100 per
+    // logical core (i.e. up to 100*N_cores total) — normalise to a single
+    // 0..=100 scale for consistent rendering across hosts with different
+    // core counts.
+    let cores = sys.cpus().len().max(1) as f32;
+    let mut procs: Vec<crate::system_info_types::TopProcess> = sys
+        .processes()
+        .values()
+        .map(|p| crate::system_info_types::TopProcess {
+            pid: p.pid().as_u32(),
+            name: p.name().to_string_lossy().to_string(),
+            cpu_percent: p.cpu_usage() / cores,
+            mem_mb: p.memory() / 1024 / 1024,
+        })
+        .collect();
+    procs.sort_by(|a, b| {
+        b.cpu_percent
+            .partial_cmp(&a.cpu_percent)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    procs.truncate(10);
+    report.top_processes = procs;
+
     // Storage — the filesystem hosting ~/.orca. Pick the longest mount-point
     // prefix so we report the right volume on hosts with separate /home or
     // /var partitions.

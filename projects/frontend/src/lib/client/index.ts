@@ -565,6 +565,7 @@ export type {
   SystemUpdateResponse,
   SystemUpdateResponses,
   TopologyClaim,
+  TopProcess,
   VaultStatus,
   VersionEntry,
 } from './types.gen';

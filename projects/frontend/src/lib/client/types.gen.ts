@@ -919,11 +919,37 @@ export type SystemInfoReport = {
   system_type?: string | null;
   system_uptime_secs?: number | null;
   /**
+   * Top processes by CPU usage at snapshot time. Capped at 10 entries
+   * (drawer renders them as a click-to-histogram table; widening the
+   * list is cheap server-side but wastes wire bytes the UI can't
+   * usefully render). Empty when sysinfo failed to enumerate.
+   */
+  top_processes?: Array<TopProcess>;
+  /**
    * Hypervisor / container kind: `kvm`, `qemu`, `vmware`, `lxc`,
    * `docker`, `none`, etc. Linux-only — read from `/sys/class/dmi/id/`
    * + `/proc/1/cgroup`. macOS reports `None`.
    */
   virtualization?: string | null;
+};
+
+/**
+ * One process in the host's top-N-by-CPU snapshot. Names are basenames
+ * (e.g. `plex-media-server`), not full argv. Memory is RSS in MiB.
+ */
+export type TopProcess = {
+  /**
+   * Aggregate CPU% across all cores (0..=100*N_cores in sysinfo's units;
+   * the collector normalises to a 0..=100 single-core scale before
+   * emitting).
+   */
+  cpu_percent: number;
+  /**
+   * Resident set size in MiB.
+   */
+  mem_mb: number;
+  name: string;
+  pid: number;
 };
 
 /**

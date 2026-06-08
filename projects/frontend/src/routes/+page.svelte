@@ -398,9 +398,106 @@
           };
         });
       instances = local ? [local, ...podRows] : podRows;
+      // Per-tick sampling for the open-drawer histograms. Only sample the
+      // currently selected peer to keep the rolling window bounded; the
+      // window resets when the user switches drawers.
+      if (selectedInstId) {
+        const inst = instances.find((i) => i.id === selectedInstId);
+        if (inst) sampleDrawerMetrics(inst);
+      }
     } catch (e) {
       console.warn('pod.list failed:', e);
     }
+  }
+
+  // ── Drawer metric history (CPU / RAM / GPU / processes) ──────────────────
+  // Rolling sample window kept in browser memory for the currently-open
+  // drawer. Capped at HIST_LEN points; oldest dropped on each new sample.
+  // Not persisted — drawer close = history cleared. The cards keep their
+  // own (separate) sparkline state.
+  const HIST_LEN = 120;
+  type Sample = { t: number; cpu: number | null; memPct: number | null; gpuPct: (number | null)[] };
+  let histSamples = $state<Sample[]>([]);
+  let histProcMap = $state<Map<number, { name: string; cpu: number[]; mem: number[] }>>(new Map());
+  let pinnedPid = $state<number | null>(null);
+
+  function resetDrawerHistory() {
+    histSamples = [];
+    histProcMap = new Map();
+    pinnedPid = null;
+  }
+
+  function sampleDrawerMetrics(inst: Instance) {
+    const s = inst.sys;
+    if (!s) return;
+    const memPct =
+      s.mem_total_mb && s.mem_used_mb !== null && s.mem_used_mb !== undefined
+        ? (s.mem_used_mb / s.mem_total_mb) * 100
+        : null;
+    const sample: Sample = {
+      t: Date.now(),
+      cpu: s.cpu_usage_percent ?? null,
+      memPct,
+      gpuPct: (s.gpus ?? []).map((g) => g.utilization_percent ?? null),
+    };
+    histSamples = [...histSamples, sample].slice(-HIST_LEN);
+
+    // Per-process series: append a point for each pid seen this tick,
+    // null-pad pids we've tracked previously but didn't see now (so the
+    // chart shows the drop instead of leaving stale values).
+    const seen = new Set<number>();
+    for (const p of s.top_processes ?? []) {
+      seen.add(p.pid);
+      const prev = histProcMap.get(p.pid);
+      const next = prev ?? { name: p.name, cpu: [], mem: [] };
+      next.cpu = [...next.cpu, p.cpu_percent].slice(-HIST_LEN);
+      next.mem = [...next.mem, p.mem_mb].slice(-HIST_LEN);
+      next.name = p.name;
+      histProcMap.set(p.pid, next);
+    }
+    for (const [pid, v] of histProcMap) {
+      if (!seen.has(pid)) {
+        v.cpu = [...v.cpu, NaN].slice(-HIST_LEN);
+        v.mem = [...v.mem, NaN].slice(-HIST_LEN);
+      }
+    }
+    histProcMap = new Map(histProcMap);
+  }
+
+  // Render a chart segment list — each contiguous run of finite values
+  // becomes one `{ line, area }` pair (NaN values split into separate
+  // segments so dropouts render as gaps, not interpolated lines).
+  function chartSegments(vals: number[], W: number, H: number, vmax: number): { line: string; area: string }[] {
+    const out: { line: string; area: string }[] = [];
+    if (!vals.length) return out;
+    const n = vals.length;
+    let line = '';
+    let area = '';
+    let segStartX: number | null = null;
+    let segLastX: number | null = null;
+    const flush = () => {
+      if (line) {
+        out.push({ line: line.trim(), area: `${area} L ${segLastX!.toFixed(1)} ${H} L ${segStartX!.toFixed(1)} ${H} Z`.trim() });
+      }
+      line = ''; area = ''; segStartX = null; segLastX = null;
+    };
+    for (let i = 0; i < n; i++) {
+      const v = vals[i];
+      const x = (i / Math.max(1, n - 1)) * W;
+      if (!Number.isFinite(v)) { flush(); continue; }
+      const y = H - (Math.min(Math.max(v, 0), vmax) / vmax) * H;
+      if (line === '') {
+        line = `M ${x.toFixed(1)} ${y.toFixed(1)} `;
+        area = `M ${x.toFixed(1)} ${y.toFixed(1)} `;
+        segStartX = x;
+      } else {
+        line += `L ${x.toFixed(1)} ${y.toFixed(1)} `;
+        area += `L ${x.toFixed(1)} ${y.toFixed(1)} `;
+      }
+      segLastX = x;
+    }
+    flush();
+    return out;
   }
 
   // Friendly label for the canonical system_type tag. Every detected host
@@ -488,12 +585,15 @@
       drawerChannelSelect = inferChannel(selectedInst.version, selectedInst.channel);
       drawerVersions = [];
       updateResult = null;
-      // Hydrate from the already-loaded pod.list row. Update state
-      // (current_version / latest / available) is kept fresh by the
-      // page-level periodic probe that fans out to every peer regardless
-      // of whether a drawer is open — so the operator can see
-      // update-available badges before clicking in.
+      // Hydrate from the already-loaded pod.list row. If the page-level
+      // probe hasn't completed for this peer yet (cold drawer open early
+      // in the session), fire an immediate one-shot probe so the version
+      // dropdown never sits empty waiting for the next 60 s tick.
+      resetDrawerHistory();
       hydrateDrawerFromInstance();
+      if (!(selectedInst.availableVersions ?? []).length) {
+        void probeUpdateState();
+      }
     }
   });
 
@@ -705,10 +805,16 @@
     };
     instances = [local];
     refreshLocal(local);
-    refreshPodPeers();
     loadRetention();
     refreshInboundOffers();
-    void probeAllInstances();
+    // Sequence pod.list → probeAllInstances so the probe sees every peer
+    // on its first run. Without the await, `instances` is still just
+    // [local] when the probe iterates and remote dropdowns stay empty
+    // until the next 60s tick.
+    void (async () => {
+      await refreshPodPeers();
+      await probeAllInstances();
+    })();
     pollHandle = setInterval(() => {
       const loc = instances.find((i) => i.role === 'local');
       if (loc) refreshLocal(loc);
@@ -1081,6 +1187,28 @@
   }}
 />
 
+{#snippet chartCell(label: string, vals: number[], vmax: number, unit: string, color: string)}
+  {@const W = 400}
+  {@const H = 90}
+  {@const segs = chartSegments(vals, W, H, vmax)}
+  {@const last = [...vals].reverse().find(Number.isFinite) ?? null}
+  {@const lastStr = last == null ? '—' : unit === '%' ? `${last.toFixed(1)}%` : last < 1024 ? `${Math.round(last)} ${unit}` : `${(last / 1024).toFixed(1)} G${unit}`}
+  <div class="hist-cell">
+    <div class="hist-label">{label}<span class="hist-val">{lastStr}</span></div>
+    <svg class="hist-svg" viewBox="0 0 {W} {H}" preserveAspectRatio="none" style="color: {color};">
+      <!-- gridlines at 0, 25, 50, 75, 100% of vmax -->
+      {#each [0.25, 0.5, 0.75] as g}
+        <line x1="0" x2={W} y1={H * (1 - g)} y2={H * (1 - g)} stroke="currentColor" stroke-width="0.5" opacity="0.15" />
+      {/each}
+      {#each segs as s}
+        <path d={s.area} fill="currentColor" opacity="0.18" />
+        <path d={s.line} fill="none" stroke="currentColor" stroke-width="1.5" />
+      {/each}
+    </svg>
+    <div class="hist-axis"><span>0</span><span>{unit === '%' ? '100%' : vmax < 1024 ? `${Math.round(vmax)} ${unit}` : `${(vmax / 1024).toFixed(1)} G${unit}`}</span></div>
+  </div>
+{/snippet}
+
 <!-- Drawer -->
 <Drawer open={!!selectedInst} side="right" onclose={closeDrawer} ariaLabel="Host details">
   {#if selectedInst}
@@ -1162,6 +1290,42 @@
         <dt>Checked</dt>
         <dd>{relTime(selectedInst.lastChecked)}</dd>
       </dl>
+
+      <div class="section-head">Live <span style="margin-left:8px; opacity:0.5; font-weight:400; font-size:11px;">{histSamples.length}/{HIST_LEN} samples</span></div>
+      <div class="hist-grid">
+        {@render chartCell('CPU', histSamples.map(s => s.cpu ?? NaN), 100, '%', '#89b4fa')}
+        {@render chartCell('RAM', histSamples.map(s => s.memPct ?? NaN), 100, '%', '#a6e3a1')}
+        {#each selectedInst.sys?.gpus ?? [] as g, gi}
+          {@render chartCell(g.name || `GPU ${gi}`, histSamples.map(s => s.gpuPct?.[gi] ?? NaN), 100, '%', '#f5c2e7')}
+        {/each}
+      </div>
+
+      {#if (selectedInst.sys?.top_processes ?? []).length}
+        <div class="section-head">Top processes
+          <span style="margin-left:8px; opacity:0.6; font-weight:400;">click to pin</span>
+        </div>
+        <table class="proc-table">
+          <thead><tr><th>name</th><th>pid</th><th>cpu</th><th>mem</th></tr></thead>
+          <tbody>
+            {#each selectedInst.sys?.top_processes ?? [] as p (p.pid)}
+              <tr class:pinned={pinnedPid === p.pid} onclick={() => { pinnedPid = pinnedPid === p.pid ? null : p.pid; }}>
+                <td><code>{p.name}</code></td>
+                <td><code>{p.pid}</code></td>
+                <td>{p.cpu_percent.toFixed(1)}%</td>
+                <td>{p.mem_mb < 1024 ? `${p.mem_mb} MB` : `${(p.mem_mb / 1024).toFixed(1)} GB`}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+        {#if pinnedPid != null && histProcMap.get(pinnedPid)}
+          {@const pinned = histProcMap.get(pinnedPid)!}
+          {@const maxMem = Math.max(1, ...pinned.mem.filter(Number.isFinite))}
+          <div class="hist-grid">
+            {@render chartCell(`${pinned.name} CPU`, pinned.cpu, 100, '%', '#fab387')}
+            {@render chartCell(`${pinned.name} RAM`, pinned.mem, maxMem, 'MB', '#cba6f7')}
+          </div>
+        {/if}
+      {/if}
 
       {#if (selectedInst.addresses ?? []).length > 0}
         <div class="section-head">Addresses</div>
@@ -1704,6 +1868,58 @@
     font-size: var(--text-xs);
   }
 
+  .hist-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 8px;
+    margin: 8px 0 12px;
+  }
+  .hist-cell {
+    background: var(--bg-elevated, rgba(255, 255, 255, 0.03));
+    border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+    border-radius: 6px;
+    padding: 8px;
+    color: var(--accent, #89b4fa);
+  }
+  .hist-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--text-secondary, rgba(255, 255, 255, 0.6));
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .hist-val {
+    color: var(--text-primary, #fff);
+    font-family: ui-monospace, monospace;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .hist-svg { display: block; width: 100%; height: 90px; }
+  .hist-axis {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    color: var(--text-secondary, rgba(255, 255, 255, 0.45));
+    font-family: ui-monospace, monospace;
+    margin-top: 2px;
+  }
+  .proc-table {
+    width: 100%;
+    font-size: 12px;
+    border-collapse: collapse;
+    margin: 6px 0 12px;
+  }
+  .proc-table th, .proc-table td {
+    padding: 4px 6px;
+    text-align: left;
+    border-bottom: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+  }
+  .proc-table th { font-weight: 500; color: var(--text-secondary, rgba(255, 255, 255, 0.6)); }
+  .proc-table tbody tr { cursor: pointer; }
+  .proc-table tbody tr:hover { background: var(--bg-elevated, rgba(255, 255, 255, 0.04)); }
+  .proc-table tr.pinned { background: rgba(137, 180, 250, 0.15); }
   .section-head {
     font-size: 10px;
     text-transform: uppercase;

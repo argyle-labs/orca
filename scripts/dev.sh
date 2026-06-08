@@ -146,16 +146,22 @@ DEV_SERVER_CMD='while true; do ../../target/debug/orca serve --dev; echo "  [ser
 if [[ $SERVE_BINARY -eq 1 ]]; then
   # Linux release build runs as a background -s step after the debug build so
   # both share one cargo-watch process and avoid fighting over the Cargo lock.
-  DEV_LINUX_BUILD_CMD="cargo build --release --target ${DEV_LINUX_TARGET} 2>&1 | sed 's/^/[linux]    /' &"
-  cargo watch -C projects/server \
-    -w src -w Cargo.toml \
-    -x build \
+  DEV_LINUX_BUILD_CMD="cargo build --release --target ${DEV_LINUX_TARGET} -p server 2>&1 | sed 's/^/[linux]    /' &"
+  # Watch every workspace crate, not just projects/server — editing a shared
+  # type in projects/system/ (or any other crate the server depends on) must
+  # trigger a rebuild + daemon respawn. Without -w on each, cargo-watch
+  # silently ignores those edits and the running daemon serves stale code.
+  cargo watch \
+    -w projects -w Cargo.toml -w Cargo.lock \
+    --ignore 'projects/frontend/**' --ignore 'target/**' --ignore '**/*.md' \
+    -x 'build -p server' \
     -s "$DEV_LINUX_BUILD_CMD" \
     -s "$DEV_SERVER_CMD" 2>&1 | sed 's/^/[server]   /' &
 else
-  cargo watch -C projects/server \
-    -w src -w Cargo.toml \
-    -x build \
+  cargo watch \
+    -w projects -w Cargo.toml -w Cargo.lock \
+    --ignore 'projects/frontend/**' --ignore 'target/**' --ignore '**/*.md' \
+    -x 'build -p server' \
     -s "$DEV_SERVER_CMD" 2>&1 | sed 's/^/[server]   /' &
 fi
 _SERVER_PID=$!
