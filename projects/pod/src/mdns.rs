@@ -49,10 +49,9 @@ impl Advertisement {
         port: u16,
     ) -> Self {
         Self {
-            peer_id: match pod_id {
-                Some(_) => format!("peer.{machine_id_short}"),
-                None => format!("unclaimed.{machine_id_short}"),
-            },
+            // Identity is the bare machine_id; join state lives in `state`
+            // alongside it. No synthetic prefixes per feedback-no-id-prefixes.
+            peer_id: machine_id_short.to_string(),
             state: match pod_id {
                 Some(id) => format!("pod:{id}"),
                 None => "unclaimed".to_string(),

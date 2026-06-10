@@ -33,7 +33,7 @@ impl PodMeshTransport {
 #[async_trait]
 impl ReplicationTransport for PodMeshTransport {
     async fn list_peers(&self) -> Result<Vec<TransportPeer>> {
-        let own_peer_id = format!("peer.{}", system::host_identity::machine_id_short());
+        let own_peer_id = system::host_identity::machine_id_short().to_string();
         let conn = db::open_default()?;
         let rows = pdb::list_peers(&conn)?;
         Ok(rows
@@ -74,7 +74,7 @@ impl ReplicationTransport for PodMeshTransport {
 /// push (transport) + receiver-side `pod/replicate-export` handler.
 pub fn sign_bundle(entities: BTreeMap<String, Value>) -> Result<pki::SignedEnvelope> {
     let body = ReplicateBundle {
-        peer_id: format!("peer.{}", system::host_identity::machine_id_short()),
+        peer_id: system::host_identity::machine_id_short().to_string(),
         issued_at: chrono::Utc::now().timestamp(),
         entities,
     };
@@ -118,7 +118,7 @@ mod tests {
         // sign_bundle uses pki_dir(); for the roundtrip we directly drive
         // pki::sign_envelope so the test stays hermetic.
         let body = ReplicateBundle {
-            peer_id: "peer.test".into(),
+            peer_id: "test".into(),
             issued_at: 0,
             entities: empty_entities(),
         };
@@ -132,7 +132,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let signing = pki::load_or_init_bootstrap_key(tmp.path()).unwrap();
         let body = ReplicateBundle {
-            peer_id: "peer.test".into(),
+            peer_id: "test".into(),
             issued_at: 0,
             entities: empty_entities(),
         };

@@ -252,7 +252,7 @@ pub async fn cmd_pod_join(addr: &str) -> Result<()> {
     let pki_d = pki_dir();
     let signing = pki::load_or_init_bootstrap_key(&pki_d)?;
     let joiner_fp = pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
-    let joiner_peer_id = format!("peer.{}", system::host_identity::machine_id_short());
+    let joiner_peer_id = system::host_identity::machine_id_short().to_string();
     let joiner_hostname = system::host_identity::machine_id_short().to_string();
     let joiner_display_name = system::host_identity::display_hostname().to_string();
 

@@ -396,7 +396,7 @@ mod tests {
 
     fn peer(host: &str, pinned: Option<&str>) -> TransportPeer {
         TransportPeer {
-            peer_id: format!("peer.{host}"),
+            peer_id: host.into(),
             hostname: host.into(),
             addr: format!("10.0.0.{host}"),
             pinned_fp: pinned.map(String::from),

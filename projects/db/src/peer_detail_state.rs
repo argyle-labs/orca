@@ -76,12 +76,12 @@ mod tests {
     fn upsert_then_get_roundtrips() {
         let c = mem();
         let row = PeerDetailState {
-            peer_id: "peer.x".into(),
+            peer_id: "x".into(),
             payload: "{\"system\":{\"hostname\":\"x\"}}".into(),
             checked_at: 1_700_000_000,
         };
         upsert(&c, &row).unwrap();
-        let got = get(&c, "peer.x").unwrap().expect("present");
+        let got = get(&c, "x").unwrap().expect("present");
         assert_eq!(got.payload, "{\"system\":{\"hostname\":\"x\"}}");
         assert_eq!(got.checked_at, 1_700_000_000);
     }
@@ -90,7 +90,7 @@ mod tests {
     fn upsert_overwrites() {
         let c = mem();
         let mut row = PeerDetailState {
-            peer_id: "peer.x".into(),
+            peer_id: "x".into(),
             payload: "{}".into(),
             checked_at: 1,
         };
@@ -98,7 +98,7 @@ mod tests {
         row.payload = "{\"a\":1}".into();
         row.checked_at = 2;
         upsert(&c, &row).unwrap();
-        let got = get(&c, "peer.x").unwrap().unwrap();
+        let got = get(&c, "x").unwrap().unwrap();
         assert_eq!(got.payload, "{\"a\":1}");
         assert_eq!(got.checked_at, 2);
     }

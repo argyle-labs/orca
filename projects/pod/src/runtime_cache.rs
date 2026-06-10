@@ -40,7 +40,7 @@ mod tests {
     #[test]
     fn put_then_get_roundtrips() {
         put(
-            "peer.test-roundtrip",
+            "test-roundtrip",
             RuntimeFields {
                 version: Some("0.0.5-rc.2".into()),
                 target: Some("aarch64-apple-darwin".into()),
@@ -50,7 +50,7 @@ mod tests {
                 pinned_to: None,
             },
         );
-        let got = get("peer.test-roundtrip").expect("cache hit");
+        let got = get("test-roundtrip").expect("cache hit");
         assert_eq!(got.version.as_deref(), Some("0.0.5-rc.2"));
         assert_eq!(got.channel.as_deref(), Some("rc"));
         assert!(got.pinned_to.is_none());
@@ -58,6 +58,6 @@ mod tests {
 
     #[test]
     fn miss_returns_none() {
-        assert!(get("peer.never-inserted").is_none());
+        assert!(get("never-inserted").is_none());
     }
 }

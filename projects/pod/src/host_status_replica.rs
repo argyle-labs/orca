@@ -123,7 +123,7 @@ pub fn spawn_fleet_replicator() {
 }
 
 async fn reconcile_once(registry: &Mutex<HashMap<String, JoinHandle<()>>>) -> Result<()> {
-    let own = format!("peer.{}", system::host_identity::machine_id_short());
+    let own = system::host_identity::machine_id_short().to_string();
     let peers = tokio::task::spawn_blocking(move || -> Result<Vec<(String, String)>> {
         let conn = ::db::open_default()?;
         let rows = ::db::pod::list_peer_summaries(&conn)?;
@@ -181,14 +181,14 @@ mod tests {
 
     #[test]
     fn validate_accepts_matching_peer_id() {
-        let e = ev("peer.alpha", 1, "snap");
-        assert_eq!(validate_event(&e, "peer.alpha"), Some("snap"));
+        let e = ev("alpha", 1, "snap");
+        assert_eq!(validate_event(&e, "alpha"), Some("snap"));
     }
 
     #[test]
     fn validate_rejects_foreign_peer_id() {
-        let e = ev("peer.evil", 1, "snap");
-        assert!(validate_event(&e, "peer.alpha").is_none());
+        let e = ev("evil", 1, "snap");
+        assert!(validate_event(&e, "alpha").is_none());
     }
 
     #[test]
@@ -236,9 +236,9 @@ mod tests {
         // drop the sender. Coverage goal: hit both branches of `validate_event`
         // through `run_event_consumer`, then exit cleanly.
         let (tx, rx) = mpsc::channel::<HostStatusEvent>(4);
-        let owner = "peer.alpha".to_string();
-        tx.send(ev("peer.evil", 1, "x")).await.unwrap();
-        tx.send(ev("peer.alpha", 2, "y")).await.unwrap();
+        let owner = "alpha".to_string();
+        tx.send(ev("evil", 1, "x")).await.unwrap();
+        tx.send(ev("alpha", 2, "y")).await.unwrap();
         // We can't easily set up a real DB in this test, so spawn the
         // consumer and let `insert_synced_row` fail with a debug log —
         // we only need to prove the validate branch is exercised and the

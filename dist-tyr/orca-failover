@@ -1,0 +1,204 @@
+#!/bin/bash
+# orca-failover — NFS upstream failover orchestrator for tyr.
+#
+# Probes each share's primary backend; on N consecutive RPC failures, lazy-
+# umounts the share and remounts from the replica. Re-runs `exportfs -ra` so
+# downstream clients see the new backend on their next request. Client edge
+# stays at tyr (10.10.10.29) — no client config change.
+#
+# State file at $STATE_DIR/state tracks the current active backend per share
+# so re-runs only touch shares whose target changed. Probe history at
+# $STATE_DIR/probe.<share>.
+#
+# Usage:
+#   orca-failover                 — one probe pass (called by timer)
+#   orca-failover status          — print current backend per share
+#   orca-failover pin <share> <host>   — lock <share> to <host>, disable auto
+#   orca-failover unpin <share>        — return <share> to auto (failover+failback)
+#   orca-failover failback <share>     — one-shot force back to primary
+#   orca-failover swap <share> <host>  — one-shot force to specific host
+#
+# Default behavior: AUTO failover (primary → replica after N probe fails) AND
+# AUTO failback (replica → primary after K consecutive primary OKs). Pin a
+# share to override both directions.
+#
+# This script ships in the orca repo at dist-tyr/orca-failover and is
+# deployed to tyr at /usr/local/sbin/orca-failover.
+
+set -u
+
+CONF=${ORCA_FAILOVER_CONF:-/etc/orca/failover.conf}
+STATE_DIR=${ORCA_FAILOVER_STATE:-/var/lib/orca-failover}
+PROBE_TIMEOUT=${ORCA_PROBE_TIMEOUT:-3}
+FAIL_THRESHOLD=${ORCA_FAIL_THRESHOLD:-3}
+# Auto-failback: this many consecutive primary OKs while on replica before
+# we swap back. Higher = more conservative against flapping primaries.
+RECOVER_THRESHOLD=${ORCA_RECOVER_THRESHOLD:-8}
+LOG_TAG=orca-failover
+
+mkdir -p "$STATE_DIR"
+
+log() { logger -t "$LOG_TAG" -- "$*"; echo "$(date -Is) $*" >&2; }
+
+read_conf() {
+  grep -vE '^\s*(#|$)' "$CONF"
+}
+
+# Probe NFS liveness on $1. Exit 0 if alive.
+# We probe NFSv4 port 2049 with a raw TCP connect. NOT rpcinfo: NFSv4 doesn't
+# register with rpcbind, so `rpcinfo -T tcp <host> nfs 4` actually queries
+# port 111 and returns "Program not registered" — same exit code whether the
+# host is healthy or sick. A direct TCP connect to 2049 is the only signal
+# that actually means "nfsd is accepting connections."
+probe_host() {
+  local host=$1
+  timeout "$PROBE_TIMEOUT" bash -c "exec 3<>/dev/tcp/$host/2049" 2>/dev/null
+}
+
+# Active backend (host) for $1=share, derived from /proc/mounts.
+current_host() {
+  local share=$1 lp
+  lp=$(read_conf | awk -F: -v s="$share" '$1==s {print $5; exit}')
+  [ -z "$lp" ] && return 1
+  awk -v p="$lp" '$2==p {split($1,a,":"); print a[1]; exit}' /proc/mounts
+}
+
+do_swap() {
+  local share=$1 target=$2 remote_path=$3 local_path=$4 opts=$5
+  log "swap $share -> $target ($remote_path -> $local_path)"
+  # Lazy umount so in-flight syscalls EIO promptly instead of blocking.
+  umount -l "$local_path" 2>/dev/null
+  # Remount; if it fails, leave a state marker so the next pass retries.
+  if ! mount -t nfs4 -o "_netdev,$opts" "$target:$remote_path" "$local_path"; then
+    log "ERROR: mount $target:$remote_path failed; share $share is offline"
+    echo "FAILED:$target" > "$STATE_DIR/state.$share"
+    return 1
+  fi
+  echo "$target" > "$STATE_DIR/state.$share"
+  exportfs -ra 2>/dev/null || log "WARN: exportfs -ra returned non-zero"
+  return 0
+}
+
+probe_pass() {
+  read_conf | while IFS=: read -r share primary replica remote_path local_path opts; do
+    local fail_file="$STATE_DIR/fails.$share"
+    local ok_file="$STATE_DIR/oks.$share"
+    local pin_file="$STATE_DIR/pin.$share"
+    local fails=0 oks=0 pinned=""
+    [ -f "$fail_file" ] && fails=$(cat "$fail_file")
+    [ -f "$ok_file" ]   && oks=$(cat "$ok_file")
+    [ -f "$pin_file" ]  && pinned=$(cat "$pin_file")
+
+    local cur
+    cur=$(current_host "$share" 2>/dev/null || echo "")
+
+    # Pin overrides everything. Enforce on every pass.
+    if [ -n "$pinned" ]; then
+      if [ "$cur" != "$pinned" ]; then
+        log "PIN: $share -> $pinned (was $cur)"
+        do_swap "$share" "$pinned" "$remote_path" "$local_path" "$opts"
+      fi
+      echo 0 > "$fail_file"; echo 0 > "$ok_file"
+      continue
+    fi
+
+    # On replica: probe primary; auto-failback after RECOVER_THRESHOLD OKs.
+    if [ "$cur" = "$replica" ] && [ "$primary" != "$replica" ]; then
+      if probe_host "$primary"; then
+        oks=$((oks + 1))
+        echo "$oks" > "$ok_file"
+        echo 0 > "$fail_file"
+        if [ "$oks" -ge "$RECOVER_THRESHOLD" ]; then
+          log "FAILBACK: $share -> $primary after $oks consecutive primary OKs"
+          do_swap "$share" "$primary" "$remote_path" "$local_path" "$opts"
+          echo 0 > "$ok_file"
+        fi
+      else
+        echo 0 > "$ok_file"
+      fi
+      continue
+    fi
+
+    # On primary (or nothing mounted). Probe primary.
+    if probe_host "$primary"; then
+      echo 0 > "$fail_file"
+      echo 0 > "$ok_file"
+      [ -z "$cur" ] && do_swap "$share" "$primary" "$remote_path" "$local_path" "$opts"
+      continue
+    fi
+
+    fails=$((fails + 1))
+    echo "$fails" > "$fail_file"
+    log "WARN: $share primary $primary probe failed ($fails/$FAIL_THRESHOLD)"
+
+    if [ "$fails" -ge "$FAIL_THRESHOLD" ] && [ "$primary" != "$replica" ]; then
+      log "FAILOVER: $share -> $replica after $fails failures"
+      do_swap "$share" "$replica" "$remote_path" "$local_path" "$opts"
+      echo 0 > "$fail_file"
+    fi
+  done
+}
+
+cmd_status() {
+  printf '%-12s %-16s %-16s %-10s %s\n' SHARE CURRENT PRIMARY MODE NOTES
+  read_conf | while IFS=: read -r share primary replica remote_path local_path opts; do
+    local cur fails=0 oks=0 pinned="" mode=auto state=ok notes=""
+    cur=$(current_host "$share" 2>/dev/null || echo "(unmounted)")
+    [ -f "$STATE_DIR/fails.$share" ] && fails=$(cat "$STATE_DIR/fails.$share")
+    [ -f "$STATE_DIR/oks.$share" ]   && oks=$(cat "$STATE_DIR/oks.$share")
+    [ -f "$STATE_DIR/pin.$share" ]   && pinned=$(cat "$STATE_DIR/pin.$share")
+    [ -n "$pinned" ] && mode="pin=$pinned"
+    [ "$cur" != "$primary" ] && [ "$cur" != "(unmounted)" ] && notes="on-replica"
+    [ "$cur" = "(unmounted)" ] && notes="OFFLINE"
+    [ "$fails" -gt 0 ] && notes="${notes:+$notes,}fails=$fails/$FAIL_THRESHOLD"
+    [ "$oks" -gt 0 ]   && notes="${notes:+$notes,}primary-oks=$oks/$RECOVER_THRESHOLD"
+    printf '%-12s %-16s %-16s %-10s %s\n' "$share" "$cur" "$primary" "$mode" "$notes"
+  done
+}
+
+cmd_pin() {
+  local share=$1 host=$2
+  read_conf | awk -F: -v s="$share" '$1==s {found=1} END{exit !found}' || {
+    echo "unknown share: $share" >&2; exit 1; }
+  echo "$host" > "$STATE_DIR/pin.$share"
+  log "PIN set: $share -> $host (auto disabled)"
+  probe_pass
+}
+
+cmd_unpin() {
+  local share=$1
+  rm -f "$STATE_DIR/pin.$share"
+  log "PIN cleared: $share (auto re-enabled)"
+}
+
+cmd_failback() {
+  local share=$1
+  read_conf | while IFS=: read -r s primary replica remote_path local_path opts; do
+    [ "$s" = "$share" ] || continue
+    if ! probe_host "$primary"; then
+      log "ERROR: failback $share refused — primary $primary not responding"
+      exit 1
+    fi
+    do_swap "$share" "$primary" "$remote_path" "$local_path" "$opts"
+    exit $?
+  done
+}
+
+cmd_swap() {
+  local share=$1 target=$2
+  read_conf | while IFS=: read -r s primary replica remote_path local_path opts; do
+    [ "$s" = "$share" ] || continue
+    do_swap "$share" "$target" "$remote_path" "$local_path" "$opts"
+    exit $?
+  done
+}
+
+case "${1:-probe}" in
+  probe)    probe_pass ;;
+  status)   cmd_status ;;
+  pin)      shift; cmd_pin "$@" ;;
+  unpin)    shift; cmd_unpin "$@" ;;
+  failback) shift; cmd_failback "$@" ;;
+  swap)     shift; cmd_swap "$@" ;;
+  *) echo "usage: $0 [probe|status|pin <share> <host>|unpin <share>|failback <share>|swap <share> <host>]" >&2; exit 2 ;;
+esac

@@ -754,7 +754,7 @@ mod tests {
         upsert_discovery(
             &c,
             "fp1",
-            Some("peer.host-g"),
+            Some("host-g"),
             "host-g",
             "10.0.0.5",
             12002,
@@ -765,7 +765,7 @@ mod tests {
         upsert_discovery(
             &c,
             "fp1",
-            Some("peer.host-g"),
+            Some("host-g"),
             "host-g",
             "10.0.0.6",
             12002,
@@ -794,7 +794,7 @@ mod tests {
             12002,
             &hash_code(code),
             Some("CA-PEM"),
-            Some("peer.host-i"),
+            Some("host-i"),
             Some("pod-1"),
             300,
             None,
@@ -833,7 +833,7 @@ mod tests {
         let (_d, c) = test_conn();
         upsert_peer(
             &c,
-            "peer.host-g",
+            "host-g",
             "host-g",
             "10.0.0.5",
             12002,
@@ -852,69 +852,33 @@ mod tests {
     #[test]
     fn peer_departed_resets_trust() {
         let (_d, c) = test_conn();
-        upsert_peer(
-            &c,
-            "peer.host-g",
-            "host-g",
-            "10.0.0.5",
-            12002,
-            None,
-            "ca-pem",
-        )
-        .unwrap();
-        set_trust(&c, "peer.host-g", Some(true), Some(true)).unwrap();
-        mark_peer_departed(&c, "peer.host-g").unwrap();
-        assert!(is_peer_departed(&c, "peer.host-g").unwrap());
-        let t = get_trust(&c, "peer.host-g").unwrap();
+        upsert_peer(&c, "host-g", "host-g", "10.0.0.5", 12002, None, "ca-pem").unwrap();
+        set_trust(&c, "host-g", Some(true), Some(true)).unwrap();
+        mark_peer_departed(&c, "host-g").unwrap();
+        assert!(is_peer_departed(&c, "host-g").unwrap());
+        let t = get_trust(&c, "host-g").unwrap();
         assert!(!t.local_secure && !t.peer_secure);
     }
 
     #[test]
     fn rejoining_clears_departed() {
         let (_d, c) = test_conn();
-        upsert_peer(
-            &c,
-            "peer.host-g",
-            "host-g",
-            "10.0.0.5",
-            12002,
-            None,
-            "ca-pem",
-        )
-        .unwrap();
-        mark_peer_departed(&c, "peer.host-g").unwrap();
-        assert!(is_peer_departed(&c, "peer.host-g").unwrap());
-        upsert_peer(
-            &c,
-            "peer.host-g",
-            "host-g",
-            "10.0.0.5",
-            12002,
-            None,
-            "ca-pem",
-        )
-        .unwrap();
-        assert!(!is_peer_departed(&c, "peer.host-g").unwrap());
+        upsert_peer(&c, "host-g", "host-g", "10.0.0.5", 12002, None, "ca-pem").unwrap();
+        mark_peer_departed(&c, "host-g").unwrap();
+        assert!(is_peer_departed(&c, "host-g").unwrap());
+        upsert_peer(&c, "host-g", "host-g", "10.0.0.5", 12002, None, "ca-pem").unwrap();
+        assert!(!is_peer_departed(&c, "host-g").unwrap());
     }
 
     #[test]
     fn trust_bits_independent() {
         let (_d, c) = test_conn();
-        upsert_peer(
-            &c,
-            "peer.host-g",
-            "host-g",
-            "10.0.0.5",
-            12002,
-            None,
-            "ca-pem",
-        )
-        .unwrap();
-        set_trust(&c, "peer.host-g", Some(true), None).unwrap();
-        let t = get_trust(&c, "peer.host-g").unwrap();
+        upsert_peer(&c, "host-g", "host-g", "10.0.0.5", 12002, None, "ca-pem").unwrap();
+        set_trust(&c, "host-g", Some(true), None).unwrap();
+        let t = get_trust(&c, "host-g").unwrap();
         assert!(t.local_secure && !t.peer_secure && !is_mutual_secure(t));
-        set_trust(&c, "peer.host-g", None, Some(true)).unwrap();
-        assert!(is_mutual_secure(get_trust(&c, "peer.host-g").unwrap()));
+        set_trust(&c, "host-g", None, Some(true)).unwrap();
+        assert!(is_mutual_secure(get_trust(&c, "host-g").unwrap()));
     }
 
     #[test]
@@ -924,7 +888,7 @@ mod tests {
         set_trust(&c, "unknown", Some(true), None).unwrap();
         upsert_peer(
             &c,
-            "peer.real",
+            "real",
             "host-i",
             "10.0.0.1",
             12002,
@@ -935,7 +899,7 @@ mod tests {
         cleanup_unknown_stub_at(&c, "10.0.0.1").unwrap();
         let peers = list_peers(&c).unwrap();
         assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].peer_id, "peer.real");
+        assert_eq!(peers[0].peer_id, "real");
         // Trust row for the stub must be gone too — no dangling FK ghost.
         let trust_count: i64 = c
             .query_row(
@@ -964,7 +928,7 @@ mod tests {
         let (_d, c) = test_conn();
         upsert_peer(
             &c,
-            "peer.real",
+            "real",
             "host-i",
             "10.0.0.1",
             12002,
@@ -975,7 +939,7 @@ mod tests {
         cleanup_unknown_stub_at(&c, "10.0.0.1").unwrap();
         let peers = list_peers(&c).unwrap();
         assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].peer_id, "peer.real");
+        assert_eq!(peers[0].peer_id, "real");
     }
 
     #[test]
@@ -992,17 +956,8 @@ mod tests {
     #[test]
     fn wipe_clears_state() {
         let (_d, c) = test_conn();
-        upsert_peer(
-            &c,
-            "peer.host-g",
-            "host-g",
-            "10.0.0.5",
-            12002,
-            None,
-            "ca-pem",
-        )
-        .unwrap();
-        set_trust(&c, "peer.host-g", Some(true), Some(true)).unwrap();
+        upsert_peer(&c, "host-g", "host-g", "10.0.0.5", 12002, None, "ca-pem").unwrap();
+        set_trust(&c, "host-g", Some(true), Some(true)).unwrap();
         upsert_discovery(
             &c,
             "fp1",

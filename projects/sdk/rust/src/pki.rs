@@ -120,7 +120,7 @@ pub struct NodeBundle {
 //   <pki_dir>/mesh/client/node.{cert,key}.pem — this host's pod-client cert (used outbound to peers)
 //
 // Server cert SAN: `pod.orca.local` (the SNI the client sends to reach this surface).
-// Client cert CN:  `peer.<hostname>` so server-side handlers can identify the caller.
+// Client cert CN:  `<hostname>` so server-side handlers can identify the caller.
 
 pub fn mesh_dir(pki_dir: &Path) -> PathBuf {
     pki_dir.join("mesh")
@@ -229,13 +229,13 @@ fn issue_mesh_client_cert(
     host_cn: &str,
 ) -> Result<()> {
     let key = gen_keypair()?;
-    let mut params = CertificateParams::new(vec![format!("peer.{host_cn}.pod.orca.local")])?;
+    let mut params = CertificateParams::new(vec![format!("{host_cn}.pod.orca.local")])?;
     params.is_ca = IsCa::NoCa;
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
     set_validity_days(&mut params, PEER_VALIDITY_DAYS);
     {
         let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, format!("peer.{host_cn}"));
+        dn.push(DnType::CommonName, host_cn.to_string());
         dn.push(DnType::OrganizationName, "orca");
         dn.push(DnType::OrganizationalUnitName, "pod-client");
         params.distinguished_name = dn;
@@ -296,7 +296,7 @@ pub enum PeerRole {
 pub fn build_peer_csr(peer_cn: &str, role: PeerRole) -> Result<(String, String)> {
     let key = gen_keypair()?;
     let san = match role {
-        PeerRole::Client => format!("peer.{peer_cn}.pod.orca.local"),
+        PeerRole::Client => format!("{peer_cn}.pod.orca.local"),
         PeerRole::Server => POD_SERVER_SAN.to_string(),
     };
     let mut params = CertificateParams::new(vec![san])?;
@@ -309,7 +309,7 @@ pub fn build_peer_csr(peer_cn: &str, role: PeerRole) -> Result<(String, String)>
     dn.push(
         DnType::CommonName,
         match role {
-            PeerRole::Client => format!("peer.{peer_cn}"),
+            PeerRole::Client => peer_cn.to_string(),
             PeerRole::Server => "orca-pod-server".to_string(),
         },
     );
@@ -357,7 +357,7 @@ pub fn sign_peer_csr(
     // Enforce naming policy: rewrite SAN, DN, EKU regardless of what the
     // joiner asked for. Joiner-controlled fields are not trusted.
     let san = match role {
-        PeerRole::Client => format!("peer.{peer_cn}.pod.orca.local"),
+        PeerRole::Client => format!("{peer_cn}.pod.orca.local"),
         PeerRole::Server => POD_SERVER_SAN.to_string(),
     };
     csr.params.subject_alt_names.clear();
@@ -373,7 +373,7 @@ pub fn sign_peer_csr(
         dn.push(
             DnType::CommonName,
             match role {
-                PeerRole::Client => format!("peer.{peer_cn}"),
+                PeerRole::Client => peer_cn.to_string(),
                 PeerRole::Server => "orca-pod-server".to_string(),
             },
         );
@@ -531,13 +531,13 @@ pub fn reissue_mesh_client_cert(pki_dir: &Path, host_cn: &str) -> Result<()> {
     let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key)?;
 
     let key = gen_keypair()?;
-    let mut params = CertificateParams::new(vec![format!("peer.{host_cn}.pod.orca.local")])?;
+    let mut params = CertificateParams::new(vec![format!("{host_cn}.pod.orca.local")])?;
     params.is_ca = IsCa::NoCa;
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
     set_validity_days(&mut params, PEER_VALIDITY_DAYS);
     {
         let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, format!("peer.{host_cn}"));
+        dn.push(DnType::CommonName, host_cn.to_string());
         dn.push(DnType::OrganizationName, "orca");
         dn.push(DnType::OrganizationalUnitName, "pod-client");
         params.distinguished_name = dn;
@@ -1933,7 +1933,7 @@ mod tests {
 
         // Verify CN was rewritten per role regardless of CSR contents.
         let summary_c = cert_summary(&cert_c).unwrap();
-        assert_eq!(summary_c.cn, "peer.joiner");
+        assert_eq!(summary_c.cn, "joiner");
         let summary_s = cert_summary(&cert_s).unwrap();
         assert_eq!(summary_s.cn, "orca-pod-server");
     }
@@ -2001,7 +2001,7 @@ mod tests {
         reissue_mesh_client_cert(dir.path(), "host-cli").unwrap();
         let after = std::fs::read_to_string(mesh_client_cert_path(dir.path())).unwrap();
         assert_ne!(before, after);
-        assert_eq!(cert_summary(&after).unwrap().cn, "peer.host-cli");
+        assert_eq!(cert_summary(&after).unwrap().cn, "host-cli");
     }
 
     #[test]
@@ -2039,7 +2039,7 @@ mod tests {
             &std::fs::read_to_string(mesh_client_key_path(dir.path())).unwrap(),
         )
         .unwrap();
-        assert_eq!(peer_common_name(&chain[0]).unwrap(), "peer.alice");
+        assert_eq!(peer_common_name(&chain[0]).unwrap(), "alice");
     }
 
     #[test]

@@ -155,7 +155,7 @@ pub async fn push_trust(
     caller: Option<contract::CallerIdentity>,
 ) -> Result<PodTrustOutput> {
     // Our own peer_id as the remote knows us.
-    let own_id = format!("peer.{}", system::host_identity::machine_id_short());
+    let own_id = system::host_identity::machine_id_short().to_string();
     // Execute pod.trust on the remote host, making THEM set their
     // local_secure for us. `push: false` prevents recursion. The caller is the
     // local admin who invoked `pod.trust` — the recipient authorizes the
@@ -620,11 +620,11 @@ fn enrich_from_local_db(base: &mut PodPeerDto, latest: &db::host_status::HostSta
 }
 
 /// Canonical peer-id for the local host. Mirrors the value the listener
-/// publishes in its mTLS CN and on the wire (`peer.<machine_id_short>`), so
-/// any DB row matching this id is unambiguously a self-reference (e.g. mDNS
+/// publishes in its mTLS CN and on the wire (`<machine_id_short>`), so any
+/// DB row matching this id is unambiguously a self-reference (e.g. mDNS
 /// discovered us at our own LAN IP and stub'd us in via `ensure_peer_stub`).
 pub fn local_peer_id() -> String {
-    format!("peer.{}", system::host_identity::machine_id_short())
+    system::host_identity::machine_id_short().to_string()
 }
 
 /// Read pod_peers + local host_status; merge into enriched DTOs.
@@ -797,32 +797,32 @@ mod tests {
 
     #[test]
     fn resolves_by_peer_id_case_insensitive() {
-        let peers = vec![peer("peer.abc", "host-e", "10.0.0.1", false)];
-        assert_eq!(resolve_peer_addr(&peers, "PEER.abc").unwrap(), "10.0.0.1");
+        let peers = vec![peer("abc", "host-e", "10.0.0.1", false)];
+        assert_eq!(resolve_peer_addr(&peers, "ABC").unwrap(), "10.0.0.1");
     }
 
     #[test]
     fn resolves_by_hostname() {
-        let peers = vec![peer("peer.abc", "host-e", "10.0.0.1", false)];
+        let peers = vec![peer("abc", "host-e", "10.0.0.1", false)];
         assert_eq!(resolve_peer_addr(&peers, "host-e").unwrap(), "10.0.0.1");
     }
 
     #[test]
     fn resolves_by_addr() {
-        let peers = vec![peer("peer.abc", "host-e", "10.0.0.1", false)];
+        let peers = vec![peer("abc", "host-e", "10.0.0.1", false)];
         assert_eq!(resolve_peer_addr(&peers, "10.0.0.1").unwrap(), "10.0.0.1");
     }
 
     #[test]
     fn departed_peers_are_skipped() {
-        let peers = vec![peer("peer.abc", "host-e", "10.0.0.1", true)];
+        let peers = vec![peer("abc", "host-e", "10.0.0.1", true)];
         let err = resolve_peer_addr(&peers, "host-e").unwrap_err();
         assert!(err.to_string().contains("no active paired peer"));
     }
 
     #[test]
     fn no_match_errors_with_selector() {
-        let peers = vec![peer("peer.abc", "host-e", "10.0.0.1", false)];
+        let peers = vec![peer("abc", "host-e", "10.0.0.1", false)];
         let err = resolve_peer_addr(&peers, "host-i").unwrap_err();
         assert!(err.to_string().contains("'host-i'"));
     }
@@ -830,21 +830,21 @@ mod tests {
     #[test]
     fn ambiguous_hostname_lists_peer_ids() {
         let peers = vec![
-            peer("peer.abc", "host-e", "10.0.0.1", false),
-            peer("peer.def", "host-e", "10.0.0.2", false),
+            peer("abc", "host-e", "10.0.0.1", false),
+            peer("def", "host-e", "10.0.0.2", false),
         ];
         let err = resolve_peer_addr(&peers, "host-e").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("ambiguous"), "got: {msg}");
-        assert!(msg.contains("peer.abc"), "got: {msg}");
-        assert!(msg.contains("peer.def"), "got: {msg}");
+        assert!(msg.contains("abc"), "got: {msg}");
+        assert!(msg.contains("def"), "got: {msg}");
     }
 
     #[test]
     fn one_active_one_departed_with_same_hostname_is_not_ambiguous() {
         let peers = vec![
-            peer("peer.abc", "host-e", "10.0.0.1", true),
-            peer("peer.def", "host-e", "10.0.0.2", false),
+            peer("abc", "host-e", "10.0.0.1", true),
+            peer("def", "host-e", "10.0.0.2", false),
         ];
         assert_eq!(resolve_peer_addr(&peers, "host-e").unwrap(), "10.0.0.2");
     }

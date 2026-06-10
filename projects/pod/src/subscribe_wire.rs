@@ -314,20 +314,20 @@ mod tests {
 
     #[test]
     fn host_status_topic_round_trips() {
-        let t = host_status_topic("peer.abc");
-        assert_eq!(t, "host:peer.abc:status");
-        assert_eq!(parse_host_status_topic(&t).unwrap(), "peer.abc");
+        let t = host_status_topic("abc");
+        assert_eq!(t, "host:abc:status");
+        assert_eq!(parse_host_status_topic(&t).unwrap(), "abc");
     }
 
     #[test]
     fn parse_topic_rejects_missing_prefix() {
-        let e = parse_host_status_topic("peer.abc:status").unwrap_err();
+        let e = parse_host_status_topic("abc:status").unwrap_err();
         assert!(e.to_string().contains("'host:' prefix"));
     }
 
     #[test]
     fn parse_topic_rejects_missing_suffix() {
-        let e = parse_host_status_topic("host:peer.abc:metrics").unwrap_err();
+        let e = parse_host_status_topic("host:abc:metrics").unwrap_err();
         assert!(e.to_string().contains("':status' suffix"));
     }
 
@@ -343,38 +343,35 @@ mod tests {
             "pod/ping",
             Some(subscribe_params_value("host:peer.x:status")),
         );
-        let e = validate_subscribe(&r, "peer.x").unwrap_err();
+        let e = validate_subscribe(&r, "x").unwrap_err();
         assert!(e.to_string().contains("unexpected method"));
     }
 
     #[test]
     fn validate_rejects_missing_params() {
         let r = req(METHOD, None);
-        let e = validate_subscribe(&r, "peer.x").unwrap_err();
+        let e = validate_subscribe(&r, "x").unwrap_err();
         assert!(e.to_string().contains("requires params"));
     }
 
     #[test]
     fn validate_rejects_unparseable_params() {
         let r = req(METHOD, Some(Value::String("not an object".into())));
-        let e = validate_subscribe(&r, "peer.x").unwrap_err();
+        let e = validate_subscribe(&r, "x").unwrap_err();
         assert!(e.to_string().contains("SubscribeParams"));
     }
 
     #[test]
     fn validate_rejects_bad_topic() {
         let r = req(METHOD, Some(subscribe_params_value("not-a-topic")));
-        let e = validate_subscribe(&r, "peer.x").unwrap_err();
+        let e = validate_subscribe(&r, "x").unwrap_err();
         assert!(e.to_string().contains("'host:' prefix"));
     }
 
     #[test]
     fn validate_rejects_foreign_peer_id() {
-        let r = req(
-            METHOD,
-            Some(subscribe_params_value("host:peer.other:status")),
-        );
-        let e = validate_subscribe(&r, "peer.self").unwrap_err();
+        let r = req(METHOD, Some(subscribe_params_value("host:other:status")));
+        let e = validate_subscribe(&r, "self").unwrap_err();
         assert!(e.to_string().contains("not owned by this daemon"));
     }
 
@@ -403,12 +400,9 @@ mod tests {
 
     #[test]
     fn validate_accepts_matching_topic() {
-        let r = req(
-            METHOD,
-            Some(subscribe_params_value("host:peer.self:status")),
-        );
-        let p = validate_subscribe(&r, "peer.self").unwrap();
-        assert_eq!(p, "peer.self");
+        let r = req(METHOD, Some(subscribe_params_value("host:self:status")));
+        let p = validate_subscribe(&r, "self").unwrap();
+        assert_eq!(p, "self");
     }
 
     /// Drive serve_session + run_client over an in-memory duplex pipe.
@@ -416,7 +410,7 @@ mod tests {
     /// branch), and the run_client → tx happy path.
     #[tokio::test]
     async fn end_to_end_subscribe_streams_matching_events() {
-        let own = "peer.e2e-happy";
+        let own = "e2e-happy";
         let (mut client_io, mut server_io) = tokio::io::duplex(64 * 1024);
         let (tx, mut rx) = mpsc::channel::<HostStatusEvent>(8);
 
@@ -434,7 +428,7 @@ mod tests {
 
         // Publish a foreign-peer event first to exercise the filter branch.
         publish_host_status(HostStatusEvent {
-            peer_id: "peer.e2e-foreign".into(),
+            peer_id: "e2e-foreign".into(),
             snapshot_at_unix: 1,
             payload: "ignored".into(),
         });
@@ -464,7 +458,7 @@ mod tests {
     /// loop with a short heartbeat interval so we don't have to wait 5s.
     #[tokio::test]
     async fn server_observes_client_heartbeats() {
-        let own = "peer.e2e-heartbeat";
+        let own = "e2e-heartbeat";
         let (mut client_io, mut server_io) = tokio::io::duplex(64 * 1024);
         let (tx, _rx) = mpsc::channel::<HostStatusEvent>(8);
 
@@ -481,7 +475,7 @@ mod tests {
             let req = Request::new(
                 1,
                 METHOD,
-                Some(subscribe_params_value("host:peer.e2e-heartbeat:status")),
+                Some(subscribe_params_value("host:e2e-heartbeat:status")),
             );
             write_frame(&mut s, &serde_json::to_vec(&req).unwrap())
                 .await
@@ -522,9 +516,9 @@ mod tests {
 
         let server = tokio::spawn(async move {
             // own_peer_id mismatches the client's request → rejection.
-            serve_session(server_io, "peer.server-owns-this").await
+            serve_session(server_io, "server-owns-this").await
         });
-        let client_err = run_client(client_io, "peer.something-else", tx)
+        let client_err = run_client(client_io, "something-else", tx)
             .await
             .expect_err("client should see rejection");
         assert!(
@@ -545,7 +539,7 @@ mod tests {
         let notif = Notification::new("pod/ping", None);
         let bytes = serde_json::to_vec(&notif).unwrap();
         write_frame(&mut client_io, &bytes).await.unwrap();
-        let err = serve_session(server_io, "peer.any").await.unwrap_err();
+        let err = serve_session(server_io, "any").await.unwrap_err();
         assert!(err.to_string().contains("first frame must be a Request"));
     }
 
@@ -565,7 +559,7 @@ mod tests {
                 _ => panic!("expected request"),
             };
             let ok = SubscribeOk {
-                topic: host_status_topic("peer.bad-payload"),
+                topic: host_status_topic("bad-payload"),
             };
             let resp = Response::ok(req.id, serde_json::to_value(&ok).unwrap());
             write_frame(&mut server_io, &serde_json::to_vec(&resp).unwrap())
@@ -578,7 +572,7 @@ mod tests {
                 .unwrap();
         });
 
-        let err = run_client(client_io, "peer.bad-payload", tx)
+        let err = run_client(client_io, "bad-payload", tx)
             .await
             .expect_err("expected EventFrame parse error");
         assert!(err.to_string().contains("EventFrame"), "got: {err}");
@@ -600,7 +594,7 @@ mod tests {
                 _ => panic!("expected request"),
             };
             let ok = SubscribeOk {
-                topic: host_status_topic("peer.no-params"),
+                topic: host_status_topic("no-params"),
             };
             let resp = Response::ok(req.id, serde_json::to_value(&ok).unwrap());
             write_frame(&mut server_io, &serde_json::to_vec(&resp).unwrap())
@@ -612,7 +606,7 @@ mod tests {
                 .unwrap();
         });
 
-        let err = run_client(client_io, "peer.no-params", tx)
+        let err = run_client(client_io, "no-params", tx)
             .await
             .expect_err("expected EventFrame parse error from Null");
         assert!(err.to_string().contains("EventFrame"), "got: {err}");
@@ -633,7 +627,7 @@ mod tests {
                 _ => panic!("expected request"),
             };
             let ok = SubscribeOk {
-                topic: host_status_topic("peer.garbage"),
+                topic: host_status_topic("garbage"),
             };
             let resp = Response::ok(req.id, serde_json::to_value(&ok).unwrap());
             write_frame(&mut server_io, &serde_json::to_vec(&resp).unwrap())
@@ -643,7 +637,7 @@ mod tests {
             write_frame(&mut server_io, b"not json").await.unwrap();
         });
 
-        let err = run_client(client_io, "peer.garbage", tx)
+        let err = run_client(client_io, "garbage", tx)
             .await
             .expect_err("expected parse error");
         assert!(err.to_string().contains("parse event frame"), "got: {err}");
@@ -665,7 +659,7 @@ mod tests {
             write_frame(&mut server_io, &bytes).await.unwrap();
         });
 
-        let err = run_client(client_io, "peer.x", tx).await.unwrap_err();
+        let err = run_client(client_io, "x", tx).await.unwrap_err();
         assert!(err.to_string().contains("expected Response ack"));
         _ = server.await;
     }
@@ -688,7 +682,7 @@ mod tests {
             };
             // Send ack.
             let ok = SubscribeOk {
-                topic: host_status_topic("peer.skip-test"),
+                topic: host_status_topic("skip-test"),
             };
             let resp = Response::ok(req.id, serde_json::to_value(&ok).unwrap());
             write_frame(&mut server_io, &serde_json::to_vec(&resp).unwrap())
@@ -706,7 +700,7 @@ mod tests {
                 .unwrap();
             // Send a real event → client should forward.
             let frame = EventFrame {
-                peer_id: "peer.skip-test".into(),
+                peer_id: "skip-test".into(),
                 snapshot_at_unix: 7,
                 payload: "yes".into(),
             };
@@ -720,7 +714,7 @@ mod tests {
         });
 
         let client = tokio::spawn(async move {
-            _ = run_client(client_io, "peer.skip-test", tx).await;
+            _ = run_client(client_io, "skip-test", tx).await;
         });
 
         let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())

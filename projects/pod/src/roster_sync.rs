@@ -53,7 +53,7 @@ async fn tick() -> Result<()> {
         return Ok(());
     }
 
-    let own_peer_id = format!("peer.{}", system::host_identity::machine_id_short());
+    let own_peer_id = system::host_identity::machine_id_short().to_string();
 
     let peers = {
         let conn = db::open_default()?;
@@ -227,76 +227,61 @@ mod tests {
 
     #[test]
     fn source_active_real_peer_is_usable() {
-        assert!(is_usable_source(&peer_row("peer.real", false), "peer.me"));
+        assert!(is_usable_source(&peer_row("real", false), "me"));
     }
 
     #[test]
     fn source_departed_is_skipped() {
-        assert!(!is_usable_source(&peer_row("peer.real", true), "peer.me"));
+        assert!(!is_usable_source(&peer_row("real", true), "me"));
     }
 
     #[test]
     fn source_unknown_stub_is_skipped() {
         // The rc.≤24 legacy stubs have peer_id="unknown" and no usable
         // bootstrap channel — skip rather than waste a dial.
-        assert!(!is_usable_source(&peer_row("unknown", false), "peer.me"));
+        assert!(!is_usable_source(&peer_row("unknown", false), "me"));
     }
 
     #[test]
     fn source_self_is_skipped() {
         // Self-discovered (mDNS picked up our own LAN addr) — no point
         // dialing ourselves for a roster.
-        assert!(!is_usable_source(&peer_row("peer.me", false), "peer.me"));
+        assert!(!is_usable_source(&peer_row("me", false), "me"));
     }
 
     // ── is_ingestable ────────────────────────────────────────────────────────
 
     #[test]
     fn ingest_active_real_peer() {
-        assert!(is_ingestable(
-            &entry("peer.other", "active", false),
-            "peer.me"
-        ));
+        assert!(is_ingestable(&entry("other", "active", false), "me"));
     }
 
     #[test]
     fn ingest_skips_synthetic_local_row() {
         // The remote's response includes its own row with local=true; that's
         // the source peer (which we already have) and must not be merged.
-        assert!(!is_ingestable(
-            &entry("peer.other", "active", true),
-            "peer.me"
-        ));
+        assert!(!is_ingestable(&entry("other", "active", true), "me"));
     }
 
     #[test]
     fn ingest_skips_synthetic_local_peer_id() {
         // Defense in depth — even if `local` flag is missing, peer_id="local"
         // is the synthetic marker.
-        assert!(!is_ingestable(&entry("local", "active", false), "peer.me"));
+        assert!(!is_ingestable(&entry("local", "active", false), "me"));
     }
 
     #[test]
     fn ingest_skips_unknown_stub() {
-        assert!(!is_ingestable(
-            &entry("unknown", "active", false),
-            "peer.me"
-        ));
+        assert!(!is_ingestable(&entry("unknown", "active", false), "me"));
     }
 
     #[test]
     fn ingest_skips_self() {
-        assert!(!is_ingestable(
-            &entry("peer.me", "active", false),
-            "peer.me"
-        ));
+        assert!(!is_ingestable(&entry("me", "active", false), "me"));
     }
 
     #[test]
     fn ingest_skips_inactive() {
-        assert!(!is_ingestable(
-            &entry("peer.other", "departed", false),
-            "peer.me"
-        ));
+        assert!(!is_ingestable(&entry("other", "departed", false), "me"));
     }
 }

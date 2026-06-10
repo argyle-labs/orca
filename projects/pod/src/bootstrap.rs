@@ -315,7 +315,7 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
         PeerRole::Server,
     )?;
 
-    let joiner_peer_id = format!("peer.{}", body.joiner_hostname);
+    let joiner_peer_id = body.joiner_hostname.clone();
     let peer_label = select_peer_label(&body.joiner_hostname, body.joiner_display_name.as_deref());
     pdb::upsert_peer(
         &conn,
@@ -344,7 +344,7 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
     let inviter_peer_id = offer
         .inviter_peer_id
         .clone()
-        .unwrap_or_else(|| format!("peer.{}", system::host_identity::machine_id_short()));
+        .unwrap_or_else(|| system::host_identity::machine_id_short().to_string());
     let pod_id = offer
         .pod_id
         .clone()
@@ -417,7 +417,7 @@ fn handle_request_offer(
     // `pod/join-confirm` step can echo it back to the joiner. Without this
     // the joiner records the inviter as `"unknown"` and roster-sync skips
     // every row that references it.
-    let inviter_peer_id = format!("peer.{}", system::host_identity::machine_id_short());
+    let inviter_peer_id = system::host_identity::machine_id_short().to_string();
     pdb::insert_pending_offer(
         &conn,
         &offer_id,
@@ -514,7 +514,7 @@ mod tests {
     #[test]
     fn offer_body_deserializes_rc24_without_display_name() {
         let json = serde_json::json!({
-            "inviter_peer_id": "peer.abc",
+            "inviter_peer_id": "abc",
             "inviter_hostname": "abc123",
             "inviter_addr": "10.0.0.1",
             "inviter_port": 12002,
@@ -531,7 +531,7 @@ mod tests {
     #[test]
     fn offer_body_roundtrip_rc25_with_display_name() {
         let json = serde_json::json!({
-            "inviter_peer_id": "peer.abc",
+            "inviter_peer_id": "abc",
             "inviter_hostname": "abc123",
             "inviter_addr": "10.0.0.1",
             "inviter_port": 12002,
@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn request_offer_body_roundtrip() {
         let json = serde_json::json!({
-            "joiner_peer_id": "peer.abc",
+            "joiner_peer_id": "abc",
             "joiner_hostname": "abc123",
             "joiner_pubkey_fp": "fp-deadbeef",
             "joiner_display_name": "host-h",
@@ -574,7 +574,7 @@ mod tests {
     #[test]
     fn request_offer_body_optional_display_name() {
         let json = serde_json::json!({
-            "joiner_peer_id": "peer.abc",
+            "joiner_peer_id": "abc",
             "joiner_hostname": "abc123",
             "joiner_pubkey_fp": "fp-deadbeef",
         });
@@ -586,7 +586,7 @@ mod tests {
     fn request_offer_result_roundtrip() {
         let r = RequestOfferResult {
             inviter_pubkey_fp: "fp-inviter".into(),
-            inviter_peer_id: "peer.host-g".into(),
+            inviter_peer_id: "host-g".into(),
             inviter_hostname: "host-g".into(),
             inviter_addr: String::new(),
             inviter_port: 12002,
@@ -623,7 +623,7 @@ mod tests {
     fn offer_body_deserializes_rc11_without_code_plain() {
         // rc.≤11 inviters don't send code_plain; must default to None.
         let json = serde_json::json!({
-            "inviter_peer_id": "peer.abc",
+            "inviter_peer_id": "abc",
             "inviter_hostname": "abc123",
             "inviter_addr": "10.0.0.1",
             "inviter_port": 12002,
@@ -639,7 +639,7 @@ mod tests {
     #[test]
     fn offer_body_deserializes_rc12_with_code_plain() {
         let json = serde_json::json!({
-            "inviter_peer_id": "peer.abc",
+            "inviter_peer_id": "abc",
             "inviter_hostname": "abc123",
             "inviter_addr": "10.0.0.1",
             "inviter_port": 12002,
@@ -658,7 +658,7 @@ mod tests {
         // Older inviters omit code_plain; must not break deserialization.
         let json = serde_json::json!({
             "inviter_pubkey_fp": "fp",
-            "inviter_peer_id": "peer.x",
+            "inviter_peer_id": "x",
             "inviter_hostname": "x",
             "inviter_addr": "",
             "inviter_port": 12002,
@@ -676,7 +676,7 @@ mod tests {
     fn request_offer_result_roundtrip_with_code_plain() {
         let r = RequestOfferResult {
             inviter_pubkey_fp: "fp".into(),
-            inviter_peer_id: "peer.x".into(),
+            inviter_peer_id: "x".into(),
             inviter_hostname: "x".into(),
             inviter_addr: String::new(),
             inviter_port: 12002,

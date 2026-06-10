@@ -99,7 +99,7 @@ mod tests {
     fn upsert_then_get_roundtrips() {
         let c = mem();
         let row = PeerUpdateState {
-            peer_id: "peer.x".into(),
+            peer_id: "x".into(),
             version: Some("0.0.6-rc.8".into()),
             channel: Some("rc".into()),
             pinned_to: None,
@@ -108,7 +108,7 @@ mod tests {
             checked_at: Some(1_700_000_000),
         };
         upsert(&c, &row).unwrap();
-        let got = get(&c, "peer.x").unwrap().expect("present");
+        let got = get(&c, "x").unwrap().expect("present");
         assert_eq!(got.version.as_deref(), Some("0.0.6-rc.8"));
         assert_eq!(got.channel.as_deref(), Some("rc"));
         assert!(got.update_available);
@@ -118,7 +118,7 @@ mod tests {
     fn upsert_overwrites() {
         let c = mem();
         let mut row = PeerUpdateState {
-            peer_id: "peer.x".into(),
+            peer_id: "x".into(),
             version: Some("0.0.6-rc.8".into()),
             update_available: true,
             checked_at: Some(1),
@@ -129,7 +129,7 @@ mod tests {
         row.update_available = false;
         row.checked_at = Some(2);
         upsert(&c, &row).unwrap();
-        let got = get(&c, "peer.x").unwrap().unwrap();
+        let got = get(&c, "x").unwrap().unwrap();
         assert_eq!(got.version.as_deref(), Some("0.0.6-rc.10"));
         assert!(!got.update_available);
         assert_eq!(got.checked_at, Some(2));

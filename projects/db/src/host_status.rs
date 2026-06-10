@@ -197,12 +197,12 @@ mod tests {
     fn insert_and_latest_per_peer() {
         let conn = test_db();
         let t = now();
-        insert_status(&conn, "peer.a", t - 200, "{}", t, "local").unwrap();
-        insert_status(&conn, "peer.a", t - 100, "{}", t, "local").unwrap();
-        insert_status(&conn, "peer.b", t - 150, "{}", t, "synced").unwrap();
+        insert_status(&conn, "a", t - 200, "{}", t, "local").unwrap();
+        insert_status(&conn, "a", t - 100, "{}", t, "local").unwrap();
+        insert_status(&conn, "b", t - 150, "{}", t, "synced").unwrap();
         let rows = latest_per_peer(&conn).unwrap();
         assert_eq!(rows.len(), 2);
-        let a = rows.iter().find(|r| r.peer_id == "peer.a").unwrap();
+        let a = rows.iter().find(|r| r.peer_id == "a").unwrap();
         assert_eq!(a.snapshot_at_unix, t - 100);
     }
 
@@ -210,8 +210,8 @@ mod tests {
     fn insert_ignores_duplicate() {
         let conn = test_db();
         let t = now();
-        assert!(insert_status(&conn, "peer.a", t - 100, "{}", t, "local").unwrap());
-        assert!(!insert_status(&conn, "peer.a", t - 100, "{}", t, "local").unwrap());
+        assert!(insert_status(&conn, "a", t - 100, "{}", t, "local").unwrap());
+        assert!(!insert_status(&conn, "a", t - 100, "{}", t, "local").unwrap());
     }
 
     #[test]
@@ -219,14 +219,14 @@ mod tests {
         let conn = test_db();
         let t = now();
         // Two recent rows survive.
-        insert_status(&conn, "peer.a", t - 100, "{}", t, "local").unwrap();
-        insert_status(&conn, "peer.a", t - 50, "{}", t, "local").unwrap();
+        insert_status(&conn, "a", t - 100, "{}", t, "local").unwrap();
+        insert_status(&conn, "a", t - 50, "{}", t, "local").unwrap();
         // Row older than 24 h gets pruned on the next insert.
-        insert_status(&conn, "peer.a", t - 90_001, "{}", t, "local").unwrap();
-        insert_status(&conn, "peer.a", t - 10, "{}", t, "local").unwrap();
+        insert_status(&conn, "a", t - 90_001, "{}", t, "local").unwrap();
+        insert_status(&conn, "a", t - 10, "{}", t, "local").unwrap();
         let n: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM host_status WHERE peer_id='peer.a'",
+                "SELECT COUNT(*) FROM host_status WHERE peer_id='a'",
                 [],
                 |r| r.get(0),
             )
@@ -239,10 +239,10 @@ mod tests {
     fn rows_for_peer_respects_since() {
         let conn = test_db();
         let t = now();
-        insert_status(&conn, "peer.a", t - 300, "{}", t, "local").unwrap();
-        insert_status(&conn, "peer.a", t - 200, "{}", t, "local").unwrap();
-        insert_status(&conn, "peer.a", t - 100, "{}", t, "local").unwrap();
-        let rows = rows_for_peer(&conn, "peer.a", Some(t - 250), 100).unwrap();
+        insert_status(&conn, "a", t - 300, "{}", t, "local").unwrap();
+        insert_status(&conn, "a", t - 200, "{}", t, "local").unwrap();
+        insert_status(&conn, "a", t - 100, "{}", t, "local").unwrap();
+        let rows = rows_for_peer(&conn, "a", Some(t - 250), 100).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].snapshot_at_unix, t - 100);
     }
@@ -250,11 +250,11 @@ mod tests {
     #[test]
     fn latest_snapshot_at_works() {
         let conn = test_db();
-        assert_eq!(latest_snapshot_at(&conn, "peer.a").unwrap(), None);
+        assert_eq!(latest_snapshot_at(&conn, "a").unwrap(), None);
         let t = now();
-        insert_status(&conn, "peer.a", t - 300, "{}", t, "local").unwrap();
-        insert_status(&conn, "peer.a", t - 100, "{}", t, "local").unwrap();
-        insert_status(&conn, "peer.a", t - 200, "{}", t, "local").unwrap();
-        assert_eq!(latest_snapshot_at(&conn, "peer.a").unwrap(), Some(t - 100));
+        insert_status(&conn, "a", t - 300, "{}", t, "local").unwrap();
+        insert_status(&conn, "a", t - 100, "{}", t, "local").unwrap();
+        insert_status(&conn, "a", t - 200, "{}", t, "local").unwrap();
+        assert_eq!(latest_snapshot_at(&conn, "a").unwrap(), Some(t - 100));
     }
 }

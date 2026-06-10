@@ -98,7 +98,7 @@ pub async fn handle_pod_connection(
     // one request → ack → streamed events until close. The normal one-shot
     // request/response path below is bypassed.
     if request.method == crate::subscribe_wire::METHOD {
-        let own_peer_id = format!("peer.{}", system::host_identity::machine_id_short());
+        let own_peer_id = system::host_identity::machine_id_short().to_string();
         return crate::subscribe_wire::serve_session_with_request(tls, request, &own_peer_id).await;
     }
 
@@ -593,9 +593,9 @@ fn handle_refresh_cert(peer_cn: &str, request: Request) -> Result<RefreshCertRes
     };
 
     // Enforce that the joiner identifier matches the authenticated CN. CN is
-    // `peer.<machine_id_short>`; the param is named `joiner_hostname` for wire
+    // `<machine_id_short>`; the param is named `joiner_hostname` for wire
     // compat but now carries the stable machine_id, not the OS hostname.
-    let expected_cn = format!("peer.{}", params.joiner_hostname);
+    let expected_cn = params.joiner_hostname.clone();
     anyhow::ensure!(
         peer_cn == expected_cn,
         "refresh refused: cert CN ({peer_cn}) does not match joiner_hostname ({expected_cn})"

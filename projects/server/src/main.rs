@@ -394,7 +394,7 @@ async fn main() -> Result<()> {
                 println!("✓ mesh CA initialized at {}", pki.join("mesh").display());
                 println!("  pod id: {pod_id}");
                 println!(
-                    "  founder peer id: peer.{host}  (machine_id; display: {})",
+                    "  founder peer id: {host}  (machine_id; display: {})",
                     system::host_identity::hostname()
                 );
                 println!("  self_secure: true (secrets storage enabled)");

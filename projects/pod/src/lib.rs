@@ -805,7 +805,7 @@ mod tests {
     #[test]
     fn pod_peer_address_from_db_row() {
         let row = db::host_addressing::PodPeerAddress {
-            peer_id: "peer.x".into(),
+            peer_id: "x".into(),
             kind: "lan_v4".into(),
             value: "10.0.0.5".into(),
             source: "mdns".into(),
@@ -821,7 +821,7 @@ mod tests {
     #[test]
     fn pod_peer_from_db_summary_defaults_optional_fields_to_none() {
         let row = db::pod::PeerSummary {
-            peer_id: "peer.x".into(),
+            peer_id: "x".into(),
             hostname: "h".into(),
             addr: "1.2.3.4".into(),
             port: 12002,
@@ -832,7 +832,7 @@ mod tests {
             addresses: vec![],
         };
         let dto: PodPeerDto = row.into();
-        assert_eq!(dto.peer_id, "peer.x");
+        assert_eq!(dto.peer_id, "x");
         assert!(!dto.local);
         assert!(dto.reachable.is_none());
         assert!(dto.version.is_none());
@@ -974,7 +974,7 @@ pub fn pki_dir() -> PathBuf {
 /// logged at warn and returns `Ok(false)` so daemon startup proceeds.
 pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
     let cert_path = pki::mesh_client_cert_path(pki_dir);
-    let expected = format!("peer.{}", system::host_identity::machine_id_short());
+    let expected = system::host_identity::machine_id_short().to_string();
 
     // Classify current state into one of:
     //   "ok"     – cert present, CN matches expected. No-op.
@@ -1042,7 +1042,7 @@ pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
         pki::reissue_mesh_server_cert(pki_dir).context("self-reissue mesh server cert")?;
         pki::reissue_mesh_client_cert(pki_dir, &host).context("self-reissue mesh client cert")?;
         tracing::warn!(
-            "[pod] founder reissued mesh client+server certs under CN peer.{host}; \
+            "[pod] founder reissued mesh client+server certs under CN {host}; \
              pod-membership wiped — re-pair joiners as needed"
         );
         let conn = ::db::open_default()?;
