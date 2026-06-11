@@ -7,11 +7,27 @@ edition.workspace = true
 name = "ntfy"
 path = "src/lib.rs"
 
+[features]
+cli = ["dep:clap"]
+
 [dependencies]
-serde       = { workspace = true }
-thiserror   = { workspace = true }
-urlencoding = { workspace = true }
-utils  = { path = "../../utils" }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+thiserror     = { workspace = true }
+urlencoding   = { workspace = true }
+async-trait   = { workspace = true }
+anyhow        = { workspace = true }
+schemars      = { workspace = true }
+inventory     = { workspace = true }
+utils         = { path = "../../utils" }
+notifications = { path = "../../notifications" }
+db            = { path = "../../db" }
+dispatch      = { path = "../../dispatch" }
+contract      = { path = "../../contract", default-features = false }
+derive        = { path = "../../derive" }
+tracing       = { workspace = true }
+
+clap          = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio       = { workspace = true }

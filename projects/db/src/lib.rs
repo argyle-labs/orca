@@ -20,6 +20,7 @@ pub mod host_addressing;
 pub mod host_status;
 pub mod llm;
 pub mod mcp_servers;
+pub mod ntfy;
 pub mod oauth;
 pub mod openapi_specs;
 pub mod openapi_specs_registry;
@@ -684,6 +685,15 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             name       TEXT PRIMARY KEY,
             base_url   TEXT NOT NULL,
             token      TEXT NOT NULL,
+            enabled    INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS ntfy_endpoints (
+            name       TEXT PRIMARY KEY,
+            base_url   TEXT NOT NULL,
+            topic      TEXT NOT NULL,
+            token      TEXT,
             enabled    INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         );

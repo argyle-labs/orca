@@ -216,106 +216,6 @@ pub trait Backend: Send + Sync {
     async fn emit(&self, event: &Event) -> Result<MessageRef, BackendError>;
 }
 
-// ── ntfy backend ───────────────────────────────────────────────────────────
-
-/// ntfy backend. Wraps the [`ntfy::Client`] library and renders the generic
-/// [`Event`] into ntfy's native primitives. Body is sent as markdown
-/// (`X-Markdown: yes`) so the iOS / Android / web clients format it as a
-/// real notification card instead of a wall of plain text.
-///
-/// | Event field | ntfy primitive |
-/// |---|---|
-/// | `title` | `X-Title` header |
-/// | `severity` + `class` | `X-Tags` (emoji shortcodes — render as icons in the title row) |
-/// | `severity` | `X-Priority` header (Info→default, Warn→high, Error/Critical→urgent) |
-/// | `host` | rendered as the first markdown bullet (`**host**: …`) |
-/// | `body` | markdown body, first paragraph |
-/// | `fields[]` | markdown bullet list under the body |
-/// | `click` | `X-Click` header (tap-through URL) |
-/// | `actions[]` | not represented yet (ntfy supports `X-Actions` view-buttons
-/// |   but that requires an orca approval endpoint — wired in §9.3+) |
-pub struct NtfyBackend {
-    name: String,
-    client: ntfy::Client,
-}
-
-impl NtfyBackend {
-    pub fn new(name: impl Into<String>, client: ntfy::Client) -> Self {
-        Self {
-            name: name.into(),
-            client,
-        }
-    }
-}
-
-#[async_trait]
-impl Backend for NtfyBackend {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    async fn emit(&self, event: &Event) -> Result<MessageRef, BackendError> {
-        let priority = match event.severity {
-            Severity::Info => ntfy::Priority::Default,
-            Severity::Warn => ntfy::Priority::High,
-            Severity::Error | Severity::Critical => ntfy::Priority::Urgent,
-        };
-        let tags = vec![event.severity.emoji_tag(), event.class.emoji_tag()];
-
-        // Markdown render. ntfy iOS/Android/web clients v2+ honor
-        // X-Markdown: yes and format the result as a structured card.
-        let mut body = String::new();
-        if let Some(host) = &event.host {
-            body.push_str(&format!("**host:** `{host}`\n"));
-        }
-        if !event.body.is_empty() {
-            if !body.is_empty() {
-                body.push('\n');
-            }
-            body.push_str(&event.body);
-            body.push('\n');
-        }
-        if !event.fields.is_empty() {
-            if !body.is_empty() {
-                body.push('\n');
-            }
-            for f in &event.fields {
-                body.push_str(&format!("- **{}:** {}\n", f.key, f.value));
-            }
-        }
-        // Footer with provenance — last line, italicized, low visual weight.
-        body.push_str(&format!("\n_via {}_\n", event.source));
-
-        let result = self
-            .client
-            .send(ntfy::Message {
-                message: &body,
-                title: Some(&event.title),
-                priority: Some(priority),
-                tags,
-                click: event.click.as_deref(),
-                markdown: true,
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| BackendError::Transport(e.to_string()))?;
-        if !result.ok {
-            return Err(BackendError::Transport(format!(
-                "ntfy returned status {}",
-                result.status
-            )));
-        }
-        // ntfy doesn't return a stable message id in the basic POST path.
-        // Use the topic+status as a placeholder; the future escalation
-        // logic will need to switch to the JSON publish endpoint to get
-        // a real id back (tracked under §10.4).
-        Ok(MessageRef::new(
-            self.name.clone(),
-            format!("ntfy:{}", result.status),
-        ))
-    }
-}
-
 // ── Routing ────────────────────────────────────────────────────────────────
 
 /// Severity matcher. Parsed from strings like `"Warn"`, `"==Critical"`, or
@@ -554,106 +454,67 @@ impl Default for Dispatcher {
 
 // ── Process-global dispatcher ──────────────────────────────────────────────
 
-use std::sync::OnceLock;
+use std::sync::{Arc, LazyLock, RwLock};
 
-static GLOBAL: OnceLock<Dispatcher> = OnceLock::new();
+static GLOBAL: LazyLock<RwLock<GlobalState>> =
+    LazyLock::new(|| RwLock::new(GlobalState::default()));
 
-/// Install the process-wide [`Dispatcher`]. Idempotent — second call is a
-/// no-op so library code can defensively call it; the daemon installs once
-/// at startup and that wins.
-pub fn install_global(dispatcher: Dispatcher) {
-    if GLOBAL.set(dispatcher).is_err() {
-        // Already installed — first wins. Library code may defensively call
-        // this; the daemon installs once at startup.
-    }
+#[derive(Default)]
+struct GlobalState {
+    backends: Vec<Arc<dyn Backend>>,
+    routing: Option<RoutingConfig>,
 }
 
-/// Borrow the installed dispatcher, or `None` if [`install_global`] was
-/// never called. Callers that want a non-fatal degraded path use `None` to
-/// mean "notifications are not configured on this host."
-pub fn global() -> Option<&'static Dispatcher> {
-    GLOBAL.get()
+/// Register a backend with the process-global dispatcher. Each backend plugin
+/// (ntfy, smtp, slack, …) calls this from its own bootstrap once per enabled
+/// endpoint row. Backend names are the [`Backend::name`] string and are what
+/// routing rules' `send = [...]` entries match against.
+pub fn register_backend(backend: Arc<dyn Backend>) {
+    let mut g = GLOBAL.write().expect("notifications global poisoned");
+    g.backends.push(backend);
 }
 
-/// Emit `event` through the process-global dispatcher. If no dispatcher is
-/// installed, returns an empty outcome list — emitters are never blocked by
-/// missing notification config.
+/// Replace the routing config on the global dispatcher. `None` means
+/// fan-out-to-all (§9.2 behavior).
+pub fn set_routing(routing: Option<RoutingConfig>) {
+    let mut g = GLOBAL.write().expect("notifications global poisoned");
+    g.routing = routing;
+}
+
+/// Snapshot of currently-registered backend names. For observability /
+/// `notify.status` tools.
+pub fn registered_backend_names() -> Vec<String> {
+    let g = GLOBAL.read().expect("notifications global poisoned");
+    g.backends.iter().map(|b| b.name().to_string()).collect()
+}
+
+/// Emit `event` through every backend selected by the routing config (or all
+/// registered backends when routing is unset). Returns one outcome per
+/// dispatched backend — never short-circuits on a single backend failure.
+/// When no backends are registered, returns an empty vec.
 pub async fn emit(event: &Event) -> Vec<EmitOutcome> {
-    match global() {
-        Some(d) => d.emit(event).await,
-        None => Vec::new(),
-    }
-}
-
-/// Backend constructor: given the environment, optionally produce a configured
-/// backend. Returning `Ok(None)` means "this backend isn't configured on this
-/// host" — perfectly normal, the dispatcher just won't include it. Each
-/// backend implementation owns its own env-var scheme and registers a
-/// constructor here so [`bootstrap_from_env`] stays backend-agnostic.
-pub type BackendBuilder = fn() -> anyhow::Result<Option<Box<dyn Backend>>>;
-
-fn builtin_backend_builders() -> &'static [BackendBuilder] {
-    // As email/Slack/Discord/SMS land (§9.4–9.6), each adds its own
-    // `try_from_env` constructor and appends to this slice. Nothing else in
-    // this module hard-codes a backend name or env-var scheme.
-    &[ntfy_from_env]
-}
-
-fn ntfy_from_env() -> anyhow::Result<Option<Box<dyn Backend>>> {
-    let (Ok(base), Ok(topic)) = (
-        std::env::var("ORCA_NTFY_BASE"),
-        std::env::var("ORCA_NTFY_TOPIC"),
-    ) else {
-        return Ok(None);
+    let (selected, _) = {
+        let g = GLOBAL.read().expect("notifications global poisoned");
+        let chosen: Vec<Arc<dyn Backend>> = match &g.routing {
+            None => g.backends.clone(),
+            Some(cfg) => {
+                let targets = cfg.targets(event);
+                targets
+                    .iter()
+                    .filter_map(|name| g.backends.iter().find(|b| b.name() == name).cloned())
+                    .collect()
+            }
+        };
+        (chosen, ())
     };
-    let mut cfg = ntfy::Config::new(base, topic.clone());
-    if let Ok(token) = std::env::var("ORCA_NTFY_TOKEN") {
-        cfg = cfg.with_token(token);
+    let mut out = Vec::with_capacity(selected.len());
+    for b in selected {
+        out.push(EmitOutcome {
+            backend: b.name().to_string(),
+            result: b.emit(event).await,
+        });
     }
-    Ok(Some(Box::new(NtfyBackend::new(
-        format!("ntfy:{topic}"),
-        ntfy::Client::new(cfg),
-    ))))
-}
-
-/// Build a [`Dispatcher`] by asking every registered [`BackendBuilder`] whether
-/// it has a configured backend in the current environment, then applying
-/// optional TOML routing from `ORCA_NOTIFY_ROUTES`.
-///
-/// Returns `Ok(None)` when no backend is configured. Returns `Err` only on
-/// malformed inputs (e.g. unparseable routes).
-pub fn dispatcher_from_env() -> anyhow::Result<Option<Dispatcher>> {
-    let mut d = Dispatcher::new();
-    let mut any = false;
-
-    for build in builtin_backend_builders() {
-        if let Some(backend) = build()? {
-            d = d.with_backend(backend);
-            any = true;
-        }
-    }
-
-    if let Ok(toml_src) = std::env::var("ORCA_NOTIFY_ROUTES") {
-        let routes = RoutingConfig::from_toml(&toml_src)
-            .map_err(|e| anyhow::anyhow!("ORCA_NOTIFY_ROUTES parse error: {e}"))?;
-        d = d.with_routing(routes);
-        any = true;
-    }
-
-    Ok(any.then_some(d))
-}
-
-/// Convenience: build from env and install as the process global. Logs (via
-/// `eprintln!`) and continues on a missing/partial config so daemon startup is
-/// never gated on notifications.
-pub fn bootstrap_from_env() {
-    match dispatcher_from_env() {
-        Ok(Some(d)) => install_global(d),
-        Ok(None) => {}
-        Err(e) => {
-            eprintln!("notifications: bootstrap_from_env failed: {e}");
-        }
-    }
+    out
 }
 
 // ── notify.send tool ───────────────────────────────────────────────────────
@@ -750,14 +611,14 @@ async fn notify_send(
         event = event.with_click(c);
     }
 
-    let Some(d) = global() else {
+    let names = registered_backend_names();
+    if names.is_empty() {
         return Ok(NotifySendOutput {
             configured: false,
             results: Vec::new(),
         });
-    };
-
-    let outcomes = d.emit(&event).await;
+    }
+    let outcomes = emit(&event).await;
     Ok(NotifySendOutput {
         configured: true,
         results: outcomes
