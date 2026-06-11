@@ -269,7 +269,7 @@ Slack.
 | 9.7 | `orca user link <backend> <id>` for interactive backends | S | Operator-to-chat-user mapping |
 | 9.8 | Generic webhook backend | S | Configurable JSON template |
 | 9.9 | Retire `projects/plugins/ntfy/` directory | S | After 9.2 lands |
-| 9.10 | Wire reconcilers + drift + rotation detectors to emit events | M | Touches several call sites |
+| 9.10 | Wire reconcilers + drift + rotation detectors to emit events | M | **PARTIAL 2026-06-10** — process-global `Dispatcher` (`install_global`/`global`/`emit`) + `bootstrap_from_env` (`ORCA_NTFY_BASE`/`ORCA_NTFY_TOPIC`/`ORCA_NTFY_TOKEN`/`ORCA_NOTIFY_ROUTES`) live in `projects/notifications/src/lib.rs`; `notifications::bootstrap_from_env()` called from `server/src/main.rs` after tracing init. `#[orca_tool(domain="notify", verb="send")]` (`notify.send`) shipped — accepts class/severity/title/body/host/source/click, returns per-backend ok/error. Reconciler/drift/rotation call-site emissions still TODO. |
 
 ---
 

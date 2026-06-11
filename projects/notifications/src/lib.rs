@@ -585,35 +585,52 @@ pub async fn emit(event: &Event) -> Vec<EmitOutcome> {
     }
 }
 
-/// Build a [`Dispatcher`] from environment + optional inline TOML routes.
+/// Backend constructor: given the environment, optionally produce a configured
+/// backend. Returning `Ok(None)` means "this backend isn't configured on this
+/// host" — perfectly normal, the dispatcher just won't include it. Each
+/// backend implementation owns its own env-var scheme and registers a
+/// constructor here so [`bootstrap_from_env`] stays backend-agnostic.
+pub type BackendBuilder = fn() -> anyhow::Result<Option<Box<dyn Backend>>>;
+
+fn builtin_backend_builders() -> &'static [BackendBuilder] {
+    // As email/Slack/Discord/SMS land (§9.4–9.6), each adds its own
+    // `try_from_env` constructor and appends to this slice. Nothing else in
+    // this module hard-codes a backend name or env-var scheme.
+    &[ntfy_from_env]
+}
+
+fn ntfy_from_env() -> anyhow::Result<Option<Box<dyn Backend>>> {
+    let (Ok(base), Ok(topic)) = (
+        std::env::var("ORCA_NTFY_BASE"),
+        std::env::var("ORCA_NTFY_TOPIC"),
+    ) else {
+        return Ok(None);
+    };
+    let mut cfg = ntfy::Config::new(base, topic.clone());
+    if let Ok(token) = std::env::var("ORCA_NTFY_TOKEN") {
+        cfg = cfg.with_token(token);
+    }
+    Ok(Some(Box::new(NtfyBackend::new(
+        format!("ntfy:{topic}"),
+        ntfy::Client::new(cfg),
+    ))))
+}
+
+/// Build a [`Dispatcher`] by asking every registered [`BackendBuilder`] whether
+/// it has a configured backend in the current environment, then applying
+/// optional TOML routing from `ORCA_NOTIFY_ROUTES`.
 ///
-/// Looks for:
-///   - `ORCA_NTFY_BASE` (e.g. `http://10.10.10.6:8080`) — registers an
-///     [`NtfyBackend`] named `"ntfy:<topic>"` if `ORCA_NTFY_TOPIC` is also set.
-///   - `ORCA_NTFY_TOPIC` — the ntfy topic name.
-///   - `ORCA_NTFY_TOKEN` (optional) — bearer token forwarded to ntfy.
-///   - `ORCA_NOTIFY_ROUTES` (optional) — TOML routing config (`[[notify.route]]`).
-///
-/// Returns `Ok(None)` when nothing is configured — the caller should leave the
-/// global uninstalled and emitters will silently no-op (see [`emit`]). Returns
-/// `Err` only on malformed inputs (e.g. unparseable routes).
+/// Returns `Ok(None)` when no backend is configured. Returns `Err` only on
+/// malformed inputs (e.g. unparseable routes).
 pub fn dispatcher_from_env() -> anyhow::Result<Option<Dispatcher>> {
     let mut d = Dispatcher::new();
     let mut any = false;
 
-    if let (Ok(base), Ok(topic)) = (
-        std::env::var("ORCA_NTFY_BASE"),
-        std::env::var("ORCA_NTFY_TOPIC"),
-    ) {
-        let mut cfg = ntfy::Config::new(base, topic.clone());
-        if let Ok(token) = std::env::var("ORCA_NTFY_TOKEN") {
-            cfg = cfg.with_token(token);
+    for build in builtin_backend_builders() {
+        if let Some(backend) = build()? {
+            d = d.with_backend(backend);
+            any = true;
         }
-        d = d.with_backend(Box::new(NtfyBackend::new(
-            format!("ntfy:{topic}"),
-            ntfy::Client::new(cfg),
-        )));
-        any = true;
     }
 
     if let Ok(toml_src) = std::env::var("ORCA_NOTIFY_ROUTES") {
