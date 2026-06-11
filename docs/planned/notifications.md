@@ -48,14 +48,23 @@ generic `Event` and the active backends render it.
 
 ## 2. Crate shape
 
+> **Note 2026-06-10**: the directory ended up at `projects/notifications/`
+> (package name `notifications`), not `projects/notify/`. The `notify` name
+> collides with a popular crates.io filesystem-watcher crate (`notify-8.x`)
+> and `cargo -p notify` resolved to the registry crate, breaking the per-crate
+> clippy hook. Path-references throughout this doc still say `notify/` for
+> readability; treat them as aliases for `notifications/`.
+
 ```
-projects/notify/
+projects/notifications/
   src/
-    lib.rs              ← Event, Severity, Action, dispatcher
-    backend.rs          ← Backend trait
-    routing.rs          ← class/severity/host → backend selection
-    backends/
-      ntfy.rs           ← ports the existing projects/plugins/ntfy/ code
+    lib.rs              ← Event, Severity, Action, Backend trait, Dispatcher,
+                          NtfyBackend (all inlined — single-file style matches
+                          the existing ntfy crate and the no-thin-wrappers rule)
+    backends/           ← (future) one file per additional backend as they land
+  examples/
+    smoke_ntfy.rs       ← live ntfy smoke test, run via `cargo run -p notifications
+                          --example smoke_ntfy` with NTFY_BASE / NTFY_TOPIC env
       email.rs          ← SMTP
       slack.rs          ← Block Kit webhook + Events API
       discord.rs        ← Embed webhook + Interactions endpoint
@@ -251,8 +260,8 @@ Slack.
 
 | # | Item | Size | Notes |
 |---|---|---|---|
-| 9.1 | `projects/notify/` crate scaffold + `Event` + `Backend` trait + dispatcher | M | |
-| 9.2 | Port ntfy backend | S | Lift existing code into `backends/ntfy.rs` |
+| 9.1 | `projects/notifications/` crate scaffold + `Event` + `Backend` trait + dispatcher | M | **SHIPPED 2026-06-10** — `projects/notifications/src/lib.rs`, 3 tests pass, clippy clean. |
+| 9.2 | Port ntfy backend | S | **SHIPPED 2026-06-10** — `NtfyBackend` in `lib.rs` wraps existing `ntfy::Client`. Live smoke-tested via `cargo run -p notifications --example smoke_ntfy` (HTTP 200 to baldur). |
 | 9.3 | Routing engine + TOML config | M | Declarative routes per §5 |
 | 9.4 | Email (SMTP) backend | M | |
 | 9.5 | Slack backend (webhook out + Events API in) | L | Block Kit renderer + signed-request validation |

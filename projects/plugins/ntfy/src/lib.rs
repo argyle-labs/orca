@@ -46,6 +46,10 @@ pub struct Message<'a> {
     pub click: Option<&'a str>,
     /// Override the configured topic for this single call.
     pub topic_override: Option<&'a str>,
+    /// Render body as markdown on supporting clients (web UI, iOS/Android
+    /// app v2+). Sends `X-Markdown: yes` and switches the body content type
+    /// to `text/markdown`. Plain-text clients fall back to raw text.
+    pub markdown: bool,
 }
 
 /// ntfy priority levels. Wire format is the lowercase name.
@@ -109,11 +113,19 @@ impl Client {
             urlencoding::encode(topic)
         );
 
+        let content_type = if msg.markdown {
+            "text/markdown; charset=utf-8"
+        } else {
+            "text/plain; charset=utf-8"
+        };
         let mut req = self
             .http
             .post(&endpoint)
-            .bytes(msg.message.as_bytes().to_vec(), "text/plain; charset=utf-8");
+            .bytes(msg.message.as_bytes().to_vec(), content_type);
 
+        if msg.markdown {
+            req = req.header("X-Markdown", "yes");
+        }
         if let Some(title) = msg.title {
             req = req.header("X-Title", title);
         }

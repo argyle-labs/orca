@@ -1,0 +1,20 @@
+[package]
+name = "notifications"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "notifications"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+serde       = { workspace = true }
+thiserror   = { workspace = true }
+ntfy        = { path = "../plugins/ntfy" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true
