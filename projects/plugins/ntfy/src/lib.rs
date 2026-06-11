@@ -1,7 +1,22 @@
-//! ntfy.sh-compatible push notification client. Replaces the former `ntfy`
-//! plugin: same surface (`send`, `heartbeat`), no plugin scaffolding.
+//! ntfy.sh-compatible push notification client + orca-managed endpoint
+//! registry. The plugin owns:
+//!   - the [`Client`] + [`Message`] HTTP primitives,
+//!   - a [`backend::NtfyBackend`] that implements `notifications::Backend`,
+//!   - `ntfy.{add,list,delete,send}` `#[orca_tool]` CRUD surface,
+//!   - a [`bootstrap`] entry point that loads `db::ntfy` rows and registers
+//!     each enabled endpoint with the `notifications` dispatcher.
 //!
-//! Composes with [`orca_http`] for transport so HTTP bug fixes propagate.
+//! `notifications` knows nothing about ntfy. Adding email/Slack/etc. follows
+//! the same shape: own crate, own table, own backend impl, own bootstrap.
+//!
+//! Composes with `utils::http` for transport so HTTP bug fixes propagate.
+
+pub mod backend;
+pub mod tools;
+
+use std::sync::Arc;
+
+use crate::backend::NtfyBackend;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -158,6 +173,43 @@ impl Client {
             ..Default::default()
         })
         .await
+    }
+}
+
+// ── notifications wiring ───────────────────────────────────────────────────
+
+/// Build an [`NtfyBackend`] from a db row and register it with the global
+/// `notifications` dispatcher. Used both at daemon startup (via [`bootstrap`])
+/// and live by `ntfy.add` so freshly-added endpoints work without a restart.
+pub fn register_endpoint(row: &db::ntfy::EndpointRow) {
+    let mut cfg = Config::new(row.base_url.clone(), row.topic.clone());
+    if let Some(t) = &row.token {
+        cfg = cfg.with_token(t.clone());
+    }
+    let backend = NtfyBackend::new(row.name.clone(), Client::new(cfg));
+    notifications::register_backend(Arc::new(backend));
+}
+
+/// Daemon startup hook — load every enabled ntfy endpoint and register it as
+/// a notifications backend. Non-fatal on db read errors so notifications
+/// outages don't gate daemon boot.
+pub fn bootstrap() {
+    let conn = match db::open_default() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("ntfy bootstrap: db open failed: {e}");
+            return;
+        }
+    };
+    let rows = match db::ntfy::list(&conn) {
+        Ok(rs) => rs,
+        Err(e) => {
+            tracing::warn!("ntfy bootstrap: list failed: {e}");
+            return;
+        }
+    };
+    for row in rows.into_iter().filter(|r| r.enabled) {
+        register_endpoint(&row);
     }
 }
 

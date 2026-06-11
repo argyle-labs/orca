@@ -8,6 +8,7 @@ name = "notifications"
 path = "src/lib.rs"
 
 [features]
+default = ["cli"]
 cli = ["dep:clap"]
 
 [dependencies]

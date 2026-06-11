@@ -22,31 +22,23 @@ impl NtfyBackend {
     }
 }
 
-trait NtfyEmojiTag {
-    fn emoji_tag(self) -> &'static str;
-}
-
-impl NtfyEmojiTag for Severity {
-    fn emoji_tag(self) -> &'static str {
-        match self {
-            Severity::Info => "white_check_mark",
-            Severity::Warn => "warning",
-            Severity::Error => "rotating_light",
-            Severity::Critical => "fire",
-        }
+fn severity_emoji(s: Severity) -> &'static str {
+    match s {
+        Severity::Info => "white_check_mark",
+        Severity::Warn => "warning",
+        Severity::Error => "rotating_light",
+        Severity::Critical => "fire",
     }
 }
 
-impl NtfyEmojiTag for EventClass {
-    fn emoji_tag(self) -> &'static str {
-        match self {
-            EventClass::Heartbeat => "heartbeat",
-            EventClass::Drift => "compass",
-            EventClass::Rotation => "arrows_counterclockwise",
-            EventClass::Lifecycle => "package",
-            EventClass::Alert => "bell",
-            EventClass::Approval => "raised_hand",
-        }
+fn class_emoji(c: EventClass) -> &'static str {
+    match c {
+        EventClass::Heartbeat => "heartbeat",
+        EventClass::Drift => "compass",
+        EventClass::Rotation => "arrows_counterclockwise",
+        EventClass::Lifecycle => "package",
+        EventClass::Alert => "bell",
+        EventClass::Approval => "raised_hand",
     }
 }
 
@@ -62,7 +54,7 @@ impl Backend for NtfyBackend {
             Severity::Warn => Priority::High,
             Severity::Error | Severity::Critical => Priority::Urgent,
         };
-        let tags = vec![event.severity.emoji_tag(), event.class.emoji_tag()];
+        let tags = vec![severity_emoji(event.severity), class_emoji(event.class)];
 
         let mut body = String::new();
         if let Some(host) = &event.host {

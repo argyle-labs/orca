@@ -283,10 +283,11 @@ async fn main() -> Result<()> {
         .with_writer(make_writer)
         .init();
 
-    // Install the process-wide notifications dispatcher from env config
-    // (ORCA_NTFY_BASE/_TOPIC/_TOKEN + optional ORCA_NOTIFY_ROUTES). No-op
-    // when nothing is configured. Must run before any tool that emits.
-    notifications::bootstrap_from_env();
+    // Register notification backends from each plugin's db-backed registry.
+    // Each backend plugin owns its own table + bootstrap; `notifications`
+    // itself stays backend-agnostic. Add `smtp::bootstrap()` etc. here as
+    // they land. All bootstraps are non-fatal — they log and continue.
+    ntfy::bootstrap();
 
     // Short-circuit OrcaOp ops *before* clap parse: the derive `Cli` has a
     // positional `project: Option<String>` that would otherwise swallow the

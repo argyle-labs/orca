@@ -52,7 +52,7 @@ docker        = { path = "../plugins/docker",        features = ["cli"] }
 dockge        = { path = "../plugins/dockge" }
 homeassistant = { path = "../plugins/homeassistant", features = ["cli"] }
 nfs           = { path = "../plugins/nfs" }
-ntfy          = { path = "../plugins/ntfy" }
+ntfy          = { path = "../plugins/ntfy", features = ["cli"] }
 notifications = { path = "../notifications", features = ["cli"] }
 proxmox       = { path = "../plugins/proxmox",       features = ["cli"] }
 smb           = { path = "../plugins/smb" }
