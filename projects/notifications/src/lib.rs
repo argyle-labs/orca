@@ -13,6 +13,7 @@
 //! the popular fs-watcher crate on crates.io.
 
 use async_trait::async_trait;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -20,7 +21,7 @@ use thiserror::Error;
 
 /// Coarse event taxonomy. Routing rules (§9.3) match on this plus
 /// [`Severity`] plus optional host scope.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum EventClass {
     /// Low-priority "still alive" ping. Default routing keeps these on ntfy.
@@ -39,7 +40,9 @@ pub enum EventClass {
 
 /// Severity ladder. Backends map this to their native primitive (color,
 /// priority header, subject prefix) per the rendering table in the planned doc.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     Info,
