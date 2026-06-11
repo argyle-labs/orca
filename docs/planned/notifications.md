@@ -269,7 +269,7 @@ Slack.
 | 9.7 | `orca user link <backend> <id>` for interactive backends | S | Operator-to-chat-user mapping |
 | 9.8 | Generic webhook backend | S | Configurable JSON template |
 | 9.9 | Retire `projects/plugins/ntfy/` directory | S | After 9.2 lands |
-| 9.10 | Wire reconcilers + drift + rotation detectors to emit events | M | **PARTIAL 2026-06-10** — process-global `Dispatcher` (`install_global`/`global`/`emit`) + `bootstrap_from_env` (`ORCA_NTFY_BASE`/`ORCA_NTFY_TOPIC`/`ORCA_NTFY_TOKEN`/`ORCA_NOTIFY_ROUTES`) live in `projects/notifications/src/lib.rs`; `notifications::bootstrap_from_env()` called from `server/src/main.rs` after tracing init. `#[orca_tool(domain="notify", verb="send")]` (`notify.send`) shipped — accepts class/severity/title/body/host/source/click, returns per-backend ok/error. Reconciler/drift/rotation call-site emissions still TODO. |
+| 9.10 | Wire reconcilers + drift + rotation detectors to emit events | M | **PARTIAL 2026-06-10** — process-global `RwLock<GlobalState>` + `register_backend`/`set_routing`/`emit` in `projects/notifications/src/lib.rs` (backend-agnostic; no ntfy code). `notify.send` `#[orca_tool]` shipped. **ntfy is now a plugin-owned resource**: `db::ntfy::ntfy_endpoints` table + migration `20260611024546__ntfy_endpoints`; `projects/plugins/ntfy/` ships `backend::NtfyBackend` (impls `notifications::Backend`), `ntfy.{add,list,delete,send}` admin tools, and `ntfy::bootstrap()` which registers each enabled endpoint with the dispatcher at daemon start. `ntfy.add` also live-registers without restart. `server/main.rs` calls `ntfy::bootstrap()`. Email/Slack/etc. follow the same shape (own crate, own table, own bootstrap). Reconciler/drift/rotation call-site emissions still TODO. |
 
 ---
 
