@@ -552,6 +552,208 @@ impl Default for Dispatcher {
     }
 }
 
+// ── Process-global dispatcher ──────────────────────────────────────────────
+
+use std::sync::OnceLock;
+
+static GLOBAL: OnceLock<Dispatcher> = OnceLock::new();
+
+/// Install the process-wide [`Dispatcher`]. Idempotent — second call is a
+/// no-op so library code can defensively call it; the daemon installs once
+/// at startup and that wins.
+pub fn install_global(dispatcher: Dispatcher) {
+    if GLOBAL.set(dispatcher).is_err() {
+        // Already installed — first wins. Library code may defensively call
+        // this; the daemon installs once at startup.
+    }
+}
+
+/// Borrow the installed dispatcher, or `None` if [`install_global`] was
+/// never called. Callers that want a non-fatal degraded path use `None` to
+/// mean "notifications are not configured on this host."
+pub fn global() -> Option<&'static Dispatcher> {
+    GLOBAL.get()
+}
+
+/// Emit `event` through the process-global dispatcher. If no dispatcher is
+/// installed, returns an empty outcome list — emitters are never blocked by
+/// missing notification config.
+pub async fn emit(event: &Event) -> Vec<EmitOutcome> {
+    match global() {
+        Some(d) => d.emit(event).await,
+        None => Vec::new(),
+    }
+}
+
+/// Build a [`Dispatcher`] from environment + optional inline TOML routes.
+///
+/// Looks for:
+///   - `ORCA_NTFY_BASE` (e.g. `http://10.10.10.6:8080`) — registers an
+///     [`NtfyBackend`] named `"ntfy:<topic>"` if `ORCA_NTFY_TOPIC` is also set.
+///   - `ORCA_NTFY_TOPIC` — the ntfy topic name.
+///   - `ORCA_NTFY_TOKEN` (optional) — bearer token forwarded to ntfy.
+///   - `ORCA_NOTIFY_ROUTES` (optional) — TOML routing config (`[[notify.route]]`).
+///
+/// Returns `Ok(None)` when nothing is configured — the caller should leave the
+/// global uninstalled and emitters will silently no-op (see [`emit`]). Returns
+/// `Err` only on malformed inputs (e.g. unparseable routes).
+pub fn dispatcher_from_env() -> anyhow::Result<Option<Dispatcher>> {
+    let mut d = Dispatcher::new();
+    let mut any = false;
+
+    if let (Ok(base), Ok(topic)) = (
+        std::env::var("ORCA_NTFY_BASE"),
+        std::env::var("ORCA_NTFY_TOPIC"),
+    ) {
+        let mut cfg = ntfy::Config::new(base, topic.clone());
+        if let Ok(token) = std::env::var("ORCA_NTFY_TOKEN") {
+            cfg = cfg.with_token(token);
+        }
+        d = d.with_backend(Box::new(NtfyBackend::new(
+            format!("ntfy:{topic}"),
+            ntfy::Client::new(cfg),
+        )));
+        any = true;
+    }
+
+    if let Ok(toml_src) = std::env::var("ORCA_NOTIFY_ROUTES") {
+        let routes = RoutingConfig::from_toml(&toml_src)
+            .map_err(|e| anyhow::anyhow!("ORCA_NOTIFY_ROUTES parse error: {e}"))?;
+        d = d.with_routing(routes);
+        any = true;
+    }
+
+    Ok(any.then_some(d))
+}
+
+/// Convenience: build from env and install as the process global. Logs (via
+/// `eprintln!`) and continues on a missing/partial config so daemon startup is
+/// never gated on notifications.
+pub fn bootstrap_from_env() {
+    match dispatcher_from_env() {
+        Ok(Some(d)) => install_global(d),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("notifications: bootstrap_from_env failed: {e}");
+        }
+    }
+}
+
+// ── notify.send tool ───────────────────────────────────────────────────────
+
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NotifySendArgs {
+    /// Event class — one of `heartbeat`, `drift`, `rotation`, `lifecycle`,
+    /// `alert`, `approval`. Defaults to `alert`.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub class: Option<String>,
+    /// Severity — one of `info`, `warn`, `error`, `critical`. Defaults to `info`.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub severity: Option<String>,
+    /// Short title — rendered as the notification heading.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub title: String,
+    /// Optional markdown-rendered body.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub body: Option<String>,
+    /// Host this event is about (not necessarily this host).
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub host: Option<String>,
+    /// Emitter identifier, e.g. `reconciler:lxc`. Defaults to `notify.send`.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub source: Option<String>,
+    /// Optional tap-through URL surfaced as the click target on backends
+    /// that support one (ntfy `X-Click`).
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub click: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NotifySendBackendResult {
+    pub backend: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NotifySendOutput {
+    /// True when the global dispatcher was installed and ran. False when
+    /// notifications are unconfigured on this host (no backends to send to).
+    pub configured: bool,
+    pub results: Vec<NotifySendBackendResult>,
+}
+
+fn parse_class(s: &str) -> anyhow::Result<EventClass> {
+    Ok(match s.to_ascii_lowercase().as_str() {
+        "heartbeat" => EventClass::Heartbeat,
+        "drift" => EventClass::Drift,
+        "rotation" => EventClass::Rotation,
+        "lifecycle" => EventClass::Lifecycle,
+        "alert" => EventClass::Alert,
+        "approval" => EventClass::Approval,
+        other => anyhow::bail!("unknown event class `{other}`"),
+    })
+}
+
+fn parse_severity_word(s: &str) -> anyhow::Result<Severity> {
+    Ok(match s.to_ascii_lowercase().as_str() {
+        "info" => Severity::Info,
+        "warn" => Severity::Warn,
+        "error" => Severity::Error,
+        "critical" => Severity::Critical,
+        other => anyhow::bail!("unknown severity `{other}`"),
+    })
+}
+
+/// Emit a notification event through this host's installed dispatcher. The
+/// event is built from the supplied fields and fanned out per the configured
+/// routing rules. When no dispatcher is installed, returns `configured=false`
+/// with an empty result list — callers can treat that as a soft no-op.
+#[derive::orca_tool(domain = "notify", verb = "send")]
+async fn notify_send(
+    args: NotifySendArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<NotifySendOutput> {
+    let class = parse_class(args.class.as_deref().unwrap_or("alert"))?;
+    let severity = parse_severity_word(args.severity.as_deref().unwrap_or("info"))?;
+    let source = args.source.unwrap_or_else(|| "notify.send".to_string());
+    let mut event = Event::new(class, severity, args.title, source);
+    if let Some(b) = args.body {
+        event = event.with_body(b);
+    }
+    if let Some(h) = args.host {
+        event = event.with_host(h);
+    }
+    if let Some(c) = args.click {
+        event = event.with_click(c);
+    }
+
+    let Some(d) = global() else {
+        return Ok(NotifySendOutput {
+            configured: false,
+            results: Vec::new(),
+        });
+    };
+
+    let outcomes = d.emit(&event).await;
+    Ok(NotifySendOutput {
+        configured: true,
+        results: outcomes
+            .into_iter()
+            .map(|o| NotifySendBackendResult {
+                backend: o.backend,
+                ok: o.result.is_ok(),
+                error: o.result.err().map(|e| e.to_string()),
+            })
+            .collect(),
+    })
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

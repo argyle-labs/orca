@@ -283,6 +283,11 @@ async fn main() -> Result<()> {
         .with_writer(make_writer)
         .init();
 
+    // Install the process-wide notifications dispatcher from env config
+    // (ORCA_NTFY_BASE/_TOPIC/_TOKEN + optional ORCA_NOTIFY_ROUTES). No-op
+    // when nothing is configured. Must run before any tool that emits.
+    notifications::bootstrap_from_env();
+
     // Short-circuit OrcaOp ops *before* clap parse: the derive `Cli` has a
     // positional `project: Option<String>` that would otherwise swallow the
     // domain name (`orca engine list` → project=engine, command="list").

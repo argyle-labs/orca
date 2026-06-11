@@ -53,6 +53,7 @@ dockge        = { path = "../plugins/dockge" }
 homeassistant = { path = "../plugins/homeassistant", features = ["cli"] }
 nfs           = { path = "../plugins/nfs" }
 ntfy          = { path = "../plugins/ntfy" }
+notifications = { path = "../notifications", features = ["cli"] }
 proxmox       = { path = "../plugins/proxmox",       features = ["cli"] }
 smb           = { path = "../plugins/smb" }
 unraid        = { path = "../plugins/unraid",        features = ["cli"] }
