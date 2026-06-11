@@ -313,6 +313,158 @@ impl Backend for NtfyBackend {
     }
 }
 
+// ── Routing ────────────────────────────────────────────────────────────────
+
+/// Severity matcher. Parsed from strings like `"Warn"`, `"==Critical"`, or
+/// `">=Warn"` for use in TOML route definitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SeverityMatch {
+    pub op: SeverityOp,
+    pub level: Severity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeverityOp {
+    Eq,
+    Gte,
+}
+
+impl SeverityMatch {
+    pub fn matches(&self, sev: Severity) -> bool {
+        match self.op {
+            SeverityOp::Eq => sev == self.level,
+            SeverityOp::Gte => sev >= self.level,
+        }
+    }
+}
+
+impl std::str::FromStr for SeverityMatch {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        let (op, rest) = if let Some(r) = s.strip_prefix(">=") {
+            (SeverityOp::Gte, r.trim())
+        } else if let Some(r) = s.strip_prefix("==") {
+            (SeverityOp::Eq, r.trim())
+        } else {
+            (SeverityOp::Eq, s)
+        };
+        let level = match rest.to_ascii_lowercase().as_str() {
+            "info" => Severity::Info,
+            "warn" => Severity::Warn,
+            "error" => Severity::Error,
+            "critical" => Severity::Critical,
+            other => return Err(format!("unknown severity `{other}`")),
+        };
+        Ok(SeverityMatch { op, level })
+    }
+}
+
+impl<'de> Deserialize<'de> for SeverityMatch {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// Route matcher. All present fields must hold (logical AND).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Match {
+    #[serde(default)]
+    pub class: Option<EventClass>,
+    #[serde(default)]
+    pub severity: Option<SeverityMatch>,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+impl Match {
+    pub fn matches(&self, event: &Event) -> bool {
+        if let Some(c) = self.class
+            && c != event.class
+        {
+            return false;
+        }
+        if let Some(s) = &self.severity
+            && !s.matches(event.severity)
+        {
+            return false;
+        }
+        if let Some(h) = &self.host
+            && event.host.as_deref() != Some(h.as_str())
+        {
+            return false;
+        }
+        if let Some(src) = &self.source
+            && event.source != *src
+        {
+            return false;
+        }
+        true
+    }
+}
+
+/// One row in the routing table. `send` is the list of backend names
+/// (matching [`Backend::name`]) the event is dispatched to when `match` holds.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Route {
+    #[serde(rename = "match", default)]
+    pub matcher: Match,
+    pub send: Vec<String>,
+}
+
+/// Routing config. Loadable from TOML under a `[notify]` table:
+///
+/// ```toml
+/// [[notify.route]]
+/// match = { class = "drift", severity = ">=Warn" }
+/// send  = ["ntfy-alerts"]
+///
+/// [notify]
+/// default = ["ntfy-default"]
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RoutingConfig {
+    #[serde(default)]
+    pub route: Vec<Route>,
+    #[serde(default)]
+    pub default: Vec<String>,
+}
+
+impl RoutingConfig {
+    /// Parse from a TOML string with a top-level `[notify]` table (per §5).
+    pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
+        #[derive(Deserialize)]
+        struct Outer {
+            #[serde(default)]
+            notify: RoutingConfig,
+        }
+        let outer: Outer = toml::from_str(s)?;
+        Ok(outer.notify)
+    }
+
+    /// Decide which backend names should receive `event`. Returns
+    /// `default` if no routes match, or an empty vec if there are no
+    /// routes AND no default (caller's responsibility to fall back).
+    pub fn targets(&self, event: &Event) -> Vec<String> {
+        let mut hit = false;
+        let mut out: Vec<String> = Vec::new();
+        for r in &self.route {
+            if r.matcher.matches(event) {
+                hit = true;
+                for name in &r.send {
+                    if !out.contains(name) {
+                        out.push(name.clone());
+                    }
+                }
+            }
+        }
+        if hit { out } else { self.default.clone() }
+    }
+}
+
 // ── Dispatcher ─────────────────────────────────────────────────────────────
 
 /// Per-backend outcome of [`Dispatcher::emit`]. Errors from one backend
@@ -324,18 +476,24 @@ pub struct EmitOutcome {
     pub result: Result<MessageRef, BackendError>,
 }
 
-/// Minimal static dispatcher. Holds a list of registered backends and fans
-/// every event out to all of them. The routing engine (§9.3) will replace
-/// the "fan out to all" policy with `class`/`severity`/`host`-scoped routes;
-/// the [`Dispatcher::emit`] signature stays stable across that change.
+/// Dispatcher. Holds the registered backends and an optional [`RoutingConfig`].
+///
+/// Without routing configured, the dispatcher fans every event out to every
+/// registered backend in registration order (the §9.2 behavior).
+///
+/// With routing configured, only backends named by a matching route receive
+/// the event. If no route matches, [`RoutingConfig::default`] is used; if
+/// that is empty, the event is dropped and the returned outcome list is empty.
 pub struct Dispatcher {
     backends: Vec<Box<dyn Backend>>,
+    routing: Option<RoutingConfig>,
 }
 
 impl Dispatcher {
     pub fn new() -> Self {
         Self {
             backends: Vec::new(),
+            routing: None,
         }
     }
 
@@ -344,16 +502,38 @@ impl Dispatcher {
         self
     }
 
+    pub fn with_routing(mut self, routing: RoutingConfig) -> Self {
+        self.routing = Some(routing);
+        self
+    }
+
     pub fn register(&mut self, backend: Box<dyn Backend>) {
         self.backends.push(backend);
     }
 
-    /// Fan an event out to every registered backend in registration order.
-    /// Always returns an outcome row per backend — never short-circuits on
-    /// the first failure.
+    pub fn set_routing(&mut self, routing: RoutingConfig) {
+        self.routing = Some(routing);
+    }
+
+    /// Dispatch `event` to the backends selected by the routing config (or
+    /// to all backends when no routing is configured). Always returns an
+    /// outcome row per dispatched backend — never short-circuits on the
+    /// first failure. Backend names in the routing config that don't
+    /// resolve to a registered backend are silently skipped (logging is
+    /// the caller's job).
     pub async fn emit(&self, event: &Event) -> Vec<EmitOutcome> {
-        let mut out = Vec::with_capacity(self.backends.len());
-        for b in &self.backends {
+        let selected: Vec<&Box<dyn Backend>> = match &self.routing {
+            None => self.backends.iter().collect(),
+            Some(cfg) => {
+                let targets = cfg.targets(event);
+                targets
+                    .iter()
+                    .filter_map(|name| self.backends.iter().find(|b| b.name() == name))
+                    .collect()
+            }
+        };
+        let mut out = Vec::with_capacity(selected.len());
+        for b in selected {
             out.push(EmitOutcome {
                 backend: b.name().to_string(),
                 result: b.emit(event).await,
@@ -466,6 +646,130 @@ mod tests {
         assert!(outcomes[0].result.is_err());
         assert!(outcomes[1].result.is_ok());
         assert_eq!(good.captured.lock().expect("mutex poisoned").len(), 1);
+    }
+
+    fn make_disp_with_recorders(
+        names: &[&str],
+    ) -> (Dispatcher, Vec<std::sync::Arc<RecordingBackend>>) {
+        struct Forward(std::sync::Arc<RecordingBackend>);
+        #[async_trait]
+        impl Backend for Forward {
+            fn name(&self) -> &str {
+                self.0.name()
+            }
+            async fn emit(&self, e: &Event) -> Result<MessageRef, BackendError> {
+                self.0.emit(e).await
+            }
+        }
+        let mut d = Dispatcher::new();
+        let mut arcs = Vec::new();
+        for n in names {
+            let r = std::sync::Arc::new(RecordingBackend {
+                name: (*n).to_string(),
+                captured: Mutex::new(Vec::new()),
+            });
+            d.register(Box::new(Forward(r.clone())));
+            arcs.push(r);
+        }
+        (d, arcs)
+    }
+
+    #[test]
+    fn severity_match_parses_operators() {
+        let m: SeverityMatch = ">=Warn".parse().expect("parses");
+        assert_eq!(m.op, SeverityOp::Gte);
+        assert_eq!(m.level, Severity::Warn);
+        assert!(m.matches(Severity::Error));
+        assert!(!m.matches(Severity::Info));
+
+        let m: SeverityMatch = "==Critical".parse().expect("parses");
+        assert_eq!(m.op, SeverityOp::Eq);
+        assert!(m.matches(Severity::Critical));
+        assert!(!m.matches(Severity::Error));
+
+        let m: SeverityMatch = "Info".parse().expect("bare = Eq");
+        assert_eq!(m.op, SeverityOp::Eq);
+        assert!(m.matches(Severity::Info));
+
+        assert!("nope".parse::<SeverityMatch>().is_err());
+    }
+
+    #[test]
+    fn routing_targets_selects_matching_routes_and_dedupes() {
+        let cfg = RoutingConfig::from_toml(
+            r#"
+[[notify.route]]
+match = { class = "drift", severity = ">=Warn" }
+send  = ["ntfy-alerts", "slack-ops"]
+
+[[notify.route]]
+match = { host = "freyr" }
+send  = ["ntfy-alerts", "email"]
+
+[notify]
+default = ["ntfy-default"]
+"#,
+        )
+        .expect("parses");
+
+        let drift_warn =
+            Event::new(EventClass::Drift, Severity::Warn, "t", "src").with_host("freyr");
+        // both routes match → dedup ntfy-alerts
+        let t = cfg.targets(&drift_warn);
+        assert_eq!(t, vec!["ntfy-alerts", "slack-ops", "email"]);
+
+        // no match → default
+        let info = Event::new(EventClass::Heartbeat, Severity::Info, "t", "src");
+        assert_eq!(cfg.targets(&info), vec!["ntfy-default"]);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_with_routing_only_hits_matched_backends() {
+        let (mut d, arcs) = make_disp_with_recorders(&["ntfy-alerts", "slack-ops", "ntfy-default"]);
+        d.set_routing(
+            RoutingConfig::from_toml(
+                r#"
+[[notify.route]]
+match = { class = "alert" }
+send  = ["slack-ops"]
+
+[notify]
+default = ["ntfy-default"]
+"#,
+            )
+            .expect("parses"),
+        );
+
+        let alert = Event::new(EventClass::Alert, Severity::Warn, "t", "src");
+        let outcomes = d.emit(&alert).await;
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].backend, "slack-ops");
+        assert_eq!(arcs[0].captured.lock().expect("mutex").len(), 0);
+        assert_eq!(arcs[1].captured.lock().expect("mutex").len(), 1);
+        assert_eq!(arcs[2].captured.lock().expect("mutex").len(), 0);
+
+        // unmatched → falls to default
+        let hb = Event::new(EventClass::Heartbeat, Severity::Info, "t", "src");
+        let outcomes = d.emit(&hb).await;
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].backend, "ntfy-default");
+    }
+
+    #[tokio::test]
+    async fn dispatcher_skips_unknown_backend_names() {
+        let (mut d, arcs) = make_disp_with_recorders(&["a"]);
+        d.set_routing(RoutingConfig {
+            route: vec![Route {
+                matcher: Match::default(),
+                send: vec!["a".into(), "ghost".into()],
+            }],
+            default: vec![],
+        });
+        let evt = Event::new(EventClass::Alert, Severity::Info, "t", "src");
+        let outcomes = d.emit(&evt).await;
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].backend, "a");
+        assert_eq!(arcs[0].captured.lock().expect("mutex").len(), 1);
     }
 
     #[test]

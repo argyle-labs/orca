@@ -262,7 +262,7 @@ Slack.
 |---|---|---|---|
 | 9.1 | `projects/notifications/` crate scaffold + `Event` + `Backend` trait + dispatcher | M | **SHIPPED 2026-06-10** — `projects/notifications/src/lib.rs`, 3 tests pass, clippy clean. |
 | 9.2 | Port ntfy backend | S | **SHIPPED 2026-06-10** — `NtfyBackend` in `lib.rs` wraps existing `ntfy::Client`. Live smoke-tested via `cargo run -p notifications --example smoke_ntfy` (HTTP 200 to baldur). |
-| 9.3 | Routing engine + TOML config | M | Declarative routes per §5 |
+| 9.3 | Routing engine + TOML config | M | **SHIPPED 2026-06-10** — `Match` / `Route` / `RoutingConfig` in `projects/notifications/src/lib.rs`; `Dispatcher::set_routing` selects backends per class/severity/host/source, falls back to `[notify].default`. 4 new tests green. |
 | 9.4 | Email (SMTP) backend | M | |
 | 9.5 | Slack backend (webhook out + Events API in) | L | Block Kit renderer + signed-request validation |
 | 9.6 | Discord backend (webhook out + Interactions in) | L | Embed renderer + signed-request validation + button → apply path |
