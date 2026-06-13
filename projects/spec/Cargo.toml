@@ -11,9 +11,6 @@ path = "src/lib.rs"
 # First-class objects that assign to a namespace via `namespace_id`; not
 # children of the namespace crate.
 
-[features]
-cli = ["dep:clap"]
-
 [dependencies]
 contract = { path = "../contract", default-features = false }
 derive   = { path = "../derive" }
@@ -33,7 +30,7 @@ async-trait = { workspace = true }
 tokio      = { workspace = true }
 dirs       = { workspace = true }
 utils      = { path = "../utils" }
-clap       = { workspace = true, optional = true }
+clap       = { workspace = true }
 
 [lints]
 workspace = true

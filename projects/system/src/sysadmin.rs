@@ -18,8 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct SystemKillArgs {}
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]

@@ -54,6 +54,38 @@ pub fn get(conn: &Connection, name: &str) -> Result<Option<EndpointRow>> {
     .map_err(Into::into)
 }
 
+/// Strict insert — fails with [`rusqlite::Error::SqliteFailure`] whose
+/// `extended_code` is `SQLITE_CONSTRAINT_PRIMARYKEY` if `name` already
+/// exists. Use this from `dockge.create` (POST semantics — refuse to
+/// silently overwrite). Use [`upsert`] from mesh sync / replication
+/// where last-writer-wins is intentional.
+pub fn insert(conn: &Connection, ep: &EndpointRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO dockge_endpoints (name, base_url, token, enabled)
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![ep.name, ep.base_url, ep.token, ep.enabled],
+    )?;
+    Ok(())
+}
+
+/// Strict update — returns `Ok(false)` if no row matched `name`. Use
+/// from `dockge.update` (PATCH semantics — must already exist).
+pub fn update(conn: &Connection, ep: &EndpointRow) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE dockge_endpoints
+            SET base_url = ?2,
+                token    = ?3,
+                enabled  = ?4
+          WHERE name = ?1",
+        rusqlite::params![ep.name, ep.base_url, ep.token, ep.enabled],
+    )?;
+    Ok(n > 0)
+}
+
+/// Upsert — used by non-tool callers (mesh sync, replication) where
+/// last-writer-wins is intentional. The tool surface uses [`insert`]
+/// and [`update`] for explicit create-vs-modify semantics per the
+/// REST-verbs-for-tool-surfaces feedback rule.
 pub fn upsert(conn: &Connection, ep: &EndpointRow) -> Result<()> {
     conn.execute(
         "INSERT INTO dockge_endpoints (name, base_url, token, enabled)
@@ -80,36 +112,67 @@ mod tests {
     use super::*;
     use crate::testing::test_conn;
 
-    #[test]
-    fn endpoint_crud() {
-        let conn = test_conn();
-        let ep = EndpointRow {
-            name: "freyr-dockge".into(),
-            base_url: "http://10.10.10.5:5001".into(),
-            token: "tok-a".into(),
+    fn fixture(name: &str, token: &str) -> EndpointRow {
+        EndpointRow {
+            name: name.into(),
+            base_url: "http://127.0.0.1:5001".into(),
+            token: token.into(),
             enabled: true,
-        };
-        upsert(&conn, &ep).unwrap();
+        }
+    }
 
-        let rows = list(&conn).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].name, "freyr-dockge");
+    #[test]
+    fn upsert_round_trip() {
+        let conn = test_conn();
+        upsert(&conn, &fixture("dockge-a", "tok-a")).unwrap();
+        let got = get(&conn, "dockge-a").unwrap().unwrap();
+        assert_eq!(got.token, "tok-a");
 
-        let got = get(&conn, "freyr-dockge").unwrap().unwrap();
-        assert_eq!(got.base_url, "http://10.10.10.5:5001");
-
-        let ep2 = EndpointRow {
-            name: "freyr-dockge".into(),
-            base_url: "http://10.10.10.5:5001".into(),
-            token: "tok-b".into(),
-            enabled: false,
-        };
+        let mut ep2 = fixture("dockge-a", "tok-b");
+        ep2.enabled = false;
         upsert(&conn, &ep2).unwrap();
-        let after = get(&conn, "freyr-dockge").unwrap().unwrap();
+        let after = get(&conn, "dockge-a").unwrap().unwrap();
         assert_eq!(after.token, "tok-b");
         assert!(!after.enabled);
 
-        assert!(remove(&conn, "freyr-dockge").unwrap());
+        assert!(remove(&conn, "dockge-a").unwrap());
         assert!(list(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn insert_refuses_to_overwrite_existing_row() {
+        let conn = test_conn();
+        insert(&conn, &fixture("dockge-a", "tok-a")).unwrap();
+        let err = insert(&conn, &fixture("dockge-a", "tok-b")).unwrap_err();
+        // Surface the underlying rusqlite error (UNIQUE constraint
+        // violation on the PRIMARY KEY). The tool layer translates this
+        // into a "name already exists" error for the operator.
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("UNIQUE") || msg.contains("PRIMARY"),
+            "expected PK conflict, got: {msg}"
+        );
+        let got = get(&conn, "dockge-a").unwrap().unwrap();
+        assert_eq!(got.token, "tok-a", "row must not have been overwritten");
+    }
+
+    #[test]
+    fn update_returns_false_when_row_missing() {
+        let conn = test_conn();
+        let changed = update(&conn, &fixture("nonexistent", "tok-x")).unwrap();
+        assert!(!changed, "update on a missing row must report no change");
+    }
+
+    #[test]
+    fn update_applies_to_existing_row_only() {
+        let conn = test_conn();
+        insert(&conn, &fixture("dockge-a", "tok-a")).unwrap();
+        let mut ep = fixture("dockge-a", "tok-b");
+        ep.enabled = false;
+        let changed = update(&conn, &ep).unwrap();
+        assert!(changed);
+        let after = get(&conn, "dockge-a").unwrap().unwrap();
+        assert_eq!(after.token, "tok-b");
+        assert!(!after.enabled);
     }
 }

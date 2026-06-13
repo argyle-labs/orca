@@ -33,8 +33,7 @@ fn to_entry(r: db::ntfy::EndpointRow) -> NtfyEndpointEntry {
 
 // ── ntfy.list ──────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default)]
 pub struct NtfyListArgs {}
 
@@ -59,24 +58,23 @@ async fn ntfy_list(
 
 // ── ntfy.add ───────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NtfyAddArgs {
     /// Short name — referenced by routing rules (`send = [\"<name>\"]`).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub name: String,
     /// ntfy base URL, e.g. `http://10.10.10.6:8080` or `https://ntfy.sh`.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub base_url: String,
     /// Topic name on the ntfy server.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub topic: String,
     /// Optional bearer token for authenticated topics.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub token: Option<String>,
     /// Defaults to true. Disabled endpoints are skipped at bootstrap.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub enabled: Option<bool>,
 }
 
@@ -110,10 +108,9 @@ async fn ntfy_add(args: NtfyAddArgs, _ctx: &contract::ToolCtx) -> anyhow::Result
 
 // ── ntfy.delete ────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct NtfyDeleteArgs {
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub name: String,
 }
 
@@ -139,18 +136,17 @@ async fn ntfy_delete(
 
 // ── ntfy.send ──────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NtfySendArgs {
     /// Registered endpoint name (see `ntfy.list`).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub endpoint: String,
     /// Message body.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub message: String,
     /// Optional title.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub title: Option<String>,
 }
 

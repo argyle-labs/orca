@@ -15,9 +15,6 @@ path = "src/lib.rs"
 # Host identity / addressing / status types live in `system` (slice 5,
 # 2026-05-28). The pod ↔ fleet dep is gone; fleet dissolves entirely next.
 
-[features]
-cli = ["dep:clap", "dep:colored"]
-
 [dependencies]
 dispatch    = { path = "../dispatch" }
 contract   = { path = "../contract", default-features = false }
@@ -35,8 +32,8 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
-clap              = { workspace = true,         optional = true }
-colored           = { workspace = true,         optional = true }
+clap              = { workspace = true }
+colored           = { workspace = true }
 orca-sdk = { path = "../sdk/rust" }
 tracing = { workspace = true }
 rustls = { workspace = true }

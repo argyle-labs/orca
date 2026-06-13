@@ -7,10 +7,6 @@ edition.workspace = true
 name = "proxmox"
 path = "src/lib.rs"
 
-[features]
-cli = [
-    "dep:clap",
-]
 [dependencies]
 serde       = { workspace = true }
 serde_json  = { workspace = true }
@@ -27,7 +23,7 @@ inventory        = { workspace = true }
 db = { package = "db", path = "../../db" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-clap        = { workspace = true, optional = true }
+clap        = { workspace = true }
 
 [dev-dependencies]
 tokio    = { workspace = true }

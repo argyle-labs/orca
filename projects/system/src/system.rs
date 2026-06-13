@@ -100,8 +100,7 @@ pub struct SystemStatusReport {
     pub daemon: DaemonRuntimeStatus,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct SystemStatusArgs {}
 
 /// Snapshot of orca's installation: binary, ~/.claude/CLAUDE.md, vault dir, agents symlink, PKI init, MCP registration.

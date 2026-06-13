@@ -30,8 +30,7 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ── shared args ─────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct EmptyArgs {}
 
 // ── install / delete ───────────────────────────────────────────────────────
@@ -39,29 +38,28 @@ pub struct EmptyArgs {}
 /// Args for [`system_install`]. Empty by default — does the user-level
 /// install. Pass `service_user` (and optional `home_dir` / `admin_pubkey`)
 /// to also provision a system service user with SSH access (Linux, root).
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 pub struct SystemInstallArgs {
     /// Service user name. When set, also runs the service-user bootstrap
     /// (`useradd`, group membership, linger, optional SSH key). Linux-only;
     /// no-op on macOS.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub service_user: Option<String>,
     /// Home directory for the service user (default: `/var/lib/orca`).
     /// Ignored when `service_user` is unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub home_dir: Option<String>,
     /// SSH pubkey to append to the service user's `authorized_keys`.
     /// Ignored when `service_user` is unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub admin_pubkey: Option<String>,
     /// HTTP port the daemon supervisor should bind. Defaults to the
     /// workspace-wide `APP_REST_HTTP_PORT`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub port: Option<u16>,
 }
 
@@ -127,24 +125,23 @@ async fn system_delete(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> Result<Ins
 // [[project-secret-delegation-not-distribution]].
 
 /// Args for [`system_fetch_release_asset`].
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 pub struct FetchReleaseAssetArgs {
     /// Release tag to fetch, with or without `v` prefix (e.g. `0.0.6-rc.15`
     /// or `v0.0.6-rc.15`). Optional — when omitted the holder resolves the
     /// channel's latest tag using its own GitHub token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub version: Option<String>,
     /// Rust target triple of the requester (e.g. `x86_64-unknown-linux-gnu`,
     /// `aarch64-apple-darwin`). The holder may be on a different arch, so
     /// the caller MUST specify the asset they need.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub target: String,
     /// Channel the requester wants the latest of (`stable` | `rc`). Required
     /// when `version` is omitted; ignored when `version` is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub channel: Option<String>,
 }
 
@@ -213,13 +210,12 @@ async fn system_serve_release(
 ///   - system identity: `hostname`, `fqdn`
 ///   - addressing overrides: `lan_v4`, `lan_v6`, `tailscale_v4`, `tailscale_v6`
 ///   - OS package upgrade: `os_packages`
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 pub struct SystemUpdateArgs {
     /// Switch update channel: stable | rc | dev. On change, applies latest on the new channel.
     /// `dev` enables dev mode (tracks GitHub HEAD via cargo-watch).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub channel: Option<String>,
 
     /// Apply a specific version (semver, leading `v` optional). Selecting a
@@ -227,66 +223,66 @@ pub struct SystemUpdateArgs {
     /// the channel-latest version implicitly unpins. Omit to update to the
     /// channel latest (which also unpins if currently pinned).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub version: Option<String>,
 
     /// Set the dev-source URL (orca fetches binaries from there instead of GitHub).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub dev_source: Option<String>,
 
     /// Clear the dev-source URL.
     #[serde(default)]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub clear_dev_source: bool,
 
     /// Change this host's OS hostname. Also updates `host.display_name` setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub hostname: Option<String>,
 
     /// Set the host's FQDN setting (no DNS write — UI/peer-display only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub fqdn: Option<String>,
 
     /// Manual LAN IPv4 override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub lan_v4: Option<String>,
 
     /// Manual LAN IPv6 override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub lan_v6: Option<String>,
 
     /// Manual Tailscale IPv4 override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub tailscale_v4: Option<String>,
 
     /// Manual Tailscale IPv6 override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub tailscale_v6: Option<String>,
 
     /// Run the OS package upgrade (apt / apk / brew / unraid plugin).
     #[serde(default)]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub os_packages: bool,
 
     /// Force a re-detect of host addressing channels (LAN + Tailscale +
     /// settings overrides). Was `system.host.refresh`. Drives the
     /// `HostRefreshHook` registered at server startup.
     #[serde(default)]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub refresh_host: bool,
 
     /// Daemon action: "stop" (SIGTERM), "park" (SIGUSR1, release port),
     /// or "reclaim" (SIGUSR2, take port back). Was the
     /// `system.daemon.{stop,park,reclaim}` family.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub daemon: Option<String>,
 }
 

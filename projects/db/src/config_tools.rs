@@ -29,14 +29,13 @@ pub struct ConfigRowOut {
     pub updated_by: String,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 pub struct ConfigListArgs {
     /// Filter by noun (service, schedule, backup_job, nfs_watch, …).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub noun: Option<String>,
     /// Filter by host_owner.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub host: Option<String>,
 }
 
@@ -45,8 +44,7 @@ pub struct ConfigListOutput {
     pub rows: Vec<ConfigRowOut>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ConfigGetArgs {
     /// Row noun (service, schedule, backup_job, …).
     pub noun: String,
@@ -59,8 +57,7 @@ pub struct ConfigGetOutput {
     pub row: Option<ConfigRowOut>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ConfigSetArgs {
     pub noun: String,
     pub name: String,
@@ -68,7 +65,7 @@ pub struct ConfigSetArgs {
     pub json: String,
     /// host_owner. Defaults to the local host's display_name. Must equal
     /// the local host until cross-host routing lands (§3.3).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub host: Option<String>,
 }
 
@@ -78,13 +75,12 @@ pub struct ConfigSetOutput {
     pub created: bool,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ConfigDeleteArgs {
     pub noun: String,
     pub name: String,
     /// host_owner. Defaults to the local host's display_name.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub host: Option<String>,
 }
 

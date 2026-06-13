@@ -32,11 +32,10 @@ pub struct ScheduleEntry {
     pub is_replica: bool,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 pub struct ScheduleListArgs {
     /// Filter by host_owner.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub host: Option<String>,
 }
 
@@ -55,8 +54,7 @@ pub struct JobStatus {
     pub last_run_duration_ms: Option<i64>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 pub struct ScheduleStatusArgs {
     /// If provided, return only this job's status.
     pub job: Option<String>,
@@ -67,8 +65,7 @@ pub struct ScheduleStatusOutput {
     pub jobs: Vec<JobStatus>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ScheduleRunArgs {
     /// Schedule row name (the `name` in config_rows). Invokes the row's
     /// `job` immediately, out-of-band from the scheduler loop.

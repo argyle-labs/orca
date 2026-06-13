@@ -27,8 +27,7 @@ pub struct SecretEntry {
 
 // ── secret.list ─────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct SecretListArgs {}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -38,8 +37,7 @@ pub struct SecretListReport {
 
 // ── secret.get ──────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct SecretGetArgs {
     pub name: String,
 }
@@ -53,24 +51,23 @@ pub struct SecretGetReport {
 
 // ── secret.set ──────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct SecretSetArgs {
     pub name: String,
     /// Backend kind. Defaults to "inline".
     #[serde(default = "default_inline")]
-    #[cfg_attr(feature = "cli", arg(long, default_value = "inline"))]
+    #[arg(long, default_value = "inline")]
     pub backend: String,
     /// Required for `inline`. Ignored for external backends (which use `ref_path`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub value: Option<String>,
     /// Required for external backends (e.g. `op://Personal/orca-gh/token`). Ignored for inline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub ref_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub description: Option<String>,
 }
 
@@ -87,8 +84,7 @@ pub struct SecretMutationReport {
 
 // ── secret.delete ───────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct SecretDeleteArgs {
     pub name: String,
 }

@@ -16,8 +16,9 @@ fn pki_dir() -> PathBuf {
         .join(APP_PKI_DIR)
 }
 
-#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
-#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(
+    clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq, Eq, Default,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum PkiKind {
     #[default]
@@ -31,18 +32,17 @@ pub struct PkiCertEntry {
     pub cert_path: String,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default)]
 pub struct PkiCreateArgs {
     /// `ca` (default) initializes the orca CA + server cert; `cert` issues a plugin cert.
-    #[cfg_attr(feature = "cli", arg(long, default_value = "ca"))]
+    #[arg(long, default_value = "ca")]
     pub kind: PkiKind,
     /// (cert) Plugin id to issue for.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub plugin_id: Option<String>,
     /// (cert) `general` (default) or `sensitive`.
-    #[cfg_attr(feature = "cli", arg(long, default_value = "general"))]
+    #[arg(long, default_value = "general")]
     pub capability: Option<String>,
 }
 
@@ -68,8 +68,7 @@ pub struct PkiCreateOutput {
     pub key_path: String,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 pub struct PkiListArgs {}
 
 #[derive(Serialize, Deserialize, JsonSchema)]

@@ -12,8 +12,7 @@ pub struct SpecDetailReport {
     pub spec: String,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct SpecDetailArgs {}
 
 /// Dump orca's own OpenAPI JSON document. Used by build pipelines that don't want to spin up the HTTP server.

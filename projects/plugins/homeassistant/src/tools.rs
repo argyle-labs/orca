@@ -40,16 +40,15 @@ fn make_client(name: &str) -> anyhow::Result<Client> {
 // home-assistant.list — endpoints; with `endpoint`, drill in to entities+automations
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default)]
 pub struct HaListArgs {
     /// Drill into one endpoint. When set, the output's `entities` +
     /// `automations` are populated for that endpoint.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub endpoint: Option<String>,
     /// Optional HA domain filter for entities (light, sensor, switch, …).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub domain: Option<String>,
 }
 
@@ -96,8 +95,7 @@ async fn ha_list(args: HaListArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<H
 // home-assistant.detail — single entity state
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct HaDetailArgs {
     pub endpoint: String,
     /// Entity ID (e.g. "light.living_room").
@@ -115,32 +113,31 @@ async fn ha_detail(args: HaDetailArgs, _ctx: &contract::ToolCtx) -> anyhow::Resu
 // home-assistant.update — register endpoint OR invoke service
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct HaUpdateArgs {
     /// Endpoint register/update: `name` + `base_url` + `token`.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub name: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub base_url: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub token: Option<String>,
 
     /// Service invocation: `endpoint` + `service_domain` + `service_name`
     /// (+ optional `entity_id`, `service_data` JSON).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub endpoint: Option<String>,
     /// HA service domain (light, switch, automation, …).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub service_domain: Option<String>,
     /// HA service name (turn_on, toggle, …).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub service_name: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub entity_id: Option<String>,
     /// Opaque free-form service-data — upstream-defined.
-    #[cfg_attr(feature = "cli", arg(skip))]
+    #[arg(skip)]
     pub service_data: Option<sj::Map<String, sj::Value>>,
 }
 
@@ -209,8 +206,7 @@ async fn ha_update(args: HaUpdateArgs, _ctx: &contract::ToolCtx) -> anyhow::Resu
 // home-assistant.delete — remove a registered endpoint
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct HaDeleteArgs {
     pub name: String,
 }

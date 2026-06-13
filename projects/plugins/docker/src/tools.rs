@@ -99,16 +99,15 @@ fn list_runtime_rows() -> anyhow::Result<Vec<DockerRuntimeRow>> {
 // docker.list — primary resource = containers; runtime/engine surface alongside
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default)]
 pub struct DockerListArgs {
     /// Single compose project path. Returns its services.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub path: Option<String>,
     /// Scan this directory for compose projects (default `$HOME/code`).
     /// Mutually exclusive with `path`.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub root: Option<String>,
 }
 
@@ -218,19 +217,18 @@ async fn docker_list(
 // docker.detail — one compose project: logs + stats
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DockerDetailArgs {
     /// Compose project path.
     pub path: String,
     /// Optional service to scope logs.
     #[serde(default)]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub service: Option<String>,
     /// Tail length for logs (default 200).
     #[serde(default)]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub tail: Option<u32>,
 }
 
@@ -297,34 +295,33 @@ async fn docker_detail(
 // docker.update — args differentiate: engine start, runtime register, compose action
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DockerUpdateArgs {
     /// Start the local docker engine (colima/desktop).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub engine_start: bool,
 
     /// Register a docker runtime — also set `socket_path`, `host`, or `url`.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub runtime_name: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub socket_path: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub host: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub url: Option<String>,
 
     /// Run a compose lifecycle action. Set `path` and `action`.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub path: Option<String>,
     /// `up`, `down`, `restart`, `start`, `stop`, `build`, `pull`, `logs`.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub action: Option<String>,
     /// Scope the compose action to one service.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub service: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub tail: Option<u32>,
 }
 
@@ -405,8 +402,7 @@ async fn docker_update(
 // docker.delete — remove a registered docker runtime
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct DockerDeleteArgs {
     /// Runtime name to remove.
     pub runtime: String,

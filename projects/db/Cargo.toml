@@ -7,11 +7,6 @@ edition.workspace = true
 name = "db"
 path = "src/lib.rs"
 
-[features]
-# Enables clap::Args derives on Args structs so tool-defined types can be
-# pulled into the unified CLI surface (`register_op!`) by upstream binaries
-# linking db with the cli flavour.
-cli = ["dep:clap"]
 [dependencies]
 utils       = { path = "../utils" }
 dispatch    = { path = "../dispatch" }
@@ -35,7 +30,7 @@ cron        = { workspace = true }
 inventory   = { workspace = true }
 reqwest     = { workspace = true, features = ["blocking"] }
 
-clap        = { workspace = true, optional = true }
+clap        = { workspace = true }
 # Used only for `task_local!` — the right primitive for scoping a DB path
 # override across `.await` points and worker threads. Cheap: `rt` feature
 # alone, no runtime is constructed in this crate.

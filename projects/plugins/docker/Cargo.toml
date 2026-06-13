@@ -7,10 +7,6 @@ edition.workspace = true
 name = "docker"
 path = "src/lib.rs"
 
-[features]
-cli = [
-    "dep:clap",
-]
 [dependencies]
 anyhow      = { workspace = true }
 serde       = { workspace = true }
@@ -26,7 +22,7 @@ inventory        = { workspace = true }
 
 db = { package = "db", path = "../../db" }
 async-trait = { workspace = true }
-clap        = { workspace = true, optional = true }
+clap        = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

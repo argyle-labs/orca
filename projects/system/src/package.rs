@@ -18,8 +18,7 @@ use std::process::Command;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
-#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
+#[derive(clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum PackageFormat {
     /// Debian/Ubuntu — requires dpkg-deb
@@ -40,43 +39,39 @@ pub enum PackageFormat {
     Plg,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct PackageBuildArgs {
     /// Package format: deb / rpm / apk / pkgbuild / pkg / homebrew. Auto-detected when omitted.
-    #[cfg_attr(feature = "cli", arg(long, value_enum))]
+    #[arg(long, value_enum)]
     pub format: Option<PackageFormat>,
     /// Write the finished package into this directory.
-    #[cfg_attr(feature = "cli", arg(long, default_value = "."))]
+    #[arg(long, default_value = ".")]
     #[serde(default = "default_out_dir")]
     pub out_dir: PathBuf,
     /// Binary to package (default: running executable).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub binary: Option<PathBuf>,
     /// CPU architecture override for cross-compiled binaries (x86_64 or aarch64).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub arch: Option<String>,
     /// Maintainer string embedded in deb/rpm package metadata.
-    #[cfg_attr(
-        feature = "cli",
-        arg(long, default_value = "Orca <noreply@orca.local>")
-    )]
+    #[arg(long, default_value = "Orca <noreply@orca.local>")]
     #[serde(default = "default_maintainer")]
     pub maintainer: String,
     /// macOS Developer ID Application identity for codesign (binary signing).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub codesign_identity: Option<String>,
     /// macOS Developer ID Installer identity for productsign (.pkg signing).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub pkg_sign_identity: Option<String>,
     /// `.plg` only — URL where the published `.plg` file itself will
     /// live (Unraid uses this to check for plugin updates). Defaults to
     /// the github-releases convention for this version.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub plg_url: Option<String>,
     /// `.plg` only — URL where the binary payload will live. Defaults
     /// to the github-releases convention for the current arch.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub plg_binary_url: Option<String>,
 }
 

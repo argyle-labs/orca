@@ -43,8 +43,7 @@ pub struct McpServerRow {
     pub mappings: Vec<MappingEntry>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 pub struct McpListArgs {}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -92,8 +91,7 @@ async fn mcp_list(_args: McpListArgs, _ctx: &contract::ToolCtx) -> anyhow::Resul
 // mcp.detail — one server + mappings + live tool advertisement
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct McpDetailArgs {
     /// Server name. Omit to return the full federated tool catalogue across all servers.
     #[serde(default)]
@@ -189,40 +187,39 @@ async fn mcp_detail(
 // mcp.update — register/update a server, map/unmap a tool, or sync
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct McpUpdateArgs {
     /// Server name. Required for register/map/unmap/sync (unless `sync_all=true`).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub name: Option<String>,
     /// Register-or-update: when set, upserts the server row using `name`+this+args+env.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub command: Option<String>,
     /// Arg list for the server command.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub args: Option<Vec<String>>,
     /// Env map (REST/MCP only — CLI K=V parsing not currently supported).
-    #[cfg_attr(feature = "cli", arg(skip))]
+    #[arg(skip)]
     pub env: Option<HashMap<String, String>>,
 
     /// Tool mapping: set `map_orca_tool` + `map_external_tool` (uses `name` as the server).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub map_orca_tool: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub map_external_tool: Option<String>,
     /// Remove a tool mapping by orca tool name.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub unmap_orca_tool: Option<String>,
 
     /// Auto-discover and map tools. Requires either `name` or `sync_all=true`.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub sync: bool,
     /// When set with `sync`, runs against every registered server.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub sync_all: bool,
     /// Fuzzy-match threshold for `sync` (default 0.8).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub sync_threshold: Option<f64>,
 }
 
@@ -350,8 +347,7 @@ async fn mcp_update(
 // mcp.delete — remove a server (cascades mappings)
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct McpDeleteArgs {
     pub name: String,
 }
@@ -379,14 +375,13 @@ async fn mcp_delete(
 // mcp.run — execute a tool on a registered MCP server (RPC verb)
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct McpRunArgs {
     pub server: String,
     pub tool: String,
     /// Opaque MCP `tools/call` arguments — upstream-defined per the MCP spec.
     #[serde(default)]
-    #[cfg_attr(feature = "cli", arg(skip))]
+    #[arg(skip)]
     pub args: Option<sj::Map<String, sj::Value>>,
 }
 

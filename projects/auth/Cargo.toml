@@ -7,11 +7,6 @@ edition.workspace = true
 name = "auth"
 path = "src/lib.rs"
 
-[features]
-cli = [
-    "dep:clap",
-    "dep:colored",
-]
 [dependencies]
 dispatch        = { path = "../dispatch" }
 contract    = { path = "../contract", default-features = false }
@@ -29,8 +24,8 @@ dirs = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
-clap        = { workspace = true, optional = true }
-colored     = { workspace = true, optional = true }
+clap        = { workspace = true }
+colored     = { workspace = true }
 base64 = { version = "0.22" }
 rand = { workspace = true }
 sha2 = { workspace = true }

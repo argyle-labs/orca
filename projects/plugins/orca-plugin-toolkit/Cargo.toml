@@ -1,0 +1,28 @@
+[package]
+name = "orca-plugin-toolkit"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "orca_plugin_toolkit"
+path = "src/lib.rs"
+
+[dependencies]
+# Re-exports for the prelude.
+serde      = { workspace = true }
+serde_json = { workspace = true }
+schemars   = { workspace = true }
+async-trait = { workspace = true }
+anyhow      = { workspace = true }
+clap        = { workspace = true }
+inventory   = { workspace = true }
+
+# Macros and trait anchors the toolkit primitives expand to.
+contract    = { path = "../../contract", default-features = false }
+dispatch    = { path = "../../dispatch" }
+derive      = { path = "../../derive" }
+db          = { package = "db", path = "../../db" }
+rusqlite    = { workspace = true }
+
+[lints]
+workspace = true

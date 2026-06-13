@@ -71,35 +71,30 @@ pub struct NamespaceSharesReport {
 
 // ── Args ────────────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct NamespaceListArgs {}
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct NamespaceShowArgs {
     /// Namespace id or name. Omit to show the active namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec: Option<String>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct NamespaceCreateArgs {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct NamespaceSpecArgs {
     /// Namespace id or name.
     pub spec: String,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct NamespaceShareArgs {
     pub spec: String,
     pub user: String,
@@ -107,8 +102,7 @@ pub struct NamespaceShareArgs {
     pub role: String,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct NamespaceUnshareArgs {
     pub spec: String,
     pub user: String,

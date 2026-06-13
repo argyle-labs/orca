@@ -41,8 +41,7 @@ pub struct SyncToolsServerEntry {
     pub error: Option<String>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ListMcpServersArgs {}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -50,15 +49,14 @@ pub struct ListMcpServersOutput {
     pub servers: Vec<McpServerEntry>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct AddMcpServerArgs {
     pub name: String,
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(skip))]
+    #[arg(skip)]
     pub env: Option<HashMap<String, String>>,
 }
 
@@ -68,14 +66,12 @@ pub struct McpServerMutationResult {
     pub changed: bool,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct RemoveMcpServerArgs {
     pub name: String,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct MapToolArgs {
     pub name: String,
     pub orca_tool: String,
@@ -89,8 +85,7 @@ pub struct MapToolResult {
     pub external_tool: String,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct UnmapToolArgs {
     pub orca_tool: String,
 }
@@ -101,8 +96,7 @@ pub struct UnmapToolResult {
     pub changed: bool,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct SyncToolsArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub all: Option<bool>,
@@ -117,8 +111,7 @@ pub struct SyncToolsOutput {
     pub results: Vec<SyncToolsServerEntry>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ListToolMappingsArgs {
     /// Filter by server name (omit for all).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -146,8 +139,7 @@ mod mcp_fed {
         pub input_schema: JsonSchemaNode,
     }
 
-    #[cfg_attr(feature = "cli", derive(clap::Args))]
-    #[derive(Serialize, Deserialize, JsonSchema)]
+    #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
     pub struct ListMcpToolsArgs {}
 
     #[derive(Serialize, Deserialize, JsonSchema)]

@@ -21,8 +21,7 @@ pub struct AgentEntry {
 
 // ── Args / Outputs ──────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ListAgentsArgs {}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -30,8 +29,7 @@ pub struct ListAgentsOutput {
     pub agents: Vec<AgentEntry>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct GetAgentArgs {
     pub name: String,
 }

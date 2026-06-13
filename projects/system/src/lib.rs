@@ -39,7 +39,6 @@ pub mod scheduler;
 pub mod diagnostic;
 
 pub mod daemon;
-#[cfg(feature = "cli")]
 pub mod hook;
 pub mod package;
 pub mod sysadmin;

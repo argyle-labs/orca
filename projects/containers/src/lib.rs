@@ -569,18 +569,17 @@ fn builtin_adapters_for(_detected: &[RuntimeKind]) -> Vec<Arc<dyn RuntimeAdapter
 // ── Tool: containers.list ──────────────────────────────────────────────────
 
 /// Arguments for `containers.list`.
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ContainersListArgs {
     /// Restrict to one runtime. When unset, every detected runtime on this
     /// host contributes rows.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub runtime: Option<String>,
     /// Include stopped / exited / dead containers in addition to running.
     /// Defaults to true — the reconciler's whole point is acting on
     /// non-running rows.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub all: Option<bool>,
 }
 

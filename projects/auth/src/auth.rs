@@ -28,12 +28,10 @@ pub struct AuthStatusReport {
     pub providers: Vec<AuthProviderStatus>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct AuthStatusArgs {}
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct AuthLogoutArgs {
     /// "anthropic" | "github" | "atlassian"
     pub provider: String,
@@ -45,8 +43,7 @@ pub struct AuthLogoutOutput {
     pub removed: bool,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct AuthLoginArgs {
     /// "anthropic" | "github" | "atlassian"
     pub provider: String,
@@ -177,8 +174,7 @@ pub struct ApiTokenSummary {
     pub expires_at: Option<String>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct TokenCreateArgs {
     /// Human-readable label (e.g. "ci-runner", "scott-laptop"). Must be unique on this host.
     pub name: String,
@@ -198,8 +194,7 @@ pub struct TokenCreateOutput {
     pub token: String,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct TokenListArgs {}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -207,8 +202,7 @@ pub struct TokenListOutput {
     pub tokens: Vec<ApiTokenSummary>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct TokenRevokeArgs {
     pub id: String,
 }
@@ -310,8 +304,7 @@ async fn auth_token_delete(
 // `server/src/mcp/mod.rs`, which slides on each authenticated call.
 pub const CLI_SESSION_TTL_SECS: i64 = 24 * 60 * 60;
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct LoginArgs {
     /// Operator username (matches the web `users` table).
     pub username: String,
@@ -401,8 +394,7 @@ async fn auth_login(args: LoginArgs, _ctx: &contract::ToolCtx) -> anyhow::Result
     })
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct LogoutArgs {}
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

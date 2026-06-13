@@ -519,32 +519,31 @@ pub async fn emit(event: &Event) -> Vec<EmitOutcome> {
 
 // ── notify.send tool ───────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct NotifySendArgs {
     /// Event class — one of `heartbeat`, `drift`, `rotation`, `lifecycle`,
     /// `alert`, `approval`. Defaults to `alert`.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub class: Option<String>,
     /// Severity — one of `info`, `warn`, `error`, `critical`. Defaults to `info`.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub severity: Option<String>,
     /// Short title — rendered as the notification heading.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub title: String,
     /// Optional markdown-rendered body.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub body: Option<String>,
     /// Host this event is about (not necessarily this host).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub host: Option<String>,
     /// Emitter identifier, e.g. `reconciler:lxc`. Defaults to `notify.send`.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub source: Option<String>,
     /// Optional tap-through URL surfaced as the click target on backends
     /// that support one (ntfy `X-Click`).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub click: Option<String>,
 }
 

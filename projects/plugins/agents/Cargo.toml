@@ -8,11 +8,6 @@ build = "build.rs"
 name = "agents"
 path = "src/lib.rs"
 
-[features]
-cli = [
-    "dep:clap",
-    "dep:colored",
-]
 [dependencies]
 dispatch        = { path = "../../dispatch" }
 contract    = { path = "../../contract", default-features = false }
@@ -28,8 +23,8 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
-clap        = { workspace = true,         optional = true }
-colored     = { workspace = true,         optional = true }
+clap        = { workspace = true }
+colored     = { workspace = true }
 llm = { path = "../../plugins/llm" }
 namespace = { path = "../../namespace" }
 

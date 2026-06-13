@@ -7,13 +7,6 @@ edition.workspace = true
 name = "homeassistant"
 path = "src/lib.rs"
 
-# Feature flavors:
-#   - cli: adds clap derives on Args so the tools surface in the unified
-#          `orca` CLI binary.
-[features]
-cli = [
-    "dep:clap",
-]
 [dependencies]
 serde       = { workspace = true }
 serde_json  = { workspace = true }
@@ -34,8 +27,7 @@ db = { package = "db", path = "../../db" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 
-# cli-only — clap derives on Args.
-clap = { workspace = true, optional = true }
+clap = { workspace = true }
 
 [dev-dependencies]
 tokio    = { workspace = true }

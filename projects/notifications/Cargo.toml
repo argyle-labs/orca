@@ -7,10 +7,6 @@ edition.workspace = true
 name = "notifications"
 path = "src/lib.rs"
 
-[features]
-default = ["cli"]
-cli = ["dep:clap"]
-
 [dependencies]
 async-trait = { workspace = true }
 serde       = { workspace = true }
@@ -26,7 +22,7 @@ derive      = { path = "../derive" }
 schemars    = { workspace = true }
 inventory   = { workspace = true }
 
-clap        = { workspace = true, optional = true }
+clap        = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

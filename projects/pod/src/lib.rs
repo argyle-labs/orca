@@ -25,8 +25,7 @@ use derive::orca_tool;
 
 // ── Args / Output types (shared by every surface) ────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct EmptyArgs {}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -137,22 +136,21 @@ pub struct PodListOutput {
 //   "join"    — joiner pulls offer from an out-of-mDNS host  (needs `addr`)
 //   "accept"  — joiner accepts a pending inbound offer        (needs `code`)
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct PodJoinArgs {
     /// "invite" | "join" | "accept"
     pub action: String,
     /// Target address (host or host:port). Required for "invite" and "join".
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub addr: Option<String>,
     /// Override port. Defaults to `APP_PLUGIN_PORT`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub port: Option<u16>,
     /// 6-char pairing code. Required for "accept".
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub code: Option<String>,
 }
 
@@ -201,20 +199,19 @@ pub struct PodAcceptOutput {
 
 // ── pod.trust ────────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct PodTrustArgs {
     pub peer_id: String,
     // Bare `bool` derives as a flag (`--on`) under clap, which leaves no way
     // to express the positional `[ON]` shown in --help. Force value parsing
     // so `orca system peer update <peer> true|false` works.
-    #[cfg_attr(feature = "cli", clap(action = clap::ArgAction::Set))]
+    #[clap(action = clap::ArgAction::Set)]
     pub on: bool,
     /// When `true`, execute the trust update on the remote peer so THEY trust
     /// US rather than updating our local trust of them. Requires the peer to
     /// be reachable via mTLS and the caller to hold admin role.
     #[serde(default)]
-    #[cfg_attr(feature = "cli", clap(long))]
+    #[clap(long)]
     pub push: bool,
 }
 
@@ -231,20 +228,18 @@ pub struct PodTrustOutput {
 
 // ── pod.ping ─────────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct PodPingArgs {
     /// Paired peer ID (`peer.<machine_id_short>`) — looked up in `pod_peers`
     /// for the dial target.
     pub peer_id: String,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Default, Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Default, Serialize, Deserialize, JsonSchema)]
 pub struct PodSyncArgs {
     /// Optional source-peer filter (hostname / peer_id / addr). Omit to pull
     /// from every paired peer.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub peer: Option<String>,
 }
@@ -317,8 +312,7 @@ pub struct PodPendingListOutput(pub Vec<PodPendingOfferDto>);
 
 // ── pod.offer ────────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct PodOfferArgs {
     /// Joiner's bootstrap address (host or host:port). Joiner must already
     /// be in `pod_discovery` (mDNS-seen) so we know its pinned pubkey fp.
@@ -348,8 +342,7 @@ pub struct PodOfferOutput {
 // from an inviter not yet in mDNS. Renamed from PodJoinArgs/Output (2026-05-28)
 // because the user-facing umbrella tool now owns the `PodJoin*` names.
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct PodJoinRequestArgs {
     /// Inviter's address (host or host:port).
     pub inviter_addr: String,
@@ -366,8 +359,7 @@ pub struct PodJoinRequestOutput {
 
 // ── pod.leave ────────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct PodLeaveArgs {
     /// Peer to notify + remove. The full `pod leave` wipe path stays on the
     /// CLI (it touches secrets + PKI material and takes flags this tool
@@ -399,8 +391,7 @@ pub struct PodLeaveSelfOutput {
 
 // ── pod.recover ──────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct PodRecoverArgs {
     /// Peer whose stale `departed_at` flag should be cleared on THIS host.
     pub peer_id: String,
@@ -416,8 +407,7 @@ pub struct PodRecoverOutput {
 
 // ── pod.forget ───────────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct PodForgetArgs {
     /// Stale/orphan peer_id to purge mesh-wide (e.g. an old identity left over
     /// from a machine_id change, or a decommissioned host).
@@ -476,19 +466,18 @@ pub struct PodCertStatusOutput {
 
 // ── system.pod.update — singleton pod-settings update ───────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct PodUpdateArgs {
     /// Toggle Tier-2 secrets-storage permission (`self_secure`). `None` leaves
     /// the current value unchanged so the tool can grow new fields without
     /// every caller having to opt out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub self_secure: Option<bool>,
     /// When set, proxy the call to the named remote peer via the pod mesh
     /// instead of running on the local host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long, hide = true))]
+    #[arg(long, hide = true)]
     pub peer_id: Option<String>,
 }
 
@@ -560,10 +549,8 @@ pub struct PodExecDispatch {
 /// through `server_pod::exec`. Registered in the daemon's `build_tool_ctx` so
 /// `cli::exec_remote::<T>(...)` (in orca-dispatch, which knows nothing about
 /// pod) finds a peer transport. Unit struct — no service indirection.
-#[cfg(feature = "cli")]
 pub struct PodRemoteExec;
 
-#[cfg(feature = "cli")]
 #[async_trait::async_trait]
 impl contract::RemoteExec for PodRemoteExec {
     #[allow(clippy::disallowed_types)]

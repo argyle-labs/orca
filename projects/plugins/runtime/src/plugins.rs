@@ -42,12 +42,11 @@ pub struct PluginRow {
 // plugin.list
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default)]
 pub struct PluginListArgs {
     /// Filter by tier (omit for all).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub tier: Option<String>,
 }
 
@@ -97,13 +96,12 @@ async fn plugin_list(
 // plugin.detail
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct PluginDetailArgs {
     pub id: String,
     /// Fetch the value of a specific data key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub data_key: Option<String>,
 }
 
@@ -166,37 +164,36 @@ async fn plugin_detail(
 // plugin.update — install / enable-disable / cred CRUD / data set / cred sync
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PluginUpdateArgs {
     /// Install path. Manifest URL or local file.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub manifest: Option<String>,
     /// Optional instance id override when installing.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub instance_id: Option<String>,
 
     /// Existing plugin id — required for every operation other than install.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub id: Option<String>,
     /// Enable / disable the plugin.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub enabled: Option<bool>,
 
     /// Store a credential value. `cred_key` + `cred_value`.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub cred_key: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub cred_value: Option<String>,
     /// Sync stored credentials to the plugin's runtime environment.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub cred_sync: bool,
 
     /// Set a plugin data entry. `data_key` + `data_value` (JSON, REST/MCP only).
-    #[cfg_attr(feature = "cli", arg(skip))]
+    #[arg(skip)]
     pub data_key: Option<String>,
-    #[cfg_attr(feature = "cli", arg(skip))]
+    #[arg(skip)]
     pub data_value: Option<sj::Value>,
 }
 
@@ -289,18 +286,17 @@ async fn plugin_update(
 // plugin.delete — remove the plugin, a credential, or a data entry
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginDeleteArgs {
     pub id: String,
     /// Remove a stored credential by key (leaves the plugin in place).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub cred_key: Option<String>,
     /// Remove a stored data entry by key (leaves the plugin in place).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub data_key: Option<String>,
 }
 

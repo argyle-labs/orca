@@ -15,31 +15,30 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Config, schema_pull};
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 pub struct UnraidSchemaArgs {
     /// Base URL of a live Unraid host (e.g. `https://willow.local`).
     /// Required to do anything other than list embedded versions.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub from: Option<String>,
     /// Unraid API key (`x-api-key` header). Required when `from` is set.
     /// Generate one in the Unraid UI under Settings → Management Access →
     /// API Keys.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub api_key: Option<String>,
     /// Accept self-signed TLS certificates (common on Unraid).
-    #[cfg_attr(feature = "cli", arg(long, default_value_t = false))]
+    #[arg(long, default_value_t = false)]
     pub insecure: bool,
     /// When set, report drift between the live and embedded schemas
     /// without writing the live JSON to disk. Mutually exclusive with
     /// `dir`.
-    #[cfg_attr(feature = "cli", arg(long, default_value_t = false))]
+    #[arg(long, default_value_t = false)]
     pub check_drift: bool,
     /// Destination directory for the pulled schema. The written file is
     /// always `<probed_version>.introspection.json`. Required when
     /// `check_drift` is false and `from` is set. The default schemas
     /// directory in the orca repo is `projects/plugins/unraid/schemas`.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub dir: Option<PathBuf>,
 }
 

@@ -12,11 +12,7 @@ name = "orca"
 path = "src/main.rs"
 
 [features]
-default = ["ui", "cli"]
-# No-op feature flag expected by `#[orca_tool]` codegen — the macro emits
-# `#[cfg(feature = "cli")]` on its generated items. The server binary is
-# always cli, so we just enable it.
-cli = []
+default = ["ui"]
 # Embed the compiled frontend (projects/frontend/dist/) into the binary.
 # On by default. Disable with `--no-default-features` for a true headless build.
 # Runtime serving is additionally gated by the `ui.enabled` DB setting.
@@ -32,31 +28,31 @@ dispatch = { path = "../dispatch" }
 derive    = { path = "../derive" }
 inventory     = { workspace = true }
 contract = { path = "../contract" }
-db         = { package = "db", path = "../db", features = ["cli"] }
+db         = { package = "db", path = "../db" }
 # Domain crates
-auth     = { path = "../auth",     features = ["cli"] }
-pod      = { path = "../pod",      features = ["cli"] }
-system   = { path = "../system",   features = ["cli"] }
+auth     = { path = "../auth" }
+pod      = { path = "../pod" }
+system   = { path = "../system" }
 dev      = { path = "../dev" }
-namespace = { path = "../namespace", features = ["cli"] }
-spec     = { path = "../spec",      features = ["cli"] }
-agents   = { path = "../plugins/agents",   features = ["cli"] }
-plugins  = { path = "../plugins/runtime",  features = ["cli"] }
-files    = { path = "../files",    features = ["cli"] }
-mcp      = { path = "../plugins/mcp",      features = ["cli"] }
+namespace = { path = "../namespace" }
+spec     = { path = "../spec" }
+agents   = { path = "../plugins/agents" }
+plugins  = { path = "../plugins/runtime" }
+files    = { path = "../files" }
+mcp      = { path = "../plugins/mcp" }
 llm      = { path = "../plugins/llm" }
 conversation = { path = "../conversation" }
 # Integration crates (flat names, no facade)
-database = { path = "../plugins/db",          features = ["cli"] }
-docker        = { path = "../plugins/docker",        features = ["cli"] }
+database = { path = "../plugins/db" }
+docker        = { path = "../plugins/docker" }
 dockge        = { path = "../plugins/dockge" }
-homeassistant = { path = "../plugins/homeassistant", features = ["cli"] }
+homeassistant = { path = "../plugins/homeassistant" }
 nfs           = { path = "../plugins/nfs" }
 ntfy          = { path = "../plugins/ntfy" }
 notifications = { path = "../notifications" }
-proxmox       = { path = "../plugins/proxmox",       features = ["cli"] }
+proxmox       = { path = "../plugins/proxmox" }
 smb           = { path = "../plugins/smb" }
-unraid        = { path = "../plugins/unraid",        features = ["cli"] }
+unraid        = { path = "../plugins/unraid" }
 
 # CLI
 clap = { workspace = true }

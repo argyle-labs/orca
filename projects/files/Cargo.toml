@@ -7,9 +7,6 @@ edition.workspace = true
 name = "files"
 path = "src/lib.rs"
 
-[features]
-cli = ["dep:clap"]
-
 [dependencies]
 dispatch = { path = "../dispatch" }
 contract = { path = "../contract", default-features = false }
@@ -27,7 +24,7 @@ async-trait = { workspace = true }
 thiserror   = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-clap        = { workspace = true,  optional = true }
+clap        = { workspace = true }
 
 # Embedded docs
 rust-embed  = { workspace = true }

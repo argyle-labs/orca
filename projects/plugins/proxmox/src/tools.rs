@@ -63,15 +63,14 @@ mod native_support {
 // proxmox.list — endpoints, optionally drilling into one
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default)]
 pub struct ProxmoxListArgs {
     /// Drill into one endpoint. Without `node`, returns its cluster nodes;
     /// with `node`, returns VMs + containers on that node.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub endpoint: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub node: Option<String>,
 }
 
@@ -131,8 +130,7 @@ async fn proxmox_list(
 // proxmox.detail — endpoint detail with nodes/VMs/containers nested
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxDetailArgs {
     /// Endpoint name.
     pub endpoint: String,
@@ -191,37 +189,36 @@ async fn proxmox_detail(
 // proxmox.update — register/update endpoint, OR run VM/container action
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ProxmoxUpdateArgs {
     /// Endpoint register/update: `name` + `base_url` + `token_id` + `token_secret`.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub name: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub base_url: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub token_id: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub token_secret: Option<String>,
     /// Allow self-signed TLS (endpoint register).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub insecure: Option<bool>,
 
     /// VM/container lifecycle action: provide `endpoint` + `node` + (`vmid` for
     /// a QEMU VM OR `ctid` for an LXC container) + `action`.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub endpoint: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub node: Option<String>,
     /// QEMU VM id.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub vmid: Option<u64>,
     /// LXC container id.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub ctid: Option<u64>,
     /// `start` | `stop` | `shutdown` | `reboot`.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub action: Option<String>,
 }
 
@@ -309,8 +306,7 @@ async fn proxmox_update(
 // proxmox.delete — remove a registered endpoint
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxDeleteArgs {
     pub name: String,
 }

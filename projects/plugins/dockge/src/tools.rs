@@ -1,7 +1,10 @@
-//! Dockge tool surface — flat 4-tool shape (`dockge.{list, detail, update,
-//! delete}`). An endpoint is the primary resource; stacks nest into the
-//! surface via the `endpoint` arg, and stack actions ride on `.update`
-//! per [[feedback-one-tool-per-resource]].
+//! Dockge tool surface — REST-shaped 5-verb resource (`dockge.{list,
+//! detail, create, update, delete}`) per the REST-verbs-for-tool-
+//! surfaces rule. An endpoint is the primary resource; stacks nest
+//! into the surface via the `endpoint` arg, and stack lifecycle
+//! actions (start/stop/restart) ride on `.update` via an action enum
+//! arg per the one-tool-per-resource rule (stack is the resource,
+//! `.update` is the verb, action is the transition).
 //!
 //! Endpoint resolution: tools accept the endpoint *name* and load
 //! `(base_url, token)` from `db::dockge` at call time.
@@ -40,13 +43,12 @@ fn make_client(name: &str) -> anyhow::Result<Client> {
 // dockge.list — endpoints; with `endpoint`, drill into stacks
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default)]
 pub struct DockgeListArgs {
     /// Drill into one endpoint. When set, the output's `stacks` is
     /// populated for that endpoint.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub endpoint: Option<String>,
 }
 
@@ -93,8 +95,7 @@ async fn dockge_list(
 // dockge.detail — single stack logs
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct DockgeDetailArgs {
     pub endpoint: String,
     /// Stack name (e.g. "sonarr").
@@ -112,14 +113,69 @@ async fn dockge_detail(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// dockge.update — register endpoint OR run a stack action
+// dockge.create — register a new endpoint (POST semantics)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Stack action verb. Anything other than these three is rejected by
-/// `dockge.update` — Dockge itself supports only these lifecycle ops on
-/// a stack.
-#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
-#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct DockgeCreateArgs {
+    /// Unique endpoint name (operator-chosen identifier).
+    #[arg(long)]
+    pub name: String,
+    /// Reachable URL of the Dockge instance.
+    #[arg(long)]
+    pub base_url: String,
+    /// Bearer token. Generate one in the Dockge UI.
+    #[arg(long)]
+    pub token: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DockgeCreateOutput {
+    pub name: String,
+    pub base_url: String,
+    pub enabled: bool,
+}
+
+/// [MUTATES STATE] Register a new Dockge endpoint. Errors if `name`
+/// is already taken — use `dockge.update` to modify an existing
+/// endpoint.
+#[orca_tool(domain = "dockge", verb = "create")]
+async fn dockge_create(
+    args: DockgeCreateArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<DockgeCreateOutput> {
+    let row = db::dockge::EndpointRow {
+        name: args.name.clone(),
+        base_url: args.base_url.clone(),
+        token: args.token,
+        enabled: true,
+    };
+    let conn = db::open_default()?;
+    db::dockge::insert(&conn, &row).map_err(|e| {
+        let msg = format!("{e:#}");
+        if msg.contains("UNIQUE") || msg.contains("PRIMARY") {
+            anyhow::anyhow!(
+                "dockge endpoint '{}' already exists; use dockge.update",
+                row.name
+            )
+        } else {
+            e
+        }
+    })?;
+    Ok(DockgeCreateOutput {
+        name: row.name,
+        base_url: row.base_url,
+        enabled: row.enabled,
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// dockge.update — modify endpoint OR run a stack action (PATCH semantics)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Stack lifecycle action. Anything other than these three is rejected
+/// by `dockge.update` — Dockge itself only supports these.
+#[derive(clap::ValueEnum, Serialize, Deserialize, JsonSchema, Clone, Copy, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum DockgeStackAction {
     Start,
@@ -127,24 +183,26 @@ pub enum DockgeStackAction {
     Restart,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DockgeUpdateArgs {
-    /// Endpoint register/update: `name` + `base_url` + `token`.
-    #[cfg_attr(feature = "cli", arg(long))]
+    /// Endpoint modify: `name` + at least one of `base_url`/`token`/`enabled`.
+    /// Errors if `name` is not registered.
+    #[arg(long)]
     pub name: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub base_url: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub token: Option<String>,
+    #[arg(long)]
+    pub enabled: Option<bool>,
 
     /// Stack action: `endpoint` + `stack` + `action`.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub endpoint: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub stack: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long, value_enum))]
+    #[arg(long, value_enum)]
     pub action: Option<DockgeStackAction>,
 }
 
@@ -157,7 +215,8 @@ pub struct DockgeUpdateOutput {
     pub action_status: Option<u16>,
 }
 
-/// [MUTATES STATE] Register/update an endpoint, run a stack action, or both.
+/// [MUTATES STATE] Modify a registered endpoint, run a stack action,
+/// or both. PATCH semantics — endpoint must already exist.
 #[orca_tool(domain = "dockge", verb = "update")]
 async fn dockge_update(
     args: DockgeUpdateArgs,
@@ -166,23 +225,24 @@ async fn dockge_update(
     let mut out = DockgeUpdateOutput::default();
 
     if let Some(name) = &args.name {
-        let base_url = args
-            .base_url
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("base_url required to register endpoint"))?;
-        let token = args
-            .token
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("token required to register endpoint"))?;
-        let row = db::dockge::EndpointRow {
-            name: name.clone(),
-            base_url,
-            token,
-            enabled: true,
-        };
         let conn = db::open_default()?;
-        db::dockge::upsert(&conn, &row)?;
-        out.applied.push(format!("endpoint-upserted:{name}"));
+        let mut row = db::dockge::get(&conn, name)?.ok_or_else(|| {
+            anyhow::anyhow!("dockge endpoint '{name}' not registered; use dockge.create")
+        })?;
+        if let Some(base_url) = args.base_url.clone() {
+            row.base_url = base_url;
+        }
+        if let Some(token) = args.token.clone() {
+            row.token = token;
+        }
+        if let Some(enabled) = args.enabled {
+            row.enabled = enabled;
+        }
+        let changed = db::dockge::update(&conn, &row)?;
+        if !changed {
+            anyhow::bail!("dockge endpoint '{name}' update reported no row change");
+        }
+        out.applied.push(format!("endpoint-updated:{name}"));
     }
 
     match (args.endpoint.as_deref(), args.stack.as_deref(), args.action) {
@@ -211,8 +271,7 @@ async fn dockge_update(
 // dockge.delete — remove a registered endpoint
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct DockgeDeleteArgs {
     pub name: String,
 }

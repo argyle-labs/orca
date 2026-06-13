@@ -7,9 +7,6 @@ edition.workspace = true
 name = "conversation"
 path = "src/lib.rs"
 
-[features]
-cli = []
-
 [dependencies]
 contract = { path = "../contract" }
 derive    = { path = "../derive" }

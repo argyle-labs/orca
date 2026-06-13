@@ -50,15 +50,13 @@ pub struct DbMigrateReport {
 
 macro_rules! empty_args {
     ($name:ident) => {
-        #[cfg_attr(feature = "cli", derive(clap::Args))]
-        #[derive(Serialize, Deserialize, JsonSchema)]
+        #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
         pub struct $name {}
     };
 }
 empty_args!(DbStatusArgs);
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct DbUpdateArgs {
     /// "migrate" | "up" | "down"
     pub action: String,

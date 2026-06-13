@@ -24,8 +24,7 @@ pub struct AgentBackendStatusOutput {
     pub overrides: Vec<AgentBackendOverrideEntry>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default)]
 pub struct AgentBackendDetailArgs {}
 
@@ -41,27 +40,26 @@ async fn agent_backend_detail(
 /// [MUTATES STATE] Update one or more agent-backend settings: mode, API key,
 /// per-agent override, server-side Anthropic toggle. All fields optional;
 /// only the supplied fields are applied. Returns the fresh full status.
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default)]
 pub struct AgentBackendUpdateArgs {
     /// Global backend mode: "local" | "claude" | "hybrid".
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub mode: Option<String>,
     /// Anthropic API key to store in the encrypted orca DB.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub api_key: Option<String>,
     /// Remove the stored Anthropic API key.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub clear_api_key: bool,
     /// Per-agent override: set with `--override-agent NAME --override-backend
     /// {local|claude}`. Clear with `--override-backend clear`.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub override_agent: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub override_backend: Option<String>,
     /// Toggle whether the orca server makes Anthropic API calls directly.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub use_server_anthropic: Option<bool>,
 }
 

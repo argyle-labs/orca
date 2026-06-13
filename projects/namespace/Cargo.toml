@@ -12,9 +12,6 @@ path = "src/lib.rs"
 # metadata in orca.db. Free fns called directly by `#[orca_tool]` sites
 # (no service trait, per feedback_no_indirection).
 
-[features]
-cli = ["dep:clap"]
-
 [dependencies]
 dispatch = { path = "../dispatch" }
 contract = { path = "../contract", default-features = false }
@@ -35,7 +32,7 @@ rusqlite   = { workspace = true }
 thiserror  = { workspace = true }
 uuid       = { workspace = true }
 tracing    = { workspace = true }
-clap       = { workspace = true, optional = true }
+clap       = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

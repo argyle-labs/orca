@@ -984,13 +984,12 @@ fn render_held_pending_breaker_body(p: &HeldPendingBreakerPayload) -> String {
 // ── Tool surface ─────────────────────────────────────────────────────────
 
 /// Arguments for `containers.reconcile` / `containers.reconcile_dry`.
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ContainersReconcileArgs {
     /// Restrict to one runtime (`docker`, `lxc`, `podman`, `nspawn`).
     /// Defaults to all registered adapters.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub runtime: Option<String>,
 }
 
@@ -1045,21 +1044,20 @@ async fn containers_reconcile_dry(
 /// the breaker keys on `(host, runtime, container_id)`, and an
 /// operator clearing a hold must know which record they're acting on
 /// (the hold message names them).
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ContainersUnholdArgs {
     /// Host the held container lives on (matches `BreakerRecord::host`).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub host: String,
     /// Runtime kind: one of `docker`, `lxc`, `podman`, `nspawn`.
     /// String at the tool boundary because `RuntimeKind` doesn't
     /// implement `clap::ValueEnum`; parsed via
     /// [`parse_runtime_kind`] inside the tool body.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub runtime: String,
     /// Runtime-native container id (docker id, lxc vmid as a string).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub container_id: String,
 }
 
@@ -2367,7 +2365,7 @@ mod tests {
             id: format!("id-{name}"),
             name: name.to_string(),
             runtime: RuntimeKind::Lxc,
-            host: "thor".to_string(),
+            host: "host-a".to_string(),
             state,
             restart_policy: policy,
             image: None,

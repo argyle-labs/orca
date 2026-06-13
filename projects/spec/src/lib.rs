@@ -23,8 +23,7 @@ use graphql::shopify_proxy::GraphqlProxyResult;
 
 // ── Tool args / outputs ───────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ListSpecsArgs {}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -32,21 +31,18 @@ pub struct ListSpecsOutput {
     pub specs: Vec<SpecMetaRow>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct RegisterSpecArgs {
     pub name: String,
     pub url: String,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct RefreshSpecArgs {
     pub name: String,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct UnregisterSpecArgs {
     pub name: String,
 }
@@ -56,14 +52,12 @@ pub struct UnregisterSpecOutput {
     pub removed: bool,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct SyncMcpSpecsArgs {
     pub server: String,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct GetSpecGraphqlInfoArgs {
     pub repo: String,
 }

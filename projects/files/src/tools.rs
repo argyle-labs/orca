@@ -71,8 +71,7 @@ pub struct FsRootEntry {
 
 // ── Args / Outputs ──────────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct FsListArgs {
     /// Named root alias (e.g. "orca", "docs"). Omit to address path absolutely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -96,8 +95,7 @@ pub struct FsListOutput {
     pub ignore_patterns: Vec<String>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct FsTreeArgs {
     /// Named root alias. When omitted, `path` must be absolute or `~/`-prefixed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -115,8 +113,7 @@ pub struct FsTreeOutput {
     pub nodes: Vec<FsTreeNode>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct FsReadArgs {
     /// Named root alias. Omit to read by absolute path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -136,8 +133,7 @@ pub struct FsReadOutput {
     pub content: String,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct FsSearchArgs {
     /// Case-insensitive search term.
     pub query: String,
@@ -153,8 +149,7 @@ pub struct FsSearchOutput {
     pub hits: Vec<FsSearchHit>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct FsStatArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
@@ -171,27 +166,26 @@ pub struct FsStatOutput {
     pub exists: bool,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct FsUpdateArgs {
     /// Write a file: provide `path` (absolute or `~/`-prefixed) + `content`.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub path: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub content: Option<String>,
 
     /// Register/update a root: provide `register_root_name` + `register_root_path`
     /// (+ optional `register_root_description`).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub register_root_name: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub register_root_path: Option<String>,
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub register_root_description: Option<String>,
 
     /// Add a global ignore pattern.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub add_ignore_pattern: Option<String>,
 }
 
@@ -201,20 +195,19 @@ pub struct FsUpdateOutput {
     pub applied: Vec<String>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema, Default)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct FsDeleteArgs {
     /// Delete a file at `path` (absolute or `~/`-prefixed).
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub path: Option<String>,
 
     /// Unregister a root by name.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub unregister_root: Option<String>,
 
     /// Remove a global ignore pattern.
-    #[cfg_attr(feature = "cli", arg(long))]
+    #[arg(long)]
     pub remove_ignore_pattern: Option<String>,
 }
 

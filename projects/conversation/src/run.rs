@@ -13,11 +13,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct AgentRunArgs {
     /// Agent name (e.g. wolf, owl, fox, crow, raven, badger).
-    #[cfg_attr(feature = "cli", arg(short, long, default_value = "wolf"))]
+    #[arg(short, long, default_value = "wolf")]
     #[serde(default = "default_agent")]
     pub agent: String,
     /// Task or question to send to the agent.

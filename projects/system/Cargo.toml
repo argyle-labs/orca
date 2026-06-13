@@ -8,14 +8,10 @@ name = "system"
 path = "src/lib.rs"
 
 [features]
-cli = [
-    "dep:clap",
-    "dep:axum",
-    "dep:regex",
-]
 # Marker feature mirroring `orca/ui` — flips `system_detail`'s `frontend`
 # field to "embedded". Pure cfg flag; pulls no extra deps.
 ui = []
+
 [dependencies]
 dispatch   = { path = "../dispatch" }
 contract  = { path = "../contract", default-features = false }
@@ -36,7 +32,7 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-clap         = { workspace = true, optional = true }
+clap         = { workspace = true }
 sysinfo = { workspace = true }
 if-addrs = { version = "0.14" }
 chrono = { workspace = true }
@@ -47,7 +43,7 @@ base64 = "0.22"
 cron         = { workspace = true }
 colored      = { workspace = true }
 axum         = { workspace = true, optional = true }
-regex        = { workspace = true, optional = true }
+regex        = { workspace = true }
 docker = { path = "../plugins/docker", default-features = false }
 proxmox = { path = "../plugins/proxmox", default-features = false }
 

@@ -644,12 +644,16 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     // the const.
     let inner_fn = item;
 
-    // CLI behaviour: default emits register_op!; `manual`/`skip` mirror the
-    // existing semantics.
+    // CLI behaviour: default emits register_op! unconditionally; `manual`/
+    // `skip` mirror the existing semantics. The `#[cfg(feature = "cli")]`
+    // gate was removed because CLI/MCP/REST are structurally automatic
+    // from `#[orca_tool]` — see feedback_rest_verbs_for_tool_surfaces and
+    // the user's directive that specifying `cli` at all is the bug. The
+    // emission depends on `clap`, which `dispatch` already takes as a
+    // hard dep — no downstream feature toggling is needed.
     let cli_block = match attr.cli_mode.as_ref().map(|i| i.to_string()).as_deref() {
         Some("manual") | Some("skip") => quote! {},
         _ => quote! {
-            #[cfg(feature = "cli")]
             const _: () = {
                 ::dispatch::register_op! {
                     tool: #zst_ident,

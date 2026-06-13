@@ -7,10 +7,6 @@ edition.workspace = true
 name = "mcp"
 path = "src/lib.rs"
 
-[features]
-cli = [
-    "dep:clap",
-]
 [dependencies]
 dispatch    = { path = "../../dispatch" }
 contract   = { path = "../../contract", default-features = false }
@@ -29,7 +25,7 @@ dirs = { workspace = true }
 futures-util = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }
-clap          = { workspace = true,         optional = true }
+clap          = { workspace = true }
 chrono        = { workspace = true }
 
 [lints]

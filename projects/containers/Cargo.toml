@@ -7,10 +7,6 @@ edition.workspace = true
 name = "containers"
 path = "src/lib.rs"
 
-[features]
-default = ["cli"]
-cli = ["dep:clap"]
-
 [dependencies]
 async-trait = { workspace = true }
 serde       = { workspace = true }
@@ -49,7 +45,7 @@ bollard     = { version = "0.21", default-features = false, features = ["pipe"] 
 # this crate maps its JSON onto our typed `Container` model.
 proxmox     = { path = "../plugins/proxmox" }
 
-clap        = { workspace = true, optional = true }
+clap        = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

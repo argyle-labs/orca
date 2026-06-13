@@ -25,8 +25,7 @@ pub struct SchemaDbEntry {
     pub enabled: bool,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ListSchemasArgs {}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -34,8 +33,7 @@ pub struct ListSchemasOutput {
     pub schemas: Vec<SchemaDbEntry>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AddSchemaArgs {
     pub name: String,
@@ -58,16 +56,14 @@ pub struct SchemaMutationResult {
     pub changed: bool,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct RemoveSchemaArgs {
     pub name: String,
 }
 
 // ── Schema view types ───────────────────────────────────────────────────────
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct GetSchemaArgs {}
 
 /// One row in `tabs[*].tables`.
@@ -132,8 +128,7 @@ pub struct GetSchemaOutput {
     pub errors: Option<Vec<String>>,
 }
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct GetSchemaDomainsArgs {}
 
 #[derive(Serialize, Deserialize, JsonSchema)]

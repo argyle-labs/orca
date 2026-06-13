@@ -33,8 +33,7 @@ pub struct HostStatusRowDto {
 #[serde(transparent)]
 pub struct HostStatusRows(pub Vec<HostStatusRowDto>);
 
-#[cfg_attr(feature = "cli", derive(clap::Args))]
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct HostStatusDetailArgs {
     /// Peer whose history to read. Use `local` to read this host's own rows.
     pub peer_id: String,
