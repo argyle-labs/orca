@@ -8,3 +8,4 @@
 
 pub mod docker;
 pub mod lxc_proxmox;
+pub mod lxc_proxmox_api;
