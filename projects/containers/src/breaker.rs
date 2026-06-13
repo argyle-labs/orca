@@ -473,11 +473,16 @@ impl BreakerStore for MemoryStore {
 pub struct ArmRequest<'a> {
     pub container: &'a Container,
     pub observation: &'a HostObservation,
-    /// `Some` when the reconciler is about to issue a start *now*; the
-    /// breaker stamps `last_orca_start_at = Some(now)` after a `Proceed`
-    /// decision. `None` means classification-only (dry-run, observe).
     pub now: DateTime<Utc>,
     pub store: &'a dyn BreakerStore,
+    /// `true` when the reconciler is about to call `adapter.start()` on a
+    /// `Proceed` decision — the breaker stamps `last_orca_start_at` and
+    /// (for docker) pushes `recent_starts`. `false` means observe-only:
+    /// fold the observation, classify, persist `last_observed_state`, but
+    /// don't mint a start event. LXC arms every tick in observe mode; the
+    /// `recent_starts` count comes from `fold_lxc`'s next-tick transition
+    /// detection, not from arm itself.
+    pub initiating_start: bool,
 }
 
 /// Ask the breaker whether the reconciler should proceed with a
@@ -545,9 +550,28 @@ pub fn arm(req: ArmRequest<'_>) -> Result<BreakerDecision, BreakerError> {
             BreakerDecision::Hold { reason }
         }
         None => {
-            // No trip — record the start intent.
-            record.recent_starts.push(req.now);
-            record.last_orca_start_at = Some(req.now);
+            // No trip. Three things may need to happen, on different
+            // conditions:
+            //
+            // 1. `recent_starts.push` — captures "we minted a start." Only
+            //    on `initiating_start`, and only for runtimes whose fold
+            //    *doesn't* already derive starts from observed state. LXC
+            //    is excluded because `fold_lxc` will detect the next-tick
+            //    `Exited → Running` transition and push then; pushing here
+            //    would double-count. Docker keeps the push: `fold_docker`
+            //    relies on `restart_count` delta which lags an orca-issued
+            //    start by a tick.
+            // 2. `last_orca_start_at` — only on `initiating_start`. This
+            //    timestamp is the anchor for the fast-reexit classifier;
+            //    observe-only ticks must not move it.
+            // 3. `restart_count_snapshot` — refreshed every tick so docker
+            //    deltas are computed against the freshest baseline.
+            if req.initiating_start && container.runtime != RuntimeKind::Lxc {
+                record.recent_starts.push(req.now);
+            }
+            if req.initiating_start {
+                record.last_orca_start_at = Some(req.now);
+            }
             record.restart_count_snapshot = Some(u64::from(container.restart_count));
             BreakerDecision::Proceed
         }
@@ -1033,6 +1057,7 @@ unrelated chatter
             observation: &obs,
             now: now(),
             store: &store,
+            initiating_start: true,
         })
         .expect("arm ok");
         assert_eq!(decision, BreakerDecision::Proceed);
@@ -1056,6 +1081,7 @@ unrelated chatter
             observation: &obs,
             now: t,
             store: &store,
+            initiating_start: true,
         })
         .expect("seed");
 
@@ -1070,6 +1096,7 @@ unrelated chatter
                 observation: &obs,
                 now: t,
                 store: &store,
+                initiating_start: true,
             })
             .expect("tick");
         }
@@ -1105,6 +1132,7 @@ unrelated chatter
             observation: &obs,
             now: now() + Duration::seconds(30),
             store: &store,
+            initiating_start: true,
         })
         .expect("arm");
         assert!(matches!(decision, BreakerDecision::Hold { .. }));
@@ -1206,6 +1234,7 @@ unrelated chatter
             observation: &obs,
             now: now() + Duration::seconds(120),
             store: &b,
+            initiating_start: true,
         })
         .expect("arm");
         assert!(matches!(decision, BreakerDecision::Hold { .. }));
@@ -1223,6 +1252,7 @@ unrelated chatter
             observation: &obs,
             now: now(),
             store: &store,
+            initiating_start: true,
         })
         .expect("arm");
 
@@ -1250,6 +1280,7 @@ unrelated chatter
             observation: &HostObservation::default(),
             now: now(),
             store: &fresh_store,
+            initiating_start: true,
         })
         .expect("fresh arm");
 
@@ -1262,6 +1293,7 @@ unrelated chatter
             observation: &HostObservation::default(),
             now: now(),
             store: &primed_store,
+            initiating_start: true,
         })
         .expect("primed arm");
 
@@ -1307,6 +1339,7 @@ unrelated chatter
             observation: &HostObservation::default(),
             now: now(),
             store: &no_override,
+            initiating_start: true,
         })
         .expect("no override arm");
 
@@ -1320,6 +1353,7 @@ unrelated chatter
             observation: &obs,
             now: now(),
             store: &with_override,
+            initiating_start: true,
         })
         .expect("override arm");
 

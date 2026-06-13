@@ -367,6 +367,35 @@ pub async fn reconcile(input: ReconcileInput<'_>) -> ReconcileOutput {
                     rows.push(row);
                 }
                 ReconcileAction::NoOp => {
+                    // LXC observe-only arm. A NoOp row means classify
+                    // decided no start is needed this tick (container
+                    // is running, or its policy isn't auto-start). For
+                    // LXC with an auto-restart policy we still arm the
+                    // breaker every tick — the journalctl tail +
+                    // cross-tick `last_observed_state` only update if
+                    // `arm()` runs, so without this the transition
+                    // counter and journal-failure classifier stay
+                    // dormant for healthy-looking-but-flapping
+                    // containers. `initiating_start: false` keeps the
+                    // start-intent counters untouched: this is pure
+                    // observation. If the breaker trips, the helper
+                    // notifies (with per-hold suppression) and
+                    // persists `Held`; the row stays `NoOp` because
+                    // the container *is* currently running — the hold
+                    // takes effect the next time we'd start it.
+                    if !input.dry_run
+                        && container.runtime == RuntimeKind::Lxc
+                        && container.restart_policy.desires_running()
+                    {
+                        let _ = arm_and_dispatch_hold(
+                            adapter.as_ref(),
+                            &container,
+                            input.breaker_store,
+                            input.dispatcher,
+                            /* initiating_start */ false,
+                        )
+                        .await;
+                    }
                     rows.push(row);
                 }
                 ReconcileAction::Started
@@ -531,10 +560,26 @@ async fn run_start_pipeline(
         };
     }
 
-    // Breaker gate — only for tentative starts. The breaker classifies
-    // crashloop signals (docker restart-storm / fast re-exit, lxc
-    // flapping / journal failures) and short-circuits to
-    // `containers.held_pending_breaker` when it trips.
+    // Breaker gate. The breaker classifies crashloop signals (docker
+    // restart-storm / fast re-exit, lxc flapping / journal failures)
+    // and short-circuits to `containers.held_pending_breaker` when it
+    // trips.
+    //
+    // Whether to arm here is runtime-dispatched:
+    //
+    // * **docker** — only arm on a tentative start (`Exited` with a
+    //   non-zero exit code). Clean exits and live containers don't go
+    //   through this pipeline, and `fold_docker` relies on
+    //   `restart_count` deltas which the start-intent already captures.
+    // * **lxc** — `run_start_pipeline` is entered when classify decided
+    //   to start (state ∈ {Created, Exited, Dead}). Always arm. LXC
+    //   adapters don't surface `exit_code`, so the docker-style "exited
+    //   non-zero" gate would dead-letter every LXC start and leave all
+    //   the observation/journal/transition plumbing dormant. Per-tick
+    //   observation for *running* LXC happens in the reconcile dispatch
+    //   loop's `NoOp` branch (see `observe_lxc_if_auto_restart`); this
+    //   arm is the "we're about to issue a start" arm.
+    // * **podman / nspawn** — no classifier yet; skip.
     //
     // Dry runs skip the gate entirely — arming would mutate the
     // persisted record (push `recent_starts`, refresh
@@ -549,92 +594,34 @@ async fn run_start_pipeline(
     // (persisted in `BreakerRecord::last_observed_state`).
     let tentative = matches!(container.state, ContainerState::Exited)
         && !matches!(container.exit_code, None | Some(0));
-
-    if tentative && !dry_run {
-        let observation = adapter.observe(container).await;
-        let decision = match breaker::arm(ArmRequest {
-            container,
-            observation: &observation,
-            now: Utc::now(),
-            store: breaker_store,
-        }) {
-            Ok(d) => d,
-            Err(e) => {
-                // Breaker store failures must not silently swallow
-                // the start signal ([[feedback-no-hiding-errors]]).
-                // Log + treat as Proceed: the breaker is a safety
-                // net, not the critical path, and refusing to start
-                // because of a storage hiccup would itself be a new
-                // class of outage.
-                tracing::warn!(
-                    container = %container.name,
-                    host = %container.host,
-                    error = %e,
-                    "breaker arm failed; proceeding with tentative start"
-                );
-                BreakerDecision::Proceed
-            }
+    let should_arm = !dry_run
+        && match container.runtime {
+            RuntimeKind::Docker => tentative,
+            RuntimeKind::Lxc => true,
+            RuntimeKind::Podman | RuntimeKind::Nspawn => false,
         };
 
-        if let BreakerDecision::Hold { reason } = decision {
-            // Suppress repeat notifications for the same hold. The
-            // record's `notified_at` is the sentinel: set by
-            // `mark_notified` after at least one backend successfully
-            // delivered the alert, cleared by `unhold`. Loading the
-            // record back is cheap (MemoryStore is in-process; FileStore
-            // hits the warm cache); arguably it could be returned from
-            // `arm()` to avoid the round-trip, but the API stays
-            // simpler if the caller asks.
-            let already_notified =
-                match breaker_store.load(&container.host, container.runtime, &container.id) {
-                    Ok(Some(r)) => r.notified_at.is_some(),
-                    Ok(None) => false,
-                    Err(e) => {
-                        // Store hiccups should not turn a held container
-                        // into a notification storm — log + assume not yet
-                        // notified so the operator at least gets the alert
-                        // once. [[feedback-no-hiding-errors]] permits this
-                        // pattern (log + continue with a documented default).
-                        tracing::warn!(
-                            container = %container.name,
-                            host = %container.host,
-                            error = %e,
-                            "breaker store load failed; assuming not yet notified"
-                        );
-                        false
-                    }
-                };
-            if !already_notified {
-                let outcomes = emit_held_pending_breaker(dispatcher, container, &reason).await;
-                let any_ok = outcomes.iter().any(|o| o.result.is_ok());
-                if any_ok
-                    && let Err(e) = breaker::mark_notified(
-                        breaker_store,
-                        &container.host,
-                        container.runtime,
-                        &container.id,
-                        Utc::now(),
-                    )
-                {
-                    tracing::warn!(
-                        container = %container.name,
-                        host = %container.host,
-                        error = %e,
-                        "mark_notified failed; alert may repeat next tick"
-                    );
-                }
-            }
-            return ReconcileRow {
-                host: container.host.clone(),
-                runtime: container.runtime,
-                id: container.id.clone(),
-                name: container.name.clone(),
-                action: ReconcileAction::HeldPendingBreaker,
-                reason: ReconcileReason::BreakerHeld {
-                    exit_code: container.exit_code,
-                },
-            };
-        }
+    if should_arm
+        && arm_and_dispatch_hold(
+            adapter,
+            container,
+            breaker_store,
+            dispatcher,
+            /* initiating_start */ true,
+        )
+        .await
+        .is_some()
+    {
+        return ReconcileRow {
+            host: container.host.clone(),
+            runtime: container.runtime,
+            id: container.id.clone(),
+            name: container.name.clone(),
+            action: ReconcileAction::HeldPendingBreaker,
+            reason: ReconcileReason::BreakerHeld {
+                exit_code: container.exit_code,
+            },
+        };
     }
 
     // Execute the start (unless dry).
@@ -671,6 +658,88 @@ async fn run_start_pipeline(
         action: ReconcileAction::Started,
         reason,
     }
+}
+
+/// Arm the breaker + handle a `Hold` by emitting a notification with
+/// per-hold suppression. Shared between the start-pipeline (where Hold
+/// returns a `HeldPendingBreaker` row) and the observe-only path
+/// (where Hold just notifies — a currently-running container can't be
+/// unwound, but the operator should know the next start will block).
+///
+/// Returns `Some(reason)` on Hold, `None` on Proceed or a recoverable
+/// store error. Storage errors degrade to Proceed per
+/// [[feedback-no-hiding-errors]] — refusing to act because the breaker
+/// store hiccuped would itself be a new class of outage.
+async fn arm_and_dispatch_hold(
+    adapter: &dyn RuntimeAdapter,
+    container: &Container,
+    breaker_store: &dyn BreakerStore,
+    dispatcher: Option<&Dispatcher>,
+    initiating_start: bool,
+) -> Option<HoldReason> {
+    let observation = adapter.observe(container).await;
+    let decision = match breaker::arm(ArmRequest {
+        container,
+        observation: &observation,
+        now: Utc::now(),
+        store: breaker_store,
+        initiating_start,
+    }) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(
+                container = %container.name,
+                host = %container.host,
+                error = %e,
+                initiating_start,
+                "breaker arm failed; treating as Proceed"
+            );
+            BreakerDecision::Proceed
+        }
+    };
+
+    let BreakerDecision::Hold { reason } = decision else {
+        return None;
+    };
+
+    // Suppress repeat notifications for the same hold. `notified_at` is
+    // the sentinel: set by `mark_notified` after at least one backend
+    // successfully delivered the alert, cleared by `unhold`.
+    let already_notified =
+        match breaker_store.load(&container.host, container.runtime, &container.id) {
+            Ok(Some(r)) => r.notified_at.is_some(),
+            Ok(None) => false,
+            Err(e) => {
+                tracing::warn!(
+                    container = %container.name,
+                    host = %container.host,
+                    error = %e,
+                    "breaker store load failed; assuming not yet notified"
+                );
+                false
+            }
+        };
+    if !already_notified {
+        let outcomes = emit_held_pending_breaker(dispatcher, container, &reason).await;
+        let any_ok = outcomes.iter().any(|o| o.result.is_ok());
+        if any_ok
+            && let Err(e) = breaker::mark_notified(
+                breaker_store,
+                &container.host,
+                container.runtime,
+                &container.id,
+                Utc::now(),
+            )
+        {
+            tracing::warn!(
+                container = %container.name,
+                host = %container.host,
+                error = %e,
+                "mark_notified failed; alert may repeat next tick"
+            );
+        }
+    }
+    Some(reason)
 }
 
 // ── Event emission helpers ───────────────────────────────────────────────
@@ -1107,6 +1176,7 @@ mod tests {
         started: Mutex<Vec<String>>,
         list_err: Mutex<Option<AdapterError>>,
         start_err: Mutex<HashMap<String, AdapterError>>,
+        observation: Mutex<crate::breaker::HostObservation>,
     }
 
     impl FakeAdapter {
@@ -1117,6 +1187,7 @@ mod tests {
                 started: Mutex::new(Vec::new()),
                 list_err: Mutex::new(None),
                 start_err: Mutex::new(HashMap::new()),
+                observation: Mutex::new(crate::breaker::HostObservation::default()),
             }
         }
         fn started_ids(&self) -> Vec<String> {
@@ -1130,6 +1201,22 @@ mod tests {
                 .lock()
                 .expect("mutex poisoned")
                 .insert(id.to_string(), err);
+        }
+        /// Test hook — swap the next-tick state observed by `list()` for
+        /// `id`. Lets the LXC every-tick observation tests simulate
+        /// stopped→running transitions across reconciles.
+        fn set_state(&self, id: &str, state: ContainerState) {
+            let mut g = self.containers.lock().expect("mutex poisoned");
+            for c in g.iter_mut() {
+                if c.id == id {
+                    c.state = state;
+                }
+            }
+        }
+        /// Test hook — override the `HostObservation` returned by
+        /// `observe()`. Default is `HostObservation::default()`.
+        fn set_observation(&self, obs: crate::breaker::HostObservation) {
+            *self.observation.lock().expect("mutex poisoned") = obs;
         }
     }
 
@@ -1165,6 +1252,9 @@ mod tests {
         }
         async fn logs(&self, _id: &str, _tail: LogTail) -> Result<String, AdapterError> {
             Ok(String::new())
+        }
+        async fn observe(&self, _c: &Container) -> crate::breaker::HostObservation {
+            self.observation.lock().expect("mutex poisoned").clone()
         }
     }
 
@@ -2248,6 +2338,225 @@ mod tests {
             msg.contains("docker"),
             "error must list valid options: {msg}"
         );
+    }
+
+    // ── LXC every-tick observation ───────────────────────────────────
+    //
+    // C4-followup #5 (project_session_handoff_2026_06_13_breaker_followups):
+    // LXC adapters surface `exit_code: None`, which means the docker-
+    // style `Exited && exit_code != 0` gate would never fire and all the
+    // breaker plumbing (journal tail, cross-tick state) would sit
+    // dormant. These tests pin the corrected behavior:
+    //
+    // 1. Running LXC with auto-restart → NoOp row, but the breaker is
+    //    armed observe-only so `last_observed_state` is captured for the
+    //    next tick.
+    // 2. Exited → Running across two ticks counts as one `recent_starts`
+    //    entry, contributed by `fold_lxc`'s transition detection. The
+    //    arm-time push is suppressed for LXC; without that suppression
+    //    the count would be 2.
+    // 3. Observe-only ticks must not touch `last_orca_start_at` — that
+    //    timestamp anchors the docker fast-reexit classifier and would
+    //    misbehave if observation moved it.
+    // 4. A first-contact LXC start (no persisted prev state) must not
+    //    double-count itself: arm doesn't push, fold has no prev → 0.
+    // 5. Journal failures observed while running must trip the breaker.
+
+    fn mk_lxc(name: &str, state: ContainerState, policy: RestartPolicy) -> Container {
+        Container {
+            id: format!("id-{name}"),
+            name: name.to_string(),
+            runtime: RuntimeKind::Lxc,
+            host: "thor".to_string(),
+            state,
+            restart_policy: policy,
+            image: None,
+            labels: Vec::new(),
+            mounts: Vec::new(),
+            ports: Vec::new(),
+            started_at: None,
+            finished_at: None,
+            restart_count: 0,
+            // LXC adapters don't surface exit_code; this is the gap that
+            // the runtime-dispatched arming gate exists to handle.
+            exit_code: None,
+            startup: None,
+        }
+    }
+
+    async fn run_once(
+        adapter: &Arc<FakeAdapter>,
+        store: &MemoryStore,
+        probe: &dyn MountProbe,
+    ) -> ReconcileOutput {
+        let adapters: Vec<Arc<dyn RuntimeAdapter>> = vec![adapter.clone() as _];
+        reconcile(ReconcileInput {
+            adapters,
+            probe,
+            dispatcher: None,
+            dry_run: false,
+            breaker_store: store,
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn lxc_running_noop_arms_breaker_and_persists_observed_state() {
+        // Running LXC with an auto-restart policy. classify() → NoOp,
+        // but the dispatch loop's NoOp arm should still call the breaker
+        // observe-only so the cross-tick state is laid down for the
+        // next tick's fold_lxc.
+        let c = mk_lxc("ct100", ContainerState::Running, RestartPolicy::Always);
+        let adapter = Arc::new(FakeAdapter::new(RuntimeKind::Lxc, vec![c.clone()]));
+        let store = MemoryStore::new();
+
+        let out = run_once(&adapter, &store, &FakeMountProbe::all_ok()).await;
+        assert_eq!(one_row(&out).action, ReconcileAction::NoOp);
+        // Adapter.start was never called — observation must not start.
+        assert!(adapter.started_ids().is_empty(), "must not start a Running");
+
+        let r = store
+            .load(&c.host, c.runtime, &c.id)
+            .expect("load")
+            .expect("record must exist — NoOp branch armed breaker");
+        assert_eq!(r.status, BreakerStatus::Watching);
+        assert_eq!(r.last_observed_state, Some(ContainerState::Running));
+    }
+
+    #[tokio::test]
+    async fn lxc_exited_then_running_transition_counted_once_via_fold_lxc() {
+        // Two ticks, same container, state changes between them.
+        // Tick 1: Exited → run_start_pipeline arms with
+        //   initiating_start=true. No prev state, fold sees no
+        //   transition, arm suppresses its LXC push → recent_starts == 0.
+        // Tick 2: Running → NoOp arms observe-only. fold_lxc reads
+        //   persisted prev=Exited from the record overlay, sees
+        //   Exited→Running, pushes once → recent_starts == 1.
+        // The single push proves we count exactly one start despite
+        // arm firing twice across the transition.
+        let c = mk_lxc(
+            "ct101",
+            ContainerState::Exited,
+            RestartPolicy::UnlessStopped,
+        );
+        let adapter = Arc::new(FakeAdapter::new(RuntimeKind::Lxc, vec![c.clone()]));
+        let store = MemoryStore::new();
+
+        let _ = run_once(&adapter, &store, &FakeMountProbe::all_ok()).await;
+        let r1 = store
+            .load(&c.host, c.runtime, &c.id)
+            .expect("load")
+            .expect("tick1 record");
+        assert_eq!(
+            r1.recent_starts.len(),
+            0,
+            "tick1 fresh contact: no prev → no fold push, LXC arm doesn't push"
+        );
+        assert_eq!(r1.last_observed_state, Some(ContainerState::Exited));
+
+        adapter.set_state(&c.id, ContainerState::Running);
+        let _ = run_once(&adapter, &store, &FakeMountProbe::all_ok()).await;
+        let r2 = store
+            .load(&c.host, c.runtime, &c.id)
+            .expect("load")
+            .expect("tick2 record");
+        assert_eq!(
+            r2.recent_starts.len(),
+            1,
+            "tick2 transition: fold_lxc pushes exactly one start"
+        );
+        assert_eq!(r2.last_observed_state, Some(ContainerState::Running));
+    }
+
+    #[tokio::test]
+    async fn lxc_observe_only_preserves_last_orca_start_at() {
+        // Pre-seed a record with last_orca_start_at set. Reconcile a
+        // running LXC — observe-only path. The timestamp must survive:
+        // moving it would invalidate the docker fast-reexit anchor (LXC
+        // doesn't use it today, but the invariant must hold for the
+        // shared arm() impl regardless of runtime).
+        let c = mk_lxc("ct102", ContainerState::Running, RestartPolicy::Always);
+        let adapter = Arc::new(FakeAdapter::new(RuntimeKind::Lxc, vec![c.clone()]));
+        let store = MemoryStore::new();
+
+        let mut seed = breaker::BreakerRecord::fresh(&c.host, c.runtime, &c.id);
+        let anchor = Utc::now() - chrono::Duration::seconds(120);
+        seed.last_orca_start_at = Some(anchor);
+        store.save(&seed).expect("seed");
+
+        let _ = run_once(&adapter, &store, &FakeMountProbe::all_ok()).await;
+        let r = store
+            .load(&c.host, c.runtime, &c.id)
+            .expect("load")
+            .expect("record");
+        assert_eq!(
+            r.last_orca_start_at,
+            Some(anchor),
+            "observe-only must not move last_orca_start_at"
+        );
+    }
+
+    #[tokio::test]
+    async fn lxc_initiating_start_does_not_push_recent_starts() {
+        // Regression: pre-#5 arm() unconditionally pushed recent_starts
+        // on Proceed. For LXC that double-counts with fold_lxc's
+        // next-tick transition push. First-contact LXC start with no
+        // prev state must produce zero pushes — the next tick's
+        // transition is the canonical source of "we started."
+        let c = mk_lxc("ct103", ContainerState::Exited, RestartPolicy::Always);
+        let adapter = Arc::new(FakeAdapter::new(RuntimeKind::Lxc, vec![c.clone()]));
+        let store = MemoryStore::new();
+
+        let out = run_once(&adapter, &store, &FakeMountProbe::all_ok()).await;
+        assert_eq!(one_row(&out).action, ReconcileAction::Started);
+        let r = store
+            .load(&c.host, c.runtime, &c.id)
+            .expect("load")
+            .expect("record");
+        assert!(
+            r.recent_starts.is_empty(),
+            "LXC arm must not push recent_starts (fold_lxc owns the count): got {:?}",
+            r.recent_starts
+        );
+        // But last_orca_start_at SHOULD be set — that's the
+        // initiating_start=true signal.
+        assert!(
+            r.last_orca_start_at.is_some(),
+            "initiating_start=true must stamp last_orca_start_at"
+        );
+    }
+
+    #[tokio::test]
+    async fn lxc_journal_failures_during_running_trip_breaker() {
+        // Per breaker::LXC_JOURNAL_FAILURE_THRESHOLD = 3, more than 3
+        // "failed to start" / "exited with status" lines in the
+        // observed journal tail trips the breaker. Surface this through
+        // the reconciler's observe-only NoOp arm — a running container
+        // whose journal shows recent flap should be held.
+        let c = mk_lxc("ct104", ContainerState::Running, RestartPolicy::Always);
+        let adapter = Arc::new(FakeAdapter::new(RuntimeKind::Lxc, vec![c.clone()]));
+        adapter.set_observation(crate::breaker::HostObservation {
+            // 4 failure lines — strictly greater than the threshold of 3.
+            lxc_journal_tail: Some(["Failed to start pve-container@104.service"; 4].join("\n")),
+            lxc_previous_state: None,
+        });
+        let store = MemoryStore::new();
+
+        let out = run_once(&adapter, &store, &FakeMountProbe::all_ok()).await;
+        // Row stays NoOp — the container is currently running and the
+        // observe-only branch doesn't unwind that. The hold is
+        // surfaced via the persisted breaker state and the notification.
+        assert_eq!(one_row(&out).action, ReconcileAction::NoOp);
+
+        let r = store
+            .load(&c.host, c.runtime, &c.id)
+            .expect("load")
+            .expect("record");
+        assert_eq!(r.status, BreakerStatus::Held);
+        assert!(matches!(
+            r.held_reason,
+            Some(HoldReason::LxcJournalFailuresIn5Min { .. })
+        ));
     }
 
     // ── Module sanity ───────────────────────────────────────────────
