@@ -1,8 +1,23 @@
-//! Dockge stack-manager client. Replaces the former `dockge` plugin: same
-//! surface (stack list / start / stop / logs), no plugin scaffolding.
-// serde_json::Value is intentional: Dockge stack-list and log payloads are
-// opaque JSON passed through from the upstream Dockge API.
+//! Dockge stack-manager plugin. Client + tool surface.
+//!
+//! Tool surface (mirrors home-assistant's flat 4-tool shape per
+//! [[feedback-one-tool-per-resource]]):
+//! - `dockge.list` — registered endpoints (no args), or stacks on one
+//!   endpoint (`endpoint=` arg).
+//! - `dockge.detail` — logs for a single `(endpoint, stack)`.
+//! - `dockge.update` — register/update an endpoint, or run a stack
+//!   action (start / stop / restart) via the `action` arg.
+//! - `dockge.delete` — remove a registered endpoint.
+//!
+//! Endpoint resolution: tools accept the endpoint *name* and load
+//! `(base_url, token)` from `db::dockge` at call time. Per
+//! [[project-colocated-api-clients]] + model B (any creds-holder may
+//! execute), this row syncs to every paired peer so any of them can
+//! call dockge.* against a registered endpoint.
+// Upstream Dockge stack-list and log payloads are opaque per their API.
 #![allow(clippy::disallowed_types)]
+
+pub mod tools;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
