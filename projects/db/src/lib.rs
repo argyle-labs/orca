@@ -13,6 +13,7 @@ pub mod api_tokens;
 pub mod config_store;
 pub mod config_tools;
 pub mod docker_runtimes;
+pub mod dockge;
 pub mod docs;
 pub mod feature_flags;
 pub mod home_assistant;
@@ -682,6 +683,14 @@ fn apply_schema(conn: &Connection) -> Result<()> {
         );
 
         CREATE TABLE IF NOT EXISTS homeassistant_endpoints (
+            name       TEXT PRIMARY KEY,
+            base_url   TEXT NOT NULL,
+            token      TEXT NOT NULL,
+            enabled    INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS dockge_endpoints (
             name       TEXT PRIMARY KEY,
             base_url   TEXT NOT NULL,
             token      TEXT NOT NULL,

@@ -7,12 +7,36 @@ edition.workspace = true
 name = "dockge"
 path = "src/lib.rs"
 
+# Feature flavors:
+#   - cli: adds clap derives on Args so the tools surface in the unified
+#          `orca` CLI binary.
+[features]
+cli = [
+    "dep:clap",
+]
+
 [dependencies]
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 urlencoding = { workspace = true }
 utils  = { path = "../../utils" }
+
+# `#[orca_tool]` machinery.
+dispatch        = { path = "../../dispatch" }
+contract    = { path = "../../contract", default-features = false }
+derive       = { path = "../../derive" }
+schemars         = { workspace = true }
+inventory        = { workspace = true }
+
+# DB lookup for registered dockge endpoints + async-trait used by the
+# macro-generated OrcaTool impl.
+db = { package = "db", path = "../../db" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+
+# cli-only — clap derives on Args.
+clap = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio       = { workspace = true }
