@@ -566,7 +566,7 @@ pub fn arm(req: ArmRequest<'_>) -> Result<BreakerDecision, BreakerError> {
             //    observe-only ticks must not move it.
             // 3. `restart_count_snapshot` — refreshed every tick so docker
             //    deltas are computed against the freshest baseline.
-            if req.initiating_start && container.runtime != RuntimeKind::Lxc {
+            if req.initiating_start && !fold_owns_start_count(container.runtime) {
                 record.recent_starts.push(req.now);
             }
             if req.initiating_start {
@@ -637,6 +637,46 @@ pub fn unhold(
     // first start.
     store.save(&record)?;
     Ok(record)
+}
+
+// ── Per-runtime arming policy ─────────────────────────────────────────────
+//
+// Two questions collapse into one predicate each:
+//
+// * `arm_on_every_start` — should `run_start_pipeline` arm regardless of
+//   the docker-style `Exited && exit_code != 0` tentative gate? True
+//   for runtimes whose adapters don't surface `exit_code` (LXC). Also
+//   used in the reconcile dispatch loop's NoOp branch to enable per-
+//   tick observation while a container is running — the only way the
+//   cross-tick `last_observed_state` and journalctl tail stay current.
+//
+// * `fold_owns_start_count` — does the runtime's `fold_*` derive
+//   `recent_starts` from observed state (so `arm()` must NOT push on
+//   `initiating_start`), or does it rely on the reconciler to inject
+//   the start intent (so `arm()` must push)? True for LXC (`fold_lxc`
+//   counts observed Exited→Running transitions); false for docker
+//   (`fold_docker` only catches docker-initiated restarts via the
+//   restart_count delta, so orca-initiated starts must be stamped by
+//   `arm()` directly).
+//
+// Adding a new runtime classifier — say podman with its own
+// restart_count semantics, or nspawn with a different observation
+// signal — means editing these two predicates, plus adding the
+// `fold_*` and `classify_*` arms below. The adapter trait stays
+// breaker-agnostic.
+
+/// Whether `arm()` should fire on every tick this runtime presents
+/// for arming, not just on the docker-style tentative gate. See module
+/// comment above this function.
+pub fn arm_on_every_start(runtime: RuntimeKind) -> bool {
+    matches!(runtime, RuntimeKind::Lxc)
+}
+
+/// Whether the runtime's fold derives `recent_starts` from observed
+/// state. If true, `arm()` must not push on `initiating_start` (the
+/// next tick's fold will catch the transition). See module comment.
+fn fold_owns_start_count(runtime: RuntimeKind) -> bool {
+    matches!(runtime, RuntimeKind::Lxc)
 }
 
 // ── Window-folding ────────────────────────────────────────────────────────

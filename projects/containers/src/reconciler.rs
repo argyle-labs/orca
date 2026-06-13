@@ -384,7 +384,7 @@ pub async fn reconcile(input: ReconcileInput<'_>) -> ReconcileOutput {
                     // the container *is* currently running — the hold
                     // takes effect the next time we'd start it.
                     if !input.dry_run
-                        && container.runtime == RuntimeKind::Lxc
+                        && breaker::arm_on_every_start(container.runtime)
                         && container.restart_policy.desires_running()
                     {
                         let _ = arm_and_dispatch_hold(
@@ -594,12 +594,11 @@ async fn run_start_pipeline(
     // (persisted in `BreakerRecord::last_observed_state`).
     let tentative = matches!(container.state, ContainerState::Exited)
         && !matches!(container.exit_code, None | Some(0));
-    let should_arm = !dry_run
-        && match container.runtime {
-            RuntimeKind::Docker => tentative,
-            RuntimeKind::Lxc => true,
-            RuntimeKind::Podman | RuntimeKind::Nspawn => false,
-        };
+    // Per-runtime arming policy lives in `breaker::arm_on_every_start`
+    // (see that function's doc for the full rationale). Runtimes that
+    // don't surface `exit_code` — LXC today — need every-start arming
+    // because the docker-style tentative gate dead-letters them.
+    let should_arm = !dry_run && (tentative || breaker::arm_on_every_start(container.runtime));
 
     if should_arm
         && arm_and_dispatch_hold(
