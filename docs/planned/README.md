@@ -20,6 +20,8 @@ homelab; orca itself stays generic.
 | [install-bootstrap.md](install-bootstrap.md) | One-command install, platform detection, minimum permissions, pairing | Phase 1.3 |
 | [host-lifecycle.md](host-lifecycle.md) | Drivers (NVIDIA/AMD/Intel), OS updates, reboots, UPS-coordinated shutdowns | Phase 1.2 + 1.6 |
 | [lxc-vm-reconciler.md](lxc-vm-reconciler.md) | Declarative Proxmox LXC + VM configs: diff repo vs live, bind/tmpfs lifecycle, restore-aware start, drift detection | Phase 1.1 (next slice) |
+| [self-healing-reconciler.md](self-healing-reconciler.md) | Containers + mounts reconcilers: auto-start declared-running containers, ESTALE detection w/ dependent-restart graph, replaces freyr/baldur band-aid watchdog | Phase 1.1 |
+| [nfs-reexport-resilience.md](nfs-reexport-resilience.md) | Unraid SHFS + mover ESTALE cascade: gateway role, fileid-mutation detection, pre-warned downstream remediation, mover-window awareness, SHFS-bypass escalation | Phase 1.1 |
 | [observability.md](observability.md) | Metrics + logs + viewer; tree UI; retention; external sinks | Phase 1.9 |
 | [backup-restore.md](backup-restore.md) | Unified backup framework: managed services + orca self-state; restore drills; offsite | Phase 1.8 |
 | [storage-shares.md](storage-shares.md) | Native share management: one declarative share → reconciled NFS + SMB(+fruit) + Avahi/mDNS + wsdd for Mac/Windows/Linux | Phase 1.7 |

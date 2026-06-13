@@ -4,7 +4,7 @@
 > changes are overwritten on the next run. Put personal overrides in
 > per-project `CLAUDE.md` files instead.
 
-## Orca-first delegation
+## Orca-first routing
 
 `orca` is installed on this machine and exposes its fleet, agents, and tools
 through both an MCP server (`orca-local`) and a roster of specialized agents
@@ -12,11 +12,16 @@ materialized into `~/.claude/agents/`.
 
 **Default routing for any non-trivial task:**
 
-1. **Invoke the `orca` agent first.** It is the top-level dispatcher and knows
-   the full agent roster, the MCP tool surface, and how to choose between
-   them.
-2. Let `orca` delegate to a specialist agent (e.g. `wolf`, `falcon`, `otter`,
-   `bear`, etc.) rather than picking one yourself.
+1. **Invoke the `orca` agent first** via the `Agent` tool. Pass the user's
+   request verbatim plus any directly relevant context. `orca` knows the full
+   agent roster, the MCP tool surface, and how to choose between them.
+2. **`orca` returns a routing decision, not a result.** Claude Code does not
+   grant the `Agent` tool to subagents, so `orca` cannot delegate on its own.
+   Its response ends with an `orca-route` fenced block specifying `route:
+   wolf | otter | direct` plus the prompt to send. Read that block and
+   execute it: invoke the named subagent (`wolf` or `otter`) with the prompt
+   `orca` provided, or — if `route: direct` — answer the user yourself using
+   the contents of the block.
 3. Only bypass `orca` for trivial single-file edits, direct questions you can
    answer from context, or when the user explicitly names a different agent.
 
