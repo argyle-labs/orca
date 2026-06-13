@@ -54,11 +54,13 @@
 //! crate stays backend-agnostic
 //! ([[feedback-notifications-backend-agnostic]]).
 
+use crate::breaker::{self, ArmRequest, BreakerDecision, BreakerStore, HoldReason, MemoryStore};
 use crate::{
     Container, ContainerState, ListFilter, RestartPolicy, RuntimeAdapter, RuntimeKind,
     registered_adapters,
 };
-use notifications::{Dispatcher, Event, EventClass, Severity};
+use chrono::Utc;
+use notifications::{Dispatcher, EmitOutcome, Event, EventClass, Severity};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -231,8 +233,10 @@ pub struct StaleMountBlockedPayload {
     pub blocked_sources: Vec<PathBuf>,
 }
 
-/// `containers.held_pending_breaker` — warn severity. C3 wires this
-/// but the stub breaker never returns `Hold`; C4 turns it on.
+/// `containers.held_pending_breaker` — warn severity. C4 turns this
+/// on; the breaker's classifier returns the trip reason, which is
+/// stamped into the payload so the operator sees *why* the start was
+/// held without having to re-run classification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeldPendingBreakerPayload {
     pub host: String,
@@ -240,6 +244,8 @@ pub struct HeldPendingBreakerPayload {
     pub container_id: String,
     pub container_name: String,
     pub exit_code: Option<i32>,
+    /// Closed enum of trip reasons from the breaker classifier.
+    pub hold_reason: HoldReason,
 }
 
 // ── Mount probe ───────────────────────────────────────────────────────────
@@ -310,6 +316,16 @@ pub struct ReconcileInput<'a> {
     pub adapters: Vec<Arc<dyn RuntimeAdapter>>,
     pub probe: &'a dyn MountProbe,
     pub dispatcher: Option<&'a Dispatcher>,
+    /// Persistence boundary for the crashloop circuit breaker. The
+    /// reconciler consults this on every tentative start (exited non-
+    /// zero) to decide whether to proceed or short-circuit to
+    /// [`ReconcileAction::HeldPendingBreaker`].
+    ///
+    /// The tool-surface entry points wire in a process-local
+    /// [`MemoryStore`] until the plugin-namespaced db primitive
+    /// (`project_sdk_plugin_namespaced_db`) lands and a `FileStore` or
+    /// db-backed impl takes its place.
+    pub breaker_store: &'a dyn BreakerStore,
     pub dry_run: bool,
 }
 
@@ -364,6 +380,7 @@ pub async fn reconcile(input: ReconcileInput<'_>) -> ReconcileOutput {
                         adapter.as_ref(),
                         &container,
                         input.probe,
+                        input.breaker_store,
                         input.dispatcher,
                         input.dry_run,
                         &mut start_errors,
@@ -490,6 +507,7 @@ async fn run_start_pipeline(
     adapter: &dyn RuntimeAdapter,
     container: &Container,
     probe: &dyn MountProbe,
+    breaker_store: &dyn BreakerStore,
     dispatcher: Option<&Dispatcher>,
     dry_run: bool,
     start_errors: &mut Vec<StartFailure>,
@@ -513,18 +531,111 @@ async fn run_start_pipeline(
         };
     }
 
-    // Breaker gate — only for tentative starts.
+    // Breaker gate — only for tentative starts. The breaker classifies
+    // crashloop signals (docker restart-storm / fast re-exit, lxc
+    // flapping / journal failures) and short-circuits to
+    // `containers.held_pending_breaker` when it trips.
     //
-    // TODO(C4-wiring): construct a real `breaker::ArmRequest { container,
-    // observation, now, store }` and call `breaker::arm(req)?`. `breaker.rs`
-    // already has the full C4 surface (persisted state + classifier +
-    // `BreakerDecision::Hold { reason }`) — only the reconciler hook needs
-    // to be threaded with a `BreakerStore` + `HostObservation`. Until that
-    // wiring lands, tentative starts proceed unconditionally (matches the
-    // C3 stub semantic). `emit_held_pending_breaker` is registered but
-    // never fires from this path yet.
+    // Dry runs skip the gate entirely — arming would mutate the
+    // persisted record (push `recent_starts`, refresh
+    // `restart_count_snapshot`), and dry mode is contractually
+    // read-only at this layer.
+    //
+    // `adapter.observe(container)` is the per-tick observation hook:
+    // docker returns `HostObservation::default()` (its classifier
+    // works from `Container.restart_count` alone), lxc runs
+    // `journalctl -u pve-container@<vmid>.service` for the journal
+    // tail. Cross-tick `lxc_previous_state` is owned by the breaker
+    // (persisted in `BreakerRecord::last_observed_state`).
     let tentative = matches!(container.state, ContainerState::Exited)
         && !matches!(container.exit_code, None | Some(0));
+
+    if tentative && !dry_run {
+        let observation = adapter.observe(container).await;
+        let decision = match breaker::arm(ArmRequest {
+            container,
+            observation: &observation,
+            now: Utc::now(),
+            store: breaker_store,
+        }) {
+            Ok(d) => d,
+            Err(e) => {
+                // Breaker store failures must not silently swallow
+                // the start signal ([[feedback-no-hiding-errors]]).
+                // Log + treat as Proceed: the breaker is a safety
+                // net, not the critical path, and refusing to start
+                // because of a storage hiccup would itself be a new
+                // class of outage.
+                tracing::warn!(
+                    container = %container.name,
+                    host = %container.host,
+                    error = %e,
+                    "breaker arm failed; proceeding with tentative start"
+                );
+                BreakerDecision::Proceed
+            }
+        };
+
+        if let BreakerDecision::Hold { reason } = decision {
+            // Suppress repeat notifications for the same hold. The
+            // record's `notified_at` is the sentinel: set by
+            // `mark_notified` after at least one backend successfully
+            // delivered the alert, cleared by `unhold`. Loading the
+            // record back is cheap (MemoryStore is in-process; FileStore
+            // hits the warm cache); arguably it could be returned from
+            // `arm()` to avoid the round-trip, but the API stays
+            // simpler if the caller asks.
+            let already_notified =
+                match breaker_store.load(&container.host, container.runtime, &container.id) {
+                    Ok(Some(r)) => r.notified_at.is_some(),
+                    Ok(None) => false,
+                    Err(e) => {
+                        // Store hiccups should not turn a held container
+                        // into a notification storm — log + assume not yet
+                        // notified so the operator at least gets the alert
+                        // once. [[feedback-no-hiding-errors]] permits this
+                        // pattern (log + continue with a documented default).
+                        tracing::warn!(
+                            container = %container.name,
+                            host = %container.host,
+                            error = %e,
+                            "breaker store load failed; assuming not yet notified"
+                        );
+                        false
+                    }
+                };
+            if !already_notified {
+                let outcomes = emit_held_pending_breaker(dispatcher, container, &reason).await;
+                let any_ok = outcomes.iter().any(|o| o.result.is_ok());
+                if any_ok
+                    && let Err(e) = breaker::mark_notified(
+                        breaker_store,
+                        &container.host,
+                        container.runtime,
+                        &container.id,
+                        Utc::now(),
+                    )
+                {
+                    tracing::warn!(
+                        container = %container.name,
+                        host = %container.host,
+                        error = %e,
+                        "mark_notified failed; alert may repeat next tick"
+                    );
+                }
+            }
+            return ReconcileRow {
+                host: container.host.clone(),
+                runtime: container.runtime,
+                id: container.id.clone(),
+                name: container.name.clone(),
+                action: ReconcileAction::HeldPendingBreaker,
+                reason: ReconcileReason::BreakerHeld {
+                    exit_code: container.exit_code,
+                },
+            };
+        }
+    }
 
     // Execute the start (unless dry).
     if !dry_run && let Err(e) = adapter.start(&container.id).await {
@@ -683,17 +794,25 @@ async fn emit_stale_mount_blocked(
     let _outcomes = d.emit(&event).await;
 }
 
-// TODO(C4-wiring): called once the breaker gate is re-threaded — see the
-// TODO at the breaker gate above.
-#[allow(dead_code)]
-async fn emit_held_pending_breaker(dispatcher: Option<&Dispatcher>, container: &Container) {
-    let Some(d) = dispatcher else { return };
+/// Returns the dispatcher outcomes so the caller can decide whether
+/// to stamp `notified_at` (only when at least one backend accepted
+/// the event). Returns an empty Vec when there is no dispatcher — no
+/// attempt, no stamp.
+async fn emit_held_pending_breaker(
+    dispatcher: Option<&Dispatcher>,
+    container: &Container,
+    hold_reason: &HoldReason,
+) -> Vec<EmitOutcome> {
+    let Some(d) = dispatcher else {
+        return Vec::new();
+    };
     let payload = HeldPendingBreakerPayload {
         host: container.host.clone(),
         runtime: container.runtime,
         container_id: container.id.clone(),
         container_name: container.name.clone(),
         exit_code: container.exit_code,
+        hold_reason: hold_reason.clone(),
     };
     let event = Event::new(
         EventClass::Alert,
@@ -706,7 +825,7 @@ async fn emit_held_pending_breaker(dispatcher: Option<&Dispatcher>, container: &
     )
     .with_host(payload.host.clone())
     .with_body(render_held_pending_breaker_body(&payload));
-    let _outcomes = d.emit(&event).await;
+    d.emit(&event).await
 }
 
 fn render_started_body(p: &StartedPayload) -> String {
@@ -765,14 +884,28 @@ fn render_stale_mount_blocked_body(p: &StaleMountBlockedPayload) -> String {
     )
 }
 
-#[allow(dead_code)]
 fn render_held_pending_breaker_body(p: &HeldPendingBreakerPayload) -> String {
     let code = p
         .exit_code
         .map(|c| c.to_string())
         .unwrap_or_else(|| "?".to_string());
+    let reason = match &p.hold_reason {
+        HoldReason::RestartStormIn5Min { count, .. } => {
+            format!("restart storm: {count} starts in 5 min")
+        }
+        HoldReason::FastReexitAfterOrcaStart {
+            within_secs,
+            exit_code,
+        } => format!("fast re-exit: exit {exit_code} within {within_secs}s of orca-issued start"),
+        HoldReason::LxcFlappingIn5Min { transitions, .. } => {
+            format!("lxc flapping: {transitions} state transitions in 5 min")
+        }
+        HoldReason::LxcJournalFailuresIn5Min { count, .. } => {
+            format!("lxc journal: {count} failure lines in 5 min")
+        }
+    };
     format!(
-        "HELD start of `{}` ({}) on `{}` — breaker open, last exit code {code}",
+        "HELD start of `{}` ({}) on `{}` — breaker open ({reason}), last exit code {code}",
         p.container_name,
         p.runtime.as_str(),
         p.host
@@ -805,10 +938,12 @@ async fn containers_reconcile(
     let adapters = filtered_adapters(args.runtime.as_deref());
     let probe = RealMountProbe;
     let dispatcher: Option<&Dispatcher> = None;
+    let breaker_store = default_breaker_store();
     Ok(reconcile(ReconcileInput {
         adapters,
         probe: &probe,
         dispatcher,
+        breaker_store: breaker_store.as_ref(),
         dry_run: false,
     })
     .await)
@@ -824,13 +959,114 @@ async fn containers_reconcile_dry(
     let adapters = filtered_adapters(args.runtime.as_deref());
     let probe = RealMountProbe;
     let dispatcher: Option<&Dispatcher> = None;
+    let breaker_store = default_breaker_store();
     Ok(reconcile(ReconcileInput {
         adapters,
         probe: &probe,
         dispatcher,
+        breaker_store: breaker_store.as_ref(),
         dry_run: true,
     })
     .await)
+}
+
+// ── Tool: containers.unhold ──────────────────────────────────────────────
+
+/// Arguments for `containers.unhold`. All three fields are required —
+/// the breaker keys on `(host, runtime, container_id)`, and an
+/// operator clearing a hold must know which record they're acting on
+/// (the hold message names them).
+#[cfg_attr(feature = "cli", derive(clap::Args))]
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainersUnholdArgs {
+    /// Host the held container lives on (matches `BreakerRecord::host`).
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub host: String,
+    /// Runtime kind: one of `docker`, `lxc`, `podman`, `nspawn`.
+    /// String at the tool boundary because `RuntimeKind` doesn't
+    /// implement `clap::ValueEnum`; parsed via
+    /// [`parse_runtime_kind`] inside the tool body.
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub runtime: String,
+    /// Runtime-native container id (docker id, lxc vmid as a string).
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub container_id: String,
+}
+
+/// Tool-facing view of a cleared `BreakerRecord`. Flattened to the
+/// fields an operator cares about; timestamps are RFC 3339 strings
+/// (chrono types don't impl `JsonSchema` in this workspace —
+/// `Container` uses the same pattern at `lib.rs:220-240`).
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainersUnholdOutput {
+    pub host: String,
+    pub runtime: String,
+    pub container_id: String,
+    /// Status after the unhold — always `"watching"`.
+    pub status: String,
+    /// `held_since` from the cleared record, RFC 3339. `None` if the
+    /// record's prior held_since was unset (shouldn't happen for a
+    /// real Held record, but the type doesn't enforce that).
+    pub previously_held_since: Option<String>,
+}
+
+/// Clear a `Held` breaker record so the reconciler stops short-
+/// circuiting starts. Returns the cleared record's identity + new
+/// status. Errors with `NotFound` if no record matches, `NotHeld` if
+/// the record is in any state other than `Held`.
+#[derive::orca_tool(domain = "containers", verb = "unhold")]
+async fn containers_unhold(
+    args: ContainersUnholdArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<ContainersUnholdOutput> {
+    let runtime = parse_runtime_kind(&args.runtime)?;
+    let store = default_breaker_store();
+    let record = breaker::unhold(store.as_ref(), &args.host, runtime, &args.container_id)?;
+    Ok(ContainersUnholdOutput {
+        host: record.host,
+        runtime: record.runtime.as_str().to_string(),
+        container_id: record.container_id,
+        status: "watching".to_string(),
+        previously_held_since: record.held_since.map(|t| t.to_rfc3339()),
+    })
+}
+
+fn parse_runtime_kind(s: &str) -> anyhow::Result<RuntimeKind> {
+    match s.to_ascii_lowercase().as_str() {
+        "docker" => Ok(RuntimeKind::Docker),
+        "lxc" => Ok(RuntimeKind::Lxc),
+        "podman" => Ok(RuntimeKind::Podman),
+        "nspawn" => Ok(RuntimeKind::Nspawn),
+        other => {
+            anyhow::bail!("unknown runtime `{other}`: expected one of docker, lxc, podman, nspawn")
+        }
+    }
+}
+
+/// Pick the right `BreakerStore` for the tool surface: a
+/// [`FileStore`] rooted at `<orca_home>/containers` when
+/// [`FileStore::default_path`] resolves (the common case — we have
+/// either `ORCA_HOME` or `HOME`), otherwise a process-local
+/// [`MemoryStore`]. The MemoryStore fallback exists for environments
+/// with neither env var (rare; container/CI sandboxes); state lives
+/// only for the lifetime of the reconcile call and the breaker re-
+/// observes the runtime on the next tick.
+///
+/// Db-backed persistence is queued behind the plugin-namespaced db
+/// primitive — until then, FileStore is the durable substrate.
+fn default_breaker_store() -> Box<dyn BreakerStore> {
+    match breaker::FileStore::default_path() {
+        Some(dir) => Box::new(breaker::FileStore::new(dir)),
+        None => {
+            tracing::warn!(
+                target: "containers::breaker",
+                "neither ORCA_HOME nor HOME set; using in-memory breaker store (state lost on restart)"
+            );
+            Box::new(MemoryStore::new())
+        }
+    }
 }
 
 fn filtered_adapters(runtime: Option<&str>) -> Vec<Arc<dyn RuntimeAdapter>> {
@@ -1005,11 +1241,13 @@ mod tests {
         dry_run: bool,
     ) -> ReconcileOutput {
         let adapters: Vec<Arc<dyn RuntimeAdapter>> = vec![adapter as Arc<dyn RuntimeAdapter>];
+        let breaker_store = MemoryStore::new();
         reconcile(ReconcileInput {
             adapters,
             probe,
             dispatcher: None,
             dry_run,
+            breaker_store: &breaker_store,
         })
         .await
     }
@@ -1571,11 +1809,13 @@ mod tests {
         lxc.set_list_error(AdapterError::Unavailable("pct not on PATH".into()));
 
         let adapters: Vec<Arc<dyn RuntimeAdapter>> = vec![docker.clone() as _, lxc.clone() as _];
+        let breaker_store = MemoryStore::new();
         let out = reconcile(ReconcileInput {
             adapters,
             probe: &FakeMountProbe::all_ok(),
             dispatcher: None,
             dry_run: false,
+            breaker_store: &breaker_store,
         })
         .await;
         assert_eq!(out.rows.len(), 1);
@@ -1664,6 +1904,349 @@ mod tests {
                 ("alpha".to_string(), "zulu".to_string()),
                 ("beta".to_string(), "bravo".to_string()),
             ]
+        );
+    }
+
+    // ── Breaker wiring (C4) ─────────────────────────────────────────
+    //
+    // The Proceed path is covered by `unless_stopped_exited_nonzero_
+    // tentative_proceeds` above (fresh store → no trip → start). These
+    // tests cover the Hold path: short-circuit + typed notification +
+    // reason round-trip into the rendered body. We pre-seed a
+    // `BreakerRecord` with `status=Held` rather than driving the
+    // classifier — `arm()` shortcuts on a sticky hold (breaker.rs:500),
+    // which is exactly the production behaviour after a previous trip.
+
+    use crate::breaker::{BreakerRecord, BreakerStatus, HoldReason};
+    use notifications::{Backend, BackendError, Dispatcher, Event, MessageRef};
+
+    struct CapturingBackend {
+        captured: Arc<Mutex<Vec<Event>>>,
+    }
+
+    #[async_trait]
+    impl Backend for CapturingBackend {
+        fn name(&self) -> &str {
+            "capturing"
+        }
+        async fn emit(&self, event: &Event) -> Result<MessageRef, BackendError> {
+            self.captured
+                .lock()
+                .expect("capturing backend mutex poisoned")
+                .push(event.clone());
+            Ok(MessageRef::new("capturing", "msg-1"))
+        }
+    }
+
+    /// Pre-seed a `MemoryStore` with a stuck-Held record matching
+    /// `container`. `arm()` will short-circuit to `Hold { reason }` on
+    /// the next tick without re-running the classifier.
+    fn seed_held(store: &MemoryStore, container: &Container, reason: HoldReason) {
+        let mut record = BreakerRecord::fresh(&container.host, container.runtime, &container.id);
+        record.status = BreakerStatus::Held;
+        record.held_reason = Some(reason);
+        record.held_since = Some(Utc::now());
+        store.save(&record).expect("seed breaker record");
+    }
+
+    #[tokio::test]
+    async fn breaker_hold_short_circuits_tentative_start() {
+        let container = mk(
+            "looper",
+            RestartPolicy::UnlessStopped,
+            ContainerState::Exited,
+            Some(137),
+            vec![],
+            vec![],
+        );
+        let adapter = Arc::new(FakeAdapter::new(
+            RuntimeKind::Docker,
+            vec![container.clone()],
+        ));
+        let probe = FakeMountProbe::all_ok();
+        let breaker_store = MemoryStore::new();
+        seed_held(
+            &breaker_store,
+            &container,
+            HoldReason::FastReexitAfterOrcaStart {
+                within_secs: 12,
+                exit_code: 137,
+            },
+        );
+
+        let adapters: Vec<Arc<dyn RuntimeAdapter>> = vec![adapter.clone() as _];
+        let out = reconcile(ReconcileInput {
+            adapters,
+            probe: &probe,
+            dispatcher: None,
+            dry_run: false,
+            breaker_store: &breaker_store,
+        })
+        .await;
+
+        let row = one_row(&out);
+        assert_eq!(row.action, ReconcileAction::HeldPendingBreaker);
+        assert_eq!(
+            row.reason,
+            ReconcileReason::BreakerHeld {
+                exit_code: Some(137)
+            }
+        );
+        assert!(
+            adapter.started_ids().is_empty(),
+            "Hold must not start the container, got: {:?}",
+            adapter.started_ids()
+        );
+    }
+
+    #[tokio::test]
+    async fn breaker_hold_emits_held_pending_breaker_notification_with_reason() {
+        let container = mk(
+            "stormy",
+            RestartPolicy::UnlessStopped,
+            ContainerState::Exited,
+            Some(1),
+            vec![],
+            vec![],
+        );
+        let adapter = Arc::new(FakeAdapter::new(
+            RuntimeKind::Docker,
+            vec![container.clone()],
+        ));
+        let probe = FakeMountProbe::all_ok();
+        let breaker_store = MemoryStore::new();
+        let window_start = Utc::now() - chrono::Duration::minutes(3);
+        seed_held(
+            &breaker_store,
+            &container,
+            HoldReason::RestartStormIn5Min {
+                count: 7,
+                window_start,
+            },
+        );
+
+        let captured: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let dispatcher = Dispatcher::new().with_backend(Box::new(CapturingBackend {
+            captured: Arc::clone(&captured),
+        }));
+
+        let adapters: Vec<Arc<dyn RuntimeAdapter>> = vec![adapter as _];
+        let _out = reconcile(ReconcileInput {
+            adapters,
+            probe: &probe,
+            dispatcher: Some(&dispatcher),
+            dry_run: false,
+            breaker_store: &breaker_store,
+        })
+        .await;
+
+        let events = captured
+            .lock()
+            .expect("capturing backend mutex poisoned")
+            .clone();
+        assert_eq!(events.len(), 1, "expected exactly one notification");
+        let event = &events[0];
+        assert!(
+            event.title.starts_with("containers.held_pending_breaker:"),
+            "title was {:?}",
+            event.title
+        );
+        assert!(
+            event.title.ends_with("stormy"),
+            "title did not name the container: {:?}",
+            event.title
+        );
+        let body = &event.body;
+        assert!(
+            body.contains("restart storm"),
+            "body missing classifier reason text: {body}"
+        );
+        assert!(
+            body.contains("7 starts"),
+            "body missing classifier count: {body}"
+        );
+    }
+
+    // ── mark_notified suppression ────────────────────────────────────
+
+    struct FailingBackend;
+    #[async_trait]
+    impl Backend for FailingBackend {
+        fn name(&self) -> &str {
+            "failing"
+        }
+        async fn emit(&self, _event: &Event) -> Result<MessageRef, BackendError> {
+            Err(BackendError::Transport("simulated".into()))
+        }
+    }
+
+    /// Build a fresh adapter+probe+held-store fixture for the
+    /// repeat-suppression tests. Container is `name`, runtime
+    /// Docker, tentative-eligible (Exited + non-zero exit_code).
+    /// Store is pre-seeded with a stuck Hold so each `reconcile`
+    /// call routes through the Hold branch.
+    fn held_fixture(name: &str) -> (Arc<FakeAdapter>, MemoryStore, Container) {
+        let container = mk(
+            name,
+            RestartPolicy::UnlessStopped,
+            ContainerState::Exited,
+            Some(1),
+            vec![],
+            vec![],
+        );
+        let adapter = Arc::new(FakeAdapter::new(
+            RuntimeKind::Docker,
+            vec![container.clone()],
+        ));
+        let store = MemoryStore::new();
+        seed_held(
+            &store,
+            &container,
+            HoldReason::FastReexitAfterOrcaStart {
+                within_secs: 5,
+                exit_code: 1,
+            },
+        );
+        (adapter, store, container)
+    }
+
+    async fn run_once_with(
+        adapter: &Arc<FakeAdapter>,
+        store: &MemoryStore,
+        dispatcher: Option<&Dispatcher>,
+    ) {
+        let probe = FakeMountProbe::all_ok();
+        let adapters: Vec<Arc<dyn RuntimeAdapter>> = vec![adapter.clone() as _];
+        let _ = reconcile(ReconcileInput {
+            adapters,
+            probe: &probe,
+            dispatcher,
+            dry_run: false,
+            breaker_store: store,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn second_held_tick_does_not_re_emit() {
+        let (adapter, store, _container) = held_fixture("loop1");
+        let captured: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let dispatcher = Dispatcher::new().with_backend(Box::new(CapturingBackend {
+            captured: Arc::clone(&captured),
+        }));
+
+        // Tick 1: emits + stamps notified_at.
+        run_once_with(&adapter, &store, Some(&dispatcher)).await;
+        // Tick 2: notified_at is set → must skip emission.
+        run_once_with(&adapter, &store, Some(&dispatcher)).await;
+
+        let events = captured.lock().expect("mutex").clone();
+        assert_eq!(
+            events.len(),
+            1,
+            "second tick must not emit while hold is sticky; got events={events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn after_unhold_next_trip_emits_again() {
+        let (adapter, store, container) = held_fixture("loop2");
+        let captured: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let dispatcher = Dispatcher::new().with_backend(Box::new(CapturingBackend {
+            captured: Arc::clone(&captured),
+        }));
+
+        // Tick 1: emits once, stamps notified_at.
+        run_once_with(&adapter, &store, Some(&dispatcher)).await;
+        assert_eq!(captured.lock().expect("mutex").len(), 1);
+
+        // Operator clears the hold.
+        crate::breaker::unhold(&store, &container.host, container.runtime, &container.id)
+            .expect("unhold");
+
+        // Re-seed the same trip — emulates the next reconciler tick
+        // tripping the breaker again.
+        seed_held(
+            &store,
+            &container,
+            HoldReason::FastReexitAfterOrcaStart {
+                within_secs: 5,
+                exit_code: 1,
+            },
+        );
+
+        // Tick 2: notified_at was cleared by unhold → emit again.
+        run_once_with(&adapter, &store, Some(&dispatcher)).await;
+        assert_eq!(
+            captured.lock().expect("mutex").len(),
+            2,
+            "post-unhold trip must re-emit"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_dispatch_does_not_stamp_notified_so_next_tick_retries() {
+        let (adapter, store, container) = held_fixture("loop3");
+        // First dispatcher: only a failing backend → no successful emit.
+        let failing = Dispatcher::new().with_backend(Box::new(FailingBackend));
+
+        // Tick 1: emit attempted, all backends fail → notified_at stays None.
+        run_once_with(&adapter, &store, Some(&failing)).await;
+        let record_after_tick1 = store
+            .load(&container.host, container.runtime, &container.id)
+            .expect("load")
+            .expect("record");
+        assert!(
+            record_after_tick1.notified_at.is_none(),
+            "failed dispatch must not stamp notified_at"
+        );
+
+        // Tick 2: now with a capturing dispatcher → must emit (the
+        // retry the dispatch-failure semantic exists for).
+        let captured: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let ok = Dispatcher::new().with_backend(Box::new(CapturingBackend {
+            captured: Arc::clone(&captured),
+        }));
+        run_once_with(&adapter, &store, Some(&ok)).await;
+        assert_eq!(
+            captured.lock().expect("mutex").len(),
+            1,
+            "second tick with a working backend must retry"
+        );
+        let record_after_tick2 = store
+            .load(&container.host, container.runtime, &container.id)
+            .expect("load")
+            .expect("record");
+        assert!(
+            record_after_tick2.notified_at.is_some(),
+            "successful dispatch must stamp notified_at"
+        );
+    }
+
+    // ── containers.unhold ────────────────────────────────────────────
+
+    #[test]
+    fn parse_runtime_kind_accepts_canonical_names() {
+        assert_eq!(parse_runtime_kind("docker").unwrap(), RuntimeKind::Docker);
+        assert_eq!(parse_runtime_kind("lxc").unwrap(), RuntimeKind::Lxc);
+        assert_eq!(parse_runtime_kind("podman").unwrap(), RuntimeKind::Podman);
+        assert_eq!(parse_runtime_kind("nspawn").unwrap(), RuntimeKind::Nspawn);
+    }
+
+    #[test]
+    fn parse_runtime_kind_is_case_insensitive() {
+        assert_eq!(parse_runtime_kind("Docker").unwrap(), RuntimeKind::Docker);
+        assert_eq!(parse_runtime_kind("LXC").unwrap(), RuntimeKind::Lxc);
+    }
+
+    #[test]
+    fn parse_runtime_kind_rejects_unknown() {
+        let err = parse_runtime_kind("kvm").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("kvm"), "error must echo input: {msg}");
+        assert!(
+            msg.contains("docker"),
+            "error must list valid options: {msg}"
         );
     }
 

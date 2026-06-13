@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
+use crate::breaker::{HostObservation, OBSERVATION_WINDOW};
 use crate::{
     AdapterError, Container, ContainerMount, ContainerState, ListFilter, LogTail, RestartPolicy,
     RuntimeAdapter, RuntimeKind, StartupOrdering, binary_on_path, local_hostname,
@@ -65,11 +66,13 @@ pub struct PctRow {
     pub name: String,
 }
 
-/// LXC adapter. Holds the conf directory (overridable for tests) and the
-/// `pct` binary path (overridable for tests / non-Proxmox LXC).
+/// LXC adapter. Holds the conf directory (overridable for tests), the
+/// `pct` binary path, and the `journalctl` binary path (both overridable
+/// for tests / non-Proxmox LXC).
 pub struct LxcProxmoxAdapter {
     conf_dir: PathBuf,
     pct_bin: String,
+    journalctl_bin: String,
 }
 
 impl LxcProxmoxAdapter {
@@ -77,15 +80,21 @@ impl LxcProxmoxAdapter {
         Self {
             conf_dir: PathBuf::from(DEFAULT_PVE_LXC_DIR),
             pct_bin: "pct".to_string(),
+            journalctl_bin: "journalctl".to_string(),
         }
     }
 
-    /// Test-only constructor that targets a custom conf directory and pct
-    /// binary. The body of `list()` reads both; pointing them at a tempdir
-    /// + a stub shell script gives unit-test reach without a live cluster.
+    /// Test-only constructor that targets a custom conf directory and
+    /// stubbed binary paths. The body of `list()` reads conf_dir + pct_bin;
+    /// `observe()` reads journalctl_bin. Pointing all three at a tempdir +
+    /// stub shell scripts gives unit-test reach without a live cluster.
     #[doc(hidden)]
-    pub fn with_paths(conf_dir: PathBuf, pct_bin: String) -> Self {
-        Self { conf_dir, pct_bin }
+    pub fn with_paths(conf_dir: PathBuf, pct_bin: String, journalctl_bin: String) -> Self {
+        Self {
+            conf_dir,
+            pct_bin,
+            journalctl_bin,
+        }
     }
 }
 
@@ -191,6 +200,66 @@ impl RuntimeAdapter for LxcProxmoxAdapter {
         Err(AdapterError::Refused(
             "LxcProxmoxAdapter::logs lands in C3".into(),
         ))
+    }
+
+    /// Run `journalctl -u pve-container@<vmid>.service --since "5 min ago"
+    /// --no-pager -o cat` and stuff the stdout into
+    /// `lxc_journal_tail`. The breaker's `classify_lxc` filters lines for
+    /// `failed to start` / `exited with status`. Failures here are
+    /// swallowed (logged) — a missing journal tail must not block a
+    /// start, per [[feedback-no-hiding-errors]] (logged + continue is
+    /// not "hidden").
+    async fn observe(&self, container: &Container) -> HostObservation {
+        if container.runtime != RuntimeKind::Lxc {
+            return HostObservation::default();
+        }
+        let unit = format!("pve-container@{}.service", container.id);
+        let since = format!("{} sec ago", OBSERVATION_WINDOW.num_seconds());
+        let out = match Command::new(&self.journalctl_bin)
+            .args(["-u", &unit, "--since", &since, "--no-pager", "-o", "cat"])
+            .output()
+            .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!(
+                    target: "containers::lxc",
+                    vmid = %container.id,
+                    journalctl = %self.journalctl_bin,
+                    error = %e,
+                    "journalctl spawn failed; proceeding with empty observation"
+                );
+                return HostObservation::default();
+            }
+        };
+        if !out.status.success() {
+            tracing::warn!(
+                target: "containers::lxc",
+                vmid = %container.id,
+                status = %out.status,
+                stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                "journalctl exited non-zero; proceeding with empty observation"
+            );
+            return HostObservation::default();
+        }
+        let tail = match String::from_utf8(out.stdout) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    target: "containers::lxc",
+                    vmid = %container.id,
+                    error = %e,
+                    "journalctl stdout not utf8; proceeding with empty observation"
+                );
+                return HostObservation::default();
+            }
+        };
+        HostObservation {
+            lxc_journal_tail: Some(tail),
+            // Cross-tick state is owned by the breaker — see
+            // `RuntimeAdapter::observe` doc.
+            lxc_previous_state: None,
+        }
     }
 }
 
@@ -576,5 +645,125 @@ VMID       Status     Lock         Name
         assert!(!is_mp_key("mpx")); // non-digit
         assert!(!is_mp_key("rootfs"));
         assert!(!is_mp_key("net0"));
+    }
+
+    // ── observe() / journalctl stub ───────────────────────────────────────
+
+    /// Write `body` as an executable shell script under `dir/name` and
+    /// return the absolute path. Use as the `journalctl_bin` for an
+    /// adapter under test. Script ignores its args; whatever it echoes
+    /// to stdout is what `observe()` will see as the journal tail.
+    fn stub_script(dir: &std::path::Path, name: &str, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, body).expect("write stub script");
+        let mut perms = std::fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod");
+        path.to_str().expect("utf8 path").to_string()
+    }
+
+    fn mk_lxc_container(vmid: u32) -> Container {
+        Container {
+            id: vmid.to_string(),
+            name: format!("ct-{vmid}"),
+            runtime: RuntimeKind::Lxc,
+            host: "testhost".into(),
+            state: ContainerState::Exited,
+            restart_policy: RestartPolicy::Always,
+            image: None,
+            labels: Vec::new(),
+            mounts: Vec::new(),
+            ports: Vec::new(),
+            started_at: None,
+            finished_at: None,
+            restart_count: 0,
+            exit_code: None,
+            startup: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn observe_returns_journal_tail_from_stub_journalctl() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // Stub echoes a tail containing 4 "failed to start" lines —
+        // enough to trip LxcJournalFailuresIn5Min (threshold 3).
+        let body = "#!/bin/sh\ncat <<'EOF'\nfailed to start something\nexited with status 1\nfailed to start something\nrandom line\nfailed to start something\nEOF\n";
+        let journalctl = stub_script(tmp.path(), "journalctl-stub", body);
+        let adapter = LxcProxmoxAdapter::with_paths(
+            tmp.path().to_path_buf(),
+            "pct-not-used".into(),
+            journalctl,
+        );
+        let container = mk_lxc_container(116);
+        let obs = adapter.observe(&container).await;
+        let tail = obs.lxc_journal_tail.expect("tail populated");
+        assert!(
+            tail.contains("failed to start"),
+            "tail did not contain stub output: {tail}"
+        );
+        let failed_count = tail
+            .lines()
+            .filter(|l| l.contains("failed to start"))
+            .count();
+        assert_eq!(failed_count, 3, "tail line count: {tail}");
+        assert!(
+            obs.lxc_previous_state.is_none(),
+            "adapter must not synthesize prev_state"
+        );
+    }
+
+    #[tokio::test]
+    async fn observe_returns_empty_on_journalctl_failure() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // Stub exits non-zero — observe() must swallow the failure
+        // and return a default observation rather than propagating.
+        let body = "#!/bin/sh\necho 'unit not found' >&2\nexit 1\n";
+        let journalctl = stub_script(tmp.path(), "journalctl-fail", body);
+        let adapter = LxcProxmoxAdapter::with_paths(
+            tmp.path().to_path_buf(),
+            "pct-not-used".into(),
+            journalctl,
+        );
+        let container = mk_lxc_container(116);
+        let obs = adapter.observe(&container).await;
+        assert!(obs.lxc_journal_tail.is_none());
+        assert!(obs.lxc_previous_state.is_none());
+    }
+
+    #[tokio::test]
+    async fn observe_returns_empty_on_missing_journalctl_binary() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let adapter = LxcProxmoxAdapter::with_paths(
+            tmp.path().to_path_buf(),
+            "pct-not-used".into(),
+            "/nonexistent/path/to/journalctl-does-not-exist".into(),
+        );
+        let container = mk_lxc_container(116);
+        let obs = adapter.observe(&container).await;
+        assert!(obs.lxc_journal_tail.is_none());
+    }
+
+    #[tokio::test]
+    async fn observe_skips_non_lxc_runtime() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // Even a "successful" stub must not be consulted for docker.
+        let journalctl = stub_script(
+            tmp.path(),
+            "journalctl-should-not-run",
+            "#!/bin/sh\necho 'failed to start oops'\n",
+        );
+        let adapter = LxcProxmoxAdapter::with_paths(
+            tmp.path().to_path_buf(),
+            "pct-not-used".into(),
+            journalctl,
+        );
+        let mut container = mk_lxc_container(116);
+        container.runtime = RuntimeKind::Docker;
+        let obs = adapter.observe(&container).await;
+        assert!(
+            obs.lxc_journal_tail.is_none(),
+            "docker container should bypass journalctl entirely"
+        );
     }
 }

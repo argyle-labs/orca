@@ -98,6 +98,13 @@ pub struct BreakerRecord {
     /// Suppress repeat `containers.held` notifications while a single
     /// hold is active. Reset by [`unhold`].
     pub notified_at: Option<DateTime<Utc>>,
+    /// Container state observed at the end of the previous arm() call.
+    /// Used by [`fold_lxc`] to detect stopped→running transitions
+    /// without requiring the caller to thread cross-tick state. Set
+    /// inside [`arm`] just before save. `None` on a fresh record (no
+    /// prior observation to compare against).
+    #[serde(default)]
+    pub last_observed_state: Option<ContainerState>,
 }
 
 impl BreakerRecord {
@@ -115,6 +122,7 @@ impl BreakerRecord {
             held_reason: None,
             held_since: None,
             notified_at: None,
+            last_observed_state: None,
         }
     }
 
@@ -505,12 +513,29 @@ pub fn arm(req: ArmRequest<'_>) -> Result<BreakerDecision, BreakerError> {
 
     record.prune_window(req.now);
 
+    // Overlay the caller's observation with the cross-tick state we
+    // own. `lxc_previous_state` is authoritatively the state observed
+    // at the end of the *previous* arm() call — callers cannot supply
+    // it accurately (they don't see prior ticks). When the caller
+    // passes Some(...), it's an explicit override (tests, planned
+    // probe-driven recovery paths); otherwise we inject from the record.
+    let observation_owned;
+    let observation: &HostObservation = if req.observation.lxc_previous_state.is_some() {
+        req.observation
+    } else {
+        observation_owned = HostObservation {
+            lxc_journal_tail: req.observation.lxc_journal_tail.clone(),
+            lxc_previous_state: record.last_observed_state,
+        };
+        &observation_owned
+    };
+
     // Fold the current observation into the sliding window, runtime-
     // aware.
-    fold_observation(&mut record, container, req.observation, req.now);
+    fold_observation(&mut record, container, observation, req.now);
 
     // Classify against the updated record.
-    let decision = match classify(&record, container, req.observation, req.now) {
+    let decision = match classify(&record, container, observation, req.now) {
         Some(reason) => {
             record.status = BreakerStatus::Held;
             record.held_reason = Some(reason.clone());
@@ -527,6 +552,12 @@ pub fn arm(req: ArmRequest<'_>) -> Result<BreakerDecision, BreakerError> {
             BreakerDecision::Proceed
         }
     };
+
+    // Stamp the current state for the next tick's prev-state lookup.
+    // Done unconditionally — both Hold and Proceed branches need it, and
+    // the Held short-circuit at the top of this function reads only
+    // `status`/`held_reason`, so we never overwrite a sticky state.
+    record.last_observed_state = Some(container.state);
 
     req.store.save(&record)?;
     Ok(decision)
@@ -1178,6 +1209,137 @@ unrelated chatter
         })
         .expect("arm");
         assert!(matches!(decision, BreakerDecision::Hold { .. }));
+    }
+
+    // ── Cross-tick last_observed_state ───────────────────────────
+
+    #[test]
+    fn arm_persists_current_state_for_next_tick() {
+        let store = MemoryStore::new();
+        let container = mk_lxc(ContainerState::Running);
+        let obs = HostObservation::default();
+        let _ = arm(ArmRequest {
+            container: &container,
+            observation: &obs,
+            now: now(),
+            store: &store,
+        })
+        .expect("arm");
+
+        let persisted = store
+            .load(&container.host, container.runtime, &container.id)
+            .expect("load")
+            .expect("record present");
+        assert_eq!(persisted.last_observed_state, Some(ContainerState::Running));
+    }
+
+    #[test]
+    fn arm_injects_persisted_prev_state_into_lxc_fold() {
+        // Compare two stores side-by-side at the same tick: one with
+        // a persisted prev=Exited (should trip the fold's
+        // stopped→running detection), one fresh (no prev, no
+        // transition detected). The fresh-store row isolates arm()'s
+        // unconditional Proceed-time push from the fold's overlay-
+        // driven push, so the difference between the two row sizes
+        // proves the overlay was applied.
+        let running = mk_lxc(ContainerState::Running);
+
+        let fresh_store = MemoryStore::new();
+        let _ = arm(ArmRequest {
+            container: &running,
+            observation: &HostObservation::default(),
+            now: now(),
+            store: &fresh_store,
+        })
+        .expect("fresh arm");
+
+        let primed_store = MemoryStore::new();
+        let mut seed = BreakerRecord::fresh(&running.host, running.runtime, &running.id);
+        seed.last_observed_state = Some(ContainerState::Exited);
+        primed_store.save(&seed).expect("seed");
+        let _ = arm(ArmRequest {
+            container: &running,
+            observation: &HostObservation::default(),
+            now: now(),
+            store: &primed_store,
+        })
+        .expect("primed arm");
+
+        let fresh = fresh_store
+            .load(&running.host, running.runtime, &running.id)
+            .expect("load")
+            .expect("fresh record")
+            .recent_starts
+            .len();
+        let primed = primed_store
+            .load(&running.host, running.runtime, &running.id)
+            .expect("load")
+            .expect("primed record")
+            .recent_starts
+            .len();
+        assert_eq!(
+            primed,
+            fresh + 1,
+            "overlayed prev_state=Exited should produce exactly one extra fold push (fresh={fresh}, primed={primed})"
+        );
+    }
+
+    #[test]
+    fn arm_respects_caller_supplied_prev_state_when_set() {
+        // Pre-seed the persisted record with prev=Running so an
+        // overlay would produce running→running (no transition). The
+        // caller forces prev=Exited; this must drive the fold even
+        // though the persisted state disagrees. We sanity-check by
+        // running the same scenario without the override and asserting
+        // the fold did *not* fire.
+        let running = mk_lxc(ContainerState::Running);
+        let seed_with = || {
+            let s = MemoryStore::new();
+            let mut r = BreakerRecord::fresh(&running.host, running.runtime, &running.id);
+            r.last_observed_state = Some(ContainerState::Running);
+            s.save(&r).expect("seed");
+            s
+        };
+
+        let no_override = seed_with();
+        let _ = arm(ArmRequest {
+            container: &running,
+            observation: &HostObservation::default(),
+            now: now(),
+            store: &no_override,
+        })
+        .expect("no override arm");
+
+        let with_override = seed_with();
+        let obs = HostObservation {
+            lxc_journal_tail: None,
+            lxc_previous_state: Some(ContainerState::Exited),
+        };
+        let _ = arm(ArmRequest {
+            container: &running,
+            observation: &obs,
+            now: now(),
+            store: &with_override,
+        })
+        .expect("override arm");
+
+        let no_count = no_override
+            .load(&running.host, running.runtime, &running.id)
+            .expect("load")
+            .expect("record")
+            .recent_starts
+            .len();
+        let with_count = with_override
+            .load(&running.host, running.runtime, &running.id)
+            .expect("load")
+            .expect("record")
+            .recent_starts
+            .len();
+        assert_eq!(
+            with_count,
+            no_count + 1,
+            "caller's prev_state=Exited should produce exactly one extra fold push over the no-override baseline (no_override={no_count}, with_override={with_count})"
+        );
     }
 
     #[test]

@@ -46,6 +46,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, RwLock};
 use thiserror::Error;
 
+use crate::breaker::HostObservation;
+
 pub mod adapters;
 pub mod breaker;
 pub mod reconciler;
@@ -362,6 +364,19 @@ pub trait RuntimeAdapter: Send + Sync {
     /// can't honor `tail` cheaply (e.g. lxc) MAY return more, but never less
     /// than requested when more are available.
     async fn logs(&self, id: &str, tail: LogTail) -> Result<String, AdapterError>;
+
+    /// Gather a per-container [`HostObservation`] for the breaker. The
+    /// default returns an empty observation — only adapters whose
+    /// runtime carries breaker-relevant out-of-band signals
+    /// (currently lxc's `journalctl` tail) override it. `lxc_previous_state`
+    /// is *not* the adapter's concern: the breaker owns cross-tick state
+    /// in [`crate::breaker::BreakerRecord::last_observed_state`] and
+    /// injects it inside [`crate::breaker::arm`]. Errors gathering the
+    /// observation are intentionally swallowed in the override (logged
+    /// via `tracing`) — a missing journal tail must not block a start.
+    async fn observe(&self, _container: &Container) -> HostObservation {
+        HostObservation::default()
+    }
 }
 
 // ── Runtime detection ──────────────────────────────────────────────────────
