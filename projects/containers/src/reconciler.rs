@@ -576,9 +576,10 @@ async fn run_start_pipeline(
     //   adapters don't surface `exit_code`, so the docker-style "exited
     //   non-zero" gate would dead-letter every LXC start and leave all
     //   the observation/journal/transition plumbing dormant. Per-tick
-    //   observation for *running* LXC happens in the reconcile dispatch
-    //   loop's `NoOp` branch (see `observe_lxc_if_auto_restart`); this
-    //   arm is the "we're about to issue a start" arm.
+    //   observation for *running* LXC happens inline in the reconcile
+    //   dispatch loop's `NoOp` branch (search for `arm_on_every_start`
+    //   in [`reconcile`]); this arm is the "we're about to issue a
+    //   start" arm.
     // * **podman / nspawn** — no classifier yet; skip.
     //
     // Dry runs skip the gate entirely — arming would mutate the

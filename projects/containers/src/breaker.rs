@@ -476,27 +476,39 @@ pub struct ArmRequest<'a> {
     pub now: DateTime<Utc>,
     pub store: &'a dyn BreakerStore,
     /// `true` when the reconciler is about to call `adapter.start()` on a
-    /// `Proceed` decision — the breaker stamps `last_orca_start_at` and
-    /// (for docker) pushes `recent_starts`. `false` means observe-only:
-    /// fold the observation, classify, persist `last_observed_state`, but
-    /// don't mint a start event. LXC arms every tick in observe mode; the
-    /// `recent_starts` count comes from `fold_lxc`'s next-tick transition
-    /// detection, not from arm itself.
+    /// `Proceed` decision — the breaker stamps `last_orca_start_at` and,
+    /// for runtimes where the fold doesn't own start counting (see
+    /// `fold_owns_start_count`), pushes `recent_starts`. `false` means
+    /// observe-only: fold the observation, classify, persist
+    /// `last_observed_state`, but don't mint a start event. LXC arms
+    /// every tick in observe mode (see `arm_on_every_start`); its
+    /// `recent_starts` count comes from `fold_lxc`'s next-tick
+    /// transition detection, not from arm itself.
     pub initiating_start: bool,
 }
 
-/// Ask the breaker whether the reconciler should proceed with a
-/// tentative start. Loads-or-fresh, folds the current observation into
-/// the persisted sliding window, classifies, persists, returns the
-/// decision.
+/// Ask the breaker whether the reconciler should proceed with a start
+/// (initiating) or just record an observation. Loads-or-fresh, folds
+/// the current observation into the persisted sliding window,
+/// classifies, persists, returns the decision.
 ///
-/// On `Hold`: stamps `status = Held`, `held_reason`, `held_since`,
-/// `notified_at` (so the reconciler can suppress repeat alerts on the
-/// next tick).
+/// On `Hold`: stamps `status = Held`, `held_reason`, `held_since`.
+/// `notified_at` is left `None` here — the caller stamps it via
+/// [`mark_notified`] after a successful notification dispatch, so a
+/// dropped alert can be retried on the next tick.
 ///
-/// On `Proceed`: leaves `status = Watching` (or whatever it was), pushes
-/// `now` onto `recent_starts`, refreshes `restart_count_snapshot` to the
-/// current `Container.restart_count`.
+/// On `Proceed`:
+/// - `recent_starts` gets a fresh `now` only when `initiating_start`
+///   is true AND the runtime relies on the reconciler to inject the
+///   start intent (`!fold_owns_start_count(runtime)`). LXC's fold
+///   counts observed transitions on its own; pushing here would
+///   double-count.
+/// - `last_orca_start_at` is stamped only when `initiating_start` is
+///   true — observation-only ticks must not move the anchor used by
+///   the docker fast-reexit classifier.
+/// - `restart_count_snapshot` is refreshed every Proceed; it matters
+///   only for `fold_docker` (LXC's `restart_count` is always 0) but
+///   keeping the refresh unconditional keeps the bookkeeping uniform.
 pub fn arm(req: ArmRequest<'_>) -> Result<BreakerDecision, BreakerError> {
     let container = req.container;
     let mut record = match req
