@@ -56,6 +56,8 @@ use syn::{Data, DeriveInput, Fields};
 mod endpoint_resource;
 #[cfg(not(test))]
 mod endpoint_resource_attr;
+#[cfg(not(test))]
+mod plugin_struct;
 
 /// `#[endpoint_resource(plugin = "...")]` — annotate a struct to generate the
 /// full 5-verb endpoint-registry surface with zero SQL in the plugin.
@@ -80,6 +82,17 @@ pub fn endpoint_resource(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
+}
+
+/// `#[plugin_struct]` — inject the standard plugin-author derive set with
+/// crate paths anchored to `::plugin_toolkit::*`, so plugins do not need
+/// direct deps on serde/schemars/clap. See `plugin_struct.rs`.
+#[cfg(not(test))]
+#[proc_macro_attribute]
+pub fn plugin_struct(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let attr = parse_macro_input!(attr as plugin_struct::PluginStructAttr);
+    let item = parse_macro_input!(item as syn::DeriveInput);
+    plugin_struct::expand(attr, item).into()
 }
 
 /// Parsed contents of `#[orca_tool(domain = "...", verb = "...", cli = ident)]`.
@@ -474,7 +487,7 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
             }
 
             ::macro_runtime::inventory::submit! {
-                ::macro_runtime::db_types::ReplicatedRegistration {
+                ::macro_runtime::ReplicatedRegistration {
                     name: #table,
                     export: #ty::__replicate_export,
                     merge: #ty::__replicate_merge,

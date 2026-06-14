@@ -20,7 +20,6 @@ path = "src/lib.rs"
 [dependencies]
 # Workspace crates the macros emit paths into.
 contract    = { path = "../contract" }
-db-types    = { path = "../db-types" }
 derive      = { path = "../derive" }
 dispatch    = { path = "../dispatch" }
 

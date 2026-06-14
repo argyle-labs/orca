@@ -7,32 +7,18 @@ edition.workspace = true
 name = "ntfy"
 path = "src/lib.rs"
 
+# Plugin reaches EVERY orca capability — including the notifications
+# domain it registers against — through `plugin_toolkit::prelude::*`.
+# Only deps allowed:
+#   1. plugin-toolkit (the gateway, exposes notifications + http + db)
+#   2. niche transport bits not common enough to live in the toolkit
 [dependencies]
-macro-runtime = { path = "../../macro-runtime" }
-db-types = { path = "../../db-types" }
-serde         = { workspace = true }
-serde_json    = { workspace = true }
-thiserror     = { workspace = true }
-urlencoding   = { workspace = true }
-async-trait   = { workspace = true }
-anyhow        = { workspace = true }
-schemars      = { workspace = true }
-inventory     = { workspace = true }
-utils         = { path = "../../utils" }
-notifications = { path = "../../notifications" }
-db            = { path = "../../db" }
-dispatch      = { path = "../../dispatch" }
-contract      = { path = "../../contract", default-features = false }
-derive        = { path = "../../derive" }
-rusqlite      = { workspace = true }
 plugin-toolkit = { path = "../../plugin-toolkit" }
-tracing       = { workspace = true }
-
-clap          = { workspace = true }
+urlencoding    = { workspace = true }
 
 [dev-dependencies]
-tokio       = { workspace = true }
-wiremock    = "0.6"
+tokio    = { workspace = true }
+wiremock = "0.6"
 
 [lints]
 workspace = true

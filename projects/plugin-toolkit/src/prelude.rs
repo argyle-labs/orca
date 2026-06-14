@@ -26,7 +26,7 @@
 pub use contract::{JsonAny, ToolCtx};
 
 // ── Macros emitted into plugin scope ────────────────────────────────────
-pub use derive::{endpoint_resource, orca_tool};
+pub use derive::{endpoint_resource, orca_tool, plugin_struct};
 
 // ── serde + schemars + clap derives + their support types ──────────────
 pub use clap;
@@ -39,6 +39,8 @@ pub use anyhow::{Context, Result, anyhow, bail};
 
 // ── async-trait for hand-written async tools ───────────────────────────
 pub use async_trait::async_trait;
+pub use thiserror;
+pub use tracing;
 
 // ── Toolkit runtime helpers ────────────────────────────────────────────
 pub use crate::runtime;

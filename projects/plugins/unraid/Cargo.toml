@@ -23,7 +23,7 @@ tracing     = { workspace = true }
 clap        = { workspace = true }
 graphql_client = { workspace = true }
 utils    = { path = "../../utils" }
-graphql  = { path = "../graphql" }
+graphql  = { path = "../../graphql" }
 contract = { path = "../../contract", default-features = false }
 derive   = { path = "../../derive" }
 dispatch = { path = "../../dispatch" }

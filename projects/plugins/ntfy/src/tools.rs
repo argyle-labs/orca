@@ -38,7 +38,7 @@ pub struct NtfyEndpoint {
 // ntfy.send — raw send via a registered endpoint
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+#[plugin_struct(args)]
 #[serde(rename_all = "camelCase")]
 pub struct NtfySendArgs {
     /// Registered endpoint name (see `ntfy.list`).
@@ -52,7 +52,7 @@ pub struct NtfySendArgs {
     pub title: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[plugin_struct]
 #[serde(rename_all = "camelCase")]
 pub struct NtfySendOutput {
     pub status: u16,

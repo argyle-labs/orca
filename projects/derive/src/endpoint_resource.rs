@@ -431,15 +431,15 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         }
 
         // ── Schema fragment ──────────────────────────────────────────────
-        ::macro_runtime::inventory::submit! {
-            ::macro_runtime::db_types::SchemaFragment { name: #table, sql: #create_table_sql }
+        ::plugin_toolkit::inventory::submit! {
+            ::plugin_toolkit::SchemaFragment { name: #table, sql: #create_table_sql }
         }
 
         // ── DB CRUD module ───────────────────────────────────────────────
         pub mod endpoint_db {
             use super::#row_ident;
-            use ::macro_runtime::anyhow::Result;
-            use ::macro_runtime::rusqlite::{Connection, OptionalExtension};
+            use ::plugin_toolkit::anyhow::Result;
+            use ::plugin_toolkit::rusqlite::{Connection, OptionalExtension};
 
             pub fn list(conn: &Connection) -> Result<::std::vec::Vec<#row_ident>> {
                 let mut stmt = conn.prepare(#list_sql)?;
@@ -450,13 +450,13 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                         enabled: row.get::<_, i32>(#row_enabled_idx)? != 0,
                     })
                 })?;
-                rows.collect::<::macro_runtime::rusqlite::Result<::std::vec::Vec<_>>>().map_err(Into::into)
+                rows.collect::<::plugin_toolkit::rusqlite::Result<::std::vec::Vec<_>>>().map_err(Into::into)
             }
 
             pub fn get(conn: &Connection, name: &str) -> Result<::std::option::Option<#row_ident>> {
                 conn.query_row(
                     #get_sql,
-                    ::macro_runtime::rusqlite::params![name],
+                    ::plugin_toolkit::rusqlite::params![name],
                     |row| Ok(#row_ident {
                         name: row.get(#row_name_idx)?,
                         #( #row_field_gets )*
@@ -468,7 +468,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             pub fn insert(conn: &Connection, ep: &#row_ident) -> Result<()> {
                 conn.execute(
                     #insert_sql,
-                    ::macro_runtime::rusqlite::params![ep.name, #( ep.#field_idents, )* ep.enabled],
+                    ::plugin_toolkit::rusqlite::params![ep.name, #( ep.#field_idents, )* ep.enabled],
                 )?;
                 Ok(())
             }
@@ -476,7 +476,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             pub fn update(conn: &Connection, ep: &#row_ident) -> Result<bool> {
                 let n = conn.execute(
                     #update_sql,
-                    ::macro_runtime::rusqlite::params![ep.name, #( ep.#field_idents, )* ep.enabled],
+                    ::plugin_toolkit::rusqlite::params![ep.name, #( ep.#field_idents, )* ep.enabled],
                 )?;
                 Ok(n > 0)
             }
@@ -484,7 +484,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             pub fn upsert(conn: &Connection, ep: &#row_ident) -> Result<()> {
                 conn.execute(
                     #upsert_sql,
-                    ::macro_runtime::rusqlite::params![ep.name, #( ep.#field_idents, )* ep.enabled],
+                    ::plugin_toolkit::rusqlite::params![ep.name, #( ep.#field_idents, )* ep.enabled],
                 )?;
                 Ok(())
             }
@@ -492,14 +492,16 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             pub fn remove(conn: &Connection, name: &str) -> Result<bool> {
                 let n = conn.execute(
                     #delete_sql,
-                    ::macro_runtime::rusqlite::params![name],
+                    ::plugin_toolkit::rusqlite::params![name],
                 )?;
                 Ok(n > 0)
             }
         }
 
         // ── Public-side entry (no secrets) ───────────────────────────────
-        #[derive(::macro_runtime::serde::Serialize, ::macro_runtime::serde::Deserialize, ::macro_runtime::schemars::JsonSchema, Debug, Clone)]
+        #[derive(::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema, Debug, Clone)]
+        #[serde(crate = "::plugin_toolkit::serde")]
+        #[schemars(crate = "::plugin_toolkit::schemars")]
         #[serde(rename_all = "camelCase")]
         pub struct #entry_ident {
             pub name: ::std::string::String,
@@ -508,17 +510,21 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         }
 
         // ── list ─────────────────────────────────────────────────────────
-        #[derive(::macro_runtime::clap::Args, ::macro_runtime::serde::Serialize, ::macro_runtime::serde::Deserialize, ::macro_runtime::schemars::JsonSchema, Default)]
+        #[derive(::plugin_toolkit::clap::Args, ::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema, Default)]
+        #[serde(crate = "::plugin_toolkit::serde")]
+        #[schemars(crate = "::plugin_toolkit::schemars")]
         #[serde(default)]
         pub struct #list_args {}
 
-        #[derive(::macro_runtime::serde::Serialize, ::macro_runtime::serde::Deserialize, ::macro_runtime::schemars::JsonSchema, Default)]
+        #[derive(::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema, Default)]
+        #[serde(crate = "::plugin_toolkit::serde")]
+        #[schemars(crate = "::plugin_toolkit::schemars")]
         #[serde(default)]
         pub struct #list_output { pub endpoints: ::std::vec::Vec<#entry_ident> }
 
         #[doc = #list_doc]
-        #[::macro_runtime::derive::orca_tool(domain = #plugin_str_lit, verb = "list")]
-        async fn #list_fn(_args: #list_args, _ctx: &::macro_runtime::contract::ToolCtx) -> ::macro_runtime::anyhow::Result<#list_output> {
+        #[::plugin_toolkit::derive::orca_tool(domain = #plugin_str_lit, verb = "list")]
+        async fn #list_fn(_args: #list_args, _ctx: &::plugin_toolkit::contract::ToolCtx) -> ::plugin_toolkit::anyhow::Result<#list_output> {
             let conn = #toolkit::runtime::open_db()?;
             let endpoints = endpoint_db::list(&conn)?
                 .into_iter()
@@ -532,15 +538,19 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         }
 
         // ── detail ───────────────────────────────────────────────────────
-        #[derive(::macro_runtime::clap::Args, ::macro_runtime::serde::Serialize, ::macro_runtime::serde::Deserialize, ::macro_runtime::schemars::JsonSchema)]
+        #[derive(::plugin_toolkit::clap::Args, ::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema)]
+        #[serde(crate = "::plugin_toolkit::serde")]
+        #[schemars(crate = "::plugin_toolkit::schemars")]
         pub struct #detail_args { #[arg(long)] pub name: ::std::string::String }
 
-        #[derive(::macro_runtime::serde::Serialize, ::macro_runtime::serde::Deserialize, ::macro_runtime::schemars::JsonSchema)]
+        #[derive(::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema)]
+        #[serde(crate = "::plugin_toolkit::serde")]
+        #[schemars(crate = "::plugin_toolkit::schemars")]
         pub struct #detail_output { pub endpoint: #entry_ident }
 
         #[doc = #detail_doc]
-        #[::macro_runtime::derive::orca_tool(domain = #plugin_str_lit, verb = "detail")]
-        async fn #detail_fn(args: #detail_args, _ctx: &::macro_runtime::contract::ToolCtx) -> ::macro_runtime::anyhow::Result<#detail_output> {
+        #[::plugin_toolkit::derive::orca_tool(domain = #plugin_str_lit, verb = "detail")]
+        async fn #detail_fn(args: #detail_args, _ctx: &::plugin_toolkit::contract::ToolCtx) -> ::plugin_toolkit::anyhow::Result<#detail_output> {
             let conn = #toolkit::runtime::open_db()?;
             let row = endpoint_db::get(&conn, &args.name)?
                 .ok_or_else(|| #toolkit::runtime::missing_row_error(#plugin_str_lit, &args.name))?;
@@ -552,18 +562,22 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         }
 
         // ── create ───────────────────────────────────────────────────────
-        #[derive(::macro_runtime::clap::Args, ::macro_runtime::serde::Serialize, ::macro_runtime::serde::Deserialize, ::macro_runtime::schemars::JsonSchema)]
+        #[derive(::plugin_toolkit::clap::Args, ::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema)]
+        #[serde(crate = "::plugin_toolkit::serde")]
+        #[schemars(crate = "::plugin_toolkit::schemars")]
         pub struct #create_args {
             #[arg(long)] pub name: ::std::string::String,
             #( #create_field_decls )*
         }
 
-        #[derive(::macro_runtime::serde::Serialize, ::macro_runtime::serde::Deserialize, ::macro_runtime::schemars::JsonSchema)]
+        #[derive(::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema)]
+        #[serde(crate = "::plugin_toolkit::serde")]
+        #[schemars(crate = "::plugin_toolkit::schemars")]
         pub struct #create_output { pub endpoint: #entry_ident }
 
         #[doc = #create_doc]
-        #[::macro_runtime::derive::orca_tool(domain = #plugin_str_lit, verb = "create")]
-        async fn #create_fn(args: #create_args, _ctx: &::macro_runtime::contract::ToolCtx) -> ::macro_runtime::anyhow::Result<#create_output> {
+        #[::plugin_toolkit::derive::orca_tool(domain = #plugin_str_lit, verb = "create")]
+        async fn #create_fn(args: #create_args, _ctx: &::plugin_toolkit::contract::ToolCtx) -> ::plugin_toolkit::anyhow::Result<#create_output> {
             let row = #row_ident {
                 name: args.name.clone(),
                 #( #create_row_fields )*
@@ -580,7 +594,9 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         }
 
         // ── update ───────────────────────────────────────────────────────
-        #[derive(::macro_runtime::clap::Args, ::macro_runtime::serde::Serialize, ::macro_runtime::serde::Deserialize, ::macro_runtime::schemars::JsonSchema, Default)]
+        #[derive(::plugin_toolkit::clap::Args, ::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema, Default)]
+        #[serde(crate = "::plugin_toolkit::serde")]
+        #[schemars(crate = "::plugin_toolkit::schemars")]
         #[serde(default)]
         pub struct #update_args {
             #[arg(long)] pub name: ::std::string::String,
@@ -588,15 +604,17 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             #[arg(long)] pub enabled: Option<bool>,
         }
 
-        #[derive(::macro_runtime::serde::Serialize, ::macro_runtime::serde::Deserialize, ::macro_runtime::schemars::JsonSchema)]
+        #[derive(::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema)]
+        #[serde(crate = "::plugin_toolkit::serde")]
+        #[schemars(crate = "::plugin_toolkit::schemars")]
         pub struct #update_output {
             pub endpoint: #entry_ident,
             pub applied: ::std::vec::Vec<::std::string::String>,
         }
 
         #[doc = #update_doc]
-        #[::macro_runtime::derive::orca_tool(domain = #plugin_str_lit, verb = "update")]
-        async fn #update_fn(args: #update_args, _ctx: &::macro_runtime::contract::ToolCtx) -> ::macro_runtime::anyhow::Result<#update_output> {
+        #[::plugin_toolkit::derive::orca_tool(domain = #plugin_str_lit, verb = "update")]
+        async fn #update_fn(args: #update_args, _ctx: &::plugin_toolkit::contract::ToolCtx) -> ::plugin_toolkit::anyhow::Result<#update_output> {
             let conn = #toolkit::runtime::open_db()?;
             let mut row = endpoint_db::get(&conn, &args.name)?
                 .ok_or_else(|| #toolkit::runtime::missing_row_error(#plugin_str_lit, &args.name))?;
@@ -607,10 +625,10 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                 applied.push("enabled".to_string());
             }
             if applied.is_empty() {
-                ::macro_runtime::anyhow::bail!("no fields to update; pass at least one flag");
+                ::plugin_toolkit::anyhow::bail!("no fields to update; pass at least one flag");
             }
             let changed = endpoint_db::update(&conn, &row)?;
-            if !changed { ::macro_runtime::anyhow::bail!("update reported no row change for `{}`", row.name); }
+            if !changed { ::plugin_toolkit::anyhow::bail!("update reported no row change for `{}`", row.name); }
             Ok(#update_output {
                 endpoint: #entry_ident {
                     name: row.name.clone(),
@@ -622,15 +640,19 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         }
 
         // ── delete ───────────────────────────────────────────────────────
-        #[derive(::macro_runtime::clap::Args, ::macro_runtime::serde::Serialize, ::macro_runtime::serde::Deserialize, ::macro_runtime::schemars::JsonSchema)]
+        #[derive(::plugin_toolkit::clap::Args, ::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema)]
+        #[serde(crate = "::plugin_toolkit::serde")]
+        #[schemars(crate = "::plugin_toolkit::schemars")]
         pub struct #delete_args { #[arg(long)] pub name: ::std::string::String }
 
-        #[derive(::macro_runtime::serde::Serialize, ::macro_runtime::serde::Deserialize, ::macro_runtime::schemars::JsonSchema)]
+        #[derive(::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema)]
+        #[serde(crate = "::plugin_toolkit::serde")]
+        #[schemars(crate = "::plugin_toolkit::schemars")]
         pub struct #delete_output { pub name: ::std::string::String, pub changed: bool }
 
         #[doc = #delete_doc]
-        #[::macro_runtime::derive::orca_tool(domain = #plugin_str_lit, verb = "delete")]
-        async fn #delete_fn(args: #delete_args, _ctx: &::macro_runtime::contract::ToolCtx) -> ::macro_runtime::anyhow::Result<#delete_output> {
+        #[::plugin_toolkit::derive::orca_tool(domain = #plugin_str_lit, verb = "delete")]
+        async fn #delete_fn(args: #delete_args, _ctx: &::plugin_toolkit::contract::ToolCtx) -> ::plugin_toolkit::anyhow::Result<#delete_output> {
             let conn = #toolkit::runtime::open_db()?;
             let changed = endpoint_db::remove(&conn, &args.name)?;
             Ok(#delete_output { name: args.name, changed })

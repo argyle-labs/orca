@@ -8,7 +8,7 @@
 //! [[feedback-plugin-toolkit-max-power-min-boilerplate]].
 
 use anyhow::Result;
-use db_types::SchemaFragment;
+use macro_runtime::SchemaFragment;
 use rusqlite::Connection;
 
 /// Apply every registered fragment. Idempotent — each fragment uses

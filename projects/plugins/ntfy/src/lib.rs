@@ -18,9 +18,8 @@ use std::sync::Arc;
 
 use crate::backend::NtfyBackend;
 
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
-use utils::http::{Client as HttpClient, HttpError};
+use plugin_toolkit::http::{Client as HttpClient, HttpError};
+use plugin_toolkit::prelude::*;
 
 /// Stable connection config. Cheap to clone (`base` + `topic` + optional
 /// bearer token).
@@ -45,10 +44,31 @@ impl Config {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum NtfyError {
-    #[error(transparent)]
-    Http(#[from] HttpError),
+    Http(HttpError),
+}
+
+impl ::std::fmt::Display for NtfyError {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match self {
+            NtfyError::Http(e) => ::std::fmt::Display::fmt(e, f),
+        }
+    }
+}
+
+impl ::std::error::Error for NtfyError {
+    fn source(&self) -> Option<&(dyn ::std::error::Error + 'static)> {
+        match self {
+            NtfyError::Http(e) => Some(e),
+        }
+    }
+}
+
+impl From<HttpError> for NtfyError {
+    fn from(e: HttpError) -> Self {
+        NtfyError::Http(e)
+    }
 }
 
 /// Per-message attributes. Optional; only `message` is required.
@@ -68,7 +88,8 @@ pub struct Message<'a> {
 }
 
 /// ntfy priority levels. Wire format is the lowercase name.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[plugin_struct]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Priority {
     Min,
@@ -90,7 +111,8 @@ impl Priority {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[plugin_struct]
+#[derive(Debug, Clone)]
 pub struct SendResult {
     pub status: u16,
     pub ok: bool,
@@ -186,14 +208,14 @@ pub fn register_endpoint(row: &tools::EndpointRow) {
         cfg = cfg.with_token(t.clone());
     }
     let backend = NtfyBackend::new(row.name.clone(), Client::new(cfg));
-    notifications::register_backend(Arc::new(backend));
+    plugin_toolkit::notifications::register_backend(Arc::new(backend));
 }
 
 /// Daemon startup hook — load every enabled ntfy endpoint and register it as
 /// a notifications backend. Non-fatal on db read errors so notifications
 /// outages don't gate daemon boot.
 pub fn bootstrap() {
-    let conn = match db::open_default() {
+    let conn = match plugin_toolkit::db::open_default() {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("ntfy bootstrap: db open failed: {e}");

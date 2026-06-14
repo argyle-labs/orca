@@ -50,7 +50,6 @@ pub use ::async_trait;
 pub use ::clap;
 pub use ::contract;
 pub use ::db;
-pub use ::db_types;
 pub use ::derive;
 pub use ::dispatch;
 pub use ::inventory;
@@ -58,7 +57,13 @@ pub use ::rusqlite;
 pub use ::schemars;
 pub use ::serde;
 pub use ::serde_json;
+pub use ::thiserror;
 pub use ::tokio;
+
+// Macro-runtime registration target types (re-exported so endpoint_resource!
+// emissions resolve through plugin_toolkit, not macro_runtime directly).
+pub use ::macro_runtime::{ReplicatedRegistration, SchemaFragment};
+pub use ::tracing;
 
 // ── Runtime primitives ──────────────────────────────────────────────────
 //
@@ -86,4 +91,16 @@ pub mod graphql {
 /// next slice on top of this primitive.
 pub mod openapi {
     pub use ::openapi::*;
+}
+
+// ── Domain registration crates ──────────────────────────────────────────
+//
+// Plugins register their capabilities with a domain crate. ntfy/email/
+// slack register with `notifications`; docker/dockge/lxc adapters
+// register with `containers`; proxmox/unraid VM adapters register with
+// `vms`. The domain crate owns the trait + dispatcher; plugins reach it
+// only through the toolkit, never via a direct `notifications`/`containers`
+// path-dep.
+pub mod notifications {
+    pub use ::notifications::*;
 }

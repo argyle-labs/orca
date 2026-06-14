@@ -19,19 +19,22 @@ rusqlite    = { workspace = true }
 schemars    = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
+thiserror   = { workspace = true }
 tokio       = { workspace = true }
+tracing     = { workspace = true }
 
 # Internal infra re-exported (trait anchors, macro definitions, db).
 contract    = { path = "../contract", default-features = false }
 db          = { package = "db", path = "../db" }
-db-types    = { path = "../db-types" }
 derive      = { path = "../derive" }
 dispatch    = { path = "../dispatch" }
+macro-runtime = { path = "../macro-runtime" }
 
 # Runtime primitives — plugins reach these through the toolkit, never directly.
 utils       = { path = "../utils" }
-graphql     = { path = "../plugins/graphql" }
-openapi     = { path = "../plugins/openapi" }
+graphql     = { path = "../graphql" }
+notifications = { path = "../notifications" }
+openapi     = { path = "../openapi" }
 
 [lints]
 workspace = true

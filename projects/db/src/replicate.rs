@@ -32,7 +32,7 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use anyhow::Result;
-use db_types::ReplicatedRegistration;
+use macro_runtime::ReplicatedRegistration;
 use rusqlite::Connection;
 use serde_json::Value;
 use tokio::sync::broadcast;
