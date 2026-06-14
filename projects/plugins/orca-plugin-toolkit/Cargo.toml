@@ -24,5 +24,10 @@ derive      = { path = "../../derive" }
 db          = { package = "db", path = "../../db" }
 rusqlite    = { workspace = true }
 
+# Runtime primitives — plugins reach these through the toolkit, never directly.
+utils       = { path = "../../utils" }
+graphql     = { path = "../graphql" }
+openapi     = { path = "../openapi" }
+
 [lints]
 workspace = true

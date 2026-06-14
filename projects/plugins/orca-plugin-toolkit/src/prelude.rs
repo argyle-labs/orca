@@ -42,3 +42,10 @@ pub use async_trait::async_trait;
 
 // ── Toolkit runtime helpers ────────────────────────────────────────────
 pub use crate::runtime;
+
+// ── Ecosystem transport primitives ─────────────────────────────────────
+// Plugins reach HTTP / GraphQL / OpenAPI through the toolkit so transport
+// bug fixes land once and propagate. After `use orca_plugin_toolkit::prelude::*;`
+// these are in scope as `http::Client`, `graphql::Client`, `openapi::parse_str`,
+// etc. — never `utils::http::…` or `::graphql::…` directly.
+pub use crate::{graphql, http, openapi};

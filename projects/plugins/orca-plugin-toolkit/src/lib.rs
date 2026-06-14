@@ -33,3 +33,31 @@ pub mod runtime;
 // `derive` crate (alongside `#[orca_tool]` and `#[derive(Replicated)]`).
 // Re-exported here so plugin authors only depend on the toolkit crate.
 pub use derive::endpoint_resource;
+
+// ── Runtime primitives ──────────────────────────────────────────────────
+//
+// Per [[feedback-plugin-toolkit-is-the-gateway]], plugins reach every
+// orca-side capability through the toolkit. These submodules re-export the
+// underlying crates so a plugin's only orca-side import is
+// `use orca_plugin_toolkit::prelude::*;` — `http`, `graphql`, `openapi`
+// are then in scope as namespaced modules.
+
+/// HTTP transport. Re-export of `utils::http` so HTTP bug fixes propagate
+/// to every plugin from one place.
+pub mod http {
+    pub use utils::http::*;
+}
+
+/// GraphQL client + envelope types. Re-export of the `graphql` crate so
+/// plugins talk GraphQL transport without importing the crate directly.
+pub mod graphql {
+    pub use ::graphql::*;
+}
+
+/// OpenAPI spec parsing + normalization helpers. Re-export of the
+/// `openapi` crate. Typed-client codegen (progenitor) runs in plugin
+/// build scripts — a build-time helper for the codegen pipeline is the
+/// next slice on top of this primitive.
+pub mod openapi {
+    pub use ::openapi::*;
+}
