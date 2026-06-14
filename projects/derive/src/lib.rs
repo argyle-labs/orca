@@ -1096,9 +1096,8 @@ mod tests {
     #[test]
     fn tool_attr_defaults_crate_path_to_plugin_toolkit() {
         let attr = parse_attr(quote!(domain = "x", verb = "y")).unwrap();
-        let rendered = quote!(#{ &attr.crate_path }).to_string();
-        // Quote interpolation of `&syn::Path` for `::plugin_toolkit` renders
-        // with spaces between the leading `::` and the segment ident.
+        let crate_path = &attr.crate_path;
+        let rendered = quote!(#crate_path).to_string();
         assert!(
             rendered.contains("plugin_toolkit"),
             "expected default crate_path to be ::plugin_toolkit, got: {rendered}"
@@ -1108,7 +1107,8 @@ mod tests {
     #[test]
     fn tool_attr_parses_crate_path_override() {
         let attr = parse_attr(quote!(domain = "x", verb = "y", crate = ::macro_runtime)).unwrap();
-        let rendered = quote!(#{ &attr.crate_path }).to_string();
+        let crate_path = &attr.crate_path;
+        let rendered = quote!(#crate_path).to_string();
         assert!(
             rendered.contains("macro_runtime"),
             "expected crate_path to be ::macro_runtime, got: {rendered}"
