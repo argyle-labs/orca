@@ -62,7 +62,15 @@ async fn tick() -> Result<()> {
     let pod_id = pdb::get_pod_id(&conn)?.unwrap_or_else(|| "default".to_string());
 
     let unclaimed = pdb::list_unclaimed_discovery(&conn)?;
+    // GC the in-memory runtime cache: any peer whose row has been removed
+    // (by any path, not just forget_peer) gets its cached RuntimeFields
+    // evicted here. Bounds cardinality by live peers.
+    let active_ids: std::collections::HashSet<String> = pdb::list_peers(&conn)?
+        .into_iter()
+        .map(|p| p.peer_id)
+        .collect();
     drop(conn);
+    crate::runtime_cache::retain_only(&active_ids);
 
     for d in unclaimed {
         let conn = db::open_default()?;

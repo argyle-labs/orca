@@ -363,6 +363,19 @@ impl TcpTransport {
     /// Send a request and wait for the matching response. Multiple calls may
     /// be in flight concurrently — each gets its own id.
     pub async fn call(&self, method: &str, params: Option<Value>) -> Result<Response> {
+        self.call_with_timeout(method, params, DEFAULT_CALL_TIMEOUT)
+            .await
+    }
+
+    /// Same as [`call`] but with a caller-supplied timeout. Use this when the
+    /// peer can legitimately take longer than [`DEFAULT_CALL_TIMEOUT`] to
+    /// respond (e.g. tool-invocation round-trips that themselves block on I/O).
+    pub async fn call_with_timeout(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout: std::time::Duration,
+    ) -> Result<Response> {
         let id = self.alloc_id();
         let req = Request::new(id, method, params);
         let json = serde_json::to_vec(&req)?;
@@ -370,13 +383,24 @@ impl TcpTransport {
         let (tx, rx) = oneshot::channel();
         self.demux.pending.lock().unwrap().insert(id, tx);
 
-        // Send the frame. If write fails we have to clean up the pending entry.
         if let Err(e) = write_frame(&mut *self.writer.lock().await, &json).await {
             self.demux.pending.lock().unwrap().remove(&id);
             return Err(e);
         }
 
-        rx.await.context("transport closed before response arrived")
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(r) => r.context("transport closed before response arrived"),
+            Err(_) => {
+                // Peer ACKed the frame but never sent a Response. Drop the
+                // pending entry so the oneshot sender doesn't leak for the
+                // process lifetime if the peer eventually replies and we no
+                // longer care.
+                self.demux.pending.lock().unwrap().remove(&id);
+                Err(anyhow::anyhow!(
+                    "no response to {method} within {timeout:?}"
+                ))
+            }
+        }
     }
 
     /// Send a notification (fire-and-forget, no response expected).

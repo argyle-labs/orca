@@ -240,6 +240,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             result = https_serve => result?,
             result = http_serve => result?,
             _ = sigterm.recv() => {
+                system::periodic::shutdown();
                 https_handle.graceful_shutdown(Some(Duration::from_secs(1)));
                 http_handle.graceful_shutdown(Some(Duration::from_secs(1)));
             }
@@ -386,6 +387,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                 }
                 _ = sigterm.recv() => {
                     info!("[orca] daemon shutting down (while parked)");
+                    system::periodic::shutdown();
                     _ = utils::state::clear();
                     return Ok(());
                 }
