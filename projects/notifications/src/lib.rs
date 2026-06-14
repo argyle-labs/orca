@@ -471,7 +471,15 @@ struct GlobalState {
 /// routing rules' `send = [...]` entries match against.
 pub fn register_backend(backend: Arc<dyn Backend>) {
     let mut g = GLOBAL.write().expect("notifications global poisoned");
-    g.backends.push(backend);
+    let name = backend.name().to_string();
+    // Replace any existing entry with the same name. A backend plugin
+    // reconnecting (or a dev rebuild that re-bootstraps) would otherwise
+    // duplicate the entry and fan the same event out N times.
+    if let Some(slot) = g.backends.iter_mut().find(|b| b.name() == name) {
+        *slot = backend;
+    } else {
+        g.backends.push(backend);
+    }
 }
 
 /// Replace the routing config on the global dispatcher. `None` means

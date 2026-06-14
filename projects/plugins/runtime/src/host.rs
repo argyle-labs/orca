@@ -71,6 +71,12 @@ impl ContextRegistry {
     /// outgoing events without round-tripping through the registry.
     fn channel(&self, context_id: &str) -> broadcast::Sender<ContextEnvelope> {
         let mut map = self.inner.lock().unwrap();
+        // Sweep dead entries: senders whose subscribers have all dropped no
+        // longer fan anything out, so dropping them reclaims the 256-slot ring
+        // buffer. Bounds growth to one generation of orphaned context_ids per
+        // access. The requested entry is preserved even if it has zero
+        // receivers (publish-before-subscribe is allowed).
+        map.retain(|k, tx| k == context_id || tx.receiver_count() > 0);
         if let Some(tx) = map.get(context_id) {
             return tx.clone();
         }

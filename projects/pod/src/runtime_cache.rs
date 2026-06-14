@@ -33,6 +33,23 @@ pub fn get(peer_id: &str) -> Option<RuntimeFields> {
     CACHE.read().ok().and_then(|g| g.get(peer_id).cloned())
 }
 
+/// Drop a peer's cached runtime fields. Called from peer-retirement paths
+/// (pod kick / leave / forget) so cardinality stays bounded by live peers.
+pub fn remove(peer_id: &str) {
+    if let Ok(mut g) = CACHE.write() {
+        g.remove(peer_id);
+    }
+}
+
+/// Retain only the supplied peer ids; everything else is evicted. Called
+/// from the periodic peer reconcile to garbage-collect entries whose peer
+/// row has been removed without a direct retirement signal.
+pub fn retain_only(active_peer_ids: &std::collections::HashSet<String>) {
+    if let Ok(mut g) = CACHE.write() {
+        g.retain(|k, _| active_peer_ids.contains(k));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

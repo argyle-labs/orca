@@ -15,6 +15,14 @@ use unicode_width::UnicodeWidthStr;
 
 // ─── TUI App State ──────────────────────────────────────────────────────────
 
+/// Cap on retained scrollback lines. Older lines are dropped from the front
+/// so a long streaming session can't grow the buffer without bound. Chosen to
+/// comfortably exceed a few full-terminal screens of context.
+const MAX_LINES: usize = 10_000;
+
+/// Cap on retained input history entries.
+const MAX_HISTORY: usize = 1_000;
+
 pub struct TuiApp {
     /// Completed output lines.
     lines: Vec<String>,
@@ -70,6 +78,7 @@ impl TuiApp {
                 self.partial.push(ch);
             }
         }
+        self.trim_scrollback();
         if self.auto_scroll {
             self.scroll_to_bottom();
         }
@@ -81,8 +90,18 @@ impl TuiApp {
             self.lines.push(std::mem::take(&mut self.partial));
         }
         self.lines.push(line.into());
+        self.trim_scrollback();
         if self.auto_scroll {
             self.scroll_to_bottom();
+        }
+    }
+
+    /// Drop oldest lines once `MAX_LINES` is exceeded so long sessions don't
+    /// grow the scrollback Vec without bound.
+    fn trim_scrollback(&mut self) {
+        if self.lines.len() > MAX_LINES {
+            let excess = self.lines.len() - MAX_LINES;
+            self.lines.drain(..excess);
         }
     }
 
@@ -140,6 +159,10 @@ impl TuiApp {
                     return TuiAction::None;
                 }
                 self.history.push(text.clone());
+                if self.history.len() > MAX_HISTORY {
+                    let excess = self.history.len() - MAX_HISTORY;
+                    self.history.drain(..excess);
+                }
                 self.history_idx = None;
                 self.input.clear();
                 self.cursor = 0;

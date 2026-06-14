@@ -465,6 +465,7 @@ pub async fn forget(peer_id: &str) -> Result<crate::PodForgetOutput> {
 
     let conn = db::open_default()?;
     let rows_removed = pdb::forget_peer(&conn, peer_id)?;
+    crate::runtime_cache::remove(peer_id);
 
     Ok(crate::PodForgetOutput {
         peer_id: peer_id.to_string(),

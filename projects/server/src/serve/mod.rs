@@ -1142,6 +1142,10 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
     // require_auth → handler. Logging sits OUTSIDE auth so 401s are still
     // logged — otherwise rejected requests vanish silently from the log.
     let api = api
+        // Cap request bodies so a malicious or runaway client can't OOM the
+        // daemon by streaming an unbounded payload at a `Bytes`/raw-body
+        // extractor. Tool payloads are JSON and fit comfortably under this.
+        .layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024))
         .layer(axum::middleware::from_fn(middleware::require_tool_role))
         .layer(axum::middleware::from_fn(middleware::require_auth))
         .layer(axum::middleware::from_fn(middleware::log_requests))

@@ -244,14 +244,20 @@ impl Client {
         };
         // Dedupe key: same endpoint + same version + same live sha = one warn.
         let key = format!("{}|{}|{}", self.endpoint, version, live_sha);
+        let mut set = warned_keys().lock().expect("warned_keys poisoned");
+        // Cardinality is bounded in practice (few endpoints × few versions ×
+        // a couple of live shas), but a long-running daemon hitting many
+        // upstreams could grow this without bound. Bound it.
+        const MAX_WARNED_KEYS: usize = 256;
+        if set.len() >= MAX_WARNED_KEYS {
+            set.clear();
+        }
         if matches!(
             status,
             DriftStatus::Drifted { .. } | DriftStatus::Unsupported { .. }
-        ) && warned_keys()
-            .lock()
-            .expect("warned_keys poisoned")
-            .insert(key)
+        ) && set.insert(key)
         {
+            drop(set);
             match &status {
                 DriftStatus::Drifted { embedded_sha, .. } => tracing::warn!(
                     endpoint = %self.endpoint,

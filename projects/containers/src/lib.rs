@@ -519,10 +519,18 @@ static REGISTRY: LazyLock<RwLock<Vec<Arc<dyn RuntimeAdapter>>>> =
 /// calls this once per enabled adapter at daemon startup; tests call it from
 /// inside `serial_test`-guarded blocks with [`reset_registry`].
 pub fn register_adapter(adapter: Arc<dyn RuntimeAdapter>) {
-    REGISTRY
+    let mut reg = REGISTRY
         .write()
-        .expect("containers adapter registry poisoned")
-        .push(adapter);
+        .expect("containers adapter registry poisoned");
+    let kind = adapter.kind();
+    // One adapter per runtime kind. A re-register (hot-reload, daemon
+    // restart-of-bootstrap) replaces the old entry instead of stacking
+    // duplicates that would each get every list/inspect call.
+    if let Some(slot) = reg.iter_mut().find(|a| a.kind() == kind) {
+        *slot = adapter;
+    } else {
+        reg.push(adapter);
+    }
 }
 
 /// Snapshot of currently-registered adapters. Cheap clone of an `Arc` per

@@ -80,6 +80,12 @@ pub(crate) fn check_at(ip: &str, username: &str, now: Instant) -> CheckOutcome {
             .count(now);
         let ip_only = s.by_ip.entry(ip.to_string()).or_default().count(now);
         let user_only = s.by_user.entry(user_key.clone()).or_default().count(now);
+        // Pruning during count() drains expired entries but leaves empty
+        // buckets in the map. Scanners that hit many (ip, username) pairs
+        // would otherwise accumulate permanent empty entries.
+        s.by_ip_user.retain(|_, b| !b.failures.is_empty());
+        s.by_ip.retain(|_, b| !b.failures.is_empty());
+        s.by_user.retain(|_, b| !b.failures.is_empty());
         let worst = ip_user.max(ip_only).max(user_only);
         if worst >= MAX_FAILURES {
             CheckOutcome::Throttled {
