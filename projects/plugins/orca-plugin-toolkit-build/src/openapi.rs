@@ -53,8 +53,8 @@ pub fn generate_all(specs_dir: impl AsRef<Path>, plugin_tag: &str) -> Result<()>
 
         let raw = fs::read_to_string(&spec_path)
             .with_context(|| format!("read {}", spec_path.display()))?;
-        let mut spec: openapiv3::OpenAPI = serde_json::from_str(&raw)
-            .with_context(|| format!("parse {}", spec_path.display()))?;
+        let mut spec: openapiv3::OpenAPI =
+            serde_json::from_str(&raw).with_context(|| format!("parse {}", spec_path.display()))?;
 
         let report = openapi::normalize::for_progenitor(&mut spec);
         report.emit_cargo_warnings(&format!("{plugin_tag}::{flavor}"));
