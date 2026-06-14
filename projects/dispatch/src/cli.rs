@@ -231,12 +231,28 @@ macro_rules! register_op {
         summary: $summary:expr $(,)?
     ) => {
         $crate::register_op! {
+            crate_path: ::plugin_toolkit,
+            tool: $tool,
+            domain: $domain,
+            verb: $verb,
+            summary: $summary,
+        }
+    };
+    (
+        crate_path: $cp:path,
+        tool: $tool:path,
+        domain: $domain:expr,
+        verb: $verb:expr,
+        summary: $summary:expr $(,)?
+    ) => {
+        $crate::register_op! {
+            crate_path: $cp,
             tool: $tool,
             domain: $domain,
             verb: $verb,
             summary: $summary,
             render: |out| {
-                let s = ::plugin_toolkit::serde_json::to_string_pretty(&out)
+                let s = __cp::serde_json::to_string_pretty(&out)
                     .unwrap_or_else(|e| format!("<unserializable output: {e}>"));
                 println!("{s}");
             }
@@ -249,32 +265,50 @@ macro_rules! register_op {
         summary: $summary:expr,
         render: |$out:ident| $render:block $(,)?
     ) => {
+        $crate::register_op! {
+            crate_path: ::plugin_toolkit,
+            tool: $tool,
+            domain: $domain,
+            verb: $verb,
+            summary: $summary,
+            render: |$out| $render
+        }
+    };
+    (
+        crate_path: $cp:path,
+        tool: $tool:path,
+        domain: $domain:expr,
+        verb: $verb:expr,
+        summary: $summary:expr,
+        render: |$out:ident| $render:block $(,)?
+    ) => {
         const _: () = {
-            use ::plugin_toolkit::dispatch::cli::{CliOp, CliBuildFn, CliRunFn};
-            use ::plugin_toolkit::contract::{OrcaTool, OrcaToolDef};
+            use $cp as __cp;
+            use __cp::dispatch::cli::{CliOp, CliBuildFn, CliRunFn};
+            use __cp::contract::{OrcaTool, OrcaToolDef};
 
-            fn build() -> ::plugin_toolkit::clap::Command {
-                let cmd = ::plugin_toolkit::clap::Command::new($verb).about($summary);
+            fn build() -> __cp::clap::Command {
+                let cmd = __cp::clap::Command::new($verb).about($summary);
                 // Cross-cutting `--peer <PEER>` is registered as a global flag
                 // on the root command (see `build_root`) and propagates to
                 // every subcommand automatically. Don't redeclare it here —
                 // clap rejects duplicate `long` names on globals.
-                <<$tool as OrcaToolDef>::Args as ::plugin_toolkit::clap::Args>::augment_args(cmd)
+                <<$tool as OrcaToolDef>::Args as __cp::clap::Args>::augment_args(cmd)
             }
 
             fn run(
-                m: &::plugin_toolkit::clap::ArgMatches,
-                ctx: ::std::sync::Arc<::plugin_toolkit::contract::ToolCtx>,
-            ) -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = ::plugin_toolkit::anyhow::Result<()>> + Send>> {
+                m: &__cp::clap::ArgMatches,
+                ctx: ::std::sync::Arc<__cp::contract::ToolCtx>,
+            ) -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = __cp::anyhow::Result<()>> + Send>> {
                 let m = m.clone();
                 Box::pin(async move {
                     // `try_dispatch` already lifted the global `--peer` value
                     // onto the ctx clone before invoking us; read it there.
                     let peer = ctx.peer().map(|s| s.to_string());
-                    let args = <<$tool as OrcaToolDef>::Args as ::plugin_toolkit::clap::FromArgMatches>::from_arg_matches(&m)
-                        .map_err(|e| ::plugin_toolkit::anyhow::anyhow!("{e}"))?;
+                    let args = <<$tool as OrcaToolDef>::Args as __cp::clap::FromArgMatches>::from_arg_matches(&m)
+                        .map_err(|e| __cp::anyhow::anyhow!("{e}"))?;
                     let $out: <$tool as OrcaToolDef>::Output = if let Some(peer) = peer {
-                        ::plugin_toolkit::dispatch::cli::exec_remote::<$tool>(&peer, args, &ctx).await?
+                        __cp::dispatch::cli::exec_remote::<$tool>(&peer, args, &ctx).await?
                     } else {
                         <$tool as OrcaTool>::run(args, &ctx).await?
                     };
@@ -283,7 +317,7 @@ macro_rules! register_op {
                 })
             }
 
-            ::plugin_toolkit::inventory::submit! {
+            __cp::inventory::submit! {
                 CliOp {
                     domain: $domain,
                     verb: $verb,

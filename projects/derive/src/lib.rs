@@ -738,6 +738,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
         _ => quote! {
             const _: () = {
                 #crate_path::dispatch::register_op! {
+                    crate_path: #crate_path,
                     tool: #zst_ident,
                     domain: #domain,
                     verb: #verb,

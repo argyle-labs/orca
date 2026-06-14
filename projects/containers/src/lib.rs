@@ -626,7 +626,7 @@ pub struct AdapterListError {
 /// Sorted by `(host, name)`. Per-adapter failures land in
 /// [`ContainersListOutput::adapter_errors`]; a single bad adapter never
 /// aborts the call.
-#[derive::orca_tool(domain = "containers", verb = "list")]
+#[derive::orca_tool(domain = "containers", verb = "list", crate = ::macro_runtime)]
 async fn containers_list(
     args: ContainersListArgs,
     _ctx: &contract::ToolCtx,

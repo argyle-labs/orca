@@ -998,7 +998,7 @@ pub struct ContainersReconcileArgs {
 // TODO(C-series): wire into orca scheduler — see
 // project_polling_rate_too_slow.md for cadence requirements. The
 // scheduler calls `containers.reconcile` — that's the unit.
-#[derive::orca_tool(domain = "containers", verb = "reconcile")]
+#[derive::orca_tool(domain = "containers", verb = "reconcile", crate = ::macro_runtime)]
 async fn containers_reconcile(
     args: ContainersReconcileArgs,
     _ctx: &contract::ToolCtx,
@@ -1019,7 +1019,7 @@ async fn containers_reconcile(
 
 /// Plan-only sibling of [`containers_reconcile`]: classifies and
 /// probes (read-only), never starts and never arms the breaker.
-#[derive::orca_tool(domain = "containers", verb = "reconcile_dry")]
+#[derive::orca_tool(domain = "containers", verb = "reconcile_dry", crate = ::macro_runtime)]
 async fn containers_reconcile_dry(
     args: ContainersReconcileArgs,
     _ctx: &contract::ToolCtx,
@@ -1083,7 +1083,7 @@ pub struct ContainersUnholdOutput {
 /// circuiting starts. Returns the cleared record's identity + new
 /// status. Errors with `NotFound` if no record matches, `NotHeld` if
 /// the record is in any state other than `Held`.
-#[derive::orca_tool(domain = "containers", verb = "unhold")]
+#[derive::orca_tool(domain = "containers", verb = "unhold", crate = ::macro_runtime)]
 async fn containers_unhold(
     args: ContainersUnholdArgs,
     _ctx: &contract::ToolCtx,
