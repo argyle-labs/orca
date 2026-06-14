@@ -47,7 +47,6 @@ pub mod sysadmin;
 // see [[feedback-plugin-toolkit-is-the-gateway]]).
 pub mod config_tools;
 pub mod db_admin;
-pub mod notify_send;
 pub mod schedule_tools;
 
 // Relocated 2026-06-01:

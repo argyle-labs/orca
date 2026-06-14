@@ -3,10 +3,13 @@
 //! `notifications` without a cycle. See db→system for the
 //! same shape.
 
-use plugin_toolkit::notifications::{Event, EventClass, Severity, emit, registered_backend_names};
-use plugin_toolkit::prelude::*;
+use crate::{Event, EventClass, Severity, emit, registered_backend_names};
 
-#[plugin_struct(args)]
+use anyhow::{Result, bail};
+use contract::ToolCtx;
+use derive::{orca_tool, plugin_struct};
+
+#[plugin_struct(args, crate = ::macro_runtime)]
 #[serde(rename_all = "camelCase", default)]
 pub struct NotifySendArgs {
     /// Event class — one of `heartbeat`, `drift`, `rotation`, `lifecycle`,
@@ -34,7 +37,7 @@ pub struct NotifySendArgs {
     pub click: Option<String>,
 }
 
-#[plugin_struct]
+#[plugin_struct(crate = ::macro_runtime)]
 #[serde(rename_all = "camelCase")]
 pub struct NotifySendBackendResult {
     pub backend: String,
@@ -43,7 +46,7 @@ pub struct NotifySendBackendResult {
     pub error: Option<String>,
 }
 
-#[plugin_struct]
+#[plugin_struct(crate = ::macro_runtime)]
 #[serde(rename_all = "camelCase")]
 pub struct NotifySendOutput {
     /// True when the global dispatcher was installed and ran. False when
@@ -78,7 +81,7 @@ fn parse_severity_word(s: &str) -> Result<Severity> {
 /// event is built from the supplied fields and fanned out per the configured
 /// routing rules. When no dispatcher is installed, returns `configured=false`
 /// with an empty result list — callers can treat that as a soft no-op.
-#[orca_tool(domain = "notify", verb = "send")]
+#[orca_tool(domain = "notify", verb = "send", crate = ::macro_runtime)]
 async fn notify_send(args: NotifySendArgs, _ctx: &ToolCtx) -> Result<NotifySendOutput> {
     let class = parse_class(args.class.as_deref().unwrap_or("alert"))?;
     let severity = parse_severity_word(args.severity.as_deref().unwrap_or("info"))?;

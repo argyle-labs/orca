@@ -17,6 +17,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod notify_send;
+
 // ── Event shape ─────────────────────────────────────────────────────────────
 
 /// Coarse event taxonomy. Routing rules (§9.3) match on this plus
