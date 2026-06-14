@@ -40,6 +40,11 @@ impl BackgroundJob {
     }
 }
 
+/// Cap on retained finished jobs. Oldest finished+notified entries beyond this
+/// cap are dropped so their JoinHandle/CancellationToken/prompt/output buffer
+/// can be reclaimed. Running jobs are never pruned.
+const MAX_RETAINED_FINISHED: usize = 32;
+
 /// Manages background jobs for a session.
 pub struct JobManager {
     jobs: Vec<BackgroundJob>,
@@ -114,7 +119,31 @@ impl JobManager {
                 ));
             }
         }
+        self.reap_finished();
         notes
+    }
+
+    /// Drop oldest finished+notified jobs once they exceed `MAX_RETAINED_FINISHED`,
+    /// reclaiming their JoinHandle, CancellationToken, prompt, and output buffer.
+    /// Running jobs are preserved regardless of position.
+    fn reap_finished(&mut self) {
+        let finished_notified = self
+            .jobs
+            .iter()
+            .filter(|j| j.is_finished() && j.notified)
+            .count();
+        if finished_notified <= MAX_RETAINED_FINISHED {
+            return;
+        }
+        let mut to_drop = finished_notified - MAX_RETAINED_FINISHED;
+        self.jobs.retain(|j| {
+            if to_drop > 0 && j.is_finished() && j.notified {
+                to_drop -= 1;
+                false
+            } else {
+                true
+            }
+        });
     }
 
     /// List all jobs with their status.

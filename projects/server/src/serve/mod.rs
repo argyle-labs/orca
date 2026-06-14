@@ -715,7 +715,7 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
             match pod::mdns::Mdns::start(ad) {
                 Ok(handle) => {
                     info!("[pod] mDNS responder + discoverer up");
-                    std::mem::forget(handle);
+                    std::mem::drop(handle);
                 }
                 Err(e) => tracing::warn!("[pod] mDNS start failed: {e:#}"),
             }
