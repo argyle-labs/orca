@@ -25,6 +25,7 @@ mcp           = { path = "../plugins/mcp" }
 plugins       = { path = "../runtime" }
 pod           = { path = "../pod" }
 system        = { path = "../system" }
+notifications = { path = "../notifications" }
 docker        = { path = "../plugins/docker" }
 files         = { path = "../files" }
 homeassistant = { path = "../plugins/homeassistant" }
