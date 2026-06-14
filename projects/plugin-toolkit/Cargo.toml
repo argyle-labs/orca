@@ -33,7 +33,6 @@ macro-runtime = { path = "../macro-runtime" }
 # Runtime primitives — plugins reach these through the toolkit, never directly.
 utils       = { path = "../utils" }
 graphql     = { path = "../graphql" }
-notifications = { path = "../notifications" }
 openapi     = { path = "../openapi" }
 
 [lints]

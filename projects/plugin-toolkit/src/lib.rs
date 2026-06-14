@@ -92,15 +92,3 @@ pub mod graphql {
 pub mod openapi {
     pub use ::openapi::*;
 }
-
-// ── Domain registration crates ──────────────────────────────────────────
-//
-// Plugins register their capabilities with a domain crate. ntfy/email/
-// slack register with `notifications`; docker/dockge/lxc adapters
-// register with `containers`; proxmox/unraid VM adapters register with
-// `vms`. The domain crate owns the trait + dispatcher; plugins reach it
-// only through the toolkit, never via a direct `notifications`/`containers`
-// path-dep.
-pub mod notifications {
-    pub use ::notifications::*;
-}
