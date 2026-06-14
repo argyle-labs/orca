@@ -109,15 +109,25 @@ pub fn spawn_fleet_replicator() {
         return;
     }
     tokio::spawn(async move {
-        // Stagger the first tick so we don't race the daemon startup that
-        // brings the pod listener up.
-        tokio::time::sleep(Duration::from_secs(20)).await;
+        let shutdown = utils::shutdown::signal();
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(20)) => {}
+            _ = shutdown.notified() => return,
+        }
         let registry: Mutex<HashMap<String, JoinHandle<()>>> = Mutex::new(HashMap::new());
         loop {
             if let Err(e) = reconcile_once(&registry).await {
                 tracing::debug!("host_status replica reconcile: {e:#}");
             }
-            tokio::time::sleep(RECONCILE_INTERVAL).await;
+            tokio::select! {
+                _ = tokio::time::sleep(RECONCILE_INTERVAL) => {}
+                _ = shutdown.notified() => {
+                    for (_, h) in registry.lock().await.drain() {
+                        h.abort();
+                    }
+                    return;
+                }
+            }
         }
     });
 }
