@@ -40,12 +40,6 @@ notifications = { path = "../notifications", default-features = false }
 # event streaming for C3+ falls out of the same client.
 bollard     = { version = "0.21", default-features = false, features = ["pipe"] }
 
-# Proxmox HTTPS API client — backs `LxcProxmoxApiAdapter`. API-first per
-# [[project-adapter-backends-api-first]]: no `pct` shell, no
-# `/etc/pve/lxc` file reads. The plugin crate owns the HTTP client + auth;
-# this crate maps its JSON onto our typed `Container` model.
-proxmox     = { path = "../plugins/proxmox" }
-
 clap        = { workspace = true }
 
 [dev-dependencies]
