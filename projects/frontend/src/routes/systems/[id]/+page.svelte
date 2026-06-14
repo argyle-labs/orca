@@ -1,9 +1,12 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { callTool } from '$lib/stores/runTool';
   import type { SystemInfoReport, SystemHistoryPoint, TopProcess } from '$lib/client/types.gen';
+  import type { PageData } from './$types';
+
+  let { data }: { data: PageData } = $props();
 
   type VersionEntry = { tag: string; prerelease: boolean; published_at: string | null; is_current: boolean };
   type PodPeer = {
@@ -32,18 +35,94 @@
   };
 
   let id = $derived($page.params.id);
-  let peer = $state<PodPeer | null>(null);
-  let loading = $state(true);
-  let error = $state<string | null>(null);
+  // Synchronous seed from load() — peer + probe come from +page.ts so the
+  // detail view is fully populated at first paint (no data snap-in when
+  // navigating from /). Re-seeded by the $effect below when SvelteKit
+  // hands us new `data` for a different `[id]`.
+  const seedPeer = untrack(() => {
+    const dp = data.peer;
+    if (!dp) return null;
+    const next = { ...dp } as unknown as PodPeer;
+    const probe = data.probe;
+    if (probe) {
+      next.version = probe.current_version || next.version;
+      next.channel = probe.channel ?? next.channel;
+      next.pinned_to = probe.pinned_to ?? next.pinned_to;
+      next.update_latest = probe.latest ?? next.update_latest;
+      next.update_available =
+        !!next.version &&
+        !!probe.latest &&
+        probe.latest.replace(/^v/, '') !== next.version;
+    }
+    return next;
+  });
+  let peer = $state<PodPeer | null>(seedPeer);
+  let loading = $state(false);
+  let error = $state<string | null>(
+    untrack(() => (data.peer ? null : `peer ${$page.params.id} not found in pod`)),
+  );
   let pinnedPid = $state<number | null>(null);
 
-  let versions = $state<VersionEntry[]>([]);
+  let versions = $state<VersionEntry[]>(
+    untrack(() => (data.probe?.available_versions ?? []) as VersionEntry[]),
+  );
   let versionsLoading = $state(false);
-  let versionSelect = $state('');
-  let channelSelect = $state('stable');
+  let versionSelect = $state(
+    untrack(() => {
+      const cv = data.probe?.current_version;
+      if (cv) return `v${cv}`;
+      return seedPeer?.version ? `v${seedPeer.version}` : '';
+    }),
+  );
+  let channelSelect = $state(
+    untrack(() =>
+      inferChannel(
+        data.probe?.current_version ?? seedPeer?.version,
+        data.probe?.channel ?? seedPeer?.channel,
+      ),
+    ),
+  );
   let updatePending = $state(false);
   let updateResult = $state<{ notes: string[]; errors: string[] } | null>(null);
-  let hydratedForId = $state<string | null>(null);
+  let hydratedForId = $state<string | null>(seedPeer?.peer_id ?? null);
+
+  // Re-seed when SvelteKit reuses the component across `[id]` changes —
+  // load() has already produced fresh data.peer/data.probe at that point,
+  // so we just copy it into the mutable $state cells. Avoids a snap when
+  // navigating /systems/a → /systems/b.
+  $effect(() => {
+    const dp = data.peer;
+    if (!dp) {
+      peer = null;
+      error = `peer ${id} not found in pod`;
+      return;
+    }
+    if (peer && peer.peer_id === dp.peer_id) return;
+    const next = { ...dp } as unknown as PodPeer;
+    if (data.probe) {
+      next.version = data.probe.current_version || next.version;
+      next.channel = data.probe.channel ?? next.channel;
+      next.pinned_to = data.probe.pinned_to ?? next.pinned_to;
+      next.update_latest = data.probe.latest ?? next.update_latest;
+      next.update_available =
+        !!next.version &&
+        !!data.probe.latest &&
+        data.probe.latest.replace(/^v/, '') !== next.version;
+    }
+    peer = next;
+    error = null;
+    versions = (data.probe?.available_versions ?? []) as VersionEntry[];
+    versionSelect = data.probe?.current_version
+      ? `v${data.probe.current_version}`
+      : next.version
+        ? `v${next.version}`
+        : '';
+    channelSelect = inferChannel(
+      data.probe?.current_version ?? next.version,
+      data.probe?.channel ?? next.channel,
+    );
+    hydratedForId = next.peer_id;
+  });
 
   let pollHandle: ReturnType<typeof setInterval> | null = null;
   const POLL_MS = 5000;
@@ -137,7 +216,10 @@
   }
 
   onMount(() => {
-    void refresh();
+    // Initial peer + probe already populated synchronously from `data`
+    // (load() in +page.ts) — onMount only registers the periodic refresh
+    // timer. Chose imperative polling over invalidate() so the existing
+    // patch-state loop runs unchanged.
     pollHandle = setInterval(refresh, POLL_MS);
   });
   onDestroy(() => {

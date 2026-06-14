@@ -8,7 +8,10 @@
   import Popover from '$lib/components/Popover.svelte';
   import PairingModal from '$lib/components/PairingModal.svelte';
   import Drawer from '$lib/components/Drawer.svelte';
-  import type { GpuInfo, SystemInfoReport } from '$lib/client/types.gen';
+  import type { GpuInfo, SystemInfoReport, PodPeerDto } from '$lib/client/types.gen';
+  import type { PageData } from './$types';
+
+  let { data }: { data: PageData } = $props();
   interface Instance {
     id: string;
     peerId: string;
@@ -43,9 +46,98 @@
     availableVersions?: VersionEntry[];
   }
 
-  let instances = $state<Instance[]>([]);
+  // Synchronous seed from load() — fully populated at first paint, so the
+  // OLD page stays visible during navigation until the NEW page's data is
+  // ready (no spinner, no data snap-in). Polling in onMount keeps these
+  // fresh via the same refresh* functions used today.
+  function seedInstancesFromLoad(): Instance[] {
+    const now = Date.now();
+    const members = data.peers.members ?? [];
+    const joined = members.filter(
+      (m): m is PodPeerDto => 'peer_id' in m && (m as PodPeerDto).status !== undefined,
+    );
+    const selfPeer = joined.find((p) => p.local);
+    const remotePeers = joined.filter((p) => p.status === 'active' && !p.local);
+
+    const localProbe = data.probes['local'];
+    const ld = data.localDetail;
+    const local: Instance = {
+      id: 'local',
+      peerId: 'local',
+      label: 'local',
+      origin: originForLocal(),
+      port: 12000,
+      role: 'local',
+      version: localProbe?.current_version ?? ld?.version ?? null,
+      target: ld?.target ?? null,
+      mode: ld?.mode ?? null,
+      channel: localProbe?.channel ?? ld?.channel ?? null,
+      updateAvailable:
+        !!localProbe?.current_version &&
+        !!localProbe?.latest &&
+        localProbe.latest.replace(/^v/, '') !== localProbe.current_version,
+      updateLatest: localProbe?.latest ?? null,
+      updateCheckedSecs: null,
+      pinnedTo: localProbe?.pinned_to ?? ld?.pinned_to ?? null,
+      health: data.localHealthy ? 'up' : 'down',
+      error: null,
+      lastChecked: now,
+      sys: ld?.system ?? selfPeer?.system ?? null,
+      availableVersions: (localProbe?.available_versions ?? []) as VersionEntry[],
+    };
+
+    const podRows: Instance[] = remotePeers.map((p) => {
+      const probe = data.probes[p.peer_id];
+      const version = probe?.current_version ?? p.version ?? null;
+      const latest = probe?.latest ?? p.update_latest ?? null;
+      return {
+        id: `system:${p.peer_id}`,
+        peerId: p.peer_id,
+        label: p.hostname || p.peer_id,
+        origin: `${p.addr}:${p.port}`,
+        port: p.port,
+        role: 'system' as const,
+        version,
+        target: p.target ?? null,
+        mode: p.mode ?? null,
+        channel: probe?.channel ?? p.channel ?? null,
+        updateAvailable:
+          !!version && !!latest && latest.replace(/^v/, '') !== version,
+        updateLatest: latest,
+        updateCheckedSecs: p.update_checked_secs ?? null,
+        pinnedTo: probe?.pinned_to ?? p.pinned_to ?? null,
+        health: p.status === 'active' ? 'up' : 'down',
+        error: null,
+        lastChecked: now,
+        secure: { local: p.local_secure, peer: p.peer_secure },
+        status: p.status,
+        addresses: (p.addresses ?? []).map((a) => ({ kind: a.kind, value: a.value })),
+        sys: p.system ?? null,
+        availableVersions: (probe?.available_versions ?? []) as VersionEntry[],
+      };
+    });
+    return [local, ...podRows];
+  }
+
+  function seedRetentionFromLoad(): number {
+    const row = data.retention?.row;
+    if (!row) return 1;
+    const v = parseFloat(row.json);
+    return Number.isFinite(v) ? v : 1;
+  }
+
+  function seedInboundOffersFromLoad(): InboundOffer[] {
+    const members = data.peers.members ?? [];
+    const now = Math.floor(Date.now() / 1000);
+    return members
+      .filter((m) => (m as { state?: string }).state === 'handshaking')
+      .map((m) => m as unknown as InboundOffer)
+      .filter((r) => r.expires_at > now);
+  }
+
+  let instances = $state<Instance[]>(seedInstancesFromLoad());
   let selectedInstId = $state<string | null>(null);
-  let retentionDays = $state(1);
+  let retentionDays = $state(seedRetentionFromLoad());
   let customPopoverOpen = $state(false);
   let customDaysInput = $state('');
   let retentionSaving = $state(false);
@@ -62,7 +154,7 @@
     expires_at: number;
     ttl_secs: number;
   };
-  let inboundOffers = $state<InboundOffer[]>([]);
+  let inboundOffers = $state<InboundOffer[]>(seedInboundOffersFromLoad());
 
   // Un-joined systems split into two buckets so the operator can act:
   //   candidates → mDNS-discovered, unclaimed orcas we can ADD (join)
@@ -883,38 +975,11 @@
   }
 
   onMount(() => {
-    const local: Instance = {
-      id: 'local',
-      peerId: 'local',
-      label: 'local',
-      origin: originForLocal(),
-      port: 12000,
-      role: 'local',
-      version: null,
-      target: null,
-      mode: null,
-      channel: null,
-      updateAvailable: false,
-      updateLatest: null,
-      updateCheckedSecs: null,
-      pinnedTo: null,
-      health: 'unknown',
-      error: null,
-      lastChecked: null,
-      sys: null,
-    };
-    instances = [local];
-    refreshLocal(local);
-    loadRetention();
-    refreshInboundOffers();
-    // Sequence pod.list → probeAllInstances so the probe sees every peer
-    // on its first run. Without the await, `instances` is still just
-    // [local] when the probe iterates and remote dropdowns stay empty
-    // until the next 60s tick.
-    void (async () => {
-      await refreshPodPeers();
-      await probeAllInstances();
-    })();
+    // Initial data already populated synchronously from `data` (load() in
+    // +page.ts) — onMount only registers periodic refresh timers. The
+    // refresh* callbacks continue to drive subsequent ticks imperatively
+    // (chose imperative over invalidate() so polling reuses the existing
+    // in-place patch-state logic without re-running load()).
     pollHandle = setInterval(() => {
       const loc = instances.find((i) => i.role === 'local');
       if (loc) refreshLocal(loc);
