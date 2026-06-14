@@ -124,13 +124,11 @@ members = [
     "projects/app-kit",
     "projects/db",
     "projects/db-types",
-    "projects/sdk/rust",
     "projects/server",
     "projects/contract",
     "projects/dispatch",
     "projects/derive",
     "projects/macro-runtime",
-    "projects/pki",
     # Domain crates — one per cohesive surface. HARD RULE: keep flat names
     # (no `orca-tools-` prefix). Each crate's `#[orca_tool]` fns and their
     # service trait live in the same module file.
@@ -138,7 +136,7 @@ members = [
     "projects/dev",
     "projects/inventory-tests",
     "projects/plugins/agents",
-    "projects/plugins/runtime",
+    "projects/runtime",
     "projects/containers",
     "projects/conversation",
     "projects/files",
@@ -160,17 +158,15 @@ members = [
     "projects/plugins/nfs",
     "projects/plugins/ntfy",
     "projects/plugins/openapi",
-    "projects/plugins/plugin-toolkit",
-    "projects/plugins/plugin-toolkit-build",
+    "projects/plugin-toolkit",
+    "projects/plugin-toolkit-build",
     "projects/plugins/proxmox",
     "projects/plugins/smb",
     "projects/plugins/arr",
     "projects/plugins/unraid",
-    "projects/plugins/unraid-generated",
 ]
 default-members = [
     "projects/db",
-    "projects/sdk/rust",
     "projects/server",
     "projects/contract",
     "projects/dispatch",
@@ -179,7 +175,7 @@ default-members = [
     "projects/dev",
     "projects/inventory-tests",
     "projects/plugins/agents",
-    "projects/plugins/runtime",
+    "projects/runtime",
     "projects/containers",
     "projects/conversation",
     "projects/files",
@@ -198,13 +194,12 @@ default-members = [
     "projects/plugins/nfs",
     "projects/plugins/ntfy",
     "projects/plugins/openapi",
-    "projects/plugins/plugin-toolkit",
-    "projects/plugins/plugin-toolkit-build",
+    "projects/plugin-toolkit",
+    "projects/plugin-toolkit-build",
     "projects/plugins/proxmox",
     "projects/plugins/smb",
     "projects/plugins/arr",
     "projects/plugins/unraid",
-    "projects/plugins/unraid-generated",
 ]
 resolver = "2"
 

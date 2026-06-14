@@ -11,13 +11,13 @@
 
 use anyhow::{Context, Result};
 use dev::mode::{cmd_dev_disable, cmd_dev_enable, cmd_dev_sync};
-use pki::{self, PeerRole};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_rustls::server::TlsStream;
 use tracing::warn;
 use utils::framing::{read_frame, write_frame};
 use utils::jsonrpc::{ErrorObject, Message, Request, Response};
+use utils::pki::PeerRole;
 use utils::state::DaemonMode;
 
 use super::{
@@ -178,7 +178,7 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
             Err(e) => Response::err(id, ErrorObject::internal(&e.to_string())),
         },
         POD_HAS_CA_KEY_METHOD => {
-            let has = pki::has_mesh_ca_key(&pki_dir());
+            let has = utils::pki::has_mesh_ca_key(&pki_dir());
             value_response(id, &HasCaKeyResult { has_key: has })
         }
         POD_PUSH_CA_KEY_METHOD => match handle_push_ca_key(peer_cn, request) {
@@ -252,7 +252,7 @@ fn handle_push_ca_key(peer_cn: &str, request: Request) -> Result<()> {
             "pod/push-ca-key refused: peer {peer_cn} is not mutually secure with this host"
         );
     }
-    pki::import_mesh_ca_keypair(&pki_dir(), &params.cert_pem, &params.key_pem)?;
+    utils::pki::import_mesh_ca_keypair(&pki_dir(), &params.cert_pem, &params.key_pem)?;
     Ok(())
 }
 
@@ -412,7 +412,7 @@ fn authorize_role_gated(
     tool: &str,
     args: &serde_json::Value,
     required_role: &str,
-    caller_token: Option<&pki::SignedEnvelope>,
+    caller_token: Option<&utils::pki::SignedEnvelope>,
     now: i64,
 ) -> Result<()> {
     let env = caller_token.ok_or_else(|| {
@@ -525,7 +525,7 @@ fn handle_replicate_roots() -> Result<ReplicateRootsResult> {
     Ok(ReplicateRootsResult { roots })
 }
 
-fn handle_replicate_export() -> Result<pki::SignedEnvelope> {
+fn handle_replicate_export() -> Result<utils::pki::SignedEnvelope> {
     let conn = db::open_default()?;
     let entities = db::replicate::export_all(&conn)?;
     crate::transport::sign_bundle(entities)
@@ -536,7 +536,7 @@ fn handle_replicate_export() -> Result<pki::SignedEnvelope> {
 /// engine to merge. Trust model mirrors `pod/replicate-export` (mTLS proves
 /// transport, signature proves bundle origin).
 fn handle_replicate_push(peer_cn: &str, request: Request) -> Result<ReplicatePushResult> {
-    let envelope: pki::SignedEnvelope = match request.params {
+    let envelope: utils::pki::SignedEnvelope = match request.params {
         Some(v) => serde_json::from_value(v).context("parse pod/replicate-push params")?,
         None => anyhow::bail!("pod/replicate-push requires params"),
     };
@@ -565,7 +565,7 @@ fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {
             "pod/push-ca-state refused: peer {peer_cn} is not mutually secure with this host"
         );
     }
-    pki::import_mesh_ca_state(
+    utils::pki::import_mesh_ca_state(
         &pki_dir(),
         &params.current_cert_pem,
         &params.current_key_pem,
@@ -585,7 +585,7 @@ fn handle_push_ca_state(peer_cn: &str, request: Request) -> Result<()> {
 /// gate above blocks departed CNs from reaching this method.
 fn handle_refresh_cert(peer_cn: &str, request: Request) -> Result<RefreshCertResult> {
     anyhow::ensure!(
-        pki::has_mesh_ca_key(&pki_dir()),
+        utils::pki::has_mesh_ca_key(&pki_dir()),
         "this host does not have the mesh CA key — cannot refresh peer certs"
     );
     let params: RefreshCertParams = match request.params {
@@ -603,13 +603,13 @@ fn handle_refresh_cert(peer_cn: &str, request: Request) -> Result<RefreshCertRes
     );
 
     let pki_d = pki_dir();
-    let (client_cert_pem, ca_cert_pem) = pki::sign_peer_csr(
+    let (client_cert_pem, ca_cert_pem) = utils::pki::sign_peer_csr(
         &pki_d,
         &params.csr_client_pem,
         &params.joiner_hostname,
         PeerRole::Client,
     )?;
-    let (server_cert_pem, _) = pki::sign_peer_csr(
+    let (server_cert_pem, _) = utils::pki::sign_peer_csr(
         &pki_d,
         &params.csr_server_pem,
         &params.joiner_hostname,

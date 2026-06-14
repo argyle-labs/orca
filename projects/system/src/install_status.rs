@@ -10,7 +10,6 @@
 
 use anyhow::{Context, Result};
 use contract::config::{APP_MCP_SERVER, APP_NAME, APP_PKI_DIR, APP_STATE_DIR};
-use pki;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -68,8 +67,8 @@ pub fn install_status_report() -> Result<InstallStatusReport> {
     let agents_path = home.join(".claude/agents");
     let vault_dir = home.join(APP_STATE_DIR);
     let pki_dir = vault_dir.join(APP_PKI_DIR);
-    let pki_ca = pki::ca_cert_path(&pki_dir);
-    let pki_server = pki::server_cert_path(&pki_dir);
+    let pki_ca = utils::pki::ca_cert_path(&pki_dir);
+    let pki_server = utils::pki::server_cert_path(&pki_dir);
     let mcp_registered = check_mcp_registered();
 
     Ok(InstallStatusReport {

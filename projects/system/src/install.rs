@@ -9,7 +9,6 @@
 #![allow(clippy::disallowed_types)]
 use anyhow::{Context, Result};
 use contract::config::{APP_MCP_SERVER, APP_NAME, APP_PKI_DIR, APP_STATE_DIR};
-use pki;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -270,8 +269,9 @@ fn step_vault_dirs(home: &Path, report: &mut InstallReport) {
 
 fn step_pki_init(home: &Path, report: &mut InstallReport) {
     let pki_dir = home.join(APP_STATE_DIR).join(APP_PKI_DIR);
-    let already = pki::ca_cert_path(&pki_dir).exists() && pki::server_cert_path(&pki_dir).exists();
-    match pki::init(&pki_dir) {
+    let already = utils::pki::ca_cert_path(&pki_dir).exists()
+        && utils::pki::server_cert_path(&pki_dir).exists();
+    match utils::pki::init(&pki_dir) {
         Ok(_) if already => {
             report.skip(format!("pki: already initialized at {}", pki_dir.display()))
         }
@@ -285,10 +285,12 @@ fn step_pki_init(home: &Path, report: &mut InstallReport) {
 /// Idempotent — skips if `client.cert.pem` already exists.
 fn step_cli_client_cert(home: &Path, report: &mut InstallReport) {
     let pki_dir = home.join(APP_STATE_DIR).join(APP_PKI_DIR);
-    if pki::cli_client_cert_path(&pki_dir).exists() && pki::cli_client_key_path(&pki_dir).exists() {
+    if utils::pki::cli_client_cert_path(&pki_dir).exists()
+        && utils::pki::cli_client_key_path(&pki_dir).exists()
+    {
         report.skip(format!(
             "pki/cli: client cert already present at {}",
-            pki::cli_client_cert_path(&pki_dir).display()
+            utils::pki::cli_client_cert_path(&pki_dir).display()
         ));
         return;
     }
@@ -296,10 +298,10 @@ fn step_cli_client_cert(home: &Path, report: &mut InstallReport) {
     // server-side host_identity OnceLock may not be populated. CN is
     // cosmetic for routing; the trust gate is the signature, not the name.
     let host_cn = local_hostname();
-    match pki::issue_cli_client_cert(&pki_dir, &host_cn) {
+    match utils::pki::issue_cli_client_cert(&pki_dir, &host_cn) {
         Ok(_) => report.ok(format!(
             "pki/cli: issued client cert cli.{host_cn} at {}",
-            pki::cli_client_cert_path(&pki_dir).display()
+            utils::pki::cli_client_cert_path(&pki_dir).display()
         )),
         Err(e) => report.err(format!("pki/cli: issue failed: {e}")),
     }

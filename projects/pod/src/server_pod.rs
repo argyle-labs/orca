@@ -5,7 +5,6 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use db::ports::mesh_port;
-use pki;
 use std::time::Instant;
 use system::update_state::{read_channel_marker, read_version_pin};
 
@@ -30,19 +29,21 @@ pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
     drop(conn);
 
     let pki_d = pki_dir();
-    std::fs::create_dir_all(pki::mesh_dir(&pki_d))?;
+    std::fs::create_dir_all(utils::pki::mesh_dir(&pki_d))?;
     let ca_pem = offer
         .mesh_ca_cert_pem
         .as_deref()
         .context("offer has no mesh CA cert")?;
-    std::fs::write(pki::mesh_ca_cert_path(&pki_d), ca_pem.as_bytes())?;
+    std::fs::write(utils::pki::mesh_ca_cert_path(&pki_d), ca_pem.as_bytes())?;
 
     let peer_cn = system::host_identity::machine_id_short().to_string();
     let display_name = system::host_identity::display_hostname().to_string();
-    let (csr_client_pem, client_key_pem) = pki::build_peer_csr(&peer_cn, pki::PeerRole::Client)?;
-    let (csr_server_pem, server_key_pem) = pki::build_peer_csr(&peer_cn, pki::PeerRole::Server)?;
+    let (csr_client_pem, client_key_pem) =
+        utils::pki::build_peer_csr(&peer_cn, utils::pki::PeerRole::Client)?;
+    let (csr_server_pem, server_key_pem) =
+        utils::pki::build_peer_csr(&peer_cn, utils::pki::PeerRole::Server)?;
 
-    let signing = pki::load_or_init_bootstrap_key(&pki_d)?;
+    let signing = utils::pki::load_or_init_bootstrap_key(&pki_d)?;
     #[derive(serde::Serialize)]
     struct ConfirmBody<'a> {
         code: &'a str,
@@ -58,7 +59,7 @@ pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
         csr_server_pem: &csr_server_pem,
         joiner_display_name: &display_name,
     };
-    let env = pki::sign_envelope(&signing, &body)?;
+    let env = utils::pki::sign_envelope(&signing, &body)?;
 
     let resp_value = dial_bootstrap_pub(
         &offer.peer_addr,
@@ -80,14 +81,20 @@ pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
     }
     let r: Resp = serde_json::from_value(resp_value)?;
 
-    let server_dir = pki::mesh_dir(&pki_d).join("server");
-    let client_dir = pki::mesh_dir(&pki_d).join("client");
+    let server_dir = utils::pki::mesh_dir(&pki_d).join("server");
+    let client_dir = utils::pki::mesh_dir(&pki_d).join("client");
     std::fs::create_dir_all(&server_dir)?;
     std::fs::create_dir_all(&client_dir)?;
-    std::fs::write(pki::mesh_server_cert_path(&pki_d), &r.server_cert_pem)?;
-    std::fs::write(pki::mesh_server_key_path(&pki_d), &server_key_pem)?;
-    std::fs::write(pki::mesh_client_cert_path(&pki_d), &r.client_cert_pem)?;
-    std::fs::write(pki::mesh_client_key_path(&pki_d), &client_key_pem)?;
+    std::fs::write(
+        utils::pki::mesh_server_cert_path(&pki_d),
+        &r.server_cert_pem,
+    )?;
+    std::fs::write(utils::pki::mesh_server_key_path(&pki_d), &server_key_pem)?;
+    std::fs::write(
+        utils::pki::mesh_client_cert_path(&pki_d),
+        &r.client_cert_pem,
+    )?;
+    std::fs::write(utils::pki::mesh_client_key_path(&pki_d), &client_key_pem)?;
 
     let conn = db::open_default()?;
     pdb::set_self_secure(&conn, false)?;
@@ -506,12 +513,12 @@ pub fn status() -> Result<PodCertStatusOutput> {
 
 pub fn cert_status() -> Result<PodCertStatusOutput> {
     let pki_d = pki_dir();
-    let founder = pki::has_mesh_ca_key(&pki_d);
-    let member = pki::mesh_ca_cert_path(&pki_d).exists();
+    let founder = utils::pki::has_mesh_ca_key(&pki_d);
+    let member = utils::pki::mesh_ca_cert_path(&pki_d).exists();
 
     let parse = |path: std::path::PathBuf| -> Option<CertInfo> {
         let pem = std::fs::read_to_string(&path).ok()?;
-        let days = pki::cert_days_remaining(&pem).ok()?;
+        let days = utils::pki::cert_days_remaining(&pem).ok()?;
         Some(CertInfo {
             cn: String::new(),
             fingerprint: String::new(),
@@ -525,11 +532,11 @@ pub fn cert_status() -> Result<PodCertStatusOutput> {
         founder,
         member,
         self_secure: false,
-        mesh_ca: parse(pki::mesh_ca_cert_path(&pki_d)),
-        leaf_server: parse(pki::mesh_server_cert_path(&pki_d)),
-        leaf_client: parse(pki::mesh_client_cert_path(&pki_d)),
-        ca_previous: parse(pki::mesh_ca_previous_cert_path(&pki_d)),
-        bootstrap: parse(pki::bootstrap_cert_path(&pki_d)),
+        mesh_ca: parse(utils::pki::mesh_ca_cert_path(&pki_d)),
+        leaf_server: parse(utils::pki::mesh_server_cert_path(&pki_d)),
+        leaf_client: parse(utils::pki::mesh_client_cert_path(&pki_d)),
+        ca_previous: parse(utils::pki::mesh_ca_previous_cert_path(&pki_d)),
+        bootstrap: parse(utils::pki::bootstrap_cert_path(&pki_d)),
     })
 }
 

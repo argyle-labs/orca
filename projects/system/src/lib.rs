@@ -43,6 +43,12 @@ pub mod hook;
 pub mod package;
 pub mod sysadmin;
 
+// Tool surfaces relocated from `db` (db is a primitive, not a tool host —
+// see [[feedback-plugin-toolkit-is-the-gateway]]).
+pub mod config_tools;
+pub mod db_admin;
+pub mod schedule_tools;
+
 // Relocated 2026-06-01:
 // - `engine` (LLM backend registry) → `projects/plugins/llm/src/engine.rs`.
 // - `sweep` (workspace cargo-machete/deny) → `projects/dev/src/sweep.rs`.

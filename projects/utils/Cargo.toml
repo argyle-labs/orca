@@ -32,7 +32,16 @@ tokio = { workspace = true }
 
 # HTTP/TLS (http module)
 reqwest = { workspace = true }
-rustls  = { workspace = true }
+rustls           = { workspace = true }
+rustls-pki-types = { workspace = true }
+rustls-pemfile   = { workspace = true }
+tokio-rustls     = { workspace = true }
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+time = { version = "0.3", default-features = false, features = ["std"] }
+base64 = "0.22"
+x509-parser = "0.18"
 
 # Hashing (hash module)
 blake3 = "1"

@@ -853,7 +853,6 @@ pub use listener::handle_pod_connection;
 use ::db::ports::mesh_port;
 use anyhow::{Context, Result};
 use contract::config::{APP_PKI_DIR, APP_STATE_DIR};
-use pki;
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
 use std::path::PathBuf;
@@ -960,7 +959,7 @@ pub fn pki_dir() -> PathBuf {
 /// Returns `Ok(true)` if a reset happened. Best-effort: any error is
 /// logged at warn and returns `Ok(false)` so daemon startup proceeds.
 pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
-    let cert_path = pki::mesh_client_cert_path(pki_dir);
+    let cert_path = utils::pki::mesh_client_cert_path(pki_dir);
     let expected = system::host_identity::machine_id_short().to_string();
 
     // Classify current state into one of:
@@ -977,7 +976,7 @@ pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
                     .next()
                     .and_then(Result::ok)
             })
-            .and_then(|der| pki::peer_common_name(&der).ok())
+            .and_then(|der| utils::pki::peer_common_name(&der).ok())
         {
             Some(cn) if cn == expected => "ok",
             Some(cn) => {
@@ -995,7 +994,7 @@ pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
                 "stale"
             }
         }
-    } else if pki::has_mesh_ca_key(pki_dir) {
+    } else if utils::pki::has_mesh_ca_key(pki_dir) {
         tracing::warn!(
             "[pod] mesh client cert is missing but this host holds the CA key — \
              founder will self-reissue client+server certs."
@@ -1009,7 +1008,7 @@ pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
         return Ok(false);
     }
 
-    let mesh = pki::mesh_dir(pki_dir);
+    let mesh = utils::pki::mesh_dir(pki_dir);
     for sub in ["client", "server"] {
         let d = mesh.join(sub);
         if d.exists() {
@@ -1024,10 +1023,11 @@ pub fn reset_if_stale_mesh_identity(pki_dir: &std::path::Path) -> Result<bool> {
     // client/server certs under the new CN immediately so the daemon can
     // keep operating without an external re-pair. Joiner-only hosts have
     // to wait for an inviter; log the path so the operator knows.
-    if pki::has_mesh_ca_key(pki_dir) {
+    if utils::pki::has_mesh_ca_key(pki_dir) {
         let host = system::host_identity::machine_id_short().to_string();
-        pki::reissue_mesh_server_cert(pki_dir).context("self-reissue mesh server cert")?;
-        pki::reissue_mesh_client_cert(pki_dir, &host).context("self-reissue mesh client cert")?;
+        utils::pki::reissue_mesh_server_cert(pki_dir).context("self-reissue mesh server cert")?;
+        utils::pki::reissue_mesh_client_cert(pki_dir, &host)
+            .context("self-reissue mesh client cert")?;
         tracing::warn!(
             "[pod] founder reissued mesh client+server certs under CN {host}; \
              pod-membership wiped — re-pair joiners as needed"
@@ -1137,7 +1137,7 @@ mod exec_wire {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub caller_role: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub caller_token: Option<pki::SignedEnvelope>,
+        pub caller_token: Option<utils::pki::SignedEnvelope>,
         /// End-to-end trace id stamped by the originating REST/SDK request
         /// (or synthesized by the daemon middleware). The recipient sets it
         /// on its per-request ctx + tracing span so a single browser action
@@ -1202,7 +1202,7 @@ pub async fn exec_as(
 
 /// Pull a peer's signed bundle of all shared-state entities. The returned
 /// envelope is verified + merged by [`replication_sync`]; this fn just dials.
-pub async fn fetch_replicate_bundle(host: &str) -> Result<pki::SignedEnvelope> {
+pub async fn fetch_replicate_bundle(host: &str) -> Result<utils::pki::SignedEnvelope> {
     call_typed(
         host,
         POD_REPLICATE_EXPORT_METHOD,
@@ -1214,7 +1214,10 @@ pub async fn fetch_replicate_bundle(host: &str) -> Result<pki::SignedEnvelope> {
 
 /// Push our signed bundle to `host`. Recipient verifies sig + pinned bootstrap
 /// fp before merging. Returns the count of rows merged on the recipient.
-pub async fn push_replicate_bundle(host: &str, envelope: &pki::SignedEnvelope) -> Result<usize> {
+pub async fn push_replicate_bundle(
+    host: &str,
+    envelope: &utils::pki::SignedEnvelope,
+) -> Result<usize> {
     let result: ReplicatePushResult = call_typed(
         host,
         POD_REPLICATE_PUSH_METHOD,
@@ -1266,10 +1269,10 @@ pub(crate) async fn connect_pod_tls(
     host: &str,
 ) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
     let pki = pki_dir();
-    let bundle =
-        pki::load_mesh_client(&pki).context("load mesh client bundle (run `orca pod init`)")?;
-    let (chain, key) = pki::parse_cert_and_key(&bundle.cert_pem, &bundle.key_pem)?;
-    let roots = Arc::new(pki::ca_root_store(&bundle.ca_cert_pem)?);
+    let bundle = utils::pki::load_mesh_client(&pki)
+        .context("load mesh client bundle (run `orca pod init`)")?;
+    let (chain, key) = utils::pki::parse_cert_and_key(&bundle.cert_pem, &bundle.key_pem)?;
+    let roots = Arc::new(utils::pki::ca_root_store(&bundle.ca_cert_pem)?);
 
     let client_config = ClientConfig::builder()
         .with_root_certificates((*roots).clone())
@@ -1281,7 +1284,7 @@ pub(crate) async fn connect_pod_tls(
     let tcp = TcpStream::connect(&addr)
         .await
         .with_context(|| format!("connect {addr}"))?;
-    let sni = ServerName::try_from(pki::POD_SERVER_SAN)
+    let sni = ServerName::try_from(utils::pki::POD_SERVER_SAN)
         .context("build SNI ServerName")?
         .to_owned();
     connector

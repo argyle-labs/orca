@@ -16,7 +16,6 @@
 
 use anyhow::{Context, Result};
 use db::ports::mesh_port;
-use pki;
 use rand::Rng;
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
@@ -52,7 +51,7 @@ pub fn spawn() -> tokio::task::JoinHandle<()> {
 async fn tick() -> Result<()> {
     // Gate: only secure hosts with the CA key extend offers.
     let pki_d = pki_dir();
-    if !pki::has_mesh_ca_key(&pki_d) {
+    if !utils::pki::has_mesh_ca_key(&pki_d) {
         return Ok(());
     }
     let conn = db::open_default()?;
@@ -146,9 +145,9 @@ pub async fn push_offer(
     pod_id: &str,
 ) -> Result<()> {
     let pki_d = pki_dir();
-    let signing = pki::load_or_init_bootstrap_key(&pki_d)?;
-    let mesh_ca_cert_pem =
-        std::fs::read_to_string(pki::mesh_ca_cert_path(&pki_d)).context("read mesh CA cert")?;
+    let signing = utils::pki::load_or_init_bootstrap_key(&pki_d)?;
+    let mesh_ca_cert_pem = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))
+        .context("read mesh CA cert")?;
 
     let inviter_hostname = system::host_identity::hostname().to_string();
     let inviter_peer_id = system::host_identity::machine_id_short().to_string();
@@ -181,10 +180,10 @@ pub async fn push_offer(
         inviter_display_name: &inviter_hostname,
         code_plain: code,
     };
-    let env = pki::sign_envelope(&signing, &body)?;
+    let env = utils::pki::sign_envelope(&signing, &body)?;
 
     // Pinned dial to the joiner's bootstrap surface.
-    let verifier = pki::pinned_bootstrap_verifier(joiner_pubkey_fp.to_string());
+    let verifier = utils::pki::pinned_bootstrap_verifier(joiner_pubkey_fp.to_string());
     let client_config = ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(verifier)
@@ -195,7 +194,7 @@ pub async fn push_offer(
     let tcp = TcpStream::connect(&target)
         .await
         .with_context(|| format!("dial {target}"))?;
-    let sni = ServerName::try_from(pki::POD_BOOTSTRAP_SAN)
+    let sni = ServerName::try_from(utils::pki::POD_BOOTSTRAP_SAN)
         .context("bootstrap SNI")?
         .to_owned();
     let mut tls = connector

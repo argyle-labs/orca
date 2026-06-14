@@ -9,19 +9,24 @@
 //! Slice A: only Unraid 7.3.1 wired. Slice B adds runtime version probe +
 //! schema drift detection.
 
+#[allow(non_camel_case_types, unused_imports, dead_code, clippy::all)]
+pub mod generated {
+    include!(concat!(env!("OUT_DIR"), "/modules.rs"));
+}
+
 pub mod schema_pull;
 pub mod tools;
 pub mod version;
 
-use graphql::{Client as GraphQlClient, GraphQlErrors};
-use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
-use thiserror::Error;
-use unraid_generated::v7_3_1::{
+use crate::generated::v7_3_1::{
     AddPlugin, ArrayStatus, InstalledPlugins, ParityHistory, RemovePlugin, Shares, VarsVersion,
     add_plugin, array_status, installed_plugins, parity_history, remove_plugin, shares,
     vars_version,
 };
+use graphql::{Client as GraphQlClient, GraphQlErrors};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
+use thiserror::Error;
 
 use crate::version::UnraidVersion;
 
@@ -31,7 +36,7 @@ use crate::version::UnraidVersion;
 /// 1. Drop the introspection JSON in `projects/plugins/unraid/schemas/`.
 /// 2. Add a `V7_4_X` variant.
 /// 3. Each `Client` method `match`es on `self.api` and routes to the
-///    matching `unraid_generated::v7_4_X::*` types.
+///    matching `crate::generated::v7_4_X::*` types.
 ///
 /// `#[non_exhaustive]` so future variants don't break downstream
 /// `match` statements.

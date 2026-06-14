@@ -18,7 +18,6 @@
 
 use anyhow::{Context, Result};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
-use pki;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -222,11 +221,11 @@ fn handle_event(event: ServiceEvent, our_instance: &str) {
 /// Used at daemon startup. Returns None if the bootstrap key can't be loaded
 /// (which would indicate a deeper problem; caller logs + skips mDNS in that case).
 pub fn build_advertisement(pki_dir: PathBuf, port: u16) -> Result<Advertisement> {
-    let signing = pki::load_or_init_bootstrap_key(&pki_dir)?;
-    let pubkey_fp = pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
+    let signing = utils::pki::load_or_init_bootstrap_key(&pki_dir)?;
+    let pubkey_fp = utils::pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
 
     let hostname = system::host_identity::hostname().to_string();
-    let can_invite = pki::has_mesh_ca_key(&pki_dir);
+    let can_invite = utils::pki::has_mesh_ca_key(&pki_dir);
     // pod_id + self_secure from DB; failures non-fatal (we just advertise unclaimed).
     let (pod_id, self_secure) = match db::open_default() {
         Ok(conn) => (

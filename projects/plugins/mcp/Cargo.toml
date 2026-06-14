@@ -8,6 +8,7 @@ name = "mcp"
 path = "src/lib.rs"
 
 [dependencies]
+plugin-toolkit = { path = "../../plugin-toolkit" }
 macro-runtime = { path = "../../macro-runtime" }
 dispatch    = { path = "../../dispatch" }
 contract   = { path = "../../contract", default-features = false }

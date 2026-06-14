@@ -8,6 +8,7 @@ name = "conversation"
 path = "src/lib.rs"
 
 [dependencies]
+plugin-toolkit = { path = "../plugin-toolkit" }
 macro-runtime = { path = "../macro-runtime" }
 contract = { path = "../contract" }
 derive    = { path = "../derive" }

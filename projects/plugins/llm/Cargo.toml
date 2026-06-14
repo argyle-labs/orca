@@ -8,13 +8,27 @@ name = "llm"
 path = "src/lib.rs"
 
 [dependencies]
-contract = { path = "../../contract" }
+plugin-toolkit = { path = "../../plugin-toolkit" }
+# macro-runtime is the absolute-path landing crate for code emitted by
+# our derive/`endpoint_resource!` macros. Hand-written `use serde::*`,
+# `anyhow::bail!`, `tokio::*` still resolve against direct deps because
+# serde-derive / anyhow! / tokio! emit `::serde::…` / `::anyhow::…` /
+# `::tokio::…` at the call site (the proc-macro layer can't re-route
+# them through a re-export without `#[serde(crate = "...")]`-style
+# per-item annotations). See [[project-orca-macro-runtime-migration]].
+macro-runtime = { path = "../../macro-runtime" }
+contract  = { path = "../../contract" }
+derive    = { path = "../../derive" }
+dispatch  = { path = "../../dispatch" }
+inventory = { workspace = true }
+
 utils    = { path = "../../utils" }
 files    = { path = "../../files" }
-db            = { package = "db", path = "../../db" }
+db       = { package = "db", path = "../../db" }
 
 anyhow       = { workspace = true }
 async-trait  = { workspace = true }
+clap         = { workspace = true }
 colored      = { workspace = true }
 futures-util = { workspace = true }
 reqwest      = { workspace = true }

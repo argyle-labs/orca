@@ -21,10 +21,9 @@ ui = ["dep:mime_guess", "system/ui"]
 # Off by default; pulls ~10 MB of typst + font crates into the binary.
 pdf = ["dep:typst", "dep:typst-pdf", "dep:typst-assets", "dep:zip"]
 [dependencies]
-pki = { path = "../pki" }
+plugin-toolkit = { path = "../plugin-toolkit" }
 macro-runtime = { path = "../macro-runtime" }
 # Workspace crates
-orca-sdk   = { path = "../sdk/rust" }
 utils = { path = "../utils" }
 dispatch = { path = "../dispatch" }
 derive    = { path = "../derive" }
@@ -39,7 +38,7 @@ dev      = { path = "../dev" }
 namespace = { path = "../namespace" }
 spec     = { path = "../spec" }
 agents   = { path = "../plugins/agents" }
-plugins  = { path = "../plugins/runtime" }
+plugins  = { path = "../runtime" }
 files    = { path = "../files" }
 mcp      = { path = "../plugins/mcp" }
 llm      = { path = "../plugins/llm" }

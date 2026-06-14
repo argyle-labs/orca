@@ -274,7 +274,7 @@ fn expand_to_tokens(attr: ToolAttr, item: ItemFn) -> TokenStream2 {
 ///
 /// Generates `export`/`merge` fns over the named struct fields (each field maps
 /// 1:1 to a column of `table`, in declaration order) and submits a
-/// `::macro_runtime::db_types::ReplicatedRegistration` into the inventory slice the pod mesh
+/// `::plugin_toolkit::db_types::ReplicatedRegistration` into the inventory slice the pod mesh
 /// engine walks. Merge is last-write-wins on the `lww` column, keyed by `pk`.
 #[cfg(not(test))]
 #[proc_macro_derive(Replicated, attributes(replicate))]
@@ -579,7 +579,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     };
 
     let ctx_param_name = Ident::new("ctx", Span::call_site());
-    let ctx_param = quote! { #ctx_param_name: &::macro_runtime::contract::ToolCtx };
+    let ctx_param = quote! { #ctx_param_name: &::plugin_toolkit::contract::ToolCtx };
 
     // Peer dispatch is universal: every tool with `remote_ok = true` (i.e.
     // not `local_only`) gets the proxy stanza. The trigger lives on
@@ -603,9 +603,9 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             // daemon-restart gap for tools that swap the peer's binary.
             let __svc_refresh = ::std::sync::Arc::clone(&__svc);
             let __peer_refresh = __peer_id.clone();
-            ::macro_runtime::tokio::spawn(async move {
+            ::plugin_toolkit::tokio::spawn(async move {
                 for __delay_ms in [500u64, 2000, 5000, 10_000, 20_000] {
-                    ::macro_runtime::tokio::time::sleep(
+                    ::plugin_toolkit::tokio::time::sleep(
                         ::std::time::Duration::from_millis(__delay_ms)
                     ).await;
                     if __svc_refresh
@@ -627,7 +627,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     let local_only_reject_stanza = if !emit_peer_dispatch {
         quote! {
             if let ::core::option::Option::Some(__peer) = #ctx_param_name.peer() {
-                return ::core::result::Result::Err(::macro_runtime::anyhow::anyhow!(
+                return ::core::result::Result::Err(::plugin_toolkit::anyhow::anyhow!(
                     "tool `{}` is local_only and cannot be dispatched to peer `{}`",
                     #tool_name, __peer,
                 ));
@@ -642,9 +642,9 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
                 #ctx_param_name.peer().map(::std::string::ToString::to_string)
             {
                 let __svc = #ctx_param_name
-                    .service::<::std::sync::Arc<dyn ::macro_runtime::contract::RemoteExec>>()?;
-                let __args_value = ::macro_runtime::serde_json::to_value(&#args_forward)
-                    .map_err(|e| ::macro_runtime::anyhow::anyhow!("peer_dispatch: serialize args: {e}"))?;
+                    .service::<::std::sync::Arc<dyn ::plugin_toolkit::contract::RemoteExec>>()?;
+                let __args_value = ::plugin_toolkit::serde_json::to_value(&#args_forward)
+                    .map_err(|e| ::plugin_toolkit::anyhow::anyhow!("peer_dispatch: serialize args: {e}"))?;
                 // Forward the ctx's ambient operator identity; the transport
                 // mints a signed caller token from it (project-remote-exec-full-fix
                 // S1–S4). `None` on unauthenticated paths.
@@ -657,8 +657,8 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
                         #ctx_param_name.correlation_id().map(::std::string::ToString::to_string),
                     )
                     .await?;
-                let __out: #output_ty = ::macro_runtime::serde_json::from_value(__out_value)
-                    .map_err(|e| ::macro_runtime::anyhow::anyhow!(
+                let __out: #output_ty = ::plugin_toolkit::serde_json::from_value(__out_value)
+                    .map_err(|e| ::plugin_toolkit::anyhow::anyhow!(
                         "peer_dispatch: decode {} output from peer {}: {}",
                         #tool_name, __peer_id, e,
                     ))?;
@@ -685,11 +685,11 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
         Some("manual") | Some("skip") => quote! {},
         _ => quote! {
             const _: () = {
-                ::macro_runtime::dispatch::register_op! {
+                ::plugin_toolkit::dispatch::register_op! {
                     tool: #zst_ident,
                     domain: #domain,
                     verb: #verb,
-                    summary: <#zst_ident as ::macro_runtime::contract::OrcaToolDef>::DESCRIPTION,
+                    summary: <#zst_ident as ::plugin_toolkit::contract::OrcaToolDef>::DESCRIPTION,
                 }
             };
         },
@@ -699,21 +699,21 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     // native deps needed). Every tool gets one `/api/v1/<NAME>` POST entry
     // injected into the spec at runtime.
     let openapi_block = quote! {
-        ::macro_runtime::inventory::submit! {
-            ::macro_runtime::dispatch::openapi::OpenApiToolRegistration {
+        ::plugin_toolkit::inventory::submit! {
+            ::plugin_toolkit::dispatch::openapi::OpenApiToolRegistration {
                 name: #tool_name,
                 title: #title_tokens,
                 description: #description,
                 domain: #domain,
                 args_schema: || {
-                    ::macro_runtime::serde_json::to_value(
-                        ::macro_runtime::schemars::schema_for!(<#zst_ident as ::macro_runtime::contract::OrcaToolDef>::Args)
-                    ).unwrap_or(::macro_runtime::serde_json::Value::Object(::macro_runtime::serde_json::Map::new()))
+                    ::plugin_toolkit::serde_json::to_value(
+                        ::plugin_toolkit::schemars::schema_for!(<#zst_ident as ::plugin_toolkit::contract::OrcaToolDef>::Args)
+                    ).unwrap_or(::plugin_toolkit::serde_json::Value::Object(::plugin_toolkit::serde_json::Map::new()))
                 },
                 output_schema: || {
-                    ::macro_runtime::serde_json::to_value(
-                        ::macro_runtime::schemars::schema_for!(<#zst_ident as ::macro_runtime::contract::OrcaToolDef>::Output)
-                    ).unwrap_or(::macro_runtime::serde_json::Value::Object(::macro_runtime::serde_json::Map::new()))
+                    ::plugin_toolkit::serde_json::to_value(
+                        ::plugin_toolkit::schemars::schema_for!(<#zst_ident as ::plugin_toolkit::contract::OrcaToolDef>::Output)
+                    ).unwrap_or(::plugin_toolkit::serde_json::Value::Object(::plugin_toolkit::serde_json::Map::new()))
                 },
             }
         }
@@ -725,7 +725,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
         #[allow(non_camel_case_types)]
         pub struct #zst_ident;
 
-        impl ::macro_runtime::contract::OrcaToolDef for #zst_ident {
+        impl ::plugin_toolkit::contract::OrcaToolDef for #zst_ident {
             const NAME: &'static str = #tool_name;
             const DESCRIPTION: &'static str = #description;
             const REMOTE_OK: bool = #remote_ok_lit;
@@ -734,28 +734,28 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             type Output = #output_ty;
         }
 
-        impl ::macro_runtime::contract::OrcaOp for #zst_ident {
+        impl ::plugin_toolkit::contract::OrcaOp for #zst_ident {
             const DOMAIN: &'static str = #domain;
             const VERB: &'static str = #verb;
         }
 
-        #[::macro_runtime::async_trait::async_trait]
-        impl ::macro_runtime::contract::OrcaTool for #zst_ident {
+        #[::plugin_toolkit::async_trait::async_trait]
+        impl ::plugin_toolkit::contract::OrcaTool for #zst_ident {
             async fn run(
                 #args_param,
                 #ctx_param,
-            ) -> ::macro_runtime::anyhow::Result<#output_ty> {
+            ) -> ::plugin_toolkit::anyhow::Result<#output_ty> {
                 #local_only_reject_stanza
                 #peer_dispatch_stanza
                 #fn_ident(#args_forward, #ctx_param_name).await
             }
         }
 
-        ::macro_runtime::inventory::submit! {
-            ::macro_runtime::dispatch::ToolRegistration {
+        ::plugin_toolkit::inventory::submit! {
+            ::plugin_toolkit::dispatch::ToolRegistration {
                 name: #tool_name,
                 make_erased: || ::std::boxed::Box::new(
-                    ::macro_runtime::dispatch::ToolWrapper::<#zst_ident>(::std::marker::PhantomData)
+                    ::plugin_toolkit::dispatch::ToolWrapper::<#zst_ident>(::std::marker::PhantomData)
                 ),
             }
         }

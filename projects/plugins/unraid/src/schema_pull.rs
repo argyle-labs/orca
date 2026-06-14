@@ -62,7 +62,7 @@ pub fn embedded_for(probed: &str) -> Option<&'static str> {
         .split(|c: char| !c.is_ascii_digit() && c != '.')
         .next()
         .unwrap_or(probed);
-    unraid_generated::SCHEMAS
+    crate::generated::SCHEMAS
         .iter()
         .find(|(v, _)| *v == trimmed)
         .map(|(_, s)| *s)

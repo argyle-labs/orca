@@ -8,10 +8,8 @@
 //! the bottom of this file, and a migration entry in `MIGRATIONS` if the table was added
 //! to an already-deployed database.
 
-pub mod admin;
 pub mod api_tokens;
 pub mod config_store;
-pub mod config_tools;
 pub mod docker_runtimes;
 // `dockge` endpoint registry now lives in the dockge plugin via
 // `plugin_toolkit::endpoint_resource!` — that macro emits the row
@@ -25,6 +23,7 @@ pub mod host_addressing;
 pub mod host_status;
 pub mod llm;
 pub mod mcp_servers;
+pub mod models;
 // `ntfy` endpoint registry now lives in the ntfy plugin via
 // `plugin_toolkit::endpoint_resource!`.
 pub mod oauth;
@@ -63,7 +62,6 @@ pub mod sessions;
 pub mod settings;
 pub mod startup;
 pub mod tool_mappings;
-pub mod tools;
 pub mod users;
 
 use anyhow::{Context, Result};
@@ -794,6 +792,18 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             enabled    INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         );
+
+        CREATE TABLE IF NOT EXISTS models (
+            id         TEXT PRIMARY KEY,
+            provider   TEXT NOT NULL,
+            endpoint   TEXT,
+            model_name TEXT NOT NULL,
+            is_default INTEGER NOT NULL DEFAULT 0,
+            enabled    INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS models_one_default
+            ON models(is_default) WHERE is_default = 1;
 
         CREATE TABLE IF NOT EXISTS doc_roots (
             name        TEXT PRIMARY KEY,

@@ -2,6 +2,7 @@ pub mod backend;
 pub mod discovery;
 pub mod engine;
 pub mod local;
+pub mod models;
 pub mod resolve;
 pub mod tools;
 pub mod types;

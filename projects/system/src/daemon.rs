@@ -170,7 +170,7 @@ fn ensure_pki_for_home(home: &str) -> Result<()> {
     let pki_dir = std::path::PathBuf::from(home)
         .join(APP_STATE_DIR)
         .join(contract::config::APP_PKI_DIR);
-    pki::init(&pki_dir)?;
+    utils::pki::init(&pki_dir)?;
     Ok(())
 }
 

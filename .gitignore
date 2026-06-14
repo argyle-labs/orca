@@ -38,6 +38,7 @@ DerivedData/
 Pods/
 
 # CMake / CLion
+
 cmake-build-*/
 
 # Flutter / Dart

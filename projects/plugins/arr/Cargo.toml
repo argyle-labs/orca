@@ -19,6 +19,7 @@ path = "src/lib.rs"
 #   curl http://sonarr.local/api/v3/openapi.json -o specs/sonarr.openapi.json
 
 [dependencies]
+plugin-toolkit = { path = "../../plugin-toolkit" }
 anyhow      = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
@@ -37,7 +38,7 @@ wiremock = "0.6"
 rustls   = { workspace = true }
 
 [build-dependencies]
-plugin-toolkit-build = { path = "../plugin-toolkit-build" }
+plugin-toolkit-build = { path = "../../plugin-toolkit-build" }
 
 [lints]
 workspace = true

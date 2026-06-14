@@ -292,7 +292,61 @@ async fn docker_detail(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// docker.update — args differentiate: engine start, runtime register, compose action
+// docker.create — register a new docker runtime
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerCreateArgs {
+    /// Runtime name (unique).
+    #[arg(long)]
+    pub runtime_name: String,
+    #[arg(long)]
+    pub socket_path: Option<String>,
+    #[arg(long)]
+    pub host: Option<String>,
+    #[arg(long)]
+    pub url: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerCreateOutput {
+    pub name: String,
+}
+
+/// [MUTATES STATE] Register a new docker runtime. Errors if `runtime_name`
+/// already exists; use `docker.update` to modify.
+#[orca_tool(domain = "docker", verb = "create")]
+async fn docker_create(
+    args: DockerCreateArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<DockerCreateOutput> {
+    if args.socket_path.is_none() && args.host.is_none() && args.url.is_none() {
+        anyhow::bail!("runtime registration needs socket_path, host, or url");
+    }
+    let conn = db::open_default()?;
+    if db::docker_runtimes::exists(&conn, &args.runtime_name)? {
+        anyhow::bail!(
+            "docker runtime '{}' already exists; use docker.update to modify",
+            args.runtime_name
+        );
+    }
+    let row = db::docker_runtimes::RuntimeRow {
+        name: args.runtime_name.clone(),
+        socket_path: args.socket_path,
+        host: args.host,
+        url: args.url,
+        enabled: true,
+    };
+    db::docker_runtimes::insert(&conn, &row)?;
+    Ok(DockerCreateOutput {
+        name: args.runtime_name,
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// docker.update — engine start, runtime field updates, compose action
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
@@ -302,7 +356,7 @@ pub struct DockerUpdateArgs {
     #[arg(long)]
     pub engine_start: bool,
 
-    /// Register a docker runtime — also set `socket_path`, `host`, or `url`.
+    /// Update an existing docker runtime — errors if name unknown.
     #[arg(long)]
     pub runtime_name: Option<String>,
     #[arg(long)]
@@ -335,8 +389,9 @@ pub struct DockerUpdateOutput {
     pub compose_file: Option<String>,
 }
 
-/// [MUTATES STATE] Combine any of: start the local engine, register a docker
-/// runtime, run a compose action. Args determine which sub-operations fire.
+/// [MUTATES STATE] Combine any of: start the local engine, update an existing
+/// docker runtime, run a compose action. Args determine which sub-operations
+/// fire. Use `docker.create` to register a new runtime.
 #[orca_tool(domain = "docker", verb = "update")]
 async fn docker_update(
     args: DockerUpdateArgs,
@@ -351,7 +406,7 @@ async fn docker_update(
 
     if let Some(name) = &args.runtime_name {
         if args.socket_path.is_none() && args.host.is_none() && args.url.is_none() {
-            anyhow::bail!("runtime registration needs socket_path, host, or url");
+            anyhow::bail!("runtime update needs socket_path, host, or url");
         }
         let row = db::docker_runtimes::RuntimeRow {
             name: name.clone(),
@@ -361,8 +416,8 @@ async fn docker_update(
             enabled: true,
         };
         let conn = db::open_default()?;
-        db::docker_runtimes::upsert(&conn, &row)?;
-        out.applied.push(format!("runtime-upserted:{name}"));
+        db::docker_runtimes::update(&conn, &row)?;
+        out.applied.push(format!("runtime-updated:{name}"));
     }
 
     match (args.path.as_deref(), args.action.as_deref()) {
@@ -376,7 +431,6 @@ async fn docker_update(
                     ComposeError::UnknownAction(a) => anyhow::anyhow!("unknown action: {a}"),
                     other => anyhow::Error::from(other),
                 })?;
-            // If engine_start already populated output, keep both visible in `applied`
             if out.output.is_empty() {
                 out.output = output;
             } else {

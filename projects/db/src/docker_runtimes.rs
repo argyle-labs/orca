@@ -75,17 +75,41 @@ pub fn active_host(conn: &Connection) -> Option<String> {
     }
 }
 
-pub fn upsert(conn: &Connection, rt: &RuntimeRow) -> Result<()> {
+pub fn exists(conn: &Connection, name: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM docker_runtimes WHERE name = ?1",
+        rusqlite::params![name],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// Insert a brand-new runtime. Errors if `name` already exists — call
+/// [`update`] to modify existing rows.
+pub fn insert(conn: &Connection, rt: &RuntimeRow) -> Result<()> {
     conn.execute(
         "INSERT INTO docker_runtimes (name, socket_path, host, url, enabled)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(name) DO UPDATE SET
-             socket_path = excluded.socket_path,
-             host        = excluded.host,
-             url         = excluded.url,
-             enabled     = excluded.enabled",
+         VALUES (?1, ?2, ?3, ?4, ?5)",
         rusqlite::params![rt.name, rt.socket_path, rt.host, rt.url, rt.enabled],
     )?;
+    Ok(())
+}
+
+/// Update an existing runtime. Errors if `name` is unknown — call
+/// [`insert`] to register a new one.
+pub fn update(conn: &Connection, rt: &RuntimeRow) -> Result<()> {
+    let n = conn.execute(
+        "UPDATE docker_runtimes
+            SET socket_path = ?2,
+                host        = ?3,
+                url         = ?4,
+                enabled     = ?5
+          WHERE name = ?1",
+        rusqlite::params![rt.name, rt.socket_path, rt.host, rt.url, rt.enabled],
+    )?;
+    if n == 0 {
+        anyhow::bail!("docker runtime '{}' not found", rt.name);
+    }
     Ok(())
 }
 
@@ -112,7 +136,7 @@ mod tests {
             url: None,
             enabled: true,
         };
-        upsert(&conn, &rt).unwrap();
+        insert(&conn, &rt).unwrap();
 
         let rows = list(&conn).unwrap();
         assert_eq!(rows.len(), 1);
@@ -139,7 +163,7 @@ mod tests {
             url: None,
             enabled: true,
         };
-        upsert(&conn, &rt).unwrap();
+        insert(&conn, &rt).unwrap();
         let rows = list(&conn).unwrap();
         assert_eq!(rows[0].docker_host().as_deref(), Some("tcp://remote:2376"));
     }
@@ -162,7 +186,7 @@ mod tests {
     #[test]
     fn active_host_returns_first_socket() {
         let conn = test_conn();
-        upsert(
+        insert(
             &conn,
             &RuntimeRow {
                 name: "a".into(),

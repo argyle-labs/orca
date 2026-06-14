@@ -13,6 +13,7 @@ path = "src/lib.rs"
 # (no service trait, per feedback_no_indirection).
 
 [dependencies]
+plugin-toolkit = { path = "../plugin-toolkit" }
 macro-runtime = { path = "../macro-runtime" }
 dispatch = { path = "../dispatch" }
 contract = { path = "../contract", default-features = false }

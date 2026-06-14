@@ -22,7 +22,6 @@
 
 use crate::{PodListOutput, PodMember, PodPeerDto};
 use anyhow::Result;
-use pki;
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -49,7 +48,7 @@ async fn tick() -> Result<()> {
     // Gate: we need a mesh client cert to dial any peer. Hosts that haven't
     // completed initial pairing don't have one yet — let `pod-scheduler`
     // bootstrap them first.
-    if pki::load_mesh_client(&pki_d).is_err() {
+    if utils::pki::load_mesh_client(&pki_d).is_err() {
         return Ok(());
     }
 
@@ -147,7 +146,7 @@ async fn ingest_roster(
     list: Vec<PodPeerDto>,
 ) -> Result<usize> {
     let pki_d = pki_dir();
-    let ca_cert_pem = std::fs::read_to_string(pki::mesh_ca_cert_path(&pki_d))?;
+    let ca_cert_pem = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))?;
     let conn = db::open_default()?;
 
     let mut added = 0;

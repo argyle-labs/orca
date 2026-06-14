@@ -333,11 +333,11 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             result = https_serve => { result?; false }
             result = http_serve  => { result?; false }
             _ = sigusr1.recv() => {
-                // Park: drop both REST listeners AND stop the plugin host so
-                // every port we own is released for the dev binary to take.
+                // Park: drop both REST listeners so the dev binary can take
+                // the port. Plugins are compile-time-linked now — no separate
+                // host process to stop.
                 https_handle.shutdown();
                 http_handle.shutdown();
-                plugins::host::stop();
                 true
             }
             _ = sigterm.recv() => {
@@ -377,12 +377,6 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             tokio::select! {
                 _ = sigusr2.recv() => {
                     info!("[orca] daemon reclaiming port {port}");
-                    // Bring the plugin host back up alongside REST.
-                    plugins::host::start(
-                        &pki_dir,
-                        ports.mesh,
-                        plugins::host::PluginRegistry::new(),
-                    );
                     break;
                 }
                 _ = sigterm.recv() => {
@@ -402,11 +396,6 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
                         };
                         if abandoned {
                             info!("[orca] auto-reclaiming port {port} (dev abandoned)");
-                            plugins::host::start(
-                                &pki_dir,
-                                ports.mesh,
-                                plugins::host::PluginRegistry::new(),
-                            );
                             break;
                         }
                     }
@@ -428,27 +417,30 @@ async fn load_rest_tls(pki_dir: &std::path::Path) -> Result<RustlsConfig> {
     // Auto-init on first boot: previously this returned a hard error if the
     // user hadn't run `orca install` yet, which also broke the daemon test
     // harness (fresh HOME, no PKI). Init is idempotent and cheap.
-    if !pki::ca_cert_path(pki_dir).exists() || !pki::server_cert_path(pki_dir).exists() {
-        pki::init(pki_dir).context("auto-init core PKI for REST TLS")?;
+    if !utils::pki::ca_cert_path(pki_dir).exists()
+        || !utils::pki::server_cert_path(pki_dir).exists()
+    {
+        utils::pki::init(pki_dir).context("auto-init core PKI for REST TLS")?;
     } else {
         // Pre-upgrade certs only had `core.orca.local` as SAN. Browsers
         // won't store cookies for `https://localhost:…` with a mismatched
         // hostname even after bypassing the self-signed-CA warning. Detect
         // and re-issue automatically so the daemon fixes itself on restart.
-        let cert_pem = std::fs::read_to_string(pki::server_cert_path(pki_dir)).unwrap_or_default();
-        if !pki::rest_server_cert_has_localhost_san(&cert_pem) {
-            pki::refresh_rest_server_cert(pki_dir)
+        let cert_pem =
+            std::fs::read_to_string(utils::pki::server_cert_path(pki_dir)).unwrap_or_default();
+        if !utils::pki::rest_server_cert_has_localhost_san(&cert_pem) {
+            utils::pki::refresh_rest_server_cert(pki_dir)
                 .context("refresh REST server cert to add localhost SAN")?;
             info!("[pki] REST server cert refreshed — localhost SAN added");
-        } else if !pki::rest_server_cert_is_browser_compatible(&cert_pem) {
+        } else if !utils::pki::rest_server_cert_is_browser_compatible(&cert_pem) {
             // Pre-rc.9 cert used an Ed25519 leaf key. Firefox/Chrome reject
             // Ed25519 in TLS server auth — re-issue with ECDSA P-256.
-            pki::refresh_rest_server_cert(pki_dir)
+            utils::pki::refresh_rest_server_cert(pki_dir)
                 .context("refresh REST server cert to ECDSA P-256 for browser compatibility")?;
             info!("[pki] REST server cert refreshed — Ed25519 → ECDSA P-256 (browser TLS)");
         }
     }
-    let bundle = pki::load_server(pki_dir).context("load REST TLS bundle")?;
+    let bundle = utils::pki::load_server(pki_dir).context("load REST TLS bundle")?;
     RustlsConfig::from_pem(bundle.cert_pem.into_bytes(), bundle.key_pem.into_bytes())
         .await
         .context("build rustls config from core server cert + key")
@@ -649,11 +641,6 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     pod::host_status_replica::spawn_fleet_replicator();
     pod::update_state_probe::spawn_periodic();
     pod::system_detail_probe::spawn_periodic();
-    plugins::host::start(
-        pki_dir,
-        db::ports::mesh_port(),
-        plugins::host::PluginRegistry::new(),
-    );
     spawn_pod_runtime(pki_dir).await;
     spawn_scheduler_runtime();
     tokio::spawn(system::commands::startup_update_check());

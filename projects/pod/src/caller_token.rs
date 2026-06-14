@@ -28,7 +28,6 @@
 
 use anyhow::{Context, Result};
 use contract::CallerIdentity;
-use pki;
 use serde::{Deserialize, Serialize};
 use utils::hash;
 
@@ -37,7 +36,7 @@ use utils::hash;
 pub const DEFAULT_TTL_SECS: i64 = 60;
 
 /// The signed body carried in `PodExecParams.caller_token`. Serialized to
-/// canonical JSON and signed; see [`pki::sign_envelope`].
+/// canonical JSON and signed; see [`utils::pki::sign_envelope`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallerToken {
     /// Stable id of the user this call is made on behalf of. The recipient
@@ -101,9 +100,9 @@ pub fn mint(
     tool: &str,
     args: &serde_json::Value,
     ttl_secs: i64,
-) -> Result<pki::SignedEnvelope> {
+) -> Result<utils::pki::SignedEnvelope> {
     let signing =
-        pki::load_or_init_bootstrap_key(pki_dir).context("load bootstrap key for token")?;
+        utils::pki::load_or_init_bootstrap_key(pki_dir).context("load bootstrap key for token")?;
     let now = chrono::Utc::now().timestamp();
     let token = CallerToken {
         caller_user_id: identity.user_id.clone(),
@@ -115,7 +114,7 @@ pub fn mint(
         expires_at: now + ttl_secs,
         nonce: uuid::Uuid::now_v7().to_string(),
     };
-    pki::sign_envelope(&signing, &token).context("sign caller token")
+    utils::pki::sign_envelope(&signing, &token).context("sign caller token")
 }
 
 /// Outcome of verifying a token's *self-contained* claims (signature, expiry,
@@ -135,13 +134,13 @@ pub struct Verified {
 /// decoded token plus the signer fp for the caller's peer-binding + replay
 /// checks. Does NOT consult the users table or any replay cache.
 pub fn verify(
-    env: &pki::SignedEnvelope,
+    env: &utils::pki::SignedEnvelope,
     tool: &str,
     args: &serde_json::Value,
     now: i64,
 ) -> Result<Verified> {
     let (token, verifying) =
-        pki::verify_envelope::<CallerToken>(env).context("verify caller token envelope")?;
+        utils::pki::verify_envelope::<CallerToken>(env).context("verify caller token envelope")?;
 
     if token.tool != tool {
         anyhow::bail!(
@@ -157,7 +156,7 @@ pub fn verify(
         anyhow::bail!("caller token expired at {} (now {now})", token.expires_at);
     }
 
-    let signer_fp = pki::bootstrap_pubkey_fingerprint(&verifying);
+    let signer_fp = utils::pki::bootstrap_pubkey_fingerprint(&verifying);
     Ok(Verified { token, signer_fp })
 }
 
@@ -250,8 +249,8 @@ mod tests {
         assert_eq!(v.token.caller_user_id, "u-1");
         assert_eq!(v.token.role, "admin");
         // signer fp must equal the host bootstrap key fp.
-        let signing = pki::load_or_init_bootstrap_key(dir.path()).unwrap();
-        let expected_fp = pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
+        let signing = utils::pki::load_or_init_bootstrap_key(dir.path()).unwrap();
+        let expected_fp = utils::pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
         assert_eq!(v.signer_fp, expected_fp);
     }
 

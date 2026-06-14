@@ -13,7 +13,7 @@ path = "src/lib.rs"
 ui = []
 
 [dependencies]
-pki = { path = "../pki" }
+plugin-toolkit = { path = "../plugin-toolkit" }
 macro-runtime = { path = "../macro-runtime" }
 dispatch   = { path = "../dispatch" }
 contract  = { path = "../contract", default-features = false }
@@ -25,7 +25,6 @@ inventory      = { workspace = true }
 
 utils = { path = "../utils" }
 files = { path = "../files" }
-orca-sdk = { path = "../sdk/rust" }
 agents = { path = "../plugins/agents", default-features = false }
 db = { package = "db", path = "../db" }
 rusqlite = { workspace = true }

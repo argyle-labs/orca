@@ -17,7 +17,7 @@ urlencoding = { workspace = true }
 utils  = { path = "../../utils" }
 
 # Toolkit prelude + endpoint_resource! macro.
-plugin-toolkit = { path = "../plugin-toolkit" }
+plugin-toolkit = { path = "../../plugin-toolkit" }
 
 # Used directly by stack-op tools' #[orca_tool] expansions.
 dispatch    = { path = "../../dispatch" }

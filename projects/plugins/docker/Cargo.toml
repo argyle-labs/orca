@@ -8,6 +8,7 @@ name = "docker"
 path = "src/lib.rs"
 
 [dependencies]
+plugin-toolkit = { path = "../../plugin-toolkit" }
 macro-runtime = { path = "../../macro-runtime" }
 anyhow      = { workspace = true }
 serde       = { workspace = true }

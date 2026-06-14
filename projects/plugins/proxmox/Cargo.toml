@@ -24,7 +24,7 @@ inventory        = { workspace = true }
 
 db = { package = "db", path = "../../db" }
 rusqlite    = { workspace = true }
-plugin-toolkit = { path = "../plugin-toolkit" }
+plugin-toolkit = { path = "../../plugin-toolkit" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 clap        = { workspace = true }

@@ -27,7 +27,7 @@ inventory        = { workspace = true }
 # the macro-generated OrcaTool impl.
 db = { package = "db", path = "../../db" }
 rusqlite    = { workspace = true }
-plugin-toolkit = { path = "../plugin-toolkit" }
+plugin-toolkit = { path = "../../plugin-toolkit" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 

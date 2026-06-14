@@ -19,14 +19,14 @@
 //!                      the certs.
 
 use anyhow::{Context, Result};
-use pki::SignedEnvelope;
-use pki::{self, PeerRole};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_rustls::server::TlsStream;
 use tracing::{info, warn};
 use utils::framing::{read_frame, write_frame};
 use utils::jsonrpc::{ErrorObject, Message, Request, Response};
+use utils::pki::PeerRole;
+use utils::pki::SignedEnvelope;
 use uuid::Uuid;
 
 use super::pki_dir;
@@ -242,8 +242,8 @@ fn handle_offer(
     env: &SignedEnvelope,
     peer: std::net::SocketAddr,
 ) -> Result<(OfferAck, Option<String>)> {
-    let (body, signer_vk) = pki::verify_envelope::<OfferBody>(env)?;
-    let signer_fp = pki::bootstrap_pubkey_fingerprint(&signer_vk);
+    let (body, signer_vk) = utils::pki::verify_envelope::<OfferBody>(env)?;
+    let signer_fp = utils::pki::bootstrap_pubkey_fingerprint(&signer_vk);
 
     let conn = db::open_default()?;
     let offer_id = Uuid::now_v7().to_string();
@@ -294,21 +294,21 @@ fn handle_offer(
 }
 
 fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
-    let (body, signer_vk) = pki::verify_envelope::<JoinConfirmBody>(env)?;
-    let signer_fp = pki::bootstrap_pubkey_fingerprint(&signer_vk);
+    let (body, signer_vk) = utils::pki::verify_envelope::<JoinConfirmBody>(env)?;
+    let signer_fp = utils::pki::bootstrap_pubkey_fingerprint(&signer_vk);
 
     let conn = db::open_default()?;
     let offer = pdb::find_outbound_offer_by_code_and_fp(&conn, &body.code, &signer_fp)?
         .context("no matching pending outbound offer (wrong code, wrong peer, or expired)")?;
 
     let pki_d = pki_dir();
-    let (client_cert_pem, ca_cert_pem) = pki::sign_peer_csr(
+    let (client_cert_pem, ca_cert_pem) = utils::pki::sign_peer_csr(
         &pki_d,
         &body.csr_client_pem,
         &body.joiner_hostname,
         PeerRole::Client,
     )?;
-    let (server_cert_pem, _) = pki::sign_peer_csr(
+    let (server_cert_pem, _) = utils::pki::sign_peer_csr(
         &pki_d,
         &body.csr_server_pem,
         &body.joiner_hostname,
@@ -369,8 +369,8 @@ fn handle_request_offer(
     env: &SignedEnvelope,
     peer: std::net::SocketAddr,
 ) -> Result<RequestOfferResult> {
-    let (body, signer_vk) = pki::verify_envelope::<RequestOfferBody>(env)?;
-    let signer_fp = pki::bootstrap_pubkey_fingerprint(&signer_vk);
+    let (body, signer_vk) = utils::pki::verify_envelope::<RequestOfferBody>(env)?;
+    let signer_fp = utils::pki::bootstrap_pubkey_fingerprint(&signer_vk);
     // Envelope-signer must match the fp the joiner advertises. Otherwise any
     // signer could request offers for an arbitrary fp.
     if signer_fp != body.joiner_pubkey_fp {
@@ -384,7 +384,7 @@ fn handle_request_offer(
     let conn = db::open_default()?;
     // Inviter must already be a pod member (have a mesh CA) to invite peers.
     let pki_d = pki_dir();
-    let mesh_ca_cert_pem = std::fs::read_to_string(pki::mesh_ca_cert_path(&pki_d))
+    let mesh_ca_cert_pem = std::fs::read_to_string(utils::pki::mesh_ca_cert_path(&pki_d))
         .context("this host has no mesh CA; run `orca pod init` first")?;
     let pod_id = pdb::get_pod_id(&conn)?.unwrap_or_else(|| "default".to_string());
 
@@ -441,8 +441,8 @@ fn handle_request_offer(
         joiner_label, body.joiner_peer_id, body.joiner_pubkey_fp
     );
 
-    let signing = pki::load_or_init_bootstrap_key(&pki_d)?;
-    let inviter_fp = pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
+    let signing = utils::pki::load_or_init_bootstrap_key(&pki_d)?;
+    let inviter_fp = utils::pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
     let inviter_hostname = system::host_identity::hostname().to_string();
     let inviter_display_name = system::host_identity::display_hostname().to_string();
 

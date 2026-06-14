@@ -1,13 +1,13 @@
 //! Unraid version identity + dispatch helper.
 //!
 //! The set of supported versions is whatever
-//! [`unraid_generated::SUPPORTED_VERSIONS`] reports — that table is
+//! [`crate::generated::SUPPORTED_VERSIONS`] reports — that table is
 //! generated at build time from the files in
 //! `projects/plugins/unraid/schemas/`. Adding a new schema is purely
 //! additive: drop the JSON in, rebuild, and the new version is picked
 //! up here without code edits.
 
-use unraid_generated::SUPPORTED_VERSIONS;
+use crate::generated::SUPPORTED_VERSIONS;
 
 /// A probed Unraid version paired with the codegen module that backs it.
 #[derive(Debug, Clone, PartialEq, Eq)]

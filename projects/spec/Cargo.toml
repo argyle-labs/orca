@@ -12,6 +12,7 @@ path = "src/lib.rs"
 # children of the namespace crate.
 
 [dependencies]
+plugin-toolkit = { path = "../plugin-toolkit" }
 macro-runtime = { path = "../macro-runtime" }
 contract = { path = "../contract", default-features = false }
 derive   = { path = "../derive" }

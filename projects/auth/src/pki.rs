@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use contract::config::{APP_PKI_DIR, APP_STATE_DIR};
 use derive::orca_tool;
-use pki::{self as sdk_pki, Capability};
 use std::path::PathBuf;
+use utils::pki::{self as sdk_pki, Capability};
 
 fn pki_dir() -> PathBuf {
     dirs::home_dir()

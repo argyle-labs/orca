@@ -37,8 +37,9 @@ pub struct AgentRunOutput {
     pub delegated: bool,
 }
 
-/// Delegate a task to an orca agent. Backend (local LLM / server-side Anthropic
-/// / Claude Code delegation) is selected by `system.agent.backend.detail`.
+/// Delegate a task to an orca agent. The model used is resolved via the
+/// `model.*` registry — per-agent pin (`agent.<name>.model_id` setting)
+/// wins, otherwise the global `is_default` model row.
 /// Prefer deterministic tools (read_doc, search_docs, list_services, etc.)
 /// over this — only use when the task genuinely needs language model reasoning.
 #[orca_tool(domain = "agent", verb = "run")]
@@ -63,22 +64,6 @@ async fn agent_run(args: AgentRunArgs, ctx: &ToolCtx) -> Result<AgentRunOutput> 
                 delegated: false,
             })
         }
-        Resolution::LocalThenClaude(_) => match run_session(&full_prompt, config, None).await {
-            Ok(out) => Ok(AgentRunOutput {
-                output: out,
-                delegated: false,
-            }),
-            Err(e) => {
-                tracing::info!(
-                    target: "agent_backend",
-                    "local run for @{agent} failed ({e:#}); falling back to claude (claude mode)"
-                );
-                Ok(AgentRunOutput {
-                    output: delegate_envelope(agent, prompt, config)?,
-                    delegated: true,
-                })
-            }
-        },
         Resolution::ServerClaude(m) => {
             let out = run_session(&full_prompt, config, Some(m)).await?;
             Ok(AgentRunOutput {

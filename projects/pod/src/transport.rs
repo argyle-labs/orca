@@ -14,7 +14,6 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use db::replicate_engine::{ReplicationTransport, TransportPeer};
-use pki;
 use serde_json::Value;
 
 use crate::{
@@ -72,26 +71,26 @@ impl ReplicationTransport for PodMeshTransport {
 
 /// Sign the given entities bundle with this host's bootstrap key. Shared by
 /// push (transport) + receiver-side `pod/replicate-export` handler.
-pub fn sign_bundle(entities: BTreeMap<String, Value>) -> Result<pki::SignedEnvelope> {
+pub fn sign_bundle(entities: BTreeMap<String, Value>) -> Result<utils::pki::SignedEnvelope> {
     let body = ReplicateBundle {
         peer_id: system::host_identity::machine_id_short().to_string(),
         issued_at: chrono::Utc::now().timestamp(),
         entities,
     };
-    let signing = pki::load_or_init_bootstrap_key(&pki_dir())?;
-    pki::sign_envelope(&signing, &body).context("sign replicate bundle")
+    let signing = utils::pki::load_or_init_bootstrap_key(&pki_dir())?;
+    utils::pki::sign_envelope(&signing, &body).context("sign replicate bundle")
 }
 
 /// Verify a signed envelope against the expected pinned bootstrap fp; return
 /// the verified entities map. Used by transport.fetch + receiver-side
 /// `pod/replicate-push` handler.
 pub fn verify_envelope(
-    envelope: &pki::SignedEnvelope,
+    envelope: &utils::pki::SignedEnvelope,
     pinned_fp: &str,
 ) -> Result<BTreeMap<String, Value>> {
-    let (bundle, verifying) =
-        pki::verify_envelope::<ReplicateBundle>(envelope).context("verify bundle envelope")?;
-    let signer_fp = pki::bootstrap_pubkey_fingerprint(&verifying);
+    let (bundle, verifying) = utils::pki::verify_envelope::<ReplicateBundle>(envelope)
+        .context("verify bundle envelope")?;
+    let signer_fp = utils::pki::bootstrap_pubkey_fingerprint(&verifying);
     anyhow::ensure!(
         signer_fp == pinned_fp,
         "replicate bundle signer fp {signer_fp} does not match pinned peer fp {pinned_fp}"
@@ -112,17 +111,17 @@ mod tests {
     #[test]
     fn sign_then_verify_envelope_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
-        let signing = pki::load_or_init_bootstrap_key(tmp.path()).unwrap();
-        let fp = pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
+        let signing = utils::pki::load_or_init_bootstrap_key(tmp.path()).unwrap();
+        let fp = utils::pki::bootstrap_pubkey_fingerprint(&signing.verifying_key());
 
         // sign_bundle uses pki_dir(); for the roundtrip we directly drive
-        // pki::sign_envelope so the test stays hermetic.
+        // utils::pki::sign_envelope so the test stays hermetic.
         let body = ReplicateBundle {
             peer_id: "test".into(),
             issued_at: 0,
             entities: empty_entities(),
         };
-        let envelope = pki::sign_envelope(&signing, &body).unwrap();
+        let envelope = utils::pki::sign_envelope(&signing, &body).unwrap();
         let entities = verify_envelope(&envelope, &fp).unwrap();
         assert!(entities.contains_key("users"));
     }
@@ -130,13 +129,13 @@ mod tests {
     #[test]
     fn verify_envelope_rejects_wrong_fp() {
         let tmp = tempfile::tempdir().unwrap();
-        let signing = pki::load_or_init_bootstrap_key(tmp.path()).unwrap();
+        let signing = utils::pki::load_or_init_bootstrap_key(tmp.path()).unwrap();
         let body = ReplicateBundle {
             peer_id: "test".into(),
             issued_at: 0,
             entities: empty_entities(),
         };
-        let envelope = pki::sign_envelope(&signing, &body).unwrap();
+        let envelope = utils::pki::sign_envelope(&signing, &body).unwrap();
         let err = verify_envelope(&envelope, "not-the-actual-fp").unwrap_err();
         assert!(
             err.to_string().contains("does not match pinned"),

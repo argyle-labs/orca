@@ -82,7 +82,7 @@ async fn unraid_schema(
     args: UnraidSchemaArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<UnraidSchemaOutput> {
-    let embedded_versions = unraid_generated::SCHEMAS
+    let embedded_versions = crate::generated::SCHEMAS
         .iter()
         .map(|(v, _)| (*v).to_string())
         .collect();

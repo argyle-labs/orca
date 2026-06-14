@@ -16,7 +16,7 @@ path = "src/lib.rs"
 # 2026-05-28). The pod ↔ fleet dep is gone; fleet dissolves entirely next.
 
 [dependencies]
-pki = { path = "../pki" }
+plugin-toolkit = { path = "../plugin-toolkit" }
 macro-runtime = { path = "../macro-runtime" }
 dispatch    = { path = "../dispatch" }
 contract   = { path = "../contract", default-features = false }
@@ -36,7 +36,6 @@ tokio = { workspace = true }
 chrono = { workspace = true }
 clap              = { workspace = true }
 colored           = { workspace = true }
-orca-sdk = { path = "../sdk/rust" }
 tracing = { workspace = true }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }

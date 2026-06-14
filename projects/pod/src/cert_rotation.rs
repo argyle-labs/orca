@@ -14,11 +14,10 @@
 //!     If every candidate peer is unreachable, log and retry next tick.
 //!
 //! The TLS resolver in plugin_host reads from disk on every handshake, so
-//! `pki::atomic_write_pem` is what makes rotation seamless — no resolver
+//! `utils::pki::atomic_write_pem` is what makes rotation seamless — no resolver
 //! swap, no in-process cache.
 
 use anyhow::{Context, Result};
-use pki;
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
 use std::sync::Arc;
@@ -56,12 +55,12 @@ async fn tick() -> Result<()> {
     // unconditionally (independent of whether leaf rotation is needed) so a
     // host that's been online through a rotation eventually shrinks back
     // to a single trust anchor without a daemon restart.
-    if pki::has_mesh_ca_previous(&pki_d)
+    if utils::pki::has_mesh_ca_previous(&pki_d)
         && let Ok(conn) = db::open_default()
         && let Ok(Some(expires_at)) = pdb::get_ca_previous_expires_at(&conn)
         && now_secs() > expires_at
     {
-        if let Err(e) = pki::drop_mesh_ca_previous(&pki_d) {
+        if let Err(e) = utils::pki::drop_mesh_ca_previous(&pki_d) {
             warn!("[cert-rotation] could not drop previous CA: {e:#}");
         } else {
             _ = pdb::set_ca_previous_expires_at(&conn, None);
@@ -69,28 +68,29 @@ async fn tick() -> Result<()> {
         }
     }
 
-    if !pki::mesh_server_cert_path(&pki_d).exists() {
+    if !utils::pki::mesh_server_cert_path(&pki_d).exists() {
         return Ok(()); // not a pod member yet
     }
 
-    let server_pem = std::fs::read_to_string(pki::mesh_server_cert_path(&pki_d))?;
-    let client_pem = std::fs::read_to_string(pki::mesh_client_cert_path(&pki_d))?;
-    let threshold = pki::PEER_REFRESH_THRESHOLD_DAYS;
-    let need_server = pki::should_rotate(&server_pem, threshold).unwrap_or(true);
-    let need_client = pki::should_rotate(&client_pem, threshold).unwrap_or(true);
+    let server_pem = std::fs::read_to_string(utils::pki::mesh_server_cert_path(&pki_d))?;
+    let client_pem = std::fs::read_to_string(utils::pki::mesh_client_cert_path(&pki_d))?;
+    let threshold = utils::pki::PEER_REFRESH_THRESHOLD_DAYS;
+    let need_server = utils::pki::should_rotate(&server_pem, threshold).unwrap_or(true);
+    let need_client = utils::pki::should_rotate(&client_pem, threshold).unwrap_or(true);
     if !need_server && !need_client {
         return Ok(());
     }
 
-    if pki::has_mesh_ca_key(&pki_d) {
+    if utils::pki::has_mesh_ca_key(&pki_d) {
         // Cert CN must be stable across hostname flaps — use machine_id.
         let host = system::host_identity::machine_id_short().to_string();
         if need_server {
-            pki::reissue_mesh_server_cert(&pki_d).context("self-sign mesh server cert")?;
+            utils::pki::reissue_mesh_server_cert(&pki_d).context("self-sign mesh server cert")?;
             info!("[cert-rotation] self-reissued mesh server cert");
         }
         if need_client {
-            pki::reissue_mesh_client_cert(&pki_d, &host).context("self-sign mesh client cert")?;
+            utils::pki::reissue_mesh_client_cert(&pki_d, &host)
+                .context("self-sign mesh client cert")?;
             info!("[cert-rotation] self-reissued mesh client cert");
         }
     } else {
@@ -115,13 +115,13 @@ async fn refresh_via_peer() -> Result<()> {
     candidates.sort_by_key(|p| std::cmp::Reverse(p.last_seen_at));
 
     let host = system::host_identity::machine_id_short().to_string();
-    let (csr_client, key_client, csr_server, key_server) = pki::build_refresh_csrs(&host)?;
+    let (csr_client, key_client, csr_server, key_server) = utils::pki::build_refresh_csrs(&host)?;
 
     for p in candidates {
         match call_refresh(&p.peer_addr, p.peer_port, &host, &csr_client, &csr_server).await {
             Ok((client_cert, server_cert)) => {
                 let pki_d = pki_dir();
-                pki::install_refreshed_peer_certs(
+                utils::pki::install_refreshed_peer_certs(
                     &pki_d,
                     &client_cert,
                     &key_client,
@@ -148,9 +148,9 @@ async fn call_refresh(
     csr_server_pem: &str,
 ) -> Result<(String, String)> {
     let pki_d = pki_dir();
-    let bundle = pki::load_mesh_client(&pki_d)?;
-    let (chain, key) = pki::parse_cert_and_key(&bundle.cert_pem, &bundle.key_pem)?;
-    let roots = pki::ca_root_store(&bundle.ca_cert_pem)?;
+    let bundle = utils::pki::load_mesh_client(&pki_d)?;
+    let (chain, key) = utils::pki::parse_cert_and_key(&bundle.cert_pem, &bundle.key_pem)?;
+    let roots = utils::pki::ca_root_store(&bundle.ca_cert_pem)?;
     let client_config = ClientConfig::builder()
         .with_root_certificates(roots)
         .with_client_auth_cert(chain, key)?;
@@ -160,7 +160,7 @@ async fn call_refresh(
     let tcp = TcpStream::connect(&target)
         .await
         .with_context(|| format!("connect {target}"))?;
-    let sni = ServerName::try_from(pki::POD_SERVER_SAN)?.to_owned();
+    let sni = ServerName::try_from(utils::pki::POD_SERVER_SAN)?.to_owned();
     let mut tls = connector.connect(sni, tcp).await?;
 
     let params = serde_json::json!({
