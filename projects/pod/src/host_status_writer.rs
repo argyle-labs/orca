@@ -213,6 +213,11 @@ async fn pull_one_peer_inner(peer_id: &str, addr: &str) -> Result<()> {
             Ok(())
         })
         .await;
+        match join {
+            Err(e) => tracing::warn!("[pod] hostname/addressing refresh: join failed: {e:#}"),
+            Ok(Err(e)) => tracing::warn!("[pod] hostname/addressing refresh failed: {e:#}"),
+            Ok(Ok(())) => {}
+        }
     }
 
     let watermark = {
