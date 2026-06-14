@@ -12,21 +12,19 @@
 //! }
 //! ```
 //!
-//! Parses the struct, extracts fields (respecting `#[secret]`), then delegates
-//! to the shared `endpoint_resource::expand()` so both macro forms stay in
-//! sync.
+//! Parses the struct, extracts fields (respecting `#[secret]` and `Option<T>`),
+//! then delegates to `endpoint_resource::expand()`.
 
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
 use syn::{
-    Attribute, Field, Fields, Ident, ItemStruct, LitStr, Token, Type,
+    Expr, ExprLit, Fields, Ident, ItemStruct, Lit, LitStr, MetaNameValue, Token,
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
 };
 
-use crate::endpoint_resource::{EndpointField, EndpointResource};
+use crate::endpoint_resource::{EndpointField, EndpointResource, unwrap_option};
 
-/// Parsed `#[endpoint_resource(plugin = "ntfy")]` attribute.
 pub(crate) struct EndpointResourceAttr {
     pub(crate) plugin: LitStr,
     pub(crate) table: Option<String>,
@@ -34,7 +32,7 @@ pub(crate) struct EndpointResourceAttr {
 
 impl Parse for EndpointResourceAttr {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let items = Punctuated::<syn::MetaNameValue, Token![,]>::parse_terminated(input)?;
+        let items = Punctuated::<MetaNameValue, Token![,]>::parse_terminated(input)?;
         let mut plugin = None;
         let mut table = None;
         for nv in items {
@@ -43,79 +41,37 @@ impl Parse for EndpointResourceAttr {
                 .get_ident()
                 .map(|i| i.to_string())
                 .unwrap_or_default();
+            let val = match &nv.value {
+                Expr::Lit(ExprLit {
+                    lit: Lit::Str(s), ..
+                }) => s.clone(),
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        &nv.value,
+                        "expected string literal",
+                    ));
+                }
+            };
             match key.as_str() {
-                "plugin" => {
-                    plugin = Some(match &nv.value {
-                        syn::Expr::Lit(syn::ExprLit {
-                            lit: syn::Lit::Str(s),
-                            ..
-                        }) => s.clone(),
-                        _ => {
-                            return Err(syn::Error::new_spanned(
-                                &nv.value,
-                                "expected string literal for `plugin`",
-                            ));
-                        }
-                    });
-                }
-                "table" => {
-                    table = Some(match &nv.value {
-                        syn::Expr::Lit(syn::ExprLit {
-                            lit: syn::Lit::Str(s),
-                            ..
-                        }) => s.value(),
-                        _ => {
-                            return Err(syn::Error::new_spanned(
-                                &nv.value,
-                                "expected string literal for `table`",
-                            ));
-                        }
-                    });
-                }
+                "plugin" => plugin = Some(val),
+                "table" => table = Some(val.value()),
                 other => {
                     return Err(syn::Error::new_spanned(
                         &nv.path,
-                        format!(
-                            "unknown key `{other}`; expected one of: plugin, table"
-                        ),
+                        format!("unknown key `{other}`; expected: plugin, table"),
                     ));
                 }
             }
         }
         Ok(Self {
-            plugin: plugin.ok_or_else(|| {
-                syn::Error::new(Span::call_site(), "missing `plugin = \"...\"`")
-            })?,
+            plugin: plugin
+                .ok_or_else(|| syn::Error::new(Span::call_site(), "missing `plugin = \"...\"`"))?,
             table,
         })
     }
 }
 
-/// Returns true if the type is `Option<T>` (bare ident path form).
-fn is_option(ty: &Type) -> bool {
-    if let Type::Path(tp) = ty {
-        if let Some(last) = tp.path.segments.last() {
-            return last.ident == "Option";
-        }
-    }
-    false
-}
-
-/// Strip `#[secret]` (and any other orca-internal attrs) from a field's attrs,
-/// returning the cleaned list.
-fn strip_secret(attrs: &[Attribute]) -> Vec<Attribute> {
-    attrs
-        .iter()
-        .filter(|a| !a.path().is_ident("secret"))
-        .cloned()
-        .collect()
-}
-
-/// Expand `#[endpoint_resource(plugin = "...")]` applied to a struct.
-pub(crate) fn expand(
-    attr: EndpointResourceAttr,
-    item: ItemStruct,
-) -> syn::Result<TokenStream2> {
+pub(crate) fn expand(attr: EndpointResourceAttr, item: ItemStruct) -> syn::Result<TokenStream2> {
     let named = match &item.fields {
         Fields::Named(n) => &n.named,
         _ => {
@@ -126,20 +82,16 @@ pub(crate) fn expand(
         }
     };
 
-    // Separate `name` and `enabled` (implicit PKs/toggles) from endpoint data fields.
-    // We still allow them in the struct for documentation clarity, but they're
-    // managed by the macro's generated schema/row structs.
-    let data_fields: Vec<&Field> = named
-        .iter()
-        .filter(|f| {
-            let n = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
-            n != "name" && n != "enabled"
-        })
-        .collect();
+    // `name` and `enabled` are implicit PK/toggle fields managed by the macro.
+    // The user may include them for documentation clarity but they're filtered out.
+    let data_fields = named.iter().filter(|f| {
+        let n = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
+        n != "name" && n != "enabled"
+    });
 
     let mut endpoint_fields: Vec<EndpointField> = Vec::new();
     for f in data_fields {
-        let name = f
+        let name: Ident = f
             .ident
             .clone()
             .ok_or_else(|| syn::Error::new_spanned(f, "expected named field"))?;
@@ -150,19 +102,19 @@ pub(crate) fn expand(
             } else if !a.path().is_ident("doc") && !a.path().is_ident("allow") {
                 return Err(syn::Error::new_spanned(
                     a,
-                    "only `#[secret]` and `#[doc]` are allowed on endpoint_resource fields",
+                    "only `#[secret]` and `#[doc]` are recognised on endpoint_resource fields",
                 ));
             }
         }
+        let (optional, ty) = unwrap_option(f.ty.clone());
         endpoint_fields.push(EndpointField {
             secret,
+            optional,
             name,
-            ty: f.ty.clone(),
-            optional: is_option(&f.ty),
+            ty,
         });
     }
 
-    // Build the EndpointResource input and delegate to the shared expand().
     let plugin_str = attr.plugin.value();
     let table = attr
         .table
@@ -174,35 +126,16 @@ pub(crate) fn expand(
         fields: endpoint_fields,
     };
 
-    // The struct itself is consumed by the macro — we emit nothing from it
-    // (the row struct is regenerated by expand() as `EndpointRow`). To keep
-    // the plugin author's struct name available as a type alias:
-    let entry_alias = Ident::new("EndpointRow", Span::call_site());
+    // The struct definition is consumed — we emit nothing from it.
+    // The macro generates EndpointRow, EndpointEntry, endpoint_db, and tools.
+    // Emit a type alias so the struct's original name stays usable.
     let struct_ident = &item.ident;
-    // Strip orca-internal attrs from the original struct's fields for the alias.
-    let cleaned_fields: Vec<TokenStream2> = named
-        .iter()
-        .map(|f| {
-            let cleaned_attrs = strip_secret(&f.attrs);
-            let vis = &f.vis;
-            let name = &f.ident;
-            let ty = &f.ty;
-            quote! { #( #cleaned_attrs )* #vis #name: #ty, }
-        })
-        .collect();
-
-    let expanded_resource = crate::endpoint_resource::expand(resource)?;
-
-    // Re-export the generated EndpointRow under the struct's original name as
-    // a type alias so existing code that imports the struct name keeps working.
     let alias = if struct_ident != "EndpointRow" {
-        quote! { pub type #struct_ident = #entry_alias; }
+        quote! { pub type #struct_ident = EndpointRow; }
     } else {
         quote! {}
     };
 
-    Ok(quote! {
-        #expanded_resource
-        #alias
-    })
+    let expanded = crate::endpoint_resource::expand(resource)?;
+    Ok(quote! { #expanded #alias })
 }

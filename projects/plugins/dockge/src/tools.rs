@@ -32,12 +32,13 @@ use crate::{Client, Config};
 // helpers, row struct, args/output types. Power scales with the macro.
 // ═══════════════════════════════════════════════════════════════════════════
 
-endpoint_resource! {
-    plugin: "dockge",
-    fields: {
-        base_url: String,
-        #[secret] token: String,
-    }
+#[endpoint_resource(plugin = "dockge")]
+pub struct DockgeEndpoint {
+    pub name: String,
+    pub base_url: String,
+    #[secret]
+    pub token: String,
+    pub enabled: bool,
 }
 
 // ── HTTP client helper ──────────────────────────────────────────────────────

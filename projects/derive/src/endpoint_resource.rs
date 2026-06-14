@@ -1,39 +1,16 @@
-//! `endpoint_resource!` — function-like proc-macro that emits the full
+//! `endpoint_resource!` and `#[endpoint_resource]` — generates the full
 //! 5-verb REST surface for an endpoint-registry resource.
 //!
-//! See [[feedback-plugin-toolkit-max-power-min-boilerplate]] for the
-//! design principle: plugin code expresses maximum functionality with
-//! minimum boilerplate; the macro generates the row struct, db helpers,
-//! schema fragment, args/output types, and `#[orca_tool]` functions.
+//! See [[feedback-plugin-toolkit-max-power-min-boilerplate]].
 //!
-//! ## Input
-//!
-//! ```rust,ignore
-//! endpoint_resource! {
-//!     plugin: "dockge",
-//!     fields: {
-//!         base_url: String,
-//!         #[secret] token: String,
-//!     }
-//! }
-//! ```
-//!
-//! ## Output
-//!
-//! For plugin name `"dockge"`:
-//! - `pub struct EndpointRow { name, base_url, token, enabled }` in the
-//!   calling crate.
+//! Both forms generate identical output:
+//! - `pub struct EndpointRow { name, <fields>, enabled }`
 //! - `pub mod endpoint_db { list, get, insert, update, upsert, remove }`
-//!   with rusqlite-backed implementations.
-//! - One `inventory::submit!` of `db::SchemaFragment` so
-//!   `db::open_default()` creates the table.
-//! - Five `#[orca_tool]`-annotated async fns under `dockge.{list, detail,
-//!   create, update, delete}`, each emitting CLI + MCP + REST surfaces.
-//! - Args/Output structs per verb with serde / clap / schemars derives.
+//! - `inventory::submit!` of `db::SchemaFragment`
+//! - Five `#[orca_tool]` async fns: `<plugin>.{list, detail, create, update, delete}`
 //!
-//! Fields marked `#[secret]` are stored in the row and accepted on create
-//! / update but skipped from the public read-side `EndpointEntry` so they
-//! never round-trip through the `.list` / `.detail` surfaces.
+//! `#[secret]` fields: excluded from `EndpointEntry` (stored only).
+//! `Option<T>` + `#[secret]` fields: appear as `has_<name>: bool` in entry.
 
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
@@ -43,28 +20,13 @@ use syn::{
     punctuated::Punctuated,
 };
 
-/// One field of the endpoint resource. Mirrors a struct field shape but
-/// only `#[secret]` is recognised as an attribute.
 pub(crate) struct EndpointField {
     pub(crate) secret: bool,
-    /// True when the original type was `Option<T>`; `ty` is the unwrapped `T`.
+    /// True when storage type is `Option<T>`. `ty` holds the inner `T`.
     pub(crate) optional: bool,
     pub(crate) name: Ident,
-    /// The inner type `T` (unwrapped from `Option<T>` when `optional` is true).
+    /// Inner type `T` (unwrapped from `Option<T>` when optional).
     pub(crate) ty: Type,
-}
-
-/// Unwrap `Option<T>` → `(true, T)`, anything else → `(false, ty)`.
-pub(crate) fn unwrap_option(ty: &Type) -> (bool, Type) {
-    if let Type::Path(tp) = ty
-        && let Some(last) = tp.path.segments.last()
-        && last.ident == "Option"
-        && let syn::PathArguments::AngleBracketed(ref args) = last.arguments
-        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-    {
-        return (true, inner.clone());
-    }
-    (false, ty.clone())
 }
 
 impl Parse for EndpointField {
@@ -83,8 +45,8 @@ impl Parse for EndpointField {
         }
         let name: Ident = input.parse()?;
         let _: Token![:] = input.parse()?;
-        let raw_ty: Type = input.parse()?;
-        let (optional, ty) = unwrap_option(&raw_ty);
+        let ty: Type = input.parse()?;
+        let (optional, ty) = unwrap_option(ty);
         Ok(Self {
             secret,
             optional,
@@ -94,8 +56,19 @@ impl Parse for EndpointField {
     }
 }
 
-/// Top-level input to `endpoint_resource!`. Keys: `plugin`, `fields`,
-/// optional `table` (defaults to `<plugin>_endpoints`).
+/// Unwrap `Option<T>` → `(true, T)`, anything else → `(false, ty)`.
+pub(crate) fn unwrap_option(ty: Type) -> (bool, Type) {
+    if let Type::Path(ref tp) = ty
+        && let Some(last) = tp.path.segments.last()
+        && last.ident == "Option"
+        && let syn::PathArguments::AngleBracketed(ref args) = last.arguments
+        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+    {
+        return (true, inner.clone());
+    }
+    (false, ty)
+}
+
 pub(crate) struct EndpointResource {
     pub(crate) plugin: LitStr,
     pub(crate) table: String,
@@ -112,9 +85,7 @@ impl Parse for EndpointResource {
             let key: Ident = input.parse()?;
             let _: Token![:] = input.parse()?;
             match key.to_string().as_str() {
-                "plugin" => {
-                    plugin = Some(input.parse()?);
-                }
+                "plugin" => plugin = Some(input.parse()?),
                 "table" => {
                     let s: LitStr = input.parse()?;
                     table = Some(s.value());
@@ -143,8 +114,8 @@ impl Parse for EndpointResource {
             .ok_or_else(|| syn::Error::new(Span::call_site(), "missing `plugin: \"...\"`"))?;
         let fields = fields
             .ok_or_else(|| syn::Error::new(Span::call_site(), "missing `fields: { ... }`"))?;
-        let table = table.unwrap_or_else(|| format!("{}_endpoints", plugin.value()));
-
+        let table =
+            table.unwrap_or_else(|| format!("{}_endpoints", plugin.value().replace('-', "_")));
         Ok(Self {
             plugin,
             table,
@@ -153,7 +124,6 @@ impl Parse for EndpointResource {
     }
 }
 
-/// Convert "dockge" → "Dockge", "home_assistant" → "HomeAssistant".
 fn pascal(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut cap = true;
@@ -170,9 +140,6 @@ fn pascal(s: &str) -> String {
     out
 }
 
-/// Map a Rust type ident → SQLite column type. MVP supports the types
-/// `EndpointRow` actually carries today (String + bool); anything else
-/// falls back to `TEXT NOT NULL` with a compile-error hint.
 fn sql_type_for(ty: &Type) -> syn::Result<&'static str> {
     let path = match ty {
         Type::Path(tp) => &tp.path,
@@ -195,7 +162,7 @@ fn sql_type_for(ty: &Type) -> syn::Result<&'static str> {
             return Err(syn::Error::new_spanned(
                 ty,
                 format!(
-                    "endpoint_resource!: unsupported field type `{other}`; supported: String, bool, i32/i64/u32/u64"
+                    "endpoint_resource!: unsupported type `{other}`; supported: String, bool, i32/i64/u32/u64"
                 ),
             ));
         }
@@ -210,8 +177,6 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
     let entry_ident = format_ident!("EndpointEntry");
     let row_ident = format_ident!("EndpointRow");
 
-    // Per-verb names: `DockgeListArgs`, `DockgeListOutput`, etc., plus
-    // snake_case function idents the underlying #[orca_tool] derives from.
     let list_args = format_ident!("{plugin_pascal}ListArgs");
     let list_output = format_ident!("{plugin_pascal}ListOutput");
     let detail_args = format_ident!("{plugin_pascal}DetailArgs");
@@ -231,90 +196,117 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
 
     let field_idents: Vec<&Ident> = input.fields.iter().map(|f| &f.name).collect();
 
-    // Storage types: optional fields wrap the inner T in Option<>.
-    let row_field_ty_tokens: Vec<TokenStream2> = input
+    // ── Row struct field declarations ────────────────────────────────────
+    let row_field_decls: Vec<TokenStream2> = input
         .fields
         .iter()
         .map(|f| {
+            let n = &f.name;
             let ty = &f.ty;
             if f.optional {
-                quote! { Option<#ty> }
+                quote! { pub #n: Option<#ty>, }
             } else {
-                quote! { #ty }
+                quote! { pub #n: #ty, }
             }
         })
         .collect();
 
-    // Entry struct fields (public-side, no secrets).
-    // secret + non-optional → excluded.
-    // secret + optional     → has_<name>: bool.
-    // non-secret + optional → <name>: Option<T>.
-    // non-secret            → <name>: T.
-    let mut entry_field_decls: Vec<TokenStream2> = Vec::new();
-    let mut entry_from_row: Vec<TokenStream2> = Vec::new();
-    for f in &input.fields {
-        let fname = &f.name;
-        let ty = &f.ty;
-        if f.secret && !f.optional {
-            // excluded from public entry
-        } else if f.secret && f.optional {
-            let has_name = format_ident!("has_{}", fname);
-            entry_field_decls.push(quote! { pub #has_name: bool, });
-            entry_from_row.push(quote! { #has_name: row.#fname.is_some(), });
-        } else if f.optional {
-            entry_field_decls.push(quote! { pub #fname: Option<#ty>, });
-            entry_from_row.push(quote! { #fname: row.#fname.clone(), });
-        } else {
-            entry_field_decls.push(quote! { pub #fname: #ty, });
-            entry_from_row.push(quote! { #fname: row.#fname.clone(), });
-        }
-    }
+    // ── Entry struct (public read side) ─────────────────────────────────
+    // secret+non-optional → excluded
+    // secret+optional     → has_<name>: bool
+    // non-secret+optional → Option<T>
+    // non-secret          → T
+    let entry_field_decls: Vec<TokenStream2> = input
+        .fields
+        .iter()
+        .filter_map(|f| {
+            let n = &f.name;
+            let ty = &f.ty;
+            if f.secret && !f.optional {
+                None
+            } else if f.secret && f.optional {
+                let has = format_ident!("has_{}", n);
+                Some(quote! { pub #has: bool, })
+            } else if f.optional {
+                Some(quote! { pub #n: Option<#ty>, })
+            } else {
+                Some(quote! { pub #n: #ty, })
+            }
+        })
+        .collect();
 
-    // CreateArgs fields: optional storage fields stay Option<T> in the arg.
+    // Entry construction from a `row` binding.
+    let entry_from_row: Vec<TokenStream2> = input
+        .fields
+        .iter()
+        .filter_map(|f| {
+            let n = &f.name;
+            if f.secret && !f.optional {
+                None
+            } else if f.secret && f.optional {
+                let has = format_ident!("has_{}", n);
+                Some(quote! { #has: row.#n.is_some(), })
+            } else {
+                Some(quote! { #n: row.#n.clone(), })
+            }
+        })
+        .collect();
+
+    // ── CreateArgs fields ────────────────────────────────────────────────
     let create_field_decls: Vec<TokenStream2> = input
         .fields
         .iter()
         .map(|f| {
-            let fname = &f.name;
+            let n = &f.name;
             let ty = &f.ty;
             if f.optional {
-                quote! { #[arg(long)] pub #fname: Option<#ty>, }
+                quote! { #[arg(long)] pub #n: Option<#ty>, }
             } else {
-                quote! { #[arg(long)] pub #fname: #ty, }
+                quote! { #[arg(long)] pub #n: #ty, }
             }
         })
         .collect();
 
-    // UpdateArgs fields: all optional (PATCH). Inner type T regardless of storage optionality.
+    // Row construction from create args (field types match directly).
+    let create_row_fields: Vec<TokenStream2> = input
+        .fields
+        .iter()
+        .map(|f| {
+            let n = &f.name;
+            quote! { #n: args.#n, }
+        })
+        .collect();
+
+    // ── UpdateArgs fields (all optional for PATCH) ───────────────────────
     let update_field_decls: Vec<TokenStream2> = input
         .fields
         .iter()
         .map(|f| {
-            let fname = &f.name;
+            let n = &f.name;
             let ty = &f.ty;
-            quote! { #[arg(long)] pub #fname: Option<#ty>, }
+            quote! { #[arg(long)] pub #n: Option<#ty>, }
         })
         .collect();
 
-    // Update patch stanzas: optional storage fields wrap the value in Some().
+    // Patch stanzas: optional storage fields wrap value in Some().
     let update_patch_stanzas: Vec<TokenStream2> = input
         .fields
         .iter()
         .map(|f| {
-            let fname = &f.name;
-            let fname_str = fname.to_string();
+            let n = &f.name;
+            let ns = n.to_string();
             if f.optional {
                 quote! {
-                    if let ::std::option::Option::Some(v) = args.#fname {
-                        row.#fname = ::std::option::Option::Some(v);
-                        applied.push(#fname_str.to_string());
+                    if let ::std::option::Option::Some(v) = args.#n {
+                        row.#n = ::std::option::Option::Some(v);
+                        applied.push(#ns.to_string());
                     }
                 }
             } else {
                 quote! {
-                    if let ::std::option::Option::Some(v) = args.#fname {
-                        row.#fname = v;
-                        applied.push(#fname_str.to_string());
+                    if let ::std::option::Option::Some(v) = args.#n {
+                        row.#n = v;
+                        applied.push(#ns.to_string());
                     }
                 }
             }
@@ -322,20 +314,16 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         .collect();
 
     // ── SQL ───────────────────────────────────────────────────────────────
-    // CREATE TABLE statement registered into the db crate's schema fragment
-    // inventory. Columns are ordered: name (PK), <fields>, enabled, created_at.
     let mut create_columns = String::from("name TEXT PRIMARY KEY,\n");
     for f in &input.fields {
-        let base_sql_type = sql_type_for(&f.ty)?;
-        // Optional fields drop NOT NULL (and DEFAULT 0 for bools/ints).
-        let sql_type = if f.optional {
-            base_sql_type
-                .trim_end_matches(" NOT NULL DEFAULT 0")
-                .trim_end_matches(" NOT NULL")
+        let base = sql_type_for(&f.ty)?;
+        // Optional fields: drop NOT NULL / DEFAULT suffix → just TEXT or INTEGER
+        let col_type = if f.optional {
+            base.split(' ').next().unwrap_or(base)
         } else {
-            base_sql_type
+            base
         };
-        create_columns.push_str(&format!("    {} {},\n", f.name, sql_type));
+        create_columns.push_str(&format!("    {} {},\n", f.name, col_type));
     }
     create_columns.push_str("    enabled INTEGER NOT NULL DEFAULT 1,\n");
     create_columns
@@ -348,25 +336,23 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         .collect::<Vec<_>>()
         .join(", ");
 
-    let list_sql = format!("SELECT {select_cols} FROM {table} ORDER BY name");
-    let get_sql = format!("SELECT {select_cols} FROM {table} WHERE name = ?1");
-    let insert_placeholders = (1..=(input.fields.len() + 2))
+    let n_fields = input.fields.len();
+    let insert_placeholders = (1..=(n_fields + 2))
         .map(|i| format!("?{i}"))
         .collect::<Vec<_>>()
         .join(", ");
     let insert_sql = format!("INSERT INTO {table} ({select_cols}) VALUES ({insert_placeholders})");
+
     let update_assignments = input
         .fields
         .iter()
         .enumerate()
         .map(|(i, f)| format!("{} = ?{}", f.name, i + 2))
-        .chain(std::iter::once(format!(
-            "enabled = ?{}",
-            input.fields.len() + 2
-        )))
+        .chain(std::iter::once(format!("enabled = ?{}", n_fields + 2)))
         .collect::<Vec<_>>()
         .join(", ");
     let update_sql = format!("UPDATE {table} SET {update_assignments} WHERE name = ?1");
+
     let upsert_set = input
         .fields
         .iter()
@@ -378,17 +364,34 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         "INSERT INTO {table} ({select_cols}) VALUES ({insert_placeholders}) \
          ON CONFLICT(name) DO UPDATE SET {upsert_set}"
     );
+    let list_sql = format!("SELECT {select_cols} FROM {table} ORDER BY name");
+    let get_sql = format!("SELECT {select_cols} FROM {table} WHERE name = ?1");
     let delete_sql = format!("DELETE FROM {table} WHERE name = ?1");
 
-    // Row-construction tuple indices: `(0, 1, 2, ..., n+1)` where n = fields.len()
-    let row_indices = (0..(input.fields.len() + 2))
+    let row_indices = (0..(n_fields + 2))
         .map(syn::Index::from)
         .collect::<Vec<_>>();
     let row_name_idx = &row_indices[0];
-    let row_field_indices = &row_indices[1..=input.fields.len()];
-    let row_enabled_idx = &row_indices[input.fields.len() + 1];
+    let row_field_indices = &row_indices[1..=n_fields];
+    let row_enabled_idx = &row_indices[n_fields + 1];
 
-    // ── Doc strings ───────────────────────────────────────────────────────
+    // rusqlite per-field get calls (handles Option<T> and bool→i32)
+    let row_field_gets: Vec<TokenStream2> = input
+        .fields
+        .iter()
+        .zip(row_field_indices)
+        .map(|(f, idx)| {
+            let n = &f.name;
+            let ty = &f.ty;
+            if f.optional {
+                quote! { #n: row.get::<_, Option<#ty>>(#idx)?, }
+            } else {
+                quote! { #n: row.get(#idx)?, }
+            }
+        })
+        .collect();
+
+    // Doc strings
     let plugin_str_lit = LitStr::new(&plugin_str, Span::call_site());
     let list_doc = LitStr::new(
         &format!("List registered {plugin_str} endpoints."),
@@ -400,20 +403,18 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
     );
     let create_doc = LitStr::new(
         &format!(
-            "[MUTATES STATE] Register a new {plugin_str} endpoint. Errors if `name` is already taken — use {plugin_str}.update to modify an existing endpoint."
+            "[MUTATES STATE] Register a new {plugin_str} endpoint. Errors if `name` is already taken."
         ),
         Span::call_site(),
     );
     let update_doc = LitStr::new(
         &format!(
-            "[MUTATES STATE] Modify an existing {plugin_str} endpoint. PATCH semantics — endpoint must already exist."
+            "[MUTATES STATE] Modify an existing {plugin_str} endpoint. PATCH semantics — must already exist."
         ),
         Span::call_site(),
     );
     let delete_doc = LitStr::new(
-        &format!(
-            "[MUTATES STATE] Remove a registered {plugin_str} endpoint. Idempotent — returns `changed: false` if no row matched."
-        ),
+        &format!("[MUTATES STATE] Remove a registered {plugin_str} endpoint. Idempotent."),
         Span::call_site(),
     );
 
@@ -421,22 +422,16 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
 
     let expanded = quote! {
         // ── Row struct ───────────────────────────────────────────────────
-        /// Endpoint row — the storage shape for this resource's table.
-        /// `name` is the operator-chosen primary key; `enabled` defaults
-        /// true on insert.
         #[derive(Debug, Clone)]
         pub struct #row_ident {
             pub name: ::std::string::String,
-            #( pub #field_idents: #row_field_ty_tokens, )*
+            #( #row_field_decls )*
             pub enabled: bool,
         }
 
-        // ── Schema fragment registration ─────────────────────────────────
+        // ── Schema fragment ──────────────────────────────────────────────
         ::inventory::submit! {
-            ::db::SchemaFragment {
-                name: #table,
-                sql: #create_table_sql,
-            }
+            ::db::SchemaFragment { name: #table, sql: #create_table_sql }
         }
 
         // ── DB CRUD module ───────────────────────────────────────────────
@@ -450,28 +445,23 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                 let rows = stmt.query_map([], |row| {
                     Ok(#row_ident {
                         name: row.get(#row_name_idx)?,
-                        #( #field_idents: row.get(#row_field_indices)?, )*
+                        #( #row_field_gets )*
                         enabled: row.get::<_, i32>(#row_enabled_idx)? != 0,
                     })
                 })?;
-                rows.collect::<::rusqlite::Result<::std::vec::Vec<_>>>()
-                    .map_err(Into::into)
+                rows.collect::<::rusqlite::Result<::std::vec::Vec<_>>>().map_err(Into::into)
             }
 
             pub fn get(conn: &Connection, name: &str) -> Result<::std::option::Option<#row_ident>> {
                 conn.query_row(
                     #get_sql,
                     ::rusqlite::params![name],
-                    |row| {
-                        Ok(#row_ident {
-                            name: row.get(#row_name_idx)?,
-                            #( #field_idents: row.get(#row_field_indices)?, )*
-                            enabled: row.get::<_, i32>(#row_enabled_idx)? != 0,
-                        })
-                    },
-                )
-                .optional()
-                .map_err(Into::into)
+                    |row| Ok(#row_ident {
+                        name: row.get(#row_name_idx)?,
+                        #( #row_field_gets )*
+                        enabled: row.get::<_, i32>(#row_enabled_idx)? != 0,
+                    }),
+                ).optional().map_err(Into::into)
             }
 
             pub fn insert(conn: &Connection, ep: &#row_ident) -> Result<()> {
@@ -507,7 +497,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             }
         }
 
-        // ── Public-side endpoint entry (no secrets) ──────────────────────
+        // ── Public-side entry (no secrets) ───────────────────────────────
         #[derive(::serde::Serialize, ::serde::Deserialize, ::schemars::JsonSchema, Debug, Clone)]
         #[serde(rename_all = "camelCase")]
         pub struct #entry_ident {
@@ -523,16 +513,11 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
 
         #[derive(::serde::Serialize, ::serde::Deserialize, ::schemars::JsonSchema, Default)]
         #[serde(default)]
-        pub struct #list_output {
-            pub endpoints: ::std::vec::Vec<#entry_ident>,
-        }
+        pub struct #list_output { pub endpoints: ::std::vec::Vec<#entry_ident> }
 
         #[doc = #list_doc]
         #[::derive::orca_tool(domain = #plugin_str_lit, verb = "list")]
-        async fn #list_fn(
-            _args: #list_args,
-            _ctx: &::contract::ToolCtx,
-        ) -> ::anyhow::Result<#list_output> {
+        async fn #list_fn(_args: #list_args, _ctx: &::contract::ToolCtx) -> ::anyhow::Result<#list_output> {
             let conn = #toolkit::runtime::open_db()?;
             let endpoints = endpoint_db::list(&conn)?
                 .into_iter()
@@ -547,87 +532,59 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
 
         // ── detail ───────────────────────────────────────────────────────
         #[derive(::clap::Args, ::serde::Serialize, ::serde::Deserialize, ::schemars::JsonSchema)]
-        pub struct #detail_args {
-            /// Endpoint name to look up.
-            #[arg(long)]
-            pub name: ::std::string::String,
-        }
+        pub struct #detail_args { #[arg(long)] pub name: ::std::string::String }
 
         #[derive(::serde::Serialize, ::serde::Deserialize, ::schemars::JsonSchema)]
-        pub struct #detail_output {
-            pub endpoint: #entry_ident,
-        }
+        pub struct #detail_output { pub endpoint: #entry_ident }
 
         #[doc = #detail_doc]
         #[::derive::orca_tool(domain = #plugin_str_lit, verb = "detail")]
-        async fn #detail_fn(
-            args: #detail_args,
-            _ctx: &::contract::ToolCtx,
-        ) -> ::anyhow::Result<#detail_output> {
+        async fn #detail_fn(args: #detail_args, _ctx: &::contract::ToolCtx) -> ::anyhow::Result<#detail_output> {
             let conn = #toolkit::runtime::open_db()?;
             let row = endpoint_db::get(&conn, &args.name)?
                 .ok_or_else(|| #toolkit::runtime::missing_row_error(#plugin_str_lit, &args.name))?;
-            Ok(#detail_output {
-                endpoint: #entry_ident {
-                    name: row.name.clone(),
-                    #( #entry_from_row )*
-                    enabled: row.enabled,
-                },
-            })
+            Ok(#detail_output { endpoint: #entry_ident {
+                name: row.name.clone(),
+                #( #entry_from_row )*
+                enabled: row.enabled,
+            }})
         }
 
         // ── create ───────────────────────────────────────────────────────
         #[derive(::clap::Args, ::serde::Serialize, ::serde::Deserialize, ::schemars::JsonSchema)]
         pub struct #create_args {
-            /// Unique endpoint name (operator-chosen identifier).
-            #[arg(long)]
-            pub name: ::std::string::String,
+            #[arg(long)] pub name: ::std::string::String,
             #( #create_field_decls )*
         }
 
         #[derive(::serde::Serialize, ::serde::Deserialize, ::schemars::JsonSchema)]
-        pub struct #create_output {
-            pub endpoint: #entry_ident,
-        }
+        pub struct #create_output { pub endpoint: #entry_ident }
 
         #[doc = #create_doc]
         #[::derive::orca_tool(domain = #plugin_str_lit, verb = "create")]
-        async fn #create_fn(
-            args: #create_args,
-            _ctx: &::contract::ToolCtx,
-        ) -> ::anyhow::Result<#create_output> {
+        async fn #create_fn(args: #create_args, _ctx: &::contract::ToolCtx) -> ::anyhow::Result<#create_output> {
             let row = #row_ident {
                 name: args.name.clone(),
-                #( #field_idents: args.#field_idents, )*
+                #( #create_row_fields )*
                 enabled: true,
             };
             let conn = #toolkit::runtime::open_db()?;
             endpoint_db::insert(&conn, &row)
                 .map_err(|e| #toolkit::runtime::map_insert_conflict(e, #plugin_str_lit, &row.name))?;
-            Ok(#create_output {
-                endpoint: #entry_ident {
-                    name: row.name.clone(),
-                    #( #entry_from_row )*
-                    enabled: row.enabled,
-                },
-            })
+            Ok(#create_output { endpoint: #entry_ident {
+                name: row.name.clone(),
+                #( #entry_from_row )*
+                enabled: row.enabled,
+            }})
         }
 
         // ── update ───────────────────────────────────────────────────────
-        // clap's `value_parser!` is a declarative macro that arm-matches on
-        // the TOKEN TREE of the field type. Fully-qualified `::std::option::
-        // Option<T>` doesn't match its `Option<$ty>` arm, so we emit bare
-        // `Option<T>` here — the std prelude resolves it correctly at any
-        // call site that imports the toolkit prelude (or no prelude at all).
         #[derive(::clap::Args, ::serde::Serialize, ::serde::Deserialize, ::schemars::JsonSchema, Default)]
         #[serde(default)]
         pub struct #update_args {
-            /// Endpoint name (required — PATCH targets by name).
-            #[arg(long)]
-            pub name: ::std::string::String,
+            #[arg(long)] pub name: ::std::string::String,
             #( #update_field_decls )*
-            #[arg(long)]
-            pub enabled: Option<bool>,
+            #[arg(long)] pub enabled: Option<bool>,
         }
 
         #[derive(::serde::Serialize, ::serde::Deserialize, ::schemars::JsonSchema)]
@@ -638,10 +595,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
 
         #[doc = #update_doc]
         #[::derive::orca_tool(domain = #plugin_str_lit, verb = "update")]
-        async fn #update_fn(
-            args: #update_args,
-            _ctx: &::contract::ToolCtx,
-        ) -> ::anyhow::Result<#update_output> {
+        async fn #update_fn(args: #update_args, _ctx: &::contract::ToolCtx) -> ::anyhow::Result<#update_output> {
             let conn = #toolkit::runtime::open_db()?;
             let mut row = endpoint_db::get(&conn, &args.name)?
                 .ok_or_else(|| #toolkit::runtime::missing_row_error(#plugin_str_lit, &args.name))?;
@@ -652,12 +606,10 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                 applied.push("enabled".to_string());
             }
             if applied.is_empty() {
-                ::anyhow::bail!("no fields to update; pass at least one of the optional flags");
+                ::anyhow::bail!("no fields to update; pass at least one flag");
             }
             let changed = endpoint_db::update(&conn, &row)?;
-            if !changed {
-                ::anyhow::bail!("update reported no row change for `{}`", row.name);
-            }
+            if !changed { ::anyhow::bail!("update reported no row change for `{}`", row.name); }
             Ok(#update_output {
                 endpoint: #entry_ident {
                     name: row.name.clone(),
@@ -670,30 +622,17 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
 
         // ── delete ───────────────────────────────────────────────────────
         #[derive(::clap::Args, ::serde::Serialize, ::serde::Deserialize, ::schemars::JsonSchema)]
-        pub struct #delete_args {
-            /// Endpoint name to remove.
-            #[arg(long)]
-            pub name: ::std::string::String,
-        }
+        pub struct #delete_args { #[arg(long)] pub name: ::std::string::String }
 
         #[derive(::serde::Serialize, ::serde::Deserialize, ::schemars::JsonSchema)]
-        pub struct #delete_output {
-            pub name: ::std::string::String,
-            pub changed: bool,
-        }
+        pub struct #delete_output { pub name: ::std::string::String, pub changed: bool }
 
         #[doc = #delete_doc]
         #[::derive::orca_tool(domain = #plugin_str_lit, verb = "delete")]
-        async fn #delete_fn(
-            args: #delete_args,
-            _ctx: &::contract::ToolCtx,
-        ) -> ::anyhow::Result<#delete_output> {
+        async fn #delete_fn(args: #delete_args, _ctx: &::contract::ToolCtx) -> ::anyhow::Result<#delete_output> {
             let conn = #toolkit::runtime::open_db()?;
             let changed = endpoint_db::remove(&conn, &args.name)?;
-            Ok(#delete_output {
-                name: args.name,
-                changed,
-            })
+            Ok(#delete_output { name: args.name, changed })
         }
     };
 

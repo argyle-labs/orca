@@ -54,16 +54,29 @@ use syn::{Data, DeriveInput, Fields};
 
 #[cfg(not(test))]
 mod endpoint_resource;
-
-/// `endpoint_resource!` — function-like macro that emits the full 5-verb
-/// REST surface (`<plugin>.{list, detail, create, update, delete}`) for a
-/// declared endpoint resource. See `endpoint_resource.rs` for the input
-/// syntax and emitted shape.
 #[cfg(not(test))]
-#[proc_macro]
-pub fn endpoint_resource(input: TokenStream) -> TokenStream {
-    let parsed = parse_macro_input!(input as endpoint_resource::EndpointResource);
-    match endpoint_resource::expand(parsed) {
+mod endpoint_resource_attr;
+
+/// `#[endpoint_resource(plugin = "...")]` — annotate a struct to generate the
+/// full 5-verb endpoint-registry surface with zero SQL in the plugin.
+///
+/// ```rust,ignore
+/// #[endpoint_resource(plugin = "ntfy")]
+/// pub struct NtfyEndpoint {
+///     pub name: String,
+///     pub base_url: String,
+///     pub topic: String,
+///     #[secret]
+///     pub token: Option<String>,
+///     pub enabled: bool,
+/// }
+/// ```
+#[cfg(not(test))]
+#[proc_macro_attribute]
+pub fn endpoint_resource(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let attr = parse_macro_input!(attr as endpoint_resource_attr::EndpointResourceAttr);
+    let item = parse_macro_input!(item as syn::ItemStruct);
+    match endpoint_resource_attr::expand(attr, item) {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
