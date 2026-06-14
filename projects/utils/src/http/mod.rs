@@ -121,7 +121,12 @@ impl Client {
             &self.inner.secure
         };
         cell.get_or_try_init(|| async move {
-            let mut b = reqwest::Client::builder();
+            let mut b = reqwest::Client::builder()
+                // Cap idle connections so a daemon that fans out to many
+                // distinct hostnames (mesh peers, plugin upstreams, etc.)
+                // doesn't accumulate unbounded idle pools.
+                .pool_max_idle_per_host(8)
+                .pool_idle_timeout(Duration::from_secs(30));
             if insecure {
                 b = b.danger_accept_invalid_certs(true);
             }

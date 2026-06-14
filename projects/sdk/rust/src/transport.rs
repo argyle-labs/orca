@@ -196,6 +196,11 @@ pub struct ContextEvent {
 /// can resubscribe.
 const NOTIFICATIONS_CAPACITY: usize = 256;
 
+/// Default timeout for [`Transport::call`]. Callers needing longer (e.g.
+/// tool round-trips that block on remote I/O) should use
+/// [`Transport::call_with_timeout`].
+pub const DEFAULT_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 struct Demux {
     pending: StdMutex<HashMap<u64, oneshot::Sender<Response>>>,
     notifications: broadcast::Sender<Notification>,

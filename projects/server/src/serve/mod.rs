@@ -973,7 +973,16 @@ async fn proxy_http_to_vite(req: axum::extract::Request) -> axum::response::Resp
     let method = reqwest::Method::from_bytes(req.method().as_str().as_bytes())
         .unwrap_or(reqwest::Method::GET);
 
-    let client = reqwest::Client::new();
+    // Process-cached client so the dev-proxy doesn't churn a new connection
+    // pool per request.
+    static DEV_PROXY_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = DEV_PROXY_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(8)
+            .pool_idle_timeout(Duration::from_secs(30))
+            .build()
+            .expect("dev proxy reqwest client")
+    });
     let mut rb = client.request(method, &url);
 
     for (k, v) in req.headers() {
@@ -983,7 +992,9 @@ async fn proxy_http_to_vite(req: axum::extract::Request) -> axum::response::Resp
         rb = rb.header(k.as_str(), v);
     }
 
-    let body = axum::body::to_bytes(req.into_body(), 32 * 1024 * 1024)
+    // Match DefaultBodyLimit (4 MiB). Larger payloads would buffer entirely in
+    // RAM here, defeating the global cap.
+    let body = axum::body::to_bytes(req.into_body(), 4 * 1024 * 1024)
         .await
         .unwrap_or_default();
     rb = rb.body(body);
