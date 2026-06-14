@@ -73,6 +73,9 @@ pub(crate) struct EndpointResource {
     pub(crate) plugin: LitStr,
     pub(crate) table: String,
     pub(crate) fields: Vec<EndpointField>,
+    /// Crate path the macro emits against. Defaults to `::plugin_toolkit`;
+    /// domain crates pass `crate = ::macro_runtime`.
+    pub(crate) crate_path: syn::Path,
 }
 
 impl Parse for EndpointResource {
@@ -120,6 +123,11 @@ impl Parse for EndpointResource {
             plugin,
             table,
             fields,
+            // Function-macro form (`endpoint_resource! { … }`) doesn't currently
+            // accept a `crate = ::path` key — callers are plugin-side and
+            // anchor to `::plugin_toolkit` unconditionally. Add a key here when
+            // a domain-crate use of the function-form arises.
+            crate_path: syn::parse_quote!(::plugin_toolkit),
         })
     }
 }

@@ -85,7 +85,7 @@ pub fn endpoint_resource(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// `#[plugin_struct]` — inject the standard plugin-author derive set with
-/// crate paths anchored to `::plugin_toolkit::*`, so plugins do not need
+/// crate paths anchored to `#crate_path::*`, so plugins do not need
 /// direct deps on serde/schemars/clap. See `plugin_struct.rs`.
 #[cfg(not(test))]
 #[proc_macro_attribute]
@@ -123,6 +123,13 @@ struct ToolAttr {
     /// markdown description body. Set via `#[orca_tool(..., title = "...")]`;
     /// when absent, the canonical tool name (`<domain>.<verb>`) is used.
     title: Option<LitStr>,
+    /// Crate path the macro emits against. Defaults to `::plugin_toolkit`
+    /// (plugin-author surface). Domain crates that live underneath
+    /// `plugin-toolkit` (and therefore can't depend on it without a Cargo
+    /// cycle) pass `crate = ::macro_runtime` to anchor emissions against
+    /// the lower-level macro-runtime crate, which re-exports the same set
+    /// of macro-target dependencies.
+    crate_path: syn::Path,
 }
 
 impl Parse for ToolAttr {
@@ -135,6 +142,7 @@ impl Parse for ToolAttr {
         let mut refresh_runtime = false;
         let mut role: Option<LitStr> = None;
         let mut title: Option<LitStr> = None;
+        let mut crate_path: Option<syn::Path> = None;
         for nv in items {
             let key = nv
                 .path
@@ -207,6 +215,9 @@ impl Parse for ToolAttr {
                 "title" => {
                     title = Some(lit_str(&nv.value)?);
                 }
+                "crate" => {
+                    crate_path = Some(parse_path(&nv.value)?);
+                }
                 "cli" => {
                     // accept either an ident (cli = manual) or a string ("manual")
                     cli_mode = Some(match &nv.value {
@@ -239,6 +250,7 @@ impl Parse for ToolAttr {
             refresh_runtime,
             role,
             title,
+            crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
         })
     }
 }
@@ -249,6 +261,19 @@ fn lit_str(expr: &Expr) -> syn::Result<LitStr> {
             lit: Lit::Str(s), ..
         }) => Ok(s.clone()),
         _ => Err(syn::Error::new_spanned(expr, "expected string literal")),
+    }
+}
+
+/// Parse a path-valued attribute value like `crate = ::plugin_toolkit`.
+/// The expression form accepted is `syn::Expr::Path` — anything else (string
+/// literals, integers, calls) is rejected with a clear message.
+fn parse_path(expr: &Expr) -> syn::Result<syn::Path> {
+    match expr {
+        Expr::Path(p) => Ok(p.path.clone()),
+        _ => Err(syn::Error::new_spanned(
+            expr,
+            "expected a path (e.g. `::plugin_toolkit` or `::macro_runtime`)",
+        )),
     }
 }
 
@@ -287,7 +312,7 @@ fn expand_to_tokens(attr: ToolAttr, item: ItemFn) -> TokenStream2 {
 ///
 /// Generates `export`/`merge` fns over the named struct fields (each field maps
 /// 1:1 to a column of `table`, in declaration order) and submits a
-/// `::plugin_toolkit::db_types::ReplicatedRegistration` into the inventory slice the pod mesh
+/// `#crate_path::db_types::ReplicatedRegistration` into the inventory slice the pod mesh
 /// engine walks. Merge is last-write-wins on the `lww` column, keyed by `pk`.
 #[cfg(not(test))]
 #[proc_macro_derive(Replicated, attributes(replicate))]
@@ -310,6 +335,12 @@ struct ReplicateAttr {
     table: String,
     lww: String,
     pk: String,
+    /// Crate path the macro emits against. Defaults to `::plugin_toolkit`;
+    /// domain crates pass `crate = ::macro_runtime` to anchor against the
+    /// lower-level macro-runtime crate (breaks the Cargo cycle that would
+    /// otherwise exist if a domain crate hosted under `plugin-toolkit` tried
+    /// to depend on `plugin-toolkit`).
+    crate_path: syn::Path,
 }
 
 #[cfg(not(test))]
@@ -327,7 +358,17 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
     let mut table = None;
     let mut lww = None;
     let mut pk = None;
+    let mut crate_path: Option<syn::Path> = None;
     for nv in items {
+        let key = nv
+            .path
+            .get_ident()
+            .map(|i| i.to_string())
+            .unwrap_or_default();
+        if key == "crate" {
+            crate_path = Some(parse_path(&nv.value)?);
+            continue;
+        }
         let val = match &nv.value {
             Expr::Lit(ExprLit {
                 lit: Lit::Str(s), ..
@@ -339,11 +380,6 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
                 ));
             }
         };
-        let key = nv
-            .path
-            .get_ident()
-            .map(|i| i.to_string())
-            .unwrap_or_default();
         match key.as_str() {
             "table" => table = Some(val),
             "lww" => lww = Some(val),
@@ -362,12 +398,14 @@ fn parse_replicate_attr(attrs: &[Attribute]) -> syn::Result<ReplicateAttr> {
         lww: lww
             .ok_or_else(|| syn::Error::new(Span::call_site(), "#[replicate] requires `lww`"))?,
         pk: pk.unwrap_or_else(|| "id".to_string()),
+        crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
     })
 }
 
 #[cfg(not(test))]
 fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
     let cfg = parse_replicate_attr(&input.attrs)?;
+    let crate_path = &cfg.crate_path;
     let ty = &input.ident;
 
     let named = match &input.data {
@@ -446,8 +484,8 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
             #[allow(clippy::disallowed_types)]
             impl #ty {
                 fn __replicate_export(
-                    conn: &::macro_runtime::rusqlite::Connection,
-                ) -> ::macro_runtime::anyhow::Result<::macro_runtime::serde_json::Value> {
+                    conn: &#crate_path::rusqlite::Connection,
+                ) -> #crate_path::anyhow::Result<#crate_path::serde_json::Value> {
                     let mut stmt = conn.prepare(#select_sql)?;
                     let rows = stmt.query_map([], |row| {
                         ::std::result::Result::Ok(#ty {
@@ -455,20 +493,20 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
                         })
                     })?;
                     let all: ::std::vec::Vec<#ty> =
-                        rows.collect::<::macro_runtime::rusqlite::Result<::std::vec::Vec<_>>>()?;
-                    ::std::result::Result::Ok(::macro_runtime::serde_json::to_value(all)?)
+                        rows.collect::<#crate_path::rusqlite::Result<::std::vec::Vec<_>>>()?;
+                    ::std::result::Result::Ok(#crate_path::serde_json::to_value(all)?)
                 }
 
                 fn __replicate_merge(
-                    conn: &::macro_runtime::rusqlite::Connection,
-                    rows: ::macro_runtime::serde_json::Value,
-                ) -> ::macro_runtime::anyhow::Result<usize> {
-                    use ::macro_runtime::rusqlite::OptionalExtension;
-                    let rows: ::std::vec::Vec<#ty> = ::macro_runtime::serde_json::from_value(rows)?;
+                    conn: &#crate_path::rusqlite::Connection,
+                    rows: #crate_path::serde_json::Value,
+                ) -> #crate_path::anyhow::Result<usize> {
+                    use #crate_path::rusqlite::OptionalExtension;
+                    let rows: ::std::vec::Vec<#ty> = #crate_path::serde_json::from_value(rows)?;
                     let mut merged = 0usize;
                     for row in &rows {
                         let existing: ::std::option::Option<::std::string::String> = conn
-                            .query_row(#lww_select_sql, ::macro_runtime::rusqlite::params![row.#pk_ident], |r| r.get(0))
+                            .query_row(#lww_select_sql, #crate_path::rusqlite::params![row.#pk_ident], |r| r.get(0))
                             .optional()?;
                         // Last-write-wins: skip when our copy is at least as new.
                         if let ::std::option::Option::Some(local) = &existing
@@ -478,7 +516,7 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
                         }
                         conn.execute(
                             #insert_sql,
-                            ::macro_runtime::rusqlite::params![ #( row.#field_idents, )* ],
+                            #crate_path::rusqlite::params![ #( row.#field_idents, )* ],
                         )?;
                         merged += 1;
                     }
@@ -486,8 +524,8 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
                 }
             }
 
-            ::macro_runtime::inventory::submit! {
-                ::macro_runtime::ReplicatedRegistration {
+            #crate_path::inventory::submit! {
+                #crate_path::ReplicatedRegistration {
                     name: #table,
                     export: #ty::__replicate_export,
                     merge: #ty::__replicate_merge,
@@ -499,6 +537,7 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
 }
 
 fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
+    let crate_path = &attr.crate_path;
     if item.sig.asyncness.is_none() {
         return Err(syn::Error::new_spanned(
             item.sig.fn_token,
@@ -592,7 +631,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     };
 
     let ctx_param_name = Ident::new("ctx", Span::call_site());
-    let ctx_param = quote! { #ctx_param_name: &::plugin_toolkit::contract::ToolCtx };
+    let ctx_param = quote! { #ctx_param_name: &#crate_path::contract::ToolCtx };
 
     // Peer dispatch is universal: every tool with `remote_ok = true` (i.e.
     // not `local_only`) gets the proxy stanza. The trigger lives on
@@ -616,9 +655,9 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             // daemon-restart gap for tools that swap the peer's binary.
             let __svc_refresh = ::std::sync::Arc::clone(&__svc);
             let __peer_refresh = __peer_id.clone();
-            ::plugin_toolkit::tokio::spawn(async move {
+            #crate_path::tokio::spawn(async move {
                 for __delay_ms in [500u64, 2000, 5000, 10_000, 20_000] {
-                    ::plugin_toolkit::tokio::time::sleep(
+                    #crate_path::tokio::time::sleep(
                         ::std::time::Duration::from_millis(__delay_ms)
                     ).await;
                     if __svc_refresh
@@ -640,7 +679,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     let local_only_reject_stanza = if !emit_peer_dispatch {
         quote! {
             if let ::core::option::Option::Some(__peer) = #ctx_param_name.peer() {
-                return ::core::result::Result::Err(::plugin_toolkit::anyhow::anyhow!(
+                return ::core::result::Result::Err(#crate_path::anyhow::anyhow!(
                     "tool `{}` is local_only and cannot be dispatched to peer `{}`",
                     #tool_name, __peer,
                 ));
@@ -655,9 +694,9 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
                 #ctx_param_name.peer().map(::std::string::ToString::to_string)
             {
                 let __svc = #ctx_param_name
-                    .service::<::std::sync::Arc<dyn ::plugin_toolkit::contract::RemoteExec>>()?;
-                let __args_value = ::plugin_toolkit::serde_json::to_value(&#args_forward)
-                    .map_err(|e| ::plugin_toolkit::anyhow::anyhow!("peer_dispatch: serialize args: {e}"))?;
+                    .service::<::std::sync::Arc<dyn #crate_path::contract::RemoteExec>>()?;
+                let __args_value = #crate_path::serde_json::to_value(&#args_forward)
+                    .map_err(|e| #crate_path::anyhow::anyhow!("peer_dispatch: serialize args: {e}"))?;
                 // Forward the ctx's ambient operator identity; the transport
                 // mints a signed caller token from it (project-remote-exec-full-fix
                 // S1–S4). `None` on unauthenticated paths.
@@ -670,8 +709,8 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
                         #ctx_param_name.correlation_id().map(::std::string::ToString::to_string),
                     )
                     .await?;
-                let __out: #output_ty = ::plugin_toolkit::serde_json::from_value(__out_value)
-                    .map_err(|e| ::plugin_toolkit::anyhow::anyhow!(
+                let __out: #output_ty = #crate_path::serde_json::from_value(__out_value)
+                    .map_err(|e| #crate_path::anyhow::anyhow!(
                         "peer_dispatch: decode {} output from peer {}: {}",
                         #tool_name, __peer_id, e,
                     ))?;
@@ -698,11 +737,11 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
         Some("manual") | Some("skip") => quote! {},
         _ => quote! {
             const _: () = {
-                ::plugin_toolkit::dispatch::register_op! {
+                #crate_path::dispatch::register_op! {
                     tool: #zst_ident,
                     domain: #domain,
                     verb: #verb,
-                    summary: <#zst_ident as ::plugin_toolkit::contract::OrcaToolDef>::DESCRIPTION,
+                    summary: <#zst_ident as #crate_path::contract::OrcaToolDef>::DESCRIPTION,
                 }
             };
         },
@@ -712,21 +751,21 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     // native deps needed). Every tool gets one `/api/v1/<NAME>` POST entry
     // injected into the spec at runtime.
     let openapi_block = quote! {
-        ::plugin_toolkit::inventory::submit! {
-            ::plugin_toolkit::dispatch::openapi::OpenApiToolRegistration {
+        #crate_path::inventory::submit! {
+            #crate_path::dispatch::openapi::OpenApiToolRegistration {
                 name: #tool_name,
                 title: #title_tokens,
                 description: #description,
                 domain: #domain,
                 args_schema: || {
-                    ::plugin_toolkit::serde_json::to_value(
-                        ::plugin_toolkit::schemars::schema_for!(<#zst_ident as ::plugin_toolkit::contract::OrcaToolDef>::Args)
-                    ).unwrap_or(::plugin_toolkit::serde_json::Value::Object(::plugin_toolkit::serde_json::Map::new()))
+                    #crate_path::serde_json::to_value(
+                        #crate_path::schemars::schema_for!(<#zst_ident as #crate_path::contract::OrcaToolDef>::Args)
+                    ).unwrap_or(#crate_path::serde_json::Value::Object(#crate_path::serde_json::Map::new()))
                 },
                 output_schema: || {
-                    ::plugin_toolkit::serde_json::to_value(
-                        ::plugin_toolkit::schemars::schema_for!(<#zst_ident as ::plugin_toolkit::contract::OrcaToolDef>::Output)
-                    ).unwrap_or(::plugin_toolkit::serde_json::Value::Object(::plugin_toolkit::serde_json::Map::new()))
+                    #crate_path::serde_json::to_value(
+                        #crate_path::schemars::schema_for!(<#zst_ident as #crate_path::contract::OrcaToolDef>::Output)
+                    ).unwrap_or(#crate_path::serde_json::Value::Object(#crate_path::serde_json::Map::new()))
                 },
             }
         }
@@ -738,7 +777,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
         #[allow(non_camel_case_types)]
         pub struct #zst_ident;
 
-        impl ::plugin_toolkit::contract::OrcaToolDef for #zst_ident {
+        impl #crate_path::contract::OrcaToolDef for #zst_ident {
             const NAME: &'static str = #tool_name;
             const DESCRIPTION: &'static str = #description;
             const REMOTE_OK: bool = #remote_ok_lit;
@@ -747,28 +786,28 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             type Output = #output_ty;
         }
 
-        impl ::plugin_toolkit::contract::OrcaOp for #zst_ident {
+        impl #crate_path::contract::OrcaOp for #zst_ident {
             const DOMAIN: &'static str = #domain;
             const VERB: &'static str = #verb;
         }
 
-        #[::plugin_toolkit::async_trait::async_trait]
-        impl ::plugin_toolkit::contract::OrcaTool for #zst_ident {
+        #[#crate_path::async_trait::async_trait]
+        impl #crate_path::contract::OrcaTool for #zst_ident {
             async fn run(
                 #args_param,
                 #ctx_param,
-            ) -> ::plugin_toolkit::anyhow::Result<#output_ty> {
+            ) -> #crate_path::anyhow::Result<#output_ty> {
                 #local_only_reject_stanza
                 #peer_dispatch_stanza
                 #fn_ident(#args_forward, #ctx_param_name).await
             }
         }
 
-        ::plugin_toolkit::inventory::submit! {
-            ::plugin_toolkit::dispatch::ToolRegistration {
+        #crate_path::inventory::submit! {
+            #crate_path::dispatch::ToolRegistration {
                 name: #tool_name,
                 make_erased: || ::std::boxed::Box::new(
-                    ::plugin_toolkit::dispatch::ToolWrapper::<#zst_ident>(::std::marker::PhantomData)
+                    #crate_path::dispatch::ToolWrapper::<#zst_ident>(::std::marker::PhantomData)
                 ),
             }
         }

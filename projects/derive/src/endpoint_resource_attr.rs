@@ -28,6 +28,10 @@ use crate::endpoint_resource::{EndpointField, EndpointResource, unwrap_option};
 pub(crate) struct EndpointResourceAttr {
     pub(crate) plugin: LitStr,
     pub(crate) table: Option<String>,
+    /// Crate path the macro emits against. Defaults to `::plugin_toolkit`;
+    /// domain crates pass `crate = ::macro_runtime` to anchor against the
+    /// lower-level macro-runtime crate.
+    pub(crate) crate_path: syn::Path,
 }
 
 impl Parse for EndpointResourceAttr {
@@ -35,12 +39,25 @@ impl Parse for EndpointResourceAttr {
         let items = Punctuated::<MetaNameValue, Token![,]>::parse_terminated(input)?;
         let mut plugin = None;
         let mut table = None;
+        let mut crate_path: Option<syn::Path> = None;
         for nv in items {
             let key = nv
                 .path
                 .get_ident()
                 .map(|i| i.to_string())
                 .unwrap_or_default();
+            if key == "crate" {
+                match &nv.value {
+                    Expr::Path(p) => crate_path = Some(p.path.clone()),
+                    _ => {
+                        return Err(syn::Error::new_spanned(
+                            &nv.value,
+                            "expected a path (e.g. `::plugin_toolkit` or `::macro_runtime`)",
+                        ));
+                    }
+                }
+                continue;
+            }
             let val = match &nv.value {
                 Expr::Lit(ExprLit {
                     lit: Lit::Str(s), ..
@@ -58,7 +75,7 @@ impl Parse for EndpointResourceAttr {
                 other => {
                     return Err(syn::Error::new_spanned(
                         &nv.path,
-                        format!("unknown key `{other}`; expected: plugin, table"),
+                        format!("unknown key `{other}`; expected: plugin, table, crate"),
                     ));
                 }
             }
@@ -67,6 +84,7 @@ impl Parse for EndpointResourceAttr {
             plugin: plugin
                 .ok_or_else(|| syn::Error::new(Span::call_site(), "missing `plugin = \"...\"`"))?,
             table,
+            crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(::plugin_toolkit)),
         })
     }
 }
@@ -124,6 +142,7 @@ pub(crate) fn expand(attr: EndpointResourceAttr, item: ItemStruct) -> syn::Resul
         plugin: attr.plugin,
         table,
         fields: endpoint_fields,
+        crate_path: attr.crate_path,
     };
 
     // The struct definition is consumed — we emit nothing from it.
