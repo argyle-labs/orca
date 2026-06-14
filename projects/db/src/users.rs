@@ -35,7 +35,7 @@ pub struct UserAuth {
 /// derive maps fields ↔ columns 1:1), so `username_lower` is carried even
 /// though it is just `lower(username)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, derive::Replicated)]
-#[replicate(table = "users", lww = "updated_at")]
+#[replicate(crate = ::macro_runtime, table = "users", lww = "updated_at")]
 pub struct ReplicaUser {
     pub id: String,
     pub username: String,
