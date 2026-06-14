@@ -14,5 +14,6 @@ pub mod json_schema;
 pub mod mesh_status;
 pub mod path;
 pub mod search;
+pub mod shutdown;
 pub mod state;
 pub mod time;

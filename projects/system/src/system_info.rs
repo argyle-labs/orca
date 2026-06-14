@@ -70,8 +70,12 @@ pub fn spawn_refresher() {
         sys.refresh_cpu_all();
         sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
+        let shutdown = crate::periodic::shutdown_signal();
         loop {
-            tokio::time::sleep(REFRESH_INTERVAL).await;
+            tokio::select! {
+                _ = tokio::time::sleep(REFRESH_INTERVAL) => {}
+                _ = shutdown.notified() => return,
+            }
             sys.refresh_memory();
             sys.refresh_cpu_all();
             sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);

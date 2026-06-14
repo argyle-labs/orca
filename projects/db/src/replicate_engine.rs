@@ -113,7 +113,11 @@ pub fn spawn() -> Option<(
 /// "this host was offline and now it's back" case — peers learn our latest
 /// rows without waiting for the next origin write.
 async fn boot_anti_entropy() {
-    tokio::time::sleep(INITIAL_DELAY).await;
+    let shutdown = utils::shutdown::signal();
+    tokio::select! {
+        _ = tokio::time::sleep(INITIAL_DELAY) => {}
+        _ = shutdown.notified() => return,
+    }
     if let Err(e) = push_now().await {
         warn!("[replicate.boot] anti-entropy push failed: {e:#}");
     } else {
@@ -122,11 +126,18 @@ async fn boot_anti_entropy() {
 }
 
 async fn pull_loop() {
-    tokio::time::sleep(INITIAL_DELAY).await;
+    let shutdown = utils::shutdown::signal();
+    tokio::select! {
+        _ = tokio::time::sleep(INITIAL_DELAY) => {}
+        _ = shutdown.notified() => return,
+    }
     let mut ticker = tokio::time::interval(PULL_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = shutdown.notified() => return,
+        }
         match sync_now(None).await {
             Ok(reports) => {
                 for r in reports {
@@ -151,10 +162,18 @@ async fn pull_loop() {
 
 async fn push_loop() {
     let mut rx = crate::replicate::subscribe();
+    let shutdown = utils::shutdown::signal();
     loop {
-        match rx.recv().await {
+        let recv = tokio::select! {
+            r = rx.recv() => r,
+            _ = shutdown.notified() => return,
+        };
+        match recv {
             Ok(_entity) => {
-                tokio::time::sleep(PUSH_COALESCE_WINDOW).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(PUSH_COALESCE_WINDOW) => {}
+                    _ = shutdown.notified() => return,
+                }
                 while rx.try_recv().is_ok() {}
                 if let Err(e) = push_now().await {
                     warn!("[replicate.push] push failed: {e:#}");

@@ -40,9 +40,11 @@ pub fn spawn_local_writer() {
         return;
     }
     tokio::spawn(async move {
-        // Stagger the first write so it lands after `system_info` has a
-        // chance to build its first cached snapshot.
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        let shutdown = utils::shutdown::signal();
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+            _ = shutdown.notified() => return,
+        }
         loop {
             if let Err(e) = persist_local_snapshot().await {
                 tracing::warn!("host_status local writer: {e:#}");
@@ -52,7 +54,10 @@ pub fn spawn_local_writer() {
                 crate::subscribe_demand::FAST_CADENCE,
                 crate::subscribe_demand::SLOW_CADENCE,
             );
-            tokio::time::sleep(next).await;
+            tokio::select! {
+                _ = tokio::time::sleep(next) => {}
+                _ = shutdown.notified() => return,
+            }
         }
     });
 }
@@ -63,10 +68,11 @@ pub fn spawn_sync_puller() {
         return;
     }
     tokio::spawn(async move {
-        // Brief stagger so the listener has bound its sockets, then prime
-        // immediately — the first tick is what surfaces peer versions to a
-        // freshly-booted UI, so don't make users wait a full interval.
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        let shutdown = utils::shutdown::signal();
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+            _ = shutdown.notified() => return,
+        }
         loop {
             if let Err(e) = pull_peer_status_once().await {
                 tracing::warn!("host_status sync puller: {e:#}");
@@ -76,7 +82,10 @@ pub fn spawn_sync_puller() {
                 crate::subscribe_demand::FAST_CADENCE,
                 crate::subscribe_demand::SLOW_CADENCE,
             );
-            tokio::time::sleep(next).await;
+            tokio::select! {
+                _ = tokio::time::sleep(next) => {}
+                _ = shutdown.notified() => return,
+            }
         }
     });
 }

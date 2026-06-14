@@ -186,6 +186,10 @@ pub fn cmd_dev_enable(github_token: &str) -> Result<DevEnableResult> {
         }
         None => cargo_dir.as_os_str().to_owned(),
     };
+    // Child is intentionally dropped without wait/kill: std::process::Child does
+    // NOT kill on drop, so the cargo-watch process outlives this call by design.
+    // Lifecycle is owned via the PID file written below; teardown happens via
+    // explicit `kill` in the dev disable path, not Drop.
     let child = Command::new(&cargo_bin)
         .args(["watch", "-x", "run -- daemon"])
         .current_dir(&repo)
