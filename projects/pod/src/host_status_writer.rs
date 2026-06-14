@@ -194,7 +194,7 @@ async fn pull_one_peer_inner(peer_id: &str, addr: &str) -> Result<()> {
             .filter(|n| !n.trim().is_empty())
             .unwrap_or_else(|| pong.hostname.clone());
         let addressing = pong.addressing.clone();
-        _ = tokio::task::spawn_blocking(move || -> Result<()> {
+        let join = tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = db::open_default()?;
             db::pod::update_hostname(&conn, &pid, &host)?;
             if let Some(snap) = addressing {

@@ -9,11 +9,28 @@
 //! Single-instance is implicit: the daemon owns the handle, runs one
 //! process per host. No locking, no leader election.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use chrono::Utc;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tracing::debug;
+
+/// Process-wide shutdown signal honored by every `periodic::spawn` loop.
+/// Daemon shutdown (`serve` SIGTERM/Ctrl-C branches) calls [`shutdown`] so
+/// in-flight ticks finish, the next sleep wakes immediately, and the spawned
+/// tasks exit instead of being aborted mid-await by runtime drop.
+fn shutdown_signal() -> &'static Notify {
+    static NOTIFY: OnceLock<Notify> = OnceLock::new();
+    NOTIFY.get_or_init(Notify::new)
+}
+
+/// Signal every running periodic loop to stop after its current tick.
+/// Idempotent — safe to call multiple times during shutdown.
+pub fn shutdown() {
+    shutdown_signal().notify_waiters();
+}
 
 /// A periodic job's logic. Returned errors are logged at `debug` and
 /// recorded in `scheduler_runs`; the loop keeps running.
@@ -41,12 +58,19 @@ pub struct PeriodicSpec {
 /// daemon-task convention.
 pub fn spawn(spec: PeriodicSpec, tick: TickFn) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let shutdown = shutdown_signal();
         if !spec.initial_delay.is_zero() {
-            tokio::time::sleep(spec.initial_delay).await;
+            tokio::select! {
+                _ = tokio::time::sleep(spec.initial_delay) => {}
+                _ = shutdown.notified() => return,
+            }
         }
         loop {
             run_one(spec.name, &tick).await;
-            tokio::time::sleep(spec.interval).await;
+            tokio::select! {
+                _ = tokio::time::sleep(spec.interval) => {}
+                _ = shutdown.notified() => return,
+            }
         }
     })
 }
