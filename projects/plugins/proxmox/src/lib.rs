@@ -8,6 +8,7 @@
 // Typed structs are used where the shape is stable (ActionResult, lifecycle).
 #![allow(clippy::disallowed_types)]
 
+pub mod containers_adapter;
 pub mod tools;
 
 use serde::{Deserialize, Serialize};

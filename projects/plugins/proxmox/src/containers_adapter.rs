@@ -25,13 +25,13 @@
 //! typed wrappers into the `proxmox` crate.
 
 use async_trait::async_trait;
-use proxmox::{Client as ProxmoxClient, ProxmoxAction};
-use serde::{Deserialize, Serialize};
-
-use crate::{
+use plugin_toolkit::containers::{
     AdapterError, Container, ContainerState, ListFilter, LogTail, RestartPolicy, RuntimeAdapter,
     RuntimeKind,
 };
+use serde::{Deserialize, Serialize};
+
+use crate::{Client as ProxmoxClient, ProxmoxAction};
 
 /// LXC adapter that routes every operation through one Proxmox API
 /// endpoint. Multi-endpoint orchestration (different clusters) lives
@@ -144,7 +144,7 @@ impl LxcProxmoxApiAdapter {
         // `try_join_all` — TODO once we see scale.
         let raw_cfg = self
             .client
-            .guest_config(&row.node, row.vmid, proxmox::GuestKind::Lxc)
+            .guest_config(&row.node, row.vmid, crate::GuestKind::Lxc)
             .await
             .map_err(|e| AdapterError::Transport(e.to_string()))?;
         let cfg = reparse::<LxcConfigEnvelope>(&raw_cfg, "guest_config")?;
