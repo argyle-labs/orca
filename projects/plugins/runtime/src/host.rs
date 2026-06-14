@@ -31,6 +31,12 @@ use rustls::crypto::CryptoProvider;
 use rustls::server::WebPkiClientVerifier;
 use rustls_pemfile::certs;
 use serde_json::json;
+
+/// Cap on queued outbound frames per plugin connection. A slow/stuck plugin
+/// writer applies back-pressure here instead of growing the channel without
+/// bound; Full results are dropped with a warn (notifications) or surfaced as
+/// an error (host-initiated calls).
+const OUTBOUND_CAPACITY: usize = 1024;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -90,7 +96,9 @@ pub struct ConnHandle {
     /// the peer didn't declare one (legacy SDK clients).
     plugin_version: String,
     /// Outbound JSON-RPC frames the writer half of the connection drains.
-    outbound: mpsc::UnboundedSender<serde_json::Value>,
+    /// Bounded so a stuck/slow plugin writer applies back-pressure instead of
+    /// growing the queue without bound.
+    outbound: mpsc::Sender<serde_json::Value>,
     pending: Pending,
     next_id: Arc<AtomicU64>,
 }
@@ -118,7 +126,7 @@ impl ConnHandle {
         self.pending.lock().unwrap().insert(id, tx);
         let req = Request::new(id, method, Some(params));
         let envelope = serde_json::to_value(&req).context("serialize outbound request")?;
-        if self.outbound.send(envelope).is_err() {
+        if self.outbound.try_send(envelope).is_err() {
             self.pending.lock().unwrap().remove(&id);
             anyhow::bail!("plugin '{}' is no longer connected", self.plugin_id);
         }
@@ -654,7 +662,7 @@ struct ConnState {
     plugins: PluginRegistry,
     /// Outbound JSON-RPC frames (notifications + host-initiated requests)
     /// the writer half of the connection drains.
-    notify_tx: mpsc::UnboundedSender<serde_json::Value>,
+    notify_tx: mpsc::Sender<serde_json::Value>,
     /// Pending host→plugin calls awaiting their Response. Shared with the
     /// [`ConnHandle`] handed to external callers.
     pending: Pending,
@@ -682,7 +690,7 @@ async fn handle_connection(
     peer_cn: String,
 ) -> Result<()> {
     let (mut reader, mut writer) = tokio::io::split(tls);
-    let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<serde_json::Value>();
+    let (notify_tx, mut notify_rx) = mpsc::channel::<serde_json::Value>(OUTBOUND_CAPACITY);
     let pending: Pending = Arc::new(StdMutex::new(HashMap::new()));
     let next_outbound_id = Arc::new(AtomicU64::new(1));
     let mut state = ConnState {
@@ -1297,7 +1305,9 @@ fn handle_tools_invoke(
                 .expect("Response serializes")
             }
         };
-        _ = outbound.send(resp_value);
+        if let Err(e) = outbound.try_send(resp_value) {
+            tracing::warn!("[plugin-host] outbound full or closed dropping tool response: {e}");
+        }
     });
 
     // Returning null suppresses the normal sync-write path; the spawned
@@ -1417,8 +1427,12 @@ fn handle_context_subscribe(
                         "method": CONTEXT_EVENT_METHOD,
                         "params": event,
                     });
-                    if notify_tx.send(notif).is_err() {
-                        break; // connection closed
+                    match notify_tx.try_send(notif) {
+                        Ok(()) => {}
+                        Err(::tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            tracing::warn!("[plugin-host] outbound full dropping context event");
+                        }
+                        Err(::tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
