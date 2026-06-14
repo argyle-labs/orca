@@ -11,13 +11,13 @@
 
 use anyhow::{Context, Result};
 use dev::mode::{cmd_dev_disable, cmd_dev_enable, cmd_dev_sync};
-use orca_sdk::framing::{read_frame, write_frame};
-use orca_sdk::jsonrpc::{ErrorObject, Message, Request, Response};
-use orca_sdk::pki::{self, PeerRole};
+use pki::{self, PeerRole};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_rustls::server::TlsStream;
 use tracing::warn;
+use utils::framing::{read_frame, write_frame};
+use utils::jsonrpc::{ErrorObject, Message, Request, Response};
 use utils::state::DaemonMode;
 
 use super::{

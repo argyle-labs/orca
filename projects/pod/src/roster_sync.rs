@@ -22,7 +22,7 @@
 
 use crate::{PodListOutput, PodMember, PodPeerDto};
 use anyhow::Result;
-use orca_sdk::pki;
+use pki;
 use std::time::Duration;
 use tracing::{info, warn};
 

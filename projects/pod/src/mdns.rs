@@ -18,7 +18,7 @@
 
 use anyhow::{Context, Result};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
-use orca_sdk::pki;
+use pki;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;

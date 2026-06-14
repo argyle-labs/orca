@@ -5,7 +5,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use db::ports::mesh_port;
-use orca_sdk::pki;
+use pki;
 use std::time::Instant;
 use system::update_state::{read_channel_marker, read_version_pin};
 

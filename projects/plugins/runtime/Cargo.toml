@@ -8,6 +8,7 @@ name = "plugins"
 path = "src/lib.rs"
 
 [dependencies]
+pki = { path = "../../pki" }
 macro-runtime = { path = "../../macro-runtime" }
 dispatch        = { path = "../../dispatch" }
 contract    = { path = "../../contract", default-features = false }

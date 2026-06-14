@@ -853,9 +853,7 @@ pub use listener::handle_pod_connection;
 use ::db::ports::mesh_port;
 use anyhow::{Context, Result};
 use contract::config::{APP_PKI_DIR, APP_STATE_DIR};
-use orca_sdk::framing::{read_frame, write_frame};
-use orca_sdk::jsonrpc::{Message, Request, Response};
-use orca_sdk::pki;
+use pki;
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
 use std::path::PathBuf;
@@ -863,6 +861,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
+use utils::framing::{read_frame, write_frame};
+use utils::jsonrpc::{Message, Request, Response};
 
 pub const POD_PING_METHOD: &str = "pod/ping";
 pub const POD_DEV_SYNC_METHOD: &str = "pod/dev-sync";
@@ -1137,7 +1137,7 @@ mod exec_wire {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub caller_role: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub caller_token: Option<orca_sdk::pki::SignedEnvelope>,
+        pub caller_token: Option<pki::SignedEnvelope>,
         /// End-to-end trace id stamped by the originating REST/SDK request
         /// (or synthesized by the daemon middleware). The recipient sets it
         /// on its per-request ctx + tracing span so a single browser action

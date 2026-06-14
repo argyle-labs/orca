@@ -7,15 +7,15 @@
 
 use anyhow::{Context, Result, bail};
 use db::ports::mesh_port;
-use orca_sdk::framing::{read_frame, write_frame};
-use orca_sdk::jsonrpc::{Message, Request, Response};
-use orca_sdk::pki::{self, PeerRole};
+use pki::{self, PeerRole};
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
+use utils::framing::{read_frame, write_frame};
+use utils::jsonrpc::{Message, Request, Response};
 
 use crate::pki_dir;
 use db::pod as pdb;

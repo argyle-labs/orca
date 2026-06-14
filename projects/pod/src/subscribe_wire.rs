@@ -19,14 +19,14 @@
 //! Heartbeat + adaptive cadence are slice D.
 
 use anyhow::{Context, Result};
-use orca_sdk::framing::{read_frame, write_frame};
-use orca_sdk::jsonrpc::{ErrorObject, Message, Notification, Request, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
+use utils::framing::{read_frame, write_frame};
+use utils::jsonrpc::{ErrorObject, Message, Notification, Request, Response};
 
 use super::subscribe::{HostStatusEvent, subscribe_host_status};
 use super::subscribe_demand;

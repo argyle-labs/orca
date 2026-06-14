@@ -9,7 +9,7 @@
 #![allow(clippy::disallowed_types)]
 use anyhow::{Context, Result};
 use contract::config::{APP_MCP_SERVER, APP_NAME, APP_PKI_DIR, APP_STATE_DIR};
-use orca_sdk::pki;
+use pki;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

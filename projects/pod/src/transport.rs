@@ -14,7 +14,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use db::replicate_engine::{ReplicationTransport, TransportPeer};
-use orca_sdk::pki;
+use pki;
 use serde_json::Value;
 
 use crate::{

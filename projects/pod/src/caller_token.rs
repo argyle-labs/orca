@@ -28,7 +28,7 @@
 
 use anyhow::{Context, Result};
 use contract::CallerIdentity;
-use orca_sdk::pki;
+use pki;
 use serde::{Deserialize, Serialize};
 use utils::hash;
 
