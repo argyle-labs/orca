@@ -12,6 +12,7 @@ use files as _;
 use homeassistant as _;
 use mcp as _;
 use plugins as _;
+use pod as _;
 use proxmox as _;
 use system as _;
 
