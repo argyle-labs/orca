@@ -179,9 +179,8 @@ impl Client {
 // ── notifications wiring ───────────────────────────────────────────────────
 
 /// Build an [`NtfyBackend`] from a db row and register it with the global
-/// `notifications` dispatcher. Used both at daemon startup (via [`bootstrap`])
-/// and live by `ntfy.add` so freshly-added endpoints work without a restart.
-pub fn register_endpoint(row: &db::ntfy::EndpointRow) {
+/// `notifications` dispatcher. Used at daemon startup via [`bootstrap`].
+pub fn register_endpoint(row: &tools::EndpointRow) {
     let mut cfg = Config::new(row.base_url.clone(), row.topic.clone());
     if let Some(t) = &row.token {
         cfg = cfg.with_token(t.clone());
@@ -201,7 +200,7 @@ pub fn bootstrap() {
             return;
         }
     };
-    let rows = match db::ntfy::list(&conn) {
+    let rows = match tools::endpoint_db::list(&conn) {
         Ok(rs) => rs,
         Err(e) => {
             tracing::warn!("ntfy bootstrap: list failed: {e}");

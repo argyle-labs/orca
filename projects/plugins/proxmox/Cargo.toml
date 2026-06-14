@@ -21,6 +21,8 @@ schemars         = { workspace = true }
 inventory        = { workspace = true }
 
 db = { package = "db", path = "../../db" }
+rusqlite    = { workspace = true }
+orca-plugin-toolkit = { path = "../orca-plugin-toolkit" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 clap        = { workspace = true }

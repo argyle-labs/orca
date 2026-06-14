@@ -188,11 +188,12 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
     let delete_args = format_ident!("{plugin_pascal}DeleteArgs");
     let delete_output = format_ident!("{plugin_pascal}DeleteOutput");
 
-    let list_fn = format_ident!("{}_list", plugin_str);
-    let detail_fn = format_ident!("{}_detail", plugin_str);
-    let create_fn = format_ident!("{}_create", plugin_str);
-    let update_fn = format_ident!("{}_update", plugin_str);
-    let delete_fn = format_ident!("{}_delete", plugin_str);
+    let plugin_ident_str = plugin_str.replace('-', "_");
+    let list_fn = format_ident!("{}_list", plugin_ident_str);
+    let detail_fn = format_ident!("{}_detail", plugin_ident_str);
+    let create_fn = format_ident!("{}_create", plugin_ident_str);
+    let update_fn = format_ident!("{}_update", plugin_ident_str);
+    let delete_fn = format_ident!("{}_delete", plugin_ident_str);
 
     let field_idents: Vec<&Ident> = input.fields.iter().map(|f| &f.name).collect();
 

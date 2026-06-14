@@ -18,12 +18,15 @@ pub mod docker_runtimes;
 // struct, the CRUD module, and a SchemaFragment registration.
 pub mod docs;
 pub mod feature_flags;
-pub mod home_assistant;
+// `home_assistant` endpoint registry now lives in the homeassistant plugin via
+// `orca_plugin_toolkit::endpoint_resource!` — that macro emits the row
+// struct, the CRUD module, and a SchemaFragment registration.
 pub mod host_addressing;
 pub mod host_status;
 pub mod llm;
 pub mod mcp_servers;
-pub mod ntfy;
+// `ntfy` endpoint registry now lives in the ntfy plugin via
+// `orca_plugin_toolkit::endpoint_resource!`.
 pub mod oauth;
 pub mod openapi_specs;
 pub mod openapi_specs_registry;
@@ -48,7 +51,8 @@ extern crate self as db;
 pub mod ports;
 pub mod profile_creds;
 pub mod profiles;
-pub mod proxmox;
+// `proxmox` endpoint registry now lives in the proxmox plugin via
+// `orca_plugin_toolkit::endpoint_resource!`.
 pub mod scheduler_runs;
 pub mod schema_databases;
 pub mod secrets;
@@ -676,36 +680,10 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         );
 
-        CREATE TABLE IF NOT EXISTS proxmox_endpoints (
-            name         TEXT PRIMARY KEY,
-            base_url     TEXT NOT NULL,
-            token_id     TEXT NOT NULL,
-            token_secret TEXT NOT NULL,
-            insecure     INTEGER NOT NULL DEFAULT 0,
-            enabled      INTEGER NOT NULL DEFAULT 1,
-            created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS homeassistant_endpoints (
-            name       TEXT PRIMARY KEY,
-            base_url   TEXT NOT NULL,
-            token      TEXT NOT NULL,
-            enabled    INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        );
-
-        -- dockge_endpoints now lives in the dockge plugin via
-        -- endpoint_resource! and is registered through the
+        -- proxmox_endpoints, homeassistant_endpoints, ntfy_endpoints, and
+        -- dockge_endpoints all live in their respective plugins via
+        -- `orca_plugin_toolkit::endpoint_resource!`, registered through the
         -- SchemaFragment inventory (applied below).
-
-        CREATE TABLE IF NOT EXISTS ntfy_endpoints (
-            name       TEXT PRIMARY KEY,
-            base_url   TEXT NOT NULL,
-            topic      TEXT NOT NULL,
-            token      TEXT,
-            enabled    INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        );
 
         CREATE TABLE IF NOT EXISTS plugins (
             id                TEXT PRIMARY KEY,

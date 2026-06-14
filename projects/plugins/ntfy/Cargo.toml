@@ -22,6 +22,8 @@ db            = { path = "../../db" }
 dispatch      = { path = "../../dispatch" }
 contract      = { path = "../../contract", default-features = false }
 derive        = { path = "../../derive" }
+rusqlite      = { workspace = true }
+orca-plugin-toolkit = { path = "../orca-plugin-toolkit" }
 tracing       = { workspace = true }
 
 clap          = { workspace = true }

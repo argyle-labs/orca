@@ -24,6 +24,8 @@ inventory        = { workspace = true }
 # DB lookup for registered HA endpoints + error type + async-trait used by
 # the macro-generated OrcaTool impl.
 db = { package = "db", path = "../../db" }
+rusqlite    = { workspace = true }
+orca-plugin-toolkit = { path = "../orca-plugin-toolkit" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 
