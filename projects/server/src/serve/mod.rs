@@ -341,6 +341,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             }
             _ = sigterm.recv() => {
                 info!("[orca] daemon shutting down");
+                system::periodic::shutdown();
                 https_handle.graceful_shutdown(Some(Duration::from_secs(1)));
                 http_handle.graceful_shutdown(Some(Duration::from_secs(1)));
                 _ = utils::state::clear();
@@ -348,6 +349,7 @@ pub async fn run_daemon(port: u16, db_path: std::path::PathBuf) -> Result<()> {
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("[orca] daemon shutting down");
+                system::periodic::shutdown();
                 https_handle.graceful_shutdown(Some(Duration::from_secs(1)));
                 http_handle.graceful_shutdown(Some(Duration::from_secs(1)));
                 _ = utils::state::clear();
