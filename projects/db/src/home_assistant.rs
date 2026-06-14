@@ -62,6 +62,24 @@ pub fn upsert(conn: &Connection, ep: &EndpointRow) -> Result<()> {
     Ok(())
 }
 
+pub fn insert(conn: &Connection, ep: &EndpointRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO homeassistant_endpoints (name, base_url, token, enabled)
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![ep.name, ep.base_url, ep.token, ep.enabled],
+    )?;
+    Ok(())
+}
+
+pub fn update(conn: &Connection, ep: &EndpointRow) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE homeassistant_endpoints SET base_url = ?2, token = ?3, enabled = ?4
+         WHERE name = ?1",
+        rusqlite::params![ep.name, ep.base_url, ep.token, ep.enabled],
+    )?;
+    Ok(n > 0)
+}
+
 pub fn remove(conn: &Connection, name: &str) -> Result<bool> {
     let n = conn.execute(
         "DELETE FROM homeassistant_endpoints WHERE name = ?1",

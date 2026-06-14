@@ -13,7 +13,9 @@ pub mod api_tokens;
 pub mod config_store;
 pub mod config_tools;
 pub mod docker_runtimes;
-pub mod dockge;
+// `dockge` endpoint registry now lives in the dockge plugin via
+// `orca_plugin_toolkit::endpoint_resource!` — that macro emits the row
+// struct, the CRUD module, and a SchemaFragment registration.
 pub mod docs;
 pub mod feature_flags;
 pub mod home_assistant;
@@ -37,6 +39,8 @@ pub mod plugins;
 pub mod pod;
 pub mod replicate;
 pub mod replicate_engine;
+pub mod schema_fragments;
+pub use schema_fragments::SchemaFragment;
 
 // Self-alias so proc-macro emissions of `::db::replicate::ReplicatedRegistration`
 // also resolve when the derive is used *inside* this crate (e.g. `users.rs`).
@@ -690,13 +694,9 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
         );
 
-        CREATE TABLE IF NOT EXISTS dockge_endpoints (
-            name       TEXT PRIMARY KEY,
-            base_url   TEXT NOT NULL,
-            token      TEXT NOT NULL,
-            enabled    INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-        );
+        -- dockge_endpoints now lives in the dockge plugin via
+        -- endpoint_resource! and is registered through the
+        -- SchemaFragment inventory (applied below).
 
         CREATE TABLE IF NOT EXISTS ntfy_endpoints (
             name       TEXT PRIMARY KEY,
@@ -1104,6 +1104,10 @@ fn apply_schema(conn: &Connection) -> Result<()> {
             ON host_status (peer_id, snapshot_at_unix DESC);
         ",
     )?;
+    // Toolkit-emitted tables (endpoint_resource! and friends) register
+    // their CREATE TABLE statements through inventory. Apply them after
+    // the hand-coded schema so any cross-table FKs upstream still resolve.
+    schema_fragments::apply_fragments(conn)?;
     Ok(())
 }
 

@@ -52,6 +52,23 @@ use syn::{
 #[cfg(not(test))]
 use syn::{Data, DeriveInput, Fields};
 
+#[cfg(not(test))]
+mod endpoint_resource;
+
+/// `endpoint_resource!` — function-like macro that emits the full 5-verb
+/// REST surface (`<plugin>.{list, detail, create, update, delete}`) for a
+/// declared endpoint resource. See `endpoint_resource.rs` for the input
+/// syntax and emitted shape.
+#[cfg(not(test))]
+#[proc_macro]
+pub fn endpoint_resource(input: TokenStream) -> TokenStream {
+    let parsed = parse_macro_input!(input as endpoint_resource::EndpointResource);
+    match endpoint_resource::expand(parsed) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
 /// Parsed contents of `#[orca_tool(domain = "...", verb = "...", cli = ident)]`.
 struct ToolAttr {
     domain: LitStr,

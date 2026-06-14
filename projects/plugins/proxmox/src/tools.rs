@@ -133,6 +133,7 @@ async fn proxmox_list(
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxDetailArgs {
     /// Endpoint name.
+    #[arg(long)]
     pub endpoint: String,
 }
 
@@ -186,29 +187,90 @@ async fn proxmox_detail(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// proxmox.update — register/update endpoint, OR run VM/container action
+// proxmox.create — register a new endpoint
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct ProxmoxCreateArgs {
+    #[arg(long)]
+    pub name: String,
+    #[arg(long)]
+    pub base_url: String,
+    #[arg(long)]
+    pub token_id: String,
+    #[arg(long)]
+    pub token_secret: String,
+    /// Allow self-signed TLS.
+    #[arg(long)]
+    pub insecure: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ProxmoxCreateOutput {
+    pub endpoint: ProxmoxEndpointEntry,
+}
+
+/// [MUTATES STATE] Register a new Proxmox endpoint. Errors if `name` is
+/// already taken — use proxmox.update to modify an existing endpoint.
+#[orca_tool(domain = "proxmox", verb = "create")]
+async fn proxmox_create(
+    args: ProxmoxCreateArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<ProxmoxCreateOutput> {
+    let row = db::proxmox::EndpointRow {
+        name: args.name.clone(),
+        base_url: args.base_url.clone(),
+        token_id: args.token_id.clone(),
+        token_secret: args.token_secret.clone(),
+        insecure: args.insecure.unwrap_or(false),
+        enabled: true,
+    };
+    let conn = db::open_default()?;
+    db::proxmox::insert(&conn, &row).map_err(|e| {
+        if e.to_string().contains("UNIQUE") {
+            anyhow::anyhow!(
+                "proxmox endpoint '{}' already exists — use proxmox.update to modify it",
+                row.name
+            )
+        } else {
+            e
+        }
+    })?;
+    Ok(ProxmoxCreateOutput {
+        endpoint: ProxmoxEndpointEntry {
+            name: row.name,
+            base_url: row.base_url,
+            token_id: row.token_id,
+            insecure: row.insecure,
+            enabled: row.enabled,
+        },
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// proxmox.update — PATCH endpoint fields OR run VM/container action
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ProxmoxUpdateArgs {
-    /// Endpoint register/update: `name` + `base_url` + `token_id` + `token_secret`.
+    /// Endpoint to patch or target for a lifecycle action.
     #[arg(long)]
-    pub name: Option<String>,
+    pub name: String,
+
+    // PATCH fields — all optional
     #[arg(long)]
     pub base_url: Option<String>,
     #[arg(long)]
     pub token_id: Option<String>,
     #[arg(long)]
     pub token_secret: Option<String>,
-    /// Allow self-signed TLS (endpoint register).
     #[arg(long)]
     pub insecure: Option<bool>,
-
-    /// VM/container lifecycle action: provide `endpoint` + `node` + (`vmid` for
-    /// a QEMU VM OR `ctid` for an LXC container) + `action`.
     #[arg(long)]
-    pub endpoint: Option<String>,
+    pub enabled: Option<bool>,
+
+    // Lifecycle action fields
     #[arg(long)]
     pub node: Option<String>,
     /// QEMU VM id.
@@ -230,48 +292,51 @@ pub struct ProxmoxUpdateOutput {
     pub action_result: Option<ProxmoxActionResult>,
 }
 
-/// [MUTATES STATE] Register an endpoint OR run a VM/container lifecycle action.
+/// [MUTATES STATE] PATCH an existing Proxmox endpoint's fields, or run a
+/// VM/container lifecycle action. Endpoint must already exist.
 #[orca_tool(domain = "proxmox", verb = "update")]
 async fn proxmox_update(
     args: ProxmoxUpdateArgs,
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<ProxmoxUpdateOutput> {
+    let conn = db::open_default()?;
+    let mut row = db::proxmox::get(&conn, &args.name)?
+        .ok_or_else(|| anyhow::anyhow!("proxmox endpoint '{}' not registered", args.name))?;
     let mut out = ProxmoxUpdateOutput::default();
 
-    if let Some(name) = &args.name {
-        let base_url = args
-            .base_url
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("base_url required to register endpoint"))?;
-        let token_id = args
-            .token_id
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("token_id required to register endpoint"))?;
-        let token_secret = args
-            .token_secret
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("token_secret required to register endpoint"))?;
-        let row = db::proxmox::EndpointRow {
-            name: name.clone(),
-            base_url,
-            token_id,
-            token_secret,
-            insecure: args.insecure.unwrap_or(false),
-            enabled: true,
-        };
-        let conn = db::open_default()?;
-        db::proxmox::upsert(&conn, &row)?;
-        out.applied.push(format!("endpoint-upserted:{name}"));
+    // PATCH fields
+    let mut changed_fields: Vec<String> = Vec::new();
+    if let Some(v) = args.base_url {
+        row.base_url = v;
+        changed_fields.push("base_url".into());
     }
+    if let Some(v) = args.token_id {
+        row.token_id = v;
+        changed_fields.push("token_id".into());
+    }
+    if let Some(v) = args.token_secret {
+        row.token_secret = v;
+        changed_fields.push("token_secret".into());
+    }
+    if let Some(v) = args.insecure {
+        row.insecure = v;
+        changed_fields.push("insecure".into());
+    }
+    if let Some(v) = args.enabled {
+        row.enabled = v;
+        changed_fields.push("enabled".into());
+    }
+    if !changed_fields.is_empty() {
+        db::proxmox::update(&conn, &row)?;
+        out.applied.extend(changed_fields);
+    }
+    drop(conn);
 
+    // Lifecycle action
     match (args.vmid, args.ctid) {
         (Some(_), Some(_)) => anyhow::bail!("set either `vmid` or `ctid`, not both"),
         (None, None) => {}
         (vmid_or_ctid, ctid_or_none) => {
-            let endpoint = args
-                .endpoint
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("endpoint required for lifecycle action"))?;
             let node = args
                 .node
                 .as_deref()
@@ -281,7 +346,7 @@ async fn proxmox_update(
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("action required for lifecycle action"))?;
             let action: crate::ProxmoxAction = action_str.parse()?;
-            let client = native_support::make_client(endpoint)?;
+            let client = native_support::make_client(&args.name)?;
             let result: ProxmoxActionResult = if let Some(vmid) = vmid_or_ctid {
                 out.applied
                     .push(format!("vm-action:{node}:{vmid}:{action_str}"));
@@ -297,7 +362,9 @@ async fn proxmox_update(
     }
 
     if out.applied.is_empty() {
-        anyhow::bail!("no proxmox.update operation specified");
+        anyhow::bail!(
+            "no proxmox.update operation specified; pass field flags to patch or vmid/ctid + action for a lifecycle action"
+        );
     }
     Ok(out)
 }
@@ -308,6 +375,7 @@ async fn proxmox_update(
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct ProxmoxDeleteArgs {
+    #[arg(long)]
     pub name: String,
 }
 

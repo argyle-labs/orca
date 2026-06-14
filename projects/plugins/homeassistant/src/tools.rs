@@ -97,8 +97,10 @@ async fn ha_list(args: HaListArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<H
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct HaDetailArgs {
+    #[arg(long)]
     pub endpoint: String,
     /// Entity ID (e.g. "light.living_room").
+    #[arg(long)]
     pub entity_id: String,
 }
 
@@ -110,24 +112,74 @@ async fn ha_detail(args: HaDetailArgs, _ctx: &contract::ToolCtx) -> anyhow::Resu
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// home-assistant.update — register endpoint OR invoke service
+// home-assistant.create — register a new endpoint
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct HaCreateArgs {
+    #[arg(long)]
+    pub name: String,
+    #[arg(long)]
+    pub base_url: String,
+    #[arg(long)]
+    pub token: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct HaCreateOutput {
+    pub endpoint: HaEndpointEntry,
+}
+
+/// [MUTATES STATE] Register a new Home Assistant endpoint. Errors if `name` is
+/// already taken — use home-assistant.update to modify an existing endpoint.
+#[orca_tool(domain = "home-assistant", verb = "create")]
+async fn ha_create(args: HaCreateArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<HaCreateOutput> {
+    let row = db::home_assistant::EndpointRow {
+        name: args.name.clone(),
+        base_url: args.base_url.clone(),
+        token: args.token.clone(),
+        enabled: true,
+    };
+    let conn = db::open_default()?;
+    db::home_assistant::insert(&conn, &row).map_err(|e| {
+        if e.to_string().contains("UNIQUE") {
+            anyhow::anyhow!(
+                "home-assistant endpoint '{}' already exists — use home-assistant.update to modify it",
+                row.name
+            )
+        } else {
+            e
+        }
+    })?;
+    Ok(HaCreateOutput {
+        endpoint: HaEndpointEntry {
+            name: row.name,
+            base_url: row.base_url,
+            enabled: row.enabled,
+        },
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// home-assistant.update — PATCH endpoint fields OR invoke a service
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct HaUpdateArgs {
-    /// Endpoint register/update: `name` + `base_url` + `token`.
+    /// Endpoint to patch or target for a service call.
     #[arg(long)]
-    pub name: Option<String>,
+    pub name: String,
+
+    // PATCH fields
     #[arg(long)]
     pub base_url: Option<String>,
     #[arg(long)]
     pub token: Option<String>,
-
-    /// Service invocation: `endpoint` + `service_domain` + `service_name`
-    /// (+ optional `entity_id`, `service_data` JSON).
     #[arg(long)]
-    pub endpoint: Option<String>,
+    pub enabled: Option<bool>,
+
+    // Service invocation
     /// HA service domain (light, switch, automation, …).
     #[arg(long)]
     pub service_domain: Option<String>,
@@ -149,38 +201,39 @@ pub struct HaUpdateOutput {
     pub service_result: Option<JsonAny>,
 }
 
-/// [MUTATES STATE] Register/update an endpoint, invoke a service, or both.
+/// [MUTATES STATE] Patch an existing HA endpoint's fields or invoke a service.
+/// Endpoint must already exist.
 #[orca_tool(domain = "home-assistant", verb = "update")]
 async fn ha_update(args: HaUpdateArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<HaUpdateOutput> {
+    let conn = db::open_default()?;
+    let mut row = db::home_assistant::get(&conn, &args.name)?
+        .with_context(|| format!("home-assistant endpoint '{}' not registered", args.name))?;
     let mut out = HaUpdateOutput::default();
 
-    if let Some(name) = &args.name {
-        let base_url = args
-            .base_url
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("base_url required to register endpoint"))?;
-        let token = args
-            .token
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("token required to register endpoint"))?;
-        let row = db::home_assistant::EndpointRow {
-            name: name.clone(),
-            base_url,
-            token,
-            enabled: true,
-        };
-        let conn = db::open_default()?;
-        db::home_assistant::upsert(&conn, &row)?;
-        out.applied.push(format!("endpoint-upserted:{name}"));
+    // PATCH fields
+    let mut changed = Vec::new();
+    if let Some(v) = args.base_url {
+        row.base_url = v;
+        changed.push("base_url");
     }
+    if let Some(v) = args.token {
+        row.token = v;
+        changed.push("token");
+    }
+    if let Some(v) = args.enabled {
+        row.enabled = v;
+        changed.push("enabled");
+    }
+    if !changed.is_empty() {
+        db::home_assistant::update(&conn, &row)?;
+        out.applied.extend(changed.iter().map(|s| s.to_string()));
+    }
+    drop(conn);
 
-    match (
-        args.endpoint.as_deref(),
-        args.service_domain.clone(),
-        args.service_name.clone(),
-    ) {
-        (Some(ep), Some(d), Some(s)) => {
-            let client = make_client(ep)?;
+    // Service invocation
+    match (args.service_domain.clone(), args.service_name.clone()) {
+        (Some(d), Some(s)) => {
+            let client = make_client(&args.name)?;
             let call = ServiceCall {
                 domain: d,
                 service: s.clone(),
@@ -188,12 +241,10 @@ async fn ha_update(args: HaUpdateArgs, _ctx: &contract::ToolCtx) -> anyhow::Resu
                 data: args.service_data.clone().unwrap_or_default(),
             };
             out.service_result = Some(client.service_call(&call).await?.into());
-            out.applied.push(format!("service:{ep}:{s}"));
+            out.applied.push(format!("service:{}", s));
         }
-        (None, None, None) => {}
-        _ => anyhow::bail!(
-            "service invocation requires endpoint + service_domain + service_name together"
-        ),
+        (None, None) => {}
+        _ => anyhow::bail!("service invocation requires both service_domain and service_name"),
     }
 
     if out.applied.is_empty() {
@@ -208,6 +259,7 @@ async fn ha_update(args: HaUpdateArgs, _ctx: &contract::ToolCtx) -> anyhow::Resu
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct HaDeleteArgs {
+    #[arg(long)]
     pub name: String,
 }
 

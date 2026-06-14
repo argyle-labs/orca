@@ -78,6 +78,31 @@ pub fn upsert(conn: &Connection, ep: &EndpointRow) -> Result<()> {
     Ok(())
 }
 
+pub fn insert(conn: &Connection, ep: &EndpointRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO proxmox_endpoints (name, base_url, token_id, token_secret, insecure, enabled)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            ep.name,
+            ep.base_url,
+            ep.token_id,
+            ep.token_secret,
+            ep.insecure,
+            ep.enabled
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn update(conn: &Connection, ep: &EndpointRow) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE proxmox_endpoints SET base_url = ?2, token_id = ?3, token_secret = ?4, insecure = ?5, enabled = ?6
+         WHERE name = ?1",
+        rusqlite::params![ep.name, ep.base_url, ep.token_id, ep.token_secret, ep.insecure, ep.enabled],
+    )?;
+    Ok(n > 0)
+}
+
 pub fn remove(conn: &Connection, name: &str) -> Result<bool> {
     let n = conn.execute(
         "DELETE FROM proxmox_endpoints WHERE name = ?1",

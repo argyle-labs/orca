@@ -1,4 +1,4 @@
-//! ntfy endpoint CRUD tools (`ntfy.add`, `ntfy.list`, `ntfy.delete`, `ntfy.send`).
+//! ntfy endpoint CRUD tools (`ntfy.{list, detail, create, update, delete, send}`).
 //! Endpoints are stored in `db::ntfy::ntfy_endpoints`; on daemon start
 //! [`crate::bootstrap`] registers each enabled row as a notification backend
 //! with the `notifications` dispatcher.
@@ -56,15 +56,42 @@ async fn ntfy_list(
     })
 }
 
-// ── ntfy.add ───────────────────────────────────────────────────────────────
+// ── ntfy.detail ────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct NtfyDetailArgs {
+    #[arg(long)]
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NtfyDetailOutput {
+    pub endpoint: NtfyEndpointEntry,
+}
+
+/// Detail for a single registered ntfy endpoint.
+#[orca_tool(domain = "ntfy", verb = "detail")]
+async fn ntfy_detail(
+    args: NtfyDetailArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<NtfyDetailOutput> {
+    let conn = db::open_default()?;
+    let row = db::ntfy::get(&conn, &args.name)?
+        .with_context(|| format!("ntfy endpoint '{}' not registered", args.name))?;
+    Ok(NtfyDetailOutput {
+        endpoint: to_entry(row),
+    })
+}
+
+// ── ntfy.create ────────────────────────────────────────────────────────────
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct NtfyAddArgs {
-    /// Short name — referenced by routing rules (`send = [\"<name>\"]`).
+pub struct NtfyCreateArgs {
+    /// Short name — referenced by routing rules.
     #[arg(long)]
     pub name: String,
-    /// ntfy base URL, e.g. `http://10.10.10.6:8080` or `https://ntfy.sh`.
     #[arg(long)]
     pub base_url: String,
     /// Topic name on the ntfy server.
@@ -80,15 +107,17 @@ pub struct NtfyAddArgs {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct NtfyAddOutput {
+pub struct NtfyCreateOutput {
     pub endpoint: NtfyEndpointEntry,
 }
 
-/// Register (or update) an ntfy endpoint. Upsert on `name`. The new endpoint
-/// is also registered live with the notifications dispatcher — no restart
-/// required.
-#[orca_tool(domain = "ntfy", verb = "add", role = "admin")]
-async fn ntfy_add(args: NtfyAddArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<NtfyAddOutput> {
+/// [MUTATES STATE] Register a new ntfy endpoint. Errors if `name` is already
+/// taken — use ntfy.update to modify an existing endpoint.
+#[orca_tool(domain = "ntfy", verb = "create", role = "admin")]
+async fn ntfy_create(
+    args: NtfyCreateArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<NtfyCreateOutput> {
     let row = db::ntfy::EndpointRow {
         name: args.name.clone(),
         base_url: args.base_url,
@@ -97,12 +126,86 @@ async fn ntfy_add(args: NtfyAddArgs, _ctx: &contract::ToolCtx) -> anyhow::Result
         enabled: args.enabled.unwrap_or(true),
     };
     let conn = db::open_default()?;
-    db::ntfy::upsert(&conn, &row)?;
+    db::ntfy::insert(&conn, &row).map_err(|e| {
+        if e.to_string().contains("UNIQUE") {
+            anyhow::anyhow!(
+                "ntfy endpoint '{}' already exists — use ntfy.update to modify it",
+                row.name
+            )
+        } else {
+            e
+        }
+    })?;
     if row.enabled {
         crate::register_endpoint(&row);
     }
-    Ok(NtfyAddOutput {
+    Ok(NtfyCreateOutput {
         endpoint: to_entry(row),
+    })
+}
+
+// ── ntfy.update ────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct NtfyUpdateArgs {
+    #[arg(long)]
+    pub name: String,
+    #[arg(long)]
+    pub base_url: Option<String>,
+    #[arg(long)]
+    pub topic: Option<String>,
+    #[arg(long)]
+    pub token: Option<String>,
+    #[arg(long)]
+    pub enabled: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NtfyUpdateOutput {
+    pub endpoint: NtfyEndpointEntry,
+    pub applied: Vec<String>,
+}
+
+/// [MUTATES STATE] Modify an existing ntfy endpoint. PATCH semantics — endpoint
+/// must already exist.
+#[orca_tool(domain = "ntfy", verb = "update", role = "admin")]
+async fn ntfy_update(
+    args: NtfyUpdateArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<NtfyUpdateOutput> {
+    let conn = db::open_default()?;
+    let mut row = db::ntfy::get(&conn, &args.name)?
+        .with_context(|| format!("ntfy endpoint '{}' not registered", args.name))?;
+    let mut applied = Vec::new();
+    if let Some(v) = args.base_url {
+        row.base_url = v;
+        applied.push("base_url".into());
+    }
+    if let Some(v) = args.topic {
+        row.topic = v;
+        applied.push("topic".into());
+    }
+    if let Some(v) = args.token {
+        row.token = Some(v);
+        applied.push("token".into());
+    }
+    if let Some(v) = args.enabled {
+        row.enabled = v;
+        applied.push("enabled".into());
+    }
+    if applied.is_empty() {
+        anyhow::bail!(
+            "no fields to update; pass at least one of --base-url, --topic, --token, --enabled"
+        );
+    }
+    let changed = db::ntfy::update(&conn, &row)?;
+    if !changed {
+        anyhow::bail!("update reported no row change for '{}'", row.name);
+    }
+    Ok(NtfyUpdateOutput {
+        endpoint: to_entry(row),
+        applied,
     })
 }
 
@@ -120,9 +223,8 @@ pub struct NtfyDeleteOutput {
     pub deleted: bool,
 }
 
-/// Delete an ntfy endpoint row. Note: the live backend remains registered in
-/// the running dispatcher until the daemon restarts (the dispatcher exposes
-/// no unregister API yet — tracked separately).
+/// [MUTATES STATE] Remove a registered ntfy endpoint. Idempotent — returns
+/// `deleted: false` if no row matched.
 #[orca_tool(domain = "ntfy", verb = "delete", role = "admin")]
 async fn ntfy_delete(
     args: NtfyDeleteArgs,

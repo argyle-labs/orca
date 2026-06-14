@@ -14,16 +14,19 @@ thiserror   = { workspace = true }
 urlencoding = { workspace = true }
 utils  = { path = "../../utils" }
 
-# `#[orca_tool]` machinery.
-dispatch        = { path = "../../dispatch" }
-contract    = { path = "../../contract", default-features = false }
-derive       = { path = "../../derive" }
-schemars         = { workspace = true }
-inventory        = { workspace = true }
+# Toolkit prelude + endpoint_resource! macro.
+orca-plugin-toolkit = { path = "../orca-plugin-toolkit" }
 
-# DB lookup for registered dockge endpoints + async-trait used by the
-# macro-generated OrcaTool impl.
+# Used directly by stack-op tools' #[orca_tool] expansions.
+dispatch    = { path = "../../dispatch" }
+contract    = { path = "../../contract", default-features = false }
+derive      = { path = "../../derive" }
+schemars    = { workspace = true }
+inventory   = { workspace = true }
+
+# Toolkit-generated code uses these at expansion sites:
 db = { package = "db", path = "../../db" }
+rusqlite = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 
