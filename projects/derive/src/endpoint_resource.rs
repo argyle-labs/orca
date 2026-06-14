@@ -13,9 +13,9 @@
 //! `Option<T>` + `#[secret]` fields: appear as `has_<name>: bool` in entry.
 
 use proc_macro2::{Span, TokenStream as TokenStream2};
-use quote::{format_ident, quote};
+use quote::{ToTokens, format_ident, quote};
 use syn::{
-    Attribute, Ident, LitStr, Path, Token, Type,
+    Attribute, Ident, LitStr, Token, Type,
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
 };
@@ -427,7 +427,12 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         Span::call_site(),
     );
 
-    let toolkit: Path = syn::parse_quote!(::plugin_toolkit);
+    let crate_path = &input.crate_path;
+    // `#[serde(crate = "...")]` / `#[schemars(crate = "...")]` take a string
+    // literal, so stringify the path tokens once and reuse.
+    let crate_path_str = crate_path.to_token_stream().to_string().replace(' ', "");
+    let serde_path_str = format!("{crate_path_str}::serde");
+    let schemars_path_str = format!("{crate_path_str}::schemars");
 
     let expanded = quote! {
         // ── Row struct ───────────────────────────────────────────────────
@@ -439,15 +444,15 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         }
 
         // ── Schema fragment ──────────────────────────────────────────────
-        ::plugin_toolkit::inventory::submit! {
-            ::plugin_toolkit::SchemaFragment { name: #table, sql: #create_table_sql }
+        #crate_path::inventory::submit! {
+            #crate_path::SchemaFragment { name: #table, sql: #create_table_sql }
         }
 
         // ── DB CRUD module ───────────────────────────────────────────────
         pub mod endpoint_db {
             use super::#row_ident;
-            use ::plugin_toolkit::anyhow::Result;
-            use ::plugin_toolkit::rusqlite::{Connection, OptionalExtension};
+            use #crate_path::anyhow::Result;
+            use #crate_path::rusqlite::{Connection, OptionalExtension};
 
             pub fn list(conn: &Connection) -> Result<::std::vec::Vec<#row_ident>> {
                 let mut stmt = conn.prepare(#list_sql)?;
@@ -458,13 +463,13 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                         enabled: row.get::<_, i32>(#row_enabled_idx)? != 0,
                     })
                 })?;
-                rows.collect::<::plugin_toolkit::rusqlite::Result<::std::vec::Vec<_>>>().map_err(Into::into)
+                rows.collect::<#crate_path::rusqlite::Result<::std::vec::Vec<_>>>().map_err(Into::into)
             }
 
             pub fn get(conn: &Connection, name: &str) -> Result<::std::option::Option<#row_ident>> {
                 conn.query_row(
                     #get_sql,
-                    ::plugin_toolkit::rusqlite::params![name],
+                    #crate_path::rusqlite::params![name],
                     |row| Ok(#row_ident {
                         name: row.get(#row_name_idx)?,
                         #( #row_field_gets )*
@@ -476,7 +481,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             pub fn insert(conn: &Connection, ep: &#row_ident) -> Result<()> {
                 conn.execute(
                     #insert_sql,
-                    ::plugin_toolkit::rusqlite::params![ep.name, #( ep.#field_idents, )* ep.enabled],
+                    #crate_path::rusqlite::params![ep.name, #( ep.#field_idents, )* ep.enabled],
                 )?;
                 Ok(())
             }
@@ -484,7 +489,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             pub fn update(conn: &Connection, ep: &#row_ident) -> Result<bool> {
                 let n = conn.execute(
                     #update_sql,
-                    ::plugin_toolkit::rusqlite::params![ep.name, #( ep.#field_idents, )* ep.enabled],
+                    #crate_path::rusqlite::params![ep.name, #( ep.#field_idents, )* ep.enabled],
                 )?;
                 Ok(n > 0)
             }
@@ -492,7 +497,7 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             pub fn upsert(conn: &Connection, ep: &#row_ident) -> Result<()> {
                 conn.execute(
                     #upsert_sql,
-                    ::plugin_toolkit::rusqlite::params![ep.name, #( ep.#field_idents, )* ep.enabled],
+                    #crate_path::rusqlite::params![ep.name, #( ep.#field_idents, )* ep.enabled],
                 )?;
                 Ok(())
             }
@@ -500,16 +505,16 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             pub fn remove(conn: &Connection, name: &str) -> Result<bool> {
                 let n = conn.execute(
                     #delete_sql,
-                    ::plugin_toolkit::rusqlite::params![name],
+                    #crate_path::rusqlite::params![name],
                 )?;
                 Ok(n > 0)
             }
         }
 
         // ── Public-side entry (no secrets) ───────────────────────────────
-        #[derive(::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema, Debug, Clone)]
-        #[serde(crate = "::plugin_toolkit::serde")]
-        #[schemars(crate = "::plugin_toolkit::schemars")]
+        #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema, Debug, Clone)]
+        #[serde(crate = #serde_path_str)]
+        #[schemars(crate = #schemars_path_str)]
         #[serde(rename_all = "camelCase")]
         pub struct #entry_ident {
             pub name: ::std::string::String,
@@ -518,22 +523,22 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         }
 
         // ── list ─────────────────────────────────────────────────────────
-        #[derive(::plugin_toolkit::clap::Args, ::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema, Default)]
-        #[serde(crate = "::plugin_toolkit::serde")]
-        #[schemars(crate = "::plugin_toolkit::schemars")]
+        #[derive(#crate_path::clap::Args, #crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema, Default)]
+        #[serde(crate = #serde_path_str)]
+        #[schemars(crate = #schemars_path_str)]
         #[serde(default)]
         pub struct #list_args {}
 
-        #[derive(::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema, Default)]
-        #[serde(crate = "::plugin_toolkit::serde")]
-        #[schemars(crate = "::plugin_toolkit::schemars")]
+        #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema, Default)]
+        #[serde(crate = #serde_path_str)]
+        #[schemars(crate = #schemars_path_str)]
         #[serde(default)]
         pub struct #list_output { pub endpoints: ::std::vec::Vec<#entry_ident> }
 
         #[doc = #list_doc]
-        #[::plugin_toolkit::derive::orca_tool(domain = #plugin_str_lit, verb = "list")]
-        async fn #list_fn(_args: #list_args, _ctx: &::plugin_toolkit::contract::ToolCtx) -> ::plugin_toolkit::anyhow::Result<#list_output> {
-            let conn = #toolkit::runtime::open_db()?;
+        #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "list")]
+        async fn #list_fn(_args: #list_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#list_output> {
+            let conn = #crate_path::runtime::open_db()?;
             let endpoints = endpoint_db::list(&conn)?
                 .into_iter()
                 .map(|row| #entry_ident {
@@ -546,22 +551,22 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         }
 
         // ── detail ───────────────────────────────────────────────────────
-        #[derive(::plugin_toolkit::clap::Args, ::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema)]
-        #[serde(crate = "::plugin_toolkit::serde")]
-        #[schemars(crate = "::plugin_toolkit::schemars")]
+        #[derive(#crate_path::clap::Args, #crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
+        #[serde(crate = #serde_path_str)]
+        #[schemars(crate = #schemars_path_str)]
         pub struct #detail_args { #[arg(long)] pub name: ::std::string::String }
 
-        #[derive(::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema)]
-        #[serde(crate = "::plugin_toolkit::serde")]
-        #[schemars(crate = "::plugin_toolkit::schemars")]
+        #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
+        #[serde(crate = #serde_path_str)]
+        #[schemars(crate = #schemars_path_str)]
         pub struct #detail_output { pub endpoint: #entry_ident }
 
         #[doc = #detail_doc]
-        #[::plugin_toolkit::derive::orca_tool(domain = #plugin_str_lit, verb = "detail")]
-        async fn #detail_fn(args: #detail_args, _ctx: &::plugin_toolkit::contract::ToolCtx) -> ::plugin_toolkit::anyhow::Result<#detail_output> {
-            let conn = #toolkit::runtime::open_db()?;
+        #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "detail")]
+        async fn #detail_fn(args: #detail_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#detail_output> {
+            let conn = #crate_path::runtime::open_db()?;
             let row = endpoint_db::get(&conn, &args.name)?
-                .ok_or_else(|| #toolkit::runtime::missing_row_error(#plugin_str_lit, &args.name))?;
+                .ok_or_else(|| #crate_path::runtime::missing_row_error(#plugin_str_lit, &args.name))?;
             Ok(#detail_output { endpoint: #entry_ident {
                 name: row.name.clone(),
                 #( #entry_from_row )*
@@ -570,30 +575,30 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         }
 
         // ── create ───────────────────────────────────────────────────────
-        #[derive(::plugin_toolkit::clap::Args, ::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema)]
-        #[serde(crate = "::plugin_toolkit::serde")]
-        #[schemars(crate = "::plugin_toolkit::schemars")]
+        #[derive(#crate_path::clap::Args, #crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
+        #[serde(crate = #serde_path_str)]
+        #[schemars(crate = #schemars_path_str)]
         pub struct #create_args {
             #[arg(long)] pub name: ::std::string::String,
             #( #create_field_decls )*
         }
 
-        #[derive(::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema)]
-        #[serde(crate = "::plugin_toolkit::serde")]
-        #[schemars(crate = "::plugin_toolkit::schemars")]
+        #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
+        #[serde(crate = #serde_path_str)]
+        #[schemars(crate = #schemars_path_str)]
         pub struct #create_output { pub endpoint: #entry_ident }
 
         #[doc = #create_doc]
-        #[::plugin_toolkit::derive::orca_tool(domain = #plugin_str_lit, verb = "create")]
-        async fn #create_fn(args: #create_args, _ctx: &::plugin_toolkit::contract::ToolCtx) -> ::plugin_toolkit::anyhow::Result<#create_output> {
+        #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "create")]
+        async fn #create_fn(args: #create_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#create_output> {
             let row = #row_ident {
                 name: args.name.clone(),
                 #( #create_row_fields )*
                 enabled: true,
             };
-            let conn = #toolkit::runtime::open_db()?;
+            let conn = #crate_path::runtime::open_db()?;
             endpoint_db::insert(&conn, &row)
-                .map_err(|e| #toolkit::runtime::map_insert_conflict(e, #plugin_str_lit, &row.name))?;
+                .map_err(|e| #crate_path::runtime::map_insert_conflict(e, #plugin_str_lit, &row.name))?;
             Ok(#create_output { endpoint: #entry_ident {
                 name: row.name.clone(),
                 #( #entry_from_row )*
@@ -602,9 +607,9 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         }
 
         // ── update ───────────────────────────────────────────────────────
-        #[derive(::plugin_toolkit::clap::Args, ::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema, Default)]
-        #[serde(crate = "::plugin_toolkit::serde")]
-        #[schemars(crate = "::plugin_toolkit::schemars")]
+        #[derive(#crate_path::clap::Args, #crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema, Default)]
+        #[serde(crate = #serde_path_str)]
+        #[schemars(crate = #schemars_path_str)]
         #[serde(default)]
         pub struct #update_args {
             #[arg(long)] pub name: ::std::string::String,
@@ -612,20 +617,20 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
             #[arg(long)] pub enabled: Option<bool>,
         }
 
-        #[derive(::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema)]
-        #[serde(crate = "::plugin_toolkit::serde")]
-        #[schemars(crate = "::plugin_toolkit::schemars")]
+        #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
+        #[serde(crate = #serde_path_str)]
+        #[schemars(crate = #schemars_path_str)]
         pub struct #update_output {
             pub endpoint: #entry_ident,
             pub applied: ::std::vec::Vec<::std::string::String>,
         }
 
         #[doc = #update_doc]
-        #[::plugin_toolkit::derive::orca_tool(domain = #plugin_str_lit, verb = "update")]
-        async fn #update_fn(args: #update_args, _ctx: &::plugin_toolkit::contract::ToolCtx) -> ::plugin_toolkit::anyhow::Result<#update_output> {
-            let conn = #toolkit::runtime::open_db()?;
+        #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "update")]
+        async fn #update_fn(args: #update_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#update_output> {
+            let conn = #crate_path::runtime::open_db()?;
             let mut row = endpoint_db::get(&conn, &args.name)?
-                .ok_or_else(|| #toolkit::runtime::missing_row_error(#plugin_str_lit, &args.name))?;
+                .ok_or_else(|| #crate_path::runtime::missing_row_error(#plugin_str_lit, &args.name))?;
             let mut applied: ::std::vec::Vec<::std::string::String> = ::std::vec::Vec::new();
             #( #update_patch_stanzas )*
             if let ::std::option::Option::Some(v) = args.enabled {
@@ -633,10 +638,10 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
                 applied.push("enabled".to_string());
             }
             if applied.is_empty() {
-                ::plugin_toolkit::anyhow::bail!("no fields to update; pass at least one flag");
+                #crate_path::anyhow::bail!("no fields to update; pass at least one flag");
             }
             let changed = endpoint_db::update(&conn, &row)?;
-            if !changed { ::plugin_toolkit::anyhow::bail!("update reported no row change for `{}`", row.name); }
+            if !changed { #crate_path::anyhow::bail!("update reported no row change for `{}`", row.name); }
             Ok(#update_output {
                 endpoint: #entry_ident {
                     name: row.name.clone(),
@@ -648,20 +653,20 @@ pub(crate) fn expand(input: EndpointResource) -> syn::Result<TokenStream2> {
         }
 
         // ── delete ───────────────────────────────────────────────────────
-        #[derive(::plugin_toolkit::clap::Args, ::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema)]
-        #[serde(crate = "::plugin_toolkit::serde")]
-        #[schemars(crate = "::plugin_toolkit::schemars")]
+        #[derive(#crate_path::clap::Args, #crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
+        #[serde(crate = #serde_path_str)]
+        #[schemars(crate = #schemars_path_str)]
         pub struct #delete_args { #[arg(long)] pub name: ::std::string::String }
 
-        #[derive(::plugin_toolkit::serde::Serialize, ::plugin_toolkit::serde::Deserialize, ::plugin_toolkit::schemars::JsonSchema)]
-        #[serde(crate = "::plugin_toolkit::serde")]
-        #[schemars(crate = "::plugin_toolkit::schemars")]
+        #[derive(#crate_path::serde::Serialize, #crate_path::serde::Deserialize, #crate_path::schemars::JsonSchema)]
+        #[serde(crate = #serde_path_str)]
+        #[schemars(crate = #schemars_path_str)]
         pub struct #delete_output { pub name: ::std::string::String, pub changed: bool }
 
         #[doc = #delete_doc]
-        #[::plugin_toolkit::derive::orca_tool(domain = #plugin_str_lit, verb = "delete")]
-        async fn #delete_fn(args: #delete_args, _ctx: &::plugin_toolkit::contract::ToolCtx) -> ::plugin_toolkit::anyhow::Result<#delete_output> {
-            let conn = #toolkit::runtime::open_db()?;
+        #[#crate_path::derive::orca_tool(domain = #plugin_str_lit, verb = "delete")]
+        async fn #delete_fn(args: #delete_args, _ctx: &#crate_path::contract::ToolCtx) -> #crate_path::anyhow::Result<#delete_output> {
+            let conn = #crate_path::runtime::open_db()?;
             let changed = endpoint_db::remove(&conn, &args.name)?;
             Ok(#delete_output { name: args.name, changed })
         }
