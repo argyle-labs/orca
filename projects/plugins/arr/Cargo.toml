@@ -37,12 +37,7 @@ wiremock = "0.6"
 rustls   = { workspace = true }
 
 [build-dependencies]
-openapi = { path = "../openapi" }
-progenitor  = "0.14"
-openapiv3   = "2"
-serde_json  = { workspace = true }
-prettyplease = "0.2"
-syn         = { version = "2", features = ["full"] }
+orca-plugin-toolkit-build = { path = "../orca-plugin-toolkit-build" }
 
 [lints]
 workspace = true

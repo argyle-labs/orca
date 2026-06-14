@@ -4,7 +4,7 @@ edition = "2024"
 # Bump this when cutting a release; the runtime binary reports its actual
 # build state (incl. -dev suffix for non-tagged commits) via build.rs →
 # ORCA_VERSION, not this value.
-version = "0.0.7-rc.12"
+version = "0.0.7-rc.13"
 
 # Single source of truth for shared external crate versions. Every member
 # crate that uses one of these MUST declare it as `dep = { workspace = true }`
@@ -158,6 +158,7 @@ members = [
     "projects/plugins/ntfy",
     "projects/plugins/openapi",
     "projects/plugins/orca-plugin-toolkit",
+    "projects/plugins/orca-plugin-toolkit-build",
     "projects/plugins/proxmox",
     "projects/plugins/smb",
     "projects/plugins/arr",
@@ -195,6 +196,7 @@ default-members = [
     "projects/plugins/ntfy",
     "projects/plugins/openapi",
     "projects/plugins/orca-plugin-toolkit",
+    "projects/plugins/orca-plugin-toolkit-build",
     "projects/plugins/proxmox",
     "projects/plugins/smb",
     "projects/plugins/arr",
