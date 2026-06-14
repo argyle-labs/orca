@@ -1,9 +1,9 @@
 //! `notify.send` tool. Relocated from `notifications/` so `notifications`
 //! is pure plumbing (trait + dispatcher) and can be re-exported via
-//! `plugin_toolkit::notifications` without a cycle. See db→system for the
+//! `notifications` without a cycle. See db→system for the
 //! same shape.
 
-use plugin_toolkit::notifications::{Event, EventClass, Severity, emit, registered_backend_names};
+use notifications::{Event, EventClass, Severity, emit, registered_backend_names};
 use plugin_toolkit::prelude::*;
 
 #[plugin_struct(args)]
