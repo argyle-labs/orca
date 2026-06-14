@@ -9,7 +9,7 @@
 //! ## Usage
 //!
 //! ```rust,ignore
-//! use orca_plugin_toolkit::prelude::*;
+//! use plugin_toolkit::prelude::*;
 //!
 //! endpoint_resource! {
 //!     plugin: "dockge",
@@ -39,7 +39,7 @@ pub use derive::endpoint_resource;
 // Per [[feedback-plugin-toolkit-is-the-gateway]], plugins reach every
 // orca-side capability through the toolkit. These submodules re-export the
 // underlying crates so a plugin's only orca-side import is
-// `use orca_plugin_toolkit::prelude::*;` — `http`, `graphql`, `openapi`
+// `use plugin_toolkit::prelude::*;` — `http`, `graphql`, `openapi`
 // are then in scope as namespaced modules.
 
 /// HTTP transport. Re-export of `utils::http` so HTTP bug fixes propagate

@@ -7,10 +7,10 @@
 //!   - `home-assistant.automations`
 //!   - `home-assistant.service`    invoke an HA service
 //!
-//! Imports flow through `orca_plugin_toolkit::prelude::*` only.
+//! Imports flow through `plugin_toolkit::prelude::*` only.
 #![allow(clippy::disallowed_types)]
 
-use orca_plugin_toolkit::prelude::*;
+use plugin_toolkit::prelude::*;
 use serde_json as sj;
 
 use crate::{Client, Config, ServiceCall};

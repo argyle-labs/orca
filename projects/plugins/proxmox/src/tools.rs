@@ -10,10 +10,10 @@
 //!   - `proxmox.node_detail`      VMs + containers on one node
 //!   - `proxmox.action`           VM/container start/stop/shutdown/reboot
 //!
-//! Imports flow through `orca_plugin_toolkit::prelude::*` only.
+//! Imports flow through `plugin_toolkit::prelude::*` only.
 #![allow(clippy::disallowed_types)] // Proxmox upstream JSON is intentional JsonAny
 
-use orca_plugin_toolkit::prelude::*;
+use plugin_toolkit::prelude::*;
 
 use crate::{Client, Config};
 

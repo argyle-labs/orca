@@ -37,7 +37,7 @@ wiremock = "0.6"
 rustls   = { workspace = true }
 
 [build-dependencies]
-orca-plugin-toolkit-build = { path = "../orca-plugin-toolkit-build" }
+plugin-toolkit-build = { path = "../plugin-toolkit-build" }
 
 [lints]
 workspace = true

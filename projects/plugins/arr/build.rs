@@ -11,6 +11,5 @@
 
 fn main() {
     let specs_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("specs");
-    orca_plugin_toolkit_build::openapi::generate_all(specs_dir, "arr")
-        .expect("arr openapi codegen");
+    plugin_toolkit_build::openapi::generate_all(specs_dir, "arr").expect("arr openapi codegen");
 }

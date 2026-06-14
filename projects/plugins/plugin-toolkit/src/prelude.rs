@@ -2,7 +2,7 @@
 //! ever writes:
 //!
 //! ```rust,ignore
-//! use orca_plugin_toolkit::prelude::*;
+//! use plugin_toolkit::prelude::*;
 //! ```
 //!
 //! Per the user's directive (2026-06-13): "if it isn't in the plugin
@@ -45,7 +45,7 @@ pub use crate::runtime;
 
 // ── Ecosystem transport primitives ─────────────────────────────────────
 // Plugins reach HTTP / GraphQL / OpenAPI through the toolkit so transport
-// bug fixes land once and propagate. After `use orca_plugin_toolkit::prelude::*;`
+// bug fixes land once and propagate. After `use plugin_toolkit::prelude::*;`
 // these are in scope as `http::Client`, `graphql::Client`, `openapi::parse_str`,
 // etc. — never `utils::http::…` or `::graphql::…` directly.
 pub use crate::{graphql, http, openapi};

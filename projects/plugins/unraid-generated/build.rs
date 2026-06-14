@@ -14,6 +14,6 @@ fn main() {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let schemas_dir = manifest_dir.join("..").join("unraid").join("schemas");
     let queries_dir = manifest_dir.join("queries");
-    orca_plugin_toolkit_build::graphql::generate(schemas_dir, queries_dir)
+    plugin_toolkit_build::graphql::generate(schemas_dir, queries_dir)
         .expect("unraid graphql codegen");
 }

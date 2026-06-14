@@ -12,11 +12,11 @@
 //! NOTE: changes to endpoints take effect on next daemon restart. The
 //! notifications dispatcher reads the table at bootstrap.
 //!
-//! Imports flow through `orca_plugin_toolkit::prelude::*` only — the
+//! Imports flow through `plugin_toolkit::prelude::*` only — the
 //! plugin treats the toolkit as the single gateway to the orca system.
 #![allow(clippy::disallowed_types)]
 
-use orca_plugin_toolkit::prelude::*;
+use plugin_toolkit::prelude::*;
 
 use crate::{Client, Config, Message};
 

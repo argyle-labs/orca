@@ -14,19 +14,19 @@ pub mod config_store;
 pub mod config_tools;
 pub mod docker_runtimes;
 // `dockge` endpoint registry now lives in the dockge plugin via
-// `orca_plugin_toolkit::endpoint_resource!` — that macro emits the row
+// `plugin_toolkit::endpoint_resource!` — that macro emits the row
 // struct, the CRUD module, and a SchemaFragment registration.
 pub mod docs;
 pub mod feature_flags;
 // `home_assistant` endpoint registry now lives in the homeassistant plugin via
-// `orca_plugin_toolkit::endpoint_resource!` — that macro emits the row
+// `plugin_toolkit::endpoint_resource!` — that macro emits the row
 // struct, the CRUD module, and a SchemaFragment registration.
 pub mod host_addressing;
 pub mod host_status;
 pub mod llm;
 pub mod mcp_servers;
 // `ntfy` endpoint registry now lives in the ntfy plugin via
-// `orca_plugin_toolkit::endpoint_resource!`.
+// `plugin_toolkit::endpoint_resource!`.
 pub mod oauth;
 pub mod openapi_specs;
 pub mod openapi_specs_registry;
@@ -55,7 +55,7 @@ pub mod ports;
 pub mod profile_creds;
 pub mod profiles;
 // `proxmox` endpoint registry now lives in the proxmox plugin via
-// `orca_plugin_toolkit::endpoint_resource!`.
+// `plugin_toolkit::endpoint_resource!`.
 pub mod scheduler_runs;
 pub mod schema_databases;
 pub mod secrets;
@@ -685,7 +685,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
 
         -- proxmox_endpoints, homeassistant_endpoints, ntfy_endpoints, and
         -- dockge_endpoints all live in their respective plugins via
-        -- `orca_plugin_toolkit::endpoint_resource!`, registered through the
+        -- `plugin_toolkit::endpoint_resource!`, registered through the
         -- SchemaFragment inventory (applied below).
 
         CREATE TABLE IF NOT EXISTS plugins (

@@ -1,14 +1,14 @@
 [package]
-name = "orca-plugin-toolkit"
+name = "plugin-toolkit"
 version.workspace = true
 edition.workspace = true
 
 [lib]
-name = "orca_plugin_toolkit"
+name = "plugin_toolkit"
 path = "src/lib.rs"
 
 [dependencies]
-orca-macro-runtime = { path = "../../orca-macro-runtime" }
+macro-runtime = { path = "../../macro-runtime" }
 # Re-exports for the prelude.
 serde      = { workspace = true }
 serde_json = { workspace = true }

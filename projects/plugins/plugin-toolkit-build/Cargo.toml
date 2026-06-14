@@ -1,10 +1,10 @@
 [package]
-name = "orca-plugin-toolkit-build"
+name = "plugin-toolkit-build"
 version.workspace = true
 edition.workspace = true
 
 [lib]
-name = "orca_plugin_toolkit_build"
+name = "plugin_toolkit_build"
 path = "src/lib.rs"
 
 # Build-script helpers — used from plugin `build.rs` files. Pulls in the
@@ -13,7 +13,7 @@ path = "src/lib.rs"
 # typed clients does:
 #
 #   [build-dependencies]
-#   orca-plugin-toolkit-build = { path = "../orca-plugin-toolkit-build" }
+#   plugin-toolkit-build = { path = "../plugin-toolkit-build" }
 #
 # and its build.rs becomes a few lines (see `openapi::generate_all` and
 # `graphql::generate`).

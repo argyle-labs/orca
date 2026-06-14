@@ -274,7 +274,7 @@ fn expand_to_tokens(attr: ToolAttr, item: ItemFn) -> TokenStream2 {
 ///
 /// Generates `export`/`merge` fns over the named struct fields (each field maps
 /// 1:1 to a column of `table`, in declaration order) and submits a
-/// `::orca_macro_runtime::db_types::ReplicatedRegistration` into the inventory slice the pod mesh
+/// `::macro_runtime::db_types::ReplicatedRegistration` into the inventory slice the pod mesh
 /// engine walks. Merge is last-write-wins on the `lww` column, keyed by `pk`.
 #[cfg(not(test))]
 #[proc_macro_derive(Replicated, attributes(replicate))]
@@ -433,8 +433,8 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
             #[allow(clippy::disallowed_types)]
             impl #ty {
                 fn __replicate_export(
-                    conn: &::orca_macro_runtime::rusqlite::Connection,
-                ) -> ::orca_macro_runtime::anyhow::Result<::orca_macro_runtime::serde_json::Value> {
+                    conn: &::macro_runtime::rusqlite::Connection,
+                ) -> ::macro_runtime::anyhow::Result<::macro_runtime::serde_json::Value> {
                     let mut stmt = conn.prepare(#select_sql)?;
                     let rows = stmt.query_map([], |row| {
                         ::std::result::Result::Ok(#ty {
@@ -442,20 +442,20 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
                         })
                     })?;
                     let all: ::std::vec::Vec<#ty> =
-                        rows.collect::<::orca_macro_runtime::rusqlite::Result<::std::vec::Vec<_>>>()?;
-                    ::std::result::Result::Ok(::orca_macro_runtime::serde_json::to_value(all)?)
+                        rows.collect::<::macro_runtime::rusqlite::Result<::std::vec::Vec<_>>>()?;
+                    ::std::result::Result::Ok(::macro_runtime::serde_json::to_value(all)?)
                 }
 
                 fn __replicate_merge(
-                    conn: &::orca_macro_runtime::rusqlite::Connection,
-                    rows: ::orca_macro_runtime::serde_json::Value,
-                ) -> ::orca_macro_runtime::anyhow::Result<usize> {
-                    use ::orca_macro_runtime::rusqlite::OptionalExtension;
-                    let rows: ::std::vec::Vec<#ty> = ::orca_macro_runtime::serde_json::from_value(rows)?;
+                    conn: &::macro_runtime::rusqlite::Connection,
+                    rows: ::macro_runtime::serde_json::Value,
+                ) -> ::macro_runtime::anyhow::Result<usize> {
+                    use ::macro_runtime::rusqlite::OptionalExtension;
+                    let rows: ::std::vec::Vec<#ty> = ::macro_runtime::serde_json::from_value(rows)?;
                     let mut merged = 0usize;
                     for row in &rows {
                         let existing: ::std::option::Option<::std::string::String> = conn
-                            .query_row(#lww_select_sql, ::orca_macro_runtime::rusqlite::params![row.#pk_ident], |r| r.get(0))
+                            .query_row(#lww_select_sql, ::macro_runtime::rusqlite::params![row.#pk_ident], |r| r.get(0))
                             .optional()?;
                         // Last-write-wins: skip when our copy is at least as new.
                         if let ::std::option::Option::Some(local) = &existing
@@ -465,7 +465,7 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
                         }
                         conn.execute(
                             #insert_sql,
-                            ::orca_macro_runtime::rusqlite::params![ #( row.#field_idents, )* ],
+                            ::macro_runtime::rusqlite::params![ #( row.#field_idents, )* ],
                         )?;
                         merged += 1;
                     }
@@ -473,8 +473,8 @@ fn expand_replicated(input: DeriveInput) -> syn::Result<TokenStream2> {
                 }
             }
 
-            ::orca_macro_runtime::inventory::submit! {
-                ::orca_macro_runtime::db_types::ReplicatedRegistration {
+            ::macro_runtime::inventory::submit! {
+                ::macro_runtime::db_types::ReplicatedRegistration {
                     name: #table,
                     export: #ty::__replicate_export,
                     merge: #ty::__replicate_merge,
@@ -579,7 +579,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     };
 
     let ctx_param_name = Ident::new("ctx", Span::call_site());
-    let ctx_param = quote! { #ctx_param_name: &::orca_macro_runtime::contract::ToolCtx };
+    let ctx_param = quote! { #ctx_param_name: &::macro_runtime::contract::ToolCtx };
 
     // Peer dispatch is universal: every tool with `remote_ok = true` (i.e.
     // not `local_only`) gets the proxy stanza. The trigger lives on
@@ -603,9 +603,9 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             // daemon-restart gap for tools that swap the peer's binary.
             let __svc_refresh = ::std::sync::Arc::clone(&__svc);
             let __peer_refresh = __peer_id.clone();
-            ::orca_macro_runtime::tokio::spawn(async move {
+            ::macro_runtime::tokio::spawn(async move {
                 for __delay_ms in [500u64, 2000, 5000, 10_000, 20_000] {
-                    ::orca_macro_runtime::tokio::time::sleep(
+                    ::macro_runtime::tokio::time::sleep(
                         ::std::time::Duration::from_millis(__delay_ms)
                     ).await;
                     if __svc_refresh
@@ -627,7 +627,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     let local_only_reject_stanza = if !emit_peer_dispatch {
         quote! {
             if let ::core::option::Option::Some(__peer) = #ctx_param_name.peer() {
-                return ::core::result::Result::Err(::orca_macro_runtime::anyhow::anyhow!(
+                return ::core::result::Result::Err(::macro_runtime::anyhow::anyhow!(
                     "tool `{}` is local_only and cannot be dispatched to peer `{}`",
                     #tool_name, __peer,
                 ));
@@ -642,9 +642,9 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
                 #ctx_param_name.peer().map(::std::string::ToString::to_string)
             {
                 let __svc = #ctx_param_name
-                    .service::<::std::sync::Arc<dyn ::orca_macro_runtime::contract::RemoteExec>>()?;
-                let __args_value = ::orca_macro_runtime::serde_json::to_value(&#args_forward)
-                    .map_err(|e| ::orca_macro_runtime::anyhow::anyhow!("peer_dispatch: serialize args: {e}"))?;
+                    .service::<::std::sync::Arc<dyn ::macro_runtime::contract::RemoteExec>>()?;
+                let __args_value = ::macro_runtime::serde_json::to_value(&#args_forward)
+                    .map_err(|e| ::macro_runtime::anyhow::anyhow!("peer_dispatch: serialize args: {e}"))?;
                 // Forward the ctx's ambient operator identity; the transport
                 // mints a signed caller token from it (project-remote-exec-full-fix
                 // S1–S4). `None` on unauthenticated paths.
@@ -657,8 +657,8 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
                         #ctx_param_name.correlation_id().map(::std::string::ToString::to_string),
                     )
                     .await?;
-                let __out: #output_ty = ::orca_macro_runtime::serde_json::from_value(__out_value)
-                    .map_err(|e| ::orca_macro_runtime::anyhow::anyhow!(
+                let __out: #output_ty = ::macro_runtime::serde_json::from_value(__out_value)
+                    .map_err(|e| ::macro_runtime::anyhow::anyhow!(
                         "peer_dispatch: decode {} output from peer {}: {}",
                         #tool_name, __peer_id, e,
                     ))?;
@@ -685,11 +685,11 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
         Some("manual") | Some("skip") => quote! {},
         _ => quote! {
             const _: () = {
-                ::orca_macro_runtime::dispatch::register_op! {
+                ::macro_runtime::dispatch::register_op! {
                     tool: #zst_ident,
                     domain: #domain,
                     verb: #verb,
-                    summary: <#zst_ident as ::orca_macro_runtime::contract::OrcaToolDef>::DESCRIPTION,
+                    summary: <#zst_ident as ::macro_runtime::contract::OrcaToolDef>::DESCRIPTION,
                 }
             };
         },
@@ -699,21 +699,21 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
     // native deps needed). Every tool gets one `/api/v1/<NAME>` POST entry
     // injected into the spec at runtime.
     let openapi_block = quote! {
-        ::orca_macro_runtime::inventory::submit! {
-            ::orca_macro_runtime::dispatch::openapi::OpenApiToolRegistration {
+        ::macro_runtime::inventory::submit! {
+            ::macro_runtime::dispatch::openapi::OpenApiToolRegistration {
                 name: #tool_name,
                 title: #title_tokens,
                 description: #description,
                 domain: #domain,
                 args_schema: || {
-                    ::orca_macro_runtime::serde_json::to_value(
-                        ::orca_macro_runtime::schemars::schema_for!(<#zst_ident as ::orca_macro_runtime::contract::OrcaToolDef>::Args)
-                    ).unwrap_or(::orca_macro_runtime::serde_json::Value::Object(::orca_macro_runtime::serde_json::Map::new()))
+                    ::macro_runtime::serde_json::to_value(
+                        ::macro_runtime::schemars::schema_for!(<#zst_ident as ::macro_runtime::contract::OrcaToolDef>::Args)
+                    ).unwrap_or(::macro_runtime::serde_json::Value::Object(::macro_runtime::serde_json::Map::new()))
                 },
                 output_schema: || {
-                    ::orca_macro_runtime::serde_json::to_value(
-                        ::orca_macro_runtime::schemars::schema_for!(<#zst_ident as ::orca_macro_runtime::contract::OrcaToolDef>::Output)
-                    ).unwrap_or(::orca_macro_runtime::serde_json::Value::Object(::orca_macro_runtime::serde_json::Map::new()))
+                    ::macro_runtime::serde_json::to_value(
+                        ::macro_runtime::schemars::schema_for!(<#zst_ident as ::macro_runtime::contract::OrcaToolDef>::Output)
+                    ).unwrap_or(::macro_runtime::serde_json::Value::Object(::macro_runtime::serde_json::Map::new()))
                 },
             }
         }
@@ -725,7 +725,7 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
         #[allow(non_camel_case_types)]
         pub struct #zst_ident;
 
-        impl ::orca_macro_runtime::contract::OrcaToolDef for #zst_ident {
+        impl ::macro_runtime::contract::OrcaToolDef for #zst_ident {
             const NAME: &'static str = #tool_name;
             const DESCRIPTION: &'static str = #description;
             const REMOTE_OK: bool = #remote_ok_lit;
@@ -734,28 +734,28 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             type Output = #output_ty;
         }
 
-        impl ::orca_macro_runtime::contract::OrcaOp for #zst_ident {
+        impl ::macro_runtime::contract::OrcaOp for #zst_ident {
             const DOMAIN: &'static str = #domain;
             const VERB: &'static str = #verb;
         }
 
-        #[::orca_macro_runtime::async_trait::async_trait]
-        impl ::orca_macro_runtime::contract::OrcaTool for #zst_ident {
+        #[::macro_runtime::async_trait::async_trait]
+        impl ::macro_runtime::contract::OrcaTool for #zst_ident {
             async fn run(
                 #args_param,
                 #ctx_param,
-            ) -> ::orca_macro_runtime::anyhow::Result<#output_ty> {
+            ) -> ::macro_runtime::anyhow::Result<#output_ty> {
                 #local_only_reject_stanza
                 #peer_dispatch_stanza
                 #fn_ident(#args_forward, #ctx_param_name).await
             }
         }
 
-        ::orca_macro_runtime::inventory::submit! {
-            ::orca_macro_runtime::dispatch::ToolRegistration {
+        ::macro_runtime::inventory::submit! {
+            ::macro_runtime::dispatch::ToolRegistration {
                 name: #tool_name,
                 make_erased: || ::std::boxed::Box::new(
-                    ::orca_macro_runtime::dispatch::ToolWrapper::<#zst_ident>(::std::marker::PhantomData)
+                    ::macro_runtime::dispatch::ToolWrapper::<#zst_ident>(::std::marker::PhantomData)
                 ),
             }
         }

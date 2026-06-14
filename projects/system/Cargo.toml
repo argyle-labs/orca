@@ -13,7 +13,7 @@ path = "src/lib.rs"
 ui = []
 
 [dependencies]
-orca-macro-runtime = { path = "../orca-macro-runtime" }
+macro-runtime = { path = "../macro-runtime" }
 dispatch   = { path = "../dispatch" }
 contract  = { path = "../contract", default-features = false }
 derive     = { path = "../derive" }

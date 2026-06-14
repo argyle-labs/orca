@@ -21,7 +21,7 @@ ui = ["dep:mime_guess", "system/ui"]
 # Off by default; pulls ~10 MB of typst + font crates into the binary.
 pdf = ["dep:typst", "dep:typst-pdf", "dep:typst-assets", "dep:zip"]
 [dependencies]
-orca-macro-runtime = { path = "../orca-macro-runtime" }
+macro-runtime = { path = "../macro-runtime" }
 # Workspace crates
 orca-sdk   = { path = "../sdk/rust" }
 utils = { path = "../utils" }

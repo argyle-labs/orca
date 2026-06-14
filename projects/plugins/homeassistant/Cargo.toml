@@ -8,7 +8,7 @@ name = "homeassistant"
 path = "src/lib.rs"
 
 [dependencies]
-orca-macro-runtime = { path = "../../orca-macro-runtime" }
+macro-runtime = { path = "../../macro-runtime" }
 db-types = { path = "../../db-types" }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
@@ -27,7 +27,7 @@ inventory        = { workspace = true }
 # the macro-generated OrcaTool impl.
 db = { package = "db", path = "../../db" }
 rusqlite    = { workspace = true }
-orca-plugin-toolkit = { path = "../orca-plugin-toolkit" }
+plugin-toolkit = { path = "../plugin-toolkit" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 

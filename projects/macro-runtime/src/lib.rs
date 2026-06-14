@@ -2,8 +2,8 @@
 //!
 //! `derive`'s proc macros (`#[orca_tool]`, `endpoint_resource!`,
 //! `#[derive(Replicated)]`) emit absolute paths like
-//! `::orca_macro_runtime::anyhow::Result` and
-//! `::orca_macro_runtime::db_types::SchemaFragment`. A consumer crate
+//! `::macro_runtime::anyhow::Result` and
+//! `::macro_runtime::db_types::SchemaFragment`. A consumer crate
 //! only needs ONE dependency — this crate — for those paths to resolve.
 //!
 //! Domain (per [[feedback-no-re-export-layers]] carve-out): path

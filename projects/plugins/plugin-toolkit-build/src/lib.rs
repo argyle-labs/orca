@@ -1,6 +1,6 @@
 //! `orca-plugin-toolkit-build` — build-script helpers for plugin codegen.
 //!
-//! Pairs with the runtime `orca_plugin_toolkit` crate, but lives separately
+//! Pairs with the runtime `plugin_toolkit` crate, but lives separately
 //! so plugin lib compiles don't pull in progenitor / graphql_client_codegen.
 //!
 //! Used from a plugin `build.rs`:
@@ -8,12 +8,12 @@
 //! ```rust,ignore
 //! // build.rs (OpenAPI):
 //! fn main() {
-//!     orca_plugin_toolkit_build::openapi::generate_all("specs", "arr").unwrap();
+//!     plugin_toolkit_build::openapi::generate_all("specs", "arr").unwrap();
 //! }
 //!
 //! // build.rs (GraphQL):
 //! fn main() {
-//!     orca_plugin_toolkit_build::graphql::generate(
+//!     plugin_toolkit_build::graphql::generate(
 //!         "../unraid/schemas",
 //!         "queries",
 //!     ).unwrap();

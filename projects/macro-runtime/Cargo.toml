@@ -1,10 +1,10 @@
 [package]
-name = "orca-macro-runtime"
+name = "macro-runtime"
 version.workspace = true
 edition.workspace = true
 
 [lib]
-name = "orca_macro_runtime"
+name = "macro_runtime"
 path = "src/lib.rs"
 
 # Domain: macro-emission target paths for derive macros (`#[orca_tool]`,

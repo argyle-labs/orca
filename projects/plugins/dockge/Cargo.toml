@@ -8,7 +8,7 @@ name = "dockge"
 path = "src/lib.rs"
 
 [dependencies]
-orca-macro-runtime = { path = "../../orca-macro-runtime" }
+macro-runtime = { path = "../../macro-runtime" }
 db-types = { path = "../../db-types" }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
@@ -17,7 +17,7 @@ urlencoding = { workspace = true }
 utils  = { path = "../../utils" }
 
 # Toolkit prelude + endpoint_resource! macro.
-orca-plugin-toolkit = { path = "../orca-plugin-toolkit" }
+plugin-toolkit = { path = "../plugin-toolkit" }
 
 # Used directly by stack-op tools' #[orca_tool] expansions.
 dispatch    = { path = "../../dispatch" }
