@@ -208,7 +208,7 @@ pub fn register_endpoint(row: &tools::EndpointRow) {
         cfg = cfg.with_token(t.clone());
     }
     let backend = NtfyBackend::new(row.name.clone(), Client::new(cfg));
-    notifications::register_backend(Arc::new(backend));
+    plugin_toolkit::notifications::register_backend(Arc::new(backend));
 }
 
 /// Daemon startup hook — load every enabled ntfy endpoint and register it as

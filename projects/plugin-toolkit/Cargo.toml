@@ -29,6 +29,7 @@ db          = { package = "db", path = "../db" }
 derive      = { path = "../derive" }
 dispatch    = { path = "../dispatch" }
 macro-runtime = { path = "../macro-runtime" }
+notifications = { path = "../notifications" }
 
 # Runtime primitives — plugins reach these through the toolkit, never directly.
 utils       = { path = "../utils" }

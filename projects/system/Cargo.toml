@@ -14,7 +14,6 @@ ui = []
 
 [dependencies]
 plugin-toolkit = { path = "../plugin-toolkit" }
-notifications  = { path = "../notifications" }
 macro-runtime = { path = "../macro-runtime" }
 dispatch   = { path = "../dispatch" }
 contract  = { path = "../contract", default-features = false }

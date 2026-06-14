@@ -92,3 +92,17 @@ pub mod graphql {
 pub mod openapi {
     pub use ::openapi::*;
 }
+
+// ── Domain registration crates ──────────────────────────────────────────
+//
+// Per [[feedback-plugin-toolkit-only-no-exceptions]]: every orca capability,
+// including the domain contracts plugins register with, reaches plugins ONLY
+// through this gateway. Third-party plugin authors write
+// `use plugin_toolkit::prelude::*;` + `use plugin_toolkit::<domain>::*;`
+// and never direct-dep on a domain crate. Cycles are broken by relocating
+// `#[orca_tool]` sites OUT of the domain crate into a sibling/system crate
+// (see `system::notify_send` for the pattern). Domain crates here are
+// pure plumbing: model + trait + dispatcher.
+pub mod notifications {
+    pub use ::notifications::*;
+}

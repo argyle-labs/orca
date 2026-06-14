@@ -7,17 +7,15 @@ edition.workspace = true
 name = "ntfy"
 path = "src/lib.rs"
 
-# Plugin reaches orca infra through `plugin_toolkit::prelude::*` (db,
-# http, derives, runtime). Integration deps are explicit: per the
-# domain-adapter model, depending directly on the domain crate you
-# register with is the contract — not a leak past the toolkit.
+# Per [[feedback-plugin-toolkit-only-no-exceptions]]: ALL orca capabilities
+# — infra AND domain contracts — reach this plugin through `plugin-toolkit`
+# alone. No direct deps on `notifications`/`containers`/`db`/etc.; the
+# notifications domain is reachable as `plugin_toolkit::notifications`.
 # Allowed deps:
-#   1. plugin-toolkit (the gateway: infra + transport + derives)
-#   2. the DOMAIN crates this plugin registers with (notifications)
-#   3. niche transport bits not common enough to live in the toolkit
+#   1. plugin-toolkit (the only gateway)
+#   2. niche third-party transport bits not common enough to live in the toolkit
 [dependencies]
 plugin-toolkit = { path = "../../plugin-toolkit" }
-notifications  = { path = "../../notifications" }
 urlencoding    = { workspace = true }
 
 [dev-dependencies]

@@ -3,7 +3,7 @@
 //! `notifications` without a cycle. See db→system for the
 //! same shape.
 
-use notifications::{Event, EventClass, Severity, emit, registered_backend_names};
+use plugin_toolkit::notifications::{Event, EventClass, Severity, emit, registered_backend_names};
 use plugin_toolkit::prelude::*;
 
 #[plugin_struct(args)]
