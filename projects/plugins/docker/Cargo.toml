@@ -8,6 +8,7 @@ name = "docker"
 path = "src/lib.rs"
 
 [dependencies]
+orca-macro-runtime = { path = "../../orca-macro-runtime" }
 anyhow      = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }

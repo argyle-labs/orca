@@ -8,6 +8,7 @@ name = "db"
 path = "src/lib.rs"
 
 [dependencies]
+orca-macro-runtime = { path = "../orca-macro-runtime" }
 utils       = { path = "../utils" }
 dispatch    = { path = "../dispatch" }
 contract    = { path = "../contract" }

@@ -43,11 +43,14 @@ pub mod pod;
 pub mod replicate;
 pub mod replicate_engine;
 pub mod schema_fragments;
-pub use schema_fragments::SchemaFragment;
 
-// Self-alias so proc-macro emissions of `::db::replicate::ReplicatedRegistration`
-// also resolve when the derive is used *inside* this crate (e.g. `users.rs`).
+// Self-alias so in-crate code and tests can name `db::…` paths just like
+// downstream callers do (`db::open_unencrypted`, `db::pod::…`, etc.).
+// Originally added for proc-macro emissions; the macros now target
+// `::db_types::…` directly, but the alias still earns its keep as a
+// uniform-path convenience inside the crate.
 extern crate self as db;
+
 pub mod ports;
 pub mod profile_creds;
 pub mod profiles;

@@ -8,6 +8,7 @@ name = "conversation"
 path = "src/lib.rs"
 
 [dependencies]
+orca-macro-runtime = { path = "../orca-macro-runtime" }
 contract = { path = "../contract" }
 derive    = { path = "../derive" }
 dispatch = { path = "../dispatch" }

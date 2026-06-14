@@ -8,6 +8,7 @@ name = "notifications"
 path = "src/lib.rs"
 
 [dependencies]
+orca-macro-runtime = { path = "../orca-macro-runtime" }
 async-trait = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }

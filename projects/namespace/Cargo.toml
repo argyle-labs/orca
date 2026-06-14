@@ -13,6 +13,7 @@ path = "src/lib.rs"
 # (no service trait, per feedback_no_indirection).
 
 [dependencies]
+orca-macro-runtime = { path = "../orca-macro-runtime" }
 dispatch = { path = "../dispatch" }
 contract = { path = "../contract", default-features = false }
 derive    = { path = "../derive" }

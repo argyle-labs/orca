@@ -8,6 +8,7 @@ name = "mcp"
 path = "src/lib.rs"
 
 [dependencies]
+orca-macro-runtime = { path = "../../orca-macro-runtime" }
 dispatch    = { path = "../../dispatch" }
 contract   = { path = "../../contract", default-features = false }
 derive      = { path = "../../derive" }

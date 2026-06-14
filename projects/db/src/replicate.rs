@@ -32,24 +32,10 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use anyhow::Result;
+use db_types::ReplicatedRegistration;
 use rusqlite::Connection;
 use serde_json::Value;
 use tokio::sync::broadcast;
-
-/// One entry per `#[derive(Replicated)]` type. `export`/`merge` are generated
-/// to operate on the type's backing table; the engine never needs to know the
-/// concrete row type.
-pub struct ReplicatedRegistration {
-    /// Entity name — the backing table, used as the bundle key + log label.
-    pub name: &'static str,
-    /// Serialize every local row of the entity to a JSON array.
-    pub export: fn(&Connection) -> Result<Value>,
-    /// Merge a JSON array of rows last-write-wins. Returns the number of local
-    /// rows created or updated.
-    pub merge: fn(&Connection, Value) -> Result<usize>,
-}
-
-inventory::collect!(ReplicatedRegistration);
 
 /// Every registered entity, in stable name order.
 pub fn registrations() -> Vec<&'static ReplicatedRegistration> {

@@ -12,6 +12,7 @@ path = "src/lib.rs"
 # children of the namespace crate.
 
 [dependencies]
+orca-macro-runtime = { path = "../orca-macro-runtime" }
 contract = { path = "../contract", default-features = false }
 derive   = { path = "../derive" }
 db       = { path = "../db" }
