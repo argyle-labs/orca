@@ -12,6 +12,7 @@ utils       = { path = "../utils" }
 dispatch    = { path = "../dispatch" }
 contract    = { path = "../contract" }
 derive       = { path = "../derive" }
+db-types    = { path = "../db-types" }
 
 anyhow      = { workspace = true }
 tracing     = { workspace = true }

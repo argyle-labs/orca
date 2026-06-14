@@ -123,6 +123,7 @@ uniffi = { version = "0.29", features = ["tokio"] }
 members = [
     "projects/app-kit",
     "projects/db",
+    "projects/db-types",
     "projects/sdk/rust",
     "projects/server",
     "projects/contract",

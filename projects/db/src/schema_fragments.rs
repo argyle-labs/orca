@@ -8,18 +8,8 @@
 //! [[feedback-plugin-toolkit-max-power-min-boilerplate]].
 
 use anyhow::Result;
+use db_types::SchemaFragment;
 use rusqlite::Connection;
-
-/// A standalone `CREATE TABLE IF NOT EXISTS …` (and optional indices) for
-/// one resource table. Registered into inventory by the macro that owns
-/// the resource; applied by [`apply_fragments`] after the hand-coded
-/// schema runs.
-pub struct SchemaFragment {
-    pub name: &'static str,
-    pub sql: &'static str,
-}
-
-inventory::collect!(SchemaFragment);
 
 /// Apply every registered fragment. Idempotent — each fragment uses
 /// `IF NOT EXISTS`. Errors surface with the fragment name so a typo in
