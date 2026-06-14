@@ -24,3 +24,30 @@ coverage/
 .gradle/
 !gradle/wrapper/gradle-wrapper.jar
 dist-release/
+dist-*/
+
+# Generic build output
+out/
+bin/
+
+# Xcode / iOS / macOS
+Build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+Pods/
+
+# CMake / CLion
+cmake-build-*/
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# SwiftPM
+.swiftpm/
+
+# UniFFI / bindgen output
+bindings/
+*.uniffi.cache
