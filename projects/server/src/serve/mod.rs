@@ -677,9 +677,10 @@ async fn dev_source_auto_poll(src: String) {
 /// PKI dir unwritable) — pod features are simply unavailable for this run.
 async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
     // Detect mesh certs issued under the old `peer.<hostname>` CN
-    // convention and reset them. Mixing CN conventions on the same host
-    // produces duplicate pod_peers rows (one keyed on the old CN via the
-    // listener stub, one on the new machine_id_short CN via join-confirm).
+    // convention and reset them. The current convention is bare
+    // `<machine_id_short>`; mixing produces duplicate pod_peers rows (one
+    // keyed on the old CN via the listener stub, one on the new
+    // machine_id_short CN via join-confirm).
     if let Err(e) = pod::reset_if_stale_mesh_identity(pki_dir) {
         tracing::warn!("[pod] stale-cert check failed: {e:#}");
     }
@@ -721,6 +722,20 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
 
     std::mem::drop(pod::scheduler::spawn());
     info!("[pod] auto-offer scheduler armed");
+
+    // Mesh TCP+mTLS accept loop on `db::ports::mesh_port()` (default 12002).
+    // Gated on the mesh server cert: non-pod-members have nothing to serve
+    // and can't build a TLS acceptor anyway. Without this spawn the pod
+    // scheduler dials a closed port every tick.
+    if utils::pki::mesh_server_cert_path(pki_dir).exists() {
+        match pod::mesh_listener::spawn(pki_dir).await {
+            Ok(handle) => {
+                info!("[pod] mesh listener up on :{}", db::ports::mesh_port());
+                std::mem::drop(handle);
+            }
+            Err(e) => tracing::warn!("[pod] mesh listener spawn failed: {e:#}"),
+        }
+    }
 
     std::mem::drop(pod::cert_rotation::spawn());
     info!("[pod] cert-rotation scheduler armed (daily)");

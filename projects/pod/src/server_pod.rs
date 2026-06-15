@@ -22,6 +22,22 @@ pub async fn list_enriched() -> Result<Vec<PodPeerDto>> {
     list_enriched_impl().await
 }
 
+/// Refuse to install a mesh leaf cert whose Subject CN carries the legacy
+/// `peer.<id>` prefix retired in rc.16. A lagging inviter that hasn't been
+/// upgraded would otherwise re-introduce the duplicate-pod_peers flip — fail
+/// loud per feedback_no_id_prefixes so the operator notices and upgrades the
+/// inviting peer rather than silently re-pairing through a stale CN.
+fn reject_legacy_peer_cn(cert_pem: &str, role: &str) -> Result<()> {
+    let summary = utils::pki::cert_summary(cert_pem)
+        .with_context(|| format!("parse received {role} cert"))?;
+    anyhow::ensure!(
+        !summary.cn.starts_with("peer."),
+        "stale peer issued legacy `peer.<id>` {role} CN ({}); refusing to install — upgrade the inviting peer to rc.16+ and retry",
+        summary.cn
+    );
+    Ok(())
+}
+
 pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
     let conn = db::open_default()?;
     let offer = pdb::find_pending_offer_by_code(&conn, code)?
@@ -80,6 +96,14 @@ pub async fn accept(code: &str) -> Result<PodAcceptOutput> {
         pod_id: String,
     }
     let r: Resp = serde_json::from_value(resp_value)?;
+
+    // Defensive: a lagging peer (pre-rc.16) may still sign certs with the
+    // old `peer.<id>` CN convention. Installing one re-introduces the
+    // duplicate-pod_peers flip that rc.16 fixed. Fail loud per
+    // feedback_no_id_prefixes — operator re-pairs against a current peer
+    // rather than silently swallowing a legacy CN.
+    reject_legacy_peer_cn(&r.server_cert_pem, "server")?;
+    reject_legacy_peer_cn(&r.client_cert_pem, "client")?;
 
     let server_dir = utils::pki::mesh_dir(&pki_d).join("server");
     let client_dir = utils::pki::mesh_dir(&pki_d).join("client");

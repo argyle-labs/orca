@@ -836,6 +836,7 @@ pub mod dispatcher;
 pub mod host_status_replica;
 mod listener;
 pub mod mdns;
+pub mod mesh_listener;
 pub mod roster_sync;
 pub mod runtime_cache;
 pub mod scheduler;
@@ -945,9 +946,9 @@ pub fn pki_dir() -> PathBuf {
 }
 
 /// Detect a mesh client cert whose CN doesn't match the current naming
-/// convention (`peer.<machine_id_short>`). Stale certs come from hosts
-/// joined under the old `peer.<hostname>` convention; mixing the two
-/// produces duplicate `pod_peers` rows because the TLS-extracted CN keys
+/// convention (`<machine_id_short>`). Stale certs come from hosts joined
+/// under the old `peer.<hostname>` convention; mixing the two produces
+/// duplicate `pod_peers` rows because the TLS-extracted CN keys
 /// `ensure_peer_stub` differ from the CNs minted by `pod/join-confirm`.
 ///
 /// When a stale CN is detected we delete the mesh client/server cert+key

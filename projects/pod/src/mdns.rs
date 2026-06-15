@@ -3,7 +3,7 @@
 //! Service type: `_orca._tcp.local.`
 //!
 //! TXT properties advertised by every orca:
-//!   peer_id       — our pod CN (`peer.<machine_id_short>`) or `unclaimed.<machine_id_short>` pre-pod
+//!   peer_id       — our pod CN (`<machine_id_short>`) or `unclaimed.<machine_id_short>` pre-pod
 //!                   (machine_id is the stable opaque per-host UUID — NOT the OS hostname,
 //!                   which is mutable on macOS mDNS conflicts and DHCP renames)
 //!   state         — `unclaimed` | `pod:<pod_id>`
