@@ -13,17 +13,26 @@ use contract::TopologyClaim;
 mod proxmox;
 
 /// Collect topology claims from every provider this host can reach locally.
-/// Each collector failure is logged and skipped — one broken provider must
-/// not blank out the whole snapshot.
+/// Each provider is gated on the per-host capability registry — absent
+/// providers are skipped silently so a host without docker doesn't log a
+/// warning every tick. Operator can re-enable via `system.capability.recheck`
+/// after installing the missing runtime.
+///
+/// A broken Available provider still logs (one broken collector must not
+/// blank out the whole snapshot).
 pub async fn collect_claims() -> Vec<TopologyClaim> {
     let mut out = Vec::new();
-    match docker::topology::collect_claims().await {
-        Ok(mut v) => out.append(&mut v),
-        Err(e) => tracing::warn!(error = %e, "topology: docker collector failed"),
+    if crate::capability::is_available("docker") {
+        match docker::topology::collect_claims().await {
+            Ok(mut v) => out.append(&mut v),
+            Err(e) => tracing::warn!(error = %e, "topology: docker collector failed"),
+        }
     }
-    match proxmox::collect_all().await {
-        Ok(mut v) => out.append(&mut v),
-        Err(e) => tracing::warn!(error = %e, "topology: proxmox collector failed"),
+    if crate::capability::is_available("proxmox") {
+        match proxmox::collect_all().await {
+            Ok(mut v) => out.append(&mut v),
+            Err(e) => tracing::warn!(error = %e, "topology: proxmox collector failed"),
+        }
     }
     out
 }

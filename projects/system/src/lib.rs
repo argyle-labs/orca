@@ -12,6 +12,8 @@
 //!
 //! Modules will be filled in by subsequent slices.
 
+pub mod capability;
+pub mod capability_tools;
 pub mod host;
 pub mod host_identity;
 pub mod system_info_types;

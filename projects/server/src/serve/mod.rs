@@ -635,6 +635,13 @@ async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
     if let Err(e) = auth::loopback_token::install_at_startup() {
         tracing::warn!("loopback token install failed: {e:#}");
     }
+    // One-shot capability probe. Populates `host_capabilities` so
+    // topology collectors + provider tool surfaces can gate on
+    // `is_available` and stop logging warn-every-tick for absent
+    // runtimes. Operator-driven recheck via `system.capability.*`.
+    if let Err(e) = system::capability::probe_all_capabilities().await {
+        tracing::warn!("capability probe pass failed: {e:#}");
+    }
     system::system_info::spawn_refresher();
     pod::host_status_writer::spawn_local_writer();
     pod::host_status_writer::spawn_sync_puller();

@@ -20,6 +20,7 @@ pub mod feature_flags;
 // `plugin_toolkit::endpoint_resource!` — that macro emits the row
 // struct, the CRUD module, and a SchemaFragment registration.
 pub mod host_addressing;
+pub mod host_capabilities;
 pub mod host_status;
 pub mod llm;
 pub mod mcp_servers;
