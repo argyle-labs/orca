@@ -17,11 +17,11 @@
 //! seeded DB instead of a live LAN.
 
 use anyhow::{Context, Result};
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use mdns_sd::{DaemonEvent, ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 const SERVICE_TYPE: &str = "_orca._tcp.local.";
 
@@ -103,6 +103,13 @@ impl Mdns {
     /// browser task that upserts pod_discovery rows for every peer seen.
     pub fn start(ad: Advertisement) -> Result<Self> {
         let daemon = ServiceDaemon::new().context("create mDNS daemon")?;
+        // Accept gratuitous announces from peer register() calls. Without
+        // this, the browser silently drops every response that didn't match
+        // a query WE sent — which on a quiet LAN means we only ever see our
+        // own loopback announce. See mdns-sd ServiceDaemon::accept_unsolicited.
+        if let Err(e) = daemon.accept_unsolicited(true) {
+            warn!("[mdns] accept_unsolicited(true) failed: {e}");
+        }
         let info = ad.into_service_info()?;
         let instance_fullname = info.get_fullname().to_string();
         daemon.register(info).context("register mDNS service")?;
@@ -121,6 +128,24 @@ impl Mdns {
                 }
             }
         });
+
+        if let Ok(monitor_rx) = daemon.monitor() {
+            tokio::spawn(async move {
+                while let Ok(ev) = monitor_rx.recv_async().await {
+                    match ev {
+                        DaemonEvent::IpAdd(ip) => info!("[mdns] iface IP added: {ip}"),
+                        DaemonEvent::IpDel(ip) => info!("[mdns] iface IP removed: {ip}"),
+                        DaemonEvent::Error(e) => warn!("[mdns] daemon error: {e}"),
+                        DaemonEvent::Announce(name, addr) => {
+                            debug!("[mdns] announced {name} via {addr}")
+                        }
+                        DaemonEvent::NameChange(c) => info!("[mdns] name change: {c:?}"),
+                        DaemonEvent::Respond(addr) => debug!("[mdns] respond via {addr}"),
+                        _ => {}
+                    }
+                }
+            });
+        }
 
         Ok(Self {
             daemon,
@@ -154,8 +179,25 @@ impl Mdns {
 }
 
 fn handle_event(event: ServiceEvent, our_instance: &str) {
-    let ServiceEvent::ServiceResolved(info) = event else {
-        return; // SearchStarted, ServiceFound (unresolved), ServiceRemoved — ignored
+    let info = match event {
+        ServiceEvent::ServiceResolved(info) => info,
+        ServiceEvent::SearchStarted(ty) => {
+            info!("[mdns] search started for {ty}");
+            return;
+        }
+        ServiceEvent::ServiceFound(_, fullname) => {
+            debug!("[mdns] found (unresolved) {fullname}");
+            return;
+        }
+        ServiceEvent::ServiceRemoved(_, fullname) => {
+            info!("[mdns] peer removed: {fullname}");
+            return;
+        }
+        ServiceEvent::SearchStopped(ty) => {
+            warn!("[mdns] search stopped for {ty}");
+            return;
+        }
+        _ => return,
     };
     if info.get_fullname() == our_instance {
         return; // don't self-discover
@@ -211,9 +253,7 @@ fn handle_event(event: ServiceEvent, our_instance: &str) {
     ) {
         warn!("[mdns] upsert_discovery failed for {hostname}: {e}");
     } else {
-        debug!(
-            "[mdns] discovered {hostname} ({addr}:{port}) state={state} can_invite={can_invite}"
-        );
+        info!("[mdns] discovered {hostname} ({addr}:{port}) state={state} can_invite={can_invite}");
     }
 }
 
