@@ -726,13 +726,32 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
         if let Some(latest) = status_by_peer.get(&p.peer_id) {
             enrich_from_local_db(&mut p, latest);
         }
+        // Each field is overridden only when the cache holds a real value —
+        // a `None` from a partially-populated cache row must not wipe a
+        // version that came in via `enrich_from_local_db` (host_status mirror).
+        // Symptom this guards against: chips "appear then disappear after
+        // mount" when mesh fetch fails and the cache entry rotates through
+        // an empty state. Matches the guard pattern used for the
+        // `peer_update_state` override a few lines down.
         if let Some(rt) = crate::runtime_cache::get(&p.peer_id) {
-            p.version = rt.version;
-            p.target = rt.target;
-            p.frontend = rt.frontend;
-            p.mode = rt.mode;
-            p.channel = rt.channel;
-            p.pinned_to = rt.pinned_to;
+            if rt.version.is_some() {
+                p.version = rt.version;
+            }
+            if rt.target.is_some() {
+                p.target = rt.target;
+            }
+            if rt.frontend.is_some() {
+                p.frontend = rt.frontend;
+            }
+            if rt.mode.is_some() {
+                p.mode = rt.mode;
+            }
+            if rt.channel.is_some() {
+                p.channel = rt.channel;
+            }
+            if rt.pinned_to.is_some() {
+                p.pinned_to = rt.pinned_to;
+            }
         }
         // Persisted `system.update {}` probe results override the in-memory
         // runtime_cache for the version/channel/pin fields when both are
