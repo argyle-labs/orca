@@ -72,10 +72,7 @@
       target: ld?.target ?? null,
       mode: ld?.mode ?? null,
       channel: localProbe?.channel ?? ld?.channel ?? null,
-      updateAvailable:
-        !!localProbe?.current_version &&
-        !!localProbe?.latest &&
-        localProbe.latest.replace(/^v/, '') !== localProbe.current_version,
+      updateAvailable: localProbe?.update_available === true,
       updateLatest: localProbe?.latest ?? null,
       updateCheckedSecs: null,
       pinnedTo: localProbe?.pinned_to ?? ld?.pinned_to ?? null,
@@ -102,7 +99,8 @@
         mode: p.mode ?? null,
         channel: probe?.channel ?? p.channel ?? null,
         updateAvailable:
-          !!version && !!latest && latest.replace(/^v/, '') !== version,
+          probe?.update_available === true ||
+          (probe?.update_available == null && p.update_available === true),
         updateLatest: latest,
         updateCheckedSecs: p.update_checked_secs ?? null,
         pinnedTo: probe?.pinned_to ?? p.pinned_to ?? null,
@@ -813,6 +811,10 @@
     os_package_result: string | null;
     notes: string[];
     errors: string[];
+    // Server-computed (system::update_state::is_update_available) so list-
+    // view (pod.list) and detail-view (system.update) always agree on the
+    // same peer. Older peers may omit it — treat undefined as false.
+    update_available?: boolean | null;
   };
 
   let detailRefreshing = $state(false);
@@ -875,8 +877,7 @@
         drawerChannelSelect = inferChannel(r.current_version, r.channel);
         if (r.latest) {
           selectedInst.updateLatest = r.latest;
-          selectedInst.updateAvailable =
-            !!r.current_version && r.latest.replace(/^v/, '') !== r.current_version;
+          selectedInst.updateAvailable = r.update_available === true;
         }
         instances = [...instances];
       }
@@ -911,8 +912,7 @@
         drawerChannelSelect = inferChannel(r.current_version, r.channel);
         if (r.latest) {
           selectedInst.updateLatest = r.latest;
-          selectedInst.updateAvailable =
-            !!r.current_version && r.latest.replace(/^v/, '') !== r.current_version;
+          selectedInst.updateAvailable = r.update_available === true;
         }
         instances = [...instances];
       }
@@ -1019,8 +1019,7 @@
           target.pinnedTo = r.pinned_to ?? null;
           if (r.latest) {
             target.updateLatest = r.latest;
-            target.updateAvailable =
-              !!r.current_version && r.latest.replace(/^v/, '') !== r.current_version;
+            target.updateAvailable = r.update_available === true;
           } else {
             target.updateAvailable = false;
           }

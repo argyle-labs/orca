@@ -419,6 +419,42 @@ mod tests {
     }
 
     #[test]
+    fn is_update_available_equal_versions() {
+        assert!(!is_update_available("0.0.14", "0.0.14"));
+        assert!(!is_update_available("0.0.14", "v0.0.14"));
+    }
+
+    #[test]
+    fn is_update_available_dirty_current_matches_clean_latest() {
+        // build.rs format: <pkg>-dev+g<sha>[.dirty] — same release as v0.0.14
+        assert!(!is_update_available("0.0.14-dev+g9409864.dirty", "v0.0.14"));
+        assert!(!is_update_available("0.0.14-dev+g9409864", "0.0.14"));
+    }
+
+    #[test]
+    fn is_update_available_latest_higher() {
+        assert!(is_update_available("0.0.13", "v0.0.14"));
+        assert!(is_update_available("0.0.13-dev+gabcdef1.dirty", "v0.0.14"));
+    }
+
+    #[test]
+    fn is_update_available_latest_lower() {
+        assert!(!is_update_available("0.0.14", "v0.0.13"));
+    }
+
+    #[test]
+    fn is_update_available_rc_progression() {
+        assert!(is_update_available("0.0.1-rc.13", "v0.0.1-rc.14"));
+        assert!(!is_update_available("0.0.1-rc.14", "v0.0.1-rc.13"));
+    }
+
+    #[test]
+    fn is_update_available_empty_inputs() {
+        assert!(!is_update_available("", "v0.0.14"));
+        assert!(!is_update_available("0.0.14", ""));
+    }
+
+    #[test]
     fn is_newer_full_v_prefix_stripped() {
         assert!(is_newer_full("v0.0.4-rc.3", "v0.0.4-rc.1"));
         assert!(!is_newer_full("v0.0.4-rc.1", "v0.0.4-rc.1"));

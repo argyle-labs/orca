@@ -86,7 +86,21 @@ kill-dev:
 # Install logic (symlink strip, idempotent copy, codesign) lives in
 # scripts/release-lib.sh::install_orca_binary so Make and CI runners agree.
 deploy:
-	@$(MAKE) build
+	@# Pin ORCA_RELEASE_VERSION before invoking build so build.rs bypasses
+	@# the dirty/dev fallback (build.rs:32-65). Clean exact-tag deploys get
+	@# the tag string; anything else (extra commits, modified tree) gets
+	@# `git describe --tags --dirty --always` so the binary still reports a
+	@# real identifier instead of a bare CARGO_PKG_VERSION. Either way the
+	@# env var is set, so list/detail/ping versions are stable across the
+	@# deployed binary lifetime.
+	@set -e; \
+	if git diff-index --quiet HEAD -- 2>/dev/null && tag=$$(git describe --tags --exact-match HEAD 2>/dev/null); then \
+	  ver=$${tag#v}; \
+	else \
+	  ver=$$(git describe --tags --dirty --always); \
+	fi; \
+	echo "→ ORCA_RELEASE_VERSION=$$ver"; \
+	ORCA_RELEASE_VERSION=$$ver $(MAKE) build
 	@$(MAKE) kill-dev
 	bash scripts/install-binary.sh target/$(HOST_TARGET)/release/orca $(INSTALL_PATH)
 	$(INSTALL_PATH) system install

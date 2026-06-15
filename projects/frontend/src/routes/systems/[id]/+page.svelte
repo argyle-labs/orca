@@ -32,6 +32,7 @@
     latest: string | null;
     notes?: string[];
     errors?: string[];
+    update_available?: boolean | null;
   };
 
   let id = $derived($page.params.id);
@@ -49,10 +50,7 @@
       next.channel = probe.channel ?? next.channel;
       next.pinned_to = probe.pinned_to ?? next.pinned_to;
       next.update_latest = probe.latest ?? next.update_latest;
-      next.update_available =
-        !!next.version &&
-        !!probe.latest &&
-        probe.latest.replace(/^v/, '') !== next.version;
+      next.update_available = probe.update_available === true;
     }
     return next;
   });
@@ -104,10 +102,7 @@
       next.channel = data.probe.channel ?? next.channel;
       next.pinned_to = data.probe.pinned_to ?? next.pinned_to;
       next.update_latest = data.probe.latest ?? next.update_latest;
-      next.update_available =
-        !!next.version &&
-        !!data.probe.latest &&
-        data.probe.latest.replace(/^v/, '') !== next.version;
+      next.update_available = data.probe.update_available === true;
     }
     peer = next;
     error = null;
@@ -149,7 +144,7 @@
         peer.channel = r.channel;
         peer.pinned_to = r.pinned_to;
         peer.update_latest = r.latest;
-        peer.update_available = !!r.current_version && !!r.latest && r.latest.replace(/^v/, '') !== r.current_version;
+        peer.update_available = r.update_available === true;
       }
     } catch (e) {
       console.warn('probe failed', e);
@@ -176,7 +171,7 @@
         peer.channel = r.channel;
         peer.pinned_to = r.pinned_to;
         peer.update_latest = r.latest;
-        peer.update_available = !!r.current_version && !!r.latest && r.latest.replace(/^v/, '') !== r.current_version;
+        peer.update_available = r.update_available === true;
         if (r.current_version) versionSelect = `v${r.current_version}`;
         channelSelect = inferChannel(r.current_version, r.channel);
       }
