@@ -734,7 +734,14 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
         // sometimes carries `system.detail` stale across daemon restarts.
         // Always set update_available/update_latest/update_checked_secs from
         // the probe; runtime_cache doesn't track those.
-        if let Some(u) = update_by_peer.get(&p.peer_id) {
+        // SKIP local peer: the periodic probe in `update_state_probe` explicitly
+        // filters `peer_id != own` (it's a remote-only probe), so the row for
+        // self is whatever was last persisted — potentially years old after a
+        // version bump. The freshly-loaded build_local_peer_dto values are the
+        // truth for self; only let probe overrides win for remote peers.
+        if !p.local
+            && let Some(u) = update_by_peer.get(&p.peer_id)
+        {
             if u.version.is_some() {
                 p.version.clone_from(&u.version);
             }
