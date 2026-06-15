@@ -231,6 +231,12 @@ pub async fn exec_local_daemon<T: contract::OrcaToolDef>(
     #[allow(clippy::disallowed_types)]
     let body = serde_json::to_value(&args).map_err(|e| anyhow::anyhow!("serialize args: {e}"))?;
     let url = format!("{}/api/v1/{}", local_daemon_url(), T::NAME);
+    // reqwest's `rustls-no-provider` feature requires a process-global ring
+    // crypto provider before any client is built (including for plain
+    // HTTP — TLS support is detected at construct time). Idempotent.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
     let mut req = reqwest::Client::new().post(&url).json(&body);
     if let Some(sid) = read_session_id() {
         // Daemon middleware accepts either cookie or bearer for the same
