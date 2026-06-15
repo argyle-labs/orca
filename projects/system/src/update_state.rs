@@ -230,6 +230,31 @@ pub fn is_newer_full(a: &str, b: &str) -> bool {
     (ak, an) > (bk, bn)
 }
 
+/// "Is `latest` strictly newer than `current` for update-available purposes?"
+///
+/// Wraps [`is_newer_full`] with one extra step: a dev-build suffix on
+/// `current` (see `build.rs::resolve_version` — `-dev+g<sha>` plus optional
+/// trailing `.dirty`) is stripped so a dirty/uncommitted build of `rc.14`
+/// is not reported as "older than" the released `rc.14`. Without this,
+/// list-view (`pod.list` row) and detail-view (`system.update`) drift —
+/// one would show no update and the other would falsely show an update on
+/// the same peer.
+pub fn is_update_available(current: &str, latest: &str) -> bool {
+    fn strip_dev(v: &str) -> &str {
+        let v = v.strip_suffix(".dirty").unwrap_or(v);
+        match v.find("-dev+g") {
+            Some(idx) => &v[..idx],
+            None => v,
+        }
+    }
+    let cur = strip_dev(current.trim().trim_start_matches('v'));
+    let lat = latest.trim().trim_start_matches('v');
+    if cur.is_empty() || lat.is_empty() {
+        return false;
+    }
+    is_newer_full(lat, cur)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

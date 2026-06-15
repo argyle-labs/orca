@@ -45,6 +45,7 @@ cron         = { workspace = true }
 colored      = { workspace = true }
 axum         = { workspace = true, optional = true }
 regex        = { workspace = true }
+semver       = "1"
 docker = { path = "../plugins/docker", default-features = false }
 proxmox = { path = "../plugins/proxmox", default-features = false }
 

@@ -26,7 +26,7 @@ use contract::RemoteExec;
 use derive::orca_tool;
 use std::sync::Arc;
 
-const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const CURRENT_VERSION: &str = env!("ORCA_VERSION");
 
 // ── shared args ─────────────────────────────────────────────────────────────
 
@@ -317,6 +317,12 @@ pub struct SystemUpdateOutput {
     /// never restarted us" — the latter previously returned identical
     /// success.
     pub pending_restart: Option<PendingRestart>,
+    /// True when `latest` is strictly newer than `current_version` under
+    /// semver, ignoring dev-build suffixes (`-dev+g<sha>` and trailing
+    /// `.dirty`). Computed server-side so REST/MCP/CLI callers and the
+    /// web UI all agree without re-implementing the comparator. `None`
+    /// when either side is missing or unparseable.
+    pub update_available: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Default, Clone)]
@@ -613,6 +619,9 @@ async fn system_update(
         }
     };
     let latest = available_versions.first().map(|v| v.tag.clone());
+    let update_available = latest
+        .as_deref()
+        .map(|l| crate::update_state::is_update_available(CURRENT_VERSION, l));
 
     let pending_restart = crate::update::read_pending_restart()
         .map(|(target, age_secs)| PendingRestart { target, age_secs });
@@ -632,6 +641,7 @@ async fn system_update(
         notes,
         errors,
         pending_restart,
+        update_available,
     })
 }
 

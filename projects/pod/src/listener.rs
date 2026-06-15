@@ -139,7 +139,9 @@ async fn dispatch(request: Request, peer_cn: &str, peer_addr: std::net::SocketAd
         POD_PING_METHOD => {
             let result = PodPingResult {
                 peer_id: peer_cn.to_string(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
+                version: option_env!("ORCA_VERSION")
+                    .unwrap_or(env!("CARGO_PKG_VERSION"))
+                    .to_string(),
                 hostname: system::host_identity::hostname().to_string(),
                 addressing: build_addressing_snapshot(),
             };

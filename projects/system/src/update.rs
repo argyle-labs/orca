@@ -34,7 +34,7 @@ pub fn resolve_github_token() -> String {
     std::env::var("GITHUB_TOKEN").unwrap_or_default()
 }
 
-const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const CURRENT_VERSION: &str = env!("ORCA_VERSION");
 const BUILD_TARGET: &str = env!("ORCA_BUILD_TARGET");
 
 /// Rust target triple this binary was compiled for. Exposed for the

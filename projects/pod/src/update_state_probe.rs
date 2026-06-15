@@ -92,10 +92,15 @@ async fn probe_one_inner(peer_id: &str, addr: &str) -> Result<()> {
     let version = (!out.current_version.is_empty()).then_some(out.current_version.clone());
     let channel = (!out.channel.is_empty()).then_some(out.channel.clone());
     let latest = out.latest.clone();
-    let update_available = match (&version, &latest) {
-        (Some(v), Some(l)) => l.trim_start_matches('v') != v,
-        _ => false,
-    };
+    // Prefer the peer's own server-side computed flag so list-view and
+    // detail-view never disagree on the same peer. Fall back to recomputing
+    // here for older peers whose SystemUpdateOutput predates the field.
+    let update_available = out
+        .update_available
+        .unwrap_or_else(|| match (&version, &latest) {
+            (Some(v), Some(l)) => system::update_state::is_update_available(v, l),
+            _ => false,
+        });
 
     let now = chrono::Utc::now().timestamp();
     let row = db::peer_update_state::PeerUpdateState {
