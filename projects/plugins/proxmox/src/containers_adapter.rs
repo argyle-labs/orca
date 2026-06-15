@@ -26,12 +26,25 @@
 
 use async_trait::async_trait;
 use plugin_toolkit::containers::{
-    AdapterError, Container, ContainerState, ListFilter, LogTail, RestartPolicy, RuntimeAdapter,
-    RuntimeKind,
+    AdapterError, Container, ContainerState, ListFilter, Liveness, LogTail, RestartPolicy,
+    RuntimeAdapter, RuntimeKind, WedgeRecoverer,
 };
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use crate::{Client as ProxmoxClient, ProxmoxAction};
+
+/// Budget for the liveness probe. Tight on purpose — the reconciler
+/// can call this every tick on every running LXC, so a hung probe
+/// would block forward progress on the whole tick.
+const PROBE_TIMEOUT_SECS: u64 = 5;
+
+/// How long to wait after a `Stop` for the container to report
+/// `stopped`, and after a `Start` for it to report `running`.
+const RECOVERY_POLL_BUDGET_SECS: u64 = 15;
+
+/// Poll cadence while waiting on status transitions.
+const RECOVERY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// LXC adapter that routes every operation through one Proxmox API
 /// endpoint. Multi-endpoint orchestration (different clusters) lives
@@ -119,6 +132,123 @@ impl RuntimeAdapter for LxcProxmoxApiAdapter {
     // `observe()` falls through to the trait default
     // (`HostObservation::default()`) for now. Real journal-tail fetch
     // lands once a typed syslog endpoint exists on the proxmox client.
+
+    /// Local-subprocess probe: `pct exec <vmid> -- true` with a tight
+    /// timeout. This is the narrow exception to
+    /// [[project-adapter-backends-api-first]] — the Proxmox HTTPS API
+    /// has no synchronous in-container exec primitive
+    /// (`/lxc/{vmid}/exec` is async/UPID-based and the status
+    /// endpoints can't see PID-1 wedge). See
+    /// [[feedback-api-first-liveness-exception]]: probe is local,
+    /// recovery stays API-only.
+    ///
+    /// Co-location assumption: the orca daemon runs ON the PVE node
+    /// (per the rc.23 per-host fleet shape). If it isn't,
+    /// `pct` won't be on PATH and we return `Liveness::Unknown` —
+    /// which the reconciler treats as "do not act," matching the
+    /// adapter-glitch case.
+    async fn probe_liveness(&self, container: &Container) -> Liveness {
+        if container.runtime != RuntimeKind::Lxc {
+            return Liveness::NotApplicable;
+        }
+        let mut cmd = tokio::process::Command::new("pct");
+        cmd.arg("exec").arg(&container.id).arg("--").arg("true");
+        cmd.kill_on_drop(true);
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(_) => return Liveness::Unknown,
+        };
+        match tokio::time::timeout(Duration::from_secs(PROBE_TIMEOUT_SECS), child.wait()).await {
+            Ok(Ok(status)) if status.success() => Liveness::Live,
+            Ok(Ok(_)) => Liveness::Unknown,
+            Ok(Err(_)) => Liveness::Unknown,
+            Err(_) => {
+                // start_kill is best-effort: if it fails the child is
+                // already gone or unreachable, which is fine — we're
+                // about to return Wedged regardless. `kill_on_drop`
+                // (set on the Command) guarantees the kernel side gets
+                // cleaned up when `child` falls out of scope.
+                drop(child.start_kill());
+                Liveness::Wedged
+            }
+        }
+    }
+
+    fn wedge_recoverer(&self) -> Option<&dyn WedgeRecoverer> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl WedgeRecoverer for LxcProxmoxApiAdapter {
+    /// API-only recovery: hard `Stop` then `Start`, polling status
+    /// between transitions. Recovery is `Refused` if either transition
+    /// doesn't land within [`RECOVERY_POLL_BUDGET_SECS`]. Per
+    /// [[feedback-api-first-liveness-exception]] the probe is allowed
+    /// to bend API-first; this recovery path is NOT.
+    ///
+    /// `Stop` is the hard variant (`POST /status/stop`) — `Shutdown`
+    /// is graceful and would hang on exactly the wedged PID-1 case
+    /// this exists to recover.
+    async fn attempt_unwedge(&self, container: &Container) -> Result<(), AdapterError> {
+        let vmid: u64 = container
+            .id
+            .parse()
+            .map_err(|_| AdapterError::NotFound(format!("vmid `{}` is not a u64", container.id)))?;
+        let node = container.host.clone();
+
+        self.client
+            .container_action(&node, vmid, ProxmoxAction::Stop)
+            .await
+            .map_err(|e| AdapterError::Transport(format!("stop {vmid}: {e}")))?;
+        wait_for_status(&self.client, &node, vmid, "stopped").await?;
+
+        self.client
+            .container_action(&node, vmid, ProxmoxAction::Start)
+            .await
+            .map_err(|e| AdapterError::Transport(format!("start {vmid}: {e}")))?;
+        wait_for_status(&self.client, &node, vmid, "running").await?;
+
+        Ok(())
+    }
+}
+
+/// Poll `container_status` until `data.status` matches `expected`,
+/// up to [`RECOVERY_POLL_BUDGET_SECS`]. The status envelope is the
+/// same shape as `ClusterResource` (subset).
+async fn wait_for_status(
+    client: &ProxmoxClient,
+    node: &str,
+    vmid: u64,
+    expected: &str,
+) -> Result<(), AdapterError> {
+    #[derive(Deserialize)]
+    struct StatusEnvelope {
+        #[serde(default)]
+        data: StatusData,
+    }
+    #[derive(Deserialize, Default)]
+    struct StatusData {
+        #[serde(default)]
+        status: Option<String>,
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(RECOVERY_POLL_BUDGET_SECS);
+    loop {
+        let raw = client
+            .container_status(node, vmid)
+            .await
+            .map_err(|e| AdapterError::Transport(format!("status {vmid}: {e}")))?;
+        let env = reparse::<StatusEnvelope>(&raw, "container_status")?;
+        if env.data.status.as_deref() == Some(expected) {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(AdapterError::Refused(format!(
+                "container {vmid} did not reach `{expected}` within {RECOVERY_POLL_BUDGET_SECS}s"
+            )));
+        }
+        tokio::time::sleep(RECOVERY_POLL_INTERVAL).await;
+    }
 }
 
 impl LxcProxmoxApiAdapter {

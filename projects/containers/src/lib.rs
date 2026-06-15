@@ -51,6 +51,7 @@ use crate::breaker::HostObservation;
 pub mod adapters;
 pub mod breaker;
 pub mod reconciler;
+pub mod wedge;
 
 // ── Runtime kinds ──────────────────────────────────────────────────────────
 
@@ -377,6 +378,88 @@ pub trait RuntimeAdapter: Send + Sync {
     async fn observe(&self, _container: &Container) -> HostObservation {
         HostObservation::default()
     }
+
+    /// Probe whether the container's userspace is responsive. Default
+    /// returns [`Liveness::NotApplicable`] — only adapters with a way
+    /// to reach inside the container override it. Implementations must
+    /// respect a tight budget (≤5s) because the reconciler can call
+    /// this every tick on every running container.
+    ///
+    /// The distinction this enables: `ContainerState::Running` is
+    /// "runtime thinks it's up"; `Liveness::Live` is "userspace
+    /// answered". A `Running` + `Wedged` container (PID 1 hung, ffprobe
+    /// chewing CPU, no service ports responding) is the failure mode
+    /// that motivated this surface — see [[feedback-api-first-liveness-exception]].
+    async fn probe_liveness(&self, _container: &Container) -> Liveness {
+        Liveness::NotApplicable
+    }
+
+    /// Hook returning a [`WedgeRecoverer`] for adapters that can attempt
+    /// in-place recovery from a wedged container. Default: not
+    /// supported (the reconciler will escalate straight to
+    /// `containers.wedged_unrecoverable` after K detections).
+    fn wedge_recoverer(&self) -> Option<&dyn WedgeRecoverer> {
+        None
+    }
+}
+
+/// Liveness observation produced by [`RuntimeAdapter::probe_liveness`].
+///
+/// Sibling to [`ContainerState`] — kept separate so "runtime says
+/// running" and "userspace responded" remain distinguishable. The
+/// reconciler keys auto-recovery off the `Wedged` value (see the
+/// `wedge` module).
+///
+/// Lives in a side observation (not on `Container`) so existing
+/// adapters don't have to learn a new field, and so the value isn't
+/// stamped into wire payloads that don't need it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Liveness {
+    /// Adapter has no liveness concept for this runtime, or the
+    /// container isn't `Running` and the question doesn't apply.
+    #[default]
+    NotApplicable,
+    /// Probe succeeded within budget — userspace answered.
+    Live,
+    /// Probe ran but exceeded its timeout — PID 1 wedged.
+    Wedged,
+    /// Probe failed for a non-timeout reason (spawn error, non-zero
+    /// exit, container vanished during the probe). Treated as "do not
+    /// act" by the reconciler — we don't escalate on a transient
+    /// adapter glitch.
+    Unknown,
+}
+
+impl Liveness {
+    /// Stable short string used in tool output, log lines, and route
+    /// matchers. Mirrors [`RuntimeKind::as_str`] / [`ContainerState`]
+    /// shape.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotApplicable => "not_applicable",
+            Self::Live => "live",
+            Self::Wedged => "wedged",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// In-place recovery from a wedged container. Implementations live on
+/// the same adapter (returned via [`RuntimeAdapter::wedge_recoverer`])
+/// so a single instance answers both "is it wedged?" and "fix it."
+///
+/// `attempt_unwedge` returns `Ok` only when the implementation
+/// believes recovery has been attempted to completion — the caller
+/// re-probes liveness to decide whether the container actually came
+/// back. The split keeps "I tried" separate from "it worked" so the
+/// state machine can distinguish failed RPCs from successful RPCs
+/// that didn't unstick the container.
+#[async_trait]
+pub trait WedgeRecoverer: Send + Sync {
+    /// Attempt to bring `container` back to a live state. Idempotent
+    /// against an already-live container (return `Ok(())`).
+    async fn attempt_unwedge(&self, container: &Container) -> Result<(), AdapterError>;
 }
 
 // ── Runtime detection ──────────────────────────────────────────────────────

@@ -341,6 +341,17 @@ pub async fn reconcile(input: ReconcileInput<'_>) -> ReconcileOutput {
     let mut adapter_errors: Vec<AdapterFailure> = Vec::new();
     let mut start_errors: Vec<StartFailure> = Vec::new();
 
+    // Wedge detection + auto-recovery is gated on a real dispatcher.
+    // Without one there is no operator-visible escalation path, so
+    // probing + persisting state would be silent (and tests that pass
+    // `dispatcher: None` would write into `~/.orca/containers/`).
+    let wedge_store: Option<Box<dyn crate::wedge::WedgeStore>> =
+        if !input.dry_run && input.dispatcher.is_some() {
+            Some(default_wedge_store())
+        } else {
+            None
+        };
+
     for adapter in &input.adapters {
         let kind = adapter.kind();
         let containers = match adapter.list(&filter).await {
@@ -396,6 +407,24 @@ pub async fn reconcile(input: ReconcileInput<'_>) -> ReconcileOutput {
                         )
                         .await;
                     }
+                    // Wedge probe runs on currently-running, auto-
+                    // restart containers. State machine + dispatch +
+                    // recovery is delegated to `handle_wedge_observation`.
+                    // TODO: gate on external healthcheck failure once
+                    // that domain lands — until then we probe every
+                    // tick, which is cheap (Live = single API/exec call).
+                    if let Some(store) = wedge_store.as_deref()
+                        && container.state == ContainerState::Running
+                        && container.restart_policy.desires_running()
+                    {
+                        handle_wedge_observation(
+                            adapter.as_ref(),
+                            &container,
+                            store,
+                            input.dispatcher,
+                        )
+                        .await;
+                    }
                     rows.push(row);
                 }
                 ReconcileAction::Started
@@ -433,6 +462,305 @@ pub async fn reconcile(input: ReconcileInput<'_>) -> ReconcileOutput {
         rows,
         adapter_errors,
         start_errors,
+    }
+}
+
+// ── Wedge integration ─────────────────────────────────────────────────────
+
+/// One wedge tick for one Running container. Loads the prior record,
+/// runs `process_liveness_observation`, dispatches the emitted
+/// `WedgeEvent`s, applies the `NextAction`. On `AttemptRecovery` calls
+/// `wedge::attempt_unwedge` and chains `process_recovery_outcome`,
+/// dispatching its events and applying its action too.
+///
+/// Storage errors log + return (safety-net, not a critical path —
+/// same posture the breaker takes). Dispatcher errors are absorbed
+/// inside `emit_wedge_event`; one failed backend doesn't stop the
+/// rest of the loop.
+async fn handle_wedge_observation(
+    adapter: &dyn RuntimeAdapter,
+    container: &Container,
+    store: &dyn crate::wedge::WedgeStore,
+    dispatcher: Option<&Dispatcher>,
+) {
+    use crate::wedge::{self, NextAction};
+
+    let observed = adapter.probe_liveness(container).await;
+    let prior = match store.load(&container.host, container.runtime, &container.id) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                target: "containers::wedge",
+                host = %container.host,
+                runtime = container.runtime.as_str(),
+                id = %container.id,
+                "wedge store load failed: {e}",
+            );
+            return;
+        }
+    };
+    let has_recoverer = adapter.wedge_recoverer().is_some();
+    let now = Utc::now();
+    let result =
+        wedge::process_liveness_observation(prior, observed, container, has_recoverer, now);
+
+    for ev in &result.events {
+        emit_wedge_event(dispatcher, ev).await;
+    }
+
+    match result.next_action {
+        NextAction::Noop => {}
+        NextAction::Delete => {
+            if let Err(e) = store.delete(&container.host, container.runtime, &container.id) {
+                tracing::warn!(
+                    target: "containers::wedge",
+                    host = %container.host,
+                    runtime = container.runtime.as_str(),
+                    id = %container.id,
+                    "wedge store delete failed: {e}",
+                );
+            }
+        }
+        NextAction::Save(record) => {
+            if let Err(e) = store.save(&record) {
+                tracing::warn!(
+                    target: "containers::wedge",
+                    host = %container.host,
+                    runtime = container.runtime.as_str(),
+                    id = %container.id,
+                    "wedge store save failed: {e}",
+                );
+            }
+        }
+        NextAction::AttemptRecovery(record) => {
+            // Persist intent first so a crash mid-attempt doesn't lose
+            // the recovery_attempts counter.
+            if let Err(e) = store.save(&record) {
+                tracing::warn!(
+                    target: "containers::wedge",
+                    host = %container.host,
+                    runtime = container.runtime.as_str(),
+                    id = %container.id,
+                    "wedge store save (pre-attempt) failed: {e}",
+                );
+                return;
+            }
+            let outcome = match wedge::attempt_unwedge(adapter, container).await {
+                Ok(o) => o,
+                Err(e) => {
+                    // Refused = no recoverer; defensively clear the
+                    // record so we don't loop forever on a runtime
+                    // that can't recover. `process_liveness_observation`
+                    // with `has_recoverer=false` already escalated.
+                    tracing::warn!(
+                        target: "containers::wedge",
+                        host = %container.host,
+                        runtime = container.runtime.as_str(),
+                        id = %container.id,
+                        "attempt_unwedge refused: {e}",
+                    );
+                    return;
+                }
+            };
+            let follow = wedge::process_recovery_outcome(record, &outcome, container, Utc::now());
+            for ev in &follow.events {
+                emit_wedge_event(dispatcher, ev).await;
+            }
+            match follow.next_action {
+                NextAction::Noop => {}
+                NextAction::Delete => {
+                    if let Err(e) = store.delete(&container.host, container.runtime, &container.id)
+                    {
+                        tracing::warn!(
+                            target: "containers::wedge",
+                            host = %container.host,
+                            runtime = container.runtime.as_str(),
+                            id = %container.id,
+                            "wedge store delete (post-attempt) failed: {e}",
+                        );
+                    }
+                }
+                NextAction::Save(r) => {
+                    if let Err(e) = store.save(&r) {
+                        tracing::warn!(
+                            target: "containers::wedge",
+                            host = %container.host,
+                            runtime = container.runtime.as_str(),
+                            id = %container.id,
+                            "wedge store save (post-attempt) failed: {e}",
+                        );
+                    }
+                }
+                // `process_recovery_outcome` only returns Save or
+                // Delete — but pattern-match exhaustively rather than
+                // unreachable!() so the build stays clean if the enum
+                // gains variants.
+                NextAction::AttemptRecovery(_) => {}
+            }
+        }
+    }
+}
+
+/// Map a `WedgeEvent` to a typed `notifications::Event` and emit it.
+/// Severity grades: `Detected`/`RecoveryAttempted` = Warn,
+/// `RecoverySucceeded`/`Recovered` = Info, `RecoveryFailed` = Warn,
+/// `Unrecoverable` = Error (page-an-operator).
+async fn emit_wedge_event(dispatcher: Option<&Dispatcher>, ev: &crate::wedge::WedgeEvent) {
+    use crate::wedge::WedgeEvent as W;
+    let Some(d) = dispatcher else {
+        return;
+    };
+    let (severity, title, host) = match ev {
+        W::Detected {
+            host,
+            container_name,
+            ..
+        } => (
+            Severity::Warn,
+            format!("containers.wedge_detected: {container_name}"),
+            host.clone(),
+        ),
+        W::RecoveryAttempted {
+            host,
+            container_name,
+            attempt_number,
+            ..
+        } => (
+            Severity::Warn,
+            format!("containers.wedge_recovery_attempt {attempt_number}: {container_name}"),
+            host.clone(),
+        ),
+        W::RecoverySucceeded {
+            host,
+            container_name,
+            ..
+        } => (
+            Severity::Info,
+            format!("containers.wedge_recovered: {container_name}"),
+            host.clone(),
+        ),
+        W::RecoveryFailed {
+            host,
+            container_name,
+            attempt_number,
+            ..
+        } => (
+            Severity::Warn,
+            format!(
+                "containers.wedge_recovery_failed (attempt {attempt_number}): {container_name}"
+            ),
+            host.clone(),
+        ),
+        W::Unrecoverable {
+            host,
+            container_name,
+            ..
+        } => (
+            Severity::Error,
+            format!("containers.wedge_unrecoverable: {container_name}"),
+            host.clone(),
+        ),
+        W::Recovered {
+            host,
+            container_name,
+            ..
+        } => (
+            Severity::Info,
+            format!("containers.wedge_recovered_spontaneously: {container_name}"),
+            host.clone(),
+        ),
+    };
+    let event = Event::new(EventClass::Alert, severity, title, "reconciler:containers")
+        .with_host(host)
+        .with_body(render_wedge_body(ev));
+    let _ = d.emit(&event).await;
+}
+
+fn render_wedge_body(ev: &crate::wedge::WedgeEvent) -> String {
+    use crate::wedge::WedgeEvent as W;
+    match ev {
+        W::Detected {
+            host,
+            runtime,
+            container_id,
+            container_name,
+            first_wedged_at,
+        } => format!(
+            "WEDGED `{container_name}` ({runtime}:{container_id}) on `{host}` — first wedged at {first_wedged_at}",
+            runtime = runtime.as_str(),
+        ),
+        W::RecoveryAttempted {
+            host,
+            runtime,
+            container_id,
+            container_name,
+            attempt_number,
+        } => format!(
+            "attempting recovery {attempt_number}/{max} of `{container_name}` ({runtime}:{container_id}) on `{host}`",
+            runtime = runtime.as_str(),
+            max = crate::wedge::MAX_RECOVERY_ATTEMPTS,
+        ),
+        W::RecoverySucceeded {
+            host,
+            runtime,
+            container_id,
+            container_name,
+            attempts_taken,
+            total_wedged_duration_secs,
+        } => format!(
+            "recovered `{container_name}` ({runtime}:{container_id}) on `{host}` after {attempts_taken} attempt(s), wedged for {total_wedged_duration_secs:.0}s",
+            runtime = runtime.as_str(),
+        ),
+        W::RecoveryFailed {
+            host,
+            runtime,
+            container_id,
+            container_name,
+            attempt_number,
+            error,
+        } => format!(
+            "recovery attempt {attempt_number} FAILED for `{container_name}` ({runtime}:{container_id}) on `{host}` — {error}",
+            runtime = runtime.as_str(),
+        ),
+        W::Unrecoverable {
+            host,
+            runtime,
+            container_id,
+            container_name,
+            attempts,
+            first_wedged_at,
+        } => format!(
+            "UNRECOVERABLE: `{container_name}` ({runtime}:{container_id}) on `{host}` — {attempts} recovery attempts failed, first wedged at {first_wedged_at}. Manual intervention required (try `orca containers.unwedge`).",
+            runtime = runtime.as_str(),
+        ),
+        W::Recovered {
+            host,
+            runtime,
+            container_id,
+            container_name,
+            attempts,
+            total_wedged_duration_secs,
+        } => format!(
+            "`{container_name}` ({runtime}:{container_id}) on `{host}` returned to live spontaneously after {attempts} attempt(s) ({total_wedged_duration_secs:.0}s wedged)",
+            runtime = runtime.as_str(),
+        ),
+    }
+}
+
+/// Pick the right `WedgeStore` for the reconciler: `FileStore` rooted
+/// at `<orca_home>/containers/wedge_state.json` when
+/// [`crate::wedge::FileStore::default_path`] resolves, otherwise a
+/// process-local `MemoryStore`. Mirrors [`default_breaker_store`].
+fn default_wedge_store() -> Box<dyn crate::wedge::WedgeStore> {
+    match crate::wedge::FileStore::default_path() {
+        Some(dir) => Box::new(crate::wedge::FileStore::new(dir)),
+        None => {
+            tracing::warn!(
+                target: "containers::wedge",
+                "neither ORCA_HOME nor HOME set; using in-memory wedge store (state lost on restart)"
+            );
+            Box::new(crate::wedge::MemoryStore::new())
+        }
     }
 }
 
@@ -1097,6 +1425,97 @@ async fn containers_unhold(
         container_id: record.container_id,
         status: "watching".to_string(),
         previously_held_since: record.held_since.map(|t| t.to_rfc3339()),
+    })
+}
+
+// ── Tool: containers.unwedge ─────────────────────────────────────────────
+
+/// Arguments for `containers.unwedge`. Mirrors [`ContainersUnholdArgs`]
+/// — keying on `(host, runtime, container_id)` so the operator names
+/// the same record the wedged-detection event named.
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainersUnwedgeArgs {
+    /// Proxmox node / docker host the wedged container lives on.
+    #[arg(long)]
+    pub host: String,
+    /// Runtime kind: `docker`, `lxc`, `podman`, or `nspawn`. String at
+    /// the tool boundary for the same reason `containers.unhold` uses
+    /// one — `RuntimeKind` doesn't implement `clap::ValueEnum`.
+    #[arg(long)]
+    pub runtime: String,
+    /// Runtime-native container id (docker id, lxc vmid as a string).
+    #[arg(long)]
+    pub container_id: String,
+}
+
+/// Outcome of one `containers.unwedge` call. Flat — `Liveness` doesn't
+/// implement `JsonSchema`-via-`DateTime` like `Container` does, so we
+/// project to strings at the boundary just like `containers.unhold`
+/// does for the runtime field.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainersUnwedgeOutput {
+    pub host: String,
+    pub runtime: String,
+    pub container_id: String,
+    /// True iff the post-attempt liveness probe came back `Live`.
+    pub recovered: bool,
+    /// Wall-clock seconds from start of the attempt to post-probe.
+    pub attempt_duration_secs: f64,
+    /// `live` / `wedged` / `unknown` / `not_applicable` — what
+    /// liveness reported after the recovery call returned.
+    pub post_probe: String,
+    /// Adapter error message when the recovery call itself failed.
+    /// `None` when the recovery call returned Ok, regardless of
+    /// `recovered`.
+    pub error: Option<String>,
+}
+
+/// Manually trigger recovery for a wedged container. Routes through
+/// the same [`crate::wedge::attempt_unwedge`] free fn the auto-recovery
+/// loop will call — one handler, three skins
+/// ([[feedback-cli-api-mcp-one-path]]).
+///
+/// Errors with `NotFound` if no adapter for `runtime` is registered,
+/// or if `(host, container_id)` doesn't resolve to a known container.
+/// The recovery-attempt outcome — including a failed recovery — comes
+/// back via [`ContainersUnwedgeOutput::recovered`] / `error`, never as
+/// an `Err`.
+#[derive::orca_tool(domain = "containers", verb = "unwedge", crate = ::macro_runtime)]
+async fn containers_unwedge(
+    args: ContainersUnwedgeArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<ContainersUnwedgeOutput> {
+    let runtime = parse_runtime_kind(&args.runtime)?;
+    let adapters = registered_adapters();
+    let adapter = adapters
+        .into_iter()
+        .find(|a| a.kind() == runtime)
+        .ok_or_else(|| {
+            anyhow::anyhow!("no adapter registered for runtime `{}`", runtime.as_str())
+        })?;
+
+    // Fetch the container so the recovery call has the typed row
+    // (host, labels, etc.). `inspect` errors with NotFound for an
+    // unknown id — propagate directly.
+    let container = adapter
+        .inspect(&args.container_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("inspect {}: {e}", args.container_id))?;
+
+    let outcome = crate::wedge::attempt_unwedge(adapter.as_ref(), &container)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    Ok(ContainersUnwedgeOutput {
+        host: args.host,
+        runtime: runtime.as_str().to_string(),
+        container_id: args.container_id,
+        recovered: outcome.recovered,
+        attempt_duration_secs: outcome.attempt_duration_secs,
+        post_probe: outcome.post_probe.as_str().to_string(),
+        error: outcome.error,
     })
 }
 

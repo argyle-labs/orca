@@ -27,6 +27,7 @@ plugin-toolkit = { path = "../../plugin-toolkit" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 clap        = { workspace = true }
+tokio       = { workspace = true }
 
 [dev-dependencies]
 tokio    = { workspace = true }
