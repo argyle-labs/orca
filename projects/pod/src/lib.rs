@@ -825,6 +825,7 @@ mod tests {
             peer_secure: false,
             status: "active".into(),
             addresses: vec![],
+            pubkey_fp: None,
         };
         let dto: PodPeerDto = row.into();
         assert_eq!(dto.peer_id, "x");
