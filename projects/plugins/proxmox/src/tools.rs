@@ -1,4 +1,5 @@
 //! Proxmox tool surface.
+
 //!
 //! Endpoint registry: `proxmox.{list, detail, create, update, delete}` —
 //! generated wholesale by `#[endpoint_resource]`. The macro emits the row

@@ -703,7 +703,15 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
             match pod::mdns::Mdns::start(ad) {
                 Ok(handle) => {
                     info!("[pod] mDNS responder + discoverer up");
-                    std::mem::drop(handle);
+                    // Park the handle in a process-static slot so the
+                    // ServiceDaemon (and its browse task) live for the
+                    // daemon lifetime. Dropping it tears down the
+                    // responder + discoverer within ~1s; `republish` is
+                    // also unreachable without a stable handle.
+                    static MDNS: std::sync::OnceLock<pod::mdns::Mdns> = std::sync::OnceLock::new();
+                    if MDNS.set(handle).is_err() {
+                        tracing::warn!("[pod] mDNS handle already parked");
+                    }
                 }
                 Err(e) => tracing::warn!("[pod] mDNS start failed: {e:#}"),
             }
