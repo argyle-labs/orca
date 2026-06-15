@@ -27,6 +27,11 @@ pub struct PeerSummary {
     /// FQDN, etc.). Empty if no rows in `pod_peer_addresses` for this peer.
     #[serde(default)]
     pub addresses: Vec<PodPeerAddress>,
+    /// Bootstrap-pubkey fingerprint pinned for this peer, or `None` when the
+    /// row was learned via roster-sync from a third-party peer (those rows
+    /// arrive unpinned and need a transitive backfill).
+    #[serde(default)]
+    pub pubkey_fp: Option<String>,
 }
 
 /// Read the host-local `self_secure` flag from `pod_self`. Returns `false`
@@ -48,7 +53,8 @@ pub fn list_peer_summaries(conn: &Connection) -> Result<Vec<PeerSummary>> {
     let mut stmt = conn.prepare(
         "SELECT p.peer_id, p.peer_hostname, p.peer_addr, p.peer_port,
                 p.last_seen_at, p.departed_at,
-                COALESCE(t.local_secure, 0), COALESCE(t.peer_secure, 0)
+                COALESCE(t.local_secure, 0), COALESCE(t.peer_secure, 0),
+                p.pubkey_fp
          FROM pod_peers p
          LEFT JOIN pod_trust t ON t.peer_id = p.peer_id
          ORDER BY p.last_seen_at DESC",
@@ -72,6 +78,7 @@ pub fn list_peer_summaries(conn: &Connection) -> Result<Vec<PeerSummary>> {
                 peer_secure: r.get(7)?,
                 status,
                 addresses: Vec::new(),
+                pubkey_fp: r.get::<_, Option<String>>(8)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

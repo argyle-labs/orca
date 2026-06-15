@@ -102,6 +102,13 @@ pub struct PodPeerDto {
     /// by the peer's `system.runtime-spec`. `None` when the probe failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<system::system_info_types::SystemInfoReport>,
+    /// Bootstrap-pubkey fingerprint of this peer, as known to the responder.
+    /// Propagated through roster sync so peers learned via intermediary can
+    /// transitively pin the fp instead of arriving with `None` — without
+    /// this, pod/exec from a roster-synced peer is refused with "no pinned
+    /// bootstrap key" forever after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pubkey_fp: Option<String>,
 }
 
 /// Unified pod-membership view. Every row carries a `state` discriminant so
@@ -528,6 +535,7 @@ mod dto_conversions {
                 update_available: None,
                 update_checked_secs: None,
                 system: None,
+                pubkey_fp: p.pubkey_fp,
             }
         }
     }

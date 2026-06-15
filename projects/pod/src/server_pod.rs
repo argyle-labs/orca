@@ -624,6 +624,12 @@ async fn local_peer_row() -> PodPeerDto {
         update_available: None,
         update_checked_secs: None,
         system: Some((*system::system_info::current_or_collect()).clone()),
+        // The local row publishes our own bootstrap-pubkey fp so peers that
+        // learn about us via roster-sync can pin it transitively (otherwise
+        // every cross-host pod/exec lands on "no pinned bootstrap key").
+        pubkey_fp: utils::pki::load_or_init_bootstrap_key(&pki_dir())
+            .ok()
+            .map(|k| utils::pki::bootstrap_pubkey_fingerprint(&k.verifying_key())),
     }
 }
 

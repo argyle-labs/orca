@@ -315,6 +315,8 @@ fn handle_join_confirm(env: &SignedEnvelope) -> Result<JoinConfirmResult> {
         PeerRole::Server,
     )?;
 
+    // `joiner_hostname` IS the joiner's machine_id_short — the field name
+    // is misleading wire-compat (see struct docstring + feedback_no_id_prefixes).
     let joiner_peer_id = body.joiner_hostname.clone();
     let peer_label = select_peer_label(&body.joiner_hostname, body.joiner_display_name.as_deref());
     pdb::upsert_peer(
