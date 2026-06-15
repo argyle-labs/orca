@@ -352,7 +352,6 @@ async fn system_update(
 
     // ── 1. config-only mutations ────────────────────────────────────────────
     let mut channel_changed = false;
-    let mut dev_mode_requested = false;
     if let Some(raw) = args
         .channel
         .as_deref()
@@ -361,7 +360,6 @@ async fn system_update(
     {
         let prior = read_channel_marker().unwrap_or(Channel::Stable);
         if raw == "dev" {
-            dev_mode_requested = true;
             let ch = Channel::Dev;
             write_channel_marker(&ch).context("write channel marker")?;
             notes.push(
@@ -503,8 +501,14 @@ async fn system_update(
         || args.daemon.is_some()
         || args.dev_source.is_some()
         || args.clear_dev_source;
-    let binary_intent =
-        args.version.is_some() || channel_changed || (!any_non_binary && !dev_mode_requested);
+    // Per HARD RULE [[feedback-updates-are-user-actions-only]]: an empty
+    // `{}` probe MUST NOT apply anything. Binary intent requires an
+    // explicit positive signal — a version arg or a channel switch. The
+    // previous fallback `(!any_non_binary && !dev_mode_requested)` made
+    // the empty probe equivalent to "update to channel latest", silently
+    // bumping every peer the moment a new release landed.
+    let _ = any_non_binary;
+    let binary_intent = args.version.is_some() || channel_changed;
 
     // Effective channel = max(stored pref, channel implied by running version).
     // If the binary is an rc but the marker says stable (common on hosts
