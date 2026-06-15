@@ -165,6 +165,101 @@ pub async fn exec_remote<T: contract::OrcaToolDef>(
     Ok(out)
 }
 
+/// HTTP base URL of the local daemon's REST surface. Honors
+/// `ORCA_DAEMON_URL` for non-default ports / hostnames, then falls back to
+/// `http://127.0.0.1:<APP_REST_HTTP_PORT>` (12000).
+pub fn local_daemon_url() -> String {
+    if let Ok(url) = std::env::var("ORCA_DAEMON_URL") {
+        let trimmed = url.trim_end_matches('/').to_string();
+        if !trimmed.is_empty() {
+            return trimmed;
+        }
+    }
+    format!("http://127.0.0.1:{}", contract::config::APP_REST_HTTP_PORT)
+}
+
+/// Read the on-disk CLI session id written by `orca auth login`. Mode 0600
+/// at `$ORCA_HOME/session`. Returns `None` if absent / unreadable / empty —
+/// the daemon will then reject with 401 and the CLI surfaces "run
+/// `orca auth login` first".
+fn read_session_id() -> Option<String> {
+    // Resolve $ORCA_HOME (or $HOME/.orca) inline — the `files` crate that
+    // canonicalises this elsewhere depends on `db`, which depends back on
+    // `dispatch`, so we can't import it from here.
+    let dir = std::env::var_os("ORCA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".orca")))?;
+    let raw = std::fs::read_to_string(dir.join("session")).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Quick TCP probe of the local daemon. Returns true if a connection succeeds
+/// within ~200ms — fast enough to keep CLI startup snappy on hosts where the
+/// daemon isn't running (`orca install`, `orca --version`, etc.).
+pub fn local_daemon_reachable() -> bool {
+    use std::net::ToSocketAddrs;
+    use std::time::Duration;
+    let url = local_daemon_url();
+    let host_port = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .unwrap_or(&url);
+    let addr = match host_port
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut it| it.next())
+    {
+        Some(a) => a,
+        None => return false,
+    };
+    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
+}
+
+/// Proxy a tool call through the local daemon's `POST /api/v1/<name>`. Same
+/// HTTP route the UI hits, same session-cookie auth, same handler — so
+/// CLI = REST = MCP = daemon. Tools that need to bring up the daemon (e.g.
+/// `system install`, `daemon`) set `LOCAL_ONLY = true` and bypass this path.
+pub async fn exec_local_daemon<T: contract::OrcaToolDef>(
+    args: T::Args,
+    ctx: &ToolCtx,
+) -> Result<T::Output> {
+    #[allow(clippy::disallowed_types)]
+    let body = serde_json::to_value(&args).map_err(|e| anyhow::anyhow!("serialize args: {e}"))?;
+    let url = format!("{}/api/v1/{}", local_daemon_url(), T::NAME);
+    let mut req = reqwest::Client::new().post(&url).json(&body);
+    if let Some(sid) = read_session_id() {
+        // Daemon middleware accepts either cookie or bearer for the same
+        // session row. Cookie form keeps us bit-for-bit identical to the UI.
+        req = req.header("cookie", format!("orca_session={sid}"));
+    }
+    if let Some(cid) = ctx.correlation_id() {
+        req = req.header("x-correlation-id", cid.to_string());
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("POST {url}: {e}"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!(
+            "local daemon returned {} for {}: {}",
+            status,
+            T::NAME,
+            text.trim()
+        );
+    }
+    #[allow(clippy::disallowed_types)]
+    let out: T::Output = serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("decode {} output: {e} (body: {text})", T::NAME))?;
+    Ok(out)
+}
+
 /// Try to dispatch one parsed clap match through the inventory.
 /// Returns `Some(result)` if the (domain, verb) pair was found and ran;
 /// `None` if no match — caller should fall through to legacy dispatch.
@@ -309,8 +404,17 @@ macro_rules! register_op {
                         .map_err(|e| __cp::anyhow::anyhow!("{e}"))?;
                     let $out: <$tool as OrcaToolDef>::Output = if let Some(peer) = peer {
                         __cp::dispatch::cli::exec_remote::<$tool>(&peer, args, &ctx).await?
-                    } else {
+                    } else if <$tool as OrcaToolDef>::LOCAL_ONLY
+                        || !__cp::dispatch::cli::local_daemon_reachable()
+                    {
+                        // Pre-daemon ops (install, daemon start, --version) and
+                        // every CLI invocation on a host that isn't running orca
+                        // execute in-process. Once the daemon is up, every other
+                        // tool round-trips through its HTTP surface so CLI = REST
+                        // = MCP — see [[feedback-cli-api-mcp-one-path]].
                         <$tool as OrcaTool>::run(args, &ctx).await?
+                    } else {
+                        __cp::dispatch::cli::exec_local_daemon::<$tool>(args, &ctx).await?
                     };
                     { $render }
                     Ok(())

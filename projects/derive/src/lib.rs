@@ -782,6 +782,11 @@ fn expand(attr: ToolAttr, item: ItemFn) -> syn::Result<TokenStream2> {
             const NAME: &'static str = #tool_name;
             const DESCRIPTION: &'static str = #description;
             const REMOTE_OK: bool = #remote_ok_lit;
+            // local_only is the inverse of remote_ok by convention (a tool
+            // that can't be dispatched to a remote peer also can't be
+            // proxied through the local daemon's HTTP — it must run in the
+            // calling process). Same lit, opposite polarity.
+            const LOCAL_ONLY: bool = !#remote_ok_lit;
             #role_const
             type Args = #args_ty;
             type Output = #output_ty;

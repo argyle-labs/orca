@@ -141,7 +141,12 @@ fn create_service_user(user: &str, home_dir: &str) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn add_to_groups(user: &str) {
-    for grp in &["docker", "systemd-journal"] {
+    // `www-data` is the Proxmox pmxcfs read group — /etc/pve/{lxc,qemu-server}/*.conf
+    // are mode 640 root:www-data. Without it the proxmox topology collector
+    // silently returns no claims and the systems tree never nests VMs under
+    // their host. Best-effort like the others — non-Proxmox hosts won't have
+    // the group, which is fine.
+    for grp in &["docker", "systemd-journal", "www-data"] {
         let exists = Command::new("getent")
             .args(["group", grp])
             .output()

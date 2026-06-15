@@ -27,6 +27,13 @@ pub trait OrcaToolDef: Send + Sync + 'static {
     /// CLI / loopback / MCP-stdio run in-process as the daemon owner and are
     /// not gated here.
     const REQUIRED_ROLE: &'static str = "any";
+    /// Whether this tool must run in the calling process (pre-daemon ops only:
+    /// `install`, `daemon`, `system bootstrap`, `--version`). When false (the
+    /// default), CLI + MCP-stdio invocations are proxied to the local daemon's
+    /// HTTP endpoint so every surface runs the same handler. When true, the
+    /// CLI runs the tool body in-process — required for tools that bring up
+    /// or replace the daemon itself.
+    const LOCAL_ONLY: bool = false;
 
     type Args: DeserializeOwned + Serialize + JsonSchema + Send;
     type Output: Serialize + DeserializeOwned + JsonSchema + Send + 'static;

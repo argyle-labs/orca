@@ -36,8 +36,20 @@ fn scan_dir(dir: &str, kind: &str) -> Vec<TopologyClaim> {
         let Some(id) = fname.strip_suffix(".conf") else {
             continue;
         };
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
+        let content = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                // EPERM here means the orca daemon isn't in `www-data`
+                // (pve confs are mode 640 root:www-data). Silent skip
+                // makes the topology tree look empty for no apparent
+                // reason — surface it so the install fix is obvious.
+                tracing::warn!(
+                    error = %e,
+                    path = %path.display(),
+                    "topology: pve conf unreadable (orca needs www-data group?)"
+                );
+                continue;
+            }
         };
         if let Some(claim) = parse_conf(id, kind, &content) {
             out.push(claim);
