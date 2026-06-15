@@ -524,7 +524,14 @@ async fn system_update(
     };
     let token = resolve_github_token();
 
-    if binary_intent && !matches!(ch_marker, Channel::Dev) {
+    // Dev-channel gate: dev builds normally don't fetch releases (they
+    // track HEAD via cargo-watch). BUT an explicit `--version` is the
+    // user telling us "leave dev, go to this tagged build" — honor it.
+    // Without this exception, a `-dev` binary silently drops every apply
+    // request with no note + no error (the host appears alive but can
+    // never be moved off dev via the in-app updater).
+    let dev_gate_skip = matches!(ch_marker, Channel::Dev) && args.version.is_none();
+    if binary_intent && !dev_gate_skip {
         if token.is_empty() && read_dev_source().is_none() {
             // delegate-on-miss: try paired peers that may hold the token.
             // See [[project-github-token-auto-provision]],
