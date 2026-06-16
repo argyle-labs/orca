@@ -632,6 +632,12 @@ fn render_scalar(spec_url: &str, title: &str) -> axum::response::Response {
 /// dev/stable can never silently diverge — adding a new background task
 /// here arms it everywhere.
 async fn spawn_all_runtime_tasks(pki_dir: &std::path::Path) {
+    // Initialize the process-wide DB connection pool BEFORE any task that
+    // touches the DB spawns. Pays the SQLCipher KDF + page-cache allocation
+    // once at startup instead of on every tool call.
+    if let Err(e) = db::pool::DbPool::init_or_get() {
+        tracing::warn!("db pool init failed at startup, falling back to per-call opens: {e:#}");
+    }
     if let Err(e) = auth::loopback_token::install_at_startup() {
         tracing::warn!("loopback token install failed: {e:#}");
     }

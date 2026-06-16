@@ -1,6 +1,9 @@
 use ::llm::{ClaudeBackend, Message, ModelBackend, stdout_sink};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use contract::config::Config;
 use conversation::log_cmd::{LogAction, cmd_log};
 use conversation::sessions::context::ProjectContext;

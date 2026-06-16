@@ -115,18 +115,22 @@ async fn persist_local_snapshot() -> Result<()> {
     let peer_id_for_insert = peer_id.clone();
     let payload_for_insert = payload.clone();
     tokio::task::spawn_blocking(move || -> Result<()> {
-        let conn = db::open_default()?;
-        db::host_status::insert_status(
-            &conn,
-            &peer_id_for_insert,
-            snapshot_at,
-            &payload_for_insert,
-            now,
-            "local",
-        )?;
-        Ok(())
+        db::pool::with_pooled_or_open(|conn| {
+            db::host_status::insert_status(
+                conn,
+                &peer_id_for_insert,
+                snapshot_at,
+                &payload_for_insert,
+                now,
+                "local",
+            )?;
+            Ok(())
+        })
     })
     .await??;
+    // Invalidate the host_status cache so the next pod.list read sees the
+    // fresh row instead of a stale entry from the previous tick.
+    db::cache::invalidate_host_status(&peer_id);
 
     // Fan out to in-process subscribers (UI sessions, mesh forwarder).
     // Best-effort: failures here don't roll back the DB write.
@@ -140,8 +144,7 @@ async fn persist_local_snapshot() -> Result<()> {
 
 async fn pull_peer_status_once() -> Result<()> {
     let peers = tokio::task::spawn_blocking(|| -> Result<Vec<(String, String)>> {
-        let conn = db::open_default()?;
-        let rows = db::pod::list_peer_summaries(&conn)?;
+        let rows = db::pool::with_pooled_or_open(db::pod::list_peer_summaries)?;
         // (peer_id, addr) — skip departed peers, skip our own row (no point
         // pulling ourselves; the local writer owns those).
         let own = own_peer_id();

@@ -9,6 +9,7 @@
 //! to an already-deployed database.
 
 pub mod api_tokens;
+pub mod cache;
 pub mod config_store;
 pub mod docker_runtimes;
 // `dockge` endpoint registry now lives in the dockge plugin via
@@ -41,6 +42,7 @@ pub mod plugin_tools;
 pub mod plugin_types;
 pub mod plugins;
 pub mod pod;
+pub mod pool;
 pub mod replicate;
 pub mod replicate_engine;
 pub mod schema_fragments;

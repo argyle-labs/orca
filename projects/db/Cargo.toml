@@ -31,6 +31,11 @@ cron        = { workspace = true }
 inventory   = { workspace = true }
 reqwest     = { workspace = true, features = ["blocking"] }
 
+# In-memory cache for hot reads (host_status latest, runtime spec). Sits
+# above the connection pool — sub-µs hit, falls through to SQLite on miss.
+# TTL + max_capacity bounded so it cannot grow unbounded.
+moka        = { version = "0.12", features = ["sync"] }
+
 clap        = { workspace = true }
 # Used only for `task_local!` — the right primitive for scoping a DB path
 # override across `.await` points and worker threads. Cheap: `rt` feature
