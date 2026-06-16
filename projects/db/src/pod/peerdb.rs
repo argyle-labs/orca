@@ -350,6 +350,18 @@ pub fn delete_pending_offer(conn: &Connection, offer_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Delete every outbound pending offer pinned to `addr`, regardless of
+/// expiry. Returns the number of rows removed. Used by the user-driven
+/// re-invite path (idempotent +Add in the UI) and the explicit
+/// `pod.cancel_offer` tool.
+pub fn delete_outbound_offers_by_addr(conn: &Connection, addr: &str) -> Result<u32> {
+    let n = conn.execute(
+        "DELETE FROM pod_pending_offers WHERE direction = 'out' AND peer_addr = ?",
+        params![addr],
+    )?;
+    Ok(n as u32)
+}
+
 /// True if we already have an open outbound offer to this peer fp. Used by
 /// the auto-offer scheduler to avoid spamming a target.
 pub fn has_open_outbound_offer(conn: &Connection, peer_pubkey_fp: &str) -> Result<bool> {

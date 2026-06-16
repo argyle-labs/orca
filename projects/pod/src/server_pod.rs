@@ -329,10 +329,14 @@ pub async fn offer(addr: &str, port: Option<u16>) -> Result<PodOfferOutput> {
             format!("{addr} not found in pod_discovery — is the joiner visible via mDNS?")
         })?;
 
-    if pdb::has_open_outbound_offer(&conn, &d.pubkey_fp)? {
-        anyhow::bail!(
-            "an open outbound offer to {addr} already exists — wait for it to expire or for the joiner to accept"
-        );
+    // User-driven invites are idempotent: if an outbound offer to this
+    // address is already pending, drop it and mint a fresh one. The
+    // stale-offer guard belongs to the auto-offer scheduler
+    // ([[scheduler.rs:83]]), not to operator-triggered +Add clicks —
+    // the operator's intent is clear: send a NEW invite now.
+    let replaced = pdb::delete_outbound_offers_by_addr(&conn, &d.addr)?;
+    if replaced > 0 {
+        tracing::info!(addr = %d.addr, replaced, "replaced stale outbound offer(s)");
     }
 
     let pod_id = pdb::get_pod_id(&conn)?.unwrap_or_else(|| "default".to_string());
@@ -368,6 +372,16 @@ pub async fn offer(addr: &str, port: Option<u16>) -> Result<PodOfferOutput> {
         offer_id,
         expires_at: now + OFFER_TTL_SECS,
     })
+}
+
+/// Cancel every outbound pending offer pinned to `addr`. Used by the
+/// `pod.cancel_offer` tool when an operator wants to clear a stuck
+/// pairing handshake without waiting for the TTL. Returns the number of
+/// rows removed (0 if none matched).
+pub fn cancel_offer(addr: &str) -> Result<u32> {
+    let conn = db::open_default()?;
+    let n = pdb::delete_outbound_offers_by_addr(&conn, addr)?;
+    Ok(n)
 }
 
 pub async fn join(inviter_addr: &str, port: Option<u16>) -> Result<PodJoinRequestOutput> {
