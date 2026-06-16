@@ -438,6 +438,25 @@ pub struct PodForgetOutput {
     pub notified: Vec<PodForgetNotice>,
 }
 
+// ── pod.cancel_offer ─────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PodCancelOfferArgs {
+    /// Joiner address whose outbound offer(s) should be cleared
+    /// (e.g. `10.10.10.28` or the value shown in the discovery row).
+    #[arg(long)]
+    pub addr: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PodCancelOfferOutput {
+    pub addr: String,
+    /// Rows removed from `pod_pending_offers`.
+    pub rows_removed: u32,
+}
+
 // ── pod.cert-status ──────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -742,6 +761,21 @@ async fn pod_forget(
     _ctx: &contract::ToolCtx,
 ) -> anyhow::Result<PodForgetOutput> {
     server_pod::forget(&args.peer_id).await
+}
+
+/// [MUTATES STATE] Clear stuck outbound pairing offer(s) for an address.
+/// Use when a previous +Add never got accepted/expired and is blocking new
+/// invites. Idempotent — returns rows removed (0 if nothing matched).
+#[orca_tool(domain = "pod", verb = "cancel_offer", role = "admin")]
+async fn pod_cancel_offer(
+    args: PodCancelOfferArgs,
+    _ctx: &contract::ToolCtx,
+) -> anyhow::Result<PodCancelOfferOutput> {
+    let rows_removed = server_pod::cancel_offer(&args.addr)?;
+    Ok(PodCancelOfferOutput {
+        addr: args.addr,
+        rows_removed,
+    })
 }
 
 /// Force a one-shot replication tick on this host (or — with `peer_id` set —
