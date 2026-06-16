@@ -22,8 +22,13 @@
   // Enumerate tool functions from the generated SDK module. Source of truth
   // is whatever the live OpenAPI spec produced — every operationId becomes a
   // callable name here automatically.
+  // allToolNames() is async — it triggers the lazy SDK chunk import on
+  // first call so the SDK stays off the first-paint critical path. The
+  // palette populates its tool list as soon as the chunk resolves.
   onMount(() => {
-    toolNames = allToolNames();
+    void allToolNames().then((names) => {
+      toolNames = names;
+    });
   });
 
   const navEntries = $derived<Entry[]>(

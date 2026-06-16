@@ -1,33 +1,118 @@
-// Generic tool dispatcher used by the command palette + any caller that
-// wants runtime tool-name lookup with a uniform toast/error pipeline.
+// Tool dispatch — designed so the bulk of the SDK can be tree-shaken away
+// AND every callsite is fully typed end-to-end (no `any`, no widening).
 //
-// The hey-api SDK already produces a typed function per OpenAPI operation —
-// when you know the tool at compile time, import it directly from
-// `$lib/client/sdk.gen` and call it as a normal function. This module exists
-// for the dynamic case (palette enumeration, generic dispatch).
+// Two paths:
+//
+// 1. **Static dispatch (preferred, critical-path).** Import the specific
+//    `sdk.gen` function by NAME, invoke it directly with its typed
+//    options, and hand the resulting promise to `unwrap()`. Only that one
+//    SDK function and its types are reachable from this file's chunk, so
+//    Rolldown drops the other ~134 SDK functions on build.
+//
+//    ```ts
+//    import { configGet } from '$lib/client/sdk.gen';
+//    import { unwrap, peerHeader } from '$lib/stores/runTool';
+//    const r = await unwrap(configGet({ body: { noun, name } }));
+//    // peer-dispatch:
+//    const probe = await unwrap(systemUpdate({ body: {}, headers: peerHeader(peerId) }));
+//    ```
+//
+// 2. **Dynamic dispatch (CommandPalette, generic enumeration).** Call
+//    `callTool(name, args, opts)` — it lazy-imports `sdk.gen` on first use
+//    (chunked separately by Vite/Rolldown), so the SDK cost stays OFF the
+//    first-paint critical path. Typing degrades to `unknown` because the
+//    tool name isn't known until runtime — narrow at the callsite.
+//
+// HARD RULE: do NOT `import * as sdk from '$lib/client/sdk.gen'` from this
+// file or any caller of `unwrap`. That re-introduces the barrel and
+// defeats tree-shaking. The dynamic `import()` below is the ONLY allowed
+// barrel — and it's behind a Promise so the SDK doesn't pin to the
+// initial chunk.
 
-import * as sdk from '$lib/client/sdk.gen';
 import { notifications } from '$lib/stores/notifications';
 
-/**
- * Every exported async function in the generated SDK is callable here.
- * Names are operationIds: `health`, `podList`, `hostInfo`, etc.
- */
-export type ToolName = keyof typeof sdk;
-
-/**
- * Hey-api functions accept an options object; we pass `body` for POSTs and
- * an empty object for GETs. The dispatcher hides the difference.
- */
-type AnyToolFn = (opts?: { body?: unknown; headers?: Record<string, string> }) => Promise<{
-  data?: unknown;
+/** Hey-api's uniform result envelope. */
+export type ToolResult<T> = {
+  data?: T;
   error?: unknown;
   response?: Response;
-}>;
+};
 
 /**
- * Invoke a tool by operationId. Pushes an error toast on failure unless
- * `silent`. Returns the unwrapped `data` field, or null if the call errored.
+ * Unwrap a hey-api result envelope, throwing on error or non-2xx. The
+ * caller supplies a fully-typed promise (the SDK fn's return), so `T` is
+ * inferred precisely — no `any`, no cast at the callsite.
+ */
+export async function unwrap<T>(promise: Promise<ToolResult<T>>): Promise<T> {
+  const res = await promise;
+  if (res.error || !res.response?.ok) {
+    const msg =
+      (res.error as { error?: string } | undefined)?.error ??
+      `tool failed (${res.response?.status ?? 'no response'})`;
+    throw new Error(msg);
+  }
+  return res.data as T;
+}
+
+/**
+ * Build the `X-Orca-Peer` header for mesh-proxied calls. Returns
+ * `undefined` for the synthetic "local" peer so loopback calls don't
+ * bounce through the mesh. Spread into `headers` at the callsite.
+ */
+export function peerHeader(peer?: string | null): { 'X-Orca-Peer': string } | undefined {
+  return peer && peer !== 'local' ? { 'X-Orca-Peer': peer } : undefined;
+}
+
+// ── Dynamic-dispatch path ───────────────────────────────────────────────
+//
+// Lazy SDK loader — first call triggers the chunked import; subsequent
+// calls reuse the resolved module. Off the first-paint critical path.
+
+type DynamicFn = (opts?: {
+  body?: unknown;
+  headers?: Record<string, string>;
+}) => Promise<ToolResult<unknown>>;
+
+type SdkModule = Record<string, DynamicFn>;
+let sdkPromise: Promise<SdkModule> | null = null;
+function loadSdk(): Promise<SdkModule> {
+  if (!sdkPromise) {
+    sdkPromise = import('$lib/client/sdk.gen') as unknown as Promise<SdkModule>;
+  }
+  return sdkPromise;
+}
+
+export type ToolName = string;
+export type DispatchOpts = { peer?: string | null };
+
+/**
+ * Dynamic-dispatch helper for callers that don't know the tool name at
+ * compile time (palette, generic enumeration). Lazy-imports the SDK on
+ * first call. Prefer the static `unwrap(sdkFn(opts))` path everywhere
+ * else — only that path is tree-shakeable.
+ */
+export async function callTool<T = unknown>(
+  name: ToolName,
+  args: Record<string, unknown> = {},
+  opts: DispatchOpts = {},
+): Promise<T> {
+  const sdk = await loadSdk();
+  const fn = sdk[name];
+  if (typeof fn !== 'function') {
+    throw new Error(`unknown tool: ${name}`);
+  }
+  // hey-api emits one of `.get(/.head(/.post(/.put(/.delete(/.patch(` in
+  // the generated function body. GETs reject any body; POSTs need one.
+  const wantsBody = !/\.(get|head)\(/.test(fn.toString());
+  const headers = peerHeader(opts.peer);
+  const callOpts: { body?: unknown; headers?: Record<string, string> } = {};
+  if (wantsBody) callOpts.body = args;
+  if (headers) callOpts.headers = headers;
+  return (await unwrap(fn(callOpts) as Promise<ToolResult<T>>)) as T;
+}
+
+/**
+ * Toast-on-error variant for fire-and-forget UI calls (palette, etc).
  */
 export async function runTool(
   name: ToolName,
@@ -39,56 +124,15 @@ export async function runTool(
     if (opts.successMessage) notifications.success(opts.successMessage);
     return result;
   } catch (e) {
-    if (!opts.silent) notifications.error(formatError(name, e));
+    if (!opts.silent) notifications.error(`${name}: ${e instanceof Error ? e.message : String(e)}`);
     return null;
   }
 }
 
-/**
- * Strict variant — throws on failure. Use when the caller wants to manage
- * error UX itself.
- */
-export async function callTool<T = unknown>(
-  name: ToolName,
-  args: Record<string, unknown> = {},
-  opts: { peer?: string | null } = {},
-): Promise<T> {
-  const fn = (sdk as unknown as Record<string, AnyToolFn>)[name as string];
-  if (typeof fn !== 'function') {
-    throw new Error(`unknown tool: ${String(name)}`);
-  }
-  // hey-api emits one of `.get(/`.post(`/`.put(`/`.delete(`/`.patch(` in
-  // the body of every generated SDK function. GETs reject any body (fetch
-  // refuses), POSTs need a body so the request gets a Content-Type and
-  // doesn't 415. Detect by inspecting the compiled source.
-  const wantsBody = !/\.(get|head)\(/.test(fn.toString());
-  // `X-Orca-Peer` is the universal peer-dispatch trigger on the server:
-  // the dispatcher proxies the call to the named peer over the pod mesh
-  // before invoking the tool. Skip for the synthetic "local" peer_id so
-  // we don't bounce loopback calls through the mesh.
-  const headers: Record<string, string> | undefined =
-    opts.peer && opts.peer !== 'local' ? { 'X-Orca-Peer': opts.peer } : undefined;
-  const callOpts: { body?: unknown; headers?: Record<string, string> } = {};
-  if (wantsBody) callOpts.body = args;
-  if (headers) callOpts.headers = headers;
-  const res = await fn(Object.keys(callOpts).length ? callOpts : undefined);
-  if (res.error || !res.response?.ok) {
-    const msg =
-      (res.error as { error?: string } | undefined)?.error ??
-      `${String(name)} failed (${res.response?.status ?? 'no response'})`;
-    throw new Error(msg);
-  }
-  return res.data as T;
-}
-
-/** Names of every callable tool — used by the command palette. */
-export function allToolNames(): ToolName[] {
-  return (Object.keys(sdk) as ToolName[])
-    .filter(k => typeof (sdk as Record<string, unknown>)[k as string] === 'function')
+/** Names of every callable tool — used by the command palette. Async + lazy. */
+export async function allToolNames(): Promise<ToolName[]> {
+  const sdk = await loadSdk();
+  return Object.keys(sdk)
+    .filter(k => typeof sdk[k] === 'function')
     .sort();
-}
-
-function formatError(toolName: string, err: unknown): string {
-  const msg = err instanceof Error ? err.message : String(err);
-  return `${toolName}: ${msg}`;
 }

@@ -13,12 +13,17 @@
 // within one mesh RTT per peer — and each row updates the moment its
 // own probe returns, independently of the slowest peer.
 //
-// HARD RULE: every value returned from load() is an SDK-generated type
-// from `$lib/client/types.gen` — no hand-rolled shapes here.
+// Named-import + `unwrap` (not `callTool`) — only the two functions
+// imported here are pulled into the page's chunk. See [[runTool.ts]] header.
 
 import type { PageLoad } from './$types';
-import { callTool } from '$lib/stores/runTool';
-import type { SystemDetailResponse, ConfigGetResponse } from '$lib/client/types.gen';
+import { systemDetail, configGet } from '$lib/client/sdk.gen';
+import { unwrap } from '$lib/stores/runTool';
+import type {
+  SystemDetailResponse,
+  ConfigGetResponse,
+  SystemUpdateResponse,
+} from '$lib/client/types.gen';
 
 export const load: PageLoad = async ({ parent, fetch }) => {
   await parent();
@@ -27,11 +32,12 @@ export const load: PageLoad = async ({ parent, fetch }) => {
     .then(r => r.ok)
     .catch(() => false);
 
-  const localDetailPromise = callTool<SystemDetailResponse>('systemDetail', {}).catch(() => null);
-  const retentionPromise = callTool<ConfigGetResponse>('configGet', {
-    noun: 'host_status',
-    name: 'retention_days',
-  }).catch(() => null);
+  const localDetailPromise: Promise<SystemDetailResponse | null> = unwrap(
+    systemDetail({ body: {} }),
+  ).catch(() => null);
+  const retentionPromise: Promise<ConfigGetResponse | null> = unwrap(
+    configGet({ body: { noun: 'host_status', name: 'retention_days' } }),
+  ).catch(() => null);
 
   const [localHealthy, localDetail, retention] = await Promise.all([
     localHealthPromise,
@@ -39,14 +45,16 @@ export const load: PageLoad = async ({ parent, fetch }) => {
     retentionPromise,
   ]);
 
+  // Empty probes seed — onMount fires probeAllInstances() immediately,
+  // and each peer row updates as its probe returns. Until then the page
+  // renders with version/channel/pinned-to fields from PodPeerDto.
+  const probes: Record<string, SystemUpdateResponse> = {};
+
   return {
     localHealthy,
     localDetail,
     retention,
-    // Empty seed — onMount fires probeAllInstances() immediately, and
-    // each peer row updates as its probe returns. Until then the page
-    // renders with version/channel/pinned-to fields from PodPeerDto.
-    probes: {},
+    probes,
   };
 };
 
