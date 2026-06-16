@@ -23,6 +23,7 @@ pub mod host_addressing;
 pub mod host_capabilities;
 pub mod host_status;
 pub mod llm;
+pub mod maintenance;
 pub mod mcp_servers;
 pub mod models;
 // `ntfy` endpoint registry now lives in the ntfy plugin via
@@ -165,6 +166,7 @@ fn apply_tuning_pragmas(conn: &Connection) -> Result<()> {
         PRAGMA temp_store        = MEMORY;
         PRAGMA busy_timeout      = 5000;
         PRAGMA wal_autocheckpoint = 1000;
+        PRAGMA auto_vacuum       = INCREMENTAL;
         ",
     )
     .context("failed to apply tuning pragmas")?;

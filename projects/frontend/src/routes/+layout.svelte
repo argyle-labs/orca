@@ -28,8 +28,23 @@
   import Notification from '$lib/components/Notification.svelte';
   import ThemeMenu from '$lib/components/ThemeMenu.svelte';
   import Sidebar from '$lib/components/Sidebar.svelte';
-  import CommandPalette from '$lib/components/CommandPalette.svelte';
   import UserMenu from '$lib/components/UserMenu.svelte';
+
+  // CommandPalette is lazy-loaded — it's hidden until ⌘K, and it pulls in
+  // the dynamic SDK chunk via runTool.ts. Deferring its import keeps both
+  // the palette component AND the SDK off the first-paint critical path.
+  // Once requested (first open), the resolved module is cached and the
+  // component stays mounted for the rest of the session.
+  type CommandPaletteModule = typeof import('$lib/components/CommandPalette.svelte');
+  let CommandPalette = $state<CommandPaletteModule['default'] | null>(null);
+  let paletteRequested = $state(false);
+  $effect(() => {
+    if (paletteRequested && !CommandPalette) {
+      void import('$lib/components/CommandPalette.svelte').then((m) => {
+        CommandPalette = m.default;
+      });
+    }
+  });
 
   let { children } = $props();
 
@@ -88,11 +103,16 @@
     };
   });
 
+  function openPalette() {
+    paletteRequested = true;
+    toggleCommandPalette();
+  }
+
   function handleKeydown(e: KeyboardEvent) {
     const meta = e.metaKey || e.ctrlKey;
     if (meta && e.key === 'k') {
       e.preventDefault();
-      toggleCommandPalette();
+      openPalette();
     }
     if (meta && e.key === '\\') {
       e.preventDefault();
@@ -124,7 +144,7 @@
 
     <div class="topbar-right">
       {#if session.kind === 'signed-in'}
-        <button class="search-btn" onclick={toggleCommandPalette} title="Search & commands (⌘K)">
+        <button class="search-btn" onclick={openPalette} title="Search & commands (⌘K)">
           <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8">
             <circle cx="6.5" cy="6.5" r="4.5" />
             <line x1="10.5" y1="10.5" x2="14" y2="14" />
@@ -157,7 +177,10 @@
   </div>
 </div>
 
-<CommandPalette />
+{#if CommandPalette}
+  {@const Palette = CommandPalette}
+  <Palette />
+{/if}
 <Notification />
 
 <style>
