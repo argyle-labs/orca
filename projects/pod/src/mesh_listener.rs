@@ -237,6 +237,17 @@ impl HotReloadClientVerifier {
                 }
             }
         }
+        // Pre-pair: no mesh CA on disk yet → no trust anchors → rustls'
+        // `WebPkiClientVerifier::builder().build()` rejects empty roots.
+        // Use the no-client-auth verifier: bootstrap SNI is allowed
+        // (`POD_BOOTSTRAP_SAN` never presents a client cert by design),
+        // and `POD_SERVER_SAN` connections that DO present a cert are
+        // refused — which is correct, since this host hasn't joined a
+        // pod yet. `current()` swaps to a real verifier the moment
+        // `pod accept` writes the mesh CA into place.
+        if roots.is_empty() {
+            return Ok(WebPkiClientVerifier::no_client_auth());
+        }
         let v = WebPkiClientVerifier::builder(Arc::new(roots))
             .allow_unauthenticated()
             .build()

@@ -731,17 +731,22 @@ async fn spawn_pod_runtime(pki_dir: &std::path::Path) {
     info!("[pod] auto-offer scheduler armed");
 
     // Mesh TCP+mTLS accept loop on `db::ports::mesh_port()` (default 12002).
-    // Gated on the mesh server cert: non-pod-members have nothing to serve
-    // and can't build a TLS acceptor anyway. Without this spawn the pod
-    // scheduler dials a closed port every tick.
-    if utils::pki::mesh_server_cert_path(pki_dir).exists() {
-        match pod::mesh_listener::spawn(pki_dir).await {
-            Ok(handle) => {
-                info!("[pod] mesh listener up on :{}", db::ports::mesh_port());
-                std::mem::drop(handle);
-            }
-            Err(e) => tracing::warn!("[pod] mesh listener spawn failed: {e:#}"),
+    //
+    // Always spawn — the BOOTSTRAP SNI path
+    // (`utils::pki::POD_BOOTSTRAP_SAN`) is how unpaired hosts receive
+    // incoming offers and accept pairing. Gating on `mesh_server_cert`
+    // makes non-pod-members un-inviteable (mint can't dial 12002 →
+    // pairing can never start). `build_acceptor` materializes the
+    // bootstrap cert eagerly, and `HotReloadResolver` returns `None` for
+    // `POD_SERVER_SAN` until the mesh server cert lands on disk — so
+    // paired-peer handshakes are correctly refused on unpaired hosts
+    // without blocking the bootstrap path.
+    match pod::mesh_listener::spawn(pki_dir).await {
+        Ok(handle) => {
+            info!("[pod] mesh listener up on :{}", db::ports::mesh_port());
+            std::mem::drop(handle);
         }
+        Err(e) => tracing::warn!("[pod] mesh listener spawn failed: {e:#}"),
     }
 
     std::mem::drop(pod::cert_rotation::spawn());

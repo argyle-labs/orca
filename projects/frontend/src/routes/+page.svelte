@@ -211,17 +211,18 @@
     }
   }
 
-  async function refreshInboundOffers() {
-    try {
-      type PodMember = { state: 'joined' | 'handshaking' | 'discovered' } & Record<string, unknown>;
-      const list = await callTool<{ members: PodMember[] }>('podList', {});
-      const rows = (list?.members ?? [])
-        .filter((m): m is PodMember & InboundOffer => m.state === 'handshaking')
-        .map((m) => m as unknown as InboundOffer);
-      inboundOffers = rows.filter((r) => r.expires_at > Math.floor(Date.now() / 1000));
-    } catch {
-      // best-effort; this banner is informational
-    }
+  // Inbound offers are derived from the SAME `pod.list` payload that
+  // `refreshPodPeers` already fetches — never make a second call for them.
+  // Pass `members` from the existing fetch; if a caller has no list handy
+  // (e.g. initial mount before the first refresh tick), it can pass null
+  // and we skip — the next refreshPodPeers will populate.
+  type PodMemberLite = { state: 'joined' | 'handshaking' | 'discovered' } & Record<string, unknown>;
+  function applyInboundOffersFrom(members: PodMemberLite[] | null) {
+    if (!members) return;
+    const rows = members
+      .filter((m): m is PodMemberLite & InboundOffer => m.state === 'handshaking')
+      .map((m) => m as unknown as InboundOffer);
+    inboundOffers = rows.filter((r) => r.expires_at > Math.floor(Date.now() / 1000));
   }
 
   function openPair(mode: 'invite' | 'accept', code = '') {
@@ -258,10 +259,17 @@
   let secureToggling = $state(false);
   let popoverOpen = $state<Record<string, boolean>>({ stable: false, rc: false, dev: false });
 
-  // 1-second live poll; DB writes happen every 10 s (host_status_writer)
-  const POLL_MS = 1000;
+  // List-view poll cadence. 5 s, NOT 1 s — the prior 1 s tick was firing
+  // `refreshLocal` + `refreshPodPeers` + `refreshInboundOffers` every tick,
+  // and the latter two BOTH called `pod.list`, so the daemon saw 4 calls/sec
+  // sustained per open systems list (~240 calls/min, ~24 % daemon CPU on
+  // mint 2026-06-15). Sub-second realtime is reserved for the FOCUSED
+  // system-detail page (see [[project-realtime-system-telemetry-fast-ticks]])
+  // — the list view trades a few seconds of staleness for not burning the
+  // daemon. The eventual SSE/WS push design will replace this poll entirely.
+  const POLL_MS = 5000;
   // Per-peer `system.update {}` fan-out cadence. One mesh call per peer
-  // per tick — heavier than the 1 s pod.list pull, so we space it out.
+  // per tick — heavier than the pod.list pull, so we space it out.
   // 60 s matches the daemon-side periodic probe and is enough for "new
   // version landed on GitHub" detection without hammering the mesh.
   const PROBE_MS = 60000;
@@ -474,6 +482,9 @@
       type PodMember = { state: 'joined' | 'handshaking' | 'discovered' } & Partial<PodPeer>;
       const listResult = await callTool<{ members: PodMember[] }>('podList', {});
       const members = listResult?.members ?? [];
+      // Inbound offers piggy-back on this single pod.list — derived from
+      // the same payload so we don't fire a second identical call.
+      applyInboundOffersFrom(members as unknown as PodMemberLite[]);
       const joined = members
         .filter((m) => m.state === 'joined')
         .map((m) => m as unknown as PodPeer);
@@ -983,8 +994,9 @@
     pollHandle = setInterval(() => {
       const loc = instances.find((i) => i.role === 'local');
       if (loc) refreshLocal(loc);
+      // refreshPodPeers fans out into applyInboundOffersFrom from the same
+      // pod.list payload — no separate refreshInboundOffers tick needed.
       refreshPodPeers();
-      refreshInboundOffers();
     }, POLL_MS);
     // Per-peer system.update {} fan-out — slower cadence than pod.list
     // polling because every tick crosses the mesh to every peer. Keeps
@@ -1390,8 +1402,9 @@
   initialCode={pairModalInitialCode}
   onclose={() => (pairModalOpen = false)}
   onpaired={() => {
+    // refreshPodPeers cascades into applyInboundOffersFrom — single call,
+    // no duplicate pod.list.
     refreshPodPeers();
-    refreshInboundOffers();
   }}
 />
 
