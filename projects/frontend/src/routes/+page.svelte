@@ -990,6 +990,10 @@
     // polling because every tick crosses the mesh to every peer. Keeps
     // updateAvailable / current_version / channel / pinnedTo fresh on every
     // card (and on any open drawer) without the operator needing to click.
+    // Fire the first probe pass IMMEDIATELY — load() no longer awaits
+    // the mesh fan-out, so this is what actually populates version /
+    // channel / update-available on each row after first paint.
+    void probeAllInstances();
     probeHandle = setInterval(() => {
       void probeAllInstances();
     }, PROBE_MS);
