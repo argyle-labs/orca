@@ -9,6 +9,7 @@
 #![allow(clippy::disallowed_types)]
 
 pub mod containers_adapter;
+pub mod responses;
 pub mod tools;
 pub mod topology;
 
@@ -62,6 +63,8 @@ pub enum ProxmoxError {
     BadAction(String),
     #[error("unsupported guest kind '{0}' (expected qemu | lxc)")]
     BadGuestKind(String),
+    #[error("malformed proxmox response: {0}")]
+    Malformed(String),
 }
 
 /// Allowed lifecycle actions on VMs and containers. Constraining the set up
@@ -406,6 +409,59 @@ impl Client {
 
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.cfg.base_url.trim_end_matches('/'), path)
+    }
+
+    /// `GET /api2/json/nodes/{node}/journal` — pull the systemd journal
+    /// for one node, oldest line first.
+    ///
+    /// Optional filters mirror the upstream API: `since` / `until` are
+    /// unix-timestamp bounds; `lastentries` caps the line count from the
+    /// tail; `service` narrows to one unit. None of them are required —
+    /// `Client::journal(&node, JournalQuery::default())` pulls everything
+    /// in the default window.
+    ///
+    /// Closes [[project-proxmox-full-surface-vision]] phase B and the
+    /// API-first half of [[feedback-api-first-liveness-exception]]: the
+    /// breaker no longer needs to shell `journalctl` once the LXC
+    /// adapter migrates to this endpoint (phase C).
+    pub async fn journal(
+        &self,
+        node: &str,
+        q: responses::JournalQuery,
+    ) -> Result<responses::JournalResponse, ProxmoxError> {
+        if node.is_empty() {
+            return Err(ProxmoxError::Missing("node"));
+        }
+        let mut path = format!("/api2/json/nodes/{}/journal", urlencoding::encode(node));
+        let mut params: Vec<(String, String)> = Vec::new();
+        if let Some(since) = q.since {
+            params.push(("since".into(), since.to_string()));
+        }
+        if let Some(until) = q.until {
+            params.push(("until".into(), until.to_string()));
+        }
+        if let Some(n) = q.lastentries {
+            params.push(("lastentries".into(), n.to_string()));
+        }
+        if let Some(svc) = &q.service {
+            params.push(("service".into(), svc.clone()));
+        }
+        if !params.is_empty() {
+            let qs = params
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, urlencoding::encode(v)))
+                .collect::<Vec<_>>()
+                .join("&");
+            path.push('?');
+            path.push_str(&qs);
+        }
+        let raw = self.get(&path).await?;
+        // Round-trip-through-string is intentional: the workspace bans
+        // `from_value` outside the proxmox crate's own json plumbing.
+        let s = serde_json::to_string(&raw)
+            .map_err(|e| ProxmoxError::Malformed(format!("journal: re-encode: {e}")))?;
+        serde_json::from_str::<responses::JournalResponse>(&s)
+            .map_err(|e| ProxmoxError::Malformed(format!("journal: typed parse: {e}")))
     }
 }
 
