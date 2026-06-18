@@ -160,3 +160,48 @@ async fn proxmox_action(args: ProxmoxActionArgs, _ctx: &ToolCtx) -> Result<Proxm
     };
     Ok(result.into())
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// proxmox.host_logs — view systemd journal lines for one Proxmox node
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct ProxmoxHostLogsArgs {
+    #[arg(long)]
+    pub endpoint: String,
+    /// Proxmox node hostname (cluster member, e.g. the `node` field from
+    /// `proxmox.nodes`).
+    #[arg(long)]
+    pub node: String,
+    /// Cap on lines returned from the tail. Recommended for interactive
+    /// callers — Proxmox can return a lot.
+    #[arg(long)]
+    pub lastentries: Option<u32>,
+    /// Unix timestamp lower bound.
+    #[arg(long)]
+    pub since: Option<u64>,
+    /// Unix timestamp upper bound.
+    #[arg(long)]
+    pub until: Option<u64>,
+    /// Filter to one systemd unit / service name.
+    #[arg(long)]
+    pub service: Option<String>,
+}
+
+/// Pull the systemd journal for one Proxmox node. Mirrors `journalctl`
+/// over the HTTPS API — no SSH, no on-host shell. Used by operators
+/// today and by the LXC breaker once the API adapter takes over.
+#[orca_tool(domain = "proxmox", verb = "host_logs")]
+async fn proxmox_host_logs(
+    args: ProxmoxHostLogsArgs,
+    _ctx: &ToolCtx,
+) -> Result<crate::responses::JournalResponse> {
+    let client = make_client(&args.endpoint)?;
+    let q = crate::responses::JournalQuery {
+        since: args.since,
+        until: args.until,
+        lastentries: args.lastentries,
+        service: args.service,
+    };
+    Ok(client.journal(&args.node, q).await?)
+}
