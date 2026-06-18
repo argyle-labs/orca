@@ -568,7 +568,12 @@ pub fn arm(req: ArmRequest<'_>) -> Result<BreakerDecision, BreakerError> {
             record.held_since = Some(req.now);
             // notified_at left None; the caller stamps it after the
             // first successful notification dispatch.
-            BreakerDecision::Hold { reason }
+            // Fresh trip — caller stamps `notified_at` via `mark_notified`
+            // after the first successful dispatch, so it's `None` here.
+            BreakerDecision::Hold {
+                reason,
+                notified_at: None,
+            }
         }
         None => {
             // No trip. Three things may need to happen, on different

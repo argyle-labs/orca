@@ -1037,27 +1037,18 @@ async fn arm_and_dispatch_hold(
         }
     };
 
-    let BreakerDecision::Hold { reason } = decision else {
+    let BreakerDecision::Hold {
+        reason,
+        notified_at,
+    } = decision
+    else {
         return None;
     };
 
-    // Suppress repeat notifications for the same hold. `notified_at` is
-    // the sentinel: set by `mark_notified` after at least one backend
-    // successfully delivered the alert, cleared by `unhold`.
-    let already_notified =
-        match breaker_store.load(&container.host, container.runtime, &container.id) {
-            Ok(Some(r)) => r.notified_at.is_some(),
-            Ok(None) => false,
-            Err(e) => {
-                tracing::warn!(
-                    container = %container.name,
-                    host = %container.host,
-                    error = %e,
-                    "breaker store load failed; assuming not yet notified"
-                );
-                false
-            }
-        };
+    // Suppress repeat notifications for the same hold. `notified_at` rides
+    // back on the decision so we don't re-`load()` the record we just
+    // wrote — set by `mark_notified` on a prior tick, cleared by `unhold`.
+    let already_notified = notified_at.is_some();
     if !already_notified {
         // The observe-only call site passes `initiating_start=false` (the
         // container is currently running; the hold takes effect on the
