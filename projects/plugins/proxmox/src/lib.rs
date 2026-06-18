@@ -15,6 +15,7 @@
 //! Everything else routes through generated methods directly at the
 //! call site.
 
+pub mod cluster;
 pub mod containers_adapter;
 pub mod responses;
 pub mod tools;

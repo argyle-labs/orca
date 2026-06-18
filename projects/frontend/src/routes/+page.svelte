@@ -179,6 +179,94 @@
   let joiningFp = $state<string | null>(null);
   let forgettingId = $state<string | null>(null);
 
+  // ── Proxmox cluster grouping ──────────────────────────────────────────────
+  // Phase E of the Proxmox vision: peers that belong to a Proxmox cluster
+  // render under a cluster header in the systems tree. Sourced from the
+  // backend tool `proxmox.cluster_list` which walks every enabled Proxmox
+  // endpoint and reports its `/cluster/status` envelope. Matching is by IP
+  // first (exact, taken from `ClusterNode.ip` against any of a peer's
+  // `addresses[]` values), then falls back to case-insensitive hostname
+  // against `ClusterNode.name`. Standalone Proxmox hosts (no cluster
+  // configured) report `name: null` and are NOT grouped.
+  type PxClusterNode = {
+    name: string;
+    ip?: string | null;
+    online?: boolean | null;
+    node_id?: number | null;
+    local?: boolean | null;
+  };
+  type PxClusterStatus = {
+    name?: string | null;
+    quorate?: boolean | null;
+    nodes: PxClusterNode[];
+  };
+  type PxClusterListEntry = { endpoint: string; status: PxClusterStatus };
+  type ClusterSummary = {
+    name: string;
+    quorate: boolean | null;
+    online: number;
+    total: number;
+  };
+  // `null` cluster = un-grouped bucket.
+  let clusterByPeer = $state<Map<string, string | null>>(new Map());
+  let clusterSummaries = $state<Map<string, ClusterSummary>>(new Map());
+
+  async function refreshProxmoxClusters() {
+    try {
+      const list = await callTool<PxClusterListEntry[]>('proxmoxClusterList', {});
+      // Build IP and hostname indexes: ip|host → cluster name (only when
+      // the endpoint actually reports a cluster — standalone hosts are
+      // ignored so they fall through to the un-grouped bucket).
+      const byIp = new Map<string, string>();
+      const byHost = new Map<string, string>();
+      const summaries = new Map<string, ClusterSummary>();
+      for (const entry of list ?? []) {
+        const cname = entry.status.name;
+        if (!cname) continue;
+        const total = entry.status.nodes.length;
+        const online = entry.status.nodes.filter((n) => n.online === true).length;
+        // Multiple endpoints can report the same cluster; prefer the
+        // healthier reading (more online nodes seen).
+        const prev = summaries.get(cname);
+        if (!prev || online > prev.online) {
+          summaries.set(cname, {
+            name: cname,
+            quorate: entry.status.quorate ?? null,
+            online,
+            total,
+          });
+        }
+        for (const n of entry.status.nodes) {
+          if (n.ip) byIp.set(n.ip, cname);
+          if (n.name) byHost.set(n.name.toLowerCase(), cname);
+        }
+      }
+      // Resolve each peer.
+      const next = new Map<string, string | null>();
+      for (const inst of instances) {
+        let matched: string | null = null;
+        for (const a of inst.addresses ?? []) {
+          const hit = byIp.get(a.value);
+          if (hit) { matched = hit; break; }
+        }
+        if (!matched && inst.sys?.primary_ipv4) {
+          matched = byIp.get(inst.sys.primary_ipv4) ?? null;
+        }
+        if (!matched) {
+          const host = (inst.sys?.hostname ?? inst.label ?? '').toLowerCase();
+          if (host) matched = byHost.get(host) ?? null;
+        }
+        next.set(inst.peerId, matched);
+      }
+      clusterByPeer = next;
+      clusterSummaries = summaries;
+    } catch (e) {
+      // No registered endpoints / daemon failure — leave existing
+      // groupings in place. Log only; no toast (this poll is silent).
+      console.warn('proxmox.cluster_list failed:', e);
+    }
+  }
+
   async function joinCandidate(c: Candidate) {
     if (joiningFp) return;
     joiningFp = c.pubkey_fp;
@@ -232,6 +320,7 @@
   }
   let pollHandle: ReturnType<typeof setInterval> | null = null;
   let probeHandle: ReturnType<typeof setInterval> | null = null;
+  let clusterHandle: ReturnType<typeof setInterval> | null = null;
 
   // Drawer update controls — reset only when the SELECTED INSTANCE changes,
   // not on every poll tick that updates instance data.
@@ -386,6 +475,70 @@
     }
     for (const inst of instances)
       if (!visited.has(inst.peerId)) out.push({ inst, depth: 0, prefix: '', hasChildren: false });
+    return out;
+  });
+
+  // Group displayInstances by Proxmox cluster for the tree view. Header
+  // rows are synthetic — they carry no `inst` and short-circuit the tree
+  // row rendering below. In `table` mode we skip grouping (the table is
+  // a flat list by design). Ungrouped peers fall under a sentinel
+  // "Ungrouped" header only when at least one cluster IS present —
+  // otherwise we render the existing flat list unchanged (no point in a
+  // single-section header when there are no clusters to contrast it
+  // against).
+  type DisplayRow =
+    | { kind: 'header'; cluster: string | null; summary: ClusterSummary | null; key: string }
+    | { kind: 'inst'; inst: Instance; depth: number; prefix: string; hasChildren: boolean; key: string };
+  let displayRows = $derived.by<DisplayRow[]>(() => {
+    if (view === 'table' || clusterSummaries.size === 0) {
+      return displayInstances.map((r) => ({
+        kind: 'inst' as const,
+        inst: r.inst,
+        depth: r.depth,
+        prefix: r.prefix,
+        hasChildren: r.hasChildren,
+        key: `i:${r.inst.id}`,
+      }));
+    }
+    // Bucket by cluster, preserving the existing ordering within each
+    // bucket. Walk a sub-tree by tracking depth — once we see a root
+    // (depth 0), the cluster of that root governs all subsequent
+    // children until the next root.
+    const buckets = new Map<string | null, typeof displayInstances>();
+    let currentCluster: string | null = null;
+    for (const row of displayInstances) {
+      if (row.depth === 0) {
+        currentCluster = clusterByPeer.get(row.inst.peerId) ?? null;
+      }
+      const arr = buckets.get(currentCluster) ?? [];
+      arr.push(row);
+      buckets.set(currentCluster, arr);
+    }
+    // Render order: named clusters alphabetically, then Ungrouped last.
+    const named = [...buckets.keys()]
+      .filter((k): k is string => k !== null)
+      .sort((a, b) => a.localeCompare(b));
+    const ordered: (string | null)[] = [...named, ...(buckets.has(null) ? [null] : [])];
+    const out: DisplayRow[] = [];
+    for (const cname of ordered) {
+      const summary = cname ? (clusterSummaries.get(cname) ?? null) : null;
+      out.push({
+        kind: 'header',
+        cluster: cname,
+        summary,
+        key: `h:${cname ?? '__ungrouped__'}`,
+      });
+      for (const row of buckets.get(cname) ?? []) {
+        out.push({
+          kind: 'inst',
+          inst: row.inst,
+          depth: row.depth,
+          prefix: row.prefix,
+          hasChildren: row.hasChildren,
+          key: `i:${row.inst.id}`,
+        });
+      }
+    }
     return out;
   });
 
@@ -1009,11 +1162,20 @@
     probeHandle = setInterval(() => {
       void probeAllInstances();
     }, PROBE_MS);
+    // Proxmox cluster grouping for the systems tree. Fire once at mount,
+    // then piggy-back on the slow `PROBE_MS` cadence — cluster membership
+    // changes (node join/leave) are rare and the `cluster.list` walk hits
+    // every endpoint, so a 5s tick would be wasteful.
+    void refreshProxmoxClusters();
+    clusterHandle = setInterval(() => {
+      void refreshProxmoxClusters();
+    }, PROBE_MS);
   });
 
   onDestroy(() => {
     if (pollHandle) clearInterval(pollHandle);
     if (probeHandle) clearInterval(probeHandle);
+    if (clusterHandle) clearInterval(clusterHandle);
   });
 
   // Fan `system.update {}` out to every instance (local + every paired
@@ -1205,7 +1367,23 @@
   </div>
 
   <div class="instances" class:tree={view === 'tree'}>
-    {#each displayInstances as { inst, depth, prefix, hasChildren } (inst.id)}
+    {#each displayRows as row (row.key)}
+      {#if row.kind === 'header'}
+        <div class="cluster-header" aria-label={row.cluster ? `Proxmox cluster ${row.cluster}` : 'Ungrouped systems'}>
+          {#if row.cluster}
+            <span class="cluster-label">Cluster: {row.cluster}</span>
+            {#if row.summary}
+              <span class="cluster-meta">({row.summary.online}/{row.summary.total} nodes{row.summary.quorate === false ? ' · not quorate' : ''})</span>
+            {/if}
+          {:else}
+            <span class="cluster-label">Ungrouped</span>
+          {/if}
+        </div>
+      {:else}
+      {@const inst = row.inst}
+      {@const depth = row.depth}
+      {@const prefix = row.prefix}
+      {@const hasChildren = row.hasChildren}
       {#if view === 'tree'}
         <div
           class="tree-row"
@@ -1338,6 +1516,7 @@
           <span class="details-hint">Details →</span>
         </div>
       </div>
+      {/if}
       {/if}
     {/each}
   </div>
@@ -1659,6 +1838,30 @@
 </Drawer>
 
 <style>
+  .cluster-header {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    margin-top: var(--space-3);
+    border-bottom: 1px solid var(--color-border, rgba(255,255,255,0.08));
+    color: var(--color-text-muted);
+    font-size: var(--text-sm, 0.875rem);
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+  .cluster-header:first-child {
+    margin-top: 0;
+  }
+  .cluster-label {
+    font-weight: 600;
+    color: var(--color-text);
+  }
+  .cluster-meta {
+    color: var(--color-text-muted);
+    font-size: var(--text-xs, 0.75rem);
+  }
+
   .page {
     max-width: var(--content-max);
     margin: 0 auto;

@@ -337,3 +337,124 @@ async fn proxmox_host_logs(
     };
     Ok(crate::fetch_journal(&client, &args.node, q).await?)
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// proxmox.cluster_status / cluster_list — cluster envelope + node membership
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ProxmoxClusterNode {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub online: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ProxmoxClusterStatusOutput {
+    /// Cluster name. `null` when the endpoint is a standalone host
+    /// without corosync clustering configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quorate: Option<bool>,
+    pub nodes: Vec<ProxmoxClusterNode>,
+}
+
+impl From<crate::cluster::ClusterStatus> for ProxmoxClusterStatusOutput {
+    fn from(s: crate::cluster::ClusterStatus) -> Self {
+        Self {
+            name: s.name,
+            quorate: s.quorate,
+            nodes: s
+                .nodes
+                .into_iter()
+                .map(|n| ProxmoxClusterNode {
+                    name: n.name,
+                    ip: n.ip,
+                    online: n.online,
+                    node_id: n.node_id,
+                    local: n.local,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct ProxmoxClusterStatusArgs {
+    #[arg(long)]
+    pub endpoint: String,
+}
+
+/// Report cluster name, quorum, and node membership for one registered
+/// Proxmox endpoint. Returns `name: null` for standalone hosts.
+#[orca_tool(domain = "proxmox", verb = "cluster_status")]
+async fn proxmox_cluster_status(
+    args: ProxmoxClusterStatusArgs,
+    _ctx: &ToolCtx,
+) -> Result<ProxmoxClusterStatusOutput> {
+    let client = make_client(&args.endpoint)?;
+    let status = crate::cluster::fetch_cluster_status(&client).await?;
+    Ok(status.into())
+}
+
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct ProxmoxClusterListArgs {}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ProxmoxClusterListEntry {
+    pub endpoint: String,
+    pub status: ProxmoxClusterStatusOutput,
+}
+
+/// Walk every enabled Proxmox endpoint and return its cluster status.
+/// Endpoints that fail to fetch are skipped with a `warn!` log, mirroring
+/// the resilience pattern used by `topology::collect_claims` — a single
+/// flaky endpoint must not blank the fleet view.
+#[orca_tool(domain = "proxmox", verb = "cluster_list")]
+async fn proxmox_cluster_list(
+    _args: ProxmoxClusterListArgs,
+    _ctx: &ToolCtx,
+) -> Result<Vec<ProxmoxClusterListEntry>> {
+    let conn = runtime::open_db()?;
+    let endpoints = endpoint_db::list(&conn)?;
+    drop(conn);
+
+    let mut out = Vec::new();
+    for ep in endpoints.into_iter().filter(|e| e.enabled) {
+        let name = ep.name.clone();
+        let cfg =
+            crate::Config::new(ep.base_url, ep.token_id, ep.token_secret).insecure(ep.insecure);
+        let client = match cfg.build_generated_client() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    endpoint = %name,
+                    error = %e,
+                    "proxmox.cluster_list: client build failed",
+                );
+                continue;
+            }
+        };
+        match crate::cluster::fetch_cluster_status(&client).await {
+            Ok(s) => out.push(ProxmoxClusterListEntry {
+                endpoint: name,
+                status: s.into(),
+            }),
+            Err(e) => {
+                tracing::warn!(
+                    endpoint = %name,
+                    error = %e,
+                    "proxmox.cluster_list: cluster_status fetch failed",
+                );
+            }
+        }
+    }
+    Ok(out)
+}
