@@ -335,14 +335,14 @@ coverage-touched:
 	  done; \
 	fi
 
-# Re-run nextest scoped to crates with uncommitted changes.
+# Run tests only for crates (and frontend) whose sources changed vs BASE
+# (default `main`) plus anything dirty in the working tree. Falls back to a
+# full `make test` if Cargo.toml/Cargo.lock/toolchain/etc tripwires fire.
+#   make test-changed                # vs main + dirty tree
+#   BASE=origin/main make test-changed
+#   make test-changed ARGS=--include-deps
 test-changed:
-	@CARGO_TARGET_DIR=$(TARGET_DIR_NATIVE) cargo nextest run --workspace \
-	  $$(git status --porcelain | awk '{print $$2}' | grep -E '\.rs$$' \
-	     | xargs -I{} dirname {} | sort -u \
-	     | xargs -I{} sh -c 'p=$$(cargo metadata --no-deps --format-version=1 \
-	         | jq -r --arg d {} ".packages[] | select(.manifest_path | startswith(\"$(CURDIR)/\" + \$$d)) | .name" \
-	         | head -1); [ -n "$$p" ] && echo "-p $$p"')
+	@TARGET_DIR_NATIVE=$(TARGET_DIR_NATIVE) bash scripts/test-changed.sh $(ARGS)
 
 # Local release pipeline (used when GitHub Actions minutes are exhausted).
 # Builds host target only (aarch64-apple-darwin) and pushes to GitHub releases.

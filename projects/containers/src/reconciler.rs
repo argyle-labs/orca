@@ -2869,6 +2869,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn docker_running_noop_does_not_arm_breaker() {
+        // Docker container at Running with auto-restart. classify() →
+        // NoOp. The observe-only arm path is gated to runtimes for which
+        // `arm_on_every_start` is true (LXC today); docker must NOT arm
+        // here — the breaker is only engaged on tentative starts via
+        // `run_start_pipeline`.
+        let c = mk(
+            "dk1",
+            RestartPolicy::Always,
+            ContainerState::Running,
+            None,
+            vec![],
+            vec![],
+        );
+        let adapter = Arc::new(FakeAdapter::new(RuntimeKind::Docker, vec![c.clone()]));
+        let store = MemoryStore::new();
+
+        let out = run_once(&adapter, &store, &FakeMountProbe::all_ok()).await;
+        assert_eq!(one_row(&out).action, ReconcileAction::NoOp);
+        assert!(
+            store
+                .load(&c.host, c.runtime, &c.id)
+                .expect("load")
+                .is_none(),
+            "docker observe-only must not create a breaker record"
+        );
+    }
+
+    #[tokio::test]
+    async fn lxc_running_noop_dry_run_skips_arm() {
+        // Dry-run must leave the breaker store untouched on the
+        // observe-only path, just like it leaves the start-pipeline arm
+        // untouched. Mirror of the existing dry-run start-pipeline guard.
+        let c = mk_lxc("ct200", ContainerState::Running, RestartPolicy::Always);
+        let adapter = Arc::new(FakeAdapter::new(RuntimeKind::Lxc, vec![c.clone()]));
+        let store = MemoryStore::new();
+
+        let adapters: Vec<Arc<dyn RuntimeAdapter>> = vec![adapter.clone() as _];
+        let _ = reconcile(ReconcileInput {
+            adapters,
+            probe: &FakeMountProbe::all_ok(),
+            dispatcher: None,
+            dry_run: true,
+            breaker_store: &store,
+        })
+        .await;
+
+        assert!(
+            store
+                .load(&c.host, c.runtime, &c.id)
+                .expect("load")
+                .is_none(),
+            "dry_run must not write to the breaker store"
+        );
+    }
+
+    #[tokio::test]
+    async fn lxc_noop_held_emits_once_then_suppresses() {
+        // Seeded Hold on a Running LXC. The observe-only NoOp branch
+        // arms the breaker, sees the sticky Hold, dispatches the
+        // notification, stamps `notified_at`. The second tick sees the
+        // sticky Hold with `notified_at` populated and must NOT re-emit.
+        let c = mk_lxc("ct201", ContainerState::Running, RestartPolicy::Always);
+        let adapter = Arc::new(FakeAdapter::new(RuntimeKind::Lxc, vec![c.clone()]));
+        let store = MemoryStore::new();
+        seed_held(
+            &store,
+            &c,
+            HoldReason::LxcFlappingIn5Min {
+                transitions: 9,
+                window_start: Utc::now() - chrono::Duration::seconds(120),
+            },
+        );
+
+        let captured: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let dispatcher = Dispatcher::new().with_backend(Box::new(CapturingBackend {
+            captured: Arc::clone(&captured),
+        }));
+
+        // Tick 1: emit + stamp.
+        let adapters: Vec<Arc<dyn RuntimeAdapter>> = vec![adapter.clone() as _];
+        let _ = reconcile(ReconcileInput {
+            adapters: adapters.clone(),
+            probe: &FakeMountProbe::all_ok(),
+            dispatcher: Some(&dispatcher),
+            dry_run: false,
+            breaker_store: &store,
+        })
+        .await;
+        // Tick 2: suppress.
+        let _ = reconcile(ReconcileInput {
+            adapters,
+            probe: &FakeMountProbe::all_ok(),
+            dispatcher: Some(&dispatcher),
+            dry_run: false,
+            breaker_store: &store,
+        })
+        .await;
+
+        let events = captured.lock().expect("mutex").clone();
+        assert_eq!(
+            events.len(),
+            1,
+            "observe-only Held must emit once across two ticks; got events={events:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn lxc_exited_then_running_transition_counted_once_via_fold_lxc() {
         // Two ticks, same container, state changes between them.
         // Tick 1: Exited → run_start_pipeline arms with
