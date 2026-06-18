@@ -34,5 +34,14 @@ pub async fn collect_claims() -> Vec<TopologyClaim> {
             Err(e) => tracing::warn!(error = %e, "topology: proxmox collector failed"),
         }
     }
+    // API-based Proxmox collector: walks every registered + enabled
+    // Proxmox endpoint. Unlike the file-based collector above (which only
+    // works on the proxmox host itself), this runs on ANY host that has
+    // creds — so baldur gets nested under frigg from mint or thor too.
+    // Returns empty silently when no endpoints are registered.
+    match ::proxmox::topology::collect_claims().await {
+        Ok(mut v) => out.append(&mut v),
+        Err(e) => tracing::warn!(error = %e, "topology: proxmox-api collector failed"),
+    }
     out
 }

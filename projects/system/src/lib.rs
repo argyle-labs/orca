@@ -48,7 +48,9 @@ pub mod sysadmin;
 // Tool surfaces relocated from `db` (db is a primitive, not a tool host —
 // see [[feedback-plugin-toolkit-is-the-gateway]]).
 pub mod config_tools;
+
 pub mod db_admin;
+pub mod retention_tools;
 pub mod schedule_tools;
 
 // Relocated 2026-06-01:

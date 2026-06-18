@@ -22,6 +22,64 @@ pub const MAX_ROWS_PER_PEER: usize = 8640;
 /// Default retention when no explicit config entry exists: 24 hours.
 const DEFAULT_RETENTION_SECS: i64 = 86_400;
 
+/// Default maximum total payload bytes per peer. None = no size cap.
+/// Operators set a numeric override via `system.retention.set max_mb=…`.
+const DEFAULT_MAX_BYTES: Option<i64> = None;
+
+/// Default maximum row count per peer. Falls back to the safety guard
+/// when no operator-set override exists.
+const DEFAULT_MAX_ROWS: i64 = MAX_ROWS_PER_PEER as i64;
+
+/// Per-peer retention policy resolved from `config_store` with peer-specific
+/// override → global default → built-in default precedence. Returned by
+/// `retention_for(peer_id)` so the sweeper can enforce all three caps in
+/// a single pass.
+#[derive(Debug, Clone, Copy)]
+pub struct RetentionPolicy {
+    /// Age cap in seconds. Rows older than `now - age_secs` are deleted.
+    pub age_secs: i64,
+    /// Optional size cap. When set, oldest rows are deleted until the
+    /// sum of `length(payload_json)` is at or below this value.
+    pub max_bytes: Option<i64>,
+    /// Hard row-count cap. Rows beyond the newest `max_rows` are deleted.
+    pub max_rows: i64,
+}
+
+fn parse_i64_json(json: &str) -> Option<i64> {
+    json.trim_matches('"')
+        .parse::<i64>()
+        .ok()
+        .filter(|&v| v >= 0)
+}
+
+fn parse_mb_to_bytes(json: &str) -> Option<i64> {
+    json.trim_matches('"')
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .map(|mb| (mb * 1_048_576.0) as i64)
+}
+
+fn resolve_per_peer_then_global<T>(
+    conn: &Connection,
+    noun: &str,
+    knob: &str,
+    peer_id: &str,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Option<T> {
+    let per_peer = crate::config_store::get(conn, noun, &format!("{knob}:{peer_id}"))
+        .ok()
+        .flatten()
+        .and_then(|row| parse(&row.json));
+    if per_peer.is_some() {
+        return per_peer;
+    }
+    crate::config_store::get(conn, noun, knob)
+        .ok()
+        .flatten()
+        .and_then(|row| parse(&row.json))
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HostStatusRow {
     pub peer_id: String,
@@ -50,19 +108,49 @@ fn parse_retention_days(json: &str) -> Option<i64> {
 /// Per-system retention lets the UI keep, say, 7 days of mint but only 1 hour
 /// of a noisy edge node.
 pub fn retention_seconds(conn: &Connection, peer_id: &str) -> i64 {
-    let per_peer =
-        crate::config_store::get(conn, "host_status", &format!("retention_days:{peer_id}"))
-            .ok()
-            .flatten()
-            .and_then(|row| parse_retention_days(&row.json));
-    if let Some(secs) = per_peer {
-        return secs;
+    resolve_per_peer_then_global(
+        conn,
+        "host_status",
+        "retention_days",
+        peer_id,
+        parse_retention_days,
+    )
+    .unwrap_or(DEFAULT_RETENTION_SECS)
+}
+
+/// Per-peer maximum total `payload_json` bytes. `None` = no size cap.
+/// Set via `system.retention.set peer=<id> max_mb=<n>`.
+pub fn retention_max_bytes(conn: &Connection, peer_id: &str) -> Option<i64> {
+    resolve_per_peer_then_global(
+        conn,
+        "host_status",
+        "retention_max_mb",
+        peer_id,
+        parse_mb_to_bytes,
+    )
+    .or(DEFAULT_MAX_BYTES)
+}
+
+/// Per-peer maximum row count. Falls back to the built-in safety cap.
+pub fn retention_max_rows(conn: &Connection, peer_id: &str) -> i64 {
+    resolve_per_peer_then_global(
+        conn,
+        "host_status",
+        "retention_max_rows",
+        peer_id,
+        parse_i64_json,
+    )
+    .unwrap_or(DEFAULT_MAX_ROWS)
+}
+
+/// Resolve all three caps in one shot. The sweeper uses this so per-peer
+/// enforcement happens against a consistent snapshot of the policy.
+pub fn retention_for(conn: &Connection, peer_id: &str) -> RetentionPolicy {
+    RetentionPolicy {
+        age_secs: retention_seconds(conn, peer_id),
+        max_bytes: retention_max_bytes(conn, peer_id),
+        max_rows: retention_max_rows(conn, peer_id),
     }
-    crate::config_store::get(conn, "host_status", "retention_days")
-        .ok()
-        .flatten()
-        .and_then(|row| parse_retention_days(&row.json))
-        .unwrap_or(DEFAULT_RETENTION_SECS)
 }
 
 /// Insert one snapshot, then prune the per-peer history:
@@ -116,6 +204,192 @@ pub fn insert_status(
         params![peer_id, MAX_ROWS_PER_PEER as i64],
     )?;
     Ok(true)
+}
+
+/// Rows deleted by a single sweep pass. Returned so the caller can log
+/// + emit a structured event.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SweepReport {
+    pub deleted_by_age: u64,
+    pub deleted_by_size: u64,
+    pub deleted_by_count: u64,
+}
+
+impl SweepReport {
+    pub fn total(&self) -> u64 {
+        self.deleted_by_age + self.deleted_by_size + self.deleted_by_count
+    }
+}
+
+/// Enforce per-peer retention caps in one pass: age → size → count. Each
+/// pass uses the policy resolved by [`retention_for`], so callers don't
+/// need to thread three knobs through. Returns the number of rows deleted
+/// by each policy axis.
+///
+/// `now_unix` is taken as a parameter so tests can pin time.
+pub fn sweep_peer(conn: &Connection, peer_id: &str, now_unix: i64) -> Result<SweepReport> {
+    let policy = retention_for(conn, peer_id);
+    let mut report = SweepReport::default();
+
+    // 1. Age cap.
+    let cutoff = now_unix - policy.age_secs;
+    let n = conn.execute(
+        "DELETE FROM host_status WHERE peer_id = ?1 AND snapshot_at_unix < ?2",
+        params![peer_id, cutoff],
+    )?;
+    report.deleted_by_age = n as u64;
+
+    // 2. Size cap (optional). Walk newest→oldest, accumulate payload bytes,
+    // delete everything past the cap. Done in SQL so the entire row set
+    // isn't materialized in process memory.
+    if let Some(max_bytes) = policy.max_bytes {
+        let n = conn.execute(
+            "DELETE FROM host_status
+             WHERE peer_id = ?1 AND snapshot_at_unix IN (
+                SELECT snapshot_at_unix FROM (
+                    SELECT snapshot_at_unix,
+                           SUM(length(payload_json)) OVER (
+                               ORDER BY snapshot_at_unix DESC
+                               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                           ) AS running_bytes
+                    FROM host_status
+                    WHERE peer_id = ?1
+                ) WHERE running_bytes > ?2
+             )",
+            params![peer_id, max_bytes],
+        )?;
+        report.deleted_by_size = n as u64;
+    }
+
+    // 3. Row-count cap.
+    let n = conn.execute(
+        "DELETE FROM host_status
+         WHERE peer_id = ?1
+           AND snapshot_at_unix < (
+                SELECT MIN(snapshot_at_unix) FROM (
+                    SELECT snapshot_at_unix FROM host_status
+                    WHERE peer_id = ?1
+                    ORDER BY snapshot_at_unix DESC
+                    LIMIT ?2
+                )
+           )",
+        params![peer_id, policy.max_rows],
+    )?;
+    report.deleted_by_count = n as u64;
+
+    Ok(report)
+}
+
+/// All peer_ids present in `host_status`. Used by the periodic sweeper to
+/// iterate without depending on the pod peer table (sweep should still
+/// work for peers that have departed but left rows behind).
+pub fn distinct_peer_ids(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT DISTINCT peer_id FROM host_status")?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Sweep every peer present in the table. Returns the aggregate report.
+pub fn sweep_all(conn: &Connection, now_unix: i64) -> Result<SweepReport> {
+    let mut agg = SweepReport::default();
+    for peer_id in distinct_peer_ids(conn)? {
+        let r = sweep_peer(conn, &peer_id, now_unix)?;
+        agg.deleted_by_age += r.deleted_by_age;
+        agg.deleted_by_size += r.deleted_by_size;
+        agg.deleted_by_count += r.deleted_by_count;
+    }
+    Ok(agg)
+}
+
+/// Operator-facing knobs persisted via `config_store`. Setting a knob to
+/// `None` clears the per-peer override (falling back to the global default).
+/// `peer_id = None` sets the global default itself.
+pub fn set_retention_days(
+    conn: &Connection,
+    local_host: &str,
+    peer_id: Option<&str>,
+    days: Option<f64>,
+) -> Result<()> {
+    write_retention_knob(
+        conn,
+        local_host,
+        "retention_days",
+        peer_id,
+        days.map(|d| d.to_string()),
+    )
+}
+
+pub fn set_retention_max_mb(
+    conn: &Connection,
+    local_host: &str,
+    peer_id: Option<&str>,
+    max_mb: Option<f64>,
+) -> Result<()> {
+    write_retention_knob(
+        conn,
+        local_host,
+        "retention_max_mb",
+        peer_id,
+        max_mb.map(|v| v.to_string()),
+    )
+}
+
+pub fn set_retention_max_rows(
+    conn: &Connection,
+    local_host: &str,
+    peer_id: Option<&str>,
+    max_rows: Option<i64>,
+) -> Result<()> {
+    write_retention_knob(
+        conn,
+        local_host,
+        "retention_max_rows",
+        peer_id,
+        max_rows.map(|v| v.to_string()),
+    )
+}
+
+fn write_retention_knob(
+    conn: &Connection,
+    local_host: &str,
+    knob: &str,
+    peer_id: Option<&str>,
+    value: Option<String>,
+) -> Result<()> {
+    let key = retention_config_key(knob, peer_id);
+    match value {
+        Some(v) => {
+            crate::config_store::set(
+                conn,
+                local_host,
+                local_host,
+                "host_status",
+                &key,
+                &v,
+                "system.retention.set",
+            )?;
+        }
+        None => {
+            crate::config_store::delete(
+                conn,
+                local_host,
+                local_host,
+                "host_status",
+                &key,
+                "system.retention.set",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn retention_config_key(knob: &str, peer_id: Option<&str>) -> String {
+    match peer_id {
+        Some(p) => format!("{knob}:{p}"),
+        None => knob.to_string(),
+    }
 }
 
 /// Latest row for every peer present in the table. Used by the UI to render

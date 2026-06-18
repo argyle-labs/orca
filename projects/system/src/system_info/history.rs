@@ -13,8 +13,32 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
-const MAX_BYTES: u64 = 5 * 1024 * 1024;
-const MAX_AGE_SECS: i64 = 24 * 60 * 60;
+/// Fallback bytes cap when no per-peer override is configured AND the DB
+/// pool isn't available (early startup, tests). Operator-set caps via
+/// `system.retention.set max_mb=N` take precedence at runtime.
+const FALLBACK_MAX_BYTES: u64 = 5 * 1024 * 1024;
+/// Fallback age cap (seconds). Same precedence rule as `FALLBACK_MAX_BYTES`.
+const FALLBACK_MAX_AGE_SECS: i64 = 24 * 60 * 60;
+
+/// Resolve the size cap for the local host's JSONL ring. Honors the
+/// per-peer `max_mb` policy when set; falls back to [`FALLBACK_MAX_BYTES`]
+/// when no override exists or the DB pool isn't initialized.
+fn current_max_bytes() -> u64 {
+    let local = crate::host_identity::machine_id_short().to_string();
+    db::pool::with_pooled_or_open(|conn| Ok(db::host_status::retention_max_bytes(conn, &local)))
+        .ok()
+        .flatten()
+        .map(|b| b as u64)
+        .unwrap_or(FALLBACK_MAX_BYTES)
+}
+
+/// Resolve the age cap (seconds) for the local host's JSONL ring.
+fn current_max_age_secs() -> i64 {
+    let local = crate::host_identity::machine_id_short().to_string();
+    db::pool::with_pooled_or_open(|conn| Ok(db::host_status::retention_seconds(conn, &local)))
+        .ok()
+        .unwrap_or(FALLBACK_MAX_AGE_SECS)
+}
 
 fn history_path() -> Option<PathBuf> {
     let home = files::ops::orca_home()?;
@@ -52,7 +76,8 @@ pub fn point_from(snap: &SystemInfoReport) -> Option<SystemHistoryPoint> {
     })
 }
 
-/// Append one sample. Rotates if the file exceeds [`MAX_BYTES`].
+/// Append one sample. Rotates when the file exceeds the local peer's
+/// resolved `max_mb` cap (or [`FALLBACK_MAX_BYTES`] when no override).
 pub fn append(point: &SystemHistoryPoint) {
     let Some(path) = history_path() else {
         return;
@@ -77,7 +102,7 @@ pub fn append(point: &SystemHistoryPoint) {
     }
     // Rotate if oversized: keep the second half of the file (drop oldest).
     let size = f.metadata().map(|m| m.len()).unwrap_or(0);
-    if size > MAX_BYTES {
+    if size > current_max_bytes() {
         rotate(&path, size);
     }
 }
@@ -114,7 +139,8 @@ fn rotate(path: &std::path::Path, size: u64) {
     }
 }
 
-/// Read the last `n` history points, filtered by [`MAX_AGE_SECS`].
+/// Read the last `n` history points, filtered by the local peer's
+/// resolved age cap (falls back to [`FALLBACK_MAX_AGE_SECS`]).
 pub fn read_tail(n: usize) -> Vec<SystemHistoryPoint> {
     let Some(path) = history_path() else {
         return Vec::new();
@@ -122,7 +148,7 @@ pub fn read_tail(n: usize) -> Vec<SystemHistoryPoint> {
     let Ok(f) = File::open(&path) else {
         return Vec::new();
     };
-    let cutoff = chrono::Utc::now().timestamp() - MAX_AGE_SECS;
+    let cutoff = chrono::Utc::now().timestamp() - current_max_age_secs();
     let reader = BufReader::new(f);
     // Simple tail: read all lines into a ring of size n. JSONL is small
     // enough (~5 MiB cap) that this is fine and avoids reverse-seek logic.

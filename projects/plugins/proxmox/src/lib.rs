@@ -10,6 +10,7 @@
 
 pub mod containers_adapter;
 pub mod tools;
+pub mod topology;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

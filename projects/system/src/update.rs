@@ -89,7 +89,14 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
     };
 
     // For stable we can use /releases/latest (always returns stable).
-    // For pre-release channels we must scan /releases (paginated list).
+    // For pre-release channels we need BOTH endpoints unioned:
+    //   * /releases (paginated, includes rc tags) — provides newer rc candidates.
+    //   * /releases/latest (always-current stable) — guarantees we never miss
+    //     the newest stable even if 100 rc tags have shipped between stables.
+    //     Without this, an Rc-channel host that's gone many rcs past the last
+    //     stable would silently miss a newer stable upgrade — stable falls
+    //     outside the per_page window. `Channel::Rc::accepts` allows stable,
+    //     so the candidate just needs to be IN the response set.
     let releases: Vec<Release> = if *channel == Channel::Stable {
         let url = format!("{APP_REPO_API_URL}/releases/latest");
         match github_req(url).send().await {
@@ -98,13 +105,31 @@ pub async fn check_for_update(channel: &Channel, token: &str) -> Result<Option<U
             Err(e) => return Err(anyhow::Error::from(e).context("GitHub API request failed")),
         }
     } else {
-        let url = format!("{APP_REPO_API_URL}/releases?per_page=20");
-        github_req(url)
+        let list_url = format!("{APP_REPO_API_URL}/releases?per_page=100");
+        let mut all: Vec<Release> = github_req(list_url)
             .send()
             .await
             .context("GitHub API request failed")?
             .json()
-            .context("failed to parse releases JSON")?
+            .context("failed to parse releases JSON")?;
+
+        // Always also fetch /releases/latest so a stale stable far past the
+        // pagination window is still considered. 404 = repo has never had a
+        // stable release — fine, the paginated list is sufficient.
+        let latest_url = format!("{APP_REPO_API_URL}/releases/latest");
+        match github_req(latest_url).send().await {
+            Ok(resp) => {
+                let stable: Release = resp.json().context("failed to parse latest release JSON")?;
+                if !all.iter().any(|r| r.tag_name == stable.tag_name) {
+                    all.push(stable);
+                }
+            }
+            Err(utils::http::HttpError::Status { status: 404, .. }) => {}
+            Err(e) => {
+                return Err(anyhow::Error::from(e).context("GitHub latest-release request failed"));
+            }
+        }
+        all
     };
 
     // Find the best matching release for this channel. Use full semver

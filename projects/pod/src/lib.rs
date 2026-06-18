@@ -12,6 +12,7 @@
 //! `remote_ok` tools to peers.
 
 pub mod cli;
+pub mod host_status_sweep;
 pub mod host_status_writer;
 pub mod server_pod;
 pub mod status;

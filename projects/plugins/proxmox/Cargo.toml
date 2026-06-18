@@ -28,6 +28,10 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 clap        = { workspace = true }
 tokio       = { workspace = true }
+tracing     = { workspace = true }
+# join_all the per-guest config fan-out. Needed by topology.rs only — the
+# rest of the crate is sequential. Workspace alias is `futures-util`.
+futures-util = { workspace = true }
 
 [dev-dependencies]
 tokio    = { workspace = true }
