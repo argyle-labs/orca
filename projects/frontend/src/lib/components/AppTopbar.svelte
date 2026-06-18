@@ -1,6 +1,6 @@
 <script lang="ts">
   import IconButton from '$lib/components/primitives/IconButton.svelte';
-  import SidebarToggleIcon from '$lib/components/icons/SidebarToggleIcon.svelte';
+  import SidebarToggleIcon from '$lib/components/primitives/icons/SidebarToggleIcon.svelte';
   import AppBrand from '$lib/components/AppBrand.svelte';
   import SearchButton from '$lib/components/SearchButton.svelte';
   import ThemeMenu from '$lib/components/ThemeMenu.svelte';

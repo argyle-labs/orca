@@ -33,7 +33,7 @@
   {#snippet template()}
     <Button variant="primary" onclick={() => (openMd = true)}>Open medium</Button>
     <Modal open={openMd} title="Edit configuration" size="md" onclose={() => (openMd = false)}>
-      <p>Body content goes here. Modal composes ModalShell and adds the header/close affordance.</p>
+      <p>Body content goes here. Modal wraps a native &lt;dialog&gt; with backdrop, escape-to-close, and a header.</p>
     </Modal>
   {/snippet}
 </Story>

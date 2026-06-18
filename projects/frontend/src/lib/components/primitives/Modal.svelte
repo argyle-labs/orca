@@ -1,20 +1,35 @@
 <script lang="ts">
-  import ModalShell from './ModalShell.svelte';
+  import type { Snippet } from 'svelte';
 
   interface Props {
     open: boolean;
     title?: string;
     size?: 'sm' | 'md' | 'lg' | 'xl' | 'full';
+    align?: 'center' | 'top';
     onclose: () => void;
-    children: import('svelte').Snippet;
+    children: Snippet;
   }
-  let { open, title, size = 'md', onclose, children }: Props = $props();
+  let { open, title, size = 'md', align = 'center', onclose, children }: Props = $props();
 
   const maxWidths: Record<string, string> = { sm: '400px', md: '600px', lg: '800px', xl: '1000px', full: '1000px' };
   const isFull = $derived(size === 'full');
+
+  let dialog = $state<HTMLDialogElement>();
+
+  $effect(() => {
+    if (!dialog) return;
+    if (open) dialog.showModal();
+    else { try { dialog.close(); } catch {} }
+  });
 </script>
 
-<ModalShell {open} {onclose}>
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<dialog
+  class="modal modal-{align}"
+  bind:this={dialog}
+  onclose={onclose}
+  onclick={(e) => { if (e.target === dialog) onclose(); }}
+>
   <div class="modal-inner" class:modal-full={isFull} style="--_mw:{maxWidths[size] ?? '600px'}">
     {#if title}
       <div class="modal-header">
@@ -24,9 +39,20 @@
     {/if}
     <div class="modal-body" class:modal-body-full={isFull}>{@render children()}</div>
   </div>
-</ModalShell>
+</dialog>
 
 <style>
+  .modal {
+    background: transparent;
+    border: none;
+    padding: 0;
+    max-width: 100vw;
+    max-height: 100vh;
+    overflow: visible;
+  }
+  .modal::backdrop { background: rgba(0, 0, 0, 0.65); }
+  .modal-center { margin: auto; }
+  .modal-top    { margin: 80px auto auto; }
   .modal-inner {
     background: var(--color-surface);
     border: 1px solid var(--color-border);

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import SearchIcon from '$lib/components/icons/SearchIcon.svelte';
+  import SearchIcon from '$lib/components/primitives/icons/SearchIcon.svelte';
 
   interface Props {
     onclick: () => void;

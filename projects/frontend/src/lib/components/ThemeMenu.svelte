@@ -1,9 +1,9 @@
 <script lang="ts">
   import Popover from './primitives/Popover.svelte';
-  import ChevronDownIcon from './icons/ChevronDownIcon.svelte';
-  import CheckIcon from './icons/CheckIcon.svelte';
-  import MoonIcon from './icons/MoonIcon.svelte';
-  import SunIcon from './icons/SunIcon.svelte';
+  import ChevronDownIcon from './primitives/icons/ChevronDownIcon.svelte';
+  import CheckIcon from './primitives/icons/CheckIcon.svelte';
+  import MoonIcon from './primitives/icons/MoonIcon.svelte';
+  import SunIcon from './primitives/icons/SunIcon.svelte';
   import {
     PALETTES,
     FONT_SIZES,

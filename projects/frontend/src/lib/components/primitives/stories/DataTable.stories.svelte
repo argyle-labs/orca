@@ -22,17 +22,13 @@
     { label: 'Health' },
     { label: 'Version' },
   ];
-  function asPeer(r: unknown): PeerRow {
-    return r as PeerRow;
-  }
 </script>
 
 <Story name="Pod members">
   {#snippet template()}
     <div style="width:560px;">
       <DataTable {columns} rows={peers}>
-        {#snippet row(r)}
-          {@const p = asPeer(r)}
+        {#snippet row(p)}
           <td>{p.hostname}</td>
           <td><code style="font-size:0.8rem;">{p.addr}</code></td>
           <td>
@@ -50,8 +46,8 @@
 <Story name="Loading">
   {#snippet template()}
     <div style="width:560px;">
-      <DataTable {columns} rows={[]} loading>
-        {#snippet row(_r)}<td></td>{/snippet}
+      <DataTable {columns} rows={[] as PeerRow[]} loading>
+        {#snippet row(_p)}<td></td>{/snippet}
       </DataTable>
     </div>
   {/snippet}
@@ -60,8 +56,8 @@
 <Story name="Empty">
   {#snippet template()}
     <div style="width:560px;">
-      <DataTable {columns} rows={[]} emptyText="No peers discovered">
-        {#snippet row(_r)}<td></td>{/snippet}
+      <DataTable {columns} rows={[] as PeerRow[]} emptyText="No peers discovered">
+        {#snippet row(_p)}<td></td>{/snippet}
       </DataTable>
     </div>
   {/snippet}

@@ -1,4 +1,4 @@
-<script lang="ts">
+<script lang="ts" generics="T">
   import type { Snippet } from 'svelte';
 
   let {
@@ -9,9 +9,9 @@
     loading = false,
   }: {
     columns: { label: string; width?: string }[];
-    rows: unknown[];
+    rows: T[];
     emptyText?: string;
-    row: Snippet<[unknown]>;
+    row: Snippet<[T]>;
     loading?: boolean;
   } = $props();
 </script>
