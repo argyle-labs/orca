@@ -50,4 +50,5 @@ pub use crate::runtime;
 // bug fixes land once and propagate. After `use plugin_toolkit::prelude::*;`
 // these are in scope as `http::Client`, `graphql::Client`, `openapi::parse_str`,
 // etc. — never `utils::http::…` or `::graphql::…` directly.
-pub use crate::{graphql, http, openapi};
+pub use crate::api_client::ApiClientBuilder;
+pub use crate::{api_client, graphql, http, openapi};

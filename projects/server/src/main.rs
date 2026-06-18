@@ -222,69 +222,15 @@ enum AdminAction {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // In dev, tee logs to /tmp/orca-dev.log so they're inspectable without
-    // capturing the TTY where cargo-watch runs.
-    let log_file: Box<dyn std::io::Write + Send + Sync> = match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/orca-dev.log")
-    {
-        Ok(f) => Box::new(f),
-        Err(_) => Box::new(std::io::sink()),
-    };
-    let writer = std::sync::Mutex::new(log_file);
-    let make_writer = move || -> Box<dyn std::io::Write> {
-        // Multi-writer: stderr + log file.
-        struct Tee<A: std::io::Write, B: std::io::Write>(A, B);
-        impl<A: std::io::Write, B: std::io::Write> std::io::Write for Tee<A, B> {
-            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-                _ = self.1.write_all(b);
-                self.0.write(b)
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                _ = self.1.flush();
-                self.0.flush()
-            }
-        }
-        let file = writer.lock().unwrap_or_else(|e| e.into_inner());
-        // We can't move out of MutexGuard; clone a fresh file handle each call.
-        let f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/orca-dev.log")
-            .ok();
-        drop(file);
-        match f {
-            Some(f) => Box::new(Tee(std::io::stderr(), f)),
-            None => Box::new(std::io::stderr()),
-        }
-    };
-    // JSON line-per-event output so every log entry is a structured object
-    // and `correlation_id` (set by the per-request span in
-    // `serve::middleware::log_requests`) appears as a top-level field on
-    // every event emitted while a request is in flight. `jq`-friendly:
-    // `journalctl -u orca | jq -c 'select(.correlation_id == "...")'` pulls
-    // the full lifecycle of one request — including any logs the tool
-    // handler emits while running.
-    //
-    // `flatten_event(true)` hoists the message + custom fields to the top
-    // level instead of nesting them under `fields:`, so `correlation_id`
-    // (a span field) and the per-event message live side-by-side.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("ORCA_LOG").unwrap_or_else(|_| {
-                tracing_subscriber::EnvFilter::new(
-                    "warn,orca=info,tower_http=warn,axum=warn,mdns_sd=warn,mdns=warn",
-                )
-            }),
-        )
-        .json()
-        .flatten_event(true)
-        .with_current_span(true)
-        .with_span_list(false)
-        .with_target(true)
-        .with_writer(make_writer)
-        .init();
+    // Unified logging: JSON-line output, EnvFilter from `ORCA_LOG`, a
+    // ScrubWriter that redacts well-known sensitive patterns (PVE API
+    // tokens, Authorization headers, JSON secret fields) before they
+    // reach stderr or the tee'd dev log. See `plugin_toolkit::logging`.
+    plugin_toolkit::logging::init(plugin_toolkit::logging::LogInit {
+        env_var: "ORCA_LOG",
+        default_filter: "warn,orca=info,tower_http=warn,axum=warn,mdns_sd=warn,mdns=warn",
+        tee_path: Some("/tmp/orca-dev.log"),
+    })?;
 
     // Register notification backends from each plugin's db-backed registry.
     // Each backend plugin owns its own table + bootstrap; `notifications`

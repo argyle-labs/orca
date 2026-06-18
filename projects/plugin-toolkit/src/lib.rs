@@ -26,6 +26,8 @@
 //! authors only hand-write upstream API logic and surface-extension tools
 //! (e.g. stack lifecycle).
 
+pub mod api_client;
+pub mod logging;
 pub mod prelude;
 pub mod runtime;
 

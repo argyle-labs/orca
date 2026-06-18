@@ -25,54 +25,9 @@
 //! crate's call paths.
 
 use anyhow::{Context, Result, bail};
-use reqwest::{Client, Url, header};
+use plugin_toolkit::logging::Redacted;
+use reqwest::{Client, Url};
 use std::fmt;
-
-/// Wraps a secret-bearing value so `Debug`/`Display` never reveal it.
-/// Memory is zeroed on drop. Used for API keys, passwords, and any
-/// other material that must not appear in logs, error chains, or
-/// process dumps.
-pub(crate) struct Redacted<T: Zeroize>(T);
-
-impl<T: Zeroize> Redacted<T> {
-    pub(crate) fn new(value: T) -> Self {
-        Self(value)
-    }
-
-    pub(crate) fn expose(&self) -> &T {
-        &self.0
-    }
-}
-
-impl<T: Zeroize> fmt::Debug for Redacted<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Redacted(***)")
-    }
-}
-
-impl<T: Zeroize> Drop for Redacted<T> {
-    fn drop(&mut self) {
-        self.0.zeroize();
-    }
-}
-
-/// Minimal in-crate `Zeroize` to avoid pulling the upstream crate just
-/// for `String`. Overwrites the buffer with zero bytes before drop.
-pub(crate) trait Zeroize {
-    fn zeroize(&mut self);
-}
-
-impl Zeroize for String {
-    fn zeroize(&mut self) {
-        // Safety: writing zero bytes over the existing capacity is
-        // valid UTF-8 (NULs are valid). Then clear the length.
-        let bytes = unsafe { self.as_bytes_mut() };
-        for b in bytes.iter_mut() {
-            *b = 0;
-        }
-        self.clear();
-    }
-}
 
 /// Static *arr API key (the value in `config.xml > ApiKey`).
 pub(crate) struct ApiKey(Redacted<String>);
@@ -118,15 +73,10 @@ impl fmt::Debug for Credentials {
 /// `<flavor>::Client::new_with_client(base_url, client)` from the
 /// future `arr.*` orca tools — not from user code.
 pub(crate) fn reqwest_client_with_api_key(key: &ApiKey) -> Result<Client> {
-    let mut headers = header::HeaderMap::new();
-    let mut v =
-        header::HeaderValue::from_str(key.0.expose()).context("api key contains invalid bytes")?;
-    v.set_sensitive(true);
-    headers.insert("X-Api-Key", v);
-    Client::builder()
-        .default_headers(headers)
+    plugin_toolkit::api_client::ApiClientBuilder::new()
+        .header("x-api-key", key.0.expose())
+        .context("api key contains invalid bytes")?
         .build()
-        .context("build reqwest client")
 }
 
 /// Result of a successful password login: the cookie store on the
@@ -183,15 +133,8 @@ mod tests {
         _ = rustls::crypto::ring::default_provider().install_default();
     }
 
-    #[test]
-    fn zeroize_string_wipes_bytes_and_clears_len() {
-        let mut s = String::from("secret");
-        let cap = s.capacity();
-        s.zeroize();
-        assert!(s.is_empty());
-        // capacity is preserved; the wipe happened in place before clear.
-        assert_eq!(s.capacity(), cap);
-    }
+    // zeroize behaviour is covered upstream by
+    // `plugin_toolkit::logging::tests::zeroize_string_clears_buffer`.
 
     #[test]
     fn redacted_debug_hides_value() {

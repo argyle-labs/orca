@@ -35,10 +35,7 @@ pub mod generated {
 }
 
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 use thiserror::Error;
-
-const DEFAULT_TIMEOUT_SECS: u64 = 15;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -79,17 +76,9 @@ impl Config {
     /// The generated client gets this as its inner transport — so every
     /// generated method call carries auth without per-call wiring.
     pub fn build_reqwest_client(&self) -> Result<reqwest::Client, ProxmoxError> {
-        let mut headers = reqwest::header::HeaderMap::new();
-        let auth = reqwest::header::HeaderValue::from_str(&self.auth_header_value())
-            .map_err(|e| ProxmoxError::Malformed(format!("auth header: {e}")))?;
-        headers.insert(reqwest::header::AUTHORIZATION, auth);
-        let dur = Duration::from_secs(DEFAULT_TIMEOUT_SECS);
-        reqwest::Client::builder()
-            .default_headers(headers)
-            .danger_accept_invalid_certs(self.insecure)
-            .connect_timeout(dur)
-            .timeout(dur)
-            .build()
+        plugin_toolkit::api_client::ApiClientBuilder::new()
+            .header("authorization", self.auth_header_value())
+            .and_then(|b| b.insecure(self.insecure).build())
             .map_err(|e| ProxmoxError::Malformed(format!("reqwest build: {e}")))
     }
 
