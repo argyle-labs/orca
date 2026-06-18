@@ -1,16 +1,17 @@
 <script lang="ts">
   interface Props {
     variant?: 'primary' | 'secondary' | 'ghost' | 'danger';
-    size?: 'sm' | 'md';
+    size?: 'xs' | 'sm' | 'md';
     disabled?: boolean;
     type?: 'button' | 'submit';
+    title?: string;
     onclick?: () => void;
     children: import('svelte').Snippet;
   }
-  let { variant = 'secondary', size = 'md', disabled = false, type = 'button', onclick, children }: Props = $props();
+  let { variant = 'secondary', size = 'md', disabled = false, type = 'button', title, onclick, children }: Props = $props();
 </script>
 
-<button {type} {disabled} class="btn btn--{variant} btn--{size}" {onclick}>
+<button {type} {disabled} {title} class="btn btn--{variant} btn--{size}" {onclick}>
   {@render children()}
 </button>
 
@@ -31,6 +32,7 @@
 
   .btn--md { padding: var(--space-2) var(--space-3); }
   .btn--sm { padding: var(--space-1) var(--space-2); font-size: var(--text-xs); }
+  .btn--xs { padding: 2px 8px; font-size: 11px; border-radius: 4px; }
 
   .btn--primary {
     background: var(--color-accent);

@@ -2,6 +2,8 @@
   import { callTool } from '$lib/stores/runTool';
   import { inferChannel } from '$lib/utils/version';
   import SectionHead from '$lib/components/SectionHead.svelte';
+  import Button from '$lib/components/Button.svelte';
+  import SegmentedControl from '$lib/components/SegmentedControl.svelte';
   import type { Instance, VersionEntry } from '$lib/types/instance';
 
   interface Props {

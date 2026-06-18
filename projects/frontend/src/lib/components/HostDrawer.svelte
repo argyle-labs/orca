@@ -4,6 +4,7 @@
   import Drawer from '$lib/components/Drawer.svelte';
   import StatusDot from '$lib/components/StatusDot.svelte';
   import IconButton from '$lib/components/IconButton.svelte';
+  import Button from '$lib/components/Button.svelte';
   import Badge from '$lib/components/Badge.svelte';
   import SectionHead from '$lib/components/SectionHead.svelte';
   import ToggleSwitch from '$lib/components/ToggleSwitch.svelte';
@@ -91,12 +92,12 @@
         <span class="hostname">{inst.sys?.hostname ?? inst.label}</span>
       </div>
       <div class="header-actions">
-        <button
-          class="ctrl-btn"
+        <Button
+          size="xs"
           onclick={refreshDetail}
           disabled={detailRefreshing}
           title="Force a fresh system.detail probe of this peer"
-        >{detailRefreshing ? 'Refreshing…' : 'Refresh'}</button>
+        >{detailRefreshing ? 'Refreshing…' : 'Refresh'}</Button>
         <IconButton onclick={onclose} title="Close">✕</IconButton>
       </div>
     </div>
@@ -228,25 +229,6 @@
   .paired-check {
     color: #22c55e;
     font-weight: 700;
-  }
-  .ctrl-btn {
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: 4px;
-    color: var(--color-text-muted);
-    font-size: 11px;
-    padding: 2px 8px;
-    cursor: pointer;
-    transition: background 0.15s, color 0.15s, border-color 0.15s;
-    white-space: nowrap;
-  }
-  .ctrl-btn:hover:not(:disabled) {
-    border-color: var(--color-accent, #4f86f7);
-    color: var(--color-text);
-  }
-  .ctrl-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
   }
   .err {
     color: var(--color-error);
