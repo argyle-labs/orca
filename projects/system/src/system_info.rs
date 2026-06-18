@@ -17,11 +17,19 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use sysinfo::{Disks, Networks, Pid, ProcessRefreshKind, RefreshKind, System};
 
-/// In-memory cache refresh interval. Short so any client poll (UI every
-/// ~1-10s, MCP, CLI) gets near-live data without re-running sysinfo on every
-/// call. DB persistence runs on its own slower cadence — see
-/// `server::host_status_writer`.
-const REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+/// In-memory cache refresh interval. Tight enough that mount-state and
+/// other LAN-visible changes reflect within the ≤2s bar set by
+/// [[project-polling-rate-too-slow]] — LAN bandwidth is not the constraint
+/// and a ~50-150ms scan at this cadence is <8% steady CPU. DB persistence
+/// runs on its own cadence — see `server::host_status_writer`.
+const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Topology-claim refresh interval. Claims involve remote proxmox API
+/// fan-out (one call per guest) so they can't run at REFRESH_INTERVAL —
+/// that would hammer the API at ~20 calls/sec on a 40-guest fleet. VMs and
+/// LXCs don't churn fast enough to need 2s freshness; 15s keeps the
+/// inference tree fresh enough for the UI without overloading proxmox.
+const CLAIMS_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 
 static CACHE: OnceLock<Mutex<Option<Arc<SystemInfoReport>>>> = OnceLock::new();
 
@@ -71,6 +79,11 @@ pub fn spawn_refresher() {
         sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
         let shutdown = crate::periodic::shutdown_signal();
+        // Claim collection involves remote proxmox API calls; cache between
+        // ticks and only refresh on its own slower cadence. Tracked as a
+        // tokio Instant so the first iteration always populates.
+        let mut cached_claims: Vec<contract::TopologyClaim> = Vec::new();
+        let mut claims_last_refresh: Option<tokio::time::Instant> = None;
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(REFRESH_INTERVAL) => {}
@@ -81,9 +94,15 @@ pub fn spawn_refresher() {
             sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
             let gpus = collect_gpus().await;
-            let claims = crate::topology::collect_claims().await;
+            let need_claims_refresh = claims_last_refresh
+                .map(|t| t.elapsed() >= CLAIMS_REFRESH_INTERVAL)
+                .unwrap_or(true);
+            if need_claims_refresh {
+                cached_claims = crate::topology::collect_claims().await;
+                claims_last_refresh = Some(tokio::time::Instant::now());
+            }
             let mut snap = snapshot_from_sys(&sys, gpus);
-            snap.claims = claims;
+            snap.claims = cached_claims.clone();
             if let Some(point) = history::point_from(&snap) {
                 history::append(&point);
             }
