@@ -16,6 +16,7 @@ pub mod host_status_sweep;
 pub mod host_status_writer;
 pub mod server_pod;
 pub mod status;
+pub mod topology_infer;
 
 pub use db::replicate_engine::PeerSyncReport;
 

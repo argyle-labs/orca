@@ -821,6 +821,13 @@ async fn list_enriched_impl() -> Result<Vec<PodPeerDto>> {
     if !saw_self {
         out.insert(0, local_peer_row().await);
     }
+
+    // Derive `parent_peer_id` edges from TopologyClaim ↔ interface MAC
+    // matches across the assembled peer set. Read-time only — no DB
+    // writes — so a peer with stale claims doesn't mutate another peer's
+    // stored snapshot.
+    crate::topology_infer::infer(&mut out);
+
     Ok(out)
 }
 
