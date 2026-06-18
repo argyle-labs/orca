@@ -10,7 +10,11 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::process::Command;
+use tokio::sync::Mutex;
+use tokio::time::Instant;
 
 use crate::breaker::{HostObservation, OBSERVATION_WINDOW};
 use crate::{
@@ -21,6 +25,22 @@ use crate::{
 /// Default Proxmox LXC config directory. Pulled out as a constant so tests
 /// can target a tempdir without touching the global filesystem.
 const DEFAULT_PVE_LXC_DIR: &str = "/etc/pve/lxc";
+
+/// How long one merged `journalctl` fetch is reused across `observe()` calls
+/// before re-running. Reconciler ticks every 2s; 1500ms keeps every
+/// container in a tick on the same fetch without ever using a tail from a
+/// prior tick. Closes [[project-breaker-followup-6-bear-punch-list]] #2.
+const JOURNAL_CACHE_TTL: Duration = Duration::from_millis(1500);
+
+/// One merged `journalctl --merge --unit pve-container@*.service` result,
+/// partitioned by vmid. Refreshed on demand when older than
+/// [`JOURNAL_CACHE_TTL`]. `by_vmid` holds only units that produced lines in
+/// the window — vmids absent from the map had no relevant journal output.
+#[derive(Default)]
+struct JournalCache {
+    fetched_at: Option<Instant>,
+    by_vmid: HashMap<u32, String>,
+}
 
 /// Reason a single `mp*` line was dropped during conf parsing. Tracked so
 /// the parser can surface "skipped, here's why" instead of silently
@@ -67,12 +87,15 @@ pub struct PctRow {
 }
 
 /// LXC adapter. Holds the conf directory (overridable for tests), the
-/// `pct` binary path, and the `journalctl` binary path (both overridable
-/// for tests / non-Proxmox LXC).
+/// `pct` binary path, the `journalctl` binary path (both overridable for
+/// tests / non-Proxmox LXC), and a shared host-scoped journal cache that
+/// folds all `observe()` calls in a single reconciler tick into ONE
+/// `journalctl --merge` invocation.
 pub struct LxcProxmoxAdapter {
     conf_dir: PathBuf,
     pct_bin: String,
     journalctl_bin: String,
+    journal_cache: Arc<Mutex<JournalCache>>,
 }
 
 impl LxcProxmoxAdapter {
@@ -81,6 +104,7 @@ impl LxcProxmoxAdapter {
             conf_dir: PathBuf::from(DEFAULT_PVE_LXC_DIR),
             pct_bin: "pct".to_string(),
             journalctl_bin: "journalctl".to_string(),
+            journal_cache: Arc::new(Mutex::new(JournalCache::default())),
         }
     }
 
@@ -94,6 +118,7 @@ impl LxcProxmoxAdapter {
             conf_dir,
             pct_bin,
             journalctl_bin,
+            journal_cache: Arc::new(Mutex::new(JournalCache::default())),
         }
     }
 }
@@ -202,64 +227,109 @@ impl RuntimeAdapter for LxcProxmoxAdapter {
         ))
     }
 
-    /// Run `journalctl -u pve-container@<vmid>.service --since "5 min ago"
-    /// --no-pager -o cat` and stuff the stdout into
-    /// `lxc_journal_tail`. The breaker's `classify_lxc` filters lines for
-    /// `failed to start` / `exited with status`. Failures here are
-    /// swallowed (logged) — a missing journal tail must not block a
-    /// start, per [[feedback-no-hiding-errors]] (logged + continue is
-    /// not "hidden").
+    /// Pull this container's journal tail out of a shared host-scoped
+    /// cache. The cache is filled by ONE `journalctl --merge --unit
+    /// pve-container@*.service ... -o with-unit` invocation per
+    /// [`JOURNAL_CACHE_TTL`] window and then partitioned per vmid. Closes
+    /// punch-list #2 — before this change every LXC on a host spawned its
+    /// own `journalctl` per reconciler tick.
+    ///
+    /// The breaker's `classify_lxc` substring-matches `failed to start` /
+    /// `exited with status` against the returned tail, so the per-vmid
+    /// slice just needs to preserve those phrases — which `-o with-unit`'s
+    /// `unit: msg` framing does after we strip the prefix.
+    ///
+    /// Failures (spawn / non-zero / non-utf8) are logged and swallowed:
+    /// a missing journal tail must not block a start, per
+    /// [[feedback-no-hiding-errors]] (logged + continue is not "hidden").
     async fn observe(&self, container: &Container) -> HostObservation {
         if container.runtime != RuntimeKind::Lxc {
             return HostObservation::default();
         }
-        let unit = format!("pve-container@{}.service", container.id);
-        let since = format!("{} sec ago", OBSERVATION_WINDOW.num_seconds());
-        let out = match Command::new(&self.journalctl_bin)
-            .args(["-u", &unit, "--since", &since, "--no-pager", "-o", "cat"])
-            .output()
-            .await
-        {
-            Ok(o) => o,
-            Err(e) => {
-                tracing::warn!(
-                    target: "containers::lxc",
-                    vmid = %container.id,
-                    journalctl = %self.journalctl_bin,
-                    error = %e,
-                    "journalctl spawn failed; proceeding with empty observation"
-                );
-                return HostObservation::default();
-            }
-        };
-        if !out.status.success() {
-            tracing::warn!(
-                target: "containers::lxc",
-                vmid = %container.id,
-                status = %out.status,
-                stderr = %String::from_utf8_lossy(&out.stderr).trim(),
-                "journalctl exited non-zero; proceeding with empty observation"
-            );
+        let Ok(vmid) = container.id.parse::<u32>() else {
             return HostObservation::default();
-        }
-        let tail = match String::from_utf8(out.stdout) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(
-                    target: "containers::lxc",
-                    vmid = %container.id,
-                    error = %e,
-                    "journalctl stdout not utf8; proceeding with empty observation"
-                );
-                return HostObservation::default();
-            }
         };
+
+        let mut cache = self.journal_cache.lock().await;
+        let fresh = cache
+            .fetched_at
+            .map(|t| t.elapsed() < JOURNAL_CACHE_TTL)
+            .unwrap_or(false);
+        if !fresh {
+            refresh_journal_cache(&self.journalctl_bin, &mut cache).await;
+        }
+        let tail = cache.by_vmid.get(&vmid).cloned();
         HostObservation {
-            lxc_journal_tail: Some(tail),
+            lxc_journal_tail: tail,
             // Cross-tick state is owned by the breaker — see
             // `RuntimeAdapter::observe` doc.
             lxc_previous_state: None,
         }
+    }
+}
+
+/// Run one merged `journalctl` covering every `pve-container@*.service`
+/// unit on the host and refill `cache.by_vmid` from its output. Always
+/// stamps `fetched_at` (even on failure) so a broken `journalctl` doesn't
+/// trigger a hot-spin of retries within a single tick.
+async fn refresh_journal_cache(journalctl_bin: &str, cache: &mut JournalCache) {
+    let since = format!("{} sec ago", OBSERVATION_WINDOW.num_seconds());
+    let out = Command::new(journalctl_bin)
+        .args([
+            "--merge",
+            "--unit=pve-container@*.service",
+            "--since",
+            &since,
+            "--no-pager",
+            "-o",
+            "with-unit",
+        ])
+        .output()
+        .await;
+    cache.by_vmid.clear();
+    cache.fetched_at = Some(Instant::now());
+    match out {
+        Ok(o) if o.status.success() => match String::from_utf8(o.stdout) {
+            Ok(stdout) => partition_journal_by_vmid(&stdout, &mut cache.by_vmid),
+            Err(e) => tracing::warn!(
+                target: "containers::lxc",
+                error = %e,
+                "merged journalctl stdout not utf8; proceeding with empty cache",
+            ),
+        },
+        Ok(o) => tracing::warn!(
+            target: "containers::lxc",
+            status = %o.status,
+            stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+            "merged journalctl exited non-zero; proceeding with empty cache",
+        ),
+        Err(e) => tracing::warn!(
+            target: "containers::lxc",
+            journalctl = %journalctl_bin,
+            error = %e,
+            "merged journalctl spawn failed; proceeding with empty cache",
+        ),
+    }
+}
+
+/// Parse `-o with-unit` output, which frames each line as
+/// `pve-container@<vmid>.service: <message>`, and bucket the messages by
+/// vmid. Lines that don't match the prefix are dropped — they don't belong
+/// to any container unit. Pure for testability.
+pub(crate) fn partition_journal_by_vmid(stdout: &str, out: &mut HashMap<u32, String>) {
+    for line in stdout.lines() {
+        let Some(rest) = line.strip_prefix("pve-container@") else {
+            continue;
+        };
+        let Some((vmid_str, msg)) = rest.split_once(".service: ") else {
+            continue;
+        };
+        let Ok(vmid) = vmid_str.parse::<u32>() else {
+            continue;
+        };
+        let entry = out.entry(vmid).or_default();
+        entry.push_str(msg);
+        entry.push('\n');
     }
 }
 
@@ -688,7 +758,11 @@ VMID       Status     Lock         Name
         let tmp = tempfile::TempDir::new().expect("tempdir");
         // Stub echoes a tail containing 4 "failed to start" lines —
         // enough to trip LxcJournalFailuresIn5Min (threshold 3).
-        let body = "#!/bin/sh\ncat <<'EOF'\nfailed to start something\nexited with status 1\nfailed to start something\nrandom line\nfailed to start something\nEOF\n";
+        // `-o with-unit` frames lines as `<unit>: <message>`. Three
+        // failure lines for vmid 116 — enough to trip
+        // LxcJournalFailuresIn5Min (threshold 3) — plus one line for an
+        // unrelated vmid to confirm partitioning targets the requested id.
+        let body = "#!/bin/sh\ncat <<'EOF'\npve-container@116.service: failed to start something\npve-container@116.service: exited with status 1\npve-container@116.service: failed to start something\npve-container@116.service: random line\npve-container@116.service: failed to start something\npve-container@200.service: failed to start unrelated\nEOF\n";
         let journalctl = stub_script(tmp.path(), "journalctl-stub", body);
         let adapter = LxcProxmoxAdapter::with_paths(
             tmp.path().to_path_buf(),
@@ -765,5 +839,62 @@ VMID       Status     Lock         Name
             obs.lxc_journal_tail.is_none(),
             "docker container should bypass journalctl entirely"
         );
+    }
+
+    /// Two `observe()` calls for two different LXCs within the cache TTL
+    /// must result in ONE journalctl spawn. The stub appends to a counter
+    /// file every invocation so we can assert the spawn count.
+    #[tokio::test]
+    async fn observe_batches_journalctl_within_ttl() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let counter = tmp.path().join("calls");
+        let body = format!(
+            "#!/bin/sh\necho x >> {counter}\ncat <<'EOF'\npve-container@116.service: failed to start a\npve-container@116.service: exited with status 1\npve-container@116.service: failed to start b\npve-container@200.service: failed to start c\npve-container@200.service: exited with status 7\npve-container@200.service: failed to start d\nEOF\n",
+            counter = counter.display()
+        );
+        let journalctl = stub_script(tmp.path(), "journalctl-counting", &body);
+        let adapter = LxcProxmoxAdapter::with_paths(
+            tmp.path().to_path_buf(),
+            "pct-not-used".into(),
+            journalctl,
+        );
+
+        let obs1 = adapter.observe(&mk_lxc_container(116)).await;
+        let obs2 = adapter.observe(&mk_lxc_container(200)).await;
+
+        let tail1 = obs1.lxc_journal_tail.expect("116 tail populated");
+        let tail2 = obs2.lxc_journal_tail.expect("200 tail populated");
+        assert!(tail1.contains("failed to start a"));
+        assert!(!tail1.contains("failed to start c"), "no cross-vmid leak");
+        assert!(tail2.contains("exited with status 7"));
+        assert!(!tail2.contains("failed to start a"), "no cross-vmid leak");
+
+        let count = std::fs::read_to_string(&counter)
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+        assert_eq!(
+            count, 1,
+            "expected one batched journalctl spawn, got {count}"
+        );
+    }
+
+    /// Pure parser: prefix line attributed to the right bucket, unrelated
+    /// lines dropped, multiple lines for the same vmid concatenated.
+    #[test]
+    fn partition_buckets_lines_by_vmid() {
+        let stdout = "\
+pve-container@116.service: failed to start a
+pve-container@200.service: exited with status 1
+pve-container@116.service: random
+garbage line with no prefix
+pve-container@bad.service: not a number
+";
+        let mut out: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        partition_journal_by_vmid(stdout, &mut out);
+        assert_eq!(out.len(), 2);
+        let tail_116 = &out[&116];
+        assert!(tail_116.contains("failed to start a"));
+        assert!(tail_116.contains("random"));
+        assert!(out[&200].contains("exited with status 1"));
     }
 }
