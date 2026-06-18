@@ -4,35 +4,25 @@
 //! shells `pct list` and reads `/etc/pve/lxc/<vmid>.conf` directly, which
 //! only works when orca runs ON a Proxmox host and bypasses Proxmox auth
 //! entirely. This adapter talks the documented API
-//! (`https://<node>:8006/api2/json`) through the `proxmox::Client`
-//! crate, with PVE API-token auth. It works remotely, respects
-//! Proxmox permissions, and gives us cluster-aware enumeration in one
-//! request via `/cluster/resources?type=vm`.
+//! (`https://<node>:8006/api2/json`) through the progenitor-generated
+//! `proxmox::generated::Client`, with PVE API-token auth. Works
+//! remotely, respects Proxmox permissions, and gives cluster-aware
+//! enumeration via `/cluster/resources?type=vm`.
 //!
-//! The `Container.host` field is the Proxmox node name (e.g. `"thor"`,
-//! `"frigg"`) for every container this adapter returns. The breaker
-//! keys on `(host, runtime, container_id)`, so multi-node enumeration
-//! flows through unchanged.
-//!
-//! **Why the round-trip serialize:** the workspace bans opaque JSON
-//! types in product code — every shape that crosses this file's
-//! boundary is a typed struct deriving `Deserialize`. The
-//! `proxmox::Client` is the upstream-shape boundary; it returns the
-//! raw envelope, and we immediately parse it through
-//! `to_string`/`from_str` into the typed views below. The double
-//! serialization cost is acceptable for the reconciler's tick
-//! cadence; if it ever shows up in profiles, the fix is to push
-//! typed wrappers into the `proxmox` crate.
+//! The `Container.host` field is the Proxmox node name for every
+//! container this adapter returns. The breaker keys on
+//! `(host, runtime, container_id)`, so multi-node enumeration flows
+//! through unchanged.
 
 use async_trait::async_trait;
 use plugin_toolkit::containers::{
     AdapterError, Container, ContainerState, ListFilter, Liveness, LogTail, RestartPolicy,
     RuntimeAdapter, RuntimeKind, WedgeRecoverer,
 };
-use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use crate::{Client as ProxmoxClient, ProxmoxAction};
+use crate::generated::{self, types as gtypes};
+use crate::{GuestKind, ProxmoxAction, fetch_guest_config};
 
 /// Budget for the liveness probe. Tight on purpose — the reconciler
 /// can call this every tick on every running LXC, so a hung probe
@@ -51,23 +41,30 @@ const RECOVERY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// at the reconciler-entry level: one adapter per endpoint, both
 /// registered.
 pub struct LxcProxmoxApiAdapter {
-    client: ProxmoxClient,
+    client: generated::Client,
+    http: reqwest::Client,
+    base_url: String,
     /// Display name for the endpoint — surfaced in tracing / error
-    /// context, not in the typed surface. Matches the
-    /// `db::proxmox::EndpointRow::name` the tool layer uses.
+    /// context, not in the typed surface.
     endpoint_name: String,
 }
 
 impl LxcProxmoxApiAdapter {
-    pub fn new(client: ProxmoxClient, endpoint_name: impl Into<String>) -> Self {
+    pub fn new(
+        client: generated::Client,
+        http: reqwest::Client,
+        base_url: impl Into<String>,
+        endpoint_name: impl Into<String>,
+    ) -> Self {
         Self {
             client,
+            http,
+            base_url: base_url.into(),
             endpoint_name: endpoint_name.into(),
         }
     }
 
-    /// Endpoint label this adapter was constructed with. Used by the
-    /// reconciler entry to keep error rows aligned with their source.
+    /// Endpoint label this adapter was constructed with.
     pub fn endpoint_name(&self) -> &str {
         &self.endpoint_name
     }
@@ -107,10 +104,8 @@ impl RuntimeAdapter for LxcProxmoxApiAdapter {
 
     async fn stop(&self, id: &str) -> Result<(), AdapterError> {
         // The Proxmox API distinguishes `shutdown` (graceful) from
-        // `stop` (hard). We map `RuntimeAdapter::stop` to `shutdown`
-        // to match the docker adapter's graceful default (bollard's
-        // `stop` has a timeout). Operators wanting a hard stop can
-        // call `proxmox.update --action stop` directly.
+        // `stop` (hard). Map `RuntimeAdapter::stop` to `shutdown` to
+        // match the docker adapter's graceful default.
         self.lifecycle(id, ProxmoxAction::Shutdown).await
     }
 
@@ -119,34 +114,13 @@ impl RuntimeAdapter for LxcProxmoxApiAdapter {
     }
 
     async fn logs(&self, _id: &str, _tail: LogTail) -> Result<String, AdapterError> {
-        // Proxmox doesn't expose container-internal logs cleanly over
-        // the API — `pct exec` runs commands but doesn't stream
-        // journalctl in a structured shape. Deferred until we either
-        // add a typed syslog endpoint to the `proxmox` crate or route
-        // through a node-resident agent.
         Err(AdapterError::Refused(
             "LxcProxmoxApiAdapter::logs requires the syslog endpoint (not yet wired)".into(),
         ))
     }
 
-    // `observe()` falls through to the trait default
-    // (`HostObservation::default()`) for now. Real journal-tail fetch
-    // lands once a typed syslog endpoint exists on the proxmox client.
-
     /// Local-subprocess probe: `pct exec <vmid> -- true` with a tight
-    /// timeout. This is the narrow exception to
-    /// [[project-adapter-backends-api-first]] — the Proxmox HTTPS API
-    /// has no synchronous in-container exec primitive
-    /// (`/lxc/{vmid}/exec` is async/UPID-based and the status
-    /// endpoints can't see PID-1 wedge). See
-    /// [[feedback-api-first-liveness-exception]]: probe is local,
-    /// recovery stays API-only.
-    ///
-    /// Co-location assumption: the orca daemon runs ON the PVE node
-    /// (per the rc.23 per-host fleet shape). If it isn't,
-    /// `pct` won't be on PATH and we return `Liveness::Unknown` —
-    /// which the reconciler treats as "do not act," matching the
-    /// adapter-glitch case.
+    /// timeout. See [[feedback-api-first-liveness-exception]].
     async fn probe_liveness(&self, container: &Container) -> Liveness {
         if container.runtime != RuntimeKind::Lxc {
             return Liveness::NotApplicable;
@@ -163,11 +137,6 @@ impl RuntimeAdapter for LxcProxmoxApiAdapter {
             Ok(Ok(_)) => Liveness::Unknown,
             Ok(Err(_)) => Liveness::Unknown,
             Err(_) => {
-                // start_kill is best-effort: if it fails the child is
-                // already gone or unreachable, which is fine — we're
-                // about to return Wedged regardless. `kill_on_drop`
-                // (set on the Command) guarantees the kernel side gets
-                // cleaned up when `child` falls out of scope.
                 drop(child.start_kill());
                 Liveness::Wedged
             }
@@ -182,14 +151,9 @@ impl RuntimeAdapter for LxcProxmoxApiAdapter {
 #[async_trait]
 impl WedgeRecoverer for LxcProxmoxApiAdapter {
     /// API-only recovery: hard `Stop` then `Start`, polling status
-    /// between transitions. Recovery is `Refused` if either transition
-    /// doesn't land within [`RECOVERY_POLL_BUDGET_SECS`]. Per
-    /// [[feedback-api-first-liveness-exception]] the probe is allowed
-    /// to bend API-first; this recovery path is NOT.
-    ///
-    /// `Stop` is the hard variant (`POST /status/stop`) — `Shutdown`
-    /// is graceful and would hang on exactly the wedged PID-1 case
-    /// this exists to recover.
+    /// between transitions. `Stop` is the hard variant — `Shutdown`
+    /// would hang on exactly the wedged PID-1 case this exists to
+    /// recover.
     async fn attempt_unwedge(&self, container: &Container) -> Result<(), AdapterError> {
         let vmid: u64 = container
             .id
@@ -197,49 +161,32 @@ impl WedgeRecoverer for LxcProxmoxApiAdapter {
             .map_err(|_| AdapterError::NotFound(format!("vmid `{}` is not a u64", container.id)))?;
         let node = container.host.clone();
 
-        self.client
-            .container_action(&node, vmid, ProxmoxAction::Stop)
-            .await
-            .map_err(|e| AdapterError::Transport(format!("stop {vmid}: {e}")))?;
+        self.do_lifecycle(&node, vmid, ProxmoxAction::Stop).await?;
         wait_for_status(&self.client, &node, vmid, "stopped").await?;
 
-        self.client
-            .container_action(&node, vmid, ProxmoxAction::Start)
-            .await
-            .map_err(|e| AdapterError::Transport(format!("start {vmid}: {e}")))?;
+        self.do_lifecycle(&node, vmid, ProxmoxAction::Start).await?;
         wait_for_status(&self.client, &node, vmid, "running").await?;
 
         Ok(())
     }
 }
 
-/// Poll `container_status` until `data.status` matches `expected`,
-/// up to [`RECOVERY_POLL_BUDGET_SECS`]. The status envelope is the
-/// same shape as `ClusterResource` (subset).
+/// Poll the LXC current-status endpoint until `data.status` matches
+/// `expected`, up to [`RECOVERY_POLL_BUDGET_SECS`].
 async fn wait_for_status(
-    client: &ProxmoxClient,
+    client: &generated::Client,
     node: &str,
     vmid: u64,
     expected: &str,
 ) -> Result<(), AdapterError> {
-    #[derive(Deserialize)]
-    struct StatusEnvelope {
-        #[serde(default)]
-        data: StatusData,
-    }
-    #[derive(Deserialize, Default)]
-    struct StatusData {
-        #[serde(default)]
-        status: Option<String>,
-    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(RECOVERY_POLL_BUDGET_SECS);
     loop {
-        let raw = client
-            .container_status(node, vmid)
+        let st = client
+            .get_vm_status_nodes_node_lxc_vmid_status_current(node, vmid as i64)
             .await
-            .map_err(|e| AdapterError::Transport(format!("status {vmid}: {e}")))?;
-        let env = reparse::<StatusEnvelope>(&raw, "container_status")?;
-        if env.data.status.as_deref() == Some(expected) {
+            .map_err(|e| AdapterError::Transport(format!("status {vmid}: {e}")))?
+            .into_inner();
+        if st.status.to_string() == expected {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
@@ -253,32 +200,51 @@ async fn wait_for_status(
 
 impl LxcProxmoxApiAdapter {
     /// Fetch the cluster resource list and return only LXC rows.
-    async fn fetch_lxc_rows(&self) -> Result<Vec<ClusterResource>, AdapterError> {
-        let raw = self
+    async fn fetch_lxc_rows(&self) -> Result<Vec<LxcRow>, AdapterError> {
+        let items = self
             .client
-            .cluster_vm_resources()
+            .get_resources_cluster_resources(Some(gtypes::GetResourcesClusterResourcesType::Vm))
             .await
-            .map_err(|e| AdapterError::Transport(e.to_string()))?;
-        let envelope = reparse::<ClusterResourcesEnvelope>(&raw, "cluster_vm_resources")?;
-        Ok(envelope
-            .data
+            .map_err(|e| AdapterError::Transport(format!("cluster resources: {e}")))?
+            .into_inner();
+        Ok(items
             .into_iter()
-            .filter(|r| r.kind == "lxc")
+            .filter_map(|r| {
+                if !matches!(
+                    r.type_,
+                    gtypes::GetResourcesClusterResourcesResponseItemType::Lxc
+                ) {
+                    return None;
+                }
+                let node = r.node?;
+                let vmid = r.vmid?;
+                if vmid <= 0 {
+                    return None;
+                }
+                Some(LxcRow {
+                    vmid: vmid as u64,
+                    node,
+                    name: r.name,
+                    status: r.status,
+                })
+            })
             .collect())
     }
 
-    async fn build_container(&self, row: &ClusterResource) -> Result<Container, AdapterError> {
+    async fn build_container(&self, row: &LxcRow) -> Result<Container, AdapterError> {
         // Per-container config fetch populates restart_policy from
-        // `onboot`. Cluster resources don't include it; one GET per
-        // container. For large clusters this should batch via
-        // `try_join_all` — TODO once we see scale.
-        let raw_cfg = self
-            .client
-            .guest_config(&row.node, row.vmid, crate::GuestKind::Lxc)
-            .await
-            .map_err(|e| AdapterError::Transport(e.to_string()))?;
-        let cfg = reparse::<LxcConfigEnvelope>(&raw_cfg, "guest_config")?;
-        let restart_policy = if cfg.data.onboot != 0 {
+        // `onboot`. Raw URL because progenitor can't model indexed
+        // keys; see `fetch_guest_config` rationale.
+        let cfg = fetch_guest_config(
+            &self.http,
+            &self.base_url,
+            &row.node,
+            GuestKind::Lxc,
+            row.vmid,
+        )
+        .await
+        .map_err(|e| AdapterError::Transport(format!("guest_config: {e}")))?;
+        let restart_policy = if cfg.data.onboot() {
             RestartPolicy::Always
         } else {
             RestartPolicy::No
@@ -303,16 +269,11 @@ impl LxcProxmoxApiAdapter {
             restart_policy,
             image: None,
             labels: Vec::new(),
-            // C-series: mount enumeration via guest_config's mp*
-            // entries. The pct-shell adapter parses the same format
-            // off-disk; reusing that parser here is a follow-up.
             mounts: Vec::new(),
             ports: Vec::new(),
             started_at: None,
             finished_at: None,
             restart_count: 0,
-            // Proxmox exposes last task exit codes via
-            // `/nodes/<node>/tasks` — wiring deferred (task #5).
             exit_code: None,
             startup: None,
         })
@@ -322,82 +283,58 @@ impl LxcProxmoxApiAdapter {
         let vmid: u64 = id
             .parse()
             .map_err(|_| AdapterError::NotFound(format!("vmid `{id}` is not a u64")))?;
-        // We need to know which node the container lives on. One
-        // cluster query gives us the mapping; cache opportunity if
-        // this becomes hot. For now: re-query each tick.
         let rows = self.fetch_lxc_rows().await?;
         let node = rows
             .into_iter()
             .find(|r| r.vmid == vmid)
             .map(|r| r.node)
             .ok_or_else(|| AdapterError::NotFound(format!("lxc vmid `{vmid}` not in cluster")))?;
+        self.do_lifecycle(&node, vmid, action).await
+    }
 
-        self.client
-            .container_action(&node, vmid, action)
-            .await
-            .map_err(|e| AdapterError::Transport(e.to_string()))?;
-        Ok(())
+    async fn do_lifecycle(
+        &self,
+        node: &str,
+        vmid: u64,
+        action: ProxmoxAction,
+    ) -> Result<(), AdapterError> {
+        let vmid_i = vmid as i64;
+        let res = match action {
+            ProxmoxAction::Start => self
+                .client
+                .post_vm_start_nodes_node_lxc_vmid_status_start(node, vmid_i, &Default::default())
+                .await
+                .map(|_| ()),
+            ProxmoxAction::Stop => self
+                .client
+                .post_vm_stop_nodes_node_lxc_vmid_status_stop(node, vmid_i, &Default::default())
+                .await
+                .map(|_| ()),
+            ProxmoxAction::Shutdown => self
+                .client
+                .post_vm_shutdown_nodes_node_lxc_vmid_status_shutdown(
+                    node,
+                    vmid_i,
+                    &Default::default(),
+                )
+                .await
+                .map(|_| ()),
+            ProxmoxAction::Reboot => self
+                .client
+                .post_vm_reboot_nodes_node_lxc_vmid_status_reboot(node, vmid_i, &Default::default())
+                .await
+                .map(|_| ()),
+        };
+        res.map_err(|e| AdapterError::Transport(format!("{} {vmid}: {e}", action.as_str())))
     }
 }
 
-// ── Typed upstream views ───────────────────────────────────────────────────
-//
-// Mirror the subset of Proxmox API JSON we actually consume. Fields the
-// API omits use `#[serde(default)]` so a missing key is the safe value
-// (rather than a parse failure that wedges the whole tick).
-
-#[derive(Debug, Clone, Deserialize)]
-struct ClusterResourcesEnvelope {
-    #[serde(default)]
-    data: Vec<ClusterResource>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ClusterResource {
-    /// `"lxc"`, `"qemu"`, `"storage"`, `"node"`, `"pool"` — the
-    /// non-guest variants get filtered out at the call site.
-    #[serde(rename = "type")]
-    kind: String,
+#[derive(Debug, Clone)]
+struct LxcRow {
     vmid: u64,
     node: String,
-    #[serde(default)]
     name: Option<String>,
-    /// Proxmox state string. Mapped to `ContainerState` via
-    /// [`map_proxmox_status`]; unknowns survive as
-    /// `ContainerState::Unknown(_)` rather than getting rejected.
-    #[serde(default)]
     status: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct LxcConfigEnvelope {
-    #[serde(default)]
-    data: LxcConfigData,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct LxcConfigData {
-    /// `0` or `1`. Treated as the restart_policy signal: nonzero =
-    /// Always, zero = No.
-    #[serde(default)]
-    onboot: u64,
-}
-
-/// Re-parse a value the proxmox client returned into a typed view.
-///
-/// The `proxmox::Client` returns an opaque upstream envelope; this
-/// crate's policy disallows raw dynamic-JSON types in product code
-/// (per the file-level comment), so we round-trip through a JSON
-/// string to get back into the typed world. `context` lands in the
-/// error message so a malformed response names the endpoint.
-fn reparse<T: for<'de> Deserialize<'de>>(
-    raw: &impl Serialize,
-    context: &'static str,
-) -> Result<T, AdapterError> {
-    let s = serde_json::to_string(raw)
-        .map_err(|e| AdapterError::Malformed(format!("{context}: re-encode: {e}")))?;
-    serde_json::from_str(&s)
-        .map_err(|e| AdapterError::Malformed(format!("{context}: typed parse: {e}")))
 }
 
 fn map_proxmox_status(s: &str) -> ContainerState {
@@ -405,10 +342,6 @@ fn map_proxmox_status(s: &str) -> ContainerState {
         "running" => ContainerState::Running,
         "stopped" => ContainerState::Exited,
         "paused" => ContainerState::Paused,
-        // `ContainerState::Unknown` is unit (no carried string); the
-        // raw status is lost here. If operators need to see it,
-        // `inspect()` can surface it via a separate notes field —
-        // pending a Container model extension.
         _ => ContainerState::Unknown,
     }
 }
