@@ -2,6 +2,7 @@
 name = "proxmox"
 version.workspace = true
 edition.workspace = true
+build = "build.rs"
 
 [lib]
 name = "proxmox"
@@ -32,6 +33,17 @@ tracing     = { workspace = true }
 # join_all the per-guest config fan-out. Needed by topology.rs only — the
 # rest of the crate is sequential. Workspace alias is `futures-util`.
 futures-util = { workspace = true }
+# Runtime deps for the progenitor-generated client (see build.rs).
+reqwest     = { workspace = true, features = ["multipart", "cookies"] }
+chrono      = { workspace = true }
+uuid        = { workspace = true, features = ["serde"] }
+progenitor-client = "0.14"
+futures-core = "0.3"
+bytes       = "1"
+regress     = "0.10"
+
+[build-dependencies]
+plugin-toolkit-build = { path = "../../plugin-toolkit-build" }
 
 [dev-dependencies]
 tokio    = { workspace = true }
