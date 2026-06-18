@@ -263,6 +263,22 @@ fn snapshot_from_sys(sys: &System, gpus: Vec<GpuInfo>) -> SystemInfoReport {
                 }
             }
         }
+        // sysinfo returns all-zero MACs on alpine/musl LXC (e.g. baldur),
+        // leaving every iface unpinned. Fall back to /sys/class/net for any
+        // iface still missing a MAC.
+        #[cfg(target_os = "linux")]
+        for iface in by_name.values_mut() {
+            if iface.mac.is_some() || iface.loopback {
+                continue;
+            }
+            let path = format!("/sys/class/net/{}/address", iface.name);
+            if let Ok(s) = std::fs::read_to_string(&path) {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() && trimmed != "00:00:00:00:00:00" {
+                    iface.mac = Some(trimmed.to_ascii_lowercase());
+                }
+            }
+        }
         report.interfaces = by_name.into_values().collect();
         // Primary IPs: first non-loopback v4/v6.
         report.primary_ipv4 = report
