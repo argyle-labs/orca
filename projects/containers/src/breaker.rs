@@ -188,7 +188,13 @@ pub enum HoldReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BreakerDecision {
     Proceed,
-    Hold { reason: HoldReason },
+    Hold {
+        reason: HoldReason,
+        /// `Some(_)` when a prior tick already notified for this sticky
+        /// hold; `None` on a fresh trip. Lets callers suppress repeat
+        /// notifications without a second `store.load()` after arm.
+        notified_at: Option<DateTime<Utc>>,
+    },
 }
 
 /// Per-tick observation captured by the caller. Runtime-specific signals
@@ -525,7 +531,10 @@ pub fn arm(req: ArmRequest<'_>) -> Result<BreakerDecision, BreakerError> {
     if record.status == BreakerStatus::Held
         && let Some(reason) = record.held_reason.clone()
     {
-        return Ok(BreakerDecision::Hold { reason });
+        return Ok(BreakerDecision::Hold {
+            reason,
+            notified_at: record.notified_at,
+        });
     }
 
     record.prune_window(req.now);

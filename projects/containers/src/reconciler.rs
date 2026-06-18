@@ -246,6 +246,13 @@ pub struct HeldPendingBreakerPayload {
     pub exit_code: Option<i32>,
     /// Closed enum of trip reasons from the breaker classifier.
     pub hold_reason: HoldReason,
+    /// True when the container is currently running and the hold applies
+    /// to the *next* start — fired from the observe-only NoOp branch.
+    /// False when the hold blocked an in-flight start — fired from the
+    /// start-pipeline path. Drives the body text so operators don't read
+    /// "HELD start of X" for a container that's running fine right now.
+    #[serde(default)]
+    pub currently_running: bool,
 }
 
 // ── Mount probe ───────────────────────────────────────────────────────────
@@ -398,6 +405,10 @@ pub async fn reconcile(input: ReconcileInput<'_>) -> ReconcileOutput {
                         && breaker::arm_on_every_start(container.runtime)
                         && container.restart_policy.desires_running()
                     {
+                        // Discard the returned HoldReason: the row stays
+                        // NoOp by design on the observe-only path — the
+                        // hold only blocks the *next* start, and the
+                        // helper has already notified internally.
                         let _ = arm_and_dispatch_hold(
                             adapter.as_ref(),
                             &container,
@@ -1048,7 +1059,13 @@ async fn arm_and_dispatch_hold(
             }
         };
     if !already_notified {
-        let outcomes = emit_held_pending_breaker(dispatcher, container, &reason).await;
+        // The observe-only call site passes `initiating_start=false` (the
+        // container is currently running; the hold takes effect on the
+        // next start). The start-pipeline passes `true` (the hold blocked
+        // an in-flight start). That 1:1 maps to `currently_running`.
+        let currently_running = !initiating_start;
+        let outcomes =
+            emit_held_pending_breaker(dispatcher, container, &reason, currently_running).await;
         let any_ok = outcomes.iter().any(|o| o.result.is_ok());
         if any_ok
             && let Err(e) = breaker::mark_notified(
@@ -1199,6 +1216,7 @@ async fn emit_held_pending_breaker(
     dispatcher: Option<&Dispatcher>,
     container: &Container,
     hold_reason: &HoldReason,
+    currently_running: bool,
 ) -> Vec<EmitOutcome> {
     let Some(d) = dispatcher else {
         return Vec::new();
@@ -1210,6 +1228,7 @@ async fn emit_held_pending_breaker(
         container_name: container.name.clone(),
         exit_code: container.exit_code,
         hold_reason: hold_reason.clone(),
+        currently_running,
     };
     let event = Event::new(
         EventClass::Alert,
@@ -1301,8 +1320,13 @@ fn render_held_pending_breaker_body(p: &HeldPendingBreakerPayload) -> String {
             format!("lxc journal: {count} failure lines in 5 min")
         }
     };
+    let prefix = if p.currently_running {
+        "HELD next start of"
+    } else {
+        "HELD start of"
+    };
     format!(
-        "HELD start of `{}` ({}) on `{}` — breaker open ({reason}), last exit code {code}",
+        "{prefix} `{}` ({}) on `{}` — breaker open ({reason}), last exit code {code}",
         p.container_name,
         p.runtime.as_str(),
         p.host

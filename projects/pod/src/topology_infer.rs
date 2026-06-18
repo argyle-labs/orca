@@ -140,20 +140,20 @@ mod tests {
     fn vm_nests_under_hypervisor_via_mac() {
         let mut peers = vec![
             peer(
-                "frigg",
+                "hyp1",
                 Some("aa:bb:cc:00:00:01"),
                 vec![claim("lxc", "AA:BB:CC:00:00:02")],
             ),
-            peer("baldur", Some("aa:bb:cc:00:00:02"), vec![]),
+            peer("guest1", Some("aa:bb:cc:00:00:02"), vec![]),
         ];
         infer(&mut peers);
-        let baldur = peers.iter().find(|p| p.peer_id == "baldur").unwrap();
+        let child = peers.iter().find(|p| p.peer_id == "guest1").unwrap();
         assert_eq!(
-            baldur.system.as_ref().unwrap().parent_peer_id.as_deref(),
-            Some("frigg")
+            child.system.as_ref().unwrap().parent_peer_id.as_deref(),
+            Some("hyp1")
         );
         assert_eq!(
-            baldur.system.as_ref().unwrap().parent_kind.as_deref(),
+            child.system.as_ref().unwrap().parent_kind.as_deref(),
             Some("hypervisor")
         );
     }
@@ -162,21 +162,21 @@ mod tests {
     fn no_match_leaves_parent_none() {
         let mut peers = vec![
             peer(
-                "frigg",
+                "hyp1",
                 Some("aa:bb:cc:00:00:01"),
                 vec![claim("vm", "ff:ff:ff:ff:ff:ff")],
             ),
-            peer("baldur", Some("aa:bb:cc:00:00:02"), vec![]),
+            peer("guest1", Some("aa:bb:cc:00:00:02"), vec![]),
         ];
         infer(&mut peers);
-        let baldur = peers.iter().find(|p| p.peer_id == "baldur").unwrap();
-        assert!(baldur.system.as_ref().unwrap().parent_peer_id.is_none());
+        let child = peers.iter().find(|p| p.peer_id == "guest1").unwrap();
+        assert!(child.system.as_ref().unwrap().parent_peer_id.is_none());
     }
 
     #[test]
     fn self_claim_does_not_self_parent() {
         let mut peers = vec![peer(
-            "frigg",
+            "hyp1",
             Some("aa:bb:cc:00:00:01"),
             vec![claim("vm", "aa:bb:cc:00:00:01")],
         )];
@@ -188,7 +188,7 @@ mod tests {
     fn container_kind_maps_to_host() {
         let mut peers = vec![
             peer(
-                "frigg",
+                "hyp1",
                 Some("aa:bb:cc:00:00:01"),
                 vec![claim("container", "aa:bb:cc:00:00:02")],
             ),
