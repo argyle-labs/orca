@@ -531,9 +531,16 @@ pub fn arm(req: ArmRequest<'_>) -> Result<BreakerDecision, BreakerError> {
     if record.status == BreakerStatus::Held
         && let Some(reason) = record.held_reason.clone()
     {
+        // Keep `last_observed_state` fresh even on the Held short-circuit
+        // so that after `unhold()` clears, the next tick's prev-state
+        // lookup reflects reality instead of whatever was observed at
+        // trip-time. Persist before returning.
+        let notified_at = record.notified_at;
+        record.last_observed_state = Some(container.state);
+        req.store.save(&record)?;
         return Ok(BreakerDecision::Hold {
             reason,
-            notified_at: record.notified_at,
+            notified_at,
         });
     }
 

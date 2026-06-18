@@ -199,6 +199,13 @@ pub struct StartedPayload {
     pub exit_code: Option<i32>,
     /// True when this start was classified tentative (exited non-zero)
     /// and went through the breaker.
+    ///
+    /// **Docker-only today.** The LXC adapter does not surface an
+    /// `exit_code`, so the tentative gate (`exit_code != Some(0)`) is
+    /// always false for LXC and this field never goes true on that path.
+    /// Tracked as #11 in [[project-breaker-followup-6-bear-punch-list]];
+    /// a future fix may compute it from the breaker arming gate so it
+    /// has meaning for runtimes without exit codes.
     pub tentative: bool,
 }
 
@@ -880,7 +887,13 @@ async fn run_start_pipeline(
     dry_run: bool,
     start_errors: &mut Vec<StartFailure>,
 ) -> ReconcileRow {
-    // Stale-mount gate.
+    // Stale-mount gate — runs BEFORE the breaker gate, intentionally:
+    // a container with a stale bind source can never start successfully,
+    // and arming the breaker on every such tick would burn the
+    // sliding-window budget on a failure mode the breaker is not
+    // designed to remediate. The trade-off (the breaker stays dormant
+    // for stale-mount-blocked containers until the mount recovers) is
+    // accepted per [[project-breaker-followup-6-bear-punch-list]] #10.
     let mut blocked_sources: Vec<PathBuf> = Vec::new();
     for m in &container.mounts {
         if let MountProbeResult::Stale = probe.probe(&m.source) {
