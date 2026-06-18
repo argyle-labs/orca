@@ -1,5 +1,62 @@
 import type { SystemInfoReport } from '$lib/client/types.gen';
 
+export type InboundOffer = {
+  offer_id: string;
+  peer_hostname: string;
+  peer_addr: string;
+  peer_port: number;
+  inviter_peer_id?: string | null;
+  expires_at: number;
+  ttl_secs: number;
+};
+
+export type Candidate = {
+  pubkey_fp: string;
+  peer_id: string | null;
+  hostname: string;
+  addr: string;
+  port: number;
+  can_invite: boolean;
+};
+
+export type StaleRow = {
+  peer_id: string;
+  hostname: string;
+  addr: string;
+  port: number;
+  reason: string;
+  last_seen_at: number | null;
+};
+
+export type ClusterSummary = {
+  name: string;
+  quorate: boolean | null;
+  online: number;
+  total: number;
+};
+
+export type DisplayRow =
+  | { kind: 'header'; cluster: string | null; summary: ClusterSummary | null; key: string }
+  | {
+      kind: 'inst';
+      inst: Instance;
+      depth: number;
+      prefix: string;
+      hasChildren: boolean;
+      key: string;
+    };
+
+export type SystemUpdateResp = {
+  current_version: string;
+  channel: string;
+  pinned_to: string | null;
+  available_versions: VersionEntry[];
+  latest: string | null;
+  notes: string[];
+  errors: string[];
+  update_available?: boolean | null;
+};
+
 export type VersionEntry = {
   tag: string;
   prerelease: boolean;

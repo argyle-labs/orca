@@ -1,5 +1,9 @@
 <script lang="ts">
   import Popover from './Popover.svelte';
+  import ChevronDownIcon from './icons/ChevronDownIcon.svelte';
+  import CheckIcon from './icons/CheckIcon.svelte';
+  import MoonIcon from './icons/MoonIcon.svelte';
+  import SunIcon from './icons/SunIcon.svelte';
   import {
     PALETTES,
     FONT_SIZES,
@@ -30,9 +34,7 @@
       title="Theme"
     >
       <span class="swatch" style="background: var(--color-accent)"></span>
-      <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5">
-        <path d="M2 4l3 3 3-3" />
-      </svg>
+      <ChevronDownIcon />
     </button>
   {/snippet}
 
@@ -52,9 +54,7 @@
               <span class="swatch-lg"></span>
               <span class="palette-label">{p.label}</span>
               {#if palette === p.id}
-                <svg class="check" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M2 6.5l2.5 2.5L10 3" />
-                </svg>
+                <span class="check"><CheckIcon /></span>
               {/if}
             </button>
           {/each}
@@ -72,19 +72,7 @@
               onclick={() => setMode(m as Mode)}
               aria-pressed={mode === m}
             >
-              {#if m === 'dark'}
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6">
-                  <path d="M13.5 10.5A6 6 0 0 1 5.5 2.5a6 6 0 1 0 8 8z" />
-                </svg>
-              {:else}
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6">
-                  <circle cx="8" cy="8" r="3.2" />
-                  <line x1="8" y1="1.5" x2="8" y2="3" />
-                  <line x1="8" y1="13" x2="8" y2="14.5" />
-                  <line x1="1.5" y1="8" x2="3" y2="8" />
-                  <line x1="13" y1="8" x2="14.5" y2="8" />
-                </svg>
-              {/if}
+              {#if m === 'dark'}<MoonIcon />{:else}<SunIcon />{/if}
               {m}
             </button>
           {/each}
