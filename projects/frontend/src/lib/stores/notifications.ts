@@ -31,6 +31,13 @@ function createNotifications() {
 
 export const notifications = createNotifications();
 
+/**
+ * Unified toast API — same store as `notifications`, cleaner name at the
+ * call site. `toast.success('saved')`, `toast.error(err)`, `toast.info(msg)`.
+ * Rendered once via `<Notification />` in +layout.svelte.
+ */
+export const toast = notifications;
+
 /** Wraps an async call with try/catch/notify. Returns the result or null on error. */
 export async function act<T>(fn: () => Promise<T>, opts?: { success?: string }): Promise<T | null> {
   try {

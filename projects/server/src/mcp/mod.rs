@@ -28,6 +28,12 @@ pub fn build_tool_ctx(config: Arc<Config>) -> ToolCtx {
     // remote_ok tools through whatever RemoteExec the host registers).
     let remote: Arc<dyn contract::RemoteExec> = Arc::new(pod::PodRemoteExec);
     ctx.register_service(remote);
+    // Pod-host cluster roster — plugin-agnostic discovery used by
+    // `pod.snapshot` so the systems UI can group peers by cluster
+    // without depending on a specific virtualization plugin.
+    let cluster_roster: Arc<dyn contract::ClusterRoster> =
+        Arc::new(proxmox::cluster_roster_impl::ProxmoxClusterRoster);
+    ctx.register_service(cluster_roster);
     dispatch::remote_ok::install(dispatch::remote_ok_names());
     dispatch::tool_roles::install(dispatch::role_table());
     match resolve_host_operator() {

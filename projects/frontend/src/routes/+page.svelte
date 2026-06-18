@@ -2,49 +2,39 @@
   import { onMount, onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
-  import { callTool } from '$lib/stores/runTool';
+  import { callTool, unwrap } from '$lib/stores/runTool';
+  import { proxmoxClusterList } from '$lib/client/sdk.gen';
   import { notifications } from '$lib/stores/notifications';
+  import { createPoller } from '$lib/utils/polling';
+  import { relTime, fmtMb, fmtUptime, fmtGpu } from '$lib/utils/format';
+  import { memPct, loadPct, cpuPct } from '$lib/utils/sysMetrics';
+  import { addrKindLabel, systemTypeLabel, capabilityLabel } from '$lib/utils/labels';
+  import { inferChannel, instChannel } from '$lib/utils/version';
   import StatusDot from '$lib/components/StatusDot.svelte';
   import Popover from '$lib/components/Popover.svelte';
   import PairingModal from '$lib/components/PairingModal.svelte';
   import Drawer from '$lib/components/Drawer.svelte';
-  import type { GpuInfo, SystemInfoReport, PodPeerDto } from '$lib/client/types.gen';
+  import MetricRow from '$lib/components/MetricRow.svelte';
+  import Chart from '$lib/components/Chart.svelte';
+  import SegmentedControl from '$lib/components/SegmentedControl.svelte';
+  import ToggleSwitch from '$lib/components/ToggleSwitch.svelte';
+  import InstanceCard from '$lib/components/InstanceCard.svelte';
+  import InstanceTreeRow from '$lib/components/InstanceTreeRow.svelte';
+  import ClusterHeader from '$lib/components/ClusterHeader.svelte';
+  import AuxList from '$lib/components/AuxList.svelte';
+  import AuxRow from '$lib/components/AuxRow.svelte';
+  import InboundOffersBanner from '$lib/components/InboundOffersBanner.svelte';
+  import IconButton from '$lib/components/IconButton.svelte';
+  import SectionHead from '$lib/components/SectionHead.svelte';
+  import type {
+    SystemInfoReport,
+    PodPeerDto,
+    ProxmoxClusterListEntry,
+  } from '$lib/client/types.gen';
+  import type { Instance, VersionEntry } from '$lib/types/instance';
   import type { PageData } from './$types';
 
   let { data }: { data: PageData } = $props();
-  interface Instance {
-    id: string;
-    peerId: string;
-    label: string;
-    origin: string;
-    port: number;
-    role: 'local' | 'system';
-    version: string | null;
-    target: string | null;
-    mode: string | null;
-    channel: string | null;
-    updateAvailable: boolean;
-    updateLatest: string | null;
-    updateCheckedSecs: number | null;
-    pinnedTo: string | null;
-    health: 'up' | 'down' | 'unknown';
-    error: string | null;
-    lastChecked: number | null;
-    secure?: { local: boolean; peer: boolean } | null;
-    status?: string | null;
-    addresses?: { kind: string; value: string }[] | null;
-    sys?: SystemInfoReport | null;
-    // Set after a successful peer-dispatched mutation. Polling refreshes
-    // (refreshPodPeers) read from the local mesh cache, which lags behind
-    // the peer's true state by one mesh sync. While this window is active,
-    // preserve fields the action authoritatively changed.
-    actionLockUntil?: number;
-    // Full version list from this peer's `system.update {}` probe, kept
-    // fresh by the page-level fan-out poll. Empty until the first probe
-    // completes. The drawer reads from this directly so opening it never
-    // needs a Refresh click.
-    availableVersions?: VersionEntry[];
-  }
 
   // Synchronous seed from load() — fully populated at first paint, so the
   // OLD page stays visible during navigation until the NEW page's data is
@@ -188,19 +178,6 @@
   // `addresses[]` values), then falls back to case-insensitive hostname
   // against `ClusterNode.name`. Standalone Proxmox hosts (no cluster
   // configured) report `name: null` and are NOT grouped.
-  type PxClusterNode = {
-    name: string;
-    ip?: string | null;
-    online?: boolean | null;
-    node_id?: number | null;
-    local?: boolean | null;
-  };
-  type PxClusterStatus = {
-    name?: string | null;
-    quorate?: boolean | null;
-    nodes: PxClusterNode[];
-  };
-  type PxClusterListEntry = { endpoint: string; status: PxClusterStatus };
   type ClusterSummary = {
     name: string;
     quorate: boolean | null;
@@ -213,7 +190,7 @@
 
   async function refreshProxmoxClusters() {
     try {
-      const list = await callTool<PxClusterListEntry[]>('proxmoxClusterList', {});
+      const list: ProxmoxClusterListEntry[] = await unwrap(proxmoxClusterList({ body: {} }));
       // Build IP and hostname indexes: ip|host → cluster name (only when
       // the endpoint actually reports a cluster — standalone hosts are
       // ignored so they fall through to the un-grouped bucket).
@@ -318,28 +295,12 @@
     pairModalInitialCode = code;
     pairModalOpen = true;
   }
-  let pollHandle: ReturnType<typeof setInterval> | null = null;
-  let probeHandle: ReturnType<typeof setInterval> | null = null;
-  let clusterHandle: ReturnType<typeof setInterval> | null = null;
 
   // Drawer update controls — reset only when the SELECTED INSTANCE changes,
   // not on every poll tick that updates instance data.
-  type VersionEntry = { tag: string; prerelease: boolean; published_at: string | null; is_current: boolean };
   let drawerVersionSelect = $state('');
   let drawerChannelSelect = $state('stable');
 
-  function inferChannel(version: string | null | undefined, fallback: string | null | undefined): string {
-    const v = version ?? '';
-    if (/-dev/i.test(v)) return 'dev';
-    if (/-rc/i.test(v)) return 'rc';
-    if (v) return 'stable';
-    return fallback ?? 'stable';
-  }
-
-  function instChannel(i: { version: string | null; pinnedTo?: string | null; channel?: string | null } | null): string {
-    if (!i) return 'stable';
-    return inferChannel(i.pinnedTo ?? i.version, i.channel);
-  }
   let drawerVersions = $state<VersionEntry[]>([]);
   let drawerVersionsLoading = $state(false);
   let drawerOpenedForId = $state<string | null>(null);
@@ -545,17 +506,6 @@
   function originForLocal(): string {
     if (typeof window === 'undefined') return '';
     return window.location.origin;
-  }
-
-  function addrKindLabel(kind: string): string {
-    switch (kind) {
-      case 'lan_v4': return 'LAN IPv4';
-      case 'lan_v6': return 'LAN IPv6';
-      case 'tailscale_v4': return 'Tailscale IPv4';
-      case 'tailscale_v6': return 'Tailscale IPv6';
-      case 'fqdn': return 'FQDN';
-      default: return kind;
-    }
   }
 
   // Reachable LAN addresses for the card footer. Both IPv4 and IPv6 when
@@ -821,70 +771,6 @@
   // Render a chart segment list — each contiguous run of finite values
   // becomes one `{ line, area }` pair (NaN values split into separate
   // segments so dropouts render as gaps, not interpolated lines).
-  function chartSegments(vals: number[], W: number, H: number, vmax: number): { line: string; area: string }[] {
-    const out: { line: string; area: string }[] = [];
-    if (!vals.length) return out;
-    const n = vals.length;
-    let line = '';
-    let area = '';
-    let segStartX: number | null = null;
-    let segLastX: number | null = null;
-    const flush = () => {
-      if (line) {
-        out.push({ line: line.trim(), area: `${area} L ${segLastX!.toFixed(1)} ${H} L ${segStartX!.toFixed(1)} ${H} Z`.trim() });
-      }
-      line = ''; area = ''; segStartX = null; segLastX = null;
-    };
-    for (let i = 0; i < n; i++) {
-      const v = vals[i];
-      const x = (i / Math.max(1, n - 1)) * W;
-      if (!Number.isFinite(v)) { flush(); continue; }
-      const y = H - (Math.min(Math.max(v, 0), vmax) / vmax) * H;
-      if (line === '') {
-        line = `M ${x.toFixed(1)} ${y.toFixed(1)} `;
-        area = `M ${x.toFixed(1)} ${y.toFixed(1)} `;
-        segStartX = x;
-      } else {
-        line += `L ${x.toFixed(1)} ${y.toFixed(1)} `;
-        area += `L ${x.toFixed(1)} ${y.toFixed(1)} `;
-      }
-      segLastX = x;
-    }
-    flush();
-    return out;
-  }
-
-  // Friendly label for the canonical system_type tag. Every detected host
-  // gets a badge — the OS row still carries the version string.
-  function systemTypeLabel(t: string): string {
-    switch (t) {
-      case 'unraid': return 'Unraid';
-      case 'proxmox-ve': return 'Proxmox VE';
-      case 'proxmox-backup-server': return 'Proxmox Backup Server';
-      case 'truenas-scale': return 'TrueNAS Scale';
-      case 'truenas-core': return 'TrueNAS Core';
-      case 'macos': return 'macOS';
-      case 'debian': return 'Debian';
-      case 'alpine': return 'Alpine';
-      case 'nixos': return 'NixOS';
-      case 'linux': return 'Linux';
-      default: return t;
-    }
-  }
-
-  function capabilityLabel(c: string): string {
-    switch (c) {
-      case 'docker': return 'Docker';
-      case 'vm-host': return 'VM host';
-      case 'lxc-host': return 'LXC host';
-      case 'backup-target': return 'Backup target';
-      case 'gpu-nvidia': return 'NVIDIA GPU';
-      case 'gpu-amd': return 'AMD GPU';
-      case 'gpu-intel': return 'Intel GPU';
-      default: return c;
-    }
-  }
-
   async function loadRetention() {
     try {
       const data = await callTool<{ row: { json: string } | null }>('configGet', {
@@ -1138,44 +1024,42 @@
     }
   }
 
-  onMount(() => {
-    // Initial data already populated synchronously from `data` (load() in
-    // +page.ts) — onMount only registers periodic refresh timers. The
-    // refresh* callbacks continue to drive subsequent ticks imperatively
-    // (chose imperative over invalidate() so polling reuses the existing
-    // in-place patch-state logic without re-running load()).
-    pollHandle = setInterval(() => {
+  // Initial data already populated synchronously from `data` (load() in
+  // +page.ts) — onMount only registers periodic refresh pollers. Polling
+  // reuses the existing in-place patch-state logic instead of invalidate()
+  // so we don't re-run load() on every tick.
+  const listPoller = createPoller({
+    intervalMs: POLL_MS,
+    immediate: false, // load() already seeded the first frame
+    fn: () => {
       const loc = instances.find((i) => i.role === 'local');
       if (loc) refreshLocal(loc);
       // refreshPodPeers fans out into applyInboundOffersFrom from the same
       // pod.list payload — no separate refreshInboundOffers tick needed.
-      refreshPodPeers();
-    }, POLL_MS);
-    // Per-peer system.update {} fan-out — slower cadence than pod.list
-    // polling because every tick crosses the mesh to every peer. Keeps
-    // updateAvailable / current_version / channel / pinnedTo fresh on every
-    // card (and on any open drawer) without the operator needing to click.
-    // Fire the first probe pass IMMEDIATELY — load() no longer awaits
-    // the mesh fan-out, so this is what actually populates version /
-    // channel / update-available on each row after first paint.
-    void probeAllInstances();
-    probeHandle = setInterval(() => {
-      void probeAllInstances();
-    }, PROBE_MS);
-    // Proxmox cluster grouping for the systems tree. Fire once at mount,
-    // then piggy-back on the slow `PROBE_MS` cadence — cluster membership
-    // changes (node join/leave) are rare and the `cluster.list` walk hits
-    // every endpoint, so a 5s tick would be wasteful.
-    void refreshProxmoxClusters();
-    clusterHandle = setInterval(() => {
-      void refreshProxmoxClusters();
-    }, PROBE_MS);
+      void refreshPodPeers();
+    },
+  });
+  // Per-peer system.update {} fan-out — slower cadence than pod.list polling
+  // because every tick crosses the mesh to every peer. Fires the first probe
+  // pass immediately: load() no longer awaits the mesh fan-out, so this is
+  // what populates version / channel / update-available on each row after
+  // first paint.
+  const probePoller = createPoller({ intervalMs: PROBE_MS, fn: probeAllInstances });
+  // Proxmox cluster grouping for the systems tree. Membership changes are
+  // rare and cluster.list walks every endpoint, so we share the slow probe
+  // cadence rather than ticking every 5s.
+  const clusterPoller = createPoller({ intervalMs: PROBE_MS, fn: refreshProxmoxClusters });
+
+  onMount(() => {
+    listPoller.start();
+    probePoller.start();
+    clusterPoller.start();
   });
 
   onDestroy(() => {
-    if (pollHandle) clearInterval(pollHandle);
-    if (probeHandle) clearInterval(probeHandle);
-    if (clusterHandle) clearInterval(clusterHandle);
+    listPoller.stop();
+    probePoller.stop();
+    clusterPoller.stop();
   });
 
   // Fan `system.update {}` out to every instance (local + every paired
@@ -1234,49 +1118,9 @@
     }
   });
 
-  function relTime(ts: number | null): string {
-    if (!ts) return '—';
-    const sec = Math.round((Date.now() - ts) / 1000);
-    if (sec < 5) return 'just now';
-    if (sec < 60) return `${sec}s ago`;
-    if (sec < 3600) return `${Math.round(sec / 60)}m ago`;
-    return `${Math.round(sec / 3600)}h ago`;
-  }
-
-  function fmtMb(mb: number | null | undefined): string {
-    if (mb == null) return '—';
-    if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
-    return `${mb} MB`;
-  }
-
-  function memPct(sys: SystemInfoReport | null | undefined): number {
-    if (!sys?.mem_total_mb || sys?.mem_used_mb == null) return 0;
-    return Math.min(100, (sys.mem_used_mb / sys.mem_total_mb) * 100);
-  }
-
-  function loadPct(sys: SystemInfoReport | null | undefined): number | null {
-    if (sys?.load_avg_1 == null || !sys?.cpu_logical) return null;
-    return Math.min(100, (sys.load_avg_1 / sys.cpu_logical) * 100);
-  }
-
-  function cpuPct(sys: SystemInfoReport | null | undefined): number | null {
-    return sys?.cpu_usage_percent ?? null;
-  }
-
   async function copyText(text: string) {
     await navigator.clipboard.writeText(text);
     notifications.info('Copied');
-  }
-
-  function fmtUptime(secs: number): string {
-    if (secs < 3600) return `${Math.floor(secs / 60)}m`;
-    if (secs < 86400) return `${Math.floor(secs / 3600)}h`;
-    return `${Math.floor(secs / 86400)}d`;
-  }
-
-  function fmtGpu(g: GpuInfo): string {
-    const util = g.utilization_percent != null ? ` ${g.utilization_percent.toFixed(0)}%` : '';
-    return `${g.name}${util}`;
   }
 </script>
 
@@ -1347,176 +1191,33 @@
     <p class="lede">Connected orca instances.</p>
   </header>
 
-  {#if inboundOffers.length > 0}
-    <div class="inbound-banner" role="status">
-      {#each inboundOffers as o (o.offer_id)}
-        <div class="inbound-row">
-          <div>
-            <strong>{o.peer_hostname}</strong> wants to add this host to a pod.
-            <span class="dim">({o.peer_addr}:{o.peer_port})</span>
-          </div>
-          <button class="btn primary sm" onclick={() => openPair('accept')}>Accept</button>
-        </div>
-      {/each}
-    </div>
-  {/if}
+  <InboundOffersBanner offers={inboundOffers} onaccept={() => openPair('accept')} />
 
-  <div class="view-toggle">
-    <button class:active={view === 'tree'} onclick={() => setView('tree')}>Tree</button>
-    <button class:active={view === 'table'} onclick={() => setView('table')}>Table</button>
-  </div>
+  <SegmentedControl
+    ariaLabel="View mode"
+    items={[{ label: 'Tree', value: 'tree' }, { label: 'Table', value: 'table' }]}
+    value={view}
+    onchange={(v) => setView(v as 'tree' | 'table')}
+  />
 
   <div class="instances" class:tree={view === 'tree'}>
     {#each displayRows as row (row.key)}
       {#if row.kind === 'header'}
-        <div class="cluster-header" aria-label={row.cluster ? `Proxmox cluster ${row.cluster}` : 'Ungrouped systems'}>
-          {#if row.cluster}
-            <span class="cluster-label">Cluster: {row.cluster}</span>
-            {#if row.summary}
-              <span class="cluster-meta">({row.summary.online}/{row.summary.total} nodes{row.summary.quorate === false ? ' · not quorate' : ''})</span>
-            {/if}
-          {:else}
-            <span class="cluster-label">Ungrouped</span>
-          {/if}
-        </div>
+        <ClusterHeader cluster={row.cluster} summary={row.summary} />
       {:else}
-      {@const inst = row.inst}
-      {@const depth = row.depth}
-      {@const prefix = row.prefix}
-      {@const hasChildren = row.hasChildren}
-      {#if view === 'tree'}
-        <div
-          class="tree-row"
-          class:down={inst.health === 'down'}
-          onclick={() => goto(`/systems/${inst.peerId}`)}
-          role="button"
-          tabindex="0"
-          onkeydown={(e) => e.key === 'Enter' && goto(`/systems/${inst.peerId}`)}
-        >
-          <span class="tree-prefix" aria-hidden="true">{prefix}</span>
-          {#if hasChildren}
-            <button
-              class="tree-toggle"
-              onclick={(e) => { e.stopPropagation(); toggleCollapsed(inst.peerId); }}
-              title={collapsed.has(inst.peerId) ? 'Expand' : 'Collapse'}
-            >{collapsed.has(inst.peerId) ? '▸' : '▾'}</button>
-          {:else}
-            <span class="tree-toggle-spacer" aria-hidden="true"></span>
-          {/if}
-          <StatusDot ok={inst.health === 'up' ? true : inst.health === 'down' ? false : null} />
-          <span class="hostname">{inst.sys?.hostname ?? inst.label}</span>
-          {#if inst.sys?.system_type}<span class="badge-sm">{inst.sys.system_type}</span>{/if}
-          {#if inst.version}<span class="meta-sm">v{inst.version}</span>{/if}
-          {#if inst.updateAvailable}
-            <span class="update-badge" title="Update available: {inst.updateLatest ?? 'newer version'}">↑ {inst.updateLatest ?? 'update'}</span>
-          {/if}
-          <span class="tree-stats">
-            CPU {cpuPct(inst.sys) != null ? `${cpuPct(inst.sys)!.toFixed(0)}%` : '—'} ·
-            RAM {memPct(inst.sys).toFixed(0)}%
-          </span>
-        </div>
-      {:else}
-      <div
-        class="instance"
-        class:down={inst.health === 'down'}
-        class:child={depth > 0}
-        style:margin-left="{depth * 24}px"
-        onclick={() => goto(`/systems/${inst.peerId}`)}
-        role="button"
-        tabindex="0"
-        onkeydown={(e) => e.key === 'Enter' && goto(`/systems/${inst.peerId}`)}
-      >
-        <div class="card-header">
-          <div class="ident">
-            <StatusDot ok={inst.health === 'up' ? true : inst.health === 'down' ? false : null} />
-            <span class="hostname">{inst.sys?.hostname ?? inst.label}</span>
-            {#if inst.updateAvailable}
-              <span class="update-badge" title="Update available: {inst.updateLatest ?? 'newer version'}">↑ {inst.updateLatest ?? 'update'}</span>
-            {/if}
-          </div>
-        </div>
-
-        {#if inst.sys}
-          <div class="metrics">
-            <div class="metric-row">
-              <div class="metric-head">
-                <span class="metric-label">CPU</span>
-                <span class="metric-val">
-                  {cpuPct(inst.sys) != null ? `${cpuPct(inst.sys)!.toFixed(1)}%` : '—'}
-                </span>
-              </div>
-              <div class="bar-wrap">
-                <div
-                  class="bar"
-                  style="width:{cpuPct(inst.sys) ?? 0}%"
-                  class:warn={(cpuPct(inst.sys) ?? 0) > 70}
-                  class:crit={(cpuPct(inst.sys) ?? 0) > 90}
-                ></div>
-              </div>
-            </div>
-            <div class="metric-row">
-              <div class="metric-head">
-                <span class="metric-label">RAM</span>
-                <span class="metric-val">
-                  {memPct(inst.sys).toFixed(1)}% <span class="dim">{fmtMb(inst.sys.mem_used_mb)} / {fmtMb(inst.sys.mem_total_mb)}</span>
-                </span>
-              </div>
-              <div class="bar-wrap">
-                <div
-                  class="bar"
-                  style="width:{memPct(inst.sys)}%"
-                  class:warn={memPct(inst.sys) > 70}
-                  class:crit={memPct(inst.sys) > 90}
-                ></div>
-              </div>
-            </div>
-            {#if inst.sys.load_avg_1 != null}
-              {@const lp = loadPct(inst.sys)}
-              <div class="metric-row">
-                <div class="metric-head">
-                  <span class="metric-label" title="Unix run-queue depth (processes waiting for CPU), normalized by core count">CPU Q</span>
-                  <span class="metric-val">
-                    {inst.sys.load_avg_1.toFixed(2)}<span class="dim">/{inst.sys.cpu_logical ?? '?'} <span class="load-legend">1m avg</span></span>
-                  </span>
-                </div>
-                <div class="bar-wrap">
-                  <div
-                    class="bar"
-                    style="width:{lp ?? 0}%"
-                    class:warn={(lp ?? 0) > 70}
-                    class:crit={(lp ?? 0) > 90}
-                  ></div>
-                </div>
-              </div>
-            {/if}
-            {#if inst.sys.gpus?.length}
-              {#each inst.sys.gpus as g}
-                <div class="metric-row">
-                  <div class="metric-head">
-                    <span class="metric-label">GPU</span>
-                    <span class="metric-val gpu-val">
-                      {g.utilization_percent != null ? `${g.utilization_percent.toFixed(0)}%` : '—'} <span class="dim gpu-name">{g.name}</span>
-                    </span>
-                  </div>
-                  <div class="bar-wrap">
-                    <div
-                      class="bar"
-                      style="width:{g.utilization_percent ?? 0}%"
-                      class:warn={(g.utilization_percent ?? 0) > 70}
-                      class:crit={(g.utilization_percent ?? 0) > 90}
-                    ></div>
-                  </div>
-                </div>
-              {/each}
-            {/if}
-          </div>
+        {@const inst = row.inst}
+        {#if view === 'tree'}
+          <InstanceTreeRow
+            {inst}
+            prefix={row.prefix}
+            hasChildren={row.hasChildren}
+            collapsed={collapsed.has(inst.peerId)}
+            onactivate={() => goto(`/systems/${inst.peerId}`)}
+            ontoggle={() => toggleCollapsed(inst.peerId)}
+          />
+        {:else}
+          <InstanceCard {inst} depth={row.depth} onactivate={() => goto(`/systems/${inst.peerId}`)} />
         {/if}
-
-        <div class="card-footer">
-          <span class="details-hint">Details →</span>
-        </div>
-      </div>
-      {/if}
       {/if}
     {/each}
   </div>
@@ -1530,48 +1231,37 @@
   {/if}
 
   {#if candidates.length > 0}
-    <div class="aux-section">
-      <div class="aux-head">Discovered — not yet joined</div>
-      <div class="aux-list">
-        {#each candidates as c (c.pubkey_fp)}
-          <div class="aux-row">
-            <div class="aux-ident">
-              <StatusDot ok={null} />
-              <span class="aux-name">{c.hostname || c.addr}</span>
-              <span class="dim">{c.addr}:{c.port}</span>
-            </div>
-            <button
-              class="btn primary sm"
-              disabled={joiningFp === c.pubkey_fp}
-              onclick={() => joinCandidate(c)}
-            >{joiningFp === c.pubkey_fp ? 'Adding…' : '+ Add'}</button>
-          </div>
-        {/each}
-      </div>
-    </div>
+    <AuxList title="Discovered — not yet joined">
+      {#each candidates as c (c.pubkey_fp)}
+        <AuxRow
+          name={c.hostname || c.addr}
+          sub={`${c.addr}:${c.port}`}
+          statusOk={null}
+          actionLabel="+ Add"
+          busyLabel="Adding…"
+          busy={joiningFp === c.pubkey_fp}
+          onaction={() => joinCandidate(c)}
+        />
+      {/each}
+    </AuxList>
   {/if}
 
   {#if staleRows.length > 0}
-    <div class="aux-section">
-      <div class="aux-head">Dead / stale — safe to remove</div>
-      <div class="aux-list">
-        {#each staleRows as s (s.peer_id)}
-          <div class="aux-row">
-            <div class="aux-ident">
-              <StatusDot ok={false} />
-              <span class="aux-name">{s.hostname || s.peer_id}</span>
-              <span class="dim">{s.addr}{s.port ? `:${s.port}` : ''}</span>
-              <span class="aux-tag">{s.reason}</span>
-            </div>
-            <button
-              class="btn danger sm"
-              disabled={forgettingId === s.peer_id}
-              onclick={() => forgetPeer(s)}
-            >{forgettingId === s.peer_id ? 'Removing…' : 'Forget'}</button>
-          </div>
-        {/each}
-      </div>
-    </div>
+    <AuxList title="Dead / stale — safe to remove">
+      {#each staleRows as s (s.peer_id)}
+        <AuxRow
+          name={s.hostname || s.peer_id}
+          sub={`${s.addr}${s.port ? `:${s.port}` : ''}`}
+          tag={s.reason}
+          statusOk={false}
+          actionLabel="Forget"
+          busyLabel="Removing…"
+          busy={forgettingId === s.peer_id}
+          actionVariant="danger"
+          onaction={() => forgetPeer(s)}
+        />
+      {/each}
+    </AuxList>
   {/if}
 </section>
 
@@ -1586,28 +1276,6 @@
     refreshPodPeers();
   }}
 />
-
-{#snippet chartCell(label: string, vals: number[], vmax: number, unit: string, color: string)}
-  {@const W = 400}
-  {@const H = 90}
-  {@const segs = chartSegments(vals, W, H, vmax)}
-  {@const last = [...vals].reverse().find(Number.isFinite) ?? null}
-  {@const lastStr = last == null ? '—' : unit === '%' ? `${last.toFixed(1)}%` : last < 1024 ? `${Math.round(last)} ${unit}` : `${(last / 1024).toFixed(1)} G${unit}`}
-  <div class="hist-cell">
-    <div class="hist-label">{label}<span class="hist-val">{lastStr}</span></div>
-    <svg class="hist-svg" viewBox="0 0 {W} {H}" preserveAspectRatio="none" style="color: {color};">
-      <!-- gridlines at 0, 25, 50, 75, 100% of vmax -->
-      {#each [0.25, 0.5, 0.75] as g}
-        <line x1="0" x2={W} y1={H * (1 - g)} y2={H * (1 - g)} stroke="currentColor" stroke-width="0.5" opacity="0.15" />
-      {/each}
-      {#each segs as s}
-        <path d={s.area} fill="currentColor" opacity="0.18" />
-        <path d={s.line} fill="none" stroke="currentColor" stroke-width="1.5" />
-      {/each}
-    </svg>
-    <div class="hist-axis"><span>0</span><span>{unit === '%' ? '100%' : vmax < 1024 ? `${Math.round(vmax)} ${unit}` : `${(vmax / 1024).toFixed(1)} G${unit}`}</span></div>
-  </div>
-{/snippet}
 
 <!-- Drawer -->
 <Drawer open={!!selectedInst} side="right" onclose={closeDrawer} ariaLabel="Host details">
@@ -1635,7 +1303,7 @@
           disabled={detailRefreshing}
           title="Force a fresh system.detail probe of this peer"
         >{detailRefreshing ? 'Refreshing…' : 'Refresh'}</button>
-        <button class="icon-btn" onclick={closeDrawer} title="Close">✕</button>
+        <IconButton onclick={closeDrawer} title="Close">✕</IconButton>
       </div>
     </div>
 
@@ -1691,19 +1359,25 @@
         <dd>{relTime(selectedInst.lastChecked)}</dd>
       </dl>
 
-      <div class="section-head">Live <span style="margin-left:8px; opacity:0.5; font-weight:400; font-size:11px;">{histSamples.length}/{HIST_LEN} samples</span></div>
+      <SectionHead title="Live">
+        {#snippet trailing()}
+          <span class="section-meta">{histSamples.length}/{HIST_LEN} samples</span>
+        {/snippet}
+      </SectionHead>
       <div class="hist-grid">
-        {@render chartCell('CPU', histSamples.map(s => s.cpu ?? NaN), 100, '%', '#89b4fa')}
-        {@render chartCell('RAM', histSamples.map(s => s.memPct ?? NaN), 100, '%', '#a6e3a1')}
+        <Chart label="CPU" vals={histSamples.map(s => s.cpu ?? NaN)} vmax={100} unit="%" color="#89b4fa" />
+        <Chart label="RAM" vals={histSamples.map(s => s.memPct ?? NaN)} vmax={100} unit="%" color="#a6e3a1" />
         {#each selectedInst.sys?.gpus ?? [] as g, gi}
-          {@render chartCell(g.name || `GPU ${gi}`, histSamples.map(s => s.gpuPct?.[gi] ?? NaN), 100, '%', '#f5c2e7')}
+          <Chart label={g.name || `GPU ${gi}`} vals={histSamples.map(s => s.gpuPct?.[gi] ?? NaN)} vmax={100} unit="%" color="#f5c2e7" />
         {/each}
       </div>
 
       {#if (selectedInst.sys?.top_processes ?? []).length}
-        <div class="section-head">Top processes
-          <span style="margin-left:8px; opacity:0.6; font-weight:400;">click to pin</span>
-        </div>
+        <SectionHead title="Top processes">
+          {#snippet trailing()}
+            <span class="section-meta">click to pin</span>
+          {/snippet}
+        </SectionHead>
         <table class="proc-table">
           <thead><tr><th>name</th><th>pid</th><th>cpu</th><th>mem</th></tr></thead>
           <tbody>
@@ -1721,14 +1395,14 @@
           {@const pinned = histProcMap.get(pinnedPid)!}
           {@const maxMem = Math.max(1, ...pinned.mem.filter(Number.isFinite))}
           <div class="hist-grid">
-            {@render chartCell(`${pinned.name} CPU`, pinned.cpu, 100, '%', '#fab387')}
-            {@render chartCell(`${pinned.name} RAM`, pinned.mem, maxMem, 'MB', '#cba6f7')}
+            <Chart label={`${pinned.name} CPU`} vals={pinned.cpu} vmax={100} unit="%" color="#fab387" />
+            <Chart label={`${pinned.name} RAM`} vals={pinned.mem} vmax={maxMem} unit="MB" color="#cba6f7" />
           </div>
         {/if}
       {/if}
 
       {#if (selectedInst.addresses ?? []).length > 0}
-        <div class="section-head">Addresses</div>
+        <SectionHead title="Addresses" />
         <dl class="addr-grid">
           {#each selectedInst.addresses ?? [] as a (a.kind + ':' + a.value)}
             <dt>{addrKindLabel(a.kind)}</dt>
@@ -1760,16 +1434,17 @@
         </div>
       {/if}
 
-      <div class="section-head">
-        Update
-        <button
-          class="ctrl-btn"
-          style="margin-left:8px; font-size:11px; padding:2px 8px;"
-          onclick={probeUpdateState}
-          disabled={drawerVersionsLoading || updatePending}
-          title="Re-probe this peer's update state"
-        >{drawerVersionsLoading ? 'Probing…' : 'Refresh'}</button>
-      </div>
+      <SectionHead title="Update">
+        {#snippet trailing()}
+          <button
+            class="ctrl-btn"
+            style="font-size:11px; padding:2px 8px;"
+            onclick={probeUpdateState}
+            disabled={drawerVersionsLoading || updatePending}
+            title="Re-probe this peer's update state"
+          >{drawerVersionsLoading ? 'Probing…' : 'Refresh'}</button>
+        {/snippet}
+      </SectionHead>
       <div class="update-controls">
         <div class="update-setting-row">
           <span class="update-setting-label">
@@ -1838,30 +1513,6 @@
 </Drawer>
 
 <style>
-  .cluster-header {
-    display: flex;
-    align-items: baseline;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    margin-top: var(--space-3);
-    border-bottom: 1px solid var(--color-border, rgba(255,255,255,0.08));
-    color: var(--color-text-muted);
-    font-size: var(--text-sm, 0.875rem);
-    letter-spacing: 0.02em;
-    text-transform: uppercase;
-  }
-  .cluster-header:first-child {
-    margin-top: 0;
-  }
-  .cluster-label {
-    font-weight: 600;
-    color: var(--color-text);
-  }
-  .cluster-meta {
-    color: var(--color-text-muted);
-    font-size: var(--text-xs, 0.75rem);
-  }
-
   .page {
     max-width: var(--content-max);
     margin: 0 auto;
@@ -1905,72 +1556,6 @@
     white-space: nowrap;
   }
   .pair-btn:hover { background: var(--color-bg-hover, var(--color-surface)); }
-
-  .inbound-banner {
-    margin: 0 0 var(--space-4);
-    padding: var(--space-3);
-    background: var(--color-accent-subtle, color-mix(in srgb, var(--color-accent) 12%, transparent));
-    border: 1px solid var(--color-accent);
-    border-radius: var(--radius-md);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-  .inbound-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: var(--space-3);
-    font-size: var(--text-sm);
-  }
-  .inbound-row .dim { color: var(--color-text-dim); font-family: var(--font-mono); margin-left: var(--space-1); }
-  .inbound-row .btn { padding: var(--space-1) var(--space-3); font-size: var(--text-xs); border-radius: var(--radius-md); border: 1px solid var(--color-accent); cursor: pointer; }
-  .inbound-row .btn.primary { background: var(--color-accent); color: var(--color-on-accent, #fff); }
-
-  /* ── auxiliary system sections (discovered candidates + stale rows) ── */
-  .aux-section {
-    margin-top: var(--space-4);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    overflow: hidden;
-  }
-  .aux-head {
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-surface);
-    color: var(--color-text-dim);
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    border-bottom: 1px solid var(--color-border);
-  }
-  .aux-list { display: flex; flex-direction: column; }
-  .aux-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-3);
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--color-border);
-  }
-  .aux-row:last-child { border-bottom: none; }
-  .aux-ident { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); }
-  .aux-name { font-weight: var(--weight-semibold); }
-  .aux-ident .dim { color: var(--color-text-dim); font-family: var(--font-mono); font-size: var(--text-xs); }
-  .aux-tag {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--color-text-dim);
-    border: 1px solid var(--color-border);
-    border-radius: 3px;
-    padding: 1px 5px;
-  }
-  .btn.sm { padding: var(--space-1) var(--space-3); font-size: var(--text-xs); border-radius: var(--radius-md); border: 1px solid var(--color-border); background: var(--color-surface); color: var(--color-text); cursor: pointer; }
-  .btn.sm:hover:not(:disabled) { background: var(--color-surface-2); }
-  .btn.sm:disabled { opacity: 0.5; cursor: default; }
-  .btn.primary.sm { background: var(--color-accent); color: var(--color-on-accent, #fff); border-color: var(--color-accent); }
-  .btn.danger.sm { color: var(--color-error); border-color: var(--color-error); }
-  .btn.danger.sm:hover:not(:disabled) { background: color-mix(in srgb, var(--color-error) 14%, transparent); }
 
   .retention-picker {
     display: flex;
@@ -2078,240 +1663,17 @@
     flex-direction: column;
     gap: var(--space-1);
   }
-  .tree-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    font-size: var(--text-sm);
-    color: var(--text);
-  }
-  .tree-row:hover { background: var(--surface); }
-  .tree-row.down { opacity: 0.6; }
-  .tree-prefix {
-    font-family: var(--font-mono);
-    color: var(--color-text-dim);
-    white-space: pre;
-    font-size: var(--text-sm);
-    line-height: 1;
-  }
-  .tree-toggle {
-    background: none;
-    border: 0;
-    color: var(--muted);
-    cursor: pointer;
-    padding: 0 var(--space-1);
-    font-size: var(--text-sm);
-    line-height: 1;
-  }
-  .tree-toggle:hover { color: var(--text); }
-  .tree-toggle-spacer {
-    display: inline-block;
-    width: calc(var(--space-1) * 2 + 0.6em);
-  }
-  .tree-row .hostname { font-weight: var(--weight-medium); }
-  .tree-stats {
-    margin-left: auto;
-    color: var(--muted);
-    font-size: var(--text-xs);
-    font-variant-numeric: tabular-nums;
-  }
-  .badge-sm {
-    background: var(--code-bg);
-    color: var(--muted);
-    padding: 1px var(--space-2);
-    border-radius: 999px;
-    font-size: var(--text-xs);
-  }
-  .meta-sm { font-size: var(--text-xs); color: var(--muted); }
-  .view-toggle {
-    display: flex;
-    gap: 0.25rem;
-    margin-bottom: var(--space-3);
-  }
-  .view-toggle button {
-    background: none;
-    border: 1px solid var(--border-2, #444);
-    color: inherit;
-    padding: 0.2rem 0.7rem;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 0.8rem;
-  }
-  .view-toggle button.active {
-    background: var(--accent, #89b4fa);
-    color: #11111b;
-    border-color: transparent;
-  }
-
-  /* ── card ─────────────────────────────────────────────────────────────── */
-  .instance {
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    padding: var(--space-4);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-    cursor: pointer;
-    transition: border-color 0.15s ease;
-    text-align: left;
-  }
-  .instance:hover {
-    border-color: var(--color-accent, #4f86f7);
-  }
-  .instance.down {
-    border-color: var(--color-error);
-  }
-  .instance:focus-visible {
-    outline: 2px solid var(--color-accent, #4f86f7);
-    outline-offset: 2px;
-  }
-
-  .card-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-
+  /* drawer ident block (still in page until HostDrawer is extracted) */
   .ident {
     display: inline-flex;
     align-items: center;
     gap: 8px;
     min-width: 0;
   }
-  .update-badge {
-    font-size: var(--text-xs);
-    font-weight: 600;
-    padding: 2px 8px;
-    border-radius: 999px;
-    background: color-mix(in srgb, #f59e0b 25%, transparent);
-    color: #f5a623;
-    border: 1px solid color-mix(in srgb, #f59e0b 60%, transparent);
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
   .hostname {
     font-weight: var(--weight-semibold);
   }
-  .icon-btn {
-    background: transparent;
-    color: var(--color-text-muted);
-    border: 1px solid var(--color-border);
-    border-radius: 4px;
-    width: 24px;
-    height: 22px;
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-  .icon-btn:hover {
-    background: var(--color-surface-2);
-    color: var(--color-text);
-  }
 
-  /* ── metrics ──────────────────────────────────────────────────────────── */
-  .metrics {
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-  }
-  .metric-row {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    font-size: var(--text-xs);
-  }
-  .metric-head {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 4px;
-  }
-  .metric-label {
-    color: var(--color-text-dim);
-    text-transform: uppercase;
-    font-size: 10px;
-    letter-spacing: 0.06em;
-    flex-shrink: 0;
-  }
-  .metric-val {
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-    font-size: var(--text-xs);
-    text-align: right;
-  }
-  .bar-wrap {
-    width: 100%;
-    height: 5px;
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: 3px;
-    overflow: hidden;
-  }
-  .bar {
-    height: 100%;
-    background: var(--color-accent, #4f86f7);
-    border-radius: 3px;
-    transition: width 0.3s ease;
-  }
-  .bar.warn {
-    background: #e6a817;
-  }
-  .bar.crit {
-    background: var(--color-error);
-  }
-  .load-legend {
-    font-size: 9px;
-    letter-spacing: 0.04em;
-    opacity: 0.7;
-  }
-  .gpu-val {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    overflow: hidden;
-  }
-  .gpu-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 80px;
-  }
-  .dim {
-    color: var(--color-text-dim);
-  }
-
-  /* ── card footer ──────────────────────────────────────────────────────── */
-  .card-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    gap: var(--space-2);
-    margin-top: auto;
-  }
-  .primary-urls {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-    flex: 1;
-  }
-  .primary-url {
-    font-family: var(--font-mono);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .details-hint {
-    flex-shrink: 0;
-    color: var(--color-accent, #4f86f7);
-    font-size: 10px;
-    letter-spacing: 0.04em;
-  }
 
   /* ── drawer ───────────────────────────────────────────────────────────── */
   .drawer-header {
@@ -2370,37 +1732,6 @@
     gap: 8px;
     margin: 8px 0 12px;
   }
-  .hist-cell {
-    background: var(--bg-elevated, rgba(255, 255, 255, 0.03));
-    border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
-    border-radius: 6px;
-    padding: 8px;
-    color: var(--accent, #89b4fa);
-  }
-  .hist-label {
-    display: flex;
-    justify-content: space-between;
-    font-size: 11px;
-    color: var(--text-secondary, rgba(255, 255, 255, 0.6));
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    margin-bottom: 4px;
-  }
-  .hist-val {
-    color: var(--text-primary, #fff);
-    font-family: ui-monospace, monospace;
-    text-transform: none;
-    letter-spacing: 0;
-  }
-  .hist-svg { display: block; width: 100%; height: 90px; }
-  .hist-axis {
-    display: flex;
-    justify-content: space-between;
-    font-size: 10px;
-    color: var(--text-secondary, rgba(255, 255, 255, 0.45));
-    font-family: ui-monospace, monospace;
-    margin-top: 2px;
-  }
   .proc-table {
     width: 100%;
     font-size: 12px;
@@ -2416,13 +1747,13 @@
   .proc-table tbody tr { cursor: pointer; }
   .proc-table tbody tr:hover { background: var(--bg-elevated, rgba(255, 255, 255, 0.04)); }
   .proc-table tr.pinned { background: rgba(137, 180, 250, 0.15); }
-  .section-head {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--color-text-dim);
-    border-bottom: 1px solid var(--color-border);
-    padding-bottom: var(--space-1);
+  .section-meta {
+    margin-left: var(--space-2);
+    opacity: 0.55;
+    font-weight: 400;
+    font-size: 11px;
+    text-transform: none;
+    letter-spacing: 0;
   }
 
   /* ── badges + paired line ─────────────────────────────────────────────── */
@@ -2535,13 +1866,6 @@
   .toggle-switch.on .toggle-thumb {
     left: 22px;
   }
-  .stat-raw {
-    margin: var(--space-1) 0 0;
-    font-size: 10px;
-    color: var(--color-text-dim);
-    font-family: var(--font-mono);
-  }
-
   .err {
     color: var(--color-error);
     font-size: var(--text-xs);

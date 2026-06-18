@@ -16,6 +16,7 @@
 //! call site.
 
 pub mod cluster;
+pub mod cluster_roster_impl;
 pub mod containers_adapter;
 pub mod responses;
 pub mod tools;

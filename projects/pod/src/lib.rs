@@ -138,6 +138,232 @@ pub struct PodListOutput {
     pub members: Vec<PodMember>,
 }
 
+// ── pod.snapshot — pre-classified one-shot rollup for the systems UI ─────────
+//
+// `pod.list` returns raw mesh state; the frontend then re-implements peer/
+// candidate/stale/inbound-offer classification + cluster grouping in JS. That
+// logic moves here so every surface gets the same shaped view and the systems
+// page collapses from ~2000 lines to a thin renderer. See
+// `projects/frontend/src/routes/+page.svelte` `refreshPodPeers` +
+// `refreshProxmoxClusters` for the original JS source-of-truth.
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodCandidate {
+    pub pubkey_fp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_id: Option<String>,
+    pub hostname: String,
+    pub addr: String,
+    pub port: u16,
+    pub can_invite: bool,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodStaleRow {
+    pub peer_id: String,
+    pub hostname: String,
+    pub addr: String,
+    pub port: u16,
+    /// "departed" | "orphan" | "stale self identity".
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodInboundOffer {
+    pub offer_id: String,
+    pub peer_hostname: String,
+    pub peer_addr: String,
+    pub peer_port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inviter_peer_id: Option<String>,
+    pub expires_at: i64,
+    pub ttl_secs: i64,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PodSnapshotOutput {
+    /// Same shape as `pod.list.members` — the UI reuses the existing type.
+    pub members: Vec<PodMember>,
+    /// mDNS-discovered, unclaimed, not a self-echo, not already paired.
+    pub candidates: Vec<PodCandidate>,
+    /// Departed joined peers + discovered orphans + stale self-identities.
+    pub stale: Vec<PodStaleRow>,
+    /// Handshaking offers whose `expires_at` is still in the future.
+    pub inbound_offers: Vec<PodInboundOffer>,
+    /// Plugin-neutral cluster roster (proxmox today; others later).
+    pub clusters: Vec<contract::ClusterEntry>,
+    /// `peer_id` → cluster name for every joined peer matched to a cluster
+    /// via IP-first then hostname. Only matches included.
+    pub cluster_membership: std::collections::BTreeMap<String, String>,
+}
+
+/// Pure classification helper — split out so unit tests can exercise the
+/// rules without a `ToolCtx` or a live mesh.
+fn classify_snapshot(
+    members: Vec<PodMember>,
+    now_secs: i64,
+) -> (
+    Vec<PodMember>,
+    Vec<PodCandidate>,
+    Vec<PodStaleRow>,
+    Vec<PodInboundOffer>,
+) {
+    // Identify "self" hostname so we can drop this host's own mDNS echoes.
+    let own_hostname = members
+        .iter()
+        .find_map(|m| match m {
+            PodMember::Joined(p) if p.local => Some(p.hostname.to_lowercase()),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    // Active joined peer_ids — discovered rows that match these are paired
+    // echoes, not candidates.
+    let active_peer_ids: std::collections::HashSet<String> = members
+        .iter()
+        .filter_map(|m| match m {
+            PodMember::Joined(p) if p.status == "active" => Some(p.peer_id.clone()),
+            _ => None,
+        })
+        .collect();
+
+    let mut candidates: Vec<PodCandidate> = Vec::new();
+    let mut stale: Vec<PodStaleRow> = Vec::new();
+    let mut inbound_offers: Vec<PodInboundOffer> = Vec::new();
+
+    for m in &members {
+        match m {
+            PodMember::Joined(p) => {
+                if !p.local && p.status != "active" {
+                    stale.push(PodStaleRow {
+                        peer_id: p.peer_id.clone(),
+                        hostname: if p.hostname.is_empty() {
+                            p.peer_id.clone()
+                        } else {
+                            p.hostname.clone()
+                        },
+                        addr: p.addr.clone(),
+                        port: p.port,
+                        reason: "departed".into(),
+                        last_seen_at: None,
+                    });
+                }
+            }
+            PodMember::Handshaking(o) => {
+                if o.expires_at > now_secs {
+                    inbound_offers.push(PodInboundOffer {
+                        offer_id: o.offer_id.clone(),
+                        peer_hostname: o.peer_hostname.clone(),
+                        peer_addr: o.peer_addr.clone(),
+                        peer_port: o.peer_port,
+                        inviter_peer_id: o.inviter_peer_id.clone(),
+                        expires_at: o.expires_at,
+                        ttl_secs: o.ttl_secs,
+                    });
+                }
+            }
+            PodMember::Discovered(d) => {
+                // Drop live echoes of peers we're already paired with.
+                if let Some(pid) = d.peer_id.as_deref()
+                    && active_peer_ids.contains(pid)
+                {
+                    continue;
+                }
+                let is_self_echo =
+                    !own_hostname.is_empty() && d.hostname.to_lowercase() == own_hostname;
+                let unclaimed = d.discovery_state == "unclaimed";
+                if unclaimed && !is_self_echo {
+                    candidates.push(PodCandidate {
+                        pubkey_fp: d.pubkey_fp.clone(),
+                        peer_id: d.peer_id.clone(),
+                        hostname: d.hostname.clone(),
+                        addr: d.addr.clone(),
+                        port: d.port,
+                        can_invite: d.can_invite,
+                    });
+                } else if let Some(pid) = &d.peer_id {
+                    stale.push(PodStaleRow {
+                        peer_id: pid.clone(),
+                        hostname: d.hostname.clone(),
+                        addr: d.addr.clone(),
+                        port: d.port,
+                        reason: if is_self_echo {
+                            "stale self identity".into()
+                        } else {
+                            "orphan".into()
+                        },
+                        last_seen_at: Some(d.last_seen_at),
+                    });
+                }
+            }
+        }
+    }
+
+    (members, candidates, stale, inbound_offers)
+}
+
+/// Match every joined peer to a cluster: IP-first across all addresses, then
+/// `system.primary_ipv4`, then lowercased hostname against `ClusterNode.name`.
+fn match_clusters(
+    members: &[PodMember],
+    clusters: &[contract::ClusterEntry],
+) -> std::collections::BTreeMap<String, String> {
+    let mut by_ip: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut by_host: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for entry in clusters {
+        let Some(cname) = entry.name.as_deref() else {
+            continue;
+        };
+        for n in &entry.nodes {
+            if let Some(ip) = n.ip.as_deref() {
+                by_ip
+                    .entry(ip.to_string())
+                    .or_insert_with(|| cname.to_string());
+            }
+            if !n.name.is_empty() {
+                by_host
+                    .entry(n.name.to_lowercase())
+                    .or_insert_with(|| cname.to_string());
+            }
+        }
+    }
+
+    let mut out: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for m in members {
+        let PodMember::Joined(p) = m else { continue };
+        let mut matched: Option<&String> = None;
+        for a in &p.addresses {
+            if let Some(hit) = by_ip.get(&a.value) {
+                matched = Some(hit);
+                break;
+            }
+        }
+        if matched.is_none()
+            && let Some(sys) = p.system.as_ref()
+            && let Some(ip) = sys.primary_ipv4.as_deref()
+        {
+            matched = by_ip.get(ip);
+        }
+        if matched.is_none() {
+            let host = p
+                .system
+                .as_ref()
+                .and_then(|s| s.hostname.as_deref())
+                .unwrap_or(p.hostname.as_str())
+                .to_lowercase();
+            if !host.is_empty() {
+                matched = by_host.get(&host);
+            }
+        }
+        if let Some(cname) = matched {
+            out.insert(p.peer_id.clone(), cname.clone());
+        }
+    }
+    out
+}
+
 // ── pod.join — unified pairing entry point ───────────────────────────────────
 //
 // `action` selects the pairing role:
@@ -640,6 +866,63 @@ async fn pod_list(_args: EmptyArgs, _ctx: &contract::ToolCtx) -> anyhow::Result<
     members.extend(handshaking.into_iter().map(PodMember::Handshaking));
     members.extend(discovered.into_iter().map(PodMember::Discovered));
     Ok(PodListOutput { members })
+}
+
+/// Pre-classified rollup of pod state for the systems UI. Same `members`
+/// payload as `pod.list`, plus candidate / stale / inbound-offer
+/// classification and cluster-membership matching computed server-side
+/// so every surface gets one shaped response instead of re-implementing
+/// the rules per client.
+#[orca_tool(domain = "pod", verb = "snapshot")]
+async fn pod_snapshot(
+    _args: EmptyArgs,
+    ctx: &contract::ToolCtx,
+) -> anyhow::Result<PodSnapshotOutput> {
+    // Reuse the exact assembly `pod.list` does so callers can't get a
+    // diverging members view.
+    let joined = server_pod::list_enriched().await?;
+    let handshaking = server_pod::pending().unwrap_or_default();
+    let discovered = server_pod::discover().unwrap_or_default();
+
+    fn machine_key(peer_id: &str) -> &str {
+        peer_id.split_once('.').map_or(peer_id, |(_, mid)| mid)
+    }
+    let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    claimed.insert(system::host_identity::machine_id_short().to_string());
+    for p in &joined {
+        claimed.insert(machine_key(&p.peer_id).to_string());
+    }
+    let discovered: Vec<_> = discovered
+        .into_iter()
+        .filter(|d| {
+            d.peer_id
+                .as_deref()
+                .is_none_or(|pid| !claimed.contains(machine_key(pid)))
+        })
+        .collect();
+
+    let mut members = Vec::with_capacity(joined.len() + handshaking.len() + discovered.len());
+    members.extend(joined.into_iter().map(|p| PodMember::Joined(Box::new(p))));
+    members.extend(handshaking.into_iter().map(PodMember::Handshaking));
+    members.extend(discovered.into_iter().map(PodMember::Discovered));
+
+    let now_secs = chrono::Utc::now().timestamp();
+    let (members, candidates, stale, inbound_offers) = classify_snapshot(members, now_secs);
+
+    let clusters = match ctx.service::<std::sync::Arc<dyn contract::ClusterRoster>>() {
+        Ok(svc) => svc.list_clusters().await.unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    let cluster_membership = match_clusters(&members, &clusters);
+
+    Ok(PodSnapshotOutput {
+        members,
+        candidates,
+        stale,
+        inbound_offers,
+        clusters,
+        cluster_membership,
+    })
 }
 
 /// Initiate or complete a pod-membership pairing.
@@ -1436,5 +1719,169 @@ mod mesh_tests {
             v.get("addressing").is_none(),
             "None must be skipped on wire"
         );
+    }
+}
+
+#[cfg(test)]
+mod pod_snapshot_tests {
+    use super::*;
+
+    fn joined(peer_id: &str, hostname: &str, status: &str, local: bool) -> PodMember {
+        PodMember::Joined(Box::new(PodPeerDto {
+            peer_id: peer_id.into(),
+            hostname: hostname.into(),
+            addr: "10.0.0.1".into(),
+            port: 7777,
+            last_seen_at: 0,
+            local_secure: false,
+            peer_secure: false,
+            status: status.into(),
+            addresses: vec![],
+            local,
+            reachable: None,
+            latency_ms: None,
+            probe_error: None,
+            version: None,
+            target: None,
+            frontend: None,
+            mode: None,
+            channel: None,
+            pinned_to: None,
+            update_latest: None,
+            update_available: None,
+            update_checked_secs: None,
+            system: None,
+            pubkey_fp: None,
+        }))
+    }
+
+    fn discovered(
+        pubkey_fp: &str,
+        peer_id: Option<&str>,
+        hostname: &str,
+        discovery_state: &str,
+    ) -> PodMember {
+        PodMember::Discovered(PodDiscoveryRowDto {
+            pubkey_fp: pubkey_fp.into(),
+            peer_id: peer_id.map(|s| s.into()),
+            hostname: hostname.into(),
+            addr: "10.0.0.2".into(),
+            port: 7777,
+            discovery_state: discovery_state.into(),
+            can_invite: true,
+            first_seen_at: 0,
+            last_seen_at: 42,
+        })
+    }
+
+    fn handshaking(offer_id: &str, expires_at: i64) -> PodMember {
+        PodMember::Handshaking(PodPendingOfferDto {
+            offer_id: offer_id.into(),
+            direction: "inbound".into(),
+            peer_pubkey_fp: "fp".into(),
+            peer_hostname: "h".into(),
+            peer_addr: "10.0.0.3".into(),
+            peer_port: 7777,
+            inviter_peer_id: None,
+            pod_id: None,
+            expires_at,
+            ttl_secs: 60,
+            created_at: 0,
+        })
+    }
+
+    #[test]
+    fn inbound_offers_keep_non_expired_drop_expired() {
+        let members = vec![handshaking("fresh", 1000), handshaking("stale", 50)];
+        let (_m, _c, _s, offers) = classify_snapshot(members, 500);
+        assert_eq!(offers.len(), 1);
+        assert_eq!(offers[0].offer_id, "fresh");
+    }
+
+    #[test]
+    fn candidates_drop_self_echo() {
+        let members = vec![
+            joined("peer.self", "myhost", "active", true),
+            discovered("fp1", Some("peer.x"), "MyHost", "unclaimed"),
+            discovered("fp2", Some("peer.y"), "other", "unclaimed"),
+        ];
+        let (_m, candidates, stale, _o) = classify_snapshot(members, 0);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].hostname, "other");
+        // self-echo lands in stale with the dedicated reason.
+        assert!(stale.iter().any(|s| s.reason == "stale self identity"));
+    }
+
+    #[test]
+    fn candidates_drop_already_joined() {
+        let members = vec![
+            joined("peer.a", "ha", "active", false),
+            discovered("fp", Some("peer.a"), "ha", "unclaimed"),
+        ];
+        let (_m, candidates, _s, _o) = classify_snapshot(members, 0);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn stale_includes_inactive_joined_as_departed() {
+        let members = vec![joined("peer.gone", "gone", "departed", false)];
+        let (_m, _c, stale, _o) = classify_snapshot(members, 0);
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].reason, "departed");
+        assert_eq!(stale[0].peer_id, "peer.gone");
+    }
+
+    #[test]
+    fn stale_includes_orphan_discovered_with_peer_id() {
+        // Non-unclaimed discovery row with a peer_id but no matching joined.
+        let members = vec![discovered("fp", Some("peer.orph"), "host", "pod:other")];
+        let (_m, candidates, stale, _o) = classify_snapshot(members, 0);
+        assert!(candidates.is_empty());
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].reason, "orphan");
+    }
+
+    #[test]
+    fn match_clusters_ip_first_then_hostname() {
+        let mut p_ip = match joined("peer.byip", "ignored", "active", false) {
+            PodMember::Joined(b) => *b,
+            _ => unreachable!(),
+        };
+        p_ip.addresses.push(PodPeerAddressDto {
+            kind: "lan_v4".into(),
+            value: "10.0.0.99".into(),
+            source: "test".into(),
+            last_seen_at: 0,
+        });
+        let p_host = match joined("peer.byname", "node-b", "active", false) {
+            PodMember::Joined(b) => *b,
+            _ => unreachable!(),
+        };
+        let members = vec![
+            PodMember::Joined(Box::new(p_ip)),
+            PodMember::Joined(Box::new(p_host)),
+        ];
+
+        let clusters = vec![contract::ClusterEntry {
+            endpoint: "ep".into(),
+            name: Some("alpha".into()),
+            quorate: Some(true),
+            nodes: vec![
+                contract::ClusterNode {
+                    name: "node-a".into(),
+                    ip: Some("10.0.0.99".into()),
+                    online: Some(true),
+                },
+                contract::ClusterNode {
+                    name: "node-b".into(),
+                    ip: None,
+                    online: Some(true),
+                },
+            ],
+        }];
+
+        let m = match_clusters(&members, &clusters);
+        assert_eq!(m.get("peer.byip").map(String::as_str), Some("alpha"));
+        assert_eq!(m.get("peer.byname").map(String::as_str), Some("alpha"));
     }
 }

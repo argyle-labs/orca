@@ -24,10 +24,12 @@ pub use json_any::JsonAny;
 mod types;
 pub use types::{ToolCall, ToolDef, ToolResult};
 
+mod cluster_roster;
 mod ctx;
 mod remote;
 mod tool;
 
+pub use cluster_roster::{ClusterEntry, ClusterNode, ClusterRoster};
 pub use ctx::ToolCtx;
 pub use remote::{CallerIdentity, RemoteExec};
 pub use tool::OrcaTool;
