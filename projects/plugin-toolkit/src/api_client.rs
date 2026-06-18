@@ -21,11 +21,13 @@
 //! Sensitive header values are flagged with `set_sensitive(true)` so a
 //! stray reqwest debug print can't leak them.
 
-use anyhow::{Context, Result};
+use crate::logging::Redacted;
+use anyhow::{Context, Result, bail};
 use reqwest::{
-    Client,
+    Client, Url,
     header::{HeaderMap, HeaderName, HeaderValue},
 };
+use std::fmt;
 use std::time::Duration;
 
 /// Shared connect+request timeout for plugin-built HTTP clients. Matches
@@ -122,6 +124,112 @@ impl ApiClientBuilder {
             .build()
             .context("build reqwest client")
     }
+}
+
+// ── Credentials ────────────────────────────────────────────────────────────
+
+/// Static API key (e.g. *arr's `config.xml > ApiKey`, ntfy access token).
+/// Wraps the secret in [`Redacted`] so `Debug` never reveals it and memory
+/// is zeroed on drop.
+pub struct ApiKey(Redacted<String>);
+
+impl ApiKey {
+    pub fn new(key: String) -> Self {
+        Self(Redacted::new(key))
+    }
+
+    pub fn expose(&self) -> &str {
+        self.0.expose()
+    }
+}
+
+impl fmt::Debug for ApiKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ApiKey").field(&self.0).finish()
+    }
+}
+
+/// Browser-style username + password credentials for form-based login
+/// flows (e.g. *arr `/login`). Password is wrapped in [`Redacted`].
+pub struct Credentials {
+    pub username: String,
+    password: Redacted<String>,
+}
+
+impl Credentials {
+    pub fn new(username: String, password: String) -> Self {
+        Self {
+            username,
+            password: Redacted::new(password),
+        }
+    }
+
+    pub fn expose_password(&self) -> &str {
+        self.password.expose()
+    }
+}
+
+impl fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Credentials")
+            .field("username", &self.username)
+            .field("password", &self.password)
+            .finish()
+    }
+}
+
+// ── Multipart form login ───────────────────────────────────────────────────
+
+/// Opaque result of a successful password login. Holds the underlying
+/// `reqwest::Client` whose cookie jar now carries the session cookie.
+/// Hand `into_inner()` to a progenitor-generated `Client::new_with_client`
+/// to make authenticated calls.
+pub struct LoginSession {
+    client: Client,
+}
+
+impl LoginSession {
+    pub fn into_inner(self) -> Client {
+        self.client
+    }
+
+    pub fn client(&self) -> &Client {
+        &self.client
+    }
+}
+
+/// Post `username` + `password` (+ `rememberMe=on`) as `multipart/form-data`
+/// to `<base_url>/<login_path>`. Mirrors the *arr web-UI login wire format.
+/// On 2xx or 3xx, returns a [`LoginSession`] whose client carries the
+/// session cookie.
+pub async fn multipart_form_login(
+    base_url: &str,
+    login_path: &str,
+    creds: &Credentials,
+) -> Result<LoginSession> {
+    let client = ApiClientBuilder::new().cookie_store(true).build()?;
+    let url = Url::parse(base_url)
+        .and_then(|u| u.join(login_path))
+        .context("invalid base_url")?;
+    let form = reqwest::multipart::Form::new()
+        .text("username", creds.username.clone())
+        .text("password", creds.expose_password().to_string())
+        .text("rememberMe", "on");
+    let resp = client
+        .post(url)
+        .multipart(form)
+        .send()
+        .await
+        .context("login request failed")?;
+    let status = resp.status();
+    if !status.is_success() && !status.is_redirection() {
+        bail!(
+            "login failed: HTTP {} from /{login_path} (body bytes: {})",
+            status,
+            resp.bytes().await.map(|b| b.len()).unwrap_or(0)
+        );
+    }
+    Ok(LoginSession { client })
 }
 
 #[cfg(test)]
