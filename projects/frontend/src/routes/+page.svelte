@@ -6,15 +6,11 @@
   import { proxmoxClusterList } from '$lib/client/sdk.gen';
   import { notifications } from '$lib/stores/notifications';
   import { createPoller } from '$lib/utils/polling';
-  import { relTime, fmtMb, fmtUptime, fmtGpu } from '$lib/utils/format';
-  import { memPct, loadPct, cpuPct } from '$lib/utils/sysMetrics';
-  import { addrKindLabel, systemTypeLabel, capabilityLabel } from '$lib/utils/labels';
-  import { inferChannel, instChannel } from '$lib/utils/version';
+  import { systemTypeLabel, capabilityLabel } from '$lib/utils/labels';
+  import { inferChannel } from '$lib/utils/version';
   import StatusDot from '$lib/components/StatusDot.svelte';
-  import Popover from '$lib/components/Popover.svelte';
   import PairingModal from '$lib/components/PairingModal.svelte';
   import Drawer from '$lib/components/Drawer.svelte';
-  import MetricRow from '$lib/components/MetricRow.svelte';
   import Chart from '$lib/components/Chart.svelte';
   import SegmentedControl from '$lib/components/SegmentedControl.svelte';
   import ToggleSwitch from '$lib/components/ToggleSwitch.svelte';
@@ -26,6 +22,11 @@
   import InboundOffersBanner from '$lib/components/InboundOffersBanner.svelte';
   import IconButton from '$lib/components/IconButton.svelte';
   import SectionHead from '$lib/components/SectionHead.svelte';
+  import Badge from '$lib/components/Badge.svelte';
+  import RetentionPicker from '$lib/components/RetentionPicker.svelte';
+  import HostDetailGrid from '$lib/components/HostDetailGrid.svelte';
+  import HostAddressList from '$lib/components/HostAddressList.svelte';
+  import HostLiveCharts from '$lib/components/HostLiveCharts.svelte';
   import type {
     SystemInfoReport,
     PodPeerDto,
@@ -107,13 +108,6 @@
     return [local, ...podRows];
   }
 
-  function seedRetentionFromLoad(): number {
-    const row = data.retention?.row;
-    if (!row) return 1;
-    const v = parseFloat(row.json);
-    return Number.isFinite(v) ? v : 1;
-  }
-
   function seedInboundOffersFromLoad(): InboundOffer[] {
     const members = data.peers.members ?? [];
     const now = Math.floor(Date.now() / 1000);
@@ -125,10 +119,6 @@
 
   let instances = $state<Instance[]>(seedInstancesFromLoad());
   let selectedInstId = $state<string | null>(null);
-  let retentionDays = $state(seedRetentionFromLoad());
-  let customPopoverOpen = $state(false);
-  let customDaysInput = $state('');
-  let retentionSaving = $state(false);
   let pairModalOpen = $state(false);
   let pairModalMode = $state<'invite' | 'accept'>('accept');
   let pairModalInitialCode = $state('');
@@ -325,20 +315,6 @@
   const PROBE_MS = 60000;
 
   // Preset segments (Custom is always index 3)
-  const RETENTION_PRESETS = [
-    { label: 'No history', value: 0 },
-    { label: '1 day', value: 1 },
-    { label: '7 days', value: 7 },
-    { label: 'Custom', value: -1 },
-  ];
-
-  let activeSegment = $derived(
-    RETENTION_PRESETS.findIndex((p) => p.value === retentionDays) >= 0 &&
-    RETENTION_PRESETS.findIndex((p) => p.value === retentionDays) < 3
-      ? RETENTION_PRESETS.findIndex((p) => p.value === retentionDays)
-      : 3,
-  );
-
   let selectedInst = $derived(instances.find((i) => i.id === selectedInstId) ?? null);
 
   // View mode: tree (default, indented by parent_peer_id) or table (flat).
@@ -702,113 +678,9 @@
           };
         });
       instances = local ? [local, ...podRows] : podRows;
-      // Per-tick sampling for the open-drawer histograms. Only sample the
-      // currently selected peer to keep the rolling window bounded; the
-      // window resets when the user switches drawers.
-      if (selectedInstId) {
-        const inst = instances.find((i) => i.id === selectedInstId);
-        if (inst) sampleDrawerMetrics(inst);
-      }
     } catch (e) {
       console.warn('pod.list failed:', e);
     }
-  }
-
-  // ── Drawer metric history (CPU / RAM / GPU / processes) ──────────────────
-  // Rolling sample window kept in browser memory for the currently-open
-  // drawer. Capped at HIST_LEN points; oldest dropped on each new sample.
-  // Not persisted — drawer close = history cleared. The cards keep their
-  // own (separate) sparkline state.
-  const HIST_LEN = 120;
-  type Sample = { t: number; cpu: number | null; memPct: number | null; gpuPct: (number | null)[] };
-  let histSamples = $state<Sample[]>([]);
-  let histProcMap = $state<Map<number, { name: string; cpu: number[]; mem: number[] }>>(new Map());
-  let pinnedPid = $state<number | null>(null);
-
-  function resetDrawerHistory() {
-    histSamples = [];
-    histProcMap = new Map();
-    pinnedPid = null;
-  }
-
-  function sampleDrawerMetrics(inst: Instance) {
-    const s = inst.sys;
-    if (!s) return;
-    const memPct =
-      s.mem_total_mb && s.mem_used_mb !== null && s.mem_used_mb !== undefined
-        ? (s.mem_used_mb / s.mem_total_mb) * 100
-        : null;
-    const sample: Sample = {
-      t: Date.now(),
-      cpu: s.cpu_usage_percent ?? null,
-      memPct,
-      gpuPct: (s.gpus ?? []).map((g) => g.utilization_percent ?? null),
-    };
-    histSamples = [...histSamples, sample].slice(-HIST_LEN);
-
-    // Per-process series: append a point for each pid seen this tick,
-    // null-pad pids we've tracked previously but didn't see now (so the
-    // chart shows the drop instead of leaving stale values).
-    const seen = new Set<number>();
-    for (const p of s.top_processes ?? []) {
-      seen.add(p.pid);
-      const prev = histProcMap.get(p.pid);
-      const next = prev ?? { name: p.name, cpu: [], mem: [] };
-      next.cpu = [...next.cpu, p.cpu_percent].slice(-HIST_LEN);
-      next.mem = [...next.mem, p.mem_mb].slice(-HIST_LEN);
-      next.name = p.name;
-      histProcMap.set(p.pid, next);
-    }
-    for (const [pid, v] of histProcMap) {
-      if (!seen.has(pid)) {
-        v.cpu = [...v.cpu, NaN].slice(-HIST_LEN);
-        v.mem = [...v.mem, NaN].slice(-HIST_LEN);
-      }
-    }
-    histProcMap = new Map(histProcMap);
-  }
-
-  // Render a chart segment list — each contiguous run of finite values
-  // becomes one `{ line, area }` pair (NaN values split into separate
-  // segments so dropouts render as gaps, not interpolated lines).
-  async function loadRetention() {
-    try {
-      const data = await callTool<{ row: { json: string } | null }>('configGet', {
-        noun: 'host_status',
-        name: 'retention_days',
-      });
-      if (data?.row) retentionDays = parseFloat(data.row.json) ?? 1;
-    } catch {
-      // default 1 day
-    }
-  }
-
-  async function setRetention(days: number) {
-    retentionSaving = true;
-    try {
-      await callTool('configSet', {
-        noun: 'host_status',
-        name: 'retention_days',
-        json: String(days),
-      });
-      retentionDays = days;
-    } catch (e) {
-      console.warn('retention set failed:', e);
-    } finally {
-      retentionSaving = false;
-    }
-  }
-
-  async function applyCustomRetention() {
-    const days = parseInt(customDaysInput, 10);
-    if (!Number.isFinite(days) || days < 1) return;
-    customPopoverOpen = false;
-    await setRetention(days);
-  }
-
-  function customBtnLabel(): string {
-    if (activeSegment === 3 && retentionDays > 0) return `${retentionDays}d`;
-    return 'Custom';
   }
 
   function closeDrawer() {
@@ -829,7 +701,6 @@
       // probe hasn't completed for this peer yet (cold drawer open early
       // in the session), fire an immediate one-shot probe so the version
       // dropdown never sits empty waiting for the next 60 s tick.
-      resetDrawerHistory();
       hydrateDrawerFromInstance();
       if (!(selectedInst.availableVersions ?? []).length) {
         void probeUpdateState();
@@ -1132,61 +1003,7 @@
         <button class="pair-btn" onclick={() => openPair('invite')}>+ Invite host</button>
         <button class="pair-btn" onclick={() => openPair('accept')}>+ Pair with code</button>
       </div>
-      <div
-        class="retention-picker"
-        title="Storage setting — controls how many days of metrics are kept on disk"
-      >
-        <span class="retention-label">Keep history</span>
-        <div class="retention-segment" role="radiogroup" aria-label="Keep history">
-          {#each RETENTION_PRESETS as preset, i}
-            {#if i < 3}
-              <button
-                class="segment-btn"
-                class:is-active={activeSegment === i}
-                role="radio"
-                aria-checked={activeSegment === i}
-                disabled={retentionSaving}
-                onclick={() => setRetention(preset.value)}
-              >{preset.label}</button>
-            {:else}
-              <Popover bind:open={customPopoverOpen} align="end" width={200}>
-                {#snippet trigger()}
-                  <button
-                    class="segment-btn segment-btn-custom"
-                    class:is-active={activeSegment === 3}
-                    aria-haspopup="dialog"
-                    aria-expanded={customPopoverOpen}
-                    disabled={retentionSaving}
-                    onclick={() => {
-                      customDaysInput = activeSegment === 3 ? String(retentionDays) : '';
-                      customPopoverOpen = true;
-                    }}
-                  >{customBtnLabel()}</button>
-                {/snippet}
-                {#snippet children()}
-                  <div class="custom-popover">
-                    <p class="custom-popover-label">Days to keep</p>
-                    <input
-                      type="number"
-                      min="1"
-                      max="365"
-                      placeholder="e.g. 14"
-                      bind:value={customDaysInput}
-                      class="custom-days-input"
-                      onkeydown={(e) => e.key === 'Enter' && applyCustomRetention()}
-                    />
-                    <button
-                      class="custom-apply-btn"
-                      onclick={applyCustomRetention}
-                      disabled={!customDaysInput || parseInt(customDaysInput) < 1}
-                    >Apply</button>
-                  </div>
-                {/snippet}
-              </Popover>
-            {/if}
-          {/each}
-        </div>
-      </div>
+      <RetentionPicker />
     </div>
     <p class="lede">Connected orca instances.</p>
   </header>
@@ -1310,105 +1127,19 @@
     <div class="drawer-body">
       {#if typeBadge || virtBadge || capBadges.length}
         <div class="badges">
-          {#if typeBadge}<span class="badge type-badge">{typeBadge}</span>{/if}
-          {#if virtBadge}<span class="badge virt-badge">{virtBadge}</span>{/if}
-          {#each capBadges as cap}<span class="badge cap-badge">{cap}</span>{/each}
+          {#if typeBadge}<Badge color="accent">{typeBadge}</Badge>{/if}
+          {#if virtBadge}<Badge color="purple">{virtBadge}</Badge>{/if}
+          {#each capBadges as cap}<Badge color="gray">{cap}</Badge>{/each}
         </div>
       {/if}
 
-      <dl class="detail-grid">
-        <dt>Origin</dt>
-        <dd><code>{selectedInst.origin}</code></dd>
+      <HostDetailGrid inst={selectedInst} />
 
-        {#if selectedInst.status}
-          <dt>Status</dt>
-          <dd><code>{selectedInst.status}</code></dd>
-        {/if}
-
-        {#if selectedInst.sys?.os_name}
-          <dt>OS</dt>
-          <dd>
-            <code
-              >{selectedInst.sys.os_name}{selectedInst.sys.os_version
-                ? ` ${selectedInst.sys.os_version}`
-                : ''}</code
-            >
-          </dd>
-        {/if}
-
-        {#if selectedInst.version}
-          <dt>Version</dt>
-          <dd><code>{selectedInst.version}</code></dd>
-        {/if}
-
-        {#if selectedInst.target}
-          <dt>Target</dt>
-          <dd><code>{selectedInst.target}</code></dd>
-        {/if}
-
-        {#if selectedInst.sys?.gpus?.length}
-          <dt>GPU</dt>
-          <dd>
-            {#each selectedInst.sys.gpus as g}
-              <code>{fmtGpu(g)}</code>
-            {/each}
-          </dd>
-        {/if}
-
-        <dt>Checked</dt>
-        <dd>{relTime(selectedInst.lastChecked)}</dd>
-      </dl>
-
-      <SectionHead title="Live">
-        {#snippet trailing()}
-          <span class="section-meta">{histSamples.length}/{HIST_LEN} samples</span>
-        {/snippet}
-      </SectionHead>
-      <div class="hist-grid">
-        <Chart label="CPU" vals={histSamples.map(s => s.cpu ?? NaN)} vmax={100} unit="%" color="#89b4fa" />
-        <Chart label="RAM" vals={histSamples.map(s => s.memPct ?? NaN)} vmax={100} unit="%" color="#a6e3a1" />
-        {#each selectedInst.sys?.gpus ?? [] as g, gi}
-          <Chart label={g.name || `GPU ${gi}`} vals={histSamples.map(s => s.gpuPct?.[gi] ?? NaN)} vmax={100} unit="%" color="#f5c2e7" />
-        {/each}
-      </div>
-
-      {#if (selectedInst.sys?.top_processes ?? []).length}
-        <SectionHead title="Top processes">
-          {#snippet trailing()}
-            <span class="section-meta">click to pin</span>
-          {/snippet}
-        </SectionHead>
-        <table class="proc-table">
-          <thead><tr><th>name</th><th>pid</th><th>cpu</th><th>mem</th></tr></thead>
-          <tbody>
-            {#each selectedInst.sys?.top_processes ?? [] as p (p.pid)}
-              <tr class:pinned={pinnedPid === p.pid} onclick={() => { pinnedPid = pinnedPid === p.pid ? null : p.pid; }}>
-                <td><code>{p.name}</code></td>
-                <td><code>{p.pid}</code></td>
-                <td>{p.cpu_percent.toFixed(1)}%</td>
-                <td>{p.mem_mb < 1024 ? `${p.mem_mb} MB` : `${(p.mem_mb / 1024).toFixed(1)} GB`}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-        {#if pinnedPid != null && histProcMap.get(pinnedPid)}
-          {@const pinned = histProcMap.get(pinnedPid)!}
-          {@const maxMem = Math.max(1, ...pinned.mem.filter(Number.isFinite))}
-          <div class="hist-grid">
-            <Chart label={`${pinned.name} CPU`} vals={pinned.cpu} vmax={100} unit="%" color="#fab387" />
-            <Chart label={`${pinned.name} RAM`} vals={pinned.mem} vmax={maxMem} unit="MB" color="#cba6f7" />
-          </div>
-        {/if}
-      {/if}
+      <HostLiveCharts inst={selectedInst} />
 
       {#if (selectedInst.addresses ?? []).length > 0}
         <SectionHead title="Addresses" />
-        <dl class="addr-grid">
-          {#each selectedInst.addresses ?? [] as a (a.kind + ':' + a.value)}
-            <dt>{addrKindLabel(a.kind)}</dt>
-            <dd><code>{a.value}</code></dd>
-          {/each}
-        </dl>
+        <HostAddressList addresses={selectedInst.addresses ?? []} />
       {/if}
 
       <div class="secure-row" title="When on, this host is authorized to receive encrypted secrets replicated from other pod members. Independent of pairing.">
@@ -1416,15 +1147,12 @@
           <span class="secure-label">SECURE</span>
           <span class="secure-hint">Can accept secrets from other systems</span>
         </div>
-        <button
-          class="toggle-switch"
-          class:on={selectedInst.sys?.self_secure}
+        <ToggleSwitch
+          checked={!!selectedInst.sys?.self_secure}
           disabled={secureToggling}
-          onclick={() => toggleSecure(selectedInst!)}
-          aria-label="Toggle SECURE (self_secure)"
-          role="switch"
-          aria-checked={!!selectedInst.sys?.self_secure}
-        ><span class="toggle-thumb"></span></button>
+          onchange={() => toggleSecure(selectedInst!)}
+          ariaLabel="Toggle SECURE (self_secure)"
+        />
       </div>
 
       {#if selectedInst.role === 'system'}
@@ -1557,101 +1285,6 @@
   }
   .pair-btn:hover { background: var(--color-bg-hover, var(--color-surface)); }
 
-  .retention-picker {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    flex-shrink: 0;
-  }
-  .retention-label {
-    font-size: var(--text-xs);
-    color: var(--color-text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    white-space: nowrap;
-  }
-  .retention-segment {
-    display: flex;
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 6px;
-    padding: 3px;
-    gap: 2px;
-  }
-  .segment-btn {
-    flex: 1 1 0;
-    min-width: 0;
-    background: transparent;
-    border: 1px solid transparent;
-    color: var(--color-text-muted);
-    font-size: var(--text-xs);
-    padding: 4px 10px;
-    cursor: pointer;
-    white-space: nowrap;
-    border-radius: 4px;
-    transition: background 0.15s, color 0.15s, border-color 0.15s;
-  }
-  .segment-btn:hover:not(:disabled):not(.is-active) {
-    background: var(--color-surface-2);
-    color: var(--color-text);
-  }
-  .segment-btn.is-active {
-    background: color-mix(in srgb, var(--color-accent) 12%, var(--color-surface));
-    color: var(--color-accent);
-    border-color: var(--color-accent);
-    font-weight: 500;
-  }
-  .segment-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .custom-popover {
-    padding: var(--space-3);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-  .custom-popover-label {
-    margin: 0;
-    font-size: var(--text-xs);
-    color: var(--color-text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-  }
-  .custom-days-input {
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm, 4px);
-    color: var(--color-text);
-    font-size: var(--text-sm);
-    padding: 4px 8px;
-    width: 100%;
-    box-sizing: border-box;
-  }
-  .custom-days-input:focus {
-    outline: none;
-    border-color: var(--color-accent, #4f86f7);
-  }
-  .custom-apply-btn {
-    background: color-mix(in srgb, var(--color-accent, #4f86f7) 15%, transparent);
-    border: 1px solid var(--color-accent, #4f86f7);
-    border-radius: 4px;
-    color: var(--color-accent, #4f86f7);
-    font-size: var(--text-xs);
-    padding: 4px 12px;
-    cursor: pointer;
-    transition: background 0.15s, color 0.15s;
-    align-self: flex-end;
-  }
-  .custom-apply-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--color-accent, #4f86f7) 25%, transparent);
-    color: var(--color-text);
-  }
-  .custom-apply-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-
   /* ── grid ─────────────────────────────────────────────────────────────── */
   .instances {
     display: grid;
@@ -1693,96 +1326,12 @@
     gap: var(--space-4);
   }
 
-  /* ── detail grid ──────────────────────────────────────────────────────── */
-  dl.detail-grid,
-  dl.addr-grid {
-    margin: 0;
-    display: grid;
-    grid-template-columns: 80px 1fr;
-    row-gap: 6px;
-    column-gap: var(--space-3);
-    font-size: var(--text-xs);
-  }
-  dl.addr-grid {
-    grid-template-columns: 110px 1fr;
-  }
-  dt {
-    color: var(--color-text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    font-size: 10px;
-    padding-top: 2px;
-  }
-  dd {
-    margin: 0;
-    color: var(--color-text);
-    word-break: break-all;
-  }
-  code {
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: 3px;
-    padding: 1px 5px;
-    font-size: var(--text-xs);
-  }
-
-  .hist-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 8px;
-    margin: 8px 0 12px;
-  }
-  .proc-table {
-    width: 100%;
-    font-size: 12px;
-    border-collapse: collapse;
-    margin: 6px 0 12px;
-  }
-  .proc-table th, .proc-table td {
-    padding: 4px 6px;
-    text-align: left;
-    border-bottom: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
-  }
-  .proc-table th { font-weight: 500; color: var(--text-secondary, rgba(255, 255, 255, 0.6)); }
-  .proc-table tbody tr { cursor: pointer; }
-  .proc-table tbody tr:hover { background: var(--bg-elevated, rgba(255, 255, 255, 0.04)); }
-  .proc-table tr.pinned { background: rgba(137, 180, 250, 0.15); }
-  .section-meta {
-    margin-left: var(--space-2);
-    opacity: 0.55;
-    font-weight: 400;
-    font-size: 11px;
-    text-transform: none;
-    letter-spacing: 0;
-  }
-
   /* ── badges + paired line ─────────────────────────────────────────────── */
   .badges {
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-2);
     margin-bottom: var(--space-3);
-  }
-  .badge {
-    font-size: 10px;
-    font-weight: 600;
-    padding: 2px 8px;
-    border-radius: 10px;
-    line-height: 1.4;
-    white-space: nowrap;
-    border: 1px solid var(--color-border);
-    background: color-mix(in srgb, var(--color-surface, #1a1a2e) 80%, transparent);
-    color: var(--color-text-dim);
-  }
-  .badge.type-badge {
-    background: color-mix(in srgb, var(--color-accent, #4f86f7) 15%, transparent);
-    color: var(--color-accent, #4f86f7);
-    border-color: color-mix(in srgb, var(--color-accent, #4f86f7) 40%, transparent);
-  }
-  .badge.virt-badge {
-    background: color-mix(in srgb, #a855f7 12%, transparent);
-    color: #c084fc;
-    border-color: color-mix(in srgb, #a855f7 35%, transparent);
   }
   .secure-row {
     display: flex;
@@ -1824,47 +1373,6 @@
   .paired-check {
     color: #22c55e;
     font-weight: 700;
-  }
-  .toggle-switch {
-    position: relative;
-    width: 44px;
-    height: 24px;
-    padding: 0;
-    background: var(--color-border);
-    border: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent);
-    border-radius: 12px;
-    flex-shrink: 0;
-    cursor: pointer;
-    transition: background 0.15s;
-  }
-  .toggle-switch:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--color-border) 60%, var(--color-accent, #4f86f7));
-  }
-  .toggle-switch:focus-visible {
-    outline: 2px solid var(--color-accent, #4f86f7);
-    outline-offset: 2px;
-  }
-  .toggle-switch:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .toggle-switch.on {
-    background: var(--color-accent, #4f86f7);
-  }
-  .toggle-thumb {
-    position: absolute;
-    top: 2px;
-    left: 2px;
-    width: 18px;
-    height: 18px;
-    background: white;
-    border-radius: 50%;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
-    transition: left 0.15s;
-    pointer-events: none;
-  }
-  .toggle-switch.on .toggle-thumb {
-    left: 22px;
   }
   .err {
     color: var(--color-error);

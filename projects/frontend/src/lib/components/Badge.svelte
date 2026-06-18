@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   interface Props {
-    color?: 'green' | 'yellow' | 'red' | 'blue' | 'gray' | 'purple';
+    color?: 'green' | 'yellow' | 'red' | 'blue' | 'gray' | 'purple' | 'accent';
     children: Snippet;
   }
   let { color = 'gray', children }: Props = $props();
@@ -10,7 +10,8 @@
     yellow: 'var(--color-warning)',
     red: 'var(--color-error)',
     blue: 'var(--color-info)',
-    purple: 'var(--color-accent)',
+    purple: '#a855f7',
+    accent: 'var(--color-accent)',
     gray: 'var(--color-text-dim)',
   };
 </script>
