@@ -1,5 +1,5 @@
 <script lang="ts">
-  import Modal from './Modal.svelte';
+  import Modal from './primitives/Modal.svelte';
   import { callTool } from '$lib/stores/runTool';
 
   type Mode = 'invite' | 'accept';

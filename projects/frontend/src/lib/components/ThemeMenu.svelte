@@ -1,5 +1,5 @@
 <script lang="ts">
-  import Popover from './Popover.svelte';
+  import Popover from './primitives/Popover.svelte';
   import ChevronDownIcon from './icons/ChevronDownIcon.svelte';
   import CheckIcon from './icons/CheckIcon.svelte';
   import MoonIcon from './icons/MoonIcon.svelte';

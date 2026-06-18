@@ -1,9 +1,9 @@
 <script lang="ts">
   import { callTool } from '$lib/stores/runTool';
   import { inferChannel } from '$lib/utils/version';
-  import SectionHead from '$lib/components/SectionHead.svelte';
-  import Button from '$lib/components/Button.svelte';
-  import SegmentedControl from '$lib/components/SegmentedControl.svelte';
+  import SectionHead from '$lib/components/primitives/SectionHead.svelte';
+  import Button from '$lib/components/primitives/Button.svelte';
+  import SegmentedControl from '$lib/components/primitives/SegmentedControl.svelte';
   import type { Instance, VersionEntry } from '$lib/types/instance';
 
   interface Props {
@@ -117,13 +117,12 @@
 
 <SectionHead title="Update">
   {#snippet trailing()}
-    <button
-      class="ctrl-btn"
-      style="font-size:11px; padding:2px 8px;"
+    <Button
+      size="xs"
       onclick={probeUpdateState}
       disabled={versionsLoading || updatePending}
       title="Re-probe this peer's update state"
-    >{versionsLoading ? 'Probing…' : 'Refresh'}</button>
+    >{versionsLoading ? 'Probing…' : 'Refresh'}</Button>
   {/snippet}
 </SectionHead>
 <div class="update-controls">
@@ -146,17 +145,17 @@
 
   <div class="update-setting-row">
     <span class="update-setting-label">Channel</span>
-    <div class="channel-segment">
-      {#each ['stable', 'rc', 'dev'] as ch}
-        <button
-          class="channel-btn"
-          class:active={channelSelect === ch}
-          disabled={updatePending}
-          onclick={() => (channelSelect = ch)}
-          title={`Select ${ch} channel`}
-        >{ch}</button>
-      {/each}
-    </div>
+    <SegmentedControl
+      ariaLabel="Channel"
+      value={channelSelect}
+      onchange={(v) => (channelSelect = v)}
+      disabled={updatePending}
+      items={[
+        { label: 'stable', value: 'stable', title: 'Select stable channel' },
+        { label: 'rc', value: 'rc', title: 'Select rc channel' },
+        { label: 'dev', value: 'dev', title: 'Select dev channel' },
+      ]}
+    />
   </div>
 
   {#if !inst.pinnedTo && inst.updateAvailable && inst.updateLatest}
@@ -164,12 +163,13 @@
   {/if}
 
   <div class="update-actions-row">
-    <button
-      class="ctrl-btn primary"
+    <Button
+      variant="primary"
+      size="sm"
       onclick={applyUpdateSelection}
       disabled={updatePending || (!inst.pinnedTo && `v${inst.version ?? ''}` === versionSelect && inferChannel(inst.version, inst.channel) === channelSelect)}
       title="Apply selected channel and version — selecting a non-latest version pins; selecting latest unpins"
-    >{updatePending ? 'Updating…' : 'Apply'}</button>
+    >{updatePending ? 'Updating…' : 'Apply'}</Button>
   </div>
 
   {#if updateResult}
@@ -214,37 +214,6 @@
     color: var(--color-text-dim);
     flex-shrink: 0;
   }
-  .channel-segment {
-    display: flex;
-    background: color-mix(in srgb, var(--color-bg) 60%, transparent);
-    border: 1px solid var(--color-border);
-    border-radius: 6px;
-    overflow: hidden;
-  }
-  .channel-btn {
-    background: transparent;
-    border: none;
-    color: var(--color-text-muted);
-    font-size: var(--text-xs);
-    padding: 3px 10px;
-    cursor: pointer;
-    transition: color 0.15s, background 0.15s;
-  }
-  .channel-btn.active {
-    background: color-mix(in srgb, var(--color-accent, #4f86f7) 18%, transparent);
-    color: var(--color-accent, #4f86f7);
-  }
-  .channel-btn:hover:not(:disabled):not(.active) {
-    color: var(--color-text);
-  }
-  .channel-btn:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-  .channel-btn.active:disabled {
-    opacity: 1;
-    cursor: default;
-  }
   .update-actions-row {
     display: flex;
     justify-content: flex-end;
@@ -266,34 +235,6 @@
     color: var(--color-accent, #4f86f7);
     border: 1px solid color-mix(in srgb, var(--color-accent, #4f86f7) 40%, transparent);
     white-space: nowrap;
-  }
-  .ctrl-btn {
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: 4px;
-    color: var(--color-text-muted);
-    font-size: var(--text-xs);
-    padding: 3px 10px;
-    cursor: pointer;
-    transition: background 0.15s, color 0.15s, border-color 0.15s;
-    white-space: nowrap;
-  }
-  .ctrl-btn:hover:not(:disabled) {
-    border-color: var(--color-accent, #4f86f7);
-    color: var(--color-text);
-  }
-  .ctrl-btn.primary {
-    background: color-mix(in srgb, var(--color-accent, #4f86f7) 15%, transparent);
-    border-color: var(--color-accent, #4f86f7);
-    color: var(--color-accent, #4f86f7);
-  }
-  .ctrl-btn.primary:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--color-accent, #4f86f7) 25%, transparent);
-    color: var(--color-text);
-  }
-  .ctrl-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
   }
   .update-status {
     margin: 0;

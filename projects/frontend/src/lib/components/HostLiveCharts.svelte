@@ -1,6 +1,6 @@
 <script lang="ts">
-  import Chart from '$lib/components/Chart.svelte';
-  import SectionHead from '$lib/components/SectionHead.svelte';
+  import Chart from '$lib/components/primitives/Chart.svelte';
+  import SectionHead from '$lib/components/primitives/SectionHead.svelte';
   import type { Instance } from '$lib/types/instance';
 
   interface Props {

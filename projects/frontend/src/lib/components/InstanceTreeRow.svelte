@@ -1,6 +1,6 @@
 <script lang="ts">
-  import StatusDot from './StatusDot.svelte';
-  import IconButton from './IconButton.svelte';
+  import StatusDot from './primitives/StatusDot.svelte';
+  import IconButton from './primitives/IconButton.svelte';
   import { cpuPct, memPct } from '$lib/utils/sysMetrics';
   import type { Instance } from '$lib/types/instance';
 

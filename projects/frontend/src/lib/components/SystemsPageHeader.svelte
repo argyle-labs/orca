@@ -1,5 +1,5 @@
 <script lang="ts">
-  import Button from '$lib/components/Button.svelte';
+  import Button from '$lib/components/primitives/Button.svelte';
   import RetentionPicker from '$lib/components/RetentionPicker.svelte';
 
   interface Props {

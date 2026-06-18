@@ -22,3 +22,6 @@ openapi-ts-error-*.log
 
 # Legacy (Next.js remnant)
 .next/
+
+*storybook.log
+storybook-static

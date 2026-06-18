@@ -1,6 +1,6 @@
 <script lang="ts">
-  import StatusDot from './StatusDot.svelte';
-  import Button from './Button.svelte';
+  import StatusDot from './primitives/StatusDot.svelte';
+  import Button from './primitives/Button.svelte';
 
   interface Props {
     name: string;

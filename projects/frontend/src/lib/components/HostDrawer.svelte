@@ -1,13 +1,13 @@
 <script lang="ts">
   import { callTool } from '$lib/stores/runTool';
   import { systemTypeLabel, capabilityLabel } from '$lib/utils/labels';
-  import Drawer from '$lib/components/Drawer.svelte';
-  import StatusDot from '$lib/components/StatusDot.svelte';
-  import IconButton from '$lib/components/IconButton.svelte';
-  import Button from '$lib/components/Button.svelte';
-  import Badge from '$lib/components/Badge.svelte';
-  import SectionHead from '$lib/components/SectionHead.svelte';
-  import ToggleSwitch from '$lib/components/ToggleSwitch.svelte';
+  import Drawer from '$lib/components/primitives/Drawer.svelte';
+  import StatusDot from '$lib/components/primitives/StatusDot.svelte';
+  import IconButton from '$lib/components/primitives/IconButton.svelte';
+  import Button from '$lib/components/primitives/Button.svelte';
+  import Badge from '$lib/components/primitives/Badge.svelte';
+  import SectionHead from '$lib/components/primitives/SectionHead.svelte';
+  import ToggleSwitch from '$lib/components/primitives/ToggleSwitch.svelte';
   import HostDetailGrid from '$lib/components/HostDetailGrid.svelte';
   import HostLiveCharts from '$lib/components/HostLiveCharts.svelte';
   import HostAddressList from '$lib/components/HostAddressList.svelte';

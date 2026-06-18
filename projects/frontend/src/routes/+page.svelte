@@ -7,7 +7,7 @@
   import { buildDisplayInstances, buildDisplayRows } from '$lib/utils/instanceTree';
   import { viewModeFromUrl, setViewMode } from '$lib/utils/viewMode.svelte';
   import PairingModal from '$lib/components/PairingModal.svelte';
-  import SegmentedControl from '$lib/components/SegmentedControl.svelte';
+  import SegmentedControl from '$lib/components/primitives/SegmentedControl.svelte';
   import InboundOffersBanner from '$lib/components/InboundOffersBanner.svelte';
   import HostDrawer from '$lib/components/HostDrawer.svelte';
   import SystemsPageHeader from '$lib/components/SystemsPageHeader.svelte';

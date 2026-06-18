@@ -1,6 +1,6 @@
 <script lang="ts">
-  import StatusDot from './StatusDot.svelte';
-  import MetricRow from './MetricRow.svelte';
+  import StatusDot from './primitives/StatusDot.svelte';
+  import MetricRow from './primitives/MetricRow.svelte';
   import { cpuPct, memPct, loadPct } from '$lib/utils/sysMetrics';
   import { fmtMb } from '$lib/utils/format';
   import type { Instance } from '$lib/types/instance';
