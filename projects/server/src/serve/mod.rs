@@ -13,7 +13,7 @@ use axum::Router;
 use axum::extract::FromRequest;
 use axum::http::{HeaderName, Method};
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{any, get};
 use axum_server::tls_rustls::RustlsConfig;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::info;
@@ -942,6 +942,11 @@ async fn static_handler(_uri: axum::http::Uri) -> axum::response::Response {
 
 const VITE_ORIGIN: &str = "http://127.0.0.1:12001";
 const VITE_WS_ORIGIN: &str = "ws://127.0.0.1:12001";
+// Storybook dev server. Launched by scripts/dev.sh alongside Vite so the
+// browser sees one unified origin: /storybook/* is forwarded here and the
+// rest of the UI continues to fall through to Vite.
+const STORYBOOK_ORIGIN: &str = "http://127.0.0.1:12002";
+const STORYBOOK_WS_ORIGIN: &str = "ws://127.0.0.1:12002";
 
 // Hop-by-hop headers that must not be forwarded.
 fn is_hop_by_hop(name: &str) -> bool {
@@ -959,6 +964,18 @@ fn is_hop_by_hop(name: &str) -> bool {
 }
 
 async fn dev_proxy_handler(req: axum::extract::Request) -> axum::response::Response {
+    proxy_to(req, VITE_ORIGIN, VITE_WS_ORIGIN).await
+}
+
+async fn storybook_proxy_handler(req: axum::extract::Request) -> axum::response::Response {
+    proxy_to(req, STORYBOOK_ORIGIN, STORYBOOK_WS_ORIGIN).await
+}
+
+async fn proxy_to(
+    req: axum::extract::Request,
+    http_origin: &'static str,
+    ws_origin: &'static str,
+) -> axum::response::Response {
     use axum::extract::ws::WebSocketUpgrade;
 
     let is_ws = req
@@ -976,15 +993,15 @@ async fn dev_proxy_handler(req: axum::extract::Request) -> axum::response::Respo
             .unwrap_or("/")
             .to_string();
         return match WebSocketUpgrade::from_request(req, &()).await {
-            Ok(ws) => ws.on_upgrade(move |sock| proxy_ws_to_vite(sock, path)),
+            Ok(ws) => ws.on_upgrade(move |sock| proxy_ws(sock, path, ws_origin)),
             Err(e) => e.into_response(),
         };
     }
 
-    proxy_http_to_vite(req).await
+    proxy_http(req, http_origin).await
 }
 
-async fn proxy_http_to_vite(req: axum::extract::Request) -> axum::response::Response {
+async fn proxy_http(req: axum::extract::Request, origin: &'static str) -> axum::response::Response {
     use axum::body::Body;
     use axum::http::Response;
 
@@ -994,7 +1011,7 @@ async fn proxy_http_to_vite(req: axum::extract::Request) -> axum::response::Resp
         .map(|p| p.as_str())
         .unwrap_or("/")
         .to_string();
-    let url = format!("{VITE_ORIGIN}{path_and_query}");
+    let url = format!("{origin}{path_and_query}");
 
     let method = reqwest::Method::from_bytes(req.method().as_str().as_bytes())
         .unwrap_or(reqwest::Method::GET);
@@ -1047,18 +1064,22 @@ async fn proxy_http_to_vite(req: axum::extract::Request) -> axum::response::Resp
         Err(_) => Response::builder()
             .status(502)
             .body(Body::from(
-                "orca: vite dev server unreachable — is it running on :12001?",
+                "orca: dev upstream unreachable — is the dev server running?",
             ))
             .expect("502 response is valid"),
     }
 }
 
-async fn proxy_ws_to_vite(mut browser: axum::extract::ws::WebSocket, path: String) {
+async fn proxy_ws(
+    mut browser: axum::extract::ws::WebSocket,
+    path: String,
+    ws_origin: &'static str,
+) {
     use axum::extract::ws::Message as BMsg;
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::{connect_async, tungstenite::Message as VMsg};
 
-    let url = format!("{VITE_WS_ORIGIN}{path}");
+    let url = format!("{ws_origin}{path}");
     let (mut vite, _) = match connect_async(&url).await {
         Ok(v) => v,
         Err(_) => {
@@ -1191,7 +1212,12 @@ pub fn build_router(dev: bool, db_path: std::path::PathBuf) -> Router {
         .layer(cors);
 
     if dev {
-        api.fallback(dev_proxy_handler)
+        // Storybook lives at <baseUrl>/storybook in dev — see .storybook/main.ts
+        // (viteFinal sets base = '/storybook/') and scripts/dev.sh which launches
+        // it on :12002. The Rust proxy forwards both HTTP and HMR WebSockets.
+        api.route("/storybook", any(storybook_proxy_handler))
+            .route("/storybook/{*path}", any(storybook_proxy_handler))
+            .fallback(dev_proxy_handler)
     } else {
         api.fallback(static_handler)
     }

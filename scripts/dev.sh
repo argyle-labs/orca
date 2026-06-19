@@ -112,10 +112,11 @@ echo "  syncing rebuy specs..."
 ORCA_HTTP_PORT="${ORCA_HTTP_PORT:-12000}"
 ORCA_HTTPS_PORT="${ORCA_HTTPS_PORT:-12443}"
 VITE_PORT="${VITE_PORT:-12001}"
+STORYBOOK_PORT="${STORYBOOK_PORT:-12002}"
 
 stop_system_daemon
 rm -f "$HOME/.orca/state.json"
-for port in "$ORCA_HTTP_PORT" "$ORCA_HTTPS_PORT" "$VITE_PORT"; do
+for port in "$ORCA_HTTP_PORT" "$ORCA_HTTPS_PORT" "$VITE_PORT" "$STORYBOOK_PORT"; do
   # -sTCP:LISTEN restricts to listening sockets — without it lsof returns every
   # process with *any* connection on that port (including your browser holding
   # open HMR WebSockets), which we'd then SIGTERM.

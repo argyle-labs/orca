@@ -72,17 +72,17 @@
       return seedPeer?.version ? `v${seedPeer.version}` : '';
     }),
   );
-  let channelSelect = $state(
-    untrack(() =>
-      inferChannel(
-        data.probe?.current_version ?? seedPeer?.version,
-        data.probe?.channel ?? seedPeer?.channel,
-      ),
-    ),
+  let channelSelect = $state<'stable' | 'rc'>(
+    untrack(() => normalizeChannel(data.probe?.channel ?? seedPeer?.channel)),
   );
   let updatePending = $state(false);
+  let channelPending = $state(false);
   let updateResult = $state<{ notes: string[]; errors: string[] } | null>(null);
   let hydratedForId = $state<string | null>(seedPeer?.peer_id ?? null);
+
+  function normalizeChannel(c: string | null | undefined): 'stable' | 'rc' {
+    return c === 'rc' ? 'rc' : 'stable';
+  }
 
   // Re-seed when SvelteKit reuses the component across `[id]` changes —
   // load() has already produced fresh data.peer/data.probe at that point,
@@ -112,23 +112,12 @@
       : next.version
         ? `v${next.version}`
         : '';
-    channelSelect = inferChannel(
-      data.probe?.current_version ?? next.version,
-      data.probe?.channel ?? next.channel,
-    );
+    channelSelect = normalizeChannel(data.probe?.channel ?? next.channel);
     hydratedForId = next.peer_id;
   });
 
   let pollHandle: ReturnType<typeof setInterval> | null = null;
   const POLL_MS = 5000;
-
-  function inferChannel(v: string | null | undefined, fallback: string | null | undefined): string {
-    const s = v ?? '';
-    if (/-dev/i.test(s)) return 'dev';
-    if (/-rc/i.test(s)) return 'rc';
-    if (s) return 'stable';
-    return fallback ?? 'stable';
-  }
 
   async function probeUpdate() {
     if (!peer) return;
@@ -138,7 +127,7 @@
       const r = await callTool<SystemUpdateResp>('systemUpdate', {}, { peer: target });
       versions = r.available_versions ?? [];
       if (r.current_version && !versionSelect) versionSelect = `v${r.current_version}`;
-      channelSelect = inferChannel(r.current_version, r.channel);
+      channelSelect = normalizeChannel(r.channel);
       if (peer) {
         peer.version = r.current_version || peer.version;
         peer.channel = r.channel;
@@ -155,15 +144,16 @@
 
   async function applyUpdate() {
     if (!peer) return;
-    const args: Record<string, unknown> = {};
-    if (channelSelect && channelSelect !== inferChannel(peer.version, peer.channel)) args.channel = channelSelect;
-    if (versionSelect && versionSelect !== `v${peer.version ?? ''}`) args.version = versionSelect;
-    if (Object.keys(args).length === 0) return;
+    if (!versionSelect || versionSelect === `v${peer.version ?? ''}`) return;
     updatePending = true;
     updateResult = null;
     try {
       const target = peer.local ? null : peer.peer_id;
-      const r = await callTool<SystemUpdateResp>('systemUpdate', args, { peer: target });
+      const r = await callTool<SystemUpdateResp>(
+        'systemUpdate',
+        { version: versionSelect },
+        { peer: target },
+      );
       updateResult = { notes: r.notes ?? [], errors: r.errors ?? [] };
       versions = r.available_versions ?? versions;
       if (peer) {
@@ -173,12 +163,41 @@
         peer.update_latest = r.latest;
         peer.update_available = r.update_available === true;
         if (r.current_version) versionSelect = `v${r.current_version}`;
-        channelSelect = inferChannel(r.current_version, r.channel);
+        channelSelect = normalizeChannel(r.channel);
       }
     } catch (e) {
       updateResult = { notes: [], errors: [e instanceof Error ? e.message : String(e)] };
     } finally {
       updatePending = false;
+    }
+  }
+
+  // Channel switch is server-side persistence + visibility filter. The Rust
+  // side returns available_versions already filtered to the new channel.
+  async function changeChannel(next: 'stable' | 'rc') {
+    if (!peer || channelPending || next === channelSelect) return;
+    channelPending = true;
+    channelSelect = next;
+    try {
+      const target = peer.local ? null : peer.peer_id;
+      const r = await callTool<SystemUpdateResp>(
+        'systemUpdate',
+        { channel: next },
+        { peer: target },
+      );
+      versions = r.available_versions ?? versions;
+      if (peer) {
+        peer.channel = r.channel;
+        peer.pinned_to = r.pinned_to;
+        peer.update_latest = r.latest;
+        peer.update_available = r.update_available === true;
+        if (r.current_version) peer.version = r.current_version;
+      }
+    } catch (e) {
+      console.warn('channel switch failed:', e);
+      channelSelect = normalizeChannel(peer?.channel);
+    } finally {
+      channelPending = false;
     }
   }
 
@@ -200,7 +219,7 @@
       if (peer && hydratedForId !== peer.peer_id) {
         hydratedForId = peer.peer_id;
         versionSelect = peer.version ? `v${peer.version}` : '';
-        channelSelect = inferChannel(peer.version, peer.channel);
+        channelSelect = normalizeChannel(peer.channel);
         void probeUpdate();
       }
     } catch (e) {
@@ -325,7 +344,7 @@
       <h1>{peer.hostname || peer.peer_id}</h1>
       <span class="badge">{peer.system?.system_type ?? 'unknown'}</span>
       {#if peer.version}<span class="meta">v{peer.version}</span>{/if}
-      {#if peer.channel}<span class="meta">{peer.channel}</span>{/if}
+      {#if peer.channel && peer.channel !== 'dev'}<span class="meta">{peer.channel === 'rc' ? 'preview' : peer.channel}</span>{/if}
     {:else if loading}
       <h1>Loading…</h1>
     {:else}
@@ -357,8 +376,12 @@
       <div class="row">
         <span class="row-label">Channel</span>
         <div class="seg">
-          {#each ['stable', 'rc', 'dev'] as ch}
-            <button class:active={channelSelect === ch} disabled={updatePending} onclick={() => (channelSelect = ch)}>{ch}</button>
+          {#each [{ label: 'stable', value: 'stable' as const }, { label: 'preview', value: 'rc' as const }] as ch}
+            <button
+              class:active={channelSelect === ch.value}
+              disabled={updatePending || channelPending}
+              onclick={() => void changeChannel(ch.value)}
+            >{ch.label}</button>
           {/each}
         </div>
       </div>
@@ -370,7 +393,7 @@
         <button
           class="apply"
           onclick={applyUpdate}
-          disabled={updatePending || (!peer.pinned_to && `v${peer.version ?? ''}` === versionSelect && inferChannel(peer.version, peer.channel) === channelSelect)}
+          disabled={updatePending || !versionSelect || versionSelect === `v${peer.version ?? ''}`}
         >{updatePending ? 'Updating…' : 'Apply'}</button>
       </div>
       {#if updateResult}

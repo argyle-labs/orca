@@ -12,7 +12,6 @@
   import HostDrawer from '$lib/components/HostDrawer.svelte';
   import SystemsPageHeader from '$lib/components/SystemsPageHeader.svelte';
   import InstancesGrid from '$lib/components/InstancesGrid.svelte';
-  import DiscoveredCandidatesList from '$lib/components/DiscoveredCandidatesList.svelte';
   import StalePeersList from '$lib/components/StalePeersList.svelte';
   import type { PageData } from './$types';
 
@@ -86,12 +85,11 @@
   {#if peers.instances.filter((i) => i.role === 'system').length === 0}
     <p class="hint">
       No paired systems yet. Run <code>orca pod init</code> to become a founder,
-      or click <strong>+ Pair with code</strong> above and paste a code from
-      <code>orca pod pair &lt;this-host&gt;</code> on the inviter.
+      or use <strong>+ System</strong> above to add one from LAN discovery or a
+      pairing code.
     </p>
   {/if}
 
-  <DiscoveredCandidatesList />
   <StalePeersList />
 </section>
 

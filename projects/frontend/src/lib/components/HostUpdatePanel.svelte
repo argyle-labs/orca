@@ -1,6 +1,5 @@
 <script lang="ts">
   import { callTool } from '$lib/stores/runTool';
-  import { inferChannel } from '$lib/utils/version';
   import SectionHead from '$lib/components/primitives/SectionHead.svelte';
   import Button from '$lib/components/primitives/Button.svelte';
   import SegmentedControl from '$lib/components/primitives/SegmentedControl.svelte';
@@ -22,11 +21,20 @@
     update_available?: boolean | null;
   };
 
+  // Channel is a user-visible filter: stable or preview. The wire value `rc`
+  // is shown as `preview` to users. A daemon running a -dev build reports
+  // channel='dev'; since dev is not a user-selectable option here, we default
+  // the picker to stable in that case and let the user switch to preview.
+  function normalizeChannel(c: string | null | undefined): 'stable' | 'rc' {
+    return c === 'rc' ? 'rc' : 'stable';
+  }
+
   let versionSelect = $state('');
-  let channelSelect = $state('stable');
+  let channelSelect = $state<'stable' | 'rc'>('stable');
   let versions = $state<VersionEntry[]>([]);
   let versionsLoading = $state(false);
   let updatePending = $state(false);
+  let channelPending = $state(false);
   let updateResult = $state<{ notes: string[]; errors: string[] } | null>(null);
   let openedForId = $state<string | null>(null);
 
@@ -36,7 +44,7 @@
     if (inst.id !== openedForId) {
       openedForId = inst.id;
       versionSelect = inst.version ? `v${inst.version}` : '';
-      channelSelect = inferChannel(inst.version, inst.channel);
+      channelSelect = normalizeChannel(inst.channel);
       versions = inst.availableVersions ?? [];
       updateResult = null;
       if (!(inst.availableVersions ?? []).length) {
@@ -61,7 +69,7 @@
       inst.actionLockUntil = Date.now() + 15000;
       if (r.current_version) inst.version = r.current_version;
       if (r.current_version) versionSelect = `v${r.current_version}`;
-      channelSelect = inferChannel(r.current_version, r.channel);
+      channelSelect = normalizeChannel(r.channel);
       if (r.latest) {
         inst.updateLatest = r.latest;
         inst.updateAvailable = r.update_available === true;
@@ -73,6 +81,33 @@
       console.warn('update state probe failed:', e);
     } finally {
       versionsLoading = false;
+    }
+  }
+
+  // Channel switch is a server-side persistence + visibility-filter change.
+  // The Rust side filters available_versions by the new channel and returns
+  // the trimmed list; this UI just renders it.
+  async function changeChannel(next: 'stable' | 'rc') {
+    if (channelPending || next === channelSelect) return;
+    channelPending = true;
+    channelSelect = next;
+    try {
+      const peer = inst.role === 'system' ? inst.peerId : null;
+      const r = await callTool<SystemUpdateResp>('systemUpdate', { channel: next }, { peer });
+      versions = r.available_versions ?? versions;
+      inst.channel = r.channel;
+      inst.pinnedTo = r.pinned_to;
+      inst.actionLockUntil = Date.now() + 15000;
+      if (r.current_version) inst.version = r.current_version;
+      if (r.latest) {
+        inst.updateLatest = r.latest;
+        inst.updateAvailable = r.update_available === true;
+      }
+    } catch (e) {
+      console.warn('channel switch failed:', e);
+      channelSelect = normalizeChannel(inst.channel);
+    } finally {
+      channelPending = false;
     }
   }
 
@@ -89,7 +124,7 @@
       inst.actionLockUntil = Date.now() + 15000;
       if (r.current_version) inst.version = r.current_version;
       if (r.current_version) versionSelect = `v${r.current_version}`;
-      channelSelect = inferChannel(r.current_version, r.channel);
+      channelSelect = normalizeChannel(r.channel);
       if (r.latest) {
         inst.updateLatest = r.latest;
         inst.updateAvailable = r.update_available === true;
@@ -103,15 +138,10 @@
   }
 
   async function applyUpdateSelection() {
-    const args: Record<string, unknown> = {};
-    if (channelSelect && channelSelect !== inferChannel(inst.version, inst.channel)) {
-      args.channel = channelSelect;
-    }
-    if (versionSelect && versionSelect !== `v${inst.version ?? ''}`) {
-      args.version = versionSelect;
-    }
-    if (Object.keys(args).length === 0) return;
-    await runSystemUpdate(args);
+    // Apply only installs a version. Channel switches commit immediately via
+    // changeChannel(); they're a filter setting, not part of Apply.
+    if (!versionSelect || versionSelect === `v${inst.version ?? ''}`) return;
+    await runSystemUpdate({ version: versionSelect });
   }
 </script>
 
@@ -148,12 +178,11 @@
     <SegmentedControl
       ariaLabel="Channel"
       value={channelSelect}
-      onchange={(v) => (channelSelect = v)}
-      disabled={updatePending}
+      onchange={(v) => void changeChannel(v as 'stable' | 'rc')}
+      disabled={updatePending || channelPending}
       items={[
-        { label: 'stable', value: 'stable', title: 'Select stable channel' },
-        { label: 'rc', value: 'rc', title: 'Select rc channel' },
-        { label: 'dev', value: 'dev', title: 'Select dev channel' },
+        { label: 'stable', value: 'stable', title: 'Show only stable releases' },
+        { label: 'preview', value: 'rc', title: 'Show stable + release-candidate versions' },
       ]}
     />
   </div>
@@ -167,8 +196,8 @@
       variant="primary"
       size="sm"
       onclick={applyUpdateSelection}
-      disabled={updatePending || (!inst.pinnedTo && `v${inst.version ?? ''}` === versionSelect && inferChannel(inst.version, inst.channel) === channelSelect)}
-      title="Apply selected channel and version — selecting a non-latest version pins; selecting latest unpins"
+      disabled={updatePending || !versionSelect || versionSelect === `v${inst.version ?? ''}`}
+      title="Install the selected version. Selecting a non-latest version pins; selecting latest unpins."
     >{updatePending ? 'Updating…' : 'Apply'}</Button>
   </div>
 

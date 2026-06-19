@@ -1,6 +1,5 @@
 <script lang="ts">
-  import Button from '$lib/components/primitives/Button.svelte';
-  import RetentionPicker from '$lib/components/RetentionPicker.svelte';
+  import AddSystemMenu from '$lib/components/AddSystemMenu.svelte';
 
   interface Props {
     onInvite: () => void;
@@ -13,10 +12,8 @@
   <div class="title-row">
     <h1>Systems</h1>
     <div class="actions">
-      <Button onclick={onInvite}>+ Invite host</Button>
-      <Button onclick={onAccept}>+ Pair with code</Button>
+      <AddSystemMenu {onInvite} {onAccept} />
     </div>
-    <RetentionPicker />
   </div>
   <p class="lede">Connected orca instances.</p>
 </header>
