@@ -73,9 +73,10 @@
     }
   });
 
-  // Lazy-load discovery whenever the user enters invite mode.
+  // Load discovery whenever the modal opens — discovery is always shown at the
+  // top, independent of which tab is active. One modal, one pathway.
   $effect(() => {
-    if (open && mode === 'invite' && discovery.length === 0) {
+    if (open) {
       void loadDiscovery();
     }
   });
@@ -214,7 +215,34 @@
   }
 </script>
 
-<Modal {open} title={mode === 'invite' ? 'Invite a host to this pod' : 'Pair with a code'} onclose={handleClose} size="sm">
+<Modal {open} title="Add a system" onclose={handleClose} size="sm">
+  {#if !inviteResult && !acceptSuccess}
+    <section class="discovery-section">
+      <div class="section-label">Discovered on LAN</div>
+      {#if discoveryLoading && discovery.length === 0}
+        <p class="dim sm">Loading mDNS discovery…</p>
+      {:else if discovery.length === 0}
+        <p class="dim sm">None seen yet. Add by address or paste a code below.</p>
+      {:else}
+        <ul class="discovery">
+          {#each discovery as d (d.pubkey_fp)}
+            <li>
+              <div class="d-id">
+                <strong>{d.hostname}</strong>
+                <span class="dim">{d.addr}:{d.port}</span>
+              </div>
+              <button
+                class="btn primary sm"
+                disabled={invitePending}
+                onclick={() => invite({ addr: d.addr, port: d.port, fp: d.pubkey_fp })}
+              >+ Add</button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </section>
+  {/if}
+
   <div class="mode-tabs" role="tablist">
     <button
       class="tab"
@@ -290,29 +318,7 @@
       <button class="btn" onclick={handleClose}>{waitingForJoiner ? 'Close (keep pairing in background)' : 'Done'}</button>
     </div>
   {:else}
-    <p class="hint">Pick a discovered host on the LAN, or enter an address manually.</p>
-    {#if discoveryLoading}
-      <p class="dim">Loading mDNS discovery…</p>
-    {:else if discovery.length === 0}
-      <p class="dim">No invitable hosts seen on mDNS. Enter an address below, or wait for the daemon to populate discovery.</p>
-    {:else}
-      <ul class="discovery">
-        {#each discovery as d (d.pubkey_fp)}
-          <li>
-            <div class="d-id">
-              <strong>{d.hostname}</strong>
-              <span class="dim">{d.addr}:{d.port}</span>
-            </div>
-            <button
-              class="btn primary sm"
-              disabled={invitePending}
-              onclick={() => invite({ addr: d.addr, port: d.port, fp: d.pubkey_fp })}
-            >Invite</button>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-
+    <p class="hint">Enter the host's address manually.</p>
     <div class="manual-row">
       <input
         type="text"
@@ -337,6 +343,19 @@
 </Modal>
 
 <style>
+  .discovery-section {
+    margin-bottom: var(--space-3);
+    padding-bottom: var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+  }
+  .section-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--color-text-dim);
+    margin-bottom: var(--space-2);
+  }
+  .dim.sm { font-size: var(--text-xs); margin: 0; }
   .mode-tabs { display: flex; gap: var(--space-1); margin-bottom: var(--space-3); border-bottom: 1px solid var(--color-border); }
   .tab {
     background: none;

@@ -60,7 +60,7 @@
 </script>
 
 <section class="page">
-  <SystemsPageHeader onInvite={() => openPair('invite')} onAccept={() => openPair('accept')} />
+  <SystemsPageHeader onAddSystem={() => openPair('accept')} />
 
   <InboundOffersBanner offers={peers.inboundOffers} onaccept={() => openPair('accept')} />
 

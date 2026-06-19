@@ -225,7 +225,7 @@
     color: inherit;
     font-family: var(--font-mono, monospace);
     font-size: var(--text-sm);
-    flex: 1;
+    width: 100%;
     min-width: 22ch;
   }
   .version-input:focus {
@@ -233,15 +233,21 @@
     border-color: var(--color-accent, #4ea1ff);
   }
   .update-setting-row {
-    display: flex;
+    display: grid;
+    grid-template-columns: 80px 1fr;
     align-items: center;
-    justify-content: space-between;
     gap: var(--space-3);
   }
   .update-setting-label {
     font-size: var(--text-xs);
     color: var(--color-text-dim);
     flex-shrink: 0;
+  }
+  /* Controls in the second column size to content unless they opt into the
+     full column. The version <select> sets width:100% so it still spans; the
+     SegmentedControl stays inline-flex and only takes its content width. */
+  .update-setting-row > :global(:nth-child(2):not(.version-input)) {
+    justify-self: start;
   }
   .update-actions-row {
     display: flex;
